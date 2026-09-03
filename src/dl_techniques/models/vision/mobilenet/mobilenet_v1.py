@@ -1,59 +1,21 @@
-"""
-The original MobileNet: a plain stack of depthwise separable convolutions with a
-global width multiplier.
+"""``MobileNetV1``, the original depthwise-separable-convolution backbone, plus the ``create_mobilenetv1`` factory.
 
-The generation's whole contribution is a factorization. A standard `KxK`
-convolution does two jobs at once — it filters space and it mixes channels — and
-pays for their product: `K*K*C_in*C_out*H*W` multiply-adds. Depthwise separable
-convolution splits the two jobs into consecutive layers, a depthwise `KxK`
-convolution that filters each input channel independently followed by a `1x1`
-pointwise convolution that mixes the filtered channels:
+A standard `KxK` convolution filters space and mixes channels in one step,
+costing `K*K*C_in*C_out*H*W` multiply-adds. This splits that into a
+depthwise `KxK` convolution (filters each channel) followed by a `1x1`
+pointwise convolution (mixes channels), roughly 8-9x cheaper for `K=3`.
+The network is 28 layers of that one block, with no residuals, bottlenecks,
+or attention. A width multiplier `alpha` thins every layer; a resolution
+multiplier is not a separate argument, just a smaller `input_shape`.
 
-`K*K*C_in*H*W  +  C_in*C_out*H*W`
-
-The cost ratio against the standard convolution is `1/C_out + 1/K^2`, so for `K=3`
-and any realistic channel count the block is roughly 8-9x cheaper, and the paper
-reports it costs about one point of ImageNet top-1. Nothing else in this
-generation is new: there are no residuals, no bottlenecks, no attention. The
-network is 28 layers of that one block repeated, which is precisely why it is the
-right place to read the factorization argument in isolation.
-
-Two multipliers scale the result rather than retraining a different topology. The
-width multiplier `alpha` thins every layer to `alpha * C` channels, which reduces
-both parameters and compute quadratically. The resolution multiplier `rho` in the
-paper shrinks the input, cutting compute quadratically at zero parameter cost.
-Here `alpha` is the `width_multiplier` argument; `rho` has no argument of its own
-and is expressed simply by passing a smaller `input_shape`, since the model is
-fully convolutional up to the global pooling.
-
-Architecturally this is a `3x3` stride-2 stem into `32*alpha` channels, then the
-paper's thirteen separable blocks — 64; 128/s2, 128; 256/s2, 256; 512/s2 then five
-at 512; 1024/s2, 1024 — with all downsampling done by the depthwise stride rather
-than by pooling. The head pools globally, reshapes to `1x1xC`, applies dropout and
-then a `1x1` convolution as the classifier, which is the paper's form and is
-arithmetically a dense layer. The global pooling belongs to that head: with
-`include_top=False` the model returns the 4-D feature map of the last block, matching
-V2/V3/V4, and a caller who wants the pooled vector adds the pooling layer.
-
-Two implementation details are easy to get wrong. The head's `Reshape` target is
-hardcoded to `int(1024 * width_multiplier)`, so `include_top=True` is bound to the
-final block being 1024-wide: editing `ARCHITECTURE`'s last entry breaks the head
-rather than the body. And widths are scaled with a bare `int()` truncation, not the
-round-to-multiple-of-8 `_make_divisible` rule that V2 and V3 use, so channel counts
-here follow the paper's `alpha` table exactly but will not match TF-slim
-checkpoints for fractional `alpha`.
-
-Two deliberate deviations from the reference implementation. The blocks use plain
-unbounded ReLU (the `DepthwiseSeparableBlock` factory default), where the paper's
-released model uses ReLU6, which matters if low-precision quantization is the goal.
-And the classifier ends in a softmax, so this model emits probabilities, not
-logits: compile it with `from_logits=False`.
-
-`pretrained=True` on `create_mobilenetv1` raises `NotImplementedError`. No
-checkpoints are distributed with this package. It used to log a warning and return
-a randomly initialized model; the warning was easy to miss, so the house contract
-elsewhere in `models/` (see `resnet/model.py`) now holds here too. Warm-start from
-a local file with `model.load_weights(path)`.
+Blocks use plain ReLU (the paper's released model uses ReLU6, which
+matters for quantization). The classifier ends in softmax, so this model
+outputs probabilities, not logits. With `include_top=False` it returns the
+4-D feature map of the last block, matching V2/V3/V4. Widths use plain
+`int()` truncation, not V2/V3's round-to-multiple-of-8 rule, so channel
+counts follow the paper's alpha table but will not match TF-Slim
+checkpoints at fractional alpha. No pretrained checkpoints ship with this
+package; `pretrained=True` raises `NotImplementedError`.
 
 References:
     - Howard et al., 2017. MobileNets: Efficient Convolutional Neural Networks for
@@ -85,33 +47,45 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.mobilenet.mobilenet_v1")
 class MobileNetV1(keras.Model):
-    """MobileNetV1 model implementation with depthwise separable convolutions.
+    """Depthwise-separable-convolution backbone for image classification.
 
-    The original efficient architecture for mobile and embedded vision_heads applications
-    using depthwise separable convolutions to drastically reduce computation and
-    model size while maintaining good accuracy.
+    Architecture:
 
-    Args:
-        num_classes: Integer, number of output classes for classification
-        width_multiplier: Float, multiplier for the number of filters (α).
-            Controls model width. Common values: 1.0, 0.75, 0.5, 0.25
-        dropout_rate: Float, dropout rate before the classifier
-        weight_decay: Float, L2 regularization factor for all layers
-        kernel_initializer: String or initializer, weight initialization strategy
-        include_top: Boolean, whether to include the classification head
-        input_shape: Tuple, input shape. If None, defaults to (224, 224, 3)
-        **kwargs: Additional keyword arguments for Model base class
+    .. code-block:: text
 
-    Raises:
-        ValueError: If width_multiplier is not positive
-        ValueError: If input_shape is invalid
+        image  [B, H, W, C]
+           |
+           v
+        Conv2D 3x3 s2 -> BN -> ReLU   (32*alpha channels)
+           |
+           v
+        13x DepthwiseSeparableBlock   (ARCHITECTURE table, alpha-scaled)
+           |  [B, H/32, W/32, 1024*alpha]
+           v
+        include_top=False --------+
+           |                      |
+           v                      v
+        GlobalAvgPool         feature map (returned as-is)
+           |
+        Reshape -> Dropout -> Conv2D 1x1 -> Reshape -> softmax
+           |
+           v
+        class probabilities  [B, num_classes]
 
-    Example:
-        >>> # Create standard MobileNetV1 for ImageNet
-        >>> model = MobileNetV1(num_classes=1000, width_multiplier=1.0)
-        >>>
-        >>> # Create smaller model for CIFAR-10
-        >>> model = MobileNetV1(num_classes=10, width_multiplier=0.5, input_shape=(32, 32, 3))
+    :param num_classes: Number of output classes.
+    :param width_multiplier: Filter-count multiplier (alpha). Common values: 1.0, 0.75, 0.5, 0.25.
+    :param dropout_rate: Dropout rate before the classifier.
+    :param weight_decay: L2 regularization factor for all layers.
+    :param kernel_initializer: Weight initialization strategy.
+    :param include_top: Whether to include the classification head.
+    :param input_shape: Input shape; defaults to `(224, 224, 3)`.
+    :param kwargs: Passthrough to `keras.Model`.
+    :raises ValueError: If `width_multiplier` is not positive, or `input_shape` is invalid.
+
+    Example::
+
+        model = MobileNetV1(num_classes=1000, width_multiplier=1.0)
+        small = MobileNetV1(num_classes=10, width_multiplier=0.5, input_shape=(32, 32, 3))
     """
 
     # Model variant configurations
@@ -213,12 +187,8 @@ class MobileNetV1(keras.Model):
                 filters=actual_filters,
                 stride=stride,
                 block_id=block_id,
-                # DECISION plan-2026-08-22T035419-a11304c8/D-203 -- the block's
-                # norms go through create_normalization_layer, whose OWN default
-                # is epsilon=1e-6, not the reference's 1e-3. Do NOT drop this
-                # kwarg "because batch_norm is the default anyway": the type is
-                # defaulted, the epsilon is not, and without it 183 of this
-                # family's 189 BatchNorm layers silently run at 1e-6.
+                # DECISION plan-2026-08-22T035419-a11304c8/D-203: pass epsilon explicitly; create_normalization_layer defaults to 1e-6, not the reference's 1e-3.
+                # Dropping this kwarg silently ran 183 of 189 BatchNorm layers in this family at the wrong epsilon. See decisions.md.
                 normalization_kwargs={'epsilon': REFERENCE_BN_EPSILON},
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
@@ -266,17 +236,10 @@ class MobileNetV1(keras.Model):
         for block in self.depthwise_blocks:
             x = block(x, training=training)
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-066: pooling belongs to the
-        # HEAD. Do NOT move `global_avg_pool` back outside this branch: applied
-        # unconditionally it made `include_top=False` return a 2-D pooled vector,
-        # where V2/V3/V4 all return the 4-D feature map, so a detection or
-        # segmentation head silently received the wrong rank. A caller who wants
-        # the pooled vector adds one GlobalAveragePooling2D. See decisions.md D-066.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-066: pooling belongs to the head; do not move global_avg_pool outside this branch.
+        # Applied unconditionally, include_top=False would return a 2-D pooled vector instead of the 4-D feature map V2/V3/V4 return. See decisions.md.
         if self.include_top:
-            # Global average pooling
             x = self.global_avg_pool(x)
-
-            # Classification head
             x = self.reshape(x)
             x = self.dropout(x, training=training)
             x = self.classifier_conv(x)
@@ -296,22 +259,18 @@ class MobileNetV1(keras.Model):
     ) -> "MobileNetV1":
         """Create a MobileNetV1 model from a predefined variant.
 
-        Args:
-            variant: String, one of "large", "medium", "small", "pico"
-            num_classes: Integer, number of output classes
-            input_shape: Tuple, input shape. If None, uses (224, 224, 3)
-            width_multiplier: Float, additional multiplier applied on top of variant default
-            **kwargs: Additional arguments passed to the constructor
+        :param variant: One of `"large"`, `"medium"`, `"small"`, `"pico"`.
+        :param num_classes: Number of output classes.
+        :param input_shape: Input shape; defaults to `(224, 224, 3)`.
+        :param width_multiplier: Extra multiplier applied on top of the variant default.
+        :param kwargs: Passthrough to the constructor.
+        :return: A configured `MobileNetV1` instance.
+        :raises ValueError: If `variant` is not recognized.
 
-        Returns:
-            MobileNetV1 model instance
+        Example::
 
-        Raises:
-            ValueError: If variant is not recognized
-
-        Example:
-            >>> model = MobileNetV1.from_variant("large", num_classes=1000)
-            >>> model = MobileNetV1.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+            model = MobileNetV1.from_variant("large", num_classes=1000)
+            small = MobileNetV1.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -361,17 +320,13 @@ class MobileNetV1(keras.Model):
         return cls(**config)
 
     def summary(self, **kwargs):
-        """Print model summary with additional information."""
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: a real forward pass.
-        # Do NOT go back to `self.build((None, *self._input_shape))`: for a
-        # subclassed model that only MARKS the model built and materializes no
-        # sub-layer weights, so the summary and the count_params() line below both
-        # reported exactly 0. See decisions.md D-065.
+        """Print the model summary, plus configuration and parameter count."""
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: materialize with a real forward pass, not self.build(...).
+        # build() only marks a subclassed model built without materializing sub-layer weights, so count_params() would read 0. See decisions.md.
         materialize_for_summary(self, self._input_shape)
 
         super().summary(**kwargs)
 
-        # Print additional model information
         total_blocks = len(self.depthwise_blocks)
         total_params = self.count_params()
 
@@ -397,26 +352,24 @@ def create_mobilenetv1(
         pretrained: bool = False,
         **kwargs: Any
 ) -> MobileNetV1:
-    """Convenience function to create MobileNetV1 models.
+    """Create a MobileNetV1 model.
 
-    Args:
-        variant: String, model variant ("large", "medium", "small", "pico")
-        num_classes: Integer, number of output classes
-        input_shape: Tuple, input shape. If None, uses (224, 224, 3)
-        width_multiplier: Float, additional multiplier applied on top of variant default
-        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
-            no MobileNetV1 checkpoints ship with this package.
-        **kwargs: Additional arguments passed to the model constructor
+    :param variant: Model variant: `"large"`, `"medium"`, `"small"`, `"pico"`.
+    :param num_classes: Number of output classes.
+    :param input_shape: Input shape; defaults to `(224, 224, 3)`.
+    :param width_multiplier: Extra multiplier applied on top of the variant default.
+    :param pretrained: Must be `False`; `True` raises `NotImplementedError`
+        since no MobileNetV1 checkpoints ship with this package.
+    :param kwargs: Passthrough to the constructor.
+    :return: A configured `MobileNetV1` instance.
 
-    Returns:
-        MobileNetV1 model instance
+    Example::
 
-    Example:
-        >>> model = create_mobilenetv1("large", num_classes=1000)
-        >>> model = create_mobilenetv1("small", num_classes=10, input_shape=(32, 32, 3))
-        >>> model = create_mobilenetv1("pico", num_classes=100)
+        model = create_mobilenetv1("large", num_classes=1000)
+        small = create_mobilenetv1("small", num_classes=10, input_shape=(32, 32, 3))
     """
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise on pretrained=True, do not warn and return random weights.
+    # See decisions.md.
     if pretrained:
         raise NotImplementedError(
             f"No pretrained MobileNetV1 weights are distributed with dl_techniques "

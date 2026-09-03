@@ -1,66 +1,23 @@
-"""
-MobileNetV2 image classifier: inverted residual bottlenecks with linear
-projections, assembled here from `UniversalInvertedBottleneck` blocks.
+"""``MobileNetV2``, an inverted-residual classifier built from `UniversalInvertedBottleneck` blocks, plus the ``create_mobilenetv2`` factory.
 
-What this generation adds over V1 is a shape and a missing activation. V1 was a
-flat stack of separable blocks with no shortcuts and no bottleneck; V2 wraps the
-same depthwise convolution in a residual block whose channel profile is inverted
-relative to a ResNet bottleneck. A ResNet block is wide-narrow-wide: it squeezes
-channels, does the expensive spatial work in the narrow interior, then restores
-width, and the residual runs along the *wide* tensors. V2 is narrow-wide-narrow:
-each block expands `C -> t*C` with a `1x1` convolution, does its `3x3` depthwise
-filtering in that expanded space where a per-channel filter has enough channels to
-be expressive, projects back to a narrow `C_out`, and runs the residual along the
-*narrow* tensors. The inversion is what makes it memory-efficient: only the thin
-block boundaries have to be materialized between blocks, so the expanded tensor
-never has to persist, and the same argument makes the block a natural fit for
-memory-limited inference.
+Unlike a ResNet bottleneck (wide-narrow-wide, residual on the wide
+tensors), V2 is narrow-wide-narrow: each block expands `C -> t*C`, filters
+depthwise in that expanded space, projects back to a narrow `C_out`, and
+runs the residual on the narrow tensors. Only the thin block boundaries
+need to persist between blocks. The final projection of every block has
+no activation, since a ReLU there would collapse the low-dimensional
+representation the projection produces.
 
-The linear bottleneck is the second half of the idea and the part that is easy to
-misread as an oversight. The projection `1x1` at the end of every block has **no
-activation** — no ReLU, no ReLU6 — only normalization. The paper's reasoning is
-that the information a layer carries is assumed to lie on a low-dimensional
-manifold embedded in the activation space; ReLU is only information-preserving on
-such a manifold when the space it lives in is high-dimensional enough that the
-zeroed half-space can be recovered from the surviving channels. Applying ReLU
-directly to the narrow output of the projection collapses exactly the
-low-dimensional representation the block just produced, and the collapse is not
-recoverable downstream. So the nonlinearity is kept where the tensor is wide (after
-expansion, after depthwise) and dropped where it is narrow. Empirically the paper
-measures the linear projection as worth several points of top-1.
-
-Architecturally: a `3x3` stride-2 stem into 32 channels, the paper's Table 2
-`(t, c, n, s)` schedule of seven stages totalling 17 bottleneck blocks, a final
-`1x1` expansion to 1280 channels, global pooling, dropout and a dense classifier.
-Stride is applied only to the first block of each stage. The residual is added
-inside `UniversalInvertedBottleneck` and only when `stride == 1` and the input
-channel count already equals `filters`, so the first block of every stage — which
-either strides or changes width — is a plain feed-forward block with no shortcut,
-exactly as in the paper.
-
-Three code-level details worth stating. Channel counts pass through
-`_make_divisible`, which rounds to a multiple of 8 and refuses to round down by
-more than 10%; this is why `width_multiplier=0.75` does not simply give
-`0.75 * c`. The final 1280-channel convolution is deliberately *not* scaled for
-`width_multiplier <= 1.0` and only widens above 1.0, matching the reference
-implementation — thinning the classifier's input hurts far more than it saves.
-And `MODEL_VARIANTS` includes a `1.4` width ("large") alongside the usual
-1.0/0.75/0.5/0.35 ladder; the variants are named by size, not by their `alpha`
-value, so `from_variant` takes `"medium"`, not `"1.0"`.
-
-One deviation from the paper follows from reusing the universal block. The paper's
-first stage has expansion factor `t=1` and therefore omits the expansion
-convolution entirely; `UniversalInvertedBottleneck` always builds an expansion
-`1x1` + norm + activation, so that stage here carries an extra `C -> C` projection
-the reference does not have. It is a small parameter cost and a structural
-difference, not a numerical equivalence. The classifier also ends in softmax, so
-this model emits probabilities: compile with `from_logits=False`.
-
-`pretrained=True` on `create_mobilenetv2` raises `NotImplementedError` — no
-checkpoints ship with this package. It used to return an untrained model plus a
-log line, so a caller who asked for pretrained weights got random ones; the house
-contract in `resnet/model.py` now holds here too. Warm-start from a local file
-with `model.load_weights(path)`.
+Channel counts round through `_make_divisible` (nearest multiple of 8, no
+more than 10% below `width_multiplier * c`), so `width_multiplier=0.75`
+does not give exactly `0.75 * c`. The final 1280-channel convolution is
+not scaled down for `width_multiplier <= 1.0`, only widened above it. The
+paper's first stage uses expansion factor 1 and skips the expansion
+convolution; this implementation reuses one universal block that always
+expands, so that stage carries a small extra `C -> C` projection. The
+classifier ends in softmax, so this model outputs probabilities, not
+logits. No pretrained checkpoints ship with this package;
+`pretrained=True` raises `NotImplementedError`.
 
 References:
     - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear Bottlenecks.
@@ -97,84 +54,52 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.mobilenet.mobilenet_v2")
 class MobileNetV2(keras.Model):
-    """MobileNetV2 classification model built with Universal Inverted Bottleneck blocks.
+    """Inverted-residual classifier built from Universal Inverted Bottleneck blocks.
 
-    This class implements the full MobileNetV2 architecture, an efficient
-    convolutional neural network designed for mobile and embedded vision_heads
-    applications. It utilizes `UniversalInvertedBottleneck` (UIB) layers configured
-    to replicate the original's inverted residuals and linear bottlenecks.
+    Architecture:
 
-    **Intent**: To provide a configurable and easily
-    serializable implementation of the MobileNetV2 model. This serves as a
-    best-practice example for building complex custom models in Keras 3,
-    leveraging a flexible and unified building block (UIB).
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Input(shape=[H, W, 3])
-           ↓
-    Initial Conv: 3x3 Conv2D(32, stride=2) -> BN -> ReLU6
-           ↓
-    Bottleneck Blocks: Sequence of 17 UniversalInvertedBottleneck layers
-           ↓
-    Final Conv: 1x1 Conv2D(1280) -> BN -> ReLU6
-           ↓
-    Pooling: GlobalAveragePooling2D
-           ↓
-    Classifier: Dropout -> Dense(num_classes, 'softmax')
-           ↓
-    Output(shape=[num_classes])
-    ```
+        image  [H, W, 3]
+           |
+           v
+        Conv2D 3x3 s2 -> BN -> ReLU6   (32*alpha channels)
+           |
+           v
+        17x UniversalInvertedBottleneck  (7 stages, ARCHITECTURE table)
+           |
+           v
+        Conv2D 1x1 -> BN -> ReLU6   (1280 channels, or wider above alpha=1.0)
+           |
+        include_top=False --------+
+           |                      |
+           v                      v
+        GlobalAvgPool         feature map (returned as-is)
+           |
+        Dropout -> Dense (softmax)
+           |
+           v
+        class probabilities  [num_classes]
 
-    **Data Flow**:
-    1. An initial convolution layer performs downsampling and feature extraction.
-    2. A series of 7 bottleneck stages, built from `UniversalInvertedBottleneck`
-       layers, progressively extracts features and reduces spatial dimensions.
-    3. A final 1x1 convolution expands the feature map to a high-dimensional space.
-    4. Global average pooling converts the feature map into a single feature vector.
-    5. A fully-connected classifier with softmax activation produces class probabilities.
-
-    Args:
-        num_classes: Integer, number of output classes for classification.
-        width_multiplier: Float (α), scales the number of channels in each layer,
-            allowing for control over model size and complexity.
-        dropout_rate: Float, dropout rate applied before the final classifier.
-        weight_decay: Float, L2 regularization factor for convolutional and dense layers.
-        kernel_initializer: String or Initializer for kernel weight initialization.
-        include_top: Boolean, whether to include the final pooling and classification layers.
-        input_shape: Optional Tuple, the shape of the input tensor. Defaults to (224, 224, 3).
-        **kwargs: Additional keyword arguments for the `keras.Model` base class.
+    :param num_classes: Number of output classes.
+    :param width_multiplier: Channel-count multiplier (alpha).
+    :param dropout_rate: Dropout rate before the classifier.
+    :param weight_decay: L2 regularization factor for conv and dense layers.
+    :param kernel_initializer: Weight initialization strategy.
+    :param include_top: Whether to include the pooling and classification head.
+    :param input_shape: Input shape; defaults to `(224, 224, 3)`.
+    :param kwargs: Passthrough to `keras.Model`.
 
     Input shape:
-        3D tensor with shape `(height, width, channels)`, e.g., `(224, 224, 3)`.
+        3D tensor `(height, width, channels)`, e.g. `(224, 224, 3)`.
 
     Output shape:
-        2D tensor with shape `(batch_size, num_classes)` if `include_top=True`.
-        4D feature map otherwise.
+        `(batch_size, num_classes)` if `include_top=True`, else a 4-D feature map.
 
-    Attributes:
-        initial_conv, initial_bn, initial_relu: Layers for the first block.
-        blocks: A list of `UniversalInvertedBottleneck` instances.
-        last_conv, last_bn, last_relu: Layers for the final feature extraction.
-        global_avg_pool: Global average pooling layer.
-        dropout: Dropout layer (if used).
-        classifier: Final Dense classification layer.
+    Example::
 
-    Example:
-        ```python
-        # Standard MobileNetV2 (α=1.0) for ImageNet
         model = MobileNetV2(num_classes=1000, width_multiplier=1.0)
-
-        # Smaller model (α=0.75) for CIFAR-10
-        model = MobileNetV2(
-            num_classes=10,
-            width_multiplier=0.75,
-            input_shape=(32, 32, 3)
-        )
-        ```
-
-    References:
-        - MobileNetV2 Paper: https://arxiv.org/abs/1801.04381
+        small = MobileNetV2(num_classes=10, width_multiplier=0.75, input_shape=(32, 32, 3))
     """
 
     # Model variant configurations
@@ -206,14 +131,12 @@ class MobileNetV2(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
-        # --- Configuration Validation and Storage ---
         if width_multiplier <= 0:
             raise ValueError(f"width_multiplier must be positive, got {width_multiplier}")
         self.input_shape_config = input_shape or (224, 224, 3)
         if len(self.input_shape_config) != 3:
             raise ValueError(f"input_shape must be a 3D tuple, got {self.input_shape_config}")
 
-        # Store all configuration parameters for serialization
         self.num_classes = num_classes
         self.width_multiplier = width_multiplier
         self.dropout_rate = dropout_rate
@@ -222,21 +145,17 @@ class MobileNetV2(keras.Model):
         self.include_top = include_top
         self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
 
-        # --- CREATE all sub-layers in __init__ ---
-        # For a keras.Model, all sub-layers should be created here. Keras will
-        # handle calling their `build` methods automatically.
         self._build_model_layers()
 
     def _make_divisible(self, v: float, divisor: int = 8) -> int:
-        """Ensures that layer channel counts are divisible by 8."""
+        """Round `v` to the nearest multiple of `divisor`, without dropping more than 10% below it."""
         new_v = max(divisor, int(v + divisor / 2) // divisor * divisor)
         if new_v < 0.9 * v:
             new_v += divisor
         return new_v
 
     def _build_model_layers(self) -> None:
-        """Create all layers of the model based on the configuration."""
-        # Initial Convolution
+        """Create every sub-layer from the stored configuration."""
         first_channels = self._make_divisible(32 * self.width_multiplier)
         self.initial_conv = layers.Conv2D(
             first_channels, 3, strides=2, padding='same', use_bias=False,
@@ -250,7 +169,6 @@ class MobileNetV2(keras.Model):
         )
         self.initial_relu = layers.ReLU(max_value=6, name='conv1_relu6')
 
-        # Bottleneck Blocks (using UniversalInvertedBottleneck)
         self.blocks = []
         block_id = 0
         for t, c, n, s in self.ARCHITECTURE:
@@ -261,15 +179,13 @@ class MobileNetV2(keras.Model):
                     filters=output_channels,
                     expansion_factor=t,
                     stride=stride,
-                    kernel_size=3,              # Standard for MobileNetV2
-                    use_dw1=True,               # Emulates MobileNetV2 block
-                    use_dw2=False,              # Emulates MobileNetV2 block
-                    activation_type='relu',     # Use ReLU...
-                    activation_args={'max_value': 6}, # ...with max_value=6 (ReLU6)
+                    kernel_size=3,
+                    use_dw1=True,
+                    use_dw2=False,
+                    activation_type='relu',
+                    activation_args={'max_value': 6},
                     normalization_type='batch_norm',
-                    # DECISION plan-2026-08-22T035419-a11304c8/D-203 -- see
-                    # mobilenet_v1.py. `normalization_type` alone leaves epsilon
-                    # at the factory's 1e-6, not the fetched reference's 1e-3.
+                    # DECISION plan-2026-08-22T035419-a11304c8/D-203: pass epsilon explicitly; see mobilenet_v1.py for the measured impact. See decisions.md.
                     normalization_args={'epsilon': REFERENCE_BN_EPSILON},
                     use_bias=False,
                     kernel_initializer=self.kernel_initializer,
@@ -278,9 +194,7 @@ class MobileNetV2(keras.Model):
                 ))
                 block_id += 1
 
-        # Final Convolution
-        # Per the original paper and official implementations, the last convolution
-        # layer's channels are not scaled down for width multipliers <= 1.0.
+        # Matches the paper: the last convolution's channels are not scaled down for width_multiplier <= 1.0.
         if self.width_multiplier > 1.0:
             last_channels = self._make_divisible(1280 * self.width_multiplier)
         else:
@@ -297,7 +211,6 @@ class MobileNetV2(keras.Model):
         )
         self.last_relu = layers.ReLU(max_value=6, name='conv_last_relu6')
 
-        # Top (Classification Head)
         if self.include_top:
             self.global_avg_pool = layers.GlobalAveragePooling2D(name='global_avg_pool')
             if self.dropout_rate > 0:
@@ -311,16 +224,12 @@ class MobileNetV2(keras.Model):
             )
 
     def build(self, input_shape: Any) -> None:
-        """Materialize every sub-layer from ``input_shape``.
+        """Materialize every sub-layer from `input_shape` by tracing `call`.
 
-        Without this method MobileNetV2 inherits ``Layer.build``, which marks the
-        model built while every sub-layer is still unbuilt -- Keras warns about
-        exactly that at ``layers/layer.py:393``. The shared helper traces
-        ``call()`` on symbolic inputs, so what gets built cannot drift from what
-        gets called.
+        `materialize_sublayers` traces `call` on symbolic inputs, so what
+        gets built cannot drift from what gets called.
 
-        Args:
-            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :param input_shape: Shape (or nest of shapes) of the input to `call`.
         """
         if self.built:
             return
@@ -328,7 +237,12 @@ class MobileNetV2(keras.Model):
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the MobileNetV2 model."""
+        """Run the stem, bottleneck blocks, final conv, and optional classification head.
+
+        :param inputs: Input images, shape `(B, H, W, C)`.
+        :param training: Passed to batch norm and dropout.
+        :return: Class probabilities, or the 4-D feature map if `include_top=False`.
+        """
         x = self.initial_conv(inputs)
         x = self.initial_bn(x, training=training)
         x = self.initial_relu(x)
@@ -359,15 +273,12 @@ class MobileNetV2(keras.Model):
     ) -> "MobileNetV2":
         """Create a MobileNetV2 model from a predefined variant.
 
-        Args:
-            variant: String, one of "large", "medium", "small", "nano", "pico"
-            num_classes: Integer, number of output classes
-            input_shape: Tuple, input shape. If None, uses (224, 224, 3)
-            width_multiplier: Float, additional multiplier applied on top of variant default
-            **kwargs: Additional arguments passed to the constructor
-
-        Returns:
-            MobileNetV2 model instance
+        :param variant: One of `"large"`, `"medium"`, `"small"`, `"nano"`, `"pico"`.
+        :param num_classes: Number of output classes.
+        :param input_shape: Input shape; defaults to `(224, 224, 3)`.
+        :param width_multiplier: Extra multiplier applied on top of the variant default.
+        :param kwargs: Passthrough to the constructor.
+        :return: A configured `MobileNetV2` instance.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}")
@@ -398,15 +309,13 @@ class MobileNetV2(keras.Model):
         return config
 
     def summary(self, **kwargs):
-        """Print model summary with additional information."""
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: a real forward pass; the
-        # keras.Input + build(shape) route marked the model built without creating
-        # any sub-layer weights. See decisions.md D-065.
+        """Print the model summary, plus configuration and parameter count."""
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-065: materialize with a real forward pass.
+        # The keras.Input + build(shape) route marked the model built without creating any sub-layer weights. See decisions.md.
         materialize_for_summary(self, self.input_shape_config)
 
         super().summary(**kwargs)
 
-        # Print additional model information
         total_blocks = len(self.blocks)
         total_params = self.count_params()
 
@@ -432,26 +341,24 @@ def create_mobilenetv2(
         pretrained: bool = False,
         **kwargs: Any
 ) -> MobileNetV2:
-    """Convenience function to create MobileNetV2 models.
+    """Create a MobileNetV2 model.
 
-    Args:
-        variant: String, model variant ("large", "medium", "small", "nano", "pico")
-        num_classes: Integer, number of output classes
-        input_shape: Tuple, input shape. If None, uses (224, 224, 3)
-        width_multiplier: Float, additional multiplier applied on top of variant default
-        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
-            no MobileNetV2 checkpoints ship with this package.
-        **kwargs: Additional arguments passed to the model constructor
+    :param variant: Model variant: `"large"`, `"medium"`, `"small"`, `"nano"`, `"pico"`.
+    :param num_classes: Number of output classes.
+    :param input_shape: Input shape; defaults to `(224, 224, 3)`.
+    :param width_multiplier: Extra multiplier applied on top of the variant default.
+    :param pretrained: Must be `False`; `True` raises `NotImplementedError`
+        since no MobileNetV2 checkpoints ship with this package.
+    :param kwargs: Passthrough to the constructor.
+    :return: A configured `MobileNetV2` instance.
 
-    Returns:
-        MobileNetV2 model instance
+    Example::
 
-    Example:
-        >>> model = create_mobilenetv2("medium", num_classes=1000)
-        >>> model = create_mobilenetv2("nano", num_classes=10, input_shape=(32, 32, 3))
-        >>> model = create_mobilenetv2("pico", num_classes=100)
+        model = create_mobilenetv2("medium", num_classes=1000)
+        small = create_mobilenetv2("nano", num_classes=10, input_shape=(32, 32, 3))
     """
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise on pretrained=True, do not warn and return random weights.
+    # See decisions.md.
     if pretrained:
         raise NotImplementedError(
             f"No pretrained MobileNetV2 weights are distributed with dl_techniques "
