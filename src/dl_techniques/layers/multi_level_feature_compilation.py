@@ -207,9 +207,9 @@ class MLFCLayer(keras.layers.Layer):
             for level_idx in range(4):
                 idx = iter_idx * 4 + level_idx
 
-                # Build compilation conv with concatenated input shape
+                # Build compilation conv on the concatenated (all channels) shape.
                 concat_shape = list(input_shape[level_idx])
-                concat_shape[-1] = self.total_channels  # All channels concatenated
+                concat_shape[-1] = self.total_channels
                 self.compilation_convs[idx].build(tuple(concat_shape))
 
                 # Build compilation batch norm
@@ -231,8 +231,8 @@ class MLFCLayer(keras.layers.Layer):
         for level_idx in range(4):
             self.squeeze_excitations[level_idx].build(input_shape[level_idx])
 
-        # Build activation layer (LeakyReLU doesn't need explicit building but good practice)
-        self.activation.build(input_shape[0])  # Any shape works for activation
+        # LeakyReLU needs no explicit build; any shape works.
+        self.activation.build(input_shape[0])
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -300,7 +300,8 @@ class MLFCLayer(keras.layers.Layer):
                 # Apply merge convolution with residual
                 merged_feat = self.merge_convs[idx](merged_input)
                 merged_feat = self.merge_batch_norms[idx](merged_feat, training=training)
-                merged_feat = merged_feat + original_feat  # Residual connection
+                # Residual connection.
+                merged_feat = merged_feat + original_feat
                 merged_feat = self.activation(merged_feat)
 
                 new_features.append(merged_feat)

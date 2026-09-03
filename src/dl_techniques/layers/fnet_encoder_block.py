@@ -156,9 +156,8 @@ class FNetEncoderBlock(keras.layers.Layer):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.supports_masking = True
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-081: `name` is explicit so it
-        # matches the auto-name of the first instance and the checkpoint path never moves.
-        # A caller-supplied `name` in `fourier_config` still wins.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-081: `name` is explicit so it matches
+        # the auto-name of the first instance; a caller-supplied `name` in `fourier_config` still wins.
         self.fourier_transform = FNetFourierTransform(
             **{"name": "f_net_fourier_transform", **self.fourier_config})
 
@@ -279,9 +278,8 @@ class FNetEncoderBlock(keras.layers.Layer):
         # Drop-path wraps each branch output before the residual add, never the
         # sum itself -- dropping the sum would delete the skip path.
         if self.normalization_position == 'pre':
-            # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: normalize the branch
-            # input only (`x + branch(Norm(x))`); normalizing the sum reinstates a
-            # norm on the skip path. `FNet` adds the stack-final norm this needs. See decisions.md.
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: normalize the branch input
+            # only (`x + branch(Norm(x))`) -- normalizing the sum reinstates a norm on the skip path. See decisions.md.
             fourier_output = self.fourier_transform(
                 self.fourier_layer_norm(inputs, training=training),
                 attention_mask=attention_mask,
