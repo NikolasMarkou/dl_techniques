@@ -1,105 +1,30 @@
 """
-A gated multi-head attention with rotary position embeddings.
+Gated multi-head attention with rotary position embeddings.
 
-This layer provides a sophisticated and high-performance implementation of
-multi-head attention, integrating several modern architectural enhancements
-commonly found in state-of-the-art large language models. It is designed
-for improved training stability, expressiveness, and the effective encoding of
-sequential information.
+This module defines ``GatedAttention``. Its forward pass differs from plain
+multi-head attention in three ways. Query, key and value are each normalized
+independently with zero-centered RMSNorm before the head split, value
+included, not just query and key. Partial rotary position embedding (RoPE)
+rotates only the first ``rope_percentage`` fraction of each head's
+dimensions, leaving the rest untouched. And the block gates its own output:
+a sigmoid projection of the attention output multiplies that same output
+elementwise, rather than being driven by the layer's input. Grouped-query
+attention is supported through ``num_kv_heads``.
 
-Architecture:
-The layer's architecture augments the standard scaled dot-product attention
-with three key concepts: Rotary Position Embedding (RoPE) for relative
-positional awareness, RMSNorm for efficient normalization, and an output
-gating mechanism for dynamic information flow control.
-
-1.  **QKV Projection and Normalization:** Input tokens are first projected
-    into Query (Q), Key (K), and Value (V) representations. Unlike standard
-    Transformer architectures that apply Layer Normalization pre-attention,
-    this layer normalizes Q, K, and V vectors independently using Root Mean
-    Square Normalization (RMSNorm). RMSNorm is a simpler, computationally
-    cheaper alternative that stabilizes training by re-scaling activations
-    based on their root mean square magnitude, without re-centering them.
-
-2.  **Rotary Position Embedding (RoPE):** To inject relative positional
-    information, RoPE is applied to the normalized Q and K vectors. Instead
-    of adding a positional encoding, RoPE rotates the embedding vectors in a
-    high-dimensional space. The angle of rotation for a token at position `m`
-    is determined by `m * θ`, where `θ` is a predefined frequency.
-
-    The key insight is that the dot product of two rotated vectors, one at
-    position `m` and another at `n`, depends only on their content and their
-    relative distance `m-n`. This is because the rotational matrices are
-    orthogonal, preserving vector norms, and the dot product `q_m^T k_n`
-    becomes a function of the relative position `m-n`, allowing the
-    self-attention mechanism to naturally capture relative spatial context.
-    This implementation uses "partial RoPE," applying rotation only to a
-    subset of the head dimensions, which may help disentangle positional
-    information from content representation.
-
-3.  **Scaled Dot-Product Attention:** After RoPE is applied, the standard
-    attention mechanism is computed:
-
-        Attention(Q, K, V) = softmax( (Q_rope * K_rope^T) / sqrt(d_k) ) * V
-
-    The output is a weighted sum of the Value vectors, where the weights are
-    determined by the similarity of the positionally-aware Query and Key
-    vectors.
-
-4.  **Output Gating:** The final attention output is modulated by a gating
-    mechanism inspired by Gated Linear Units (GLU). The attention output `A`
-    is used to compute a gate `g = sigmoid(Linear(A))`. The final layer
-    output is the element-wise product `g ⊗ A`. This allows the model to
-    learn to dynamically control the flow of information through the layer,
-    selectively amplifying or attenuating features from the attention output.
-
-Foundational Mathematics:
-    Composing the four stages above, for input ``x`` at positions ``m``, ``n``,
-    with ``R_m`` the RoPE rotation for position ``m`` (applied to the first
-    ``rope_percentage`` of each head's dimensions only)::
-
-        u         = W_in x                                        [input linear]
-        Q, K, V   = norm_q(W_q u), norm_k(W_k u), norm_v(W_v u)   [RMSNorm by default]
-        q_m, k_n  = R_m Q_m, R_n K_n
-        s_mn      = (q_m . k_n) / sqrt(head_dim)
-        A_m       = sum_n prob_n(s_mn) V_n
-        A'_m      = W_o A_m        [only when attention_dim != dim; else identity]
-        out_m     = sigmoid(W_g A'_m) ⊗ A'_m
-
-    Two properties make this composition work. ``R_m`` is orthogonal, so
-    ``q_m . k_n = Q_m^T R_m^T R_n K_n`` depends on ``m - n`` alone — relative
-    position for free, with no positional term added to the residual stream. And
-    the gate is computed from ``A'`` itself, i.e. it is a self-gate: the layer
-    decides how much of its OWN output to emit, on a per-feature basis, so a head
-    that produced nothing useful can be attenuated at the exit rather than having
-    to be routed around downstream.
-
-    The normalizer written ``prob`` above is softmax by default but is pluggable
-    via ``probability_type`` / ``probability_config``; ``norm_q``/``norm_k``/
-    ``norm_v`` via ``qk_norm_type`` / ``qk_norm_kwargs``; and the ``sigmoid`` via
-    ``gate_activation_type`` / ``gate_activation_args`` — note that leaving the
-    ``[0, 1]`` range turns the gate from an attenuator into a rescaler.
+A caller needs ``dim`` divisible by ``num_heads`` unless ``head_dim`` is
+given explicitly, and ``rope_percentage`` in ``(0, 1]``.
 
 References:
-  - "Attention Is All You Need" (Vaswani et al., 2017)
-    https://arxiv.org/abs/1706.03762
-  - "RoFormer: Enhanced Transformer with Rotary Position Embedding"
-    (Su et al., 2021) https://arxiv.org/abs/2104.09864
-  - "Root Mean Square Layer Normalization" (Zhang and Sennrich, 2019)
-    https://arxiv.org/abs/1910.07467
-  - "LLaMA: Open and Efficient Foundation Language Models"
-    (Touvron et al., 2023) https://arxiv.org/abs/2302.13971
-
+    - Vaswani et al., 2017. Attention Is All You Need. (https://arxiv.org/abs/1706.03762)
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding. (https://arxiv.org/abs/2104.09864)
+    - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization. (https://arxiv.org/abs/1910.07467)
+    - Touvron et al., 2023. LLaMA: Open and Efficient Foundation Language
+      Models. (https://arxiv.org/abs/2302.13971)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
@@ -109,8 +34,6 @@ from dl_techniques.layers.activations import ProbabilityOutput, resolve_activati
 
 from .common import apply_attention_mask, compute_attention_scale
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.gated_attention")
 class GatedAttention(keras.layers.Layer):
@@ -123,7 +46,7 @@ class GatedAttention(keras.layers.Layer):
     pass computes ``output = sigma(W_gate(A')) * A'`` where
     ``A' = Attention(RoPE(RMSNorm(Q)), RoPE(RMSNorm(K)), RMSNorm(V))``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -138,8 +61,8 @@ class GatedAttention(keras.layers.Layer):
         └───────────────────────────────┬──────────────────────────────┘
                                         ▼
         ┌──────────────────────────────────────────────────────────────┐
-        │  q_norm, k_norm, v_norm — zero-centered RMSNorm on ALL       │
-        │  THREE, before the head reshape. V is normed too, which      │
+        │  q_norm, k_norm, v_norm — zero-centered RMSNorm on all       │
+        │  three, before the head reshape. V is normed too, which      │
         │  the sibling layers do not do.                               │
         └───────────────────────────────┬──────────────────────────────┘
                                         ▼
@@ -161,25 +84,25 @@ class GatedAttention(keras.layers.Layer):
         ┌──────────────────────────────────────────────────────────────┐
         │  GQA expand — only when num_kv_groups > 1                    │
         │  keras.ops.repeat(K, num_kv_groups, axis=2), V likewise      │
-        │  repeat, NOT tile: copies of one K/V head must be ADJACENT   │
+        │  repeat, not tile: copies of one K/V head stay adjacent      │
         └───────────────────────────────┬──────────────────────────────┘
                                         ▼
         ┌──────────────────────────────────────────────────────────────┐
         │  scaled_dot_product_attention() — a method of this class     │
         │    transpose to [B, H, S, d]  ►  S = q kᵀ * (1/sqrt(d))      │
-        │    if attention_mask: the 1 = keep predicate is passed       │
-        │      through VERBATIM; a row that keeps nothing is rescued   │
-        │      on the axis probability_config declares                 │
+        │    if attention_mask: the 1 = keep predicate passes through  │
+        │      unchanged; a row that keeps nothing is rescued on the   │
+        │      axis probability_config declares                        │
         │    A = attn_prob(S)  ►  dropout if training  ►  out = A v    │
         └───────────────────────────────┬──────────────────────────────┘
                                         ▼
         ┌──────────────────────────────────────────────────────────────┐
-        │  reshape [B, S, attention_dim]  ►  output_proj, but ONLY     │
-        │  when attention_dim != dim (otherwise no such sub-layer)     │
+        │  reshape [B, S, attention_dim]  ►  output_proj, only when    │
+        │  attention_dim != dim (otherwise no such sub-layer)          │
         └───────────────────────────────┬──────────────────────────────┘
                                         ▼ y
         ┌──────────────────────────────────────────────────────────────┐
-        │  output gate — computed FROM y, not from the layer input     │
+        │  output gate — computed from y, not from the layer input     │
         │                                                              │
         │   y ──┬──► output_gate_linear ──► gate_activation ──► g      │
         │       │                           (sigmoid by default)       │
@@ -191,7 +114,6 @@ class GatedAttention(keras.layers.Layer):
         ┌──────────────────────────────────────────────────────────────┐
         │  Output [B, S, dim]                                          │
         └──────────────────────────────────────────────────────────────┘
-
 
     :param dim: Model dimension size. Must be positive and divisible by
         ``num_heads`` if ``head_dim`` is not specified.
@@ -233,7 +155,7 @@ class GatedAttention(keras.layers.Layer):
         raw attention scores into weights. Defaults to ``"softmax"``, which
         reproduces standard attention. The score-level routing/hierarchical
         variants (``"routing"``, ``"deterministic_routing"``, ``"hierarchical"``,
-        ``"hierarchical_routing"``) are **rejected at construction time**: they
+        ``"hierarchical_routing"``) are rejected at construction time: they
         alter the shape/semantics of their input in ways this layer does not
         support.
     :type probability_type: str
@@ -326,12 +248,8 @@ class GatedAttention(keras.layers.Layer):
                 f"GatedAttention. Disallowed types: {_disallowed_prob_types}."
             )
 
-        # Store every configuration parameter, for serialization.
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071 — `num_kv_heads=None` means
-        # "one K/V head per query head": plain MHA, byte-identical to the
-        # pre-2026-08-15 layer. Don't give it a concrete default — any non-`None`
-        # value narrows FOUR weights per block, 4x on `80b` (16/4) to 8x on `80b_a3b`
-        # (16/2), so every pre-2026-08-15 `.keras` fails to load. See decisions.md D-071.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: num_kv_heads defaults
+        # to None (plain MHA), never a concrete value -- any non-None default narrows weights and breaks pre-2026-08-15 checkpoints. See decisions.md.
         self.dim = dim
         self.num_heads = num_heads
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -365,30 +283,18 @@ class GatedAttention(keras.layers.Layer):
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
-        # TRICKY POINT: When using custom head_dim, attention_dim may not equal dim
-        # This requires an additional projection layer to match dimensions
+        # A custom head_dim can leave attention_dim != dim, hence output_proj below.
         self.attention_dim = self.num_heads * self.head_dim
-        # K and V are projected to num_kv_heads * head_dim, which is the whole
-        # point of GQA: the KV cache shrinks by num_kv_groups.
+        # K and V project to num_kv_heads * head_dim, shrinking the KV cache by num_kv_groups.
         self.kv_dim = self.num_kv_heads * self.head_dim
 
-        # DECISION plan_2026-06-14_ab855e7e/D-001
-        # The originating plan directory is gone, so this comment is the record.
-        # Precompute the attention scale as a Python float, here in `__init__`.
-        # Don't revert to `keras.ops.sqrt` on a cast scalar: on a static int that
-        # returns a backend tensor, which can leak when `__init__` runs inside a
-        # symbolic scratch graph. Don't move the call into `call()` either. The
-        # expression now lives in `common.compute_attention_scale`, whose body is
-        # `1.0 / math.sqrt(float(head_dim))` — byte-identical to what it
-        # replaced.
+        # DECISION plan_2026-06-14_ab855e7e/D-001: precompute the scale as a
+        # Python float in __init__, not with keras.ops.sqrt in call() -- a cast static int returns a backend tensor that can leak into a scratch graph. See decisions.md.
         self.scale = compute_attention_scale(self.head_dim)
 
-        # Create all sub-layers here, unbuilt; build them in `build()`.
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200 — clone the initializer
-        # per projection. Don't pass `self.kernel_initializer` straight in: one
-        # Initializer INSTANCE reused across same-shape weights gives
-        # bit-identical kernels (measured max|delta| = 0.0 over Q, K, V and the
-        # output projection), so Q and K start equal. See decisions.md D-200.
+        # Sub-layers are created here, unbuilt; build() builds them.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200: clone the initializer
+        # per projection, never pass self.kernel_initializer directly -- a shared instance gives bit-identical Q/K/V kernels. See decisions.md.
         self.input_linear = keras.layers.Dense(
             self.dim,
             use_bias=self.use_bias,
@@ -409,11 +315,8 @@ class GatedAttention(keras.layers.Layer):
             bias_regularizer=self.bias_regularizer,
             name="q_linear"
         )
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071 — K and V project to
-        # `kv_dim`, Q to `attention_dim`; the other two narrowed weights are
-        # `k_norm`/`v_norm`, built at `kv_shape`. Don't "restore symmetry" by
-        # giving K/V `attention_dim` again: the narrower width IS the KV-cache
-        # saving, and is what makes GQA a checkpoint break. See decisions.md D-071.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: K and V project to
+        # kv_dim, not attention_dim -- the narrower width is the GQA KV-cache saving. See decisions.md.
         self.k_linear = keras.layers.Dense(
             self.kv_dim,
             use_bias=self.use_bias,
@@ -451,8 +354,7 @@ class GatedAttention(keras.layers.Layer):
             name='v_norm'
         )
 
-        # Rotary Position Embedding (Partial RoPE)
-        # TRICKY POINT: RoPE doesn't have trainable parameters, just precomputed sin/cos
+        # RoPE has no trainable parameters, only precomputed sin/cos tables.
         self.rope = create_embedding_layer(
             'rope',
             head_dim=self.head_dim,
@@ -467,8 +369,7 @@ class GatedAttention(keras.layers.Layer):
         else:
             self.dropout = None
 
-        # TRICKY POINT: Output projection needed when attention_dim != dim
-        # This happens when using custom head_dim that doesn't divide evenly into dim
+        # output_proj exists only when a custom head_dim leaves attention_dim != dim.
         if self.attention_dim != self.dim:
             self.output_proj = keras.layers.Dense(
                 self.dim,
@@ -544,13 +445,8 @@ class GatedAttention(keras.layers.Layer):
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if head_dim is not None and head_dim <= 0:
             raise ValueError(f"head_dim must be positive, got {head_dim}")
-        # This check does NOT adopt `common.validate_head_divisibility`, and
-        # that is a choice. It is CONDITIONAL on `head_dim is None`, and its
-        # message carries the trailing clause "when head_dim is None", which is
-        # the part that tells a caller how to fix it: supply an explicit
-        # `head_dim`. The shared helper emits the bare majority string and cannot
-        # express that clause, so adopting it here would degrade the diagnostic.
-        # `wave_field_attention.py` is unconditional and does adopt it.
+        # Not routed through common.validate_head_divisibility: this check is
+        # conditional on head_dim is None and its message names the fix (supply head_dim), which the shared helper's message cannot express.
         if head_dim is None and dim % num_heads != 0:
             raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads}) when head_dim is None")
         if max_seq_len <= 0:
@@ -591,34 +487,25 @@ class GatedAttention(keras.layers.Layer):
         qkv_shape = (batch_size, seq_len, self.attention_dim)
         kv_shape = (batch_size, seq_len, self.kv_dim)
 
-        # Build QKV projections - MUST be built explicitly
+        # Sub-layers with lazy build must be built explicitly here for serialization.
         self.q_linear.build(linear_output_shape)
         self.k_linear.build(linear_output_shape)
         self.v_linear.build(linear_output_shape)
 
-        # Build normalization layers.
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071 — build the K/V norms at
-        # `kv_shape`, NOT `qkv_shape`. Building them at `qkv_shape` gives scale
-        # vectors `num_kv_groups` times too wide — 4x on the Qwen3-Next `80b`
-        # variant (16/4), 8x on `80b_a3b` (16/2) — and the forward pass then
-        # fails or silently mis-scales. See decisions.md D-071.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: build k_norm/v_norm at
+        # kv_shape, not qkv_shape -- qkv_shape gives scale vectors num_kv_groups times too wide and mis-scales the forward pass. See decisions.md.
         self.q_norm.build(qkv_shape)
         self.k_norm.build(kv_shape)
         self.v_norm.build(kv_shape)
 
-        # Build RoPE in the frame `call()` actually hands it: (B, H, S, head_dim).
-        # See the D-083 anchor in `call()` -- axis 2 must be the SEQUENCE axis.
-        # `RotaryPositionEmbedding.build` only validates rank and the last axis,
-        # so the old `(batch, seq, heads, head_dim)` here built identical
-        # variables; it is corrected because it documented the wrong convention.
+        # RoPE is built in the (B, H, S, head_dim) frame call() actually uses;
+        # axis 2 must be the sequence axis.
         rope_input_shape = (batch_size, self.num_heads, seq_len, self.head_dim)
         self.rope.build(rope_input_shape)
 
-        # Build dropout if used
         if self.dropout is not None:
             self.dropout.build((batch_size, self.num_heads, seq_len, seq_len))
 
-        # TRICKY POINT: Build output projection only if it exists
         if self.output_proj is not None:
             self.output_proj.build((batch_size, seq_len, self.attention_dim))
 
@@ -770,13 +657,8 @@ class GatedAttention(keras.layers.Layer):
         k_reshaped = keras.ops.reshape(k_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
         v_reshaped = keras.ops.reshape(v_norm, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
 
-        # Apply Partial RoPE to Q and K (not V).
-        #
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-083 — apply RoPE in the
-        # (B, H, S, D) frame; the two transposes are not optional. Don't pass the
-        # (B, S, H, D) tensors straight to `self.rope(...)`: it reads seq length from
-        # `ops.shape(inputs)[2]`, HEADS in that frame, leaving the layer exactly
-        # permutation-equivariant (measured 3.58e-07). See decisions.md D-083.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-083: apply RoPE in the
+        # (B, H, S, D) frame via transpose, never pass (B, S, H, D) straight in -- rope reads seq length from axis 2. See decisions.md.
         q_rope = keras.ops.transpose(
             self.rope(keras.ops.transpose(q_reshaped, (0, 2, 1, 3)), training=training),
             (0, 2, 1, 3),
@@ -786,12 +668,8 @@ class GatedAttention(keras.layers.Layer):
             (0, 2, 1, 3),
         )
 
-        # GQA: expand each K/V head to the query heads that share it. RoPE is
-        # applied BEFORE the expansion so it is computed once per K/V head, and
-        # `ops.repeat` (not `ops.tile`) is what puts the copies of one head
-        # ADJACENT -- head g of the expanded tensor must be kv head g //
-        # num_kv_groups. `ops.tile` would interleave the groups instead and
-        # silently pair each query head with the wrong K/V head.
+        # GQA expand runs after RoPE, once per K/V head. ops.repeat keeps the
+        # copies of one head adjacent; ops.tile would interleave groups and pair each query head with the wrong K/V head.
         if self.num_kv_groups > 1:
             k_rope = keras.ops.repeat(k_rope, self.num_kv_groups, axis=2)
             v_reshaped = keras.ops.repeat(v_reshaped, self.num_kv_groups, axis=2)
@@ -808,8 +686,6 @@ class GatedAttention(keras.layers.Layer):
             attention_output, (batch_size, seq_len, self.attention_dim)
         )
 
-        # TRICKY POINT: Project to original dim if needed
-        # This is necessary when attention_dim != dim (custom head_dim case)
         if self.output_proj is not None:
             # Shape: (B, S, attention_dim) -> (B, S, dim)
             attention_output = self.output_proj(attention_output, training=training)
@@ -862,5 +738,3 @@ class GatedAttention(keras.layers.Layer):
             'gate_activation_args': self.gate_activation_args,
         })
         return config
-
-# ---------------------------------------------------------------------
