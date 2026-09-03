@@ -1,38 +1,21 @@
-"""CapsNet V2 — modernised capsule network with attention routing.
+"""CapsNetV2, a capsule network with single-step attention routing.
 
-This module is the V2 counterpart to :mod:`dl_techniques.models.vision.capsnet.model`.
-It addresses several documented shortcomings of the original 2017 architecture
-without breaking the legacy ``CapsNet`` API:
+This is the V2 counterpart to :mod:`dl_techniques.models.vision.capsnet.model`. It
+replaces the original iterative dynamic-routing loop with a single-step attention
+routing capsule, and separates capsule magnitude (a learned sigmoid head) from
+capsule orientation so the two no longer share one squash nonlinearity. The stem can
+be the legacy two-conv stack or a ResNet backbone from
+:mod:`dl_techniques.models.vision.resnet`. The model returns the classification length
+tensor directly and trains through standard Keras `compile`/`fit` with margin or
+cross-entropy loss, unlike V1's custom `train_step`/`test_step`. Reconstruction, when
+enabled, is reached only through the separate :meth:`CapsNetV2.reconstruct` method, so
+it never affects the standard training loss. `stem_pretrained=True` on a ResNet stem
+raises `NotImplementedError`: no public ResNet weights ship with `dl_techniques`.
 
-Improvements over V1
---------------------
-* **Attention routing.** Replaces the iterative dynamic-routing inner loop with
-  a single-step :class:`AttentionRoutingCapsule` (see
-  :mod:`dl_techniques.layers.attention.attention_routing_capsule`).
-* **Decoupled length & probability.** Capsule magnitude is a learned scalar
-  (sigmoid head) rather than a squash side-effect, eliminating saturation at
-  zero.
-* **Configurable backbone.** Stem can be the legacy two-conv stack or any
-  ResNet variant from :mod:`dl_techniques.models.vision.resnet`. Stage-2 pretraining
-  flow accepts a local weights path string; ``stem_pretrained=True`` raises
-  ``NotImplementedError`` from ``create_resnet`` (no public ResNet weights
-  ship with ``dl_techniques``, and it refuses rather than quietly handing back
-  a randomly initialized backbone).
-* **Standard ``compile/fit``.** The model returns the classification length
-  tensor directly. Margin / cross-entropy loss flows through the standard
-  Keras workflow — no custom ``train_step`` / ``test_step`` and no dict outputs.
-* **Modern recipe defaults.** :func:`create_capsnet_v2` wires AdamW + cosine
-  schedule with linear warmup + EMA + global-norm gradient clipping.
-* **Reconstruction is optional and isolated.** When enabled, the decoder is
-  exposed via the :meth:`CapsNetV2.reconstruct` helper rather than being baked
-  into the loss path. Reconstruction gradients no longer corrupt the
-  classification representation in standard training.
-
-References
-----------
-* Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between
-  capsules. NeurIPS 30.
-* He, K., et al. (2015). Deep Residual Learning for Image Recognition.
+References:
+    - Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between
+      capsules. NeurIPS 30.
+    - He, K., et al. (2015). Deep Residual Learning for Image Recognition.
 """
 
 import keras
@@ -57,75 +40,79 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.capsnet.model_v2")
 class CapsNetV2(keras.Model):
-    """Modernised Capsule Network with attention routing.
+    """Capsule network with a stem, a primary capsule layer, and attention-routed digit capsules.
 
-    Architecture::
+    Architecture:
 
-        Input → Stem (legacy conv | resnet) → PrimaryCapsule
-              → CapsuleBlockV2 (AttentionRoutingCapsule) → length
-              → class probabilities (via margin loss or CCE)
+    .. code-block:: text
 
-    Args:
-        num_classes: Number of output classes. Must be positive.
-        input_shape: ``(H, W, C)`` shape of the input image (without batch).
-        stem: Stem variant — ``"legacy"`` (two-conv stack matching the
-            original CapsNet paper), or any ResNet variant supported by
-            :func:`dl_techniques.models.vision.resnet.create_resnet`
-            (``"resnet18"``, ``"resnet34"``, ``"resnet50"``,
-            ``"resnet101"``, ``"resnet152"``). Defaults to ``"legacy"``.
-        stem_pretrained: Pretrained-weight option for ResNet stems.
-            ``False`` (default) means random init. ``True`` **raises
-            ``NotImplementedError``** — no public ResNet weights ship with
-            ``dl_techniques``, and :func:`dl_techniques.models.vision.resnet.create_resnet`
-            refuses unconditionally rather than returning a randomly
-            initialized backbone to a caller who asked for pretrained one.
-            (Until 2026-08-15 this entry promised that a download failure
-            would quietly leave the stem randomly initialized. No such path
-            exists: it went away with the placeholder URL table, and the
-            sibling :func:`create_capsnet_v2_pretrained` docstring has
-            documented the raise since.)
-            A string is treated as a local path to a ``.keras`` weights file.
-        primary_capsules: Number of primary capsules per spatial location
-            in the legacy stem. Defaults to ``32``.
-        primary_capsule_dim: Dimension of each primary capsule. Defaults
-            to ``8``.
-        primary_kernel_size: Conv kernel for the primary-capsule layer
-            (when stem is legacy). Defaults to ``9``.
-        primary_strides: Stride for the primary-capsule conv. Defaults to ``2``.
-        digit_capsule_dim: Dimension of each output / class capsule.
-            Defaults to ``16``.
-        legacy_conv_filters: Filter counts for the legacy stem's two
-            Conv2D layers. Defaults to ``[256, 256]``.
-        loss_type: Either ``"margin"`` (capsule margin loss; matches V1)
-            or ``"categorical_crossentropy"`` (CCE on softmax(length),
-            supports label smoothing). Used only by
-            :func:`create_capsnet_v2` to pick the compile-time loss.
-            Defaults to ``"margin"``.
-        positive_margin / negative_margin / downweight: Margin-loss params.
-        reconstruction: If ``True``, build a decoder for the
-            :meth:`reconstruct` helper. Default ``False`` — reconstruction
-            no longer participates in the standard loss path.
-        decoder_architecture: Hidden layer sizes for the decoder, when
-            ``reconstruction=True``. Defaults to ``[512, 1024]``.
-        attention_softmax_axis: Forwarded to
-            :class:`AttentionRoutingCapsule`.
-        attention_top_k: Forwarded to :class:`AttentionRoutingCapsule`.
-        use_load_balancing: Forwarded to :class:`AttentionRoutingCapsule`.
-        load_balancing_weight: Forwarded to :class:`AttentionRoutingCapsule`.
-        block_dropout_rate: Dropout in :class:`CapsuleBlockV2`.
-        block_direction_only_norm: Length-preserving direction LN in
-            :class:`CapsuleBlockV2`.
-        kernel_initializer / kernel_regularizer: Initialization /
-            regularization for trainable layers.
-        name: Model name.
+        input [B, H, W, C]
+          |
+          v
+        Stem (legacy conv-stack | ResNet backbone)  -> feature map
+          |
+          v
+        PrimaryCapsule                              -> [B, N_p, D_p]
+          |
+          v
+        CapsuleBlockV2 (attention routing)           -> digit_caps [B, num_classes, D_d]
+          |
+          +--> length(digit_caps) -> class probabilities  (call())
+          |
+          '--> reconstruct(): mask + Decoder (optional, isolated from the loss path)
 
-    Notes
-    -----
-    The forward pass returns a single tensor of shape
-    ``(batch, num_classes)`` containing per-class capsule lengths in
-    ``(0, 1)``. Use :meth:`reconstruct` separately if you need image
-    reconstructions; reconstruction is **not** part of the standard
-    forward / loss path.
+    :param num_classes: Number of output classes. Must be positive.
+    :type num_classes: int
+    :param input_shape: ``(H, W, C)`` shape of the input image, without batch.
+    :type input_shape: Tuple[int, int, int]
+    :param stem: ``"legacy"`` for the two-conv stack from the original CapsNet paper, or a ResNet variant from `create_resnet` (``"resnet18"``, ``"resnet34"``, ``"resnet50"``, ``"resnet101"``, ``"resnet152"``).
+    :type stem: str
+    :param stem_pretrained: Pretrained-weight option for a ResNet stem. False means random init. True raises `NotImplementedError`, since no public ResNet weights ship with `dl_techniques`. A string is a local path to a ``.keras`` weights file.
+    :type stem_pretrained: Union[bool, str]
+    :param primary_capsules: Number of primary capsules per spatial location, legacy stem only.
+    :type primary_capsules: int
+    :param primary_capsule_dim: Dimension of each primary capsule.
+    :type primary_capsule_dim: int
+    :param primary_kernel_size: Conv kernel for the primary-capsule layer, legacy stem only.
+    :type primary_kernel_size: Union[int, Tuple[int, int]]
+    :param primary_strides: Stride for the primary-capsule conv, legacy stem only.
+    :type primary_strides: Union[int, Tuple[int, int]]
+    :param digit_capsule_dim: Dimension of each output (class) capsule.
+    :type digit_capsule_dim: int
+    :param legacy_conv_filters: Filter counts for the legacy stem's two Conv2D layers.
+    :type legacy_conv_filters: Optional[List[int]]
+    :param loss_type: ``"margin"`` (capsule margin loss, matches V1) or ``"categorical_crossentropy"`` (CCE on softmax(length), supports label smoothing). Read by `create_capsnet_v2` to pick the compile-time loss.
+    :type loss_type: str
+    :param positive_margin: Positive margin for the margin loss.
+    :type positive_margin: float
+    :param negative_margin: Negative margin for the margin loss.
+    :type negative_margin: float
+    :param downweight: Downweight factor for the negative-class term in the margin loss.
+    :type downweight: float
+    :param reconstruction: Whether to build the decoder used by :meth:`reconstruct`. Reconstruction never participates in the standard loss path.
+    :type reconstruction: bool
+    :param decoder_architecture: Hidden layer sizes for the decoder, when `reconstruction` is True.
+    :type decoder_architecture: Optional[List[int]]
+    :param attention_softmax_axis: Forwarded to the attention routing capsule.
+    :type attention_softmax_axis: str
+    :param attention_top_k: Forwarded to the attention routing capsule.
+    :type attention_top_k: Optional[int]
+    :param use_load_balancing: Forwarded to the attention routing capsule.
+    :type use_load_balancing: bool
+    :param load_balancing_weight: Forwarded to the attention routing capsule.
+    :type load_balancing_weight: float
+    :param block_dropout_rate: Dropout rate inside `CapsuleBlockV2`.
+    :type block_dropout_rate: float
+    :param block_direction_only_norm: Whether `CapsuleBlockV2` uses length-preserving direction normalization.
+    :type block_direction_only_norm: bool
+    :param kernel_initializer: Initializer for trainable layers.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for trainable layers.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param name: Model name.
+    :type name: Optional[str]
+
+    :note: `call` returns a single tensor of shape ``(batch, num_classes)`` with per-class capsule lengths in ``(0, 1)``. Use :meth:`reconstruct` separately for image reconstructions; it is not part of the forward/loss path.
     """
 
     LEGACY_STEM = "legacy"
@@ -333,11 +320,15 @@ class CapsNetV2(keras.Model):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass returning the per-class capsule lengths.
+        """Run the forward pass, returning per-class capsule lengths.
 
-        Returns a tensor of shape ``(batch, num_classes)`` with values in
-        ``(0, 1)``. Compile with :class:`CapsuleMarginLoss` (default) or
-        :class:`keras.losses.CategoricalCrossentropy` (label smoothing).
+        :param inputs: Input images, shape ``[B, H, W, C]``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the call is in training mode.
+        :type training: Optional[bool]
+        :return: Capsule lengths, shape ``(batch, num_classes)``, values in ``(0, 1)``. Compile with `CapsuleMarginLoss` (default) or `keras.losses.CategoricalCrossentropy` (label smoothing).
+        :rtype: keras.KerasTensor
+        :raises ValueError: If `inputs` is not 4D.
         """
         if len(inputs.shape) != 4:
             raise ValueError(
@@ -356,11 +347,17 @@ class CapsNetV2(keras.Model):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass returning the raw digit capsule pose vectors.
+        """Run the forward pass, returning the raw digit capsule pose vectors.
 
-        Returns a tensor of shape ``(batch, num_classes, digit_capsule_dim)``
-        — the pose representation prior to length extraction. Useful for
-        :meth:`reconstruct` and for downstream pose analysis.
+        The pose representation prior to length extraction, useful for :meth:`reconstruct`
+        and for downstream pose analysis.
+
+        :param inputs: Input images, shape ``[B, H, W, C]``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the call is in training mode.
+        :type training: Optional[bool]
+        :return: Digit capsule poses, shape ``(batch, num_classes, digit_capsule_dim)``.
+        :rtype: keras.KerasTensor
         """
         features = self._stem_forward(inputs, training=training)
         primary = self.primary_caps(features, training=training)
@@ -371,19 +368,15 @@ class CapsNetV2(keras.Model):
         inputs: keras.KerasTensor,
         mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
-        """Reconstruct ``inputs`` via the decoder (when enabled).
+        """Reconstruct `inputs` through the decoder, when reconstruction is enabled.
 
-        Args:
-            inputs: ``(B, H, W, C)`` image tensor.
-            mask: Optional one-hot ``(B, num_classes)`` mask. If ``None``,
-                uses the predicted class (argmax of capsule lengths).
-
-        Returns:
-            Reconstructed image tensor with shape ``(B, H, W, C)``.
-
-        Raises:
-            ValueError: If the model was constructed with
-                ``reconstruction=False``.
+        :param inputs: Input images, shape ``(B, H, W, C)``.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional one-hot ``(B, num_classes)`` mask. Falls back to the predicted class (argmax of capsule lengths) when omitted.
+        :type mask: Optional[keras.KerasTensor]
+        :return: Reconstructed image, shape ``(B, H, W, C)``.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If the model was constructed with `reconstruction=False`, or if `mask`'s last dimension does not equal `num_classes`.
         """
         if self.decoder is None:
             raise ValueError(
@@ -406,6 +399,11 @@ class CapsNetV2(keras.Model):
 
     # ------------------------------------------------------------------
     def get_config(self) -> Dict[str, Any]:
+        """Return the model configuration for serialization.
+
+        :return: Config dict with every constructor argument.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -443,6 +441,13 @@ class CapsNetV2(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CapsNetV2":
+        """Build a model from a config dict, deserializing initializer and regularizer entries.
+
+        :param config: Config dict as returned by `get_config`.
+        :type config: Dict[str, Any]
+        :return: A new `CapsNetV2` instance.
+        :rtype: CapsNetV2
+        """
         if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
             config["kernel_initializer"] = keras.initializers.deserialize(
                 config["kernel_initializer"]
@@ -453,8 +458,7 @@ class CapsNetV2(keras.Model):
             )
         if "input_shape" in config and isinstance(config["input_shape"], list):
             config["input_shape"] = tuple(config["input_shape"])
-        # Don't try to actually pull pretrained weights on deserialization —
-        # the saved-model already contains them. Force False here.
+        # The saved model already contains the stem weights, so deserialization never re-fetches pretrained ones.
         config["stem_pretrained"] = False
         return cls(**config)
 
@@ -473,7 +477,25 @@ def _default_recipe(
     ema_momentum: float = 0.999,
     global_clipnorm: float = 1.0,
 ) -> keras.optimizers.Optimizer:
-    """Build the modern training recipe: AdamW + cosine + warmup + EMA."""
+    """Build the modern training recipe: AdamW with a cosine schedule, warmup, and EMA.
+
+    :param learning_rate: Peak learning rate after warmup.
+    :type learning_rate: float
+    :param decay_steps: Total decay steps for the cosine schedule.
+    :type decay_steps: int
+    :param warmup_steps: Warmup steps. Defaults to 5% of `decay_steps`.
+    :type warmup_steps: Optional[int]
+    :param weight_decay: AdamW decoupled weight decay.
+    :type weight_decay: float
+    :param use_ema: Whether to enable EMA on the weights.
+    :type use_ema: bool
+    :param ema_momentum: EMA decay.
+    :type ema_momentum: float
+    :param global_clipnorm: Global-norm gradient clipping.
+    :type global_clipnorm: float
+    :return: A configured `AdamW` optimizer.
+    :rtype: keras.optimizers.Optimizer
+    """
     if warmup_steps is None:
         warmup_steps = max(1, int(0.05 * decay_steps))
 
@@ -524,33 +546,49 @@ def create_capsnet_v2(
     optimizer: Optional[keras.optimizers.Optimizer] = None,
     **model_kwargs: Any,
 ) -> CapsNetV2:
-    """Create and compile a :class:`CapsNetV2` with the modern training recipe.
+    """Create and compile a `CapsNetV2` with the modern training recipe.
 
-    Wraps :class:`CapsNetV2` with sensible defaults: AdamW + cosine schedule
-    + linear warmup + EMA + gradient clipping. Compiles with
-    :class:`CapsuleMarginLoss` (default) or
-    :class:`keras.losses.CategoricalCrossentropy(label_smoothing=...)`.
+    Wraps `CapsNetV2` with AdamW, a cosine schedule with linear warmup, EMA, and
+    gradient clipping. Compiles with `CapsuleMarginLoss` (default) or
+    `keras.losses.CategoricalCrossentropy(label_smoothing=...)`.
 
-    Args:
-        num_classes: Number of output classes.
-        input_shape: ``(H, W, C)``.
-        stem: Stem variant. See :class:`CapsNetV2`.
-        stem_pretrained: Pretrained-weight option for ResNet stems.
-        learning_rate: Peak LR after warmup.
-        decay_steps: Total decay steps for cosine schedule.
-        warmup_steps: Warmup steps. Defaults to ``5 %`` of ``decay_steps``.
-        weight_decay: AdamW weight decay (decoupled).
-        use_ema: Enable EMA on weights.
-        ema_momentum: EMA decay.
-        global_clipnorm: Global-norm gradient clipping.
-        label_smoothing: For ``loss_type="categorical_crossentropy"`` only.
-        loss_type: ``"margin"`` (default) or ``"categorical_crossentropy"``.
-        positive_margin / negative_margin / downweight: Margin loss params.
-        optimizer: Skip the recipe and supply your own optimizer.
-        **model_kwargs: Forwarded to :class:`CapsNetV2`.
-
-    Returns:
-        Compiled :class:`CapsNetV2`.
+    :param num_classes: Number of output classes.
+    :type num_classes: int
+    :param input_shape: ``(H, W, C)`` input shape.
+    :type input_shape: Tuple[int, int, int]
+    :param stem: Stem variant. See `CapsNetV2`.
+    :type stem: str
+    :param stem_pretrained: Pretrained-weight option for a ResNet stem.
+    :type stem_pretrained: Union[bool, str]
+    :param learning_rate: Peak learning rate after warmup.
+    :type learning_rate: float
+    :param decay_steps: Total decay steps for the cosine schedule.
+    :type decay_steps: int
+    :param warmup_steps: Warmup steps. Defaults to 5% of `decay_steps`.
+    :type warmup_steps: Optional[int]
+    :param weight_decay: AdamW decoupled weight decay.
+    :type weight_decay: float
+    :param use_ema: Whether to enable EMA on the weights.
+    :type use_ema: bool
+    :param ema_momentum: EMA decay.
+    :type ema_momentum: float
+    :param global_clipnorm: Global-norm gradient clipping.
+    :type global_clipnorm: float
+    :param label_smoothing: Used only when `loss_type` is ``"categorical_crossentropy"``.
+    :type label_smoothing: float
+    :param loss_type: ``"margin"`` (default) or ``"categorical_crossentropy"``.
+    :type loss_type: str
+    :param positive_margin: Positive margin for the margin loss.
+    :type positive_margin: float
+    :param negative_margin: Negative margin for the margin loss.
+    :type negative_margin: float
+    :param downweight: Downweight factor for the margin loss.
+    :type downweight: float
+    :param optimizer: Supply an optimizer directly, skipping the built-in recipe.
+    :type optimizer: Optional[keras.optimizers.Optimizer]
+    :param model_kwargs: Forwarded to `CapsNetV2`.
+    :return: A compiled `CapsNetV2`.
+    :rtype: CapsNetV2
     """
     model = CapsNetV2(
         num_classes=num_classes,
@@ -610,20 +648,24 @@ def create_capsnet_v2_pretrained(
     pretrained: Union[bool, str] = True,
     **kwargs: Any,
 ) -> CapsNetV2:
-    """Convenience wrapper: capsule head on a pretrained ResNet backbone (Stage 2).
+    """Build a capsule head on a pretrained ResNet backbone.
 
-    Equivalent to::
+    Equivalent to ``create_capsnet_v2(num_classes=num_classes, input_shape=input_shape,
+    stem=backbone, stem_pretrained=pretrained, ...)``.
 
-        create_capsnet_v2(num_classes=num_classes, input_shape=input_shape,
-                          stem=backbone, stem_pretrained=pretrained, ...)
-
-    Pass a local ``.keras`` weights path string to ``pretrained``. No public
-    ResNet weights ship with ``dl_techniques``, so ``pretrained=True`` (the
-    default) raises ``NotImplementedError`` from
-    :func:`dl_techniques.models.vision.resnet.create_resnet` rather than silently
-    returning a randomly-initialized backbone, which is what it used to do.
-
-    :raises NotImplementedError: If ``pretrained`` is ``True`` rather than a path.
+    :param backbone: ResNet variant to use as the stem.
+    :type backbone: str
+    :param num_classes: Number of output classes.
+    :type num_classes: int
+    :param input_shape: ``(H, W, C)`` input shape.
+    :type input_shape: Tuple[int, int, int]
+    :param pretrained: A local ``.keras`` weights path, or True.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Forwarded to `create_capsnet_v2`.
+    :return: A compiled `CapsNetV2`.
+    :rtype: CapsNetV2
+    :raises ValueError: If `backbone` is not a supported ResNet variant.
+    :raises NotImplementedError: If `pretrained` is True rather than a path — no public ResNet weights ship with `dl_techniques`.
     """
     if backbone not in CapsNetV2.RESNET_STEMS:
         raise ValueError(
