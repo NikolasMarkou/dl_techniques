@@ -178,10 +178,31 @@ _MASK_SENTINEL: Dict[str, float] = {
 
 
 def _mask_value(dtype: Any) -> float:
-    """Return a dtype-safe large-negative additive mask value."""
-    # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-    # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
-    # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+    """Return a dtype-safe large-negative additive mask value.
+
+    :param dtype: a backend tensor's ``.dtype`` -- i.e. a ``tf.DType`` or the
+        plain dtype-name string. **Not** a ``keras.DTypePolicy`` and not
+        ``None``; see the anchor below for what that would silently do.
+    :type dtype: Any
+    :return: the :data:`_MASK_SENTINEL` entry for that dtype; ``-1e9`` for any
+        name not in the table.
+    :rtype: float
+    """
+    # DECISION plan-2026-09-03T033750-9bdf25f4/D-007
+    # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`
+    # (a Keras-2 residue banned across `src/`; `str` alone mis-renders a
+    # `tf.DType` as "<dtype: 'float16'>"). WHAT NOT TO DO: do not widen the
+    # `Any` in the signature into a promise. The old symbol RAISED TypeError on a
+    # `keras.DTypePolicy` and normalized `None` to floatx; this idiom does
+    # neither, and the miss lands on `.get(..., -1.0e9)` -- so
+    # `_mask_value(layer.dtype_policy)` under `mixed_float16` returns -1e9, which
+    # `keras.ops.cast(..., "float16")` turns into **-inf** (measured), and one
+    # fully-masked row is then NaN. That is silent, not loud: unlike
+    # `common.py:apply_attention_mask`, where any unrecognised name still lands on
+    # float32 via `mask_dtype`, there is no second line here to catch it.
+    # Pass a TENSOR's `.dtype`, as both call sites do -- pinned by
+    # `tests/test_layers/test_attention/test_the_lighthouse_mask_value_contract.py`.
+    # See decisions.md D-007 and plans/DECISIONS.md D-018.
     return _MASK_SENTINEL.get(getattr(dtype, "name", None) or str(dtype), -1.0e9)
 
 

@@ -396,7 +396,11 @@ def apply_attention_mask(
     # SPELLING (str, `tf.DType`, `np.dtype`: 47/47 measured) but NOT on non-dtype
     # objects -- `None`, a numpy scalar TYPE like `np.float32`, and a
     # `keras.DTypePolicy` all diverge -- so pass a tensor's `.dtype`, never a
-    # layer's dtype policy. See decisions.md D-007 and plans/DECISIONS.md D-018.
+    # layer's dtype policy. HERE the divergence is benign: whatever name arrives,
+    # `mask_dtype` returns float32 unless it is exactly "float64". The one site in
+    # this package where it would be SILENTLY WRONG is `lighthouse_attention.py`'s
+    # `_mask_value`, which carries its own anchor saying so.
+    # See decisions.md D-007 and plans/DECISIONS.md D-018.
     md = mask_dtype(getattr(logits.dtype, "name", None) or str(logits.dtype))
     x = keras.ops.cast(logits, md)
     kept = keras.ops.cast(keep, md) > 0.0
