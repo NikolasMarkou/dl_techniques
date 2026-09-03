@@ -1,20 +1,18 @@
 """Repo-wide census: no file under ``src/`` calls anything on ``keras.backend``.
 
-.. warning::
-
-   **This guard is pinned** ``xfail(strict=True)`` **until step 7 of**
-   ``plans/plan-2026-09-03T033750-9bdf25f4``. At the plan's base commit the walk
-   reports **83 offenders across 67 files**; steps 3-6 convert them and step 7
-   removes the mark. The mark is ``strict``, so the day the tree becomes clean
-   this file turns the suite RED with an ``XPASS`` -- a pin that outlives the
-   defect it excuses is itself a defect, and this one cannot be forgotten.
+The walk reports **zero** offenders and the assertion below is unconditional:
+there is no ``xfail`` mark, no waiver list and no allow-list. It was landed
+pinned ``xfail(strict=True)`` against a measured **83 offenders across 67
+files**, and unpinned in the same plan once the last one was converted; that
+history lives in ``plans/plan-2026-09-03T033750-9bdf25f4`` and its
+``findings/keras-backend-inventory.md``, not in this file's behaviour.
 
 What is banned, and why all six spellings at once
 -------------------------------------------------
 The predicate is a plain substring match on the literal text ``keras.backend.``.
 It is therefore not a check about one symbol: it bans every attribute reached
-through that module. The six spellings live in this tree today, with the
-Keras 3 replacement each one takes::
+through that module. Six spellings were present in this tree before the
+migration, each with the Keras 3 replacement it took::
 
     keras.backend.standardize_dtype(d)   ->  getattr(d, "name", None) or str(d)
     keras.backend.epsilon()              ->  keras.config.epsilon()
@@ -82,15 +80,16 @@ The predicate is imported, never re-implemented
 ``_docstring_line_numbers`` and the scan loop below come from the guard this
 file replaces, verbatim. Grep over this repo finds docstrings: a hand-rolled
 second walk would count every module docstring that *warns* about
-``keras.backend.`` -- starting with this one -- as a defect. The exclusion is
-load-bearing, and step 7 proves it with an injection inside a docstring that
-must NOT fire.
+``keras.backend.`` -- starting with this one -- as a defect. Full-line ``#``
+comments are excluded by the same argument. Both exclusions are load-bearing and
+both were proven so, by injections placed in a docstring and on a comment line
+that must NOT fire, alongside one real-code injection per banned spelling that
+must. If you change the predicate, re-run all eight: a guard that only ever
+passes is indistinguishable from a guard that cannot fail.
 """
 
 from pathlib import Path
 from typing import List
-
-import pytest
 
 # One copy of the predicate, not two. The import is absolute (``tests.`` is a
 # package): the bare ``test_models.…`` spelling does NOT resolve under this
@@ -106,13 +105,6 @@ SCANNED_ROOTS = (
     SRC_ROOT / "train",
     SRC_ROOT / "applications",
 )
-
-#: The census this file was landed with, at plan-2026-09-03T033750-9bdf25f4's
-#: base commit: 83 sites in 67 files. History, not an expectation -- the
-#: assertion below is ``== 0``, and the file is not marked ``skip``.
-#: The full path:line:symbol inventory is
-#: ``plans/plan-2026-09-03T033750-9bdf25f4/findings/keras-backend-inventory.md``.
-MEASURED_OFFENDERS_AT_PIN = 83
 
 
 def keras_backend_offenders(root: Path) -> List[str]:
@@ -141,16 +133,8 @@ def keras_backend_offenders(root: Path) -> List[str]:
 
 
 class TestTheKeras2BackendCallsAreGone:
-    """The ban itself, over the whole of ``src/``."""
+    """The ban itself, over the whole of ``src/``. Unconditional: the count is 0."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "83 measured offenders across 67 files at the plan's base commit; "
-            "steps 3-6 of plan-2026-09-03T033750-9bdf25f4 fix them and step 7 "
-            "removes this mark. strict=True so an XPASS reddens the suite."
-        ),
-    )
     def test_no_keras_backend_calls(self):
         offenders = []
         for root in SCANNED_ROOTS:
@@ -168,9 +152,9 @@ class TestTheKeras2BackendCallsAreGone:
 class TestTheCensusInstrumentIsNotVacuous:
     """A walk that visits nothing reports zero offenders and proves nothing.
 
-    Not ``xfail``: these arms must be GREEN from the day the file lands, and they
-    stay green after step 7 unpins the ban. They are what distinguishes "the tree
-    is clean" from "the walk is empty".
+These arms were GREEN from the day this file landed, through the whole
+    migration, and after the ban was unpinned. They are what distinguishes "the
+    tree is clean" from "the walk is empty".
     """
 
     def test_each_scanned_root_exists_and_holds_python_files(self):
