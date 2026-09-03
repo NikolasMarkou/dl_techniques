@@ -16,7 +16,7 @@ document and this README does not restate it.
 
 ```python
 from dl_techniques.models.vision.resnet import create_resnet          # yes
-from dl_techniques.models.language.bert import BertModel              # yes
+from dl_techniques.models.language.bert import BERT                   # yes
 from dl_techniques.models import resnet                               # no - nothing is re-exported
 ```
 
