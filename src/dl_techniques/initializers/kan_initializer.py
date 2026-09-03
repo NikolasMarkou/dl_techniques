@@ -1,19 +1,22 @@
 """Variance-controlled weight initializer for Kolmogorov-Arnold Networks (KAN).
 
-Implements the three initialization schemes of Rigas et al., "Initialization
-Schemes for Kolmogorov-Arnold Networks: An Empirical Study" (arXiv:2509.03417),
-adapted to this repository's ``KANLinear`` layer. A KAN edge applies a learnable
-univariate function
+Provides :class:`KANInitializer`, which implements the three initialization
+schemes of Rigas et al., "Initialization Schemes for Kolmogorov-Arnold
+Networks: An Empirical Study" (arXiv:2509.03417), adapted to this repository's
+``KANLinear`` layer, and :func:`create_kan_initializers`, which builds a
+matched pair for one layer.
+
+A KAN edge applies a learnable univariate function::
 
     f(x) = r * SiLU(x) + sum_m b_m * B_m(x)
 
-where ``r`` is the residual (base-scaler) weight and ``b_m`` are the B-spline
+``r`` is the residual (base-scaler) weight and ``b_m`` are the B-spline
 coefficient weights. The two roles have very different sensitivities, so a
-single Glorot/He-style scalar variance is inappropriate; the paper gives a
+single Glorot- or He-style scalar variance does not fit both. The paper gives a
 per-role variance for each of three schemes.
 
-``KANInitializer`` is a single shape-driven class that produces the init tensor
-for either role, selected by ``target``:
+:class:`KANInitializer` is one shape-driven class that produces the tensor for
+either role, selected by ``target``:
 
 * ``target='residual'`` -> 2D ``(n_in, n_out)`` tensor for the ``base_scaler``.
 * ``target='spline'``   -> 3D ``(n_in, n_out, n_coeffs)`` tensor for the
@@ -21,29 +24,30 @@ for either role, selected by ``target``:
 
 The three schemes
 -----------------
-* ``'power_law'`` (the paper's best-performing scheme): ``sigma_r =
+* ``'power_law'`` is the paper's best-performing scheme: ``sigma_r =
   (n_in * N) ** -alpha`` and ``sigma_b = (n_in * N) ** -beta``. With
   ``beta > alpha`` the residual path starts larger than the spline path, biasing
-  the edge toward its well-conditioned SiLU component. This is an EMPIRICAL rule
-  -- the paper fixes ``alpha=0.25, beta=1.75`` from a grid search, not from a
-  variance derivation -- so it is NOT variance preserving and it does NOT use
-  ``n_out`` (there is no backward-path term). See the measured gains below.
-* ``'glorot_inspired'``: the paper's bidirectional Glorot-style variance,
+  the edge toward its well-conditioned SiLU component. This is an empirical
+  rule: the paper fixes ``alpha=0.25, beta=1.75`` from a grid search, not from a
+  variance derivation. It is not variance preserving and it does not use
+  ``n_out``, since there is no backward-path term.
+* ``'glorot_inspired'`` is the paper's bidirectional Glorot-style variance,
   ``sigma^2 = (1 / N) * 2 / (n_in * mu_0 + n_out * mu_1)`` with the role's own
-  expectation constants. The ``1 / N`` factor is on BOTH roles in the paper: it
-  apportions the edge's variance budget across the edge's terms (the paper
-  writes ``G + k + 1``, i.e. the ``G + k`` basis terms PLUS the residual term),
-  not across ``N`` copies of a residual weight. This is the only scheme derived
-  from a variance argument, and it is the only width-independent one.
-* ``'baseline'``: the original KAN formulation -- a Glorot-uniform-equivalent
-  residual std plus a small FIXED spline noise (``baseline_noise``, the paper's
-  ``sigma = 0.1``). A control, not a variance-preserving rule.
+  expectation constants. The ``1 / N`` factor applies to both roles, as printed
+  in the paper: it apportions the edge's variance budget across the edge's
+  terms, which the paper writes as ``G + k + 1``, the ``G + k`` basis terms plus
+  the residual term. It is not a division across ``N`` copies of a residual
+  weight. This is the only scheme derived from a variance argument and the only
+  width-independent one.
+* ``'baseline'`` is the original KAN formulation: a Glorot-uniform-equivalent
+  residual std plus a small fixed spline noise (``baseline_noise``, the paper's
+  ``sigma = 0.1``). It is a control, not a variance-preserving rule.
 
 Measured per-layer forward gain
 -------------------------------
 ``Var(y) / Var(x)`` for one edge layer, ``x ~ U(grid_range)``, ``G=5, k=3``
 (``N=8``), computed from the exact constants below. None of the three schemes is
-unit gain, and the module makes no such claim:
+unit gain, and this module makes no such claim:
 
 | width | power_law (r + b) | glorot_inspired | baseline |
 |-------|-------------------|-----------------|----------|
@@ -51,49 +55,51 @@ unit gain, and the module makes no such claim:
 | 256   | 0.535             | 0.264           | 1.32     |
 | 4096  | 2.138             | 0.264           | 19.7     |
 
-``power_law`` with ``alpha=0.25`` scales as ``sqrt(n_in / N)`` and so passes
-through 1.0 only near ``n_in ~ 900`` at ``N=8``; ``alpha=0.5`` is the exponent
+``power_law`` with ``alpha=0.25`` scales as ``sqrt(n_in / N)`` and passes
+through 1.0 only near ``n_in ~ 900`` at ``N=8``. ``alpha=0.5`` is the exponent
 that would make it width-independent. ``baseline``'s fixed spline noise is
 width-independent while the spline path's contribution grows as ``n_in * N``, so
-its gain grows linearly with width. Use :meth:`KANInitializer.expected_forward_gain`
-to compute these for a specific configuration rather than assuming stability.
+its gain grows linearly with width. Call
+:meth:`KANInitializer.expected_forward_gain` for a specific configuration
+instead of assuming stability.
 
-Note that ``power_law`` with ``beta=1.75`` makes the spline path numerically
-absent, not merely small: its forward contribution measures 3.2e-10 at width 256
-and 3.1e-13 at width 4096, so the network starts as a pure SiLU MLP to within
-float32 noise. This is recoverable rather than broken, because
+``power_law`` with ``beta=1.75`` makes the spline path numerically absent, not
+merely small: its forward contribution measures 3.2e-10 at width 256 and
+3.1e-13 at width 4096, so the network starts as a pure SiLU MLP to within
+float32 noise. That is recoverable rather than broken, because
 ``dL/db_m = (dL/dy) * B_m(x)`` does not depend on ``b``, so the spline
 coefficients still receive full-strength gradients from step one.
 
 The constants
 -------------
-``mu_R_0 = E[SiLU(x)^2]`` and ``mu_R_1 = E[SiLU'(x)^2]`` are computed by
-1024-point Gauss-Legendre quadrature over ``x ~ U(grid_range)``; ``mu_B_0 =
-E[B_m(x)^2]`` and ``mu_B_1 = E[B'_m(x)^2]``, averaged over the input AND the
-basis index ``m`` as the paper defines them, are computed exactly from the host
-layer's own knot vector by composite Gauss-Legendre (the integrands are
-piecewise polynomials, so the rule is exact). They were previously Monte-Carlo
-estimates over 10,000 draws whose value moved with the RNG seed -- 7.90% spread
-in ``mu_R_0`` and 4.44% in ``mu_R_1`` over 200 seeds -- and ``mu_B_0``,
-``mu_B_1`` were the proxies ``1 / (G + 1)`` and ``1.0``, which measured 2.3x to
-2.8x high and (for ``mu_B_1``) ignored grid resolution entirely, where the true
-value grows roughly linearly in ``G``: 0.521, 1.282, 2.899 for ``G`` = 5, 10, 20
-at ``k=3``.
+``mu_R_0 = E[SiLU(x)^2]`` and ``mu_R_1 = E[SiLU'(x)^2]`` come from a 1024-point
+Gauss-Legendre quadrature over ``x ~ U(grid_range)``. ``mu_B_0 = E[B_m(x)^2]``
+and ``mu_B_1 = E[B'_m(x)^2]``, averaged over the input and the basis index ``m``
+as the paper defines them, are computed exactly from the host layer's own knot
+vector by composite Gauss-Legendre; the integrands are piecewise polynomials, so
+the rule is exact.
+
+Do not replace these with estimates or proxies. Monte-Carlo estimates over
+10,000 draws moved with the RNG seed: 7.90% spread in ``mu_R_0`` and 4.44% in
+``mu_R_1`` over 200 seeds. The proxies ``1 / (G + 1)`` and ``1.0`` for
+``mu_B_0`` and ``mu_B_1`` measure 2.3x to 2.8x high, and the ``mu_B_1`` proxy
+ignores grid resolution entirely, where the true value grows roughly linearly in
+``G``: 0.521, 1.282, 2.899 for ``G`` = 5, 10, 20 at ``k=3``.
 
 ``grid_range`` sets both the knot vector and the expectation domain. ``mu_B_0``
 is invariant to it, ``mu_B_1`` scales as ``1 / width^2``, and the SiLU moments
-change outright: ``(0.094493, 0.319078)`` on ``(-1, 1)`` versus
+change outright: ``(0.094493, 0.319078)`` on ``(-1, 1)`` against
 ``(0.467474, 0.426391)`` on ``(-2, 2)``. The default here is ``(-1, 1)``, the
-paper's assumption; ``KANLinear``'s own default is ``(-2, 2)`` and the layer does
-NOT normalize its input, so pass the host's ``grid_range`` explicitly when it
-differs.
+paper's assumption. ``KANLinear``'s own default is ``(-2, 2)`` and the layer
+does not normalize its input, so pass the host's ``grid_range`` explicitly when
+it differs.
 
 The basis count ``N`` used by the variance formulas is pinned to the host
-layer's actual spline last-dimension ``grid_size + spline_order`` (the layer's
-``num_basis_fns``), NOT the paper's ``G + k + 1`` -- see ``D-001``. The paper's
-extra ``+1`` counts the residual term alongside the ``G + k`` basis terms, so
-this is a deliberate divergence worth ``(G + k + 1) / (G + k) = 1.125`` in
-variance at ``G=5, k=3``, i.e. ~6% in standard deviation.
+layer's actual spline last dimension ``grid_size + spline_order``, the layer's
+``num_basis_fns``, and not to the paper's ``G + k + 1``. The paper's extra
+``+1`` counts the residual term alongside the ``G + k`` basis terms. The
+divergence is worth ``(G + k + 1) / (G + k) = 1.125`` in variance at ``G=5,
+k=3``, about 6% in standard deviation. See ``D-001``.
 
 Reference:
     Rigas, S., Verma, D., Alexandridis, G., & Wang, Y. *Initialization Schemes
@@ -122,9 +128,8 @@ _VALID_TARGETS = ("residual", "spline")
 _SILU_QUADRATURE_NODES = 1024
 
 #: Distinct seed offsets per role, so a matched (residual, spline) pair drawn
-#: from one `seed` does not share a random stream. Measured on the previous
-#: implementation: the residual matrix and the leading block of the spline
-#: tensor had a Pearson correlation of exactly 1.0000.
+#: from one `seed` does not share a random stream. Without them the residual
+#: matrix and the leading block of the spline tensor correlate at exactly 1.0000.
 _TARGET_SEED_OFFSET = {"residual": 0, "spline": 1}
 
 # ---------------------------------------------------------------------
@@ -133,13 +138,13 @@ _TARGET_SEED_OFFSET = {"residual": 0, "spline": 1}
 
 
 def _silu_moments(grid_range: Tuple[float, float]) -> Tuple[float, float]:
-    """Exact ``E[SiLU(x)^2]`` and ``E[SiLU'(x)^2]`` for ``x ~ U(grid_range)``.
+    """Compute exact ``E[SiLU(x)^2]`` and ``E[SiLU'(x)^2]`` for ``x ~ U(grid_range)``.
 
-    Args:
-        grid_range: ``(lo, hi)`` input domain.
-
-    Returns:
-        ``(mu_R_0, mu_R_1)``. On ``(-1, 1)`` these are 0.094493 and 0.319078.
+    :param grid_range: ``(lo, hi)`` input domain.
+    :type grid_range: tuple of float
+    :return: ``(mu_R_0, mu_R_1)``. On ``(-1, 1)`` these are 0.094493 and
+        0.319078.
+    :rtype: tuple of float
     """
     lo, hi = grid_range
     nodes, weights = np.polynomial.legendre.leggauss(_SILU_QUADRATURE_NODES)
@@ -160,18 +165,20 @@ def _silu_moments(grid_range: Tuple[float, float]) -> Tuple[float, float]:
 def _knot_vector(
     grid_size: int, spline_order: int, grid_range: Tuple[float, float]
 ) -> np.ndarray:
-    """The host layer's knot vector, ``(grid_size + 2 * spline_order + 1,)``.
+    """Build the host layer's knot vector, ``(grid_size + 2 * spline_order + 1,)``.
 
     Mirrors ``KANLinear``'s own grid construction: a uniform spacing
-    ``h = (hi - lo) / grid_size`` extended by ``spline_order`` knots on each side.
+    ``h = (hi - lo) / grid_size`` extended by ``spline_order`` knots on each
+    side.
 
-    Args:
-        grid_size: ``G``, the number of interior intervals.
-        spline_order: ``k``.
-        grid_range: ``(lo, hi)`` knot span.
-
-    Returns:
-        The knot vector.
+    :param grid_size: ``G``, the number of interior intervals.
+    :type grid_size: int
+    :param spline_order: ``k``.
+    :type spline_order: int
+    :param grid_range: ``(lo, hi)`` knot span.
+    :type grid_range: tuple of float
+    :return: The knot vector.
+    :rtype: numpy.ndarray
     """
     lo, hi = grid_range
     h = (hi - lo) / grid_size
@@ -179,15 +186,16 @@ def _knot_vector(
 
 
 def _bspline_basis(x: np.ndarray, knots: np.ndarray, order: int) -> np.ndarray:
-    """Cox-de Boor B-spline basis, ``(len(x), len(knots) - order - 1)``.
+    """Evaluate the Cox-de Boor B-spline basis.
 
-    Args:
-        x: Evaluation points.
-        knots: The knot vector.
-        order: Spline order ``k``.
-
-    Returns:
-        Basis values.
+    :param x: Evaluation points.
+    :type x: numpy.ndarray
+    :param knots: The knot vector.
+    :type knots: numpy.ndarray
+    :param order: Spline order ``k``.
+    :type order: int
+    :return: Basis values, shape ``(len(x), len(knots) - order - 1)``.
+    :rtype: numpy.ndarray
     """
     x = np.asarray(x, dtype=np.float64)[:, None]
     basis = ((x >= knots[:-1]) & (x < knots[1:])).astype(np.float64)
@@ -202,18 +210,19 @@ def _bspline_basis(x: np.ndarray, knots: np.ndarray, order: int) -> np.ndarray:
 def _bspline_basis_derivative(
     x: np.ndarray, knots: np.ndarray, order: int
 ) -> np.ndarray:
-    """Exact derivative of the B-spline basis via the order-lowering recurrence.
+    """Evaluate the exact B-spline basis derivative via the order-lowering recurrence.
 
     ``B'_{i,k} = k * (B_{i,k-1} / (t_{i+k} - t_i) - B_{i+1,k-1} / (t_{i+k+1} - t_{i+1}))``
-    -- an identity, not a finite difference.
+    is an identity, not a finite difference.
 
-    Args:
-        x: Evaluation points.
-        knots: The knot vector.
-        order: Spline order ``k``.
-
-    Returns:
-        Basis derivatives, same shape as :func:`_bspline_basis`.
+    :param x: Evaluation points.
+    :type x: numpy.ndarray
+    :param knots: The knot vector.
+    :type knots: numpy.ndarray
+    :param order: Spline order ``k``.
+    :type order: int
+    :return: Basis derivatives, same shape as :func:`_bspline_basis`.
+    :rtype: numpy.ndarray
     """
     n_basis = len(knots) - order - 1
     if order == 0:
@@ -229,20 +238,21 @@ def _bspline_basis_derivative(
 def _basis_moments(
     grid_size: int, spline_order: int, grid_range: Tuple[float, float]
 ) -> Tuple[float, float]:
-    """Exact ``E[B_m(x)^2]`` and ``E[B'_m(x)^2]``, averaged over ``x`` and ``m``.
+    """Compute exact ``E[B_m(x)^2]`` and ``E[B'_m(x)^2]``, averaged over ``x`` and ``m``.
 
     The integrands are piecewise polynomials of degree ``2k`` and ``2k - 2`` on
     the knot intervals, so a composite Gauss-Legendre rule with ``k + 2`` nodes
     per interval is exact rather than approximate.
 
-    Args:
-        grid_size: ``G``.
-        spline_order: ``k``.
-        grid_range: ``(lo, hi)``, both the knot span and the input domain.
-
-    Returns:
-        ``(mu_B_0, mu_B_1)``. At ``G=5, k=3`` on ``(-1, 1)`` these are 0.059921
-        and 0.520833, against the previous proxies 0.166667 and 1.0.
+    :param grid_size: ``G``.
+    :type grid_size: int
+    :param spline_order: ``k``.
+    :type spline_order: int
+    :param grid_range: ``(lo, hi)``, both the knot span and the input domain.
+    :type grid_range: tuple of float
+    :return: ``(mu_B_0, mu_B_1)``. At ``G=5, k=3`` on ``(-1, 1)`` these are
+        0.059921 and 0.520833.
+    :rtype: tuple of float
     """
     lo, hi = grid_range
     knots = _knot_vector(grid_size, spline_order, grid_range)
@@ -272,56 +282,119 @@ def _basis_moments(
 
 @register_dl_technique("dl_techniques.initializers.kan_initializer")
 class KANInitializer(keras.initializers.Initializer):
-    """Variance-controlled initializer for KAN residual / spline weights.
+    """Draw KAN residual or spline weights at a scheme-controlled variance.
 
-    Produces a Gaussian init tensor whose per-element standard deviation is set
-    by the selected ``scheme`` and ``target`` according to the Rigas et al.
-    variance formulas. Dimensions are inferred from the requested ``shape``: a 2D
-    shape ``(n_in, n_out)`` is required for ``target='residual'`` and a 3D shape
+    Produces a Gaussian tensor whose per-element standard deviation is set by
+    the selected ``scheme`` and ``target`` according to the Rigas et al.
+    variance formulas. Dimensions are inferred from the requested ``shape``: a
+    2D shape ``(n_in, n_out)`` for ``target='residual'`` and a 3D shape
     ``(n_in, n_out, n_coeffs)`` for ``target='spline'``.
 
-    None of the three schemes is unit-gain; see the module docstring's measured
-    table and :meth:`expected_forward_gain`.
+    **Architecture overview:**
 
-    Args:
-        scheme: One of ``'power_law'``, ``'glorot_inspired'``, ``'baseline'``.
-            Defaults to ``'power_law'``.
-        target: Weight role this instance initializes -- ``'residual'`` (2D
-            ``base_scaler``) or ``'spline'`` (3D ``spline_weight``). Defaults to
-            ``'residual'``.
-        grid_size: B-spline grid size ``G`` of the host ``KANLinear``. Used to
-            derive ``N`` for the 2D residual target and the basis statistics.
-            Defaults to 5.
-        spline_order: B-spline order ``k`` of the host ``KANLinear``. Defaults
-            to 3.
-        grid_range: ``(lo, hi)`` knot span of the host ``KANLinear``, also taken
-            as the input domain the expectation constants are computed over.
-            Defaults to ``(-1.0, 1.0)`` (the paper's assumption). NOTE that
-            ``KANLinear``'s own default is ``(-2.0, 2.0)`` and it does not
-            normalize its input, so pass the host's value when it differs.
-        alpha: Power-law exponent for the residual std; must be finite and >= 0
-            (a negative exponent inverts the law into growth with width).
-            Defaults to 0.25.
-        beta: Power-law exponent for the spline std; must be finite and >= 0.
-            ``beta > alpha`` is what biases the edge toward the residual path,
-            and a warning is logged when it does not hold. Defaults to 1.75.
-        baseline_noise: Fixed spline std used by the ``'baseline'`` scheme. Must
-            be positive -- ``0`` gives a dead spline path and a negative value
-            silently behaves as its absolute value. Defaults to 0.1.
-        seed: Optional integer seed, kept verbatim on ``self.seed`` and in the
-            config. Following the Keras contract an instance replays the same
-            tensor at every matching shape whether or not a seed is given; a
-            seedless instance resolves one from the global RNG state, so
-            ``keras.utils.set_random_seed`` controls it. The actual draw seed
-            (``self._draw_seed``) adds a per-``target`` offset, so a matched
-            ``(residual, spline)`` pair built from one seed does not share a
-            random stream.
+    .. code-block:: text
 
-    Raises:
-        ValueError: If ``scheme`` or ``target`` is unknown, ``grid_size <= 0``,
-            ``spline_order < 0``, ``alpha`` or ``beta`` is negative or
-            non-finite, ``baseline_noise <= 0``, or ``grid_range`` is not an
-            increasing finite pair.
+        construction
+              │
+              ▼
+        ┌──────────────────────────────────────┐
+        │ _silu_moments(grid_range)            │
+        │   -> mu_R_0, mu_R_1                  │
+        │ _basis_moments(G, k, grid_range)     │
+        │   -> mu_B_0, mu_B_1                  │
+        │ exact quadrature, no RNG             │
+        └──────────────────┬───────────────────┘
+                           │
+        __call__(shape)    ▼
+        ┌──────────────────────────────────────┐
+        │ target == 'residual'                 │
+        │   require rank 2 (n_in, n_out)       │
+        │   N = grid_size + spline_order       │
+        │ target == 'spline'                   │
+        │   require rank 3 (n_in,n_out,n_coef) │
+        │   N = shape[-1], checked against     │
+        │       grid_size + spline_order       │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │ _stds(n_in, n_out, N)                │
+        │   -> (sigma_r, sigma_b)              │
+        └──────────────────┬───────────────────┘
+                           │ pick sigma_r or sigma_b by target
+                           ▼
+        ┌──────────────────────────────────────┐
+        │ keras.random.normal(0, stddev)       │
+        │ seed = base seed + target offset     │
+        │ compute dtype float32 or float64     │
+        └──────────────────┬───────────────────┘
+                           ▼
+                  cast to dtype, requested shape
+
+    **Schemes:**
+
+    .. code-block:: text
+
+        scheme            sigma_r                sigma_b
+        ---------------   --------------------   ---------------------
+        power_law         (n_in*N)^-alpha        (n_in*N)^-beta
+        glorot_inspired   sqrt((1/N)*2/(n_in     sqrt((1/N)*2/(n_in
+                          *mu_R_0+n_out*mu_R_1))  *mu_B_0+n_out*mu_B_1))
+        baseline          sqrt(6/(n_in+n_out))   baseline_noise
+                          / sqrt(3)
+
+    None of the three is unit-gain; see the module docstring's measured table
+    and :meth:`expected_forward_gain`.
+
+    :param scheme: One of ``'power_law'``, ``'glorot_inspired'``,
+        ``'baseline'``.
+    :type scheme: str
+    :param target: Weight role this instance initializes: ``'residual'`` for the
+        2D ``base_scaler``, ``'spline'`` for the 3D ``spline_weight``.
+    :type target: str
+    :param grid_size: B-spline grid size ``G`` of the host ``KANLinear``. Used
+        to derive ``N`` for the 2D residual target and the basis statistics.
+    :type grid_size: int
+    :param spline_order: B-spline order ``k`` of the host ``KANLinear``.
+    :type spline_order: int
+    :param grid_range: ``(lo, hi)`` knot span of the host ``KANLinear``, also
+        taken as the input domain the expectation constants are computed over.
+        The default ``(-1.0, 1.0)`` is the paper's assumption. ``KANLinear``'s
+        own default is ``(-2.0, 2.0)`` and it does not normalize its input, so
+        pass the host's value when it differs.
+    :type grid_range: sequence of float
+    :param alpha: Power-law exponent for the residual std. Must be finite and
+        >= 0; a negative exponent inverts the law into growth with width.
+    :type alpha: float
+    :param beta: Power-law exponent for the spline std. Must be finite and >= 0.
+        ``beta > alpha`` is what biases the edge toward the residual path, and a
+        warning is logged when it does not hold.
+    :type beta: float
+    :param baseline_noise: Fixed spline std used by the ``'baseline'`` scheme.
+        Must be positive: ``0`` gives a dead spline path and a negative value
+        silently behaves as its absolute value.
+    :type baseline_noise: float
+    :param seed: Optional integer seed, kept verbatim on ``self.seed`` and in
+        the config. Following the Keras contract an instance replays the same
+        tensor at every matching shape whether or not a seed is given; a
+        seedless instance resolves one from the global RNG state, so
+        ``keras.utils.set_random_seed`` controls it. The actual draw seed adds a
+        per-``target`` offset, so a matched ``(residual, spline)`` pair built
+        from one seed does not share a random stream.
+    :type seed: int or None
+
+    :ivar mu_R_0: ``E[SiLU(x)^2]`` over ``grid_range``.
+    :vartype mu_R_0: float
+    :ivar mu_R_1: ``E[SiLU'(x)^2]`` over ``grid_range``.
+    :vartype mu_R_1: float
+    :ivar mu_B_0: ``E[B_m(x)^2]``, averaged over ``x`` and ``m``.
+    :vartype mu_B_0: float
+    :ivar mu_B_1: ``E[B'_m(x)^2]``, averaged over ``x`` and ``m``.
+    :vartype mu_B_1: float
+
+    :raises ValueError: If ``scheme`` or ``target`` is unknown,
+        ``grid_size <= 0``, ``spline_order < 0``, ``alpha`` or ``beta`` is
+        negative or non-finite, ``baseline_noise <= 0``, or ``grid_range`` is
+        not an increasing finite pair.
 
     Example:
         >>> init = KANInitializer(scheme='power_law', target='spline',
@@ -344,6 +417,29 @@ class KANInitializer(keras.initializers.Initializer):
         baseline_noise: float = 0.1,
         seed: Optional[int] = None,
     ) -> None:
+        """Validate the configuration and compute the exact moment constants.
+
+        :param scheme: One of ``'power_law'``, ``'glorot_inspired'``,
+            ``'baseline'``.
+        :type scheme: str
+        :param target: ``'residual'`` or ``'spline'``.
+        :type target: str
+        :param grid_size: B-spline grid size ``G``; must be > 0.
+        :type grid_size: int
+        :param spline_order: B-spline order ``k``; must be >= 0.
+        :type spline_order: int
+        :param grid_range: Increasing finite ``(lo, hi)`` pair.
+        :type grid_range: sequence of float
+        :param alpha: Finite, non-negative power-law residual exponent.
+        :type alpha: float
+        :param beta: Finite, non-negative power-law spline exponent.
+        :type beta: float
+        :param baseline_noise: Positive fixed spline std for ``'baseline'``.
+        :type baseline_noise: float
+        :param seed: Optional integer seed.
+        :type seed: int or None
+        :raises ValueError: See the class docstring.
+        """
         super().__init__()
 
         if scheme not in _VALID_SCHEMES:
@@ -404,8 +500,8 @@ class KANInitializer(keras.initializers.Initializer):
             )
 
         # Mirrors keras.initializers.RandomNormal: the config keeps whatever the
-        # caller passed, the resolved seed drives the draw, and np.random is
-        # seeded by keras.utils.set_random_seed so a seedless instance is
+        # caller passed, the resolved seed drives the draw. keras.utils.
+        # set_random_seed seeds np.random, so a seedless instance stays
         # reproducible under a global seed.
         self.seed = seed
         base_seed = seed if seed is not None else int(np.random.randint(0, 2 ** 30))
@@ -434,24 +530,44 @@ class KANInitializer(keras.initializers.Initializer):
     def _compute_std_power_law(
         self, n_in: int, n_out: int, N: int
     ) -> Tuple[float, float]:
-        """The paper's empirical power law. ``n_out`` is deliberately unused.
+        """Apply the paper's empirical power law.
 
-        The rule has no backward-path term, unlike the other two schemes; the
-        uniform signature is for dispatch, not because ``n_out`` participates.
+        The rule has no backward-path term, unlike the other two schemes. The
+        uniform signature is for dispatch; ``n_out`` does not participate.
+
+        :param n_in: Input feature count.
+        :type n_in: int
+        :param n_out: Output feature count. Unused.
+        :type n_out: int
+        :param N: Basis count.
+        :type N: int
+        :return: ``(sigma_r, sigma_b)``.
+        :rtype: tuple of float
         """
-        del n_out  # no backward-path term in this scheme
+        # No backward-path term in this scheme.
+        del n_out
         denom = n_in * N
         return denom ** (-self.alpha), denom ** (-self.beta)
 
     def _compute_std_glorot(
         self, n_in: int, n_out: int, N: int
     ) -> Tuple[float, float]:
-        """The paper's bidirectional Glorot-style variance.
+        """Apply the paper's bidirectional Glorot-style variance.
 
-        The ``1 / N`` factor is on BOTH roles, as printed in the paper: it
-        apportions the edge's variance budget across the edge's additive terms
-        (the paper's ``G + k + 1`` counts the ``G + k`` basis terms plus the
-        residual term), not across ``N`` copies of a residual weight.
+        The ``1 / N`` factor is on both roles, as printed in the paper: it
+        apportions the edge's variance budget across the edge's additive terms,
+        which the paper's ``G + k + 1`` counts as the ``G + k`` basis terms plus
+        the residual term. It is not a division across ``N`` copies of a
+        residual weight.
+
+        :param n_in: Input feature count.
+        :type n_in: int
+        :param n_out: Output feature count.
+        :type n_out: int
+        :param N: Basis count.
+        :type N: int
+        :return: ``(sigma_r, sigma_b)``.
+        :rtype: tuple of float
         """
         var_r = (1.0 / N) * (2.0 / (n_in * self.mu_R_0 + n_out * self.mu_R_1))
         var_b = (1.0 / N) * (2.0 / (n_in * self.mu_B_0 + n_out * self.mu_B_1))
@@ -460,21 +576,33 @@ class KANInitializer(keras.initializers.Initializer):
     def _compute_std_baseline(
         self, n_in: int, n_out: int, N: int
     ) -> Tuple[float, float]:
-        """The original KAN formulation: Glorot residual, fixed spline noise."""
-        del N  # the fixed noise floor deliberately ignores the basis count
+        """Apply the original KAN formulation: Glorot residual, fixed spline noise.
+
+        :param n_in: Input feature count.
+        :type n_in: int
+        :param n_out: Output feature count.
+        :type n_out: int
+        :param N: Basis count. Unused.
+        :type N: int
+        :return: ``(sigma_r, sigma_b)``.
+        :rtype: tuple of float
+        """
+        # The fixed noise floor ignores the basis count.
+        del N
         glorot_limit = np.sqrt(6.0 / (n_in + n_out))
         return float(glorot_limit / np.sqrt(3.0)), self.baseline_noise
 
     def _stds(self, n_in: int, n_out: int, N: int) -> Tuple[float, float]:
         """Dispatch to the selected scheme.
 
-        Args:
-            n_in: Input feature count.
-            n_out: Output feature count.
-            N: Basis count.
-
-        Returns:
-            ``(sigma_r, sigma_b)``.
+        :param n_in: Input feature count.
+        :type n_in: int
+        :param n_out: Output feature count.
+        :type n_out: int
+        :param N: Basis count.
+        :type N: int
+        :return: ``(sigma_r, sigma_b)``.
+        :rtype: tuple of float
         """
         if self.scheme == "power_law":
             return self._compute_std_power_law(n_in, n_out, N)
@@ -489,20 +617,20 @@ class KANInitializer(keras.initializers.Initializer):
     def expected_forward_gain(
         self, n_in: int, n_out: int
     ) -> Tuple[float, float]:
-        """Predicted per-layer forward variance gain of each path.
+        """Predict the per-layer forward variance gain of each path.
 
-        ``Var(y) / Var(x) ~ n_in * sigma_r^2 * mu_R_0`` for the residual path and
-        ``n_in * N * sigma_b^2 * mu_B_0`` for the spline path, with
-        ``N = grid_size + spline_order``. Their sum is the layer's gain; 1.0
+        ``Var(y) / Var(x) ~ n_in * sigma_r^2 * mu_R_0`` for the residual path
+        and ``n_in * N * sigma_b^2 * mu_B_0`` for the spline path, with
+        ``N = grid_size + spline_order``. Their sum is the layer's gain. 1.0
         would be variance preserving, and none of the three schemes achieves it
-        in general (see the module docstring).
+        in general; see the module docstring.
 
-        Args:
-            n_in: Input feature count of the edge layer.
-            n_out: Output feature count.
-
-        Returns:
-            ``(residual_gain, spline_gain)``.
+        :param n_in: Input feature count of the edge layer.
+        :type n_in: int
+        :param n_out: Output feature count.
+        :type n_out: int
+        :return: ``(residual_gain, spline_gain)``.
+        :rtype: tuple of float
         """
         N = self.grid_size + self.spline_order
         sigma_r, sigma_b = self._stds(n_in, n_out, N)
@@ -521,19 +649,17 @@ class KANInitializer(keras.initializers.Initializer):
     ) -> Any:
         """Draw the initialization tensor for this instance's role.
 
-        Args:
-            shape: ``(n_in, n_out)`` for ``target='residual'``, or
-                ``(n_in, n_out, n_coeffs)`` for ``target='spline'``.
-            dtype: Data type of the returned tensor. ``None`` falls back to
-                ``keras.config.floatx()``.
-            **kwargs: Additional arguments (unused).
-
-        Returns:
-            Tensor: The initialized tensor.
-
-        Raises:
-            ValueError: If the rank does not match ``target``, or if the spline
-                last dimension disagrees with ``grid_size + spline_order``.
+        :param shape: ``(n_in, n_out)`` for ``target='residual'``, or
+            ``(n_in, n_out, n_coeffs)`` for ``target='spline'``.
+        :type shape: tuple of int
+        :param dtype: Data type of the result. ``None`` falls back to
+            ``keras.config.floatx()``.
+        :type dtype: str or None
+        :param kwargs: Additional arguments (unused).
+        :return: The initialized tensor.
+        :rtype: tensor
+        :raises ValueError: If the rank does not match ``target``, or if the
+            spline last dimension disagrees with ``grid_size + spline_order``.
         """
         if dtype is None:
             dtype = keras.config.floatx()
@@ -547,14 +673,11 @@ class KANInitializer(keras.initializers.Initializer):
                     f"(n_in, n_out, n_coeffs), got {shape}"
                 )
             n_in, n_out = shape[0], shape[1]
-            # DECISION plan_2026-06-12_6cc7c378/D-001: for the 3D spline target
-            # derive N directly from the host's spline_weight last dim. This is
-            # grid_size + spline_order (KANLinear's `num_basis_fns`), NOT the
-            # paper's G + k + 1, whose extra term counts the residual. Do NOT
-            # substitute grid_size + spline_order + 1 here: it would mis-shape
-            # against KANLinear and desync the residual vs spline variance
-            # scales. The check below is what makes that invariant enforceable
-            # rather than merely asserted.
+            # DECISION plan_2026-06-12_6cc7c378/D-001: N is the host's spline
+            # last dim, which is grid_size + spline_order (KANLinear's
+            # num_basis_fns). Do NOT use the paper's G + k + 1: it mis-shapes
+            # against KANLinear and desyncs the two roles' variance scales.
+            # See D-001.
             N = shape[-1]
             expected_n = self.grid_size + self.spline_order
             if N != expected_n:
@@ -573,18 +696,17 @@ class KANInitializer(keras.initializers.Initializer):
                 )
             n_in, n_out = shape[0], shape[1]
             # DECISION plan_2026-06-12_6cc7c378/D-001: the 2D residual target has
-            # no spline axis to read N from, so reconstruct the host's basis
-            # count as grid_size + spline_order (KANLinear's `num_basis_fns`) --
-            # matching the layer's own arithmetic, NOT the paper's G + k + 1.
+            # no spline axis, so N is reconstructed as grid_size + spline_order
+            # (KANLinear's num_basis_fns). Do NOT use the paper's G + k + 1.
+            # See D-001.
             N = self.grid_size + self.spline_order
 
         sigma_r, sigma_b = self._stds(n_in, n_out, N)
         stddev = sigma_r if self.target == "residual" else sigma_b
 
-        # keras.random (not np.random) so the draw honours the Keras global
-        # seed, in the resolved dtype so a float64 request is not float32
-        # quantized, and without the float64 numpy temporary the old
-        # standard_normal(...).astype("float32") allocated.
+        # keras.random rather than np.random, so the draw honours the Keras
+        # global seed, runs in the resolved dtype and allocates no float64
+        # numpy temporary.
         compute_dtype = dtype if dtype in ("float32", "float64") else "float32"
         values = keras.random.normal(
             shape=shape, mean=0.0, stddev=stddev,
@@ -595,15 +717,16 @@ class KANInitializer(keras.initializers.Initializer):
     # -----------------------------------------------------------------
 
     def get_config(self) -> Dict[str, Any]:
-        """Get configuration for serialization.
+        """Return the constructor arguments for serialization.
 
         The ``seed`` written here is the one the caller passed, not the
         per-target draw seed, so a seedless initializer stays seedless across a
-        round trip (the Keras convention). The ``mu_*`` constants are omitted
-        because they are now exact functions of the serialized fields.
+        round trip. The ``mu_*`` constants are omitted because they are exact
+        functions of the serialized fields.
 
-        Returns:
-            Dict containing the initializer configuration.
+        :return: A dict holding the scheme, target, grid settings, exponents,
+            ``baseline_noise`` and ``seed``.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -621,18 +744,22 @@ class KANInitializer(keras.initializers.Initializer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "KANInitializer":
-        """Create an initializer from configuration.
+        """Rebuild an initializer from a config dict.
 
-        Args:
-            config: Configuration dictionary. A config written before
-                ``grid_range`` existed simply omits it and picks up the default.
-
-        Returns:
-            KANInitializer instance.
+        :param config: Configuration dictionary. A config written before
+            ``grid_range`` existed omits it and picks up the default.
+        :type config: dict
+        :return: A new initializer.
+        :rtype: KANInitializer
         """
         return cls(**config)
 
     def __repr__(self) -> str:
+        """Return the constructor-like representation.
+
+        :return: A string naming every configured field.
+        :rtype: str
+        """
         return (
             f"KANInitializer(scheme={self.scheme!r}, target={self.target!r}, "
             f"grid_size={self.grid_size}, spline_order={self.spline_order}, "
@@ -655,38 +782,56 @@ def create_kan_initializers(
 ) -> Tuple[KANInitializer, KANInitializer]:
     """Build a matched ``(residual_init, spline_init)`` pair for a ``KANLinear``.
 
-    Both initializers share the same scheme and configuration, differing only in
-    their ``target`` (and, consequently, in their random stream -- one ``seed``
-    yields two INDEPENDENT draws, not two views of the same one). Wire them into
-    a ``KANLinear`` so the residual (base-scaler) and spline (coefficient)
-    weights are variance-controlled consistently:
+    Both initializers share the same scheme and configuration and differ only in
+    their ``target``, and so in their random stream: one ``seed`` yields two
+    independent draws, not two views of the same one.
 
-        residual_init -> ``base_scaler_initializer``
-        spline_init   -> ``kernel_initializer``
+    **Wiring into a KANLinear:**
 
-    The initializers are shape-driven; ``n_in``/``n_out`` are inferred at build
-    time from the layer's weight shapes (no dimension arguments here).
+    .. code-block:: text
 
-    Args:
-        grid_size: B-spline grid size ``G`` of the target ``KANLinear``.
-            Defaults to 5.
-        spline_order: B-spline order ``k`` of the target ``KANLinear``. Defaults
-            to 3.
-        scheme: Variance scheme -- ``'power_law'``, ``'glorot_inspired'`` or
-            ``'baseline'``. Defaults to ``'power_law'``.
-        grid_range: ``(lo, hi)`` knot span of the target ``KANLinear``, also the
-            domain the expectation constants are taken over. Defaults to
-            ``(-1.0, 1.0)``; ``KANLinear``'s own default is ``(-2.0, 2.0)``.
-        alpha: Power-law residual exponent. Defaults to 0.25.
-        beta: Power-law spline exponent. Defaults to 1.75.
-        baseline_noise: Fixed spline std for the ``'baseline'`` scheme. Defaults
-            to 0.1.
-        seed: Optional integer seed (shared by both initializers, which apply
-            distinct per-target offsets to it).
+        create_kan_initializers(G, k, scheme, ..., seed)
+                          │
+            ┌─────────────┴─────────────┐
+            ▼                           ▼
+        KANInitializer              KANInitializer
+        target='residual'           target='spline'
+        seed + 0                    seed + 1
+            │                           │
+            ▼                           ▼
+        base_scaler_initializer     kernel_initializer
+            │                           │
+            ▼                           ▼
+        base_scaler                 spline_weight
+        [n_in, n_out]               [n_in, n_out, G + k]
 
-    Returns:
-        A tuple ``(residual_init, spline_init)`` of ``KANInitializer`` instances
-        with ``target='residual'`` and ``target='spline'`` respectively.
+    The initializers are shape-driven: ``n_in`` and ``n_out`` are inferred at
+    build time from the layer's weight shapes, so no dimension arguments are
+    needed here.
+
+    :param grid_size: B-spline grid size ``G`` of the target ``KANLinear``.
+    :type grid_size: int
+    :param spline_order: B-spline order ``k`` of the target ``KANLinear``.
+    :type spline_order: int
+    :param scheme: Variance scheme: ``'power_law'``, ``'glorot_inspired'`` or
+        ``'baseline'``.
+    :type scheme: str
+    :param grid_range: ``(lo, hi)`` knot span of the target ``KANLinear``, also
+        the domain the expectation constants are taken over. ``KANLinear``'s own
+        default is ``(-2.0, 2.0)``.
+    :type grid_range: sequence of float
+    :param alpha: Power-law residual exponent.
+    :type alpha: float
+    :param beta: Power-law spline exponent.
+    :type beta: float
+    :param baseline_noise: Fixed spline std for the ``'baseline'`` scheme.
+    :type baseline_noise: float
+    :param seed: Optional integer seed, shared by both initializers, which apply
+        distinct per-target offsets to it.
+    :type seed: int or None
+    :return: A tuple ``(residual_init, spline_init)`` of ``KANInitializer``
+        instances with ``target='residual'`` and ``target='spline'``.
+    :rtype: tuple of KANInitializer
 
     Example:
         >>> res_init, spline_init = create_kan_initializers(

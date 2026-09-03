@@ -1,70 +1,60 @@
 """Fixed 2D Haar wavelet decomposition filters.
 
-This initializer is deterministic and does not perform random sampling.
-Instead, it builds a fixed set of 2x2 convolution kernels that correspond
-to the basis functions of the 2D discrete Haar wavelet transform. Its
-purpose is to equip a convolutional layer with the ability to perform a
-single level of multi-resolution analysis, decomposing an input signal (such
-as an image) into distinct frequency sub-bands.
+Provides :class:`HaarWaveletInitializer`, which fills a 2x2 convolution kernel
+with the four basis filters of the 2D discrete Haar wavelet transform, and
+:func:`create_haar_depthwise_conv2d`, which wires that bank into a stride-2
+``DepthwiseConv2D``. Together they give a layer one level of multi-resolution
+analysis, splitting an image into frequency sub-bands.
 
-Architecture and Mathematical Foundations:
-The Haar wavelet transform is the simplest form of wavelet analysis and is
-based on a single prototype wavelet. In two dimensions, the decomposition is
-achieved by applying the 1D transform separably along the rows and columns.
-The 1D orthonormal Haar pair is ``(a + b) / sqrt(2)`` and ``(a - b) / sqrt(2)``,
-so applying it once per axis gives four 2x2 filters whose every tap has
-magnitude ``1/2``:
+The initializer is deterministic and draws no random numbers.
 
-1.  **LL (approximation)**: ``[[0.5, 0.5], [0.5, 0.5]]``
-    A 2x2 averager. When applied with a stride of 2, it produces a
-    downsampled, lower-resolution version of the input, capturing its
-    low-frequency "approximation" coefficients.
+The four filters
+----------------
+The 1D orthonormal Haar pair is ``(a + b) / sqrt(2)`` and ``(a - b) / sqrt(2)``.
+Applying it once per axis gives four 2x2 filters whose every tap has magnitude
+``1/2``:
 
-2.  **LH**: ``[[0.5, -0.5], [0.5, -0.5]]``
-    Averages along the HEIGHT axis and differences along the WIDTH axis. It
-    responds to vertical edges.
+1. **LL (approximation)**: ``[[0.5, 0.5], [0.5, 0.5]]``. A 2x2 averager. At
+   stride 2 it produces a downsampled, lower-resolution copy of the input.
+2. **LH**: ``[[0.5, -0.5], [0.5, -0.5]]``. Averages along height, differences
+   along width. Responds to vertical edges.
+3. **HL**: ``[[0.5, 0.5], [-0.5, -0.5]]``. Differences along height, averages
+   along width. Responds to horizontal edges.
+4. **HH**: ``[[0.5, -0.5], [-0.5, 0.5]]``. Differences along both axes.
+   Responds to diagonal detail.
 
-3.  **HL**: ``[[0.5, 0.5], [-0.5, -0.5]]``
-    Differences along the HEIGHT axis and averages along the WIDTH axis. It
-    responds to horizontal edges.
-
-4.  **HH**: ``[[0.5, -0.5], [-0.5, 0.5]]``
-    Differences along both axes, responding to diagonal detail.
-
-Together these four filters form an ORTHONORMAL basis: the Gram matrix is the
-identity, so with ``scale=1.0`` the transform preserves energy exactly
-(``sum(c**2) == sum(x**2)`` per 2x2 block), leaves the variance of every
-sub-band equal to the input variance, and is inverted by its own transpose.
-Passing ``scale != 1.0`` preserves ORTHOGONALITY but not normality: energy is
-then multiplied by ``scale**2``.
+The four form an orthonormal basis: the Gram matrix is the identity. With
+``scale=1.0`` the transform preserves energy exactly, ``sum(c**2) ==
+sum(x**2)`` per 2x2 block, leaves every sub-band with the input's variance, and
+is inverted by its own transpose. ``scale != 1.0`` keeps them orthogonal but
+multiplies energy by ``scale**2``.
 
 .. note::
-    **Sub-band labels are library-dependent; the axis descriptions above are
-    the contract.** The two-letter names follow the separable
-    (row filter, column filter) ordering used here, and other wavelet libraries
-    attach the words "horizontal" and "vertical" to the opposite band. If you
-    are matching coefficients against an external reference, match on which
-    axis is differenced, not on the label.
+    Sub-band labels are library-dependent; the axis descriptions above are the
+    contract. The two-letter names follow the separable (row filter, column
+    filter) ordering used here, and other wavelet libraries attach the words
+    "horizontal" and "vertical" to the opposite band. When matching
+    coefficients against an external reference, match on which axis is
+    differenced, not on the label.
 
 .. note::
-    **Keras convolution is cross-correlation**, and no kernel flip is applied
-    here. ``LL`` is symmetric and unaffected, but the three detail sub-bands
-    carry the opposite SIGN to a true convolution against the same filters.
-    This is irrelevant to learning and to energy, and relevant only when
-    comparing coefficients with an external wavelet library.
+    Keras convolution is cross-correlation, and no kernel flip is applied here.
+    ``LL`` is symmetric and unaffected, but the three detail sub-bands carry the
+    opposite sign to a true convolution against the same filters. That matters
+    only when comparing coefficients with an external wavelet library, not for
+    learning or for energy.
 
 .. note::
     A stride-2 ``'valid'`` decomposition consumes exactly 2x2 blocks, so an odd
-    height or width would silently drop the last row/column.
+    height or width would silently drop the last row or column.
     :func:`create_haar_depthwise_conv2d` rejects that up front.
 
 References:
-    - Mallat, S. (1989). *A theory for multiresolution signal
-      decomposition: The wavelet representation*. IEEE Transactions on
-      Pattern Analysis and Machine Intelligence.
-    - Daubechies, I. (1992). *Ten lectures on wavelets*. Society for
-      Industrial and Applied Mathematics.
-
+    - Mallat, S. (1989). *A theory for multiresolution signal decomposition: The
+      wavelet representation*. IEEE Transactions on Pattern Analysis and Machine
+      Intelligence.
+    - Daubechies, I. (1992). *Ten lectures on wavelets*. Society for Industrial
+      and Applied Mathematics.
 """
 
 import keras
@@ -104,49 +94,87 @@ HAAR_PATTERNS: np.ndarray = 0.5 * np.array([
 
 
 def _numpy_dtype(dtype: Any) -> str:
-    """Keras dtype spec -> a numpy-acceptable dtype name.
+    """Convert a Keras dtype spec to a numpy-acceptable dtype name.
 
     The Keras-2 ``standardize_dtype`` helper is banned tree-wide (see
-    ``tests/test_the_keras2_backend_calls_are_gone.py``, whose predicate is a
-    plain substring match, so naming the banned module even in prose trips it);
-    this is the sanctioned replacement spelling.
+    ``tests/test_the_keras2_backend_calls_are_gone.py``); this is the sanctioned
+    replacement spelling.
+
+    :param dtype: A dtype object or name.
+    :return: The dtype name.
+    :rtype: str
     """
     return getattr(dtype, "name", None) or str(dtype)
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.initializers.haar_wavelet_initializer")
 class HaarWaveletInitializer(keras.initializers.Initializer):
-    """Haar wavelet initializer for convolutional layers.
+    """Fill a 2x2 kernel with the 2D Haar decomposition bank.
 
-    Fills a 2x2 kernel of shape ``(2, 2, in_channels, channel_multiplier)`` with
-    the standard 2D Haar decomposition bank:
+    The kernel shape is ``(2, 2, in_channels, channel_multiplier)``.
 
-    - ``LL``: approximation (average both axes)
-    - ``LH``: difference along the WIDTH axis (vertical edges)
-    - ``HL``: difference along the HEIGHT axis (horizontal edges)
-    - ``HH``: difference along both axes (diagonal detail)
+    **Architecture overview:**
 
-    Output slot ``j`` of EVERY input channel receives pattern ``j % 4``, so all
+    .. code-block:: text
+
+        requested shape (2, 2, in_channels, channel_multiplier)
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │ validate: rank 4, kernel 2x2,        │  raises ValueError
+        │ both channel dims >= 1               │
+        └──────────────────┬───────────────────┘
+                           ▼
+                  HAAR_PATTERNS * scale
+                           │ [4, 2, 2]
+                           ▼
+        ┌──────────────────────────────────────┐
+        │ index by arange(cm) % 4              │
+        │ (cycles the bank across output slots)│
+        └──────────────────┬───────────────────┘
+                           │ [cm, 2, 2]
+                           ▼
+                   transpose + repeat
+                           │
+                           ▼
+              [2, 2, in_channels, cm]
+
+    **Sub-band per output slot:**
+
+    .. code-block:: text
+
+        slot j   j % 4   filter                    responds to
+        ------   -----   -----------------------   ------------------
+        0        0       LL  [[ .5, .5],[ .5, .5]]  approximation
+        1        1       LH  [[ .5,-.5],[ .5,-.5]]  vertical edges
+        2        2       HL  [[ .5, .5],[-.5,-.5]]  horizontal edges
+        3        3       HH  [[ .5,-.5],[-.5, .5]]  diagonal detail
+
+    Output slot ``j`` of every input channel receives pattern ``j % 4``, so all
     input channels see the same bank and the sub-band of an output slot is a
     property of ``j`` alone. In a ``DepthwiseConv2D`` the output channels are
-    ordered input-channel-major, so output channel ``i * channel_multiplier + j``
-    holds sub-band ``j % 4`` of input channel ``i``.
+    ordered input-channel-major, so output channel
+    ``i * channel_multiplier + j`` holds sub-band ``j % 4`` of input channel
+    ``i``.
 
-    With ``scale=1.0`` the four filters are ORTHONORMAL (Gram matrix = identity):
-    energy is preserved exactly, every sub-band has the same variance as the
-    input, and the transform is inverted by its own transpose. ``scale != 1.0``
-    keeps them orthogonal but multiplies energy by ``scale ** 2``.
+    With ``scale=1.0`` the four filters are orthonormal: energy is preserved
+    exactly, every sub-band has the input's variance, and the transform is
+    inverted by its own transpose. ``scale != 1.0`` keeps them orthogonal but
+    multiplies energy by ``scale ** 2``.
 
-    Args:
-        scale: Scaling factor for the wavelet coefficients. Must be positive.
-            ``1.0`` (the default) is the orthonormal basis.
-        seed: Accepted and IGNORED. This initializer is deterministic and draws
-            no random numbers; the argument exists only so that configs saved by
-            earlier versions still deserialize. It is not written to
-            ``get_config``.
+    :param scale: Scaling factor for the wavelet coefficients. Must be positive.
+        ``1.0`` is the orthonormal basis.
+    :type scale: float
+    :param seed: Accepted and ignored. This initializer is deterministic and
+        draws no random numbers; the argument exists so that configs saved by
+        earlier versions still deserialize. It is not written to
+        :meth:`get_config`.
+    :type seed: int or None
 
-    Raises:
-        ValueError: If ``scale`` is not positive.
+    :ivar scale: The coerced coefficient scale.
+    :vartype scale: float
+
+    :raises ValueError: If ``scale`` is not positive.
 
     Example:
         >>> initializer = HaarWaveletInitializer(scale=1.0)
@@ -159,18 +187,16 @@ class HaarWaveletInitializer(keras.initializers.Initializer):
         scale: float = 1.0,
         seed: Optional[int] = None,
     ) -> None:
-        """Initialize Haar wavelet kernel initializer.
+        """Validate and store the coefficient scale.
 
-        Args:
-            scale: Scaling factor for the wavelet coefficients; must be > 0.
-            seed: Accepted and ignored (deterministic initializer).
-
-        Raises:
-            ValueError: If scale is not positive.
+        :param scale: Scaling factor for the wavelet coefficients; must be > 0.
+        :type scale: float
+        :param seed: Accepted and ignored.
+        :type seed: int or None
+        :raises ValueError: If ``scale`` is not positive.
         """
-        # NOTE: keras.initializers.Initializer (Keras 3) defines no __init__, so
-        # there is nothing to forward to and a **kwargs passthrough could only
-        # ever raise TypeError from object.__init__. This signature is closed.
+        # keras.initializers.Initializer (Keras 3) defines no __init__, so there
+        # is nothing to forward to and this signature is closed.
         if scale <= 0:
             raise ValueError(f"Scale must be positive, got {scale}")
 
@@ -192,19 +218,17 @@ class HaarWaveletInitializer(keras.initializers.Initializer):
     ) -> Any:
         """Generate the orthonormal Haar wavelet bank.
 
-        Args:
-            shape: Required shape ``(2, 2, in_channels, channel_multiplier)``.
-            dtype: Data type of the tensor. ``None`` falls back to
-                ``keras.config.floatx()``.
-            **kwargs: Additional arguments (unused).
-
-        Returns:
-            Tensor: The Haar bank, with output slot ``j`` holding sub-band
+        :param shape: Required shape ``(2, 2, in_channels, channel_multiplier)``.
+        :type shape: sequence of int
+        :param dtype: Data type of the result. ``None`` falls back to
+            ``keras.config.floatx()``.
+        :type dtype: str or None
+        :param kwargs: Additional arguments (unused).
+        :return: The Haar bank, with output slot ``j`` holding sub-band
             ``j % 4`` for every input channel.
-
-        Raises:
-            ValueError: If shape is not 4D, the kernel is not 2x2, or either
-                channel dimension is < 1.
+        :rtype: tensor
+        :raises ValueError: If the shape is not 4D, the kernel is not 2x2, or
+            either channel dimension is below 1.
         """
         if dtype is None:
             dtype = keras.config.floatx()
@@ -219,9 +243,8 @@ class HaarWaveletInitializer(keras.initializers.Initializer):
                 f"Haar wavelets require 2x2 kernels, got {kernel_h}x{kernel_w}"
             )
 
-        # A non-positive channel count used to leave the loop body unexecuted and
-        # hand back an empty kernel with no error -- the worst failure mode for a
-        # layer that is meant to be a fixed transform.
+        # A non-positive channel count would otherwise hand back an empty kernel
+        # with no error, the worst failure mode for a fixed transform.
         if in_channels < 1 or channel_multiplier < 1:
             raise ValueError(
                 f"in_channels and channel_multiplier must be >= 1, got "
@@ -233,10 +256,12 @@ class HaarWaveletInitializer(keras.initializers.Initializer):
         # Scaling preserves orthogonality, but only scale == 1.0 is orthonormal.
         patterns = HAAR_PATTERNS * self.scale
 
-        # Every input channel receives the SAME bank: the sub-band of an output
-        # slot is a property of j alone, so downstream code can address it.
-        bank = patterns[np.arange(channel_multiplier) % len(patterns)]  # (cm, 2, 2)
-        kernel = np.transpose(bank, (1, 2, 0))[:, :, None, :]           # (2, 2, 1, cm)
+        # Every input channel receives the same bank, so the sub-band of an
+        # output slot is a property of j alone and downstream code can address it.
+        # Shape after this: (cm, 2, 2).
+        bank = patterns[np.arange(channel_multiplier) % len(patterns)]
+        # Shape after this: (2, 2, 1, cm).
+        kernel = np.transpose(bank, (1, 2, 0))[:, :, None, :]
         kernel = np.repeat(kernel, in_channels, axis=2)
 
         return keras.ops.convert_to_tensor(
@@ -244,13 +269,13 @@ class HaarWaveletInitializer(keras.initializers.Initializer):
         )
 
     def get_config(self) -> Dict[str, Any]:
-        """Get configuration for serialization.
+        """Return the constructor arguments for serialization.
 
-        ``seed`` is deliberately absent: it does not affect the output, so
-        persisting it would advertise a dependency that does not exist.
+        ``seed`` is absent: it does not affect the output, so persisting it
+        would advertise a dependency that does not exist.
 
-        Returns:
-            Dict containing the initializer configuration.
+        :return: A dict holding ``scale``.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -260,14 +285,13 @@ class HaarWaveletInitializer(keras.initializers.Initializer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'HaarWaveletInitializer':
-        """Create initializer from configuration.
+        """Rebuild an initializer from a config dict.
 
-        Args:
-            config: Configuration dictionary. A ``seed`` key written by an
-                earlier version is accepted and ignored.
-
-        Returns:
-            HaarWaveletInitializer instance.
+        :param config: Configuration dictionary. A ``seed`` key written by an
+            earlier version is accepted and ignored.
+        :type config: dict
+        :return: A new initializer.
+        :rtype: HaarWaveletInitializer
         """
         return cls(**config)
 
@@ -287,38 +311,62 @@ def create_haar_depthwise_conv2d(
     """Create a Haar wavelet depthwise convolution layer.
 
     Implements 2D Haar wavelet decomposition as a depthwise convolution with
-    stride=2 for dyadic downsampling. This is the standard approach for
-    wavelet decomposition in neural networks.
+    stride 2 for dyadic downsampling, the standard way to do wavelet
+    decomposition in a network.
 
-    Output channels are ordered input-channel-major: channel
-    ``i * channel_multiplier + j`` holds sub-band ``SUBBAND_NAMES[j % 4]`` of
-    input channel ``i``. With the default ``channel_multiplier=4`` that is
-    ``[LL, LH, HL, HH]`` per input channel.
+    **Layer wiring:**
 
-    Args:
-        input_shape: Input tensor shape ``(height, width, channels)``. The
-            spatial dimensions must be EVEN (or ``None``): a stride-2 ``'valid'``
-            convolution consumes whole 2x2 blocks, so an odd size silently drops
-            the last row/column and breaks perfect reconstruction.
-        channel_multiplier: Output channels per input channel. For a full wavelet
-            decomposition this should be 4 (LL, LH, HL, HH). Values above 4 cycle
-            the bank and therefore duplicate filters.
-        scale: Wavelet coefficient scaling factor. ``1.0`` is orthonormal.
-        use_bias: Whether to add bias terms (typically False for wavelets).
-        kernel_regularizer: Optional kernel regularization. Measured in Keras
-            3.8: a regularizer on a NON-trainable weight contributes nothing to
-            ``model.losses`` (0 terms frozen vs 1 term trainable), so combining
-            it with ``trainable=False`` is a silent no-op and is warned about.
-        trainable: Whether wavelet weights can be trained. Usually False for
-            fixed wavelet transforms.
-        name: Layer name.
+    .. code-block:: text
 
-    Returns:
-        keras.layers.DepthwiseConv2D: Configured Haar wavelet layer.
+        input [B, H, W, C]     (H and W must be even)
+              │
+              ▼
+        ┌────────────────────────────────────┐
+        │ DepthwiseConv2D                    │
+        │   kernel_size = 2                  │
+        │   strides = 2, padding = 'valid'   │
+        │   depth_multiplier = cm            │
+        │   depthwise_initializer =          │
+        │       HaarWaveletInitializer(scale)│
+        │   trainable = trainable (False by  │
+        │       default: a fixed transform)  │
+        └────────────────┬───────────────────┘
+                         ▼
+        output [B, H/2, W/2, C * cm]
 
-    Raises:
-        ValueError: If ``input_shape`` is not 3D, either spatial dimension is
-            odd, or ``channel_multiplier`` is not positive.
+        channel ordering, input-channel-major:
+          i * cm + j  ->  sub-band SUBBAND_NAMES[j % 4] of input channel i
+
+    With the default ``channel_multiplier=4`` that is ``[LL, LH, HL, HH]`` per
+    input channel.
+
+    :param input_shape: Input tensor shape ``(height, width, channels)``. The
+        spatial dimensions must be even, or ``None``: a stride-2 ``'valid'``
+        convolution consumes whole 2x2 blocks, so an odd size drops the last row
+        or column and breaks perfect reconstruction.
+    :type input_shape: tuple of int
+    :param channel_multiplier: Output channels per input channel. A full wavelet
+        decomposition needs 4 (LL, LH, HL, HH). Values above 4 cycle the bank
+        and duplicate filters.
+    :type channel_multiplier: int
+    :param scale: Wavelet coefficient scaling factor. ``1.0`` is orthonormal.
+    :type scale: float
+    :param use_bias: Whether to add bias terms. Typically ``False`` for wavelets.
+    :type use_bias: bool
+    :param kernel_regularizer: Optional kernel regularization. Measured in Keras
+        3.8: a regularizer on a non-trainable weight contributes nothing to
+        ``model.losses`` (0 terms frozen against 1 term trainable), so combining
+        it with ``trainable=False`` is a silent no-op and is warned about.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param trainable: Whether the wavelet weights can be trained. Usually
+        ``False`` for a fixed transform.
+    :type trainable: bool
+    :param name: Layer name.
+    :type name: str or None
+    :return: The configured Haar wavelet layer.
+    :rtype: keras.layers.DepthwiseConv2D
+    :raises ValueError: If ``input_shape`` is not 3D, either spatial dimension
+        is odd, or ``channel_multiplier`` is not positive.
 
     Example:
         >>> # Create a standard Haar wavelet decomposition layer
@@ -349,7 +397,6 @@ def create_haar_depthwise_conv2d(
             f"reconstruction -- crop or pad the input to an even size first."
         )
 
-    # Log warning if using non-standard configuration
     if channel_multiplier != 4 and not trainable:
         logger.warning(
             f"Using channel_multiplier={channel_multiplier} with trainable=False. "
@@ -377,7 +424,8 @@ def create_haar_depthwise_conv2d(
 
     return keras.layers.DepthwiseConv2D(
         kernel_size=2,
-        strides=2,  # Dyadic downsampling for wavelet decomposition
+        # Stride 2 gives the dyadic downsampling of a wavelet decomposition.
+        strides=2,
         padding='valid',
         depth_multiplier=channel_multiplier,
         use_bias=use_bias,

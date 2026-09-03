@@ -1,32 +1,33 @@
-"""Per-site initializer cloning -- breaking shared-instance init symmetry.
+"""Per-site initializer cloning.
 
-A single ``keras.initializers.Initializer`` INSTANCE reused across several
-weights produces the SAME tensor at every site whose shape matches. This is
-Keras 3 behaviour, not a bug: a seedless initializer instance self-assigns a
-fixed seed at construction (measured: ``keras.initializers.get("glorot_uniform")``
-reports ``.seed == 835549144`` reproducibly after
-``keras.utils.set_random_seed(1234)``; the value itself is process-specific), and
-every later draw from that instance replays it.
+Provides :func:`clone_initializer`, which returns an independent copy of an
+initializer so that two weights do not start bit-identical.
 
-Measured, on two ``Dense(4)`` layers built from ``(None, 6)``:
+A single ``keras.initializers.Initializer`` instance reused across several
+weights produces the same tensor at every site whose shape matches. That is
+Keras 3 behaviour: a seedless initializer instance self-assigns a fixed seed at
+construction and every later draw replays it. Measured after
+``keras.utils.set_random_seed(1234)``, ``keras.initializers.get("glorot_uniform")``
+reports ``.seed == 835549144`` reproducibly (the value is process-specific).
+
+Measured on two ``Dense(4)`` layers built from ``(None, 6)``:
 
 ===================================  =========================
 how the initializer is passed        kernels identical?
 ===================================  =========================
-the STRING ``"glorot_uniform"``      **no** (a fresh instance per layer)
-one shared seedless INSTANCE         **yes**, bit-for-bit
+the string ``"glorot_uniform"``      no (a fresh instance per layer)
+one shared seedless instance         yes, bit-for-bit
 ===================================  =========================
 
 The common repo idiom ``self.kernel_initializer = keras.initializers.get(arg)``
 in ``__init__``, then handing ``self.kernel_initializer`` to several sub-layers,
-therefore takes the second row.
+takes the second row.
 
-**Whether that is a defect is a per-site judgement, not a property of the shape**
--- see ``plan-2026-08-19T163559-499b6f0e/D-057``. Symmetry between two weights
-that play the SAME role is usually harmless and is sometimes wanted; symmetry
-between two weights whose DIFFERENCE is the architecture (a main branch and a
-basis branch; a query and a key projection) is a training pathology. Probe the
-site before cloning it.
+Whether that is a defect depends on the site, not on the shape. Symmetry
+between two weights that play the same role is usually harmless. Symmetry
+between two weights whose difference is the architecture, such as a main branch
+and a basis branch, or a query and a key projection, is a training pathology.
+Probe the site before cloning it. See ``plan-2026-08-19T163559-499b6f0e/D-057``.
 """
 
 import keras
@@ -42,28 +43,46 @@ __all__ = ["clone_initializer"]
 def clone_initializer(
         initializer: Optional[Union[str, keras.initializers.Initializer]],
 ) -> Any:
-    """Return an INDEPENDENT initializer equivalent to ``initializer``.
+    """Return an independent initializer equivalent to ``initializer``.
 
-    **Contract.**
+    **Dispatch:**
+
+    .. code-block:: text
+
+        initializer
+             │
+             ├── None or str ──────────────► keras.initializers.get(arg)
+             │                               (no per-instance state to clone)
+             │
+             └── anything else
+                     │
+                     ▼
+              keras.initializers.get
+                     │
+                     ├── not an Initializer ──► returned unchanged
+                     │
+                     └── Initializer
+                             │
+                             ▼
+                   from_config(get_config())
+                             │
+                             ├── ok ────────► fresh instance
+                             │                (seedless: new seed;
+                             │                 seeded: same seed)
+                             └── raises ────► copy.deepcopy(instance)
+
+    Cloning a seeded initializer does not break symmetry: two clones of
+    ``GlorotUniform(seed=7)`` still produce identical tensors. That is the
+    caller's stated intent and this helper does not override it.
 
     :param initializer: An ``Initializer`` instance, an initializer name, a
         serialized config dict, or ``None``.
-    :returns: For an ``Initializer`` instance, a new instance rebuilt from its
-        own ``get_config()`` -- so a seedless instance draws a FRESH seed and a
-        SEEDED one keeps its explicit seed (reproducibility is preserved by
-        construction: an author who asked for a seed still gets it). For ``None``
-        or a string, the argument is returned by ``keras.initializers.get``
-        unchanged, since neither carries per-instance state to clone. Any object
-        whose ``get_config``/``from_config`` round trip raises is returned via a
-        ``copy.deepcopy`` fallback.
+    :type initializer: str or keras.initializers.Initializer or dict or None
+    :return: A new initializer that draws independently of the argument, or the
+        argument itself when it carries no per-instance state.
     :rtype: keras.initializers.Initializer or None
-    :raises: nothing. This helper never raises on a well-formed initializer; a
-        malformed one is passed to ``keras.initializers.get``, which raises.
-
-    **Failure mode to know about.** Cloning a *seeded* initializer does NOT break
-    symmetry -- two clones of ``GlorotUniform(seed=7)`` still produce identical
-    tensors. That is the caller's stated intent and this helper does not
-    override it.
+    :raises ValueError: Only from ``keras.initializers.get``, when the argument
+        is malformed. A well-formed initializer never raises here.
 
     Example::
 
