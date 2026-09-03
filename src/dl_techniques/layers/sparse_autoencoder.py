@@ -1,69 +1,20 @@
 """
-Sparse autoencoders for monosemantic feature extraction and dictionary learning.
+Sparse autoencoders for monosemantic feature extraction and dictionary learning,
+built by :class:`SparseAutoencoder`.
 
-This layer embodies the principle of overcomplete sparse dictionary learning, a
-design paradigm that trades a compressive bottleneck for an expansive one
-constrained by sparsity. The core idea addresses superposition: a neural network
-with `d` dimensions represents far more than `d` distinct concepts by packing
-them into non-orthogonal directions, so any single neuron responds to many
-unrelated features and is polysemantic. Projecting the activations into a much
-wider latent space, where only a handful of units may fire at once, recovers the
-packed features as individually interpretable dictionary atoms. Reconstruction
-alone is trivially solvable by the identity map, so the sparsity constraint is
-what carries all of the interpretive weight.
-
-Architecturally, the layer is an encode-sparsify-decode pipeline:
-
-`x' = x - b_pre`
-`z_pre = W_enc x' + b_enc`
-`z = sparsify(z_pre)`
-`x_hat = W_dec z + b_dec + b_pre`
-
-The pre-encoder bias centers the input and is added back after decoding, so the
-dictionary models deviations from the activation mean rather than spending atoms
-on a constant offset. Decoder rows are optionally renormalized to unit L2 norm,
-which fixes the scale degeneracy between an atom's direction and its coefficient
-and prevents the model from evading a magnitude-based sparsity penalty by
-shrinking latents while growing decoder norms.
-
-Five sparsity mechanisms are provided, differing in how the active set is chosen
-and in what gradient the choice admits:
-
-1.  `'relu'` applies a plain rectifier with an L1 penalty on the activations.
-    Sparsity emerges as a soft tradeoff against reconstruction, which is simple
-    but introduces systematic shrinkage: the penalty biases every surviving
-    coefficient toward zero.
-2.  `'topk'` retains exactly the `k` largest activations per sample and zeros
-    the rest, making L0 an architectural guarantee rather than a tuned penalty
-    and eliminating shrinkage entirely.
-3.  `'batch_topk'` takes the `k * batch_size` largest activations across the
-    whole batch, letting individual samples use variable numbers of latents
-    while holding average sparsity fixed. Because a per-batch threshold would
-    make one example's output depend on its batch-mates, the threshold is
-    tracked as an EMA and used verbatim at inference, seeded on the first step
-    to avoid an under-sparse ramp from zero.
-4.  `'jumprelu'` gates on a learnable per-latent threshold, `f(x) = x * (x >
-    theta)`, decoupling the firing decision from the output magnitude. The
-    comparison blocks gradient to `theta`, so it is trained solely by a sigmoid
-    surrogate for the L0 count.
-5.  `'gated'` splits detection from estimation across two encoders, so the
-    decision of whether a feature is present is learned independently of how
-    strongly it is present. The hard gate mask blocks the reconstruction
-    gradient to the gate encoder, which is instead supplied by a frozen-decoder
-    auxiliary term.
-
-The recurring difficulty across all variants is that hard selection has zero
-derivative, so any latent that stops firing receives no gradient and can never
-recover. These dead latents waste dictionary capacity permanently. The AuxK
-remedy reconstructs the residual `x - x_hat` that the live latents failed to
-explain using the top `aux_k` dead latents, giving them a gradient that pushes
-them toward genuinely unmodeled structure rather than toward duplicating
-existing atoms. Liveness is tracked statefully by a per-latent counter of
-consecutive non-firing steps rather than inferred from a single batch.
-
-Both the sparsity and auxiliary terms are registered via `add_loss` on every
-forward pass, independent of the return-shape flag; the scalar returned
-alongside the latents is the same object, exposed for inspection only.
+A neural network with `d` dimensions typically represents far more than `d`
+distinct concepts by packing them into non-orthogonal directions, so a single
+neuron responds to many unrelated features. This layer projects activations
+into a much wider latent space where only a handful of units fire at once,
+recovering the packed features as individually interpretable dictionary
+atoms: `z = sparsify(W_enc (x - b_pre) + b_enc)`, `x_hat = W_dec z + b_dec + b_pre`.
+Five sparsity mechanisms are available (`relu`, `topk`, `batch_topk`,
+`jumprelu`, `gated`), trading off how the active set is chosen against what
+gradient that choice admits; see the class docstring for each. A stateful
+per-latent dead-counter drives an auxiliary loss (AuxK) that reconstructs
+what live latents miss, keeping permanently-dead latents from wasting
+capacity. Both the sparsity and auxiliary terms are added via `add_loss` on
+every forward pass, independent of the return-shape flag.
 
 References:
     - Bricken et al., 2023. Towards Monosemanticity: Decomposing Language
@@ -100,14 +51,10 @@ class SparseAutoencoder(keras.layers.Layer):
     """
     Sparse Autoencoder layer with multiple sparsity enforcement variants.
 
-    This layer implements a sparse autoencoder that encodes input activations
-    into a sparse, higher-dimensional latent space and reconstructs them.
-    Multiple sparsity mechanisms are supported (ReLU with L1 penalty, TopK,
-    BatchTopK, JumpReLU with learnable threshold, and Gated SAE) to balance
-    reconstruction fidelity with interpretability. An auxiliary loss mechanism
-    helps prevent dead latents.
+    Encodes input activations into a sparse, higher-dimensional latent space
+    and reconstructs them. An auxiliary loss (AuxK) helps prevent dead latents.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -138,6 +85,18 @@ class SparseAutoencoder(keras.layers.Layer):
         │  + pre_encoder_bias (optional)  │
         │  → reconstruction [..., d_in]   │
         └─────────────────────────────────┘
+
+    Note:
+        The five variants differ in how the active set is chosen. ``relu``
+        penalizes activation magnitude with L1, which shrinks every surviving
+        coefficient. ``topk`` keeps exactly the ``k`` largest activations per
+        sample, with no shrinkage. ``batch_topk`` takes the top
+        ``k * batch_size`` across the whole batch, tracking an EMA threshold
+        used verbatim at inference. ``jumprelu`` gates on a learnable
+        per-latent threshold trained only by a sigmoid L0 surrogate, since the
+        hard comparison blocks its own gradient. ``gated`` splits detection
+        from estimation across two encoders, with the gate encoder trained by
+        a frozen-decoder auxiliary term.
 
     :param d_input: Dimensionality of the input activations.
     :type d_input: int
@@ -225,10 +184,8 @@ class SparseAutoencoder(keras.layers.Layer):
             raise ValueError(
                 f"d_latent must be a positive integer, got {d_latent}"
             )
-        # NOTE: the aux_k > d_latent upper bound is intentionally NOT enforced
-        # here — the default aux_k=256 exceeds small d_latent (e.g. the tests'
-        # d_latent=20) and _compute_auxiliary_loss already clamps at use via
-        # min(aux_k, d_latent). Only the genuine error (non-positive) is caught.
+        # aux_k > d_latent is not an error: _compute_auxiliary_loss clamps it
+        # via min(aux_k, d_latent) at use, so only non-positive is caught here.
         if aux_k is not None and aux_k <= 0:
             raise ValueError(
                 f"aux_k must be a positive integer, got {aux_k}"
@@ -552,7 +509,7 @@ class SparseAutoencoder(keras.layers.Layer):
         Allows variable number of active latents per sample while
         maintaining average sparsity across the batch.
 
-        Inference (``training=False``) masks with the STORED EMA threshold,
+        Inference (``training=False``) masks with the stored EMA threshold,
         which is seeded directly with the batch threshold on the first training
         step and smoothed thereafter via ``batch_topk_decay`` (avoids hundreds
         of steps of under-sparse inference while the EMA ramps up from zero).
@@ -596,10 +553,8 @@ class SparseAutoencoder(keras.layers.Layer):
             )
             threshold = batch_threshold
         else:
-            # DECISION plan-2026-07-24T071243-9325b386/D-002: at inference use the STORED
-            # EMA threshold, never recompute from the batch — recomputing makes a
-            # fixed example's output depend on its batch-mates (invariant #1). See
-            # decisions.md D-002.
+            # DECISION plan-2026-07-24T071243-9325b386/D-002: use the stored EMA
+            # threshold, never recompute from the batch. Recomputing makes one example's output depend on its batch-mates. See decisions.md.
             threshold = self.batch_topk_threshold
 
         # Mask requires meeting the threshold AND strict positivity, so a
@@ -625,28 +580,21 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Apply JumpReLU activation with a learnable per-latent threshold.
 
-        **Actual mechanism (what this code does):**
+        Forward pass is a hard gate ``f(x) = x * (x > theta)`` with a
+        learnable, ``NonNeg``-constrained per-latent threshold ``theta``
+        (``self.threshold``). Backward pass is ordinary autodiff through the
+        cast and multiply: the mask blocks gradient to ``theta``, so the
+        encoder receives gradient only through the currently-active latents,
+        and ``theta`` is trained solely by the sigmoid-surrogate L0 penalty
+        term returned as the sparsity loss below.
 
-        - *Forward*: a hard gate ``f(x) = x * (x > theta)`` with a learnable,
-          ``NonNeg``-constrained per-latent threshold ``theta`` (``self.threshold``).
-        - *Backward*: this is ORDINARY autodiff through a ``cast`` + multiply.
-          The mask ``cast(x > theta)`` is gradient-blocked, so the encoder
-          receives gradient only through the currently-active (above-threshold)
-          latents — exactly like a hard ReLU gate. There is NO custom-gradient
-          mechanism here.
-        - ``theta`` receives ZERO gradient from the reconstruction path (the
-          comparison/cast blocks it); it is trained SOLELY by the separate
-          sigmoid-surrogate L0 penalty term (``sigmoid((x - theta) * steepness)``)
-          returned as the sparsity loss below.
-
-        **Deviation from the paper.** This differs from Rajamanoharan et al.
-        (2024) "Jumping Ahead", whose JumpReLU uses a kernel-density-estimator
-        surrogate gradient for the threshold, giving ``theta`` a
-        reconstruction-fidelity gradient in addition to the L0 signal. That
-        surrogate-gradient mechanism is intentionally NOT implemented here: it
-        would be a net-new custom-gradient path, out of scope for this reference
-        layer. The existing L0-surrogate already trains ``theta``; the deviation
-        is documented rather than silently misrepresented.
+        Note:
+            This differs from Rajamanoharan et al. (2024) "Jumping Ahead",
+            whose JumpReLU uses a kernel-density-estimator surrogate gradient
+            for the threshold, giving ``theta`` a reconstruction-fidelity
+            gradient in addition to the L0 signal. That surrogate-gradient
+            path is not implemented here; the L0-surrogate above is the only
+            signal training ``theta``.
 
         :param pre_activation: Pre-activation tensor.
         :type pre_activation: keras.KerasTensor
@@ -746,11 +694,11 @@ class SparseAutoencoder(keras.layers.Layer):
         if self.aux_k is None or self.aux_k <= 0:
             return ops.zeros(())
 
-        # DECISION plan-2026-07-24T071243-9325b386/D-003: target the main-reconstruction residual, NOT the raw input (OpenAI AuxK) — dead latents specialize on what live latents miss. See decisions.md D-003.
+        # DECISION plan-2026-07-24T071243-9325b386/D-003: target the
+        # main-reconstruction residual, not the raw input (OpenAI AuxK). See decisions.md.
         residual = ops.stop_gradient(inputs - main_reconstruction)
 
-        # Stateful dead-latent detection: which latents fired THIS batch,
-        # reduced over all leading (batch) axes to shape (d_latent,).
+        # Which latents fired this batch, reduced over batch axes to (d_latent,).
         flat_latents = ops.reshape(latents, (-1, self.d_latent))
         fired = ops.max(
             ops.cast(ops.abs(flat_latents) > 1e-8, self.dead_steps.dtype),
@@ -831,22 +779,15 @@ class SparseAutoencoder(keras.layers.Layer):
             tuple of (reconstruction, latents, total_loss).
         :rtype: keras.KerasTensor or tuple
 
-        **Return-shape contract.** With ``return_latents=False`` (the default)
-        this returns *only* the ``reconstruction`` tensor. With
-        ``return_latents=True`` it returns the tuple
-        ``(reconstruction, latents, total_loss)``, where ``total_loss`` is the
-        SAME scalar (``sparsity_loss + aux_loss``) that has already been
-        registered on the layer via ``self.add_loss(...)`` on this same call —
-        it is exposed purely for inspection/debugging. The auxiliary + sparsity
-        training signal is added to ``self.losses`` on EVERY forward pass,
-        regardless of ``return_latents``; the flag controls only the return
-        shape, never whether the model is trained. Callers using stock
-        ``keras`` ``fit()`` should therefore rely on ``model.losses`` (which
-        already includes this scalar) and must NOT also add the returned
-        ``total_loss`` to their own loss, or the aux/sparsity term is
-        double-counted. The return type deliberately varies by flag — this is
-        the idiomatic Keras "add_loss + optional aux outputs" pattern, not an
-        inconsistency.
+        Note:
+            The aux/sparsity loss is added to ``self.losses`` via
+            ``add_loss`` on every forward pass, regardless of
+            ``return_latents``; the flag controls only the return shape. The
+            ``total_loss`` returned when ``return_latents=True`` is the same
+            scalar already registered, exposed for inspection only. Callers
+            using ``model.fit()`` should rely on ``model.losses`` and must
+            not also add the returned ``total_loss`` to their own loss, or
+            the term is double-counted.
         """
         # Handle Gated variant specially (needs centered input for gate)
         if self.variant == 'gated':
@@ -861,22 +802,15 @@ class SparseAutoencoder(keras.layers.Layer):
         # Decode
         reconstruction = self.decode(latents)
 
-        # Compute auxiliary loss unconditionally — it is a TRAINING signal, not
-        # an output-format concern. _compute_auxiliary_loss early-returns
-        # ops.zeros(()) when aux_k is disabled, so this is cheap when unused.
+        # aux loss is a training signal, computed regardless of return_latents;
+        # _compute_auxiliary_loss early-returns zero when aux_k is disabled.
         aux_loss = self._compute_auxiliary_loss(
             pre_activation, latents, inputs, reconstruction, training
         )
 
-        # DECISION plan-2026-07-24T071243-9325b386/D-005: add the aux+sparsity loss to
-        # self.losses on EVERY forward pass, independent of return_latents.
-        # Gating add_loss on an output-format flag (as before) meant the
-        # dead-latent aux only trained the model when the caller happened to
-        # request the tuple — a bug. return_latents controls ONLY the return
-        # shape. The returned total_loss is the SAME scalar registered here
-        # (inspection only); callers under fit() rely on model.losses and must
-        # NOT re-sum it, or it double-counts. Do NOT move add_loss back inside
-        # the return_latents branch. See decisions.md D-005.
+        # DECISION plan-2026-07-24T071243-9325b386/D-005: add_loss runs on every
+        # forward pass, independent of return_latents — gating it on the flag
+        # once meant the dead-latent aux only trained when the tuple was requested. See decisions.md.
         total_loss = sparsity_loss + aux_loss
         self.add_loss(total_loss)
 
@@ -901,9 +835,8 @@ class SparseAutoencoder(keras.layers.Layer):
         decoder whose weight/biases are ``stop_gradient``-frozen and compared to
         the raw input, so ``gate_weight``/``gate_bias`` learn whether opening a
         gate helps reconstruction (the hard Heaviside gate mask itself blocks
-        that gradient). Deviation from the paper: the magnitude and gate encoders
-        are kept UNTIED (no ``W_mag = exp(r) * W_gate`` weight-tying) — out of
-        scope; documented as a deliberate simplification.
+        that gradient). This differs from the paper: the magnitude and gate
+        encoders are kept untied (no ``W_mag = exp(r) * W_gate`` weight-tying).
 
         :param inputs: Input activations.
         :type inputs: keras.KerasTensor
@@ -943,28 +876,20 @@ class SparseAutoencoder(keras.layers.Layer):
         # Decode
         reconstruction = self.decode(latents)
 
-        # Gated SAE auxiliary loss (Rajamanoharan et al. 2024):
-        # route the gate's ReLU pre-activations through a FROZEN decoder and
-        # reconstruct the input, giving the gate encoder a fidelity gradient.
-        # DECISION plan-2026-07-24T071243-9325b386/D-004: the gate encoder needs a
-        # reconstruction gradient that the hard gate-mask (cast(sigmoid>0.5))
-        # blocks; freezing the decoder (stop_gradient on weight+biases) isolates
-        # that signal to gate_weight/gate_bias WITHOUT moving the decoder. Do NOT
-        # use the AuxK dead-latent residual here (that is the non-gated variants'
-        # loss) and do NOT drop the freeze (a live decoder would let this term
-        # train the decoder instead of the gate). Encoder weight-tying
-        # (W_mag = exp(r)*W_gate) is deliberately NOT implemented (out of scope;
-        # untied encoders are a documented deviation). See decisions.md D-004.
+        # Gated SAE auxiliary loss (Rajamanoharan et al. 2024): route the
+        # gate's ReLU pre-activations through a frozen decoder to give the
+        # gate encoder a fidelity gradient the hard mask otherwise blocks.
+        # DECISION plan-2026-07-24T071243-9325b386/D-004: freeze the decoder here
+        # (stop_gradient on weight+biases) rather than using the AuxK dead-latent
+        # path; a live decoder would train the decoder instead of the gate. See decisions.md.
         gate_relu = ops.relu(gate_pre)
         aux_reconstruction = self.decode(gate_relu, freeze=True)
         aux_loss = self.aux_coefficient * ops.mean(
             ops.square(inputs - aux_reconstruction)
         )
 
-        # Add aux+sparsity to self.losses unconditionally (see call() D-005):
-        # the L_aux training signal must not depend on return_latents. Exactly
-        # one add_loss per forward pass; the returned total_loss is the SAME
-        # scalar (inspection only — do not re-sum under fit()).
+        # Same add_loss discipline as call() (see D-005): one call per forward
+        # pass, independent of return_latents; total_loss is inspection-only.
         total_loss = sparsity_loss + aux_loss
         self.add_loss(total_loss)
 

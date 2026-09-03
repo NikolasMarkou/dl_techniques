@@ -1,53 +1,16 @@
-"""
-YOLOv12 Task-Specific Heads for Multi-Task Learning.
+"""Three task heads for YOLOv12: ``YOLOv12DetectionHead``, ``YOLOv12SegmentationHead``,
+and ``YOLOv12ClassificationHead``, each consuming the same three-scale backbone
+features and producing a different task output.
 
-This module implements specialized heads for the YOLOv12 architecture, enabling
-multitask learning capabilities including object detection, semantic segmentation,
-and image classification. Each head is designed to process shared backbone features
-from YOLOv12 while maintaining task-specific architectures optimized for their
-respective objectives.
+Each head processes the shared multi-scale features its own way instead of
+sharing a common trunk: detection keeps bbox and class predictions as
+separate branches per scale, segmentation upsamples progressively with skip
+connections back to the input resolution, and classification pools each
+scale globally before an optional attention-weighted dense stack.
 
-Architecture Overview:
-    - **YOLOv12DetectionHead**: Multi-scale object detection with separate bbox
-      regression and classification branches using depthwise separable convolutions
-    - **YOLOv12SegmentationHead**: Progressive upsampling decoder with skip connections
-      for pixel-level segmentation tasks
-    - **YOLOv12ClassificationHead**: Multi-scale global pooling with attention
-      mechanisms for image-level classification
-
-Usage Example:
-    ```python
-    # Create detection head
-    detection_head = YOLOv12DetectionHead(
-        num_classes=1,
-        reg_max=16,
-        bbox_channels=[32, 64, 96],  # Channels for each scale
-        cls_channels=[64, 96, 128]   # Channels for each scale
-    )
-
-    # Create segmentation head
-    seg_head = YOLOv12SegmentationHead(
-        num_classes=1,
-        intermediate_filters=[128, 64, 32]
-    )
-
-    # Create classification head
-    cls_head = YOLOv12ClassificationHead(
-        num_classes=1,
-        hidden_dims=[512, 256]
-    )
-
-    # Use with multiscale features
-    features = [p3, p4, p5]  # From YOLOv12 backbone
-
-    detections = detection_head(features)
-    segmentation = seg_head(features)
-    classification = cls_head(features)
-    ```
-
-Notes:
-    - All heads expect exactly 3 input feature maps from different scales
-    - Input shapes should be [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+All three heads require exactly 3 input feature maps, shaped
+``[(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]`` (P3, P4, P5
+from the YOLOv12 backbone).
 """
 
 import keras
@@ -76,7 +39,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
     bounding box regression and class probability predictions. Uses depthwise
     separable convolutions in the classification branch for efficiency.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -144,7 +107,6 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             if any(c <= 0 for c in cls_channels):
                 raise ValueError("All cls_channels must be positive")
 
-        # Store configuration - ALL parameters from __init__
         self.num_classes = num_classes
         self.reg_max = reg_max
         self.bbox_channels = bbox_channels
@@ -152,30 +114,23 @@ class YOLOv12DetectionHead(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # CREATE all sub-layers in __init__ (Modern Keras 3 pattern)
-        # Initialize but don't build - building happens in build() method
+        # Branches are populated in build(), once input channels are known.
         self.bbox_branches = []
         self.cls_branches = []
 
         for i in range(3):  # 3 scales: P3, P4, P5
-            # Create bbox branch as Sequential - will be populated in build()
             bbox_branch = keras.Sequential(name=f"bbox_branch_{i}")
             self.bbox_branches.append(bbox_branch)
 
-            # Create classification branch as Sequential - will be populated in build()
             cls_branch = keras.Sequential(name=f"cls_branch_{i}")
             self.cls_branches.append(cls_branch)
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """Build detection head branches for each input scale.
 
-        Following modern Keras 3 pattern: explicitly build all sub-layers for robust serialization.
-
-            :param input_shape: List of shape tuples for each input feature map. Expected: 3 shapes for [P3, P4, P5] features.
-            :type input_shape: tuple
-
+        :param input_shape: List of shape tuples for each input feature map. Expected: 3 shapes for [P3, P4, P5] features.
+        :type input_shape: tuple
         """
-        # Validate input structure
         if not isinstance(input_shape, list):
             raise ValueError("YOLOv12DetectionHead expects a list of input shapes")
 
@@ -204,22 +159,9 @@ class YOLOv12DetectionHead(keras.layers.Layer):
 
             logger.info(f"Scale {i}: input_channels={in_channels}, bbox_channels={bbox_c}, cls_channels={cls_c}")
 
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-071
-            # Every one of the eight consumers below takes a CLONE, not
-            # `self.kernel_initializer`. One shared instance is handed to the
-            # bbox branch and the cls branch of all three scales, and MEASURED
-            # on `create_yolov12_multitask(scale='n', input_shape=(64,64,3))`
-            # that produced 161 bit-identical same-size weight pairs of 140
-            # non-constant tensors. 155 of those are SAME-role
-            # (`conv/kernel` against `conv/kernel`), which D-057 does not
-            # convict -- but SIX are DIFFERENT-role, all here:
-            # `bbox_N_pred/kernel` against `cls_0_pw{1,2}/conv/kernel`, i.e.
-            # the box-regression head and the classification head starting as
-            # the same function. The clone is applied to all eight rather than
-            # to seven, because the loop runs three times and cloning "all but
-            # the first" would still tie scale 0's first layer to scale 1's.
-            # See decisions.md D-071.
-            # Populate bbox branch layers
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-071: every consumer below
+            # clones self.kernel_initializer rather than sharing it; a shared instance
+            # produced 161 bit-identical weight pairs, 6 of them across different roles. See decisions.md.
             self.bbox_branches[i].add(yolo12_conv_block(
                 filters=bbox_c,
                 kernel_size=3,
@@ -281,7 +223,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
                 name=f"cls_{i}_pred"
             ))
 
-            # CRITICAL: Explicitly build each sub-layer for robust serialization
+            # Each sub-layer is built explicitly for robust serialization.
             try:
                 self.bbox_branches[i].build(shape)
                 self.cls_branches[i].build(shape)
@@ -360,7 +302,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-            :return: Dictionary containing ALL layer configuration parameters.
+            :return: Layer configuration parameters.
             :rtype: dict
         """
         config = super().get_config()
@@ -388,7 +330,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     Squeeze-and-Excitation attention at skip connection fusion points and
     bilinear resize to exact target resolution.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -456,7 +398,6 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
             if any(s <= 0 for s in target_size):
                 raise ValueError("target_size values must be positive")
 
-        # Store ALL configuration parameters from __init__
         self.num_classes = num_classes
         self.intermediate_filters = list(intermediate_filters)
         self.target_size = target_size
@@ -465,7 +406,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # CREATE all sub-layers in __init__ (Modern Keras 3 pattern)
+        # Sub-layers are populated in build(), once input channels are known.
         self.upconv_blocks = []
         self.skip_convs = []
         self.attention_blocks = []
@@ -504,8 +445,6 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """Build segmentation head with progressive upsampling to full resolution.
-
-        Following modern Keras 3 pattern: explicitly build all sub-layers for robust serialization.
 
             :param input_shape: List of shape tuples for input feature maps. Expected: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
             :type input_shape: tuple
@@ -794,7 +733,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-            :return: Dictionary containing ALL layer configuration parameters.
+            :return: Layer configuration parameters.
             :rtype: dict
         """
         config = super().get_config()
@@ -822,7 +761,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     backbone feature maps, concatenates all pooled features, applies optional
     attention weighting, and passes through a dense classifier.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -897,13 +836,9 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
             if pool_type not in valid_pooling_types:
                 raise ValueError(f"Invalid pooling type: {pool_type}. Must be one of {valid_pooling_types}")
 
-        # Store ALL configuration parameters from __init__
         self.num_classes = num_classes
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
-        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
-        # store as `list(...)` is what makes the conversion invisible: it is
-        # the type `get_config` has always emitted, so a saved config's JSON
-        # shape and every `== [..]` assertion in the suites are unchanged.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: store as list, not the
+        # constructor's tuple default. get_config has always emitted a list; changing this breaks that shape. See decisions.md.
         self.hidden_dims = list(hidden_dims)
         self.pooling_types = list(pooling_types)
         self.use_attention = use_attention
@@ -911,7 +846,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # CREATE all sub-layers in __init__ (Modern Keras 3 pattern)
+        # Sub-layers are populated in build(), once input channels are known.
         self.pooling_layers = []
         self.attention_pooling = None
         self.dense_layers = []
@@ -955,8 +890,6 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """Build classification head.
-
-        Following modern Keras 3 pattern: explicitly build all sub-layers for robust serialization.
 
             :param input_shape: List of shape tuples for input feature maps. Expected: 3 shapes for [P3, P4, P5] features.
             :type input_shape: tuple
@@ -1106,7 +1039,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-            :return: Dictionary containing ALL layer configuration parameters.
+            :return: Layer configuration parameters.
             :rtype: dict
         """
         config = super().get_config()

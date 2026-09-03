@@ -1,10 +1,18 @@
 """
-Haar Wavelet Decomposition Layer supporting multi-dimensional inputs.
+This module provides `HaarWaveletDecomposition`, a Keras layer that splits a
+signal into approximation and detail bands using the Haar wavelet.
 
-This module provides a Keras layer for Haar Discrete Wavelet Transform (DWT)
-decomposition that works with timeseries (1D), images (2D), and voxels (3D).
-The Haar wavelet computes averages (approximation) and differences (detail)
-coefficients at each level, halving spatial resolution per dimension.
+At each level it averages and differences adjacent samples along every
+spatial axis instead of learning a filter, so the transform is fixed,
+invertible up to the truncation below, and adds no weights. It works on
+1D signals, 2D images (producing LL/LH/HL/HH subbands), and 3D volumes
+(producing 7 detail subbands per level).
+
+An odd-length axis is floor-truncated to an even length before each level,
+so `num_levels` levels shrink that axis to `L // 2 ** num_levels` and the
+truncated samples are dropped. The layer does not check that a chosen
+`num_levels` keeps every axis above zero; callers must bound it against
+their own input length.
 """
 
 import keras
@@ -31,7 +39,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
     channels] producing (LL, LH, HL, HH) subbands, and 3D signals [batch, D,
     H, W, channels] producing 7 detail subbands per level.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -56,10 +64,10 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         │  Output: [approx, details_K, ..., details_1]│
         └─────────────────────────────────────────────┘
 
-    :param num_levels: Number of decomposition levels. Each level FLOOR-halves
+    :param num_levels: Number of decomposition levels. Each level floor-halves
         the resolution along each dimension (an odd length is truncated to
         ``(L // 2) * 2`` first), so after ``K`` levels the approximation is
-        ``L // 2 ** K`` long. Defaults to 3. This layer does NOT refuse a
+        ``L // 2 ** K`` long. Defaults to 3. This layer does not refuse a
         ``num_levels`` that drives a dimension to 0: the reductions downstream
         are what break, so callers must bound it against their own input
         length (``PRISMModel.__init__`` is one such caller).
