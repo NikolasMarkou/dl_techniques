@@ -694,7 +694,7 @@ def main() -> None:
         trainer = MDNTrainer(config, generator_config)
         results = trainer.run_experiment()
         logger.info(f"Completed. Results: {results['experiment_dir']}")
-        keras.backend.clear_session()
+        keras.utils.clear_session()
         sys.stdout.flush()
     except Exception as e:
         logger.error(f"Failed: {e}", exc_info=True)

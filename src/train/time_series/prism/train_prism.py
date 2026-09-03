@@ -456,7 +456,7 @@ def main() -> None:
         logger.error(f"Failed: {e}", exc_info=True)
         sys.exit(1)
     finally:
-        keras.backend.clear_session()
+        keras.utils.clear_session()
         sys.stdout.flush()
         sys.stderr.flush()
 

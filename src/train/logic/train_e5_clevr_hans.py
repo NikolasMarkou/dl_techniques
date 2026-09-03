@@ -447,7 +447,7 @@ def main() -> None:
             name="resnet50_circuit", patience=args.patience,
         ))
         del m
-        keras.backend.clear_session()
+        keras.utils.clear_session()
     else:
         logger.info("Skipping circuit (skip-models or dataset unavailable).")
 
@@ -461,7 +461,7 @@ def main() -> None:
             name="resnet50_mlp", patience=args.patience,
         ))
         del m
-        keras.backend.clear_session()
+        keras.utils.clear_session()
     else:
         logger.info("Skipping mlp.")
 
@@ -475,7 +475,7 @@ def main() -> None:
             name="symbolic_circuit_oracle", patience=args.patience,
         ))
         del m
-        keras.backend.clear_session()
+        keras.utils.clear_session()
     else:
         logger.info("Skipping oracle.")
 

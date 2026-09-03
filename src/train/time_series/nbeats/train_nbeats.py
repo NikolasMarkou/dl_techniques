@@ -474,7 +474,7 @@ def main() -> None:
         trainer = NBeatsTrainer(config, generator_config)
         results = trainer.run_experiment()
         logger.info(f"Completed. Results: {results['results_dir']}")
-        keras.backend.clear_session()
+        keras.utils.clear_session()
         sys.stdout.flush()
         sys.stderr.flush()
     except Exception as e:

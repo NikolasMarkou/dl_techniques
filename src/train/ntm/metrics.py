@@ -114,7 +114,7 @@ class SequenceAccuracy(keras.metrics.Metric):
         
         :return: Sequence accuracy as a scalar.
         """
-        return self.correct / (self.total + keras.backend.epsilon())
+        return self.correct / (self.total + keras.config.epsilon())
     
     def reset_state(self) -> None:
         """Reset metric state."""
@@ -192,7 +192,7 @@ class PerStepAccuracy(keras.metrics.Metric):
         
         :return: Per-step accuracy as a scalar.
         """
-        return self.correct / (self.total + keras.backend.epsilon())
+        return self.correct / (self.total + keras.config.epsilon())
     
     def reset_state(self) -> None:
         """Reset metric state."""
@@ -255,7 +255,7 @@ class BitErrorRate(keras.metrics.Metric):
         
         :return: BER as a scalar.
         """
-        return self.errors / (self.total + keras.backend.epsilon())
+        return self.errors / (self.total + keras.config.epsilon())
     
     def reset_state(self) -> None:
         """Reset metric state."""
@@ -335,7 +335,7 @@ class ExactMatchAccuracy(keras.metrics.Metric):
         
         :return: Accuracy as a scalar.
         """
-        return self.correct / (self.total + keras.backend.epsilon())
+        return self.correct / (self.total + keras.config.epsilon())
     
     def reset_state(self) -> None:
         """Reset metric state."""
