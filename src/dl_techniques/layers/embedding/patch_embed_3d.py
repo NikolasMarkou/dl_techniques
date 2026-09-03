@@ -61,7 +61,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Union, Tuple, Any, Dict
 
 # ---------------------------------------------------------------------
@@ -323,9 +322,9 @@ class PatchEmbed3D(keras.layers.Layer):
 
         # Flatten the tubelet grid into a sequence. Let the backend infer the
         # tubelet-count axis with -1 (graph-safe; avoids multiplying three
-        # symbolic ops.shape() scalars).
-        batch_size = ops.shape(x)[0]
-        x = ops.reshape(x, (batch_size, -1, self.embed_dim))
+        # symbolic keras.ops.shape() scalars).
+        batch_size = keras.ops.shape(x)[0]
+        x = keras.ops.reshape(x, (batch_size, -1, self.embed_dim))
 
         return x
 

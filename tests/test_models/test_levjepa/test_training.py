@@ -54,15 +54,58 @@ class TestLeVJEPATrainingModelForward:
         for loss in model.losses:
             assert np.isfinite(np.array(loss))
 
-    def test_global_vs_itself_term_is_exactly_zero_component(self):
-        """The (index-0-vs-itself) term of pred_loss's mean is exactly 0 --
-        pinned as a sanity check that the broadcast, not a slice, is used."""
+    # DECISION plan-2026-09-03T113223-2a714a91/D-024
+    # The prior version of this test computed `global_emb - embeddings[:, :1, :]`
+    # where BOTH operands were the exact same slice of the exact same tensor
+    # (`a - a == 0`), a guard that cannot fail regardless of whether call()'s
+    # global/local indexing is correct. WHAT NOT TO DO: do not "fix" this by
+    # merely renaming the variables or re-deriving the SAME slice a second way
+    # from the SAME `embeddings` tensor -- that reproduces the identical
+    # tautology under a different name. The real fix independently recomputes
+    # the global row via a SEPARATE forward path (encoder -> CLS slice ->
+    # projector, called on the global view ALONE) and compares it against
+    # `embeddings[:, 0, :]` from the model's own joint forward pass, using
+    # `training=False` so BatchNormalization's moving statistics (not batch
+    # statistics, which would legitimately differ between a 1-view and a
+    # 1+V-view call) make the two paths comparable. See decisions.md D-024.
+    def test_global_embedding_matches_independent_recomputation(self):
+        """``embeddings[:, 0, :]`` (the global view's row produced by
+        ``call()``'s joint global+local forward pass) must equal an
+        INDEPENDENTLY recomputed projection of the global CLS token alone --
+        a real cross-check on ``call()``'s global/local indexing.
+
+        Prior version of this test computed ``global_emb - embeddings[:, :1, :]``
+        where both operands were literally the SAME slice of the SAME tensor
+        (``a - a == 0``), an assertion that cannot fail regardless of whether
+        ``call()``'s indexing is correct -- see decisions.md D-024.
+
+        Uses ``training=False`` throughout: ``LeVJEPAProjector``'s
+        ``BatchNormalization`` then uses its moving statistics, which do not
+        depend on how many views are present in a given forward call, so the
+        global row computed jointly (alongside the local views) must exactly
+        match the global row computed alone from the encoder's own CLS token.
+        This recomputation would diverge from ``embeddings[:, 0, :]`` if
+        ``call()`` ever mixed up which view is "global" (e.g. wrong slot in
+        the ``concatenate`` call, or an off-by-one on the view axis) --
+        confirmed by injecting exactly that mutation (swapping the
+        ``concatenate`` operand order) and observing this assertion go RED,
+        then reverting and confirming GREEN again.
+        """
         model = _make_model()
-        batch = _make_batch(batch_size=2, num_local=1)
-        embeddings = np.array(model(batch, training=True))
-        global_emb = embeddings[:, :1, :]
-        diff_at_global = global_emb - embeddings[:, :1, :]
-        np.testing.assert_allclose(diff_at_global, 0.0, atol=1e-6, rtol=0)
+        batch = _make_batch(batch_size=2, num_local=2)
+        # One training=True call to build the model and take a real moving-
+        # stat update, so `training=False` below exercises actual (non-
+        # freshly-initialized) BatchNormalization statistics.
+        model(batch, training=True)
+        embeddings = np.array(model(batch, training=False))
+
+        global_tokens = model.encoder(batch["global_frame"], training=False)
+        global_cls = global_tokens[:, :1, :]  # (B, 1, D), independent path
+        expected_global_emb = np.array(model.projector(global_cls, training=False))
+
+        np.testing.assert_allclose(
+            embeddings[:, 0, :], expected_global_emb[:, 0, :], atol=1e-5, rtol=0
+        )
 
     def test_requires_video_mode_encoder(self):
         image_encoder = LeVJEPAEncoder(

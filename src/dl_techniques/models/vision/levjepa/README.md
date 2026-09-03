@@ -82,14 +82,17 @@ with the CLS token at index 0.
 See `decisions.md` D-011 through D-013 in this plan's directory for the
 reasoning behind each of these and the LayerScale-removal correction.
 
-## Known pre-existing house-convention gap
+## House-convention gap (RESOLVED, step 6.2 completion-fix)
 
-`encoder.py` and `blocks.py` (Step 4) import `from keras import ops` rather
-than the house convention `import keras` + qualify at the call site
-(`src/dl_techniques/CLAUDE.md` § Core Conventions). Discovered during Step 6
-via `grep -rn "from keras import ops" src/dl_techniques/models/vision/levjepa/`
-(plan.md Success Criterion 12's own check). Not fixed in Step 6 --
-out of scope for a training-wrapper step, and Step 4 already committed and
-passed its own verification -- but named here rather than silently left. The
-new `training.py` (Step 6) and `src/train/levjepa/` follow the house
-convention.
+`encoder.py` and `blocks.py` (Step 4), plus `layers/embedding/patch_embed_3d.py`
+and `layers/embedding/video_rope.py` (Step 2), previously imported
+`from keras import ops` rather than the house convention `import keras` +
+qualify at the call site (`src/dl_techniques/CLAUDE.md` § Core Conventions).
+Flagged by `plan.md` Success Criterion 12's own check
+(`grep -rn "from keras import ops" ...`), which found 4 sites, not the 2
+self-reported at the end of Step 6. Fixed in the iter-1 completion-fix round
+(step 6.2): all 4 files now use `import keras` and qualify every call site as
+`keras.ops.<fn>(...)`. Re-verified empty:
+`grep -rn "from keras import ops" src/dl_techniques/models/vision/levjepa/
+src/dl_techniques/layers/embedding/patch_embed_3d.py
+src/dl_techniques/layers/embedding/video_rope.py`.

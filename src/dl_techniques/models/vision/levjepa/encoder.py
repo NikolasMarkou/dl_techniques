@@ -78,7 +78,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -498,12 +497,12 @@ class LeVJEPAEncoder(keras.Model):
 
         x, token_ids = random_token_drop(x, self.token_drop_rate, training=training)
 
-        batch_size = ops.shape(x)[0]
-        cls_token = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
+        batch_size = keras.ops.shape(x)[0]
+        cls_token = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
         if self.pos_embed is not None:
             cls_pos_embed = self.pos_embed[:, :1, :]
             cls_token = cls_token + cls_pos_embed
-        x = ops.concatenate([cls_token, x], axis=1)
+        x = keras.ops.concatenate([cls_token, x], axis=1)
 
         attn_mask = None
         if self.attn_mode == "block_causal":

@@ -90,7 +90,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -280,35 +279,35 @@ class VideoRoPE3D(keras.layers.Layer):
         half = d // 2
 
         omega = 1.0 / (
-            self.rope_theta ** (ops.arange(half, dtype="float32") / float(half))
+            self.rope_theta ** (keras.ops.arange(half, dtype="float32") / float(half))
         )
-        pos_f = ops.cast(pos, "float32")
+        pos_f = keras.ops.cast(pos, "float32")
         # (..., N, half), where ... is empty (pos rank 1) or (batch,) (rank 2).
-        freq = ops.expand_dims(pos_f, axis=-1) * omega
+        freq = keras.ops.expand_dims(pos_f, axis=-1) * omega
 
         # Each angle serves an ADJACENT channel pair -- INTERLEAVED, see the
         # module docstring. repeat(..., 2) turns [a0, a1, ...] into
         # [a0, a0, a1, a1, ...].
-        sin_e = ops.repeat(ops.sin(freq), 2, axis=-1)
-        cos_e = ops.repeat(ops.cos(freq), 2, axis=-1)
+        sin_e = keras.ops.repeat(keras.ops.sin(freq), 2, axis=-1)
+        cos_e = keras.ops.repeat(keras.ops.cos(freq), 2, axis=-1)
 
         if len(pos.shape) == 2:
             # (batch, N, band) -> (batch, 1, N, band) to broadcast over heads.
-            sin_e = ops.expand_dims(sin_e, axis=1)
-            cos_e = ops.expand_dims(cos_e, axis=1)
+            sin_e = keras.ops.expand_dims(sin_e, axis=1)
+            cos_e = keras.ops.expand_dims(cos_e, axis=1)
 
-        sin_e = ops.cast(sin_e, x_band.dtype)
-        cos_e = ops.cast(cos_e, x_band.dtype)
+        sin_e = keras.ops.cast(sin_e, x_band.dtype)
+        cos_e = keras.ops.cast(cos_e, x_band.dtype)
 
         # INTERLEAVED pair rotation: (x[2i], x[2i+1]) -> (-x[2i+1], x[2i]).
         # Reshape-based, matching AxialRoPE2D._rotate_adjacent_pairs exactly
         # (same conclusion, independently re-derived from this reference's
         # `unflatten(-1, (-1, 2))`).
-        lead = ops.shape(x_band)[:-1]
-        pairs = ops.reshape(x_band, (*lead, half, 2))
+        lead = keras.ops.shape(x_band)[:-1]
+        pairs = keras.ops.reshape(x_band, (*lead, half, 2))
         even = pairs[..., 0]
         odd = pairs[..., 1]
-        rotated = ops.reshape(ops.stack([-odd, even], axis=-1), (*lead, d))
+        rotated = keras.ops.reshape(keras.ops.stack([-odd, even], axis=-1), (*lead, d))
 
         return x_band * cos_e + rotated * sin_e
 
@@ -340,7 +339,7 @@ class VideoRoPE3D(keras.layers.Layer):
             # Leftover channels the equal-band split could not cover; passed
             # through unrotated, matching the reference's concat-remainder.
             parts.append(x[..., 3 * d:])
-        return ops.concatenate(parts, axis=-1)
+        return keras.ops.concatenate(parts, axis=-1)
 
     # -----------------------------------------------------------------
     # call / shape / config
@@ -398,7 +397,7 @@ class VideoRoPE3D(keras.layers.Layer):
 
         if token_ids is None:
             num_tokens = num_frames * height_patches * width_patches
-            token_ids = ops.arange(num_tokens, dtype="int32")
+            token_ids = keras.ops.arange(num_tokens, dtype="int32")
 
         frame_id, height_id, width_id = self._separate_positions(
             token_ids, height_patches, width_patches

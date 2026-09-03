@@ -77,7 +77,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -500,13 +499,13 @@ class LeVJEPABlock(keras.layers.Layer):
         residual = inputs
         y = self.norm1(inputs, training=training)
 
-        batch_size = ops.shape(y)[0]
-        num_tokens = ops.shape(y)[1]
+        batch_size = keras.ops.shape(y)[0]
+        num_tokens = keras.ops.shape(y)[1]
 
         qkv = self.qkv(y, training=training)
-        qkv = ops.reshape(qkv, (batch_size, num_tokens, 3, self.num_heads, self.head_dim))
+        qkv = keras.ops.reshape(qkv, (batch_size, num_tokens, 3, self.num_heads, self.head_dim))
         # (3, B, H, N, d)
-        qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))
+        qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         if self.use_rope:
@@ -529,25 +528,25 @@ class LeVJEPABlock(keras.layers.Layer):
             )
 
             if p > 0:
-                q = ops.concatenate([q_prefix, q_body], axis=2)
-                k = ops.concatenate([k_prefix, k_body], axis=2)
+                q = keras.ops.concatenate([q_prefix, q_body], axis=2)
+                k = keras.ops.concatenate([k_prefix, k_body], axis=2)
             else:
                 q, k = q_body, k_body
 
-        logits = ops.matmul(q, ops.moveaxis(k, -1, -2)) * self._scale
+        logits = keras.ops.matmul(q, keras.ops.moveaxis(k, -1, -2)) * self._scale
 
         if attn_mask is not None:
             logits = apply_attention_mask(logits, attn_mask, rescue_axis=-1)
 
-        attn = ops.softmax(ops.cast(logits, "float32"), axis=-1)
-        attn = ops.cast(attn, v.dtype)
+        attn = keras.ops.softmax(keras.ops.cast(logits, "float32"), axis=-1)
+        attn = keras.ops.cast(attn, v.dtype)
 
         if self.attn_drop is not None:
             attn = self.attn_drop(attn, training=training)
 
-        out = ops.matmul(attn, v)  # (B, H, N, d)
-        out = ops.transpose(out, (0, 2, 1, 3))  # (B, N, H, d)
-        out = ops.reshape(out, (batch_size, num_tokens, self.dim))
+        out = keras.ops.matmul(attn, v)  # (B, H, N, d)
+        out = keras.ops.transpose(out, (0, 2, 1, 3))  # (B, N, H, d)
+        out = keras.ops.reshape(out, (batch_size, num_tokens, self.dim))
 
         out = self.proj(out, training=training)
         if self.proj_drop is not None:
