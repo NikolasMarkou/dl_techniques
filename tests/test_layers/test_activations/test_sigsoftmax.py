@@ -601,7 +601,8 @@ def test_the_float16_widening_prevents_an_overflow_to_nan() -> None:
 
     The comparison is against the asymptotic, valid here because every logit
     is far below -1. Measured max absolute deviation is 0.0; the bound is
-    16.0, one float16 ulp at 14016, so it is not pinned to a reading of zero.
+    16.0, two float16 ulp at 14016 (`np.spacing(float16(14016))` is 8.0), so
+    it is not pinned to a reading of zero.
     """
     row = np.array([[-40000.0, -35000.0, -33000.0]], dtype="float16")
 
@@ -643,10 +644,16 @@ def test_the_bfloat16_widening_keeps_the_row_sums_near_one() -> None:
     ==================  ==============  ==============
 
     The bound 4e-3 sits 2.2x above the shipped reading and 3.5x below the
-    unwidened one. That is a narrower band than the other arms in this
-    module, which is why the fixture is 64 rows rather than one: the
+    unwidened one at this seed. That is a narrower band than the other arms
+    in this module, which is why the fixture is 64 rows rather than one: the
     per-row reading is luck-dependent at bfloat16's resolution near 1
     (2^-8 = 3.9e-03), the maximum over 64 rows is not.
+
+    The ``sum`` assertion is the one that discriminates; keep it. Over 200
+    seeds the unwidened ``max|sum - 1|`` never falls below 1.1093e-02, while
+    its ``max|p - ref|`` dips under the 4e-3 bound on 18 of them, lowest
+    3.1162e-03 at seed 47. The ``|p - ref|`` assertion is corroboration and
+    would not redden on its own at those seeds.
 
     ``ref`` is the float64 oracle evaluated on the bfloat16-rounded input,
     so the comparison charges the implementation for the reduction only, not
@@ -728,14 +735,15 @@ def test_xla_matches_eager(assert_xla_matches_eager) -> None:
     """
     x = np.random.default_rng(5).standard_normal((4, 3, 6)).astype("float32")
 
-    # The fixture asserts `deviation < atol` itself and returns the reading.
+    # The fixture already asserts `deviation < atol`, so the bound below is
+    # tighter than it, not a restatement of it: both hosts measure under 1e-7.
     # The layer carries no matmul, so it has no TF32-sensitive stage and the
     # CPU/GPU gap above is ordinary float32 reassociation, not TF32.
     deviation = assert_xla_matches_eager(
         SigSoftmax(axis=-2), x, 1e-6, "SigSoftmax(axis=-2)"
     )
 
-    assert deviation <= 1e-6
+    assert deviation <= 1e-7
 
 
 # ---------------------------------------------------------------------
