@@ -3,23 +3,39 @@ Attention layer factory: one registry, one construction path, strict kwargs.
 
 ``ATTENTION_REGISTRY`` maps 34 string keys to the callable that builds each
 attention layer, plus that layer's metadata. ``create_attention_layer`` is
-the single construction path: it looks the key up, REJECTS any keyword the
+the single construction path: it looks the key up, rejects any keyword the
 target type does not declare, fills in the registry defaults, and
-constructs. Nothing on that path filters and drops. A keyword the type does
-not accept is a ``ValueError``, never a discarded argument.
+constructs. Nothing on that path filters and drops silently. A keyword the
+type does not accept raises ``ValueError``.
 
-Public functions:
+The registry's key set, the ``AttentionType`` literals, and every entry's
+``required_params`` / ``optional_params`` are public API, consumed by
+config-driven callers elsewhere in the repo and asserted by
+``tests/test_layers/test_factory_registry_drift.py``. Adding, renaming or
+removing one is a breaking change. Docstrings and comments here can change
+freely; the registry data cannot.
 
-    ``get_attention_info()``           all entries' metadata, copied
-    ``list_attention_types()``         the 34 keys, sorted
-    ``get_attention_requirements()``   one entry's metadata, copied
-    ``validate_attention_config()``    pre-flight check; raises, builds nothing
-    ``assemble_attention_config()``    filter a wrapper's own defaults, then
-                                       merge the caller's args on top
-    ``create_attention_layer()``       build a layer
-    ``create_attention_from_config()`` build from a ``{'type': ...}`` dict
+Three keys map to module-level functions rather than layer classes
+(``window``, ``window_zigzag``, ``window_band``, all wrapping
+``WindowAttention`` with a fixed ``partition_mode``); the general
+``WindowAttention`` class has no key of its own and is imported directly.
+Two more configurations (``create_kan_key_window_attention``,
+``create_adaptive_softmax_window_attention`` in ``window_attention.py``) stay
+unregistered, reachable only by passing the matching argument to
+``WindowAttention`` directly, so the frozen surface above stays smaller.
 
-**Architecture Overview:**
+``validate_attention_config``'s numeric checks are one flat allowlist of
+parameter names applied to every type; there are no per-type schemas, so a
+type-specific bound cannot be expressed. Converting to per-type schemas is
+out of scope here, since it would change raised message text that tests
+match on.
+
+Public functions: ``get_attention_info()``, ``list_attention_types()``,
+``get_attention_requirements()``, ``validate_attention_config()``,
+``assemble_attention_config()``, ``create_attention_layer()``,
+``create_attention_from_config()``.
+
+Architecture:
 
 .. code-block:: text
 
@@ -27,46 +43,41 @@ Public functions:
                       │
                       ▼
     ┌───────────────────────────────────────────────┐
-    │ 1. ATTENTION_REGISTRY.get(attention_type)     │
-    │    a miss skips step 2 and falls into step 3  │
+    │ 1. ATTENTION_REGISTRY.get(attention_type)      │
+    │    a miss skips step 2 and falls into step 3   │
     └───────────────────────────────────────────────┘
                       ▼
     ┌───────────────────────────────────────────────┐
-    │ 2. STRICT KWARG CHECK, outside the try        │
+    │ 2. strict kwarg check, outside the try         │
     │    declared = required_params                 │
-    │             | optional_params keys            │
-    │    leftover = set(kwargs) - declared          │
+    │             | optional_params keys             │
+    │    leftover = set(kwargs) - declared           │
     └───────────────────────────────────────────────┘
                 │                    │
         empty   │                    │  non-empty
                 ▼                    ▼
-             continue         ► ValueError carrying
-                                STRICT_DROPPED_KEY_MARKER
-                                (RAISE, never drop a key)
+             continue         raise ValueError with
+                               STRICT_DROPPED_KEY_MARKER
                 │
                 ▼
     ┌───────────────────────────────────────────────┐
-    │ 3. try:                                       │
-    │      validate_attention_config(type, **kw)    │
-    │        unknown type      ►   ValueError       │
-    │        missing required  ►   ValueError       │
-    │        bad value / range ►   ValueError       │
-    │      params = optional_params.copy()          │
-    │      params.update(kwargs)                    │
-    │      keep declared names, add `name` if given │
-    │      return info['class'](**params)           │
-    │    except (TypeError, ValueError) as e:       │
-    │      ► ValueError, "verify parameter          │
-    │        compatibility", chained from e         │
+    │ 3. try:                                        │
+    │      validate_attention_config(type, **kw)     │
+    │        unknown type      -> ValueError         │
+    │        missing required  -> ValueError         │
+    │        bad value / range -> ValueError         │
+    │      params = optional_params.copy()           │
+    │      params.update(kwargs)                     │
+    │      keep declared names, add name if given    │
+    │      return info['class'](**params)            │
+    │    except (TypeError, ValueError) as e:        │
+    │      -> ValueError, "verify parameter          │
+    │         compatibility", chained from e         │
     └───────────────────────────────────────────────┘
                       ▼
                keras.layers.Layer
 
-**Registered types and what each key constructs:**
-
-Generated from ``ATTENTION_REGISTRY`` below. Every entry carries the same
-seven keys: ``class``, ``complexity``, ``description``, ``optional_params``,
-``paper``, ``required_params``, ``use_case``.
+Registered types:
 
 .. code-block:: text
 
@@ -105,99 +116,10 @@ seven keys: ``class``, ``complexity``, ``description``, ``optional_params``,
     window_band           create_band_window_attention
     window_zigzag         create_zigzag_window_attention
 
-**Required parameters, grouped:**
-
-The same 34 keys, grouped by the ``required_params`` list they share. Every
-other parameter is optional and has a default in the entry.
-
-.. code-block:: text
-
-    (none)
-        fnet, spatial, tripse1, tripse2, tripse3, tripse4
-    attention_channels
-        non_local
-    channels
-        cbam, channel
-    dim
-        area, energy, linear, mobile_mqa, multi_head,
-        multi_head_cross, perceiver, performer, ring, rpc,
-        shared_weights_cross, wave_field
-    num_heads
-        capsule_routing
-    dim, num_heads
-        anchor, gated, lighthouse
-    num_heads, key_dim
-        hopfield
-    dim, num_heads, head_dim
-        differential
-    dim, num_heads, kv_latent_dim
-        multi_head_latent
-    dim, num_heads, num_kv_heads
-        group_query
-    dim, window_size, num_heads
-        beit, single_window, window, window_band, window_zigzag
-
-Both tables are rendered from the registry, not transcribed. ``README.md``
-carries its own 34-row table and agrees on all 34 keys; its Class column
-names the INSTANCE type, so the three window keys read ``WindowAttention``
-there and name the builder function here. The registry is the source of
-truth.
-
-FROZEN PUBLIC SURFACE
----------------------
-``ATTENTION_REGISTRY``'s key set, the ``AttentionType`` literals, and every
-entry's ``required_params`` / ``optional_params`` are **public API**. They are
-consumed by config-driven callers (``layers/transformers/adaln_zero.py``,
-``models/vision/bias_free_denoisers/bfconvunext.py``,
-``models/vision_language/fastvlm/``, ``models/vision/dino/``,
-``models/language/gemma/``) and asserted by
-``tests/test_layers/test_factory_registry_drift.py``. Adding, renaming or
-removing any of them is a breaking change, not a cleanup. Docstrings and
-comments in this module may be improved freely; the data may not.
-
-Registry entries whose 'class' is NOT a class
----------------------------------------------
-Three of the 33 entries map to module-level FUNCTIONS rather than layer
-classes::
-
-    'window'         -> create_grid_window_attention    (window_attention.py)
-    'window_zigzag'  -> create_zigzag_window_attention  (window_attention.py)
-    'window_band'    -> create_band_window_attention    (window_attention.py)
-
-Each wrapper builds a ``WindowAttention`` locked to one ``partition_mode``
-('grid' / 'zigzag' / 'band') and carrying that mode's
-``use_relative_position_bias`` default. The class itself does not encode that
-pairing, which is why the keys point at the wrappers.
-
-Consequence: the general ``WindowAttention`` class, the one whose
-``partition_mode`` the caller chooses, has **no factory key of its own** and
-must be imported directly
-(``from dl_techniques.layers.attention import WindowAttention``).
-
-``window_attention.py`` also defines ``create_kan_key_window_attention`` and
-``create_adaptive_softmax_window_attention``. Both are non-public on purpose:
-registered here by neither key nor import, absent from
-``attention/__init__.py``, and called only by
-``tests/test_layers/test_attention/test_window_attention.py``. Both
-configurations are reachable by passing ``attention_mode='kan_key'`` /
-``probability_type='adaptive'`` to ``WindowAttention``. Do not register them
-"for consistency" — that grows the frozen surface above.
-
-Known shape of `validate_attention_config` (documented, not a defect to fix here)
---------------------------------------------------------------------------------
-The numeric checks in ``validate_attention_config`` are a single flat allowlist
-of parameter NAMES ('dim', 'num_heads', 'dropout_rate', ...) applied uniformly
-to all 33 types. There are no per-type schemas. A parameter gets range-checked
-because of what it is CALLED, so a type-specific constraint — one type's
-``window_size`` upper bound, or a parameter two types read differently —
-cannot be expressed.
-
-The one concession is that the positive-value check compares a sequence
-COMPONENTWISE, because ``window_size`` is a scalar edge length for three types
-and a ``(Wh, Ww)`` grid for 'beit' (D-006). That is still keyed on the NAME,
-not on the type. Per-type schemas would be the right shape; converting is out
-of scope for a behavior-preserving pass, because it changes raised message text
-that tests match on.
+This table is generated from ``ATTENTION_REGISTRY`` below, not transcribed.
+``README.md`` carries the same 34 keys with the instance type in its Class
+column, so the three window keys read ``WindowAttention`` there and name
+the builder function here. The registry is the source of truth for both.
 """
 
 import keras
@@ -734,11 +656,8 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'num_heads': 8,
             'dropout_rate': 0.0,
             'kernel_initializer': 'he_normal',
-            # DECISION plan-2026-08-22T035419-a11304c8/D-160 — declared on
-            # 'multi_head' and 'multi_head_cross' ONLY, of the 33 registered types,
-            # the two whose output projection IS the block's residual-path
-            # projection. Do NOT declare it anywhere else: leaving it undeclared is
-            # what turns the request into a LOUD raise. See decisions.md D-160.
+            # DECISION plan-2026-08-22T035419-a11304c8/D-160: declared only on
+            # 'multi_head' and 'multi_head_cross' -- their output projection is the residual-path projection. Adding it elsewhere raises. See decisions.md.
             'output_kernel_initializer': None,
             'kernel_regularizer': None,
             'use_bias': False,
@@ -1339,15 +1258,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         )
     },
 
-    # DECISION plan_2026-06-14_0c5d4a21/D-007 — 'gated', 'performer', 'ring' and
-    # 'rpc' are registered for CONSTRUCTION only, and their call-signature quirks
-    # are documented rather than renamed. Do NOT rename `PerformerAttention.call`
-    # (it has no `attention_mask` parameter) or `RPCAttention.call` (its parameter
-    # is `mask`, not `attention_mask`) to make the four look uniform: this factory
-    # only constructs, so a call-signature difference is a documented caveat, not
-    # a registration blocker, and renaming it changes behaviour for every direct
-    # caller of those layers.
-    # The originating plan directory is gone, so this comment is the record.
+    # DECISION plan_2026-06-14_0c5d4a21/D-007: 'gated'/'performer'/'ring'/'rpc'
+    # register for construction only -- their differing call signatures (e.g. PerformerAttention has no attention_mask) stay as-is, not renamed for uniformity.
+    # Source plan directory is deleted; this comment is the only record.
     'gated': {
         'class': GatedAttention,
         'description': (
@@ -1373,11 +1286,8 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'qk_norm_kwargs': None,
             'gate_activation_type': 'sigmoid',
             'gate_activation_args': None,
-            # DECISION plan-2026-08-17T183311-79c63e38/D-011 — `num_kv_heads` is
-            # DECLARED here, the one exception to this module's FROZEN PUBLIC
-            # SURFACE note. Do NOT clear the drift test by deleting it or exempting
-            # the entry: with the strict raise below an undeclared `num_kv_heads` is
-            # a hard ValueError, not a supported feature. See decisions.md D-011.
+            # DECISION plan-2026-08-17T183311-79c63e38/D-011: num_kv_heads is
+            # declared here, the sole exception to the frozen public surface. Removing it makes an undeclared num_kv_heads a hard ValueError. See decisions.md.
             'num_kv_heads': None
         },
         'use_case': (
@@ -1550,7 +1460,7 @@ Each entry contains:
 def get_attention_info() -> Dict[str, Dict[str, Any]]:
     """Return the metadata of every registered attention type.
 
-    One entry per registry key, each a SHALLOW copy: the outer dict is new, so
+    One entry per registry key, each a shallow copy: the outer dict is new, so
     adding or deleting a key cannot reach the registry, but the nested
     ``optional_params`` dict and ``required_params`` list are the registry's own
     objects. Do not mutate them in place.
@@ -1584,11 +1494,8 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         ``attention_type`` is unknown, if a required parameter is missing, or if
         a value violates a range or a type-specific constraint.
     """
-    # DECISION plan-2026-08-27T040114-580f8b63/D-025 — the undeclared-key check
-    # lives HERE as well as in `create_attention_layer`. Do NOT delete either
-    # copy: this function is documented as a PRE-FLIGHT check and used to pass an
-    # undeclared key silently, and the other copy runs BEFORE it, which is what
-    # preserves the unknown-type failure mode. See decisions.md D-025.
+    # DECISION plan-2026-08-27T040114-580f8b63/D-025: undeclared-key check is
+    # duplicated here and in create_attention_layer -- removing either copy changes which failure fires first. See decisions.md.
     _info = ATTENTION_REGISTRY.get(attention_type)
     if _info is not None:
         _declared = set(_info['required_params']) | set(
@@ -1618,28 +1525,15 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
             f"Required: {required}, Provided: {list(kwargs.keys())}"
         )
 
-    # NOTE (documented shape, not fixed here): everything below is a FLAT
-    # ALLOWLIST OF PARAMETER NAMES applied uniformly to all 34 attention types.
-    # There are no per-type schemas. A parameter is range-checked because of its
-    # NAME, wherever it appears, and a type-specific bound cannot be expressed.
-    # Per-type schemas would be the right shape; converting is out of scope for a
-    # behavior-preserving pass, because it changes raised message text that tests
-    # match on.
+    # Everything below is a flat allowlist of parameter names, not per-type
+    # schemas -- see the module docstring for why.
     # Validate positive integer parameters
     positive_int_params = [
         'area', 'dim', 'channels', 'attention_channels', 'num_heads',
         'num_kv_heads', 'window_size', 'head_dim', 'kv_latent_dim'
     ]
-    # DECISION plan-2026-08-11T012340-f63796dc/D-006 — the COMPONENTS are compared,
-    # not the value, because `window_size` is a scalar edge length for
-    # 'window'/'window_zigzag'/'single_window' but a `(Wh, Ww)` grid for 'beit'; a
-    # bare `<= 0` raises a TypeError the caller re-wraps as a vague "parameter
-    # compatibility" ValueError. Scalars are wrapped in a 1-tuple, unchanged.
-    #   * Do NOT special-case 'beit' here — this is a FLAT allowlist of NAMES.
-    #   * Do NOT drop `window_size` from `positive_int_params`; that also removes
-    #     the `> 0` guard from the three scalar-window types.
-    #   * Do NOT rename `BeitAttention.window_size`; it moves the hole one param on.
-    # See decisions.md D-006 (plan-2026-08-11T012340-f63796dc).
+    # DECISION plan-2026-08-11T012340-f63796dc/D-006: compare components, not
+    # the value -- window_size is scalar for 3 types but (Wh, Ww) for 'beit'; a bare <= 0 would TypeError instead of raising a clean ValueError. See decisions.md.
     for param in positive_int_params:
         if param not in kwargs:
             continue
@@ -1708,22 +1602,14 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     )
 
 
-#: The stable substring every strict dropped-key ``ValueError`` from
-#: :func:`create_attention_layer` carries. Guards match on THIS constant instead
-#: of re-typing the phrase, so rewording the message cannot silently blind them,
-#: and so the phrase has exactly one home. ``layers/ffn/factory.py`` and
-#: ``layers/embedding/factory.py`` carry a constant of the same name with the
-#: same wording, on purpose — same contract.
-#: NOTE for test authors: the ``(s)`` makes this string a REGEX with a group, so
-#: ``pytest.raises(match=...)`` needs ``re.escape()`` around it (or use a plain
-#: ``in str(excinfo.value)`` substring check, as the FFN tests do).
+#: Stable substring every strict dropped-key ``ValueError`` carries; guards
+#: match on this constant, not the phrase. The ``(s)`` makes it a regex group,
+#: so ``pytest.raises(match=...)`` needs ``re.escape()`` or a plain substring check.
 STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
 
-#: Keys accepted by :func:`create_attention_layer` that are NOT registry
-#: parameters. ``name`` is bound by the function's own signature (it never
-#: reaches ``**kwargs``), so it is listed here only for wrapper pre-filtering
-#: through :func:`assemble_attention_config`, which builds the dict a wrapper
-#: later splats.
+#: Keys :func:`create_attention_layer` accepts that are not registry params.
+#: ``name`` is bound by the function's own signature, so this exists only for
+#: :func:`assemble_attention_config`'s wrapper pre-filtering.
 _ATTENTION_CONFIG_PASSTHROUGH_KEYS: Sequence[str] = ('name',)
 
 
@@ -1734,13 +1620,14 @@ def assemble_attention_config(
         *,
         passthrough: Sequence[str] = _ATTENTION_CONFIG_PASSTHROUGH_KEYS,
 ) -> Dict[str, Any]:
-    """Filter a WRAPPER's own generic defaults, then merge the CALLER's args.
+    """Filter a wrapper's own generic defaults, then merge the caller's args.
 
     Two dicts go in, one goes out. The wrapper's dict is filtered against the
-    target type; the caller's dict is not filtered at all. The ORDER is the
-    point, and it is why this function owns the merge.
+    target type; the caller's dict is not filtered at all. That order is the
+    point, and it is why this function owns the merge rather than each call
+    site doing its own filter-then-merge.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -1763,8 +1650,8 @@ def assemble_attention_config(
                    config for create_attention_layer
                             ▼
               a caller key the type does not accept
-              still reaches the factory, and the
-              factory RAISES on it
+              still reaches the factory, which
+              raises on it
 
     Call sites: ``MixedSequentialBlock.__init__`` and
     ``FreeTransformerLayer.__init__``.
@@ -1776,28 +1663,24 @@ def assemble_attention_config(
     are the wrapper's defaults, not anybody's expressed intent.
 
     ``caller_args`` is the end user's own ``attention_args`` dict. It is merged
-    on top **verbatim, never filtered**, so it still reaches
+    on top verbatim, never filtered, so it still reaches
     :func:`create_attention_layer`, which raises on a key the type does not
     accept. Filtering it here would turn the caller's typo back into a silent
     drop.
 
     This helper is a near-copy of the equivalents in ``layers/ffn/factory.py``
-    (``assemble_ffn_config``, D-017/D-023) and ``layers/embedding/factory.py``
-    rather than a shared generic helper: each of the three binds its own registry
-    and its own frozen public surface, so unifying them is a refactor of three
-    public APIs, not a de-duplication.
+    (``assemble_ffn_config``) and ``layers/embedding/factory.py`` rather than a
+    shared generic helper: each binds its own registry and its own frozen
+    public surface, so unifying them is a refactor of three public APIs.
 
-    # DECISION plan-2026-08-17T183311-79c63e38/D-011
-    It owns the MERGE, not just the filter — that is why it takes two dicts. Do
-    NOT reduce it to a single-dict filter applied AFTER call sites merge their
-    ``attention_args`` in: the pre-filter would EAT the caller's keys, so a typo
-    could never reach the raise. See decisions.md D-011.
+    # DECISION plan-2026-08-17T183311-79c63e38/D-011: this function owns the
+    # merge, not just the filter, because a pre-filter applied after call sites merge their args would eat the caller's typos silently. See decisions.md.
 
     :param attention_type: An ``ATTENTION_REGISTRY`` key.
     :type attention_type: str
     :param wrapper_config: The wrapper's own generic config; filtered.
     :type wrapper_config: Mapping[str, Any]
-    :param caller_args: The caller's explicit args; NEVER filtered.
+    :param caller_args: The caller's explicit args; never filtered.
     :type caller_args: Optional[Mapping[str, Any]]
     :param passthrough: Keys kept regardless of the registry intersection.
     :type passthrough: Sequence[str]
@@ -1828,13 +1711,13 @@ def create_attention_layer(
         name: Optional[str] = None,
         **kwargs: Any
 ) -> keras.layers.Layer:
-    """Build one attention layer. STRICT: an undeclared keyword raises.
+    """Build one attention layer. An undeclared keyword raises.
 
     The single construction path for all 33 registered types. It looks
     ``attention_type`` up, rejects any keyword that type does not declare, fills
     the registry defaults in under the caller's values, and constructs. The
-    module's Architecture Overview draws the full ordering, including which
-    branch each ``ValueError`` comes from.
+    module docstring's architecture diagram draws the full ordering, including
+    which branch each ``ValueError`` comes from.
 
     Nothing here filters and drops. If a wrapper wants to offer generic
     conveniences that only some types accept, it pre-filters them through
@@ -1846,60 +1729,25 @@ def create_attention_layer(
     :param name: Optional name for the layer instance.
     :type name: Optional[str]
     :param kwargs: Type-specific parameters for the attention layer. See
-        ``get_attention_info()`` for detailed parameter specifications. This is
-        STRICT: any key ``attention_type`` does not accept raises rather than
-        being silently dropped. A wrapper that wants to offer generic
-        conveniences should pre-filter them through
-        :func:`assemble_attention_config` before calling here.
+        ``get_attention_info()`` for detailed parameter specifications. Any key
+        ``attention_type`` does not accept raises rather than being silently
+        dropped. A wrapper that wants to offer generic conveniences should
+        pre-filter them through :func:`assemble_attention_config` before
+        calling here.
     :return: A fully configured and instantiated attention layer.
     :rtype: keras.layers.Layer
     :raises ValueError: If attention_type is invalid, required parameters are missing,
         parameter values are out of valid ranges, a supplied keyword is not a
         parameter of ``attention_type`` (the message then carries
         :data:`STRICT_DROPPED_KEY_MARKER`), or layer construction fails.
-    :raises TypeError: ONLY if ``attention_type`` is unhashable (a list, say), so
+    :raises TypeError: Only if ``attention_type`` is unhashable (a list, say), so
         the registry lookup itself fails before the ``try`` below. A ``TypeError``
         raised by the target layer's constructor never escapes: it is caught and
         re-raised as ``ValueError``. Measured 2026-08-28, ``dim='not-an-int'``
         gives ``ValueError`` from both entry points.
     """
-    # DECISION plan-2026-08-17T183311-79c63e38/D-011 — RAISE, do not drop. Since
-    # 2026-08-17 this factory raises on a keyword the type does not declare. It
-    # used to filter `kwargs` against the declared names and discard the rest
-    # without a word, and that silent drop masked two real defects here: TRM
-    # advertised `rope_theta` on every constructor and handed it to
-    # `'multi_head'`, which declares no RoPE parameter at all, leaving the whole
-    # reasoning stack exactly permutation-equivariant; and
-    # `MixedSequentialBlock`'s `'window'` branch passed a `normalization` choice
-    # `WindowAttention` has no parameter for, since the day it was written. Same
-    # fix as the sibling factories `layers/ffn/factory.py` (D-023) and
-    # `layers/embedding/factory.py`.
-    #
-    # Three things below must not change:
-    #
-    #   * Subtract `valid_param_names` (required | optional), NOT just
-    #     `required_params`. The narrower right-hand side is the tempting
-    #     "simplification" and it is CATASTROPHIC: every optional parameter
-    #     anyone passes becomes an error.
-    #   * Read `kwargs`, not the merged `params` dict. The two agree today, since
-    #     `params` is `optional_params` updated with `kwargs` and every
-    #     `optional_params` key is already declared. The `kwargs` form survives
-    #     that relation breaking — a registry entry gaining an `optional_params`
-    #     key its class does not accept — where the `params` form would blame the
-    #     caller for the registry's own bug.
-    #   * Keep this check BEFORE the `try`. Copying
-    #     `layers/ffn/factory.py`'s version verbatim goes wrong here because that
-    #     factory has no outer error wrapper and this one does: the
-    #     `except (TypeError, ValueError)` below re-wraps every ValueError into a
-    #     generic "Please verify parameter compatibility" message, which would
-    #     swallow the wording and bury STRICT_DROPPED_KEY_MARKER in a nested
-    #     message. Do not move it inside, and do not fold it into the filter at
-    #     the merge step.
-    #
-    # Unknown-`attention_type` calls fall through untouched: `_info` is None
-    # here, so they keep their existing failure mode from
-    # `validate_attention_config` inside the `try`.
-    # See decisions.md D-011 (plan-2026-08-17T183311-79c63e38).
+    # DECISION plan-2026-08-17T183311-79c63e38/D-011: raise on an undeclared
+    # keyword instead of silently dropping it -- a silent drop once let a mistyped rope_theta/normalization kwarg vanish with no error. See decisions.md.
     _info = ATTENTION_REGISTRY.get(attention_type)
     if _info is not None:
         _valid_param_names = set(_info['required_params']) | set(
