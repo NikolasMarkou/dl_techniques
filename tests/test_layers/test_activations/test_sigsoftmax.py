@@ -4,8 +4,10 @@ Covers the closed-form comparison against an independent float64 NumPy oracle,
 the all-negative regression guard that the max-shift formulation fails, the
 not-plain-softmax mechanism arm, the layer's construction, axis validation,
 shape and config contract, the ``exp(log_sigsoftmax)`` identity, a ``.keras``
-round trip compared on values, the dtype floor in both directions, gradient
-flow, XLA agreement, the factory, and the package export contract.
+round trip compared on values, the two plain functions surviving a round trip
+in a ``Dense`` ``activation=`` slot, the dtype floor in both directions, the
+float16 and bfloat16 widening branches, gradient flow, XLA agreement, the
+factory, and the package export contract.
 
 ``tf`` is imported for the gradient tape only. The package ``__init__`` is
 imported only by the export-contract arms; every other arm imports the subject
@@ -60,6 +62,24 @@ def _reference_sigsoftmax(z: np.ndarray) -> np.ndarray:
     v = np.asarray(z, dtype=np.float64)
     n = np.exp(v) * expit(v)
     return n / n.sum(axis=-1, keepdims=True)
+
+
+def _reference_log_sigsoftmax(z: np.ndarray) -> np.ndarray:
+    """The logarithm of :func:`_reference_sigsoftmax`, in float64 NumPy.
+
+    Still the paper's Eq. (18) written out directly -- the logarithm is taken
+    of the naive form's own result rather than the expression being rewritten
+    into log space, which would turn the oracle into a second copy of the
+    implementation. Its validity range is the one above, further narrowed by
+    the requirement that the smallest normalised probability stay above
+    float64's smallest subnormal, i.e. roughly ``2 * (min z - max z) > -745``.
+
+    :param z: real-valued logits, any shape.
+    :type z: numpy.ndarray
+    :return: log-probabilities along the last axis, float64.
+    :rtype: numpy.ndarray
+    """
+    return np.log(_reference_sigsoftmax(z))
 
 
 def _asymptotic_log_sigsoftmax(z: np.ndarray) -> np.ndarray:
@@ -138,6 +158,50 @@ def test_the_all_negative_row_does_not_underflow_to_nan() -> None:
 
     np.testing.assert_allclose(
         log_y, _asymptotic_log_sigsoftmax(x), rtol=1e-3, atol=0.0
+    )
+
+
+def test_a_mid_scale_all_negative_row_matches_the_float64_oracle() -> None:
+    """An all-negative row where the asymptotic is NOT yet the right answer.
+
+    The arm above compares against ``2 * (z - max z)``, which is what a wrong
+    body would return, so it separates NaN from non-NaN and nothing else.
+    Measured: mutating ``_log_sigsoftmax_widened`` to return
+    ``2 * (z - max z)`` verbatim leaves it PASSING, and so does dropping the
+    softplus term (``w = 2z``).
+
+    This row lives in the regime where the naive float64 oracle is still
+    valid (the smallest probability is ``exp(-62) = 1.2e-27``, far above
+    float64's floor) and the asymptotic is not. Measured max absolute
+    deviation from the float64 log oracle, identical on GPU and on CPU:
+
+    ==============================================  ==========
+    body                                            max |dev|
+    ==============================================  ==========
+    shipped                                         1.4871e-06
+    ``return 2 * (z - max z)``                      1.7808e-02
+    ``w = 2z`` (softplus dropped)                   1.8144e-02
+    max-shift, ``exp(z - max z) * sigmoid(z)``      1.4871e-06
+    ==============================================  ==========
+
+    The bound 1e-4 sits 67x above the shipped reading and 178x below both
+    mutations. The max-shift body is finite and correct here; it is the arm
+    above that rejects it.
+
+    The row also covers ``|z| ~ 22-35``, the band between the moderate
+    fixture (``|z| < 6``) and the strongly-negative row (``|z| ~ 300``),
+    which nothing else in this module reaches.
+    """
+    x = np.array([[-35.0, -22.0, -8.0, -4.0]], dtype="float32")
+
+    log_y = keras.ops.convert_to_numpy(log_sigsoftmax(x)).astype(np.float64)
+    y = keras.ops.convert_to_numpy(sigsoftmax(x)).astype(np.float64)
+
+    np.testing.assert_allclose(
+        log_y, _reference_log_sigsoftmax(x), atol=1e-4, rtol=0.0
+    )
+    np.testing.assert_allclose(
+        y.sum(axis=-1), np.ones(1), atol=1e-6, rtol=0.0
     )
 
 
@@ -269,6 +333,26 @@ class TestSigSoftmax:
         )
         assert np.abs(y.sum(axis=-1) - 1.0).max() > 0.1
 
+    def test_axis_zero_normalises_along_that_axis(self) -> None:
+        """A positive ``axis=0`` normalises the leading axis, not the last.
+
+        The companion to the ``axis=-2`` arm, and the only place a
+        non-negative axis reaches a forward pass. Same anti-vacuity shape:
+        the last-axis sums are asserted away from 1, so a layer that ignored
+        ``axis`` and normalised the last dimension reddens here. On this
+        fixture the axis-0 sums agree with 1 to 1.192e-07 and the last-axis
+        sums range over [0.1297705, 1.9337022], a measured deviation from 1
+        of 0.9337022 against a threshold of 0.1.
+        """
+        x = np.random.default_rng(8).standard_normal((4, 3, 5)).astype("float32")
+
+        y = keras.ops.convert_to_numpy(SigSoftmax(axis=0)(x))
+
+        np.testing.assert_allclose(
+            y.sum(axis=0), np.ones((3, 5)), atol=1e-6, rtol=0.0
+        )
+        assert np.abs(y.sum(axis=-1) - 1.0).max() > 0.1
+
 
 # ---------------------------------------------------------------------
 # The exp/log identity. Invariant 3: `sigsoftmax` is `exp(log_sigsoftmax)`,
@@ -349,6 +433,57 @@ def test_a_saved_model_reproduces_its_output_values() -> None:
     after = keras.ops.convert_to_numpy(restored(x, training=False))
 
     np.testing.assert_allclose(after, before, atol=1e-6, rtol=0.0)
+
+
+def test_a_plain_function_survives_a_round_trip_as_a_dense_activation() -> None:
+    """``Dense(activation=sigsoftmax)`` reloads with the function restored.
+
+    D-004 registers the two plain functions with Keras to buy exactly this:
+    an unregistered callable in an ``activation=`` slot serialises as a bare
+    name and raises on load. Nothing else in this module exercises that path
+    -- the round-trip arm above saves the ``SigSoftmax`` layer, which is a
+    different registry key.
+
+    Three assertions, because a load that silently substituted a stock
+    activation would still produce a working model with the right shapes:
+    the restored callable IS the registered function object, the outputs
+    match at exactly 0.0, and they still sum to 1 along the last axis.
+    """
+    inputs = keras.Input(shape=(6,))
+    model = keras.Model(inputs, keras.layers.Dense(4, activation=sigsoftmax)(inputs))
+
+    x = np.random.default_rng(9).standard_normal((5, 6)).astype("float32")
+    before = keras.ops.convert_to_numpy(model(x, training=False))
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "dense_sigsoftmax.keras")
+        model.save(path)
+        restored = keras.models.load_model(path)
+
+    after = keras.ops.convert_to_numpy(restored(x, training=False))
+
+    assert restored.layers[-1].activation is sigsoftmax
+    assert np.abs(after - before).max() == 0.0
+    np.testing.assert_allclose(
+        after.sum(axis=-1), np.ones(5), atol=1e-6, rtol=0.0
+    )
+
+
+def test_both_plain_functions_resolve_under_their_registry_keys() -> None:
+    """Both function keys, and both legacy ``Custom>`` aliases, resolve.
+
+    The other half of D-004. ``register_dl_technique`` binds a
+    package-qualified key and a bare ``Custom>`` alias for each object; a
+    registration that landed under the wrong package, or an alias collision
+    with another module's same-named object, is invisible to the round trip
+    above until an archive from a different plan is loaded.
+    """
+    package = "dl_techniques.layers.activations.sigsoftmax"
+
+    for obj, name in ((sigsoftmax, "sigsoftmax"), (log_sigsoftmax, "log_sigsoftmax")):
+        assert keras.saving.get_registered_name(obj) == f"{package}>{name}"
+        assert keras.saving.get_registered_object(f"{package}>{name}") is obj
+        assert keras.saving.get_registered_object(f"Custom>{name}") is obj
 
 
 # ---------------------------------------------------------------------
@@ -441,6 +576,99 @@ def test_the_all_negative_float16_row_stays_finite(mixed_float16_policy) -> None
     )
 
 
+def test_the_float16_widening_prevents_an_overflow_to_nan() -> None:
+    """Deleting the float16 widening turns this row into ``nan nan nan``.
+
+    The guard for the widening branch itself. The mechanism is the working
+    value ``w = z + log_sigmoid(z)``, which is ``2z`` for strongly negative
+    ``z``: float16's most negative finite value is -65504, so ``w`` overflows
+    for any ``z`` below about -32752 and the subtraction becomes ``inf - inf``.
+    Widening the reduction to float32 moves that bound to -1.7e38.
+
+    Measured on this row, identically on GPU and on CPU:
+
+    ==================  ===========================  ===============
+    body                ``log_sigsoftmax``           ``sigsoftmax``
+    ==================  ===========================  ===============
+    shipped             ``[-14016, -4032, 0]``       ``[0, 0, 1]``
+    reduction in fp16   ``[nan, nan, nan]``          ``[nan, nan, nan]``
+    ==================  ===========================  ===============
+
+    This is a category separation, not a precision one. An earlier reading
+    recorded the widening as buying precision only (~1.7x on the ``|z| < 40``
+    rows) and no guard was written; that reading was taken entirely inside
+    the range where ``2z`` is representable.
+
+    The comparison is against the asymptotic, valid here because every logit
+    is far below -1. Measured max absolute deviation is 0.0; the bound is
+    16.0, one float16 ulp at 14016, so it is not pinned to a reading of zero.
+    """
+    row = np.array([[-40000.0, -35000.0, -33000.0]], dtype="float16")
+
+    # Anti-vacuity premise, in NumPy, independent of what `call()` chose:
+    # twice the largest-magnitude logit is outside float16's finite range, so
+    # a reduction that stayed in float16 genuinely has nowhere to put `w`.
+    assert 2.0 * float(row.min()) < float(np.finfo(np.float16).min)
+
+    log_y = keras.ops.convert_to_numpy(log_sigsoftmax(row)).astype(np.float64)
+    y = keras.ops.convert_to_numpy(sigsoftmax(row)).astype(np.float64)
+
+    assert np.all(np.isfinite(log_y)), (
+        f"log_sigsoftmax was not finite, observed {log_y}"
+    )
+    assert np.all(np.isfinite(y)), f"sigsoftmax was not finite, observed {y}"
+
+    np.testing.assert_allclose(
+        log_y, _asymptotic_log_sigsoftmax(row), atol=16.0, rtol=0.0
+    )
+    np.testing.assert_allclose(
+        y.sum(axis=-1), np.ones(1), atol=1e-6, rtol=0.0
+    )
+
+
+def test_the_bfloat16_widening_keeps_the_row_sums_near_one() -> None:
+    """Deleting ``"bfloat16"`` from the widening branch reddens here.
+
+    bfloat16 carries float32's exponent range, so it has no overflow analogue
+    of the float16 arm above; the separation is in the 8-bit significand
+    instead. It is nonetheless a guard rather than coverage, because the
+    reading is an aggregate over 64 rows and is bit-identical on GPU and on
+    CPU. Measured on this fixture:
+
+    ==================  ==============  ==============
+    body                max |sum - 1|   max |p - ref|
+    ==================  ==============  ==============
+    shipped             1.8158e-03      1.7249e-03
+    reduction in bf16   1.4130e-02      5.5932e-03
+    ==================  ==============  ==============
+
+    The bound 4e-3 sits 2.2x above the shipped reading and 3.5x below the
+    unwidened one. That is a narrower band than the other arms in this
+    module, which is why the fixture is 64 rows rather than one: the
+    per-row reading is luck-dependent at bfloat16's resolution near 1
+    (2^-8 = 3.9e-03), the maximum over 64 rows is not.
+
+    ``ref`` is the float64 oracle evaluated on the bfloat16-rounded input,
+    so the comparison charges the implementation for the reduction only, not
+    for the input rounding it cannot undo.
+    """
+    x = np.random.default_rng(0).standard_normal((64, 20)).astype("float32")
+    row = keras.ops.cast(keras.ops.convert_to_tensor(x), "bfloat16")
+
+    # The oracle runs on the values that actually entered the reduction.
+    rounded = keras.ops.convert_to_numpy(
+        keras.ops.cast(row, "float32")
+    ).astype(np.float64)
+
+    y = keras.ops.convert_to_numpy(
+        keras.ops.cast(sigsoftmax(row), "float32")
+    ).astype(np.float64)
+
+    assert np.all(np.isfinite(y)), f"sigsoftmax was not finite, observed {y}"
+    assert np.abs(y.sum(axis=-1) - 1.0).max() < 4e-3
+    assert np.abs(y - _reference_sigsoftmax(rounded)).max() < 4e-3
+
+
 # ---------------------------------------------------------------------
 # Gradients and XLA.
 # ---------------------------------------------------------------------
@@ -489,18 +717,25 @@ def test_xla_matches_eager(assert_xla_matches_eager) -> None:
 
     The regime ``fit()`` runs in is a traced ``tf.function``, not eager. The
     fixture's call itself asserts that XLA can lower the graph at all.
+
+    The exact deviation is host-dependent; the bound is not. Measured
+    max|eager - xla| on this fixture: 0.0 with the GPU visible, and
+    8.940696716308594e-08 under ``CUDA_VISIBLE_DEVICES=""``, which is one
+    float32 ulp near 1. The bound is therefore 1e-6, an order above the
+    larger reading, and is asserted as a bound rather than as equality with
+    either of them -- an earlier revision pinned it to the GPU's 0.0 and
+    failed on every CPU-only host.
     """
     x = np.random.default_rng(5).standard_normal((4, 3, 6)).astype("float32")
 
-    # atol derived from a measurement, not tuned: max|eager - xla| on this
-    # fixture reads exactly 0.0 (GPU, TF32 enabled). The layer carries no
-    # matmul, so it has no TF32-sensitive stage; 1e-6 leaves float32 headroom
-    # over a reading of zero rather than pinning the bound to it.
+    # The fixture asserts `deviation < atol` itself and returns the reading.
+    # The layer carries no matmul, so it has no TF32-sensitive stage and the
+    # CPU/GPU gap above is ordinary float32 reassociation, not TF32.
     deviation = assert_xla_matches_eager(
         SigSoftmax(axis=-2), x, 1e-6, "SigSoftmax(axis=-2)"
     )
 
-    assert deviation == 0.0
+    assert deviation <= 1e-6
 
 
 # ---------------------------------------------------------------------
