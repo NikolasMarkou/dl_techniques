@@ -1,188 +1,103 @@
-"""
-Progressive Focused Attention (PFA) Module for PFT-SR.
+"""Progressive Focused Attention (PFA), built by
+:class:`ProgressiveFocusedAttention`.
 
-This module implements the core innovation of PFT-SR: Progressive Focused Attention,
-which inherits attention maps from previous layers through Hadamard product and uses
-sparse matrix multiplication to skip unnecessary similarity calculations. Attention
-maps are progressively refined across layers, with each layer focusing on increasingly
-relevant tokens while filtering out irrelevant features before calculating similarities.
+Each layer is a Swin-style windowed attention block, but before the softmax
+the raw scores are multiplied elementwise by the previous layer's
+post-softmax attention weights::
 
-Architecture:
-    A Swin-style windowed attention block. The ``(B, H, W, C)`` feature map is
-    optionally cyclically shifted, cut into non-overlapping ``ws x ws`` windows,
-    flattened to ``(B*nW, ws^2, C)`` and run through a fused ``Dense(3C)`` QKV
-    projection. Values optionally receive LePE (a depthwise convolution over the
-    window in spatial layout) before scoring. Scores are biased by the SW-MSA mask,
-    then multiplied elementwise by the previous layer's attention map, normalized,
-    applied to V, projected, un-windowed and un-shifted.
+    scores = (Q K^T / sqrt(d_head) + SW-MSA mask) * prev_attn_map
 
-    Three structural properties matter before you touch anything:
+This runs in the logit domain, not the probability domain: a connection an
+earlier layer suppressed is pulled toward the softmax's uniform point rather
+than masked to ``-inf``, and can recover if the current layer's raw score is
+large. ``call()`` returns a tuple ``(output, attention_weights)``; the second
+element is what the next block passes in as ``prev_attn_map``.
 
-    -   ``call()`` returns a **tuple** ``(output, attention_weights)``, and
-        ``compute_output_shape()`` therefore returns a tuple of two shapes. That is
-        the point of the layer: the second element is the ``prev_attn_map``
-        that the next block consumes.
-    -   SW-MSA (``shift_size > 0``) requires statically-known ``H`` and ``W``.
-        The shifted-window mask geometry — how many windows there are, and which
-        region each one belongs to — cannot be built from a ``None`` spatial
-        dimension, so ``build()`` raises rather than emit a wrong-geometry mask.
-    -   The sparse path is a documented not-implemented stub that fails loud at
-        construction; see the ``plan_2026-06-14_0c5d4a21/D-004`` anchor in
-        ``_validate_config()``.
-
-Foundational Mathematics:
-    Within one window of ``n = ws^2`` tokens, per head::
-
-        S      = Q K^T / sqrt(d_head)  +  M_swmsa
-        S_foc  = S  (*)  A_prev                       # (*) = Hadamard, elementwise
-        A      = softmax(S_foc)
-        out    = A V
-
-    The focusing step is a product in the **logit** domain, not the probability
-    domain. Where the previous layer's weight ``A_prev[i, j]`` is near zero the
-    focused logit is pulled toward zero — i.e. toward the *uniform* point of the
-    softmax, not toward ``-inf`` — so a connection suppressed by an earlier layer is
-    attenuated rather than hard-pruned, and can recover if the current layer's raw
-    score is large. Because ``A_prev >= 0`` and ``S`` is signed, the product also
-    flips the ordering of negative logits; the layers are trained together, so this
-    is a property of the mechanism as specified, not an oversight to "correct".
-
-    The window partition is what buys the complexity: full attention over an
-    ``H x W`` map costs ``O((HW)^2 C)``, whereas ``HW / ws^2`` independent windows
-    of ``ws^2`` tokens cost ``O(HW * ws^2 * C)``. Cross-window information flows
-    only through the alternating cyclic shift.
+The sparse attention path (``sparsity_mode='top_k'`` or ``'threshold'``) is a
+documented stub: construction raises ``NotImplementedError`` for any mode
+other than ``'none'``. ``shift_size > 0`` (SW-MSA) requires a statically
+known height and width; ``build()`` raises otherwise.
 
 References:
-    Long, Wei, et al. "Progressive Focused Transformer for Single Image Super-Resolution."
-    CVPR 2025.
-
-    Liu, Ze, et al. "Swin Transformer: Hierarchical Vision Transformer using Shifted
-    Windows." ICCV 2021. (https://arxiv.org/abs/2103.14030) — the window partition,
-    cyclic shift and SW-MSA mask construction reused here.
+    - Long et al., 2025. Progressive Focused Transformer for Single Image
+      Super-Resolution. (CVPR)
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
+      using Shifted Windows. (https://arxiv.org/abs/2103.14030)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 import numpy as np
 from typing import Optional, Tuple, Union, Dict, Any, Literal
 
-# ---------------------------------------------------------------------
-# Local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-# Type definitions
-# ---------------------------------------------------------------------
-
 SparsityMode = Literal['none', 'top_k', 'threshold']
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.attention.progressive_focused_attention")
 class ProgressiveFocusedAttention(keras.layers.Layer):
-    """
-    Windowed self-attention with progressive focusing from previous layers.
+    """Windowed self-attention with progressive focusing from the previous layer's map.
 
-    Implements the PFA mechanism from PFT-SR which computes window-based multi-head
-    self-attention (W-MSA or SW-MSA) with progressive refinement. The input is
-    partitioned into non-overlapping windows of size ``window_size x window_size``,
-    reducing complexity from ``O((HW)^2)`` to ``O(HW * window_size^2)``. Within each
-    window, standard scaled dot-product attention ``softmax(Q K^T / sqrt(d_k)) V``
-    is computed with optional LePE (Locally-Enhanced Positional Encoding) via
-    depthwise convolution on value vectors. The core innovation is progressive
-    focusing: ``focused_scores = scores * prev_attn_map`` (Hadamard product),
-    which biases attention toward tokens deemed important by the previous layer.
-    Shifted windows (SW-MSA) with cyclic shift and attention masking enable
-    cross-window connections in alternating layers.
+    Partitions the input into non-overlapping ``window_size x window_size``
+    windows and runs scaled dot-product attention inside each, with optional
+    locally-enhanced positional encoding (LePE) via a depthwise convolution
+    on the values. Before the softmax, the raw scores are multiplied
+    elementwise by ``prev_attn_map`` (identity when ``None``, the first
+    layer). Shifted windows (SW-MSA) add a cyclic roll and an additive mask
+    so information crosses window boundaries in alternating layers.
 
-    **[TUPLE OUTPUT — intentional, do not "normalize"]** Unlike every other layer in
-    this package, :meth:`call` returns ``(output, attention_weights)`` and
-    :meth:`compute_output_shape` correspondingly returns a **tuple of two shapes**.
-    The second element is the ``prev_attn_map`` the next PFA block consumes; without
-    it there is no progressive focusing and the layer degenerates to plain windowed
-    attention. Callers must unpack. This is a contract, not an inconsistency.
-
-    **[PRIVATE-ATTRIBUTE NAMING — known deviation]** Constructor arguments are stored
-    under leading-underscore names (``self._dim``, ``self._num_heads``,
-    ``self._attention_dropout_rate``, ...) rather than the package-wide public spelling
-    (``self.dim``, ``self.num_heads``, ``self.attention_dropout_rate``). The four
-    later-added arguments (``probability_type``, ``probability_config``,
-    ``qk_norm_type``, ``qk_norm_kwargs``) use the public spelling, so the file is
-    internally inconsistent as well. Renaming is **not** done here: these
-    attributes are read by external callers and by tests, so a rename is an
-    API-touching change and this pass is behaviour-preserving. The ``get_config()`` KEY
-    names are already the correct public spellings, so serialization is unaffected.
-
-    **[REUSE / DUPLICATION — a choice, not an oversight]** :meth:`_window_partition` and
-    :meth:`_window_reverse` mirror the module-level ``window_partition`` /
-    ``window_reverse`` helpers in
-    :mod:`~dl_techniques.layers.attention.window_attention`. They are **not** unified.
-    Reasons, recorded so the next reader does not "fix" it.
-    (a) These are private instance methods that close over
-    ``self._window_size``. The siblings are free functions taking an explicit
-    window size.
-    (b) ``_window_reverse`` here derives the batch size from
-    ``ops.shape(windows)[0] // num_windows`` rather than taking it as an
-    argument.
-    (c) The two implementations have drifted independently. Any merge would have
-    to prove identical reshape/transpose ORDER, which is a numerics-affecting
-    property, not a cosmetic one.
-    The SW-MSA mask built in :meth:`_compute_attention_mask` depends on this
-    exact window ordering.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────┐
-        │   ProgressiveFocusedAttention — one layer of a chain    │
-        │                                                         │
-        │   Windowed (SW-)MSA whose SCORES are re-weighted by the │
-        │   PREVIOUS layer's attention map, and whose own weights │
-        │   become the NEXT layer's prev_attn_map.                │
-        │                                                         │
-        │   Inputs:  x [B, H, W, C]                               │
-        │            prev_attn_map  (optional; None on layer 1)   │
-        │                            ▼                            │
-        │    cyclic roll by -shift_size   (if shift_size > 0)     │
-        │                            ▼                            │
-        │      window partition ► flatten  [B*nW, ws*ws, C]       │
-        │                            ▼                            │
-        │    qkv Dense(3C) ► Q, K, V  [B*nW, heads, ws², d_h]     │
-        │                            ▼                            │
-        │                optional q_norm / k_norm                 │
-        │                            ▼                            │
-        │   optional LePE: DWConv2D on V, added back (V + LePE)   │
-        │                            ▼                            │
-        │                    A = Q Kᵀ * scale                     │
-        │                            ▼                            │
-        │     + SW-MSA additive mask  (shifted windows only)      │
-        │                            ▼                            │
-        │   PROGRESSIVE FOCUSING   ◄── prev_attn_map              │
-        │   A = A * prev_attn_map  (plain Hadamard product on the │
-        │   PRE-probability scores; identity when it is None)     │
-        │                            ▼                            │
-        │   _apply_sparsity(A, prev_attn_map)  —  INERT: the      │
-        │   constructor rejects every sparsity_mode but 'none',   │
-        │   so this is a pass-through, not an optional stage.     │
-        │                            ▼                            │
-        │        attn = attn_prob(A)  ►  attention dropout        │
-        │                            ▼                            │
-        │      out = attn @ V ► merge ► proj ► proj dropout       │
-        │                            ▼                            │
-        │       window reverse  ►  roll back by +shift_size       │
-        │                            ▼                            │
-        │   ALWAYS returns a TUPLE:                               │
-        │     (output [B,H,W,C],  attn [B*nW, heads, ws², ws²])   │
-        │     └─► attn is fed back in as the next layer's         │
-        │         prev_attn_map — that recurrence IS the layer.   │
-        └─────────────────────────────────────────────────────────┘
+        x [B,H,W,C]
+             │
+             ▼
+        cyclic roll  ('shift_size' only)
+             │
+             ▼
+        window partition + flatten  [B*nW, ws², C]
+             │
+             ▼
+        ┌──────────────────────────┐
+        │ qkv Dense(3C) -> Q,K,V   │
+        │ optional qk-norm         │
+        │ optional LePE on V       │
+        │ scores = QKᵀ*scale       │
+        │  + SW-MSA mask           │
+        │  * prev_attn_map         │  ◄── prev_attn_map (optional)
+        │ weights = probability()  │
+        │ out = weights @ V        │
+        │  -> proj                 │
+        └─────────────┬────────────┘
+                       ▼
+        window reverse, roll back
+                       │
+                       ▼
+        output [B,H,W,C]   attn_weights [B*nW,heads,ws²,ws²]
+                                    │
+                          (-> next layer's prev_attn_map)
+
+    ``call()`` returns a tuple ``(output, attention_weights)`` and
+    ``compute_output_shape()`` returns a matching tuple of two shapes; the
+    second element is what the next block consumes as ``prev_attn_map``.
+
+    Constructor arguments are stored under leading-underscore private names
+    (``self._dim``, ``self._num_heads``, and so on) except the four
+    later-added arguments (``probability_type``, ``probability_config``,
+    ``qk_norm_type``, ``qk_norm_kwargs``), which use the public spelling.
+    The private names are read by external callers and tests, so this pass
+    leaves them as-is; ``get_config()`` already emits the public spelling
+    for every key, so serialization is unaffected.
+
+    :meth:`_window_partition` and :meth:`_window_reverse` are private copies
+    of the free functions in
+    :mod:`~dl_techniques.layers.attention.window_attention`, kept separate
+    because they close over ``self._window_size`` and because
+    :meth:`_compute_attention_mask` depends on their exact reshape/transpose
+    order — a merge would have to prove the two orders stay identical.
 
     :param dim: Embedding dimension (number of channels).
     :type dim: int
@@ -197,18 +112,20 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         ``sparsity_mode='top_k'``. ``None`` attends to all tokens.
 
         .. warning::
-           The sparse attention path is **not implemented**. The ``'top_k'``
-           and ``'threshold'`` sparsity modes are no-op stubs (the layer always
-           performs dense attention). Constructing the layer with a non-default
-           ``sparsity_mode`` raises ``NotImplementedError``. Only
-           ``sparsity_mode='none'`` (the default, dense attention) is supported.
+           The sparse attention path is not implemented. The ``'top_k'``
+           and ``'threshold'`` sparsity modes are no-op stubs (the layer
+           always performs dense attention). Constructing the layer with a
+           non-default ``sparsity_mode`` raises ``NotImplementedError``.
+           Only ``sparsity_mode='none'`` (the default, dense attention) is
+           supported.
     :type top_k: Optional[int]
-    :param sparsity_threshold: Threshold for sparsity-based attention masking
-        when ``sparsity_mode='threshold'``. NOT IMPLEMENTED (see ``top_k``).
+    :param sparsity_threshold: Threshold for sparsity-based attention
+        masking when ``sparsity_mode='threshold'``. Not implemented (see
+        ``top_k``).
     :type sparsity_threshold: float
     :param sparsity_mode: Sparse attention mode: ``'none'``, ``'top_k'``, or
-        ``'threshold'``. **Only** ``'none'`` is implemented; ``'top_k'`` and
-        ``'threshold'`` raise ``NotImplementedError`` (dense fallback only).
+        ``'threshold'``. Only ``'none'`` is implemented; the other two raise
+        ``NotImplementedError`` (dense fallback only).
     :type sparsity_mode: SparsityMode
     :param qkv_bias: Whether to include bias terms in QKV projections.
     :type qkv_bias: bool
@@ -219,16 +136,16 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     :param use_lepe: Whether to use Locally-Enhanced Positional Encoding via
         depthwise convolution on value vectors.
 
-        **LePE bypasses the SW-MSA mask.** It is a depthwise convolution applied
-        to V INSIDE the window, so after the cyclic shift it mixes neighbouring
-        shifted-space positions and carries information across a region boundary
-        that the additive mask blocks for the ATTENTION path. Measured
-        2026-08-27 at ``window_size=4, shift_size=2, H=W=8``: perturbing a
-        masked-out key moves its guarded query from ``-0.803`` to ``-5.616`` with
-        ``use_lepe=True``, and leaves it bit-unchanged with ``use_lepe=False``.
-        This is faithful to CSWin -- LePE is a positional encoding on V, not an
-        attention term -- but it means the mask's isolation guarantee covers the
-        attention path only.
+        LePE bypasses the SW-MSA mask: it is a depthwise convolution applied
+        to V inside the window, so after the cyclic shift it mixes
+        neighbouring shifted-space positions and carries information across
+        a region boundary that the additive mask blocks for the attention
+        path. Measured 2026-08-27 at ``window_size=4, shift_size=2,
+        H=W=8``: perturbing a masked-out key moves its guarded query from
+        ``-0.803`` to ``-5.616`` with ``use_lepe=True``, and leaves it
+        bit-unchanged with ``use_lepe=False``. This is faithful to CSWin —
+        LePE is a positional encoding on V, not an attention term — but the
+        mask's isolation guarantee covers the attention path only.
     :type use_lepe: bool
     :param lepe_kernel_size: Kernel size for LePE depthwise convolution.
     :type lepe_kernel_size: int
@@ -236,23 +153,24 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for bias vectors.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param probability_type: Score-normalization strategy applied to the attention
-        logits via :class:`~dl_techniques.layers.activations.ProbabilityOutput`.
-        Defaults to ``'softmax'``. Routing / hierarchical variants are rejected
-        because they alter the output shape.
+    :param probability_type: Score-normalization strategy applied to the
+        attention logits via
+        :class:`~dl_techniques.layers.activations.ProbabilityOutput`.
+        Defaults to ``'softmax'``. Routing / hierarchical variants are
+        rejected because they alter the output shape.
     :type probability_type: str
     :param probability_config: Optional keyword arguments forwarded to
-        :class:`~dl_techniques.layers.activations.ProbabilityOutput`. Defaults to
-        ``None``.
+        :class:`~dl_techniques.layers.activations.ProbabilityOutput`.
+        Defaults to ``None``.
     :type probability_config: Optional[Dict[str, Any]]
-    :param qk_norm_type: Optional normalization type applied per-head to Q and K
-        before scoring, forwarded to
+    :param qk_norm_type: Optional normalization type applied per-head to Q
+        and K before scoring, forwarded to
         :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
         ``None`` disables QK-norm. Defaults to ``None``.
     :type qk_norm_type: Optional[str]
     :param qk_norm_kwargs: Optional keyword arguments forwarded to
-        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer` for
-        both the Q and K norms. Defaults to ``None``.
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`
+        for both the Q and K norms. Defaults to ``None``.
     :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any
@@ -260,15 +178,16 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     :raises ValueError: If ``dim`` is not divisible by ``num_heads``.
     :raises ValueError: If ``shift_size`` is negative or not less than
         ``window_size``.
-    :raises ValueError: If ``sparsity_mode`` is not one of ``'none'``, ``'top_k'``,
-        ``'threshold'``.
-    :raises ValueError: If ``sparsity_mode='top_k'`` and ``top_k`` is ``None``, or
-        if ``top_k`` is set but not positive.
-    :raises ValueError: If ``attention_dropout_rate`` or ``projection_dropout_rate`` is
-        outside ``[0.0, 1.0]``.
-    :raises ValueError: If ``probability_type`` is a routing / hierarchical variant.
-    :raises ValueError: From ``build()``, if ``shift_size > 0`` and the input height
-        or width is not statically known.
+    :raises ValueError: If ``sparsity_mode`` is not one of ``'none'``,
+        ``'top_k'``, ``'threshold'``.
+    :raises ValueError: If ``sparsity_mode='top_k'`` and ``top_k`` is
+        ``None``, or if ``top_k`` is set but not positive.
+    :raises ValueError: If ``attention_dropout_rate`` or
+        ``projection_dropout_rate`` is outside ``[0.0, 1.0]``.
+    :raises ValueError: If ``probability_type`` is a routing / hierarchical
+        variant.
+    :raises ValueError: From ``build()``, if ``shift_size > 0`` and the
+        input height or width is not statically known.
     :raises NotImplementedError: If ``sparsity_mode`` is anything other than
         ``'none'`` — the sparse path is a stub (see ``top_k`` above).
     """
@@ -298,7 +217,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         """Initialize ProgressiveFocusedAttention layer."""
         super().__init__(**kwargs)
 
-        # Store configuration parameters
         self._dim = dim
         self._num_heads = num_heads
         self._window_size = window_size
@@ -318,11 +236,10 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
-        # Validate configuration before proceeding
         self._validate_config()
 
-        # Reject probability types that produce non-standard output shapes
-        # (e.g., routing variants return tuples or have different shape semantics).
+        # Routing/hierarchical probability variants return tuples or a
+        # different shape, which this layer's tuple contract cannot absorb.
         if self.probability_type in (
                 "routing",
                 "deterministic_routing",
@@ -335,40 +252,21 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                 f"alter output shape)."
             )
 
-        # Compute derived attributes
-        # Dimension per attention head.
         self._head_dim = dim // num_heads
 
-        # This does NOT adopt `common.compute_attention_scale`, and the reason is
-        # measured rather than stylistic. The helper computes
-        # `1.0 / math.sqrt(float(head_dim))`; this site computes `head_dim ** -0.5`.
-        # Those are NOT the same double. Re-derived 2026-08-28 across 27 realistic
-        # head dims in 1..512: they differ in the last ULP for 16 of them, 8, 32
-        # and 128 among them. Swapping the helper in would be a real, if tiny,
-        # numerics change on a layer that has trained weights.
-        # Note that `1.0 / (head_dim ** 0.5)` IS bit-identical to the helper across
-        # all 27 — the difference is the NEGATIVE exponent, not the `**` operator.
-        # Any future migration must re-run the probe rather than assume it:
-        #   [d for d in dims if (d ** -0.5) != (1.0 / math.sqrt(float(d)))]
-        # Scaling factor for the dot-product scores.
+        # `head_dim ** -0.5` and `1.0/math.sqrt(head_dim)` differ in the last
+        # ULP for 16 of 27 realistic head dims (measured 2026-08-28); keep
+        # this form rather than the shared helper to avoid a numerics change
+        # on trained weights.
         self._scale = self._head_dim ** -0.5
-        # Number of tokens in one window.
         self._window_area = window_size * window_size
 
-        # ---------------------------------------------------------------------
-        # Probability activation (replaces raw softmax). Functional call,
-        # so a single shared instance is sufficient even if used at multiple
-        # progressive levels.
-        # ---------------------------------------------------------------------
         self.attn_prob = ProbabilityOutput(
             probability_type=self.probability_type,
             type_config=self.probability_config,
             name="attn_prob",
         )
 
-        # ---------------------------------------------------------------------
-        # Optional QK normalization layers
-        # ---------------------------------------------------------------------
         if self.qk_norm_type is not None:
             self.q_norm = create_normalization_layer(
                 self.qk_norm_type,
@@ -384,15 +282,8 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             self.q_norm = None
             self.k_norm = None
 
-        # ---------------------------------------------------------------------
-        # Projection / dropout / LePE sub-layers.
-        # Their configs depend ONLY on constructor args (dim, qkv_bias,
-        # initializers, dropout rates, lepe kernel size), so they are created
-        # here in __init__ per the Keras-3 authoring guide (F7). build() only
-        # resolves input shapes and calls the explicit child .build(...).
-        # ---------------------------------------------------------------------
-
-        # QKV projection: projects input to Q, K, V simultaneously (3 * dim).
+        # Sub-layers are created here (Keras-3 authoring guide F7); build()
+        # only resolves input shapes and builds them explicitly.
         self._qkv = keras.layers.Dense(
             self._dim * 3,
             use_bias=self._qkv_bias,
@@ -401,7 +292,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             name="qkv_projection"
         )
 
-        # Output projection: concatenated multi-head output back to dim.
         self._proj = keras.layers.Dense(
             self._dim,
             use_bias=True,
@@ -410,7 +300,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             name="output_projection"
         )
 
-        # Attention dropout (applied to attention weights after softmax).
         if self._attention_dropout_rate > 0.0:
             self._attn_drop = keras.layers.Dropout(
                 self._attention_dropout_rate,
@@ -419,7 +308,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         else:
             self._attn_drop = None
 
-        # Projection dropout (regularizes the final output projection).
         if self._projection_dropout_rate > 0.0:
             self._proj_drop = keras.layers.Dropout(
                 self._projection_dropout_rate,
@@ -428,7 +316,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         else:
             self._proj_drop = None
 
-        # LePE: Locally-Enhanced Positional Encoding via depthwise conv on V.
         if self._use_lepe:
             self._lepe = keras.layers.DepthwiseConv2D(
                 kernel_size=self._lepe_kernel_size,
@@ -448,17 +335,9 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
 
         :raises ValueError: If any configuration parameter is invalid or incompatible.
         """
-        # Check dimension divisibility
-        #
-        # This does NOT adopt `common.validate_head_divisibility`. A test matching
-        # on "must be divisible" would still match the shared message, so the swap
-        # is test-SAFE — but it is not diagnostic-neutral. The trailing
-        # `Got head_dim = {dim / num_heads}`
-        # clause prints the fractional head dim, which is the single most useful
-        # number when picking a valid (dim, num_heads) pair, and the shared helper
-        # has no way to emit it. Same judgment, same reason, as the declines recorded
-        # for `gated_attention.py` (step 2) and `linear_attention.py` (step 5):
-        # adopt only where the diagnostic does not regress.
+        # The shared `common.validate_head_divisibility` message omits the
+        # fractional head_dim, which is the most useful number for picking a
+        # valid (dim, num_heads) pair, so this site keeps its own check.
         if self._dim % self._num_heads != 0:
             raise ValueError(
                 f"dim ({self._dim}) must be divisible by "
@@ -466,7 +345,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                 f"Got head_dim = {self._dim / self._num_heads}"
             )
 
-        # Check shift size constraints
         if self._shift_size < 0:
             raise ValueError(
                 f"shift_size ({self._shift_size}) must be non-negative"
@@ -479,14 +357,12 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                 f"Typically use shift_size = window_size // 2 for SW-MSA."
             )
 
-        # Check sparsity mode validity
         if self._sparsity_mode not in ('none', 'top_k', 'threshold'):
             raise ValueError(
                 f"sparsity_mode must be one of 'none', 'top_k', 'threshold', "
                 f"got '{self._sparsity_mode}'"
             )
 
-        # Check sparsity configuration consistency
         if self._sparsity_mode == 'top_k' and self._top_k is None:
             raise ValueError(
                 "top_k must be specified when sparsity_mode='top_k'"
@@ -497,14 +373,10 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                 f"top_k ({self._top_k}) must be positive"
             )
 
-        # DECISION plan_2026-06-14_0c5d4a21/D-004: a non-default sparsity_mode or
-        # top_k is REJECTED here, at construction. Do NOT silently accept one.
-        # The sparse path in _apply_sparsity is a no-op stub: its 'top_k' branch
-        # builds an unused mask and its 'threshold' branch masks without the
-        # advertised top-k focusing, so accepting the argument would make the
-        # layer compute DENSE attention while claiming sparse focusing.
-        # Re-implementing sparse top-k is a research task, not a cleanup.
-        # The originating plan directory is gone, so this comment is the record.
+        # DECISION plan_2026-06-14_0c5d4a21/D-004: reject non-'none'
+        # sparsity_mode here rather than accept it silently -- _apply_sparsity
+        # is a no-op stub, so accepting it would compute dense attention
+        # while claiming sparse focusing. See decisions.md.
         if self._sparsity_mode != 'none':
             raise NotImplementedError(
                 f"sparsity_mode='{self._sparsity_mode}' is not implemented in "
@@ -515,7 +387,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                 f"(top_k={self._top_k!r} is therefore unused.)"
             )
 
-        # Check dropout rates
         if self._attention_dropout_rate < 0.0 or self._attention_dropout_rate > 1.0:
             raise ValueError(
                 f"attention_dropout_rate ({self._attention_dropout_rate}) must be "
@@ -535,27 +406,16 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             Expected shape: ``(batch_size, height, width, dim)``.
         :type input_shape: Union[tuple, list]
         """
-        # Idempotency guard (F7): build() may be re-entered via from_config /
-        # functional reuse. The sub-layers are created once in __init__; the
-        # explicit child .build(...) calls below are NOT self-guarded by Keras
-        # (a second .build() on an already-built child raises a lock violation),
-        # so we early-return if already built.
+        # build() may re-enter via from_config/functional reuse; a second
+        # .build() on an already-built child raises, so guard here.
         if self.built:
             return
 
-        # Handle different input shape formats
         if isinstance(input_shape, list):
             x_shape = input_shape[0]
         else:
             x_shape = input_shape
 
-        # Sub-layers (_qkv, _proj, _attn_drop, _proj_drop, _lepe) are created in
-        # __init__ (their configs are constructor-only). build() resolves the
-        # input shapes and explicitly builds them for weight restore.
-
-        # ============ Explicitly Build Sub-layers ============
-        # This ensures weights exist before any restoration/serialization
-        # Critical for proper model saving and loading
         qkv_input_shape = (None, self._window_area, self._dim)
         self._qkv.build(qkv_input_shape)
         self._proj.build(qkv_input_shape)
@@ -564,8 +424,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             lepe_input_shape = (None, self._window_size, self._window_size, self._dim)
             self._lepe.build(lepe_input_shape)
 
-        # ============ Create Attention Mask for Shifted Windows ============
-        # For SW-MSA, we need a mask to prevent attention across shifted regions.
         if self._shift_size > 0:
             height = x_shape[1]
             width = x_shape[2]
@@ -582,7 +440,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         else:
             self._attn_mask = None
 
-        # ============ Build Probability Activation ============
         # Attention scores have shape (B*nW, num_heads, window_area, window_area).
         score_shape = (
             None,
@@ -592,9 +449,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         )
         self.attn_prob.build(score_shape)
 
-        # ============ Build QK Normalization Layers (Optional) ============
-        # Q and K are normalized after reshape into per-head format with shape
-        # (B*nW, num_heads, window_area, head_dim).
         if self.q_norm is not None:
             qk_shape = (
                 None,
@@ -610,18 +464,16 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     def _compute_attention_mask(self, height: int, width: int) -> np.ndarray:
         """Compute attention mask for shifted window attention (SW-MSA).
 
-        Builds the SW-MSA mask for the ACTUAL static feature-map size
-        ``(height, width)``. The mask image is partitioned into windows using
-        the SAME ordering as :meth:`_window_partition` (B-major / window-minor),
-        so each mask entry aligns with its corresponding window slot.
+        Builds the SW-MSA mask for the actual static feature-map size
+        ``(height, width)``. The mask image is partitioned into windows
+        using the same ordering as :meth:`_window_partition` (B-major /
+        window-minor), so each mask entry aligns with its corresponding
+        window slot.
 
         SW-MSA requires statically-known ``height`` and ``width``: the mask
-        geometry — the number of windows and each window's region assignment —
-        cannot be constructed from a dynamic ``None`` spatial dimension.
-        ``build()`` therefore raises ``ValueError`` when either is ``None``,
-        rather than silently emitting a wrong-geometry mask. Do not relax that
-        check to fall back on a dynamic shape; there is no correct mask to fall
-        back to.
+        geometry cannot be constructed from a dynamic ``None`` spatial
+        dimension. ``build()`` therefore raises ``ValueError`` when either is
+        ``None``, rather than silently emitting a wrong-geometry mask.
 
         :param height: Static feature-map height. Must be divisible by
             ``window_size`` and ``>= 2 * window_size``.
@@ -633,8 +485,7 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             ``num_windows = (height // ws) * (width // ws)``.
         :rtype: numpy.ndarray
         """
-        # Define slice indices for creating region boundaries
-        # These create a 3x3 grid of regions after the shift
+        # Three regions per axis after the shift.
         h_slices = (
             slice(0, -self._window_size),
             slice(-self._window_size, -self._shift_size),
@@ -646,25 +497,16 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             slice(-self._shift_size, None)
         )
 
-        # Create a mask image with region indices using numpy (for static computation).
-        # `numpy` is imported at module scope so this method's return annotation
-        # (`np.ndarray`) resolves at class-definition time.
-
-        # Build the index mask at the ACTUAL feature-map size (general H, W),
-        # not a fixed 2x2-window grid.
         img_mask = np.zeros((1, height, width, 1), dtype=np.float32)
 
-        # Assign each region a unique index
         cnt = 0
         for h in h_slices:
             for w in w_slices:
                 img_mask[:, h, w, :] = cnt
                 cnt += 1
 
-        # Partition the index mask into windows using the SAME logic as
-        # _window_partition: (1,H,W,1) -> (1,nH,ws,nW,ws,1) ->
-        # transpose (0,1,3,2,4,5) -> (nW_total, ws*ws). This makes the mask
-        # window-order match _window_partition exactly (B-major, window-minor).
+        # Same reshape/transpose order as _window_partition, so mask window
+        # order matches: (1,H,W,1) -> (1,nH,ws,nW,ws,1) -> transpose(0,1,3,2,4,5).
         num_windows_h = height // self._window_size
         num_windows_w = width // self._window_size
         img_mask = img_mask.reshape(
@@ -676,26 +518,13 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             num_windows_h * num_windows_w, self._window_size * self._window_size
         )
 
-        # Compute pairwise attention mask:
-        # If indices differ, mask out (set to -100); otherwise allow (set to 0)
         attn_mask = mask_windows[:, :, np.newaxis] - mask_windows[:, np.newaxis, :]
         attn_mask = np.where(attn_mask != 0, -100.0, 0.0).astype(np.float32)
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-011 — this returns a plain
-        # NUMPY ARRAY held as a constant; the mask is a pure function of
-        # `(shift_size, window_size, height, width)`, so it carries no state.
-        #   * Do NOT make it a bare `keras.Variable(...)`: a bare Variable is
-        #     charged to whichever layer is on the build stack, so inside a
-        #     subclassed `keras.Model` every `shift_size > 0` layer died on its
-        #     first call with `ValueError: You cannot add new elements of state
-        #     ... to a layer that is already built.`
-        #   * Do NOT make it `self.add_weight(...)`: that puts a derived constant
-        #     in the checkpoint, and zero-init plus `.assign()` is silently
-        #     discarded under `StatelessScope`.
-        #   * Do NOT `keras.ops.convert_to_tensor` it here: `build()` runs inside a
-        #     scratch FuncGraph, so the tensor is out of scope by the time `call()`
-        #     runs. The conversion belongs at the USE site.
-        # See decisions.md D-011 (plan-2026-08-27T040114-580f8b63).
+        # DECISION plan-2026-08-27T040114-580f8b63/D-011: plain numpy array
+        # only -- a bare Variable/add_weight/convert_to_tensor here each break
+        # differently (build-stack charge, StatelessScope discard, out-of-scope
+        # FuncGraph). See decisions.md.
         return attn_mask
 
     def _window_partition(
@@ -704,13 +533,12 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Partition input feature map into non-overlapping windows.
 
-        R13 cross-reference: a near-twin of ``window_partition`` in
-        :mod:`~dl_techniques.layers.attention.window_attention`. NOT unified, on
-        purpose — see the ``[REUSE / DUPLICATION]`` block in the class docstring
-        for the three reasons. The reshape/transpose ORDER below (B-major, window-minor)
-        is depended on by :meth:`_compute_attention_mask`, which builds the SW-MSA
-        mask with the same ordering; changing one without the other silently produces
-        a wrong-geometry mask rather than an error.
+        Mirrors ``window_partition`` in
+        :mod:`~dl_techniques.layers.attention.window_attention`, kept
+        separate for the reasons in the class docstring. The reshape/
+        transpose order here (B-major, window-minor) must match
+        :meth:`_compute_attention_mask`, which builds the SW-MSA mask with
+        the same ordering.
 
         :param x: Input tensor of shape ``(batch_size, height, width, channels)``.
             Height and width must be divisible by window_size.
@@ -720,29 +548,23 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             ``(batch_size * num_windows, window_size, window_size, channels)``.
         :rtype: keras.KerasTensor
         """
-        # Extract shape information
         batch_size = keras.ops.shape(x)[0]
         height = keras.ops.shape(x)[1]
         width = keras.ops.shape(x)[2]
         channels = keras.ops.shape(x)[3]
 
-        # Calculate number of windows in each dimension
         num_windows_h = height // self._window_size
         num_windows_w = width // self._window_size
 
-        # Reshape: (B, H, W, C) -> (B, nH, ws, nW, ws, C)
+        # (B, H, W, C) -> (B, nH, ws, nW, ws, C) -> (B, nH, nW, ws, ws, C)
         x = keras.ops.reshape(
             x,
             (batch_size, num_windows_h, self._window_size,
              num_windows_w, self._window_size, channels)
         )
-
-        # Transpose: (B, nH, ws, nW, ws, C) -> (B, nH, nW, ws, ws, C)
-        # This groups the window dimensions together
         x = keras.ops.transpose(x, (0, 1, 3, 2, 4, 5))
 
-        # Reshape: (B, nH, nW, ws, ws, C) -> (B*nH*nW, ws, ws, C)
-        # Flatten batch and window dimensions for efficient processing
+        # Flatten batch and window dims: (B, nH, nW, ws, ws, C) -> (B*nH*nW, ws, ws, C)
         windows = keras.ops.reshape(
             x,
             (-1, self._window_size, self._window_size, channels)
@@ -758,12 +580,12 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Reverse window partition to reconstruct the spatial feature map.
 
-        R13 cross-reference: a near-twin of ``window_reverse`` in
-        :mod:`~dl_techniques.layers.attention.window_attention`, and NOT unified,
-        for the same reasons as :meth:`_window_partition`. One concrete
-        divergence worth naming: this version *derives* the batch size as
-        ``ops.shape(windows)[0] // num_windows`` instead of accepting it as an
-        argument, so its signature is not interchangeable with the sibling's.
+        Mirrors ``window_reverse`` in
+        :mod:`~dl_techniques.layers.attention.window_attention`, kept
+        separate for the same reasons as :meth:`_window_partition`. Unlike
+        the sibling, this version derives the batch size as
+        ``ops.shape(windows)[0] // num_windows`` instead of taking it as an
+        argument, so the two signatures are not interchangeable.
 
         :param windows: Windows tensor of shape
             ``(batch_size * num_windows, window_size, window_size, channels)``.
@@ -777,26 +599,18 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             ``(batch_size, height, width, channels)``.
         :rtype: keras.KerasTensor
         """
-        # Extract shape information
         channels = keras.ops.shape(windows)[-1]
         num_windows_h = height // self._window_size
         num_windows_w = width // self._window_size
         num_windows = num_windows_h * num_windows_w
         batch_size = keras.ops.shape(windows)[0] // num_windows
 
-        # Reshape: (B*nW, ws, ws, C) -> (B, nH, nW, ws, ws, C)
         x = keras.ops.reshape(
             windows,
             (batch_size, num_windows_h, num_windows_w,
              self._window_size, self._window_size, channels)
         )
-
-        # Transpose: (B, nH, nW, ws, ws, C) -> (B, nH, ws, nW, ws, C)
-        # This ungroups the window dimensions
         x = keras.ops.transpose(x, (0, 1, 3, 2, 4, 5))
-
-        # Reshape: (B, nH, ws, nW, ws, C) -> (B, H, W, C)
-        # Merge window dimensions back into spatial dimensions
         x = keras.ops.reshape(x, (batch_size, height, width, channels))
 
         return x
@@ -819,11 +633,8 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         if prev_attn_map is None:
-            # First layer: no previous attention to inherit
             return attn_scores
 
-        # Apply Hadamard product for progressive focusing
-        # This biases current attention toward patterns from previous layer
         focused_scores = attn_scores * prev_attn_map
 
         return focused_scores
@@ -848,36 +659,32 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         :rtype: keras.KerasTensor
 
         .. warning::
-            **This method is currently unreachable below its first branch.**
+            This method is unreachable below its first branch.
             ``_validate_config()`` raises ``NotImplementedError`` for every
-            ``sparsity_mode`` other than ``'none'``, so in practice only the early
-            ``return attn_scores`` executes. The ``'threshold'`` and ``'top_k'``
-            branches are retained as the starting point for the eventual real
-            implementation, NOT as working code: the ``'top_k'`` branch in particular
-            computes ``top_indices`` and an all-zeros ``mask`` and then uses neither,
-            returning the unmodified dense scores. Two latent issues to fix when the
-            path is revived, reported here rather than patched: (1) the
+            ``sparsity_mode`` other than ``'none'``, so in practice only the
+            early ``return attn_scores`` executes. The ``'threshold'`` and
+            ``'top_k'`` branches are retained as the starting point for the
+            eventual real implementation, not as working code: the
+            ``'top_k'`` branch in particular computes ``top_indices`` and an
+            all-zeros ``mask`` and then uses neither, returning the
+            unmodified dense scores. Two latent issues to fix when the path
+            is revived, reported here rather than patched: (1) the
             ``'threshold'`` branch's literal ``-1e9`` becomes ``-inf`` under
             ``mixed_float16`` — it should route through
             :data:`~dl_techniques.layers.attention.common.MASK_BIAS_VALUE` and
-            :func:`~dl_techniques.layers.attention.common.mask_dtype`; (2) ``k =
-            min(self._top_k, seq_len)`` mixes a Python ``int`` with the traced tensor
-            returned by ``ops.shape(...)[-1]``, which fails under
-            ``@tf.function``/jit.
+            :func:`~dl_techniques.layers.attention.common.mask_dtype`; (2)
+            ``k = min(self._top_k, seq_len)`` mixes a Python ``int`` with the
+            traced tensor returned by ``ops.shape(...)[-1]``, which fails
+            under ``@tf.function``/jit.
         """
-        # No sparsity mode or no previous attention map
         if self._sparsity_mode == 'none' or prev_attn_map is None:
             return attn_scores
 
         if self._sparsity_mode == 'threshold':
-            # Threshold-based sparsity: mask positions below threshold
-            # Create binary mask: 1.0 for positions to keep, 0.0 for positions to mask
             mask = keras.ops.cast(
                 prev_attn_map >= self._sparsity_threshold,
                 dtype=attn_scores.dtype
             )
-
-            # Apply mask: keep valid positions, set others to large negative value
             attn_scores = keras.ops.where(
                 mask > 0.5,
                 attn_scores,
@@ -885,23 +692,15 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             )
 
         elif self._sparsity_mode == 'top_k':
-            # Top-k sparsity: keep only k most important positions per query
             seq_len = keras.ops.shape(attn_scores)[-1]
-            # Clamp k: a caller may ask for more than the sequence has.
             k = min(self._top_k, seq_len)
 
-            # Average previous attention over heads for top-k selection
             prev_mean = keras.ops.mean(prev_attn_map, axis=1, keepdims=True)
-
-            # Get top-k indices based on previous attention
             _, top_indices = keras.ops.top_k(prev_mean, k=k)
 
-            # Note: Full sparse implementation would use scatter operations
-            # This is a simplified version - production code would need
-            # efficient sparse attention implementation using custom ops
-            # or specialized libraries
+            # A full implementation would scatter using top_indices; this
+            # stub computes it and discards it. See the warning above.
             mask = keras.ops.zeros_like(attn_scores)
-            # TODO: Implement efficient scatter operation for top-k masking
 
         return attn_scores
 
@@ -930,103 +729,68 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
 
         :raises ValueError: If input height or width is not divisible by window_size.
         """
-        # ============ Extract Input Dimensions ============
         input_shape = keras.ops.shape(x)
         batch_size = input_shape[0]
         height = input_shape[1]
         width = input_shape[2]
 
-        # ============ Shifted Window Preparation (SW-MSA) ============
         if self._shift_size > 0:
-            # Cyclic shift for shifted window attention
-            # This moves windows to enable cross-window connections
-            # Shift is negative because we'll shift back after attention
+            # Negative shift now; shifted back after attention.
             shifted_x = keras.ops.roll(
                 x,
                 shift=(-self._shift_size, -self._shift_size),
                 axis=(1, 2)
             )
         else:
-            # Regular window attention (W-MSA) - no shift needed
             shifted_x = x
 
-        # ============ Window Partition ============
-        # Transform: (B, H, W, C) -> (B*nW, ws, ws, C)
-        # Each window becomes an independent sample
+        # (B, H, W, C) -> (B*nW, ws, ws, C)
         x_windows = self._window_partition(shifted_x)
         num_windows = keras.ops.shape(x_windows)[0]
 
-        # ============ Flatten Windows for Attention ============
-        # Transform: (B*nW, ws, ws, C) -> (B*nW, ws*ws, C)
-        # Each window is now a sequence of tokens
+        # (B*nW, ws, ws, C) -> (B*nW, ws*ws, C)
         x_flat = keras.ops.reshape(
             x_windows,
             (num_windows, self._window_area, self._dim)
         )
 
-        # ============ QKV Projection ============
-        # Project to queries, keys, and values simultaneously
         # (B*nW, ws*ws, C) -> (B*nW, ws*ws, 3*C)
         qkv = self._qkv(x_flat)
 
-        # Reshape to separate Q, K, V and split by attention heads
-        # (B*nW, ws*ws, 3*C) -> (B*nW, ws*ws, 3, num_heads, head_dim)
         qkv = keras.ops.reshape(
             qkv,
             (num_windows, self._window_area, 3, self._num_heads, self._head_dim)
         )
-
-        # Transpose to convenient format for attention computation
-        # (B*nW, ws*ws, 3, num_heads, head_dim) -> (3, B*nW, num_heads, ws*ws, head_dim)
+        # -> (3, B*nW, num_heads, ws*ws, head_dim)
         qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))
-
-        # Split into Q, K, V
-        # Each has shape: (B*nW, num_heads, ws*ws, head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        # ============ Optional QK Normalization ============
-        # Stabilizes attention scores by normalizing Q and K independently.
         if self.q_norm is not None:
             q = self.q_norm(q, training=training)
             k = self.k_norm(k, training=training)
 
-        # ============ LePE (Locally-Enhanced Positional Encoding) ============
         if self._lepe is not None:
-            # Reshape V back to spatial format for depthwise convolution
             # (B*nW, num_heads, ws*ws, head_dim) -> (B*nW, ws, ws, C)
             v_spatial = keras.ops.transpose(v, (0, 2, 1, 3))
             v_spatial = keras.ops.reshape(
                 v_spatial,
                 (num_windows, self._window_size, self._window_size, self._dim)
             )
-
-            # Apply depthwise convolution to inject local positional information
-            # This provides translation-equivariant position awareness
             lepe = self._lepe(v_spatial)
-
-            # Reshape back to multi-head format
-            # (B*nW, ws, ws, C) -> (B*nW, num_heads, ws*ws, head_dim)
             lepe = keras.ops.reshape(
                 lepe,
                 (num_windows, self._window_area, self._num_heads, self._head_dim)
             )
             lepe = keras.ops.transpose(lepe, (0, 2, 1, 3))
-
-            # Add LePE to values (residual connection)
             v = v + lepe
 
-        # ============ Attention Score Computation ============
-        # Scaled dot-product attention: Q @ K^T / sqrt(head_dim)
-        # (B*nW, num_heads, ws*ws, head_dim) @ (B*nW, num_heads, head_dim, ws*ws)
-        # -> (B*nW, num_heads, ws*ws, ws*ws)
         attn_scores = keras.ops.matmul(
             q, keras.ops.transpose(k, (0, 1, 3, 2))
         ) * self._scale
 
-        # ============ Apply Shifted Window Attention Mask ============
         if self._attn_mask is not None and self._shift_size > 0:
-            # _attn_mask: (nW, wa, wa) in the same window order as _window_partition.
-            # attn_scores: (B*nW, num_heads, wa, wa). Broadcast mask over batch and heads.
+            # _attn_mask: (nW, wa, wa) in the same window order as
+            # _window_partition; broadcast over batch and heads.
             num_windows_per_image = (height // self._window_size) * (width // self._window_size)
             mask = keras.ops.reshape(
                 keras.ops.cast(
@@ -1034,65 +798,39 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                 ),
                 (num_windows_per_image, 1, self._window_area, self._window_area)
             )
-            # Tile B times along axis 0 to match the B-major/window-minor
-            # flattening of _window_partition: (B*nW, 1, wa, wa). Broadcasts over heads.
+            # Tile B times to match _window_partition's B-major flattening.
             mask = keras.ops.tile(mask, (batch_size, 1, 1, 1))
             attn_scores = attn_scores + mask
 
-        # ============ Progressive Focusing ============
-        # Multiply with previous layer's attention to focus on relevant tokens
         attn_scores = self._apply_progressive_focusing(attn_scores, prev_attn_map)
-
-        # ============ Apply Sparsity ============
-        # Optionally mask out low-importance connections
         attn_scores = self._apply_sparsity(attn_scores, prev_attn_map)
 
-        # ============ Probability Normalization ============
-        # Convert scores to probabilities via the configured ProbabilityOutput
-        # (softmax by default; supports sparsemax, adaptive, etc.).
         attn_weights = self.attn_prob(attn_scores)
 
-        # ============ Attention Dropout ============
-        # Randomly drop some attention connections during training
         if self._attn_drop is not None:
             attn_weights = self._attn_drop(attn_weights, training=training)
 
-        # ============ Apply Attention to Values ============
-        # Weighted sum of values based on attention weights
-        # (B*nW, num_heads, ws*ws, ws*ws) @ (B*nW, num_heads, ws*ws, head_dim)
-        # -> (B*nW, num_heads, ws*ws, head_dim)
         attn_output = keras.ops.matmul(attn_weights, v)
 
-        # ============ Reshape and Project Output ============
-        # Transpose: (B*nW, num_heads, ws*ws, head_dim) -> (B*nW, ws*ws, num_heads, head_dim)
+        # (B*nW, num_heads, ws*ws, head_dim) -> (B*nW, ws*ws, num_heads, head_dim)
         attn_output = keras.ops.transpose(attn_output, (0, 2, 1, 3))
-
-        # Concatenate heads: (B*nW, ws*ws, num_heads, head_dim) -> (B*nW, ws*ws, C)
         attn_output = keras.ops.reshape(
             attn_output,
             (num_windows, self._window_area, self._dim)
         )
 
-        # Output projection: (B*nW, ws*ws, C) -> (B*nW, ws*ws, C)
         output = self._proj(attn_output)
 
-        # ============ Projection Dropout ============
         if self._proj_drop is not None:
             output = self._proj_drop(output, training=training)
 
-        # ============ Reverse Window Partition ============
-        # Reshape back to spatial format: (B*nW, ws*ws, C) -> (B*nW, ws, ws, C)
         output = keras.ops.reshape(
             output,
             (num_windows, self._window_size, self._window_size, self._dim)
         )
-
-        # Reverse window partition: (B*nW, ws, ws, C) -> (B, H, W, C)
         output = self._window_reverse(output, height, width)
 
-        # ============ Reverse Cyclic Shift (for SW-MSA) ============
         if self._shift_size > 0:
-            # Shift back to original positions
             output = keras.ops.roll(
                 output,
                 shift=(self._shift_size, self._shift_size),
@@ -1145,7 +883,6 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         :return: New instance created from configuration.
         :rtype: ProgressiveFocusedAttention
         """
-        # Deserialize initializers from their serialized format
         config = config.copy()
         config["kernel_initializer"] = keras.initializers.deserialize(
             config.get("kernel_initializer", "glorot_uniform")
@@ -1170,22 +907,20 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         :rtype: Tuple[tuple, tuple]
 
         .. note::
-            Returning a **tuple of shapes** is correct here and must not be
-            "normalized" to a single shape: :meth:`call` returns
-            ``(output, attention_weights)``, so Keras needs both. ``attn_batch``
-            collapses to ``None`` whenever the batch or the spatial dims are
-            dynamic, because ``B * nW`` is not computable from a symbolic shape.
+            Returning a tuple of shapes is correct here and must not be
+            collapsed to a single shape: :meth:`call` returns
+            ``(output, attention_weights)``, so Keras needs both.
+            ``attn_batch`` becomes ``None`` whenever the batch or spatial
+            dims are dynamic, since ``B * nW`` is not computable from a
+            symbolic shape.
         """
-        # Extract x shape
         if isinstance(input_shape, list):
             x_shape = input_shape[0]
         else:
             x_shape = input_shape
 
-        # Output has same shape as input
         output_shape = x_shape
 
-        # Compute attention map shape
         batch = x_shape[0]
         h, w = x_shape[1], x_shape[2]
 
@@ -1206,6 +941,3 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         )
 
         return output_shape, attn_map_shape
-
-
-# ---------------------------------------------------------------------

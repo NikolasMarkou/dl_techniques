@@ -1,140 +1,23 @@
-"""
-Sparse causal attention over a coarse-to-fine pyramid of pooled representations.
+"""Lighthouse Attention, built by :class:`LighthouseAttention`: sparse causal
+attention over a coarse-to-fine pyramid of pooled representations.
 
-A Keras 3 / TF 2.18 implementation of Lighthouse Attention. Every position
-reads its whole causal prefix without paying the quadratic cost of reading all
-of it at full resolution. Plain self-attention spends the same precision on
-distant and on local context. Lighthouse spends precision where the content
-warrants it: salient history at token granularity, the rest through
-progressively coarser summaries.
+Every position reads its whole causal prefix without paying the quadratic
+cost of reading all of it at full resolution. Q, K and V are pooled into a
+pyramid of ``num_levels`` levels (branching factor ``pooling_factor``); a
+per-head L2-norm scorer ranks every pyramid entry; a mandatory set (every
+coarsest entry, plus a level-0 prefix) is unioned with a per-causal-block
+``top_k`` selection; one causal attention pass runs over the gathered
+sub-sequence, and the result is scattered back to base positions. Cost is
+``O(S^2)`` for the gathered length ``S`` plus ``O(N)`` bookkeeping, against
+``O(N^2)`` for dense attention.
 
-Architecture:
-    The single ``N x N`` score matrix is replaced by a pyramid of pooled
-    representations plus a sparse, content-selected read over that pyramid.
-    Five stages:
-
-    -   **Pyramid construction.** Q, K and V are projected once and mean-pooled
-        into ``num_levels`` levels with branching factor ``pooling_factor``.
-        Level 0 is the base sequence at full resolution. Level ``l`` holds
-        ``N / p^l`` entries, each summarising a window of ``p^l`` consecutive
-        tokens. Concatenating the levels gives ``S_pyr = sum_l N / p^l``
-        candidate entries per sequence.
-    -   **Scoring.** Every candidate gets a per-head L2-norm score. The norms
-        ``||Q||`` and ``||K||`` are taken on the RAW level-0 projections and
-        max-pooled up the pyramid. They are not recomputed on the pooled
-        tensors, so a window inherits the salience of its strongest token. The
-        two terms are combined per entry by a max, giving the joint QK / KQ
-        score, then reduced over heads into a single ``(B, S_pyr)`` map.
-    -   **Selection.** Two index sets are retained. A MANDATORY set, fixed at
-        build time, holds every coarsest-level entry plus the leading level-0
-        entries. Together those guarantee at least one contributor at every base
-        position. A DISCRETIONARY set of ``top_k`` entries is then chosen by
-        score from the remaining candidates, with the budget PARTITIONED BY
-        CAUSAL BLOCK so entries never compete across time (D-023). The union is
-        sorted by causal position, which restores temporal order.
-    -   **Sub-attention.** Q, K and V are gathered at the selected indices, and
-        one causal scaled dot-product attention runs over the resulting
-        sub-sequence. The indices are sorted by causal position, so an ordinary
-        lower-triangular mask over the gathered scores stops any query from
-        READING an entry that summarises its future.
-
-        **The exact causality guarantee, which is not all of causality.** The
-        mask governs reading. It says nothing about which entries are in the
-        gathered sequence at all. Selection is content-dependent, so a token
-        that changes its own score can change the set. Before D-023 a single
-        global ``top_k`` let a token evict an entry belonging to an arbitrarily
-        earlier position. Measured: perturbing token 31 evicted the entry base
-        position 15 reads as itself, moving output 15 by 2.585.
-
-        The per-block budget bounds that to one block. A perturbation at token
-        ``T`` can move outputs at positions in ``T``'s own causal block of span
-        ``p^(L-1)``, and never in any earlier block. Measured over all 28
-        perturbation positions of the guard config: 0 cross-block leaks.
-        Positions earlier in ``T``'s own block can still move. That residual is
-        real, reproduced, and pinned by ``test_causality_is_per_position`` as a
-        strict xfail. Closing it needs per-query selection and a block-wise
-        SDPA, which is a different layer shape. Don't describe this layer as
-        per-position causal.
-    -   **Scatter-back.** Each entry's output is written to the base positions
-        its window covers, offset by a causal shift of ``p^l - 1``. That shift
-        is what makes coarse entries safe: a level-``l`` summary contributes
-        only at or after the last token it pooled, so no future information
-        leaks backwards. Accumulation uses ``keras.ops.segment_sum``, which is
-        deterministic and needs no floating-point atomics.
-
-    .. warning::
-       Causality is **BLOCK-GRANULAR, not per-position.** A perturbation at
-       token ``T`` can move outputs inside ``T``'s own causal block, so a query
-       at position ``i`` may respond to position ``i + 1`` when both fall in the
-       same block. Measured at ``N=32, L=2, p=2, top_k=16``: 8 violating
-       ``(i, j)`` cells in the 32x32 support matrix, every one of them
-       ``j == i + 1``. The residual is pinned by the strict-xfail
-       ``test_causality_is_per_position``, so it can be neither forgotten nor
-       quietly fixed. The per-block guarantee is pinned by
-       ``test_causality_no_cross_block_leakage``.
-
-       Don't use this layer where strict per-position causality is required.
-       Autoregressive decoding is the obvious case.
-
-       This block replaced a "currently BROKEN" warning. That warning said
-       perturbing the last token "changes outputs at positions ``< N // 2``"
-       with the mechanism "NOT DIAGNOSED", citing D-009 (2026-07-27). D-023
-       (2026-07-29) fixed exactly that by partitioning ``top_k`` per causal
-       block, two days after the warning was written, and the warning then sat
-       stale for a month. Re-measured 2026-08-27: the described symptom is
-       exactly 0.0, and all four tests D-009 named as red now pass
-       (``12 passed, 1 xfailed``).
-
-    A ``full_attention`` flag bypasses the pyramid entirely and runs plain
-    causal attention over the full sequence. Set it at construction, or toggle
-    it at runtime with ``set_full_attention``. It exists for two-stage training,
-    where a model pretrained with sparse reads is resumed on dense attention.
-
-Foundational Mathematics:
-    The gathered sub-sequence has the static length::
-
-        S = N / p^(L-1)  +  (p^(L-1) - 1)  +  top_k
-            \\_________/     \\___________/     \\____/
-            coarsest level   prefix cover    discretionary
-
-    So attention costs ``O(S^2 * d)``, plus ``O(N)`` for pooling, scoring and
-    scatter, against ``O(N^2 * d)`` for dense attention. ``S`` does not grow
-    with ``N`` except through the ``N / p^(L-1)`` term, so the pyramid turns the
-    quadratic term into one that shrinks geometrically with depth.
-
-    The trade-off, stated exactly: any interaction not covered by a selected
-    entry is served by a coarse MEAN of its window rather than by the exact
-    token, if it is served at all. Raising ``top_k`` buys back exactness
-    linearly. Raising ``num_levels`` buys back cost geometrically. The mandatory
-    set exists so the approximation is never a HOLE: every base position always
-    has at least one contributor, however coarse.
-
-# DECISION plan_2026-07-26_c41d09b2/D-004
-A revision of D-001, after a line-by-line audit against arXiv:2605.06554v1.
-Three defects were corrected. Each is named because each failed silently: the
-layer trained and converged in every case. Eight places in this file cite these
-items by letter, so the letters (a), (b), (c) and their order are part of the
-contract. Every quantity below describes the PRE-FIX code and is not a property
-of the layer today. The originating plan directory is gone, so this comment is
-the record.
-  (a) The scorer read POST-QK-norm projections. RMSNorm maps every position to
-      a near-constant L2 norm, and that norm is exactly the signal the scorer
-      ranks on, so selection was close to arbitrary. The scorer now reads the
-      raw ``W_Q x`` / ``W_K x`` projections, per paper Eq. 4, and
-      ``qk_norm_type`` defaults to ``None``.
-  (b) The coarsest level CONSUMED the ``top_k`` budget through a ``+1e9`` score
-      boost, instead of being additive to it (paper Eq. 8). At ``L=3, p=4,
-      top_k=1536`` and ``N >= 24576`` the whole budget went to coarsest
-      entries, so no finer level was ever selected. Above ``N = 98304`` not
-      even all coarsest entries fitted, and about 75% of base positions emitted
-      exact zeros. The boost is gone.
-  (c) The causal sort key was the window START, ``i*p^l``. An entry's causal
-      timestamp is the LAST token it pooled, ``i*p^l + p^l - 1``, which is also
-      where its scatter range begins. Sorting by the start let a coarse entry
-      precede a fine entry lying inside its window, and the triangular mask
-      then let that fine entry read its own future. The sort and the mask now
-      use ``_causal_pos``. Ties are benign: two entries with equal timestamp
-      both end there, so neither contains the other's future.
+Causality here is block-granular, not per-position: a perturbation cannot
+reach an earlier causal block, but can still move outputs within its own
+block. See the class docstring's warning before using this in a decoder.
+``call()`` requires a statically known sequence length (the pyramid index
+buffers are built once, in ``build()``) and takes no ``attention_mask``.
+Setting ``full_attention=True`` bypasses the pyramid and runs plain causal
+attention over the full sequence, for two-stage training.
 
 References:
     - Long Context Pre-Training with Lighthouse Attention (arXiv:2605.06554v1).
@@ -142,19 +25,9 @@ References:
       (https://arxiv.org/abs/1706.03762)
 """
 
-# ---------------------------------------------------------------------
-
 import keras
 import numpy as np
 from typing import Optional, Dict, Any, Tuple, Union, List
-# `import keras` only, per the repo convention. This file used
-# `from keras import ops, layers, initializers, regularizers` until 2026-08-27.
-# It was the last such import in layers/attention/, outside the five legacy
-# files that are left alone on purpose (decisions.md D-026).
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations import ProbabilityOutput
@@ -180,29 +53,17 @@ _MASK_SENTINEL: Dict[str, float] = {
 def _mask_value(dtype: Any) -> float:
     """Return a dtype-safe large-negative additive mask value.
 
-    :param dtype: a backend tensor's ``.dtype`` -- i.e. a ``tf.DType`` or the
-        plain dtype-name string. **Not** a ``keras.DTypePolicy`` and not
-        ``None``; see the anchor below for what that would silently do.
+    :param dtype: A backend tensor's ``.dtype`` -- a ``tf.DType`` or a plain
+        dtype-name string. Not a ``keras.DTypePolicy`` and not ``None``; see
+        the anchor below for what that would silently do.
     :type dtype: Any
     :return: the :data:`_MASK_SENTINEL` entry for that dtype; ``-1e9`` for any
         name not in the table.
     :rtype: float
     """
-    # DECISION plan-2026-09-03T033750-9bdf25f4/D-007
-    # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`
-    # (a Keras-2 residue banned across `src/`; `str` alone mis-renders a
-    # `tf.DType` as "<dtype: 'float16'>"). WHAT NOT TO DO: do not widen the
-    # `Any` in the signature into a promise. The old symbol RAISED TypeError on a
-    # `keras.DTypePolicy` and normalized `None` to floatx; this idiom does
-    # neither, and the miss lands on `.get(..., -1.0e9)` -- so
-    # `_mask_value(layer.dtype_policy)` under `mixed_float16` returns -1e9, which
-    # `keras.ops.cast(..., "float16")` turns into **-inf** (measured), and one
-    # fully-masked row is then NaN. That is silent, not loud: unlike
-    # `common.py:apply_attention_mask`, where any unrecognised name still lands on
-    # float32 via `mask_dtype`, there is no second line here to catch it.
-    # Pass a TENSOR's `.dtype`, as both call sites do -- pinned by
-    # `tests/test_layers/test_attention/test_the_lighthouse_mask_value_contract.py`.
-    # See decisions.md D-007 and plans/DECISIONS.md D-018.
+    # DECISION plan-2026-09-03T033750-9bdf25f4/D-007: pass a tensor's
+    # `.dtype`, never a `DTypePolicy` or `None` -- a policy or `None` misses
+    # the table and returns -1e9, which casts to -inf under mixed_float16. See decisions.md.
     return _MASK_SENTINEL.get(getattr(dtype, "name", None) or str(dtype), -1.0e9)
 
 
@@ -301,10 +162,10 @@ def _compute_mandatory_indices(
     Two groups, both fixed at build time and both *additive* to the ``top_k``
     budget rather than competing with it (DECISION D-004(b)):
 
-    - **All coarsest-level entries.** Paper §3.4: the coarsest level is cheap and
+    - All coarsest-level entries. Paper §3.4: the coarsest level is cheap and
       guarantees a contributor at most base positions; Eq. 8 counts its
       ``N/p^(L-1)`` entries on top of the budget.
-    - **Level-0 entries ``0 .. p^(L-1) - 2``.** The coarsest windows scatter to
+    - Level-0 entries ``0 .. p^(L-1) - 2``. The coarsest windows scatter to
       ``[i F + F - 1, i F + 2F - 2]`` with ``F = p^(L-1)``, whose union is
       ``[F - 1, N - 1]``: positions ``0 .. F - 2`` are unreachable from the
       coarsest level. A level-0 entry has fanout 1 and shift 0, so entry ``i``
@@ -325,87 +186,75 @@ def _compute_mandatory_indices(
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-07-27T130643-38c5646a/D-009 — HISTORICAL: a cross-block
-# causality defect, FIXED by D-023 (per-causal-block `top_k`). Re-measured
-# 2026-08-27 (N=32, L=2, p=2, top_k=16): perturbing the last token moves positions
-# `< N // 2` by EXACTLY 0.0. Kept point: don't fix a causality defect in a docs
-# pass, and don't relax a red test to look green. See decisions.md D-009, D-003.
+# DECISION plan_2026-07-26_c41d09b2/D-004: (a) scorer reads raw QK
+# projections, not post-qk-norm; (b) coarsest level is additive to top_k, not
+# consuming it; (c) causal sort key is an entry's last-pooled position, not its
+# window start. These three letters are cited by (a)/(b)/(c) elsewhere in this
+# file. See decisions.md.
+
+# DECISION plan-2026-07-27T130643-38c5646a/D-009: superseded by D-023
+# (per-causal-block top_k) -- kept as the record that this was once broken.
+# See decisions.md.
 
 
 @register_dl_technique("dl_techniques.layers.attention.lighthouse_attention")
 class LighthouseAttention(keras.layers.Layer):
-    """Lighthouse Attention — coarse-to-fine pyramid + top-K causal SDPA.
+    """Coarse-to-fine pyramid attention with a per-head L2-norm scorer and top-k causal selection.
 
-    A Keras 3 port of the Lighthouse Attention mechanism. It builds a symmetric
-    Q/K/V pyramid of ``num_levels`` levels with mean-pool branching factor
-    ``pooling_factor``. It scores each pyramid entry with a per-head L2-norm
-    scorer over the raw projections, taking the joint QK / KQ max. It retains a
-    mandatory index set plus the ``top_k`` highest-scoring remaining entries,
-    and runs one causal SDPA on the gathered sub-sequence. Outputs are scattered
-    back to base positions with a causal ``p^l - 1`` shift, via
-    ``keras.ops.segment_sum``.
+    Builds a Q/K/V pyramid of ``num_levels`` levels, mean-pool branching
+    factor ``pooling_factor``. Scores each pyramid entry with a per-head
+    L2-norm scorer over the raw projections, taking the joint QK / KQ max.
+    Retains a mandatory index set plus the ``top_k`` highest-scoring
+    remaining entries, and runs one causal attention pass on the gathered
+    sub-sequence. Outputs are scattered back to base positions with a causal
+    ``p^l - 1`` shift, via ``keras.ops.segment_sum``.
 
     Set ``full_attention=True``, or call ``set_full_attention(True)`` at
-    runtime, to bypass the pyramid path entirely and run plain causal MHA. That
-    is the Stage-2 SDPA-resume path.
+    runtime, to bypass the pyramid path and run plain causal attention. That
+    is the two-stage-training resume path.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        Input  x  [B, N, dim]
-                  ▼
-        Wq / Wk / Wv  ►  Q_raw, K_raw, V   [B, N, H, D]
-                  │
-            ┌─────┴──────────────────┐
-            │ raw Q, K       Q, K, V │
-            ▼                        ▼
-        ┌────────────────────┐ ┌────────────────────────┐
-        │ SELECTOR           │ │ TRUNK                  │
-        │ ||Q_raw||          │ │ q_norm / k_norm        │
-        │ and ||K_raw||,     │ │ (optional; the SELECTOR│
-        │ at LEVEL 0 ONLY    │ │ never sees them)       │
-        │        ▼           │ │          ▼             │
-        │ MAX-pool them up   │ │ MEAN-pool up the       │
-        │ the pyramid, Eq. 5.│ │ pyramid, l = 0..L-1,   │
-        │ NEVER recomputed   │ │ window p^l. Level 0 is │
-        │ on pooled Q/K      │ │ an identity copy.      │
-        │        ▼           │ │          ▼             │
-        │ max(s_QK, s_KQ),   │ │ Q_pyr  K_pyr  V_pyr    │
-        │ then mean or max   │ │ [B, S_pyr, H, D]       │
-        │ over H             │ └───────────┬────────────┘
-        │ s  [B, S_pyr]      │             │
-        │        ▼           │             │
-        │ top_k over the     │             │
-        │ NON-mandatory pool │             │
-        │ only, per causal   │             │
-        │ block; UNION the   │             │
-        │ mandatory set      │             │
-        │ (every coarsest    │             │
-        │ entry + level-0    │             │
-        │ prefix 0..F-2)     │             │
-        │        ▼           │             │
-        │ argsort by causal  │             │
-        │ pos t = i·p^l      │             │
-        │           + p^l - 1│             │
-        └──────────┬─────────┘             │
-                   │ I  [B, S]. ONE index  │
-                   │ set, shared by every  │
-                   │ head.                 │
-                   └───────────┬───────────┘
-                               ▼
-        gather pyramid entries at I   ►  [B, S, H, D]
-                               ▼
-        causal SDPA over S: triangular mask, attn_prob,
-        dropout. Exact over S, because I is causally sorted.
-                               ▼
-        scatter back via segment_sum to base positions
-        i·p^l + p^l - 1 + k. Fan-in <= L; contributions are
-        SUMMED and are NOT normalised by fan-in.
-                               ▼
-        Wo  ►  Output  [B, N, dim]
+        x [B,N,dim]
+             │
+             ▼
+        Wq/Wk/Wv -> Q_raw,K_raw,V  [B,N,H,D]
+             │
+        ┌────┴────────────────┐
+        │ raw Q,K       Q,K,V │
+        ▼                     ▼
+        ┌─────────────┐  ┌─────────────┐
+        │ scorer:     │  │ trunk:      │
+        │ ||Q|| ||K|| │  │ q/k-norm    │
+        │ at level 0  │  │ (optional)  │
+        │ max-pooled  │  │ mean-pool   │
+        │ up pyramid  │  │ up pyramid  │
+        │  ▼          │  │  ▼          │
+        │ s [B,S_pyr] │  │ Q,K,V_pyr   │
+        │  ▼          │  │ [B,S_pyr,   │
+        │ top_k per   │  │  H,D]       │
+        │ causal      │  └──────┬──────┘
+        │ block, +    │         │
+        │ mandatory   │         │
+        │ set         │         │
+        │  ▼          │         │
+        │ sort by     │         │
+        │ causal pos  │         │
+        └──────┬──────┘         │
+               │ I [B,S]        │
+               └────────┬───────┘
+                         ▼
+        gather at I  -> [B,S,H,D]
+                         ▼
+        causal attention over S
+                         ▼
+        scatter (segment_sum) to base positions
+                         ▼
+        Wo -> output [B,N,dim]
 
-        Causality here is BLOCK-granular, not per-position. See the
+        Causality is block-granular, not per-position -- see the
         warning below before using this in a decoder.
 
     Shapes use ``B`` = batch, ``N`` = seq_len, ``H`` = num_heads,
@@ -414,7 +263,7 @@ class LighthouseAttention(keras.layers.Layer):
     ``S`` = N/F + (F - 1) + top_k.
 
     ``full_attention=True`` bypasses everything between the projections and
-    ``Wo``, running a single causal SDPA over all ``N`` positions.
+    ``Wo``, running a single causal attention pass over all ``N`` positions.
 
     :param dim: Model dimension (hidden size). Must be positive.
     :type dim: int
@@ -474,46 +323,42 @@ class LighthouseAttention(keras.layers.Layer):
     :raises ValueError: If any argument is invalid.
 
     .. note::
-        **Call-signature contract.** ``call()`` accepts only ``(inputs,
-        training=None)``. There is NO ``attention_mask`` parameter: masking is
-        internal and is never caller-supplied.
+        ``call()`` accepts only ``(inputs, training=None)``. There is no
+        ``attention_mask`` parameter: masking is internal and never
+        caller-supplied.
 
-        The layer also requires a statically-known sequence length. The pyramid
-        index buffers are built in ``build()`` from the concrete ``N`` of
-        ``input_shape``. Built with a dynamic or ``None`` sequence dimension,
-        ``call()`` raises ``RuntimeError`` ("requires a statically known
-        sequence length"). Build with a concrete ``N``, which is the common
-        training case. A static BATCH dimension is not required, but it does let
-        ``segment_sum`` take a concrete ``num_segments``, which ``jax.jit``
-        needs.
+        The layer also requires a statically known sequence length. The
+        pyramid index buffers are built in ``build()`` from the concrete
+        ``N`` of ``input_shape``. Built with a dynamic or ``None`` sequence
+        dimension, ``call()`` raises ``RuntimeError``. Build with a concrete
+        ``N``, the common training case. A static batch dimension is not
+        required, but it does let ``segment_sum`` take a concrete
+        ``num_segments``, which ``jax.jit`` needs.
 
     .. warning::
-        **Causality is block-granular, not per-position.** Cross-block causality
-        holds: a perturbation cannot reach an EARLIER causal block. Within a
-        block it can, so a query at position ``i`` may respond to ``i + 1`` when
-        both fall in the same block. Measured at ``N=32, L=2, p=2, top_k=16``:
-        8 violating cells, all ``j == i + 1``.
+        Causality is block-granular, not per-position. Cross-block
+        causality holds: a perturbation cannot reach an earlier causal
+        block. Within a block it can, so a query at position ``i`` may
+        respond to ``i + 1`` when both fall in the same block. Measured at
+        ``N=32, L=2, p=2, top_k=16``: 8 violating cells, all ``j == i + 1``.
 
         Don't use this layer where strict per-position causality decides
-        correctness. Autoregressive decoding and next-token training are the
-        cases that break. The block-level guarantee is pinned by
+        correctness. Autoregressive decoding and next-token training are
+        the cases that break. The block-level guarantee is pinned by
         ``test_causality_no_cross_block_leakage``, and the residual by the
         strict-xfail ``test_causality_is_per_position``.
 
-        This replaced a stale "not currently causal / MECHANISM IS NOT
-        DIAGNOSED" warning. See the D-009 anchor above the class.
-
     .. warning::
-        **This layer accepts NO attention mask.** ``call(inputs, training=None)``
-        has no ``attention_mask`` parameter, which is why
+        This layer accepts no attention mask. ``call(inputs,
+        training=None)`` has no ``attention_mask`` parameter, which is why
         ``TransformerLayer`` lists it in ``_MASKLESS_ATTENTION_TYPES`` and
-        SILENTLY DISCARDS a caller's mask for this type.
+        silently discards a caller's mask for this type.
 
         The cost is severity-asymmetric, measured 2026-08-27:
 
-        * **right-padding: exactly 0.0.** The causal design already isolates
+        * right-padding: exactly 0.0. The causal design already isolates
           trailing padding, so the missing mask costs nothing.
-        * **left-padding: 21.61 absolute.** This is the convention causal-LM
+        * left-padding: 21.61 absolute. This is the convention causal-LM
           decoding actually uses, and padded positions contaminate real ones.
 
         If your batch is left-padded, do not use this layer.
@@ -763,8 +608,8 @@ class LighthouseAttention(keras.layers.Layer):
         scatter targets, mandatory/candidate index sets) are stored on ``self``
         as plain numpy arrays — they are pure functions of ``(N, num_levels,
         pooling_factor)`` and are re-derived in a fresh ``build()`` after
-        ``from_config()`` restoration. See LESSONS: frozen tensor state must NOT
-        live in plain ``keras.ops.*`` tensors created in ``build()``.
+        ``from_config()`` restoration. Frozen tensor state must not live in
+        plain ``keras.ops.*`` tensors created in ``build()``.
 
         :param input_shape: ``(B, N, dim)``.
         :raises ValueError: Non-3D input, or static ``N`` not divisible by
@@ -844,11 +689,9 @@ class LighthouseAttention(keras.layers.Layer):
         n_cand = int(self._candidate_indices.size)
         self._effective_k = int(min(self.top_k, n_cand))
 
-        # DECISION plan-2026-07-29T110112-09832856/D-023 — PARTITION THE
-        # DISCRETIONARY BUDGET BY CAUSAL TIME. Don't replace this with one global
-        # `keras.ops.top_k`: measured pre-fix (N=32, L=2, p=2, top_k=16), perturbing
-        # token 31 EVICTED pyramid entry 15, moving output 15 by 2.585; a triangular
-        # mask cannot stop that. Buys BLOCK causality only. See decisions.md D-023.
+        # DECISION plan-2026-07-29T110112-09832856/D-023: partition the
+        # discretionary budget by causal block, never a single global top_k --
+        # pre-fix, perturbing token 31 moved output 15 by 2.585. See decisions.md.
         cand_causal = self._causal_pos[self._candidate_indices]
         block_span = int(self._max_fanout)
         self._sel_block_span = block_span
@@ -906,15 +749,8 @@ class LighthouseAttention(keras.layers.Layer):
                 self.top_k, n_cand, n, self._effective_k,
             )
 
-        # De-anchored 2026-08-27: this read `# DECISION D-001 item 2`, a BARE
-        # anchor with no plan-id prefix, which `validate-plan.mjs` reports as
-        # `anchor-unqualified`. Its owner is `plan_2026-07-26_c41d09b2`: the
-        # D-004 block above calls itself a revision of D-001. That plan
-        # directory has been sliding-window trimmed and no D-001 entry survives
-        # anywhere in `plans/`, so qualifying it would just produce an
-        # unresolvable orphan. The reasoning is kept inline instead, which is
-        # what an anchor is for: segment_sum has no broadcast form, so the
-        # scatter materialises one value row per (entry, target) pair.
+        # segment_sum has no broadcast form, so the scatter materialises one
+        # value row per (entry, target) pair.
         tiled = self._S_sel * self._max_fanout
         if tiled > 4 * n:
             logger.warning(
@@ -980,15 +816,15 @@ class LighthouseAttention(keras.layers.Layer):
         """Per-head L2-norm scorer with max-pool over coarser levels.
 
         Paper Eq. 4-5: norms are computed once on the level-0 projections and
-        *max-pooled* up the pyramid — NOT recomputed on mean-pooled projections,
-        so a coarse span inherits the salience of its strongest token. Returns
-        ``(s_qk_pyr, s_kq_pyr)`` each shape ``(B, S_pyr, H)``, where
-        ``s_qk = ||Q||`` and ``s_kq = ||K||`` are the two terms whose per-entry
-        max gives the joint scorer.
+        max-pooled up the pyramid, never recomputed on mean-pooled
+        projections, so a coarse span inherits the salience of its strongest
+        token. Returns ``(s_qk_pyr, s_kq_pyr)`` each shape ``(B, S_pyr, H)``,
+        where ``s_qk = ||Q||`` and ``s_kq = ||K||`` are the two terms whose
+        per-entry max gives the joint scorer.
 
-        Both arguments must be the **raw** projections. Passing QK-normalised
-        tensors flattens ``||Q||`` and ``||K||`` to a near-constant and destroys
-        the ranking (DECISION D-004(a)).
+        Both arguments must be the raw projections. Passing QK-normalised
+        tensors flattens ``||Q||`` and ``||K||`` to a near-constant and
+        destroys the ranking (DECISION D-004(a)).
         """
         n = self._N_static
         h = self.num_heads
@@ -1045,11 +881,9 @@ class LighthouseAttention(keras.layers.Layer):
         )
 
         if self._effective_k > 0:
-            # PER-CAUSAL-BLOCK top_k, NOT a global one. See the D-023 anchor in
-            # `_populate_pyramid_buffers`: a single global budget lets a future
-            # token evict a past token's entry, which is the causality defect
-            # this layer shipped with. Confining each competition to one causal
-            # block bounds the blast radius of a perturbation to that block.
+            # Per-causal-block top_k, not a global one -- see D-023 above.
+            # A global budget lets a future token evict a past token's entry;
+            # confining competition to one block bounds a perturbation's reach.
             nb, per_b = self._sel_num_blocks, self._sel_per_block
             # block_cand is (nb, W), padded with -1; valid is (nb, W).
             block_cand = self._const(
@@ -1119,12 +953,9 @@ class LighthouseAttention(keras.layers.Layer):
         k_t = keras.ops.transpose(k_heads, (0, 2, 1, 3))
         v_t = keras.ops.transpose(v_heads, (0, 2, 1, 3))
 
-        # DECISION plan_2026-06-14_33b77a7a/D-002
-        # Reuse the precomputed self._scale. Don't recompute keras.ops.sqrt per
-        # call. In float32, keras.ops.cast(self._scale, dt) equals
-        # 1/keras.ops.sqrt(cast(head_dim, dt)); measured 0 mismatches over
-        # head_dim in {8, 16, 32, 64, 128}.
-        # The originating plan directory is gone, so this comment is the record.
+        # DECISION plan_2026-06-14_33b77a7a/D-002: reuse the precomputed
+        # self._scale, never recompute keras.ops.sqrt per call -- bit-identical
+        # to 1/sqrt(head_dim) for head_dim in {8,16,32,64,128}. See decisions.md.
         scale = keras.ops.cast(self._scale, q_t.dtype)
         scores = keras.ops.matmul(q_t, keras.ops.transpose(k_t, (0, 1, 3, 2))) * scale
 
