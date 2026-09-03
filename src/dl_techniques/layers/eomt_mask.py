@@ -1,38 +1,26 @@
-"""
-Generate instance segmentation predictions from transformer query tokens.
+"""Query-based segmentation prediction heads, built by :class:`EomtMask`.
 
-This layer implements the prediction heads for a query-based segmentation
-architecture, translating learned object queries into class labels and spatial
-masks. Each query represents a hypothesis for a single object instance, and
-the module decouples classification ("what") and localization ("where") into
-two parallel prediction heads operating on the same query tokens.
-
-The classification head uses a linear layer (with optional MLP) on query tokens
-to produce class logits: class_logits = Linear(q). The mask head transforms
-queries through an MLP into mask embeddings, then computes dot-product similarity
-with every pixel in the encoder's feature map: mask_logit[i,j] = m @ P[i,j]^T,
-producing per-query segmentation masks.
+Each transformer query token represents one hypothesized object instance.
+This layer splits its prediction into two independent heads sharing the
+same query tokens: a class head (linear, with an optional MLP) producing
+``class_logits = Linear(q)``, and a mask head that projects each query to
+a mask embedding and takes its dot product against every pixel in the
+encoder's feature map, ``mask_logit[i,j] = m @ P[i,j]^T``.
 
 References:
-    - Carion et al. "End-to-End Object Detection with Transformers" (DETR).
-      https://arxiv.org/abs/2005.12872
-    - Li et al. "Your ViT is Secretly a Segmentation Model".
-      https://arxiv.org/abs/2312.02113
+    - Carion et al., 2020. End-to-End Object Detection with Transformers.
+      (https://arxiv.org/abs/2005.12872)
+    - Li et al., 2023. Your ViT Is Secretly a Segmentation Model.
+      (https://arxiv.org/abs/2312.02113)
 """
-
 
 import keras
 from typing import Optional, Any, Tuple, Union, Dict, List
 from keras import ops, layers, initializers, regularizers, activations, constraints
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from .norms import create_normalization_layer, NormalizationType
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.eomt_mask")
 class EomtMask(keras.layers.Layer):
@@ -46,7 +34,7 @@ class EomtMask(keras.layers.Layer):
     computes mask logits as mask_logits = mask_emb @ pixel_features^T, optionally
     scaled by a temperature parameter.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -162,7 +150,6 @@ class EomtMask(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if num_classes <= 0:
             raise ValueError(f"num_classes must be positive, got {num_classes}")
         if mask_dim <= 0:
@@ -172,7 +159,6 @@ class EomtMask(keras.layers.Layer):
         if mask_temperature <= 0:
             raise ValueError(f"mask_temperature must be positive, got {mask_temperature}")
 
-        # Store configuration
         self.num_classes = num_classes
         self.hidden_dims = hidden_dims if hidden_dims is not None else [256, 256]
         self.mask_dim = mask_dim
@@ -195,9 +181,6 @@ class EomtMask(keras.layers.Layer):
         self.kernel_constraint = constraints.get(kernel_constraint)
         self.bias_constraint = constraints.get(bias_constraint)
 
-        # CREATE all sub-layers in __init__
-
-        # Optional normalization layers
         if self.use_class_norm:
             self.class_norm = create_normalization_layer(
                 self.normalization_type,
@@ -216,7 +199,6 @@ class EomtMask(keras.layers.Layer):
         else:
             self.mask_norm = None
 
-        # Class prediction head
         self.class_mlp = self._build_mlp(
             self.class_mlp_dims,
             name_prefix="class_mlp"
@@ -235,13 +217,11 @@ class EomtMask(keras.layers.Layer):
             name="class_head"
         )
 
-        # Mask embedding MLP
         self.mask_mlp = self._build_mlp(
             self.hidden_dims,
             name_prefix="mask_mlp"
         ) if self.hidden_dims else None
 
-        # Final mask projection
         self.mask_projection = layers.Dense(
             self.mask_dim,
             use_bias=self.use_bias,
@@ -254,7 +234,6 @@ class EomtMask(keras.layers.Layer):
             name="mask_projection"
         )
 
-        # Temperature parameter
         if self.learnable_temperature:
             self.temperature = self.add_weight(
                 name="temperature",
@@ -318,26 +297,21 @@ class EomtMask(keras.layers.Layer):
         """
         query_shape, pixel_shape = input_shape
 
-        # Build normalization layers if present
         if self.class_norm is not None:
             self.class_norm.build(query_shape)
         if self.mask_norm is not None:
             self.mask_norm.build(query_shape)
 
-        # Build class head path
         if self.class_mlp is not None:
             self.class_mlp.build(query_shape)
-            # Get output shape of class MLP for class head
             class_mlp_output_shape = list(query_shape)
             class_mlp_output_shape[-1] = self.class_mlp_dims[-1]
             self.class_head.build(tuple(class_mlp_output_shape))
         else:
             self.class_head.build(query_shape)
 
-        # Build mask head path
         if self.mask_mlp is not None:
             self.mask_mlp.build(query_shape)
-            # Get output shape of mask MLP for projection
             mask_mlp_output_shape = list(query_shape)
             mask_mlp_output_shape[-1] = self.hidden_dims[-1]
             self.mask_projection.build(tuple(mask_mlp_output_shape))
@@ -361,21 +335,18 @@ class EomtMask(keras.layers.Layer):
         :return: Tuple of (class_predictions, mask_predictions).
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # Handle both tuple and dict inputs
         if isinstance(inputs, dict):
             query_tokens = inputs['query_tokens']
             pixel_features = inputs['pixel_features']
         else:
             query_tokens, pixel_features = inputs
 
-        # Get shapes
         batch_size = ops.shape(query_tokens)[0]
         num_queries = ops.shape(query_tokens)[1]
         height = ops.shape(pixel_features)[1]
         width = ops.shape(pixel_features)[2]
         pixel_dim = ops.shape(pixel_features)[3]
 
-        # CLASS PREDICTION PATH
         class_input = query_tokens
         if self.class_norm is not None:
             class_input = self.class_norm(class_input, training=training)
@@ -385,7 +356,6 @@ class EomtMask(keras.layers.Layer):
 
         class_predictions = self.class_head(class_input, training=training)
 
-        # MASK PREDICTION PATH
         mask_input = query_tokens
         if self.mask_norm is not None:
             mask_input = self.mask_norm(mask_input, training=training)
@@ -395,29 +365,22 @@ class EomtMask(keras.layers.Layer):
 
         mask_embeddings = self.mask_projection(mask_input, training=training)
 
-        # Compute mask logits via dot product
-        # Reshape pixel features for efficient computation
         pixel_features_flat = ops.reshape(
             pixel_features, [batch_size, height * width, pixel_dim]
         )
 
-        # Transpose for matrix multiplication
         pixel_features_transposed = ops.transpose(pixel_features_flat, [0, 2, 1])
 
-        # Dot product: [batch, queries, mask_dim] @ [batch, mask_dim, H*W]
         mask_logits_flat = ops.matmul(mask_embeddings, pixel_features_transposed)
 
-        # Apply temperature scaling
         if self.learnable_temperature or self.mask_temperature != 1.0:
             temperature = self.temperature if self.learnable_temperature else self.mask_temperature
             mask_logits_flat = mask_logits_flat / temperature
 
-        # Reshape to spatial dimensions
         mask_predictions = ops.reshape(
             mask_logits_flat, [batch_size, num_queries, height, width]
         )
 
-        # Apply mask activation if specified
         if self.mask_activation is not None:
             mask_predictions = self.mask_activation(mask_predictions)
 
@@ -481,5 +444,3 @@ class EomtMask(keras.layers.Layer):
             'bias_constraint': constraints.serialize(self.bias_constraint),
         })
         return config
-
-# ---------------------------------------------------------------------

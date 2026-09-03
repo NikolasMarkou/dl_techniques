@@ -1,51 +1,30 @@
-"""
-Convolutional Kolmogorov-Arnold Networks Implementation
-====================================================
+"""Convolutional Kolmogorov-Arnold Network layer, built by :class:`KANvolution`.
 
-This module implements Convolutional Kolmogorov-Arnold Networks (KANs) as described
-in the paper by Bodner et al. (2024). KANs integrate the principles of
-Kolmogorov-Arnold representation into convolutional layers, using learnable
-non-linear functions based on B-splines.
+The Kolmogorov-Arnold representation theorem says any multivariate continuous
+function can be written as a sum of univariate functions. KANs apply that
+idea to neural networks by replacing a fixed activation with a learnable
+univariate function per connection, built from B-splines. This layer moves
+that idea into a convolution: each kernel tap gets its own learnable
+function, combining a B-spline interpolation with a SiLU term,
+``K(x) = w_spline * B(x) + w_silu * SiLU(x)``, instead of a fixed kernel
+weight and activation.
 
-Mathematical Foundation
-----------------------
-The Kolmogorov-Arnold representation theorem states that any multivariate continuous
-function f can be expressed as:
+The B-spline uses linear interpolation over a fixed grid in ``[-1, 1]``;
+input taps are squashed into that range with ``tanh`` before the basis is
+computed. The per-tap basis tensor is
+``(batch, out_h, out_w, kernel_h*kernel_w*channels, grid_size + 1)``, so
+memory scales with ``grid_size`` — keep it small on large inputs.
 
-    f(x₁, ..., xₙ) = Σᵢ₌₁²ⁿ⁺¹ Φᵢ(Σⱼ₌₁ⁿ φᵢⱼ(xⱼ))
-
-where φᵢⱼ and Φᵢ are univariate continuous functions. KANs replace traditional
-fixed activation functions with learnable univariate functions, enabling more
-expressive and adaptive neural networks.
-
-KANvolution Layer Computation
-----------------------------
-For each convolutional kernel element, the KANvolution layer computes:
-
-    K(x) = w_spline · B(x) + w_silu · SiLU(x)
-
-where:
-- B(x) is the B-spline interpolation function: B(x) = Σᵢ Nᵢ(x) · cᵢ
-- Nᵢ(x) are the B-spline basis functions (linear interpolation weights)
-- cᵢ are learnable control points defining the spline curve
-- SiLU(x) = x · sigmoid(x) is the Swish/SiLU activation function
-- w_spline, w_silu are learnable combination weights
-
-References
-----------
-    [1] Bodner et al. (2024). "Convolutional Kolmogorov-Arnold Networks"
-    [2] Kolmogorov, A. N. (1957). "On the representation of continuous functions"
-    [3] Liu, Ziming, et al. (2024). "KAN: Kolmogorov-Arnold Networks"
+References:
+    - Bodner et al., 2024. Convolutional Kolmogorov-Arnold Networks.
+    - Liu et al., 2024. KAN: Kolmogorov-Arnold Networks.
+    - Kolmogorov, A. N., 1957. On the Representation of Continuous Functions.
 """
 
 import keras
 import numpy as np
 from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict, Callable
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
@@ -54,22 +33,17 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.kanvolution")
 class KANvolution(keras.layers.Layer):
-    """
-    Kolmogorov-Arnold Network convolution layer with learnable B-spline activations.
+    """Convolution layer whose per-tap activation is a learnable B-spline
+    combined with SiLU, instead of a fixed kernel weight and activation.
 
-    This layer implements a convolutional operation where traditional fixed activation
-    functions are replaced with learnable univariate functions based on B-splines.
-    Each kernel element applies adaptive non-linear transformations that combine
-    B-spline interpolation with SiLU activation for enhanced feature extraction.
-    The KAN combination is K(x) = w_spline * B(x) + w_silu * SiLU(x), where B(x)
-    uses linear interpolation over a grid of control points in [-1, 1] and input
-    values are normalized using tanh for stable gradient flow.
+    Computes ``K(x) = w_spline * B(x) + w_silu * SiLU(x)`` per tap, where
+    ``B(x)`` is a linear B-spline over a fixed grid in ``[-1, 1]`` and
+    ``x`` is the tap value squashed into that range by ``tanh``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -156,13 +130,11 @@ class KANvolution(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate required parameters
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
         if grid_size <= 1:
             raise ValueError(f"grid_size must be > 1, got {grid_size}")
 
-        # Store ALL configuration for serialization
         self.filters = filters
         self.kernel_size = self._normalize_kernel_size(kernel_size)
         self.grid_size = grid_size
@@ -172,18 +144,15 @@ class KANvolution(keras.layers.Layer):
         self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
 
-        # Store serializable initializers and regularizers
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
-        # Validate padding
         if self.padding not in ('valid', 'same'):
             raise ValueError(f"padding must be 'valid' or 'same', got {padding}")
 
-        # Initialize weight attributes - created in build()
         self.control_points = None
         self.w_spline = None
         self.w_silu = None
@@ -250,7 +219,6 @@ class KANvolution(keras.layers.Layer):
         """
         logger.info(f"Building KANvolution layer with input shape: {input_shape}")
 
-        # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {input_shape}")
 
@@ -259,8 +227,6 @@ class KANvolution(keras.layers.Layer):
             raise ValueError("Input channels dimension must be defined")
         self._input_channels = input_channels
 
-        # Create B-spline control points for learnable univariate functions
-        # Shape: (filters, input_channels, kernel_h, kernel_w, grid_size + 1)
         self.control_points = self.add_weight(
             name='control_points',
             shape=(self.filters, input_channels, *self.kernel_size, self.grid_size + 1),
@@ -269,7 +235,6 @@ class KANvolution(keras.layers.Layer):
             trainable=True,
         )
 
-        # Combination weights for B-spline component
         self.w_spline = self.add_weight(
             name='w_spline',
             shape=(self.filters, input_channels, *self.kernel_size),
@@ -278,7 +243,6 @@ class KANvolution(keras.layers.Layer):
             trainable=True,
         )
 
-        # Combination weights for SiLU component
         self.w_silu = self.add_weight(
             name='w_silu',
             shape=(self.filters, input_channels, *self.kernel_size),
@@ -287,7 +251,6 @@ class KANvolution(keras.layers.Layer):
             trainable=True,
         )
 
-        # Optional bias vector
         if self.use_bias:
             self.bias = self.add_weight(
                 name='bias',
@@ -297,23 +260,10 @@ class KANvolution(keras.layers.Layer):
                 trainable=True,
             )
 
-        # Fixed grid points for B-spline interpolation in range [-1, 1].
-        #
-        # Materialized by an INITIALIZER, never by `add_weight(initializer='zeros')`
-        # followed by `.assign()`. Keras 3 runs a symbolic build pass inside a
-        # `StatelessScope` whenever this layer is first reached from a PARENT's
-        # `call()` -- i.e. in every real model -- and that scope RECORDS the
-        # `.assign()` and then DISCARDS it, leaving the knot vector all zeros: every
-        # knot collapses onto a single point, so `_compute_bspline_basis` measures
-        # every distance from the same location and the "learnable univariate
-        # function" degenerates. Measured on CPU 2026-08-15: `grid[0]` is -1.0 on a
-        # direct `.build(...)` and 0.0 through a parent layer's `call()`. See the
-        # DECISION anchor in `layers/time_series/nbeats_blocks.py`
-        # (`TrendBlock._create_polynomial_basis`) and decisions.md D-028.
-        #
-        # `np.linspace` (not `ops.linspace`) on purpose: a `keras.ops` tensor created
-        # in `build()` belongs to the symbolic pass's scratch `FuncGraph` and raises
-        # "out of scope" when the initializer later runs on the eager pass.
+        # Grid must come from an initializer, not add_weight+assign: a StatelessScope
+        # build pass discards the assign, leaving every knot at 0. See decisions.md D-028.
+        # np.linspace, not ops.linspace: an ops tensor built here is scoped to the
+        # symbolic build pass and raises when the initializer runs on the eager pass.
         grid_values = np.linspace(-1.0, 1.0, self.grid_size + 1, dtype='float32')
         self.grid = self.add_weight(
             name='grid',
@@ -339,13 +289,10 @@ class KANvolution(keras.layers.Layer):
         :return: Basis function weights for each grid point.
         :rtype: keras.KerasTensor
         """
-        # Clamp input to valid grid range for numerical stability
         x_clamped = ops.clip(x, -1.0, 1.0)
 
-        # Expand dimensions for broadcasting with grid points
         x_expanded = ops.expand_dims(x_clamped, axis=-1)
 
-        # Compute distances from each grid point
         grid_expanded = ops.expand_dims(self.grid, axis=0)
         distances = ops.abs(x_expanded - grid_expanded)
 
@@ -353,7 +300,6 @@ class KANvolution(keras.layers.Layer):
         grid_spacing = 2.0 / self.grid_size  # Spacing in [-1, 1] range
         weights = ops.maximum(0.0, 1.0 - distances / grid_spacing)
 
-        # Normalize weights to ensure they sum to 1
         weight_sum = ops.sum(weights, axis=-1, keepdims=True)
         normalized_weights = weights / (weight_sum + 1e-8)
 
@@ -377,23 +323,9 @@ class KANvolution(keras.layers.Layer):
         :return: Output tensor with shape (batch_size, new_height, new_width, filters).
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-22T035419-a11304c8/D-052
-        # Do NOT "simplify" this back to `ops.conv(inputs, w_spline + w_silu)`.
-        # That is what stood here until 2026-08-22 and it is not a KAN: it never
-        # called `_compute_bspline_basis`, never read `control_points` and never
-        # read `grid`, so the whole learnable-univariate-function apparatus this
-        # module is named for was decorative. MEASURED at that revision, on CPU:
-        # the layer's output equalled `ops.conv` with kernel `w_spline + w_silu`
-        # to `max|delta| = 0.0` EXACTLY; `|f(2x) - 2f(x)| = 0.0` EXACTLY, i.e.
-        # the layer was degree-1 homogeneous and therefore carried no
-        # non-linearity at all, not even the advertised SiLU; and after one real
-        # `SGD(lr=1.0)` step `control_points` moved `0.000000e+00` while
-        # `w_spline` and `w_silu` moved by the IDENTICAL `1.221391e+00`,
-        # confirming they were a redundant reparameterization of one kernel.
-        # The cost of doing it properly is the `basis` tensor below, which is
-        # `(batch, out_h, out_w, kh*kw*channels, grid_size + 1)` -- that is
-        # inherent to a convolutional KAN, not an artifact of this code. Use a
-        # small `grid_size` on large inputs. See decisions.md D-052.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-052: never simplify this to
+        # ops.conv(inputs, w_spline + w_silu) -- that skips the spline entirely.
+        # The basis tensor's grid_size factor is inherent to a conv KAN. See decisions.md.
         num_taps = self.kernel_size[0] * self.kernel_size[1] * self._input_channels
 
         # Patches in the SAME (kernel_h, kernel_w, channels) tap order that the
@@ -438,11 +370,9 @@ class KANvolution(keras.layers.Layer):
 
         outputs = spline_term + silu_term
 
-        # Add bias if enabled
         if self.use_bias:
             outputs = ops.add(outputs, self.bias)
 
-        # Apply post-convolution activation if specified
         if self.activation is not None:
             activation_fn = keras.activations.get(self.activation)
             outputs = activation_fn(outputs)
@@ -462,9 +392,7 @@ class KANvolution(keras.layers.Layer):
 
         batch_size, height, width, _ = input_shape
 
-        # Compute spatial dimensions based on convolution parameters
         if self.padding == 'same':
-            # Same padding: output_size = ceil(input_size / stride)
             if height is not None:
                 out_height = (height + self.strides[0] - 1) // self.strides[0]
             else:
@@ -474,8 +402,7 @@ class KANvolution(keras.layers.Layer):
                 out_width = (width + self.strides[1] - 1) // self.strides[1]
             else:
                 out_width = None
-        else:  # 'valid' padding
-            # Valid padding: output_size = ceil((input_size - kernel_size + 1) / stride)
+        else:
             if height is not None:
                 out_height = max(0, (height - self.kernel_size[0]) // self.strides[0] + 1)
             else:
@@ -511,5 +438,3 @@ class KANvolution(keras.layers.Layer):
             'activity_regularizer': keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

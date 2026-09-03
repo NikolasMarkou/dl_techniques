@@ -1,74 +1,25 @@
-"""
-Restricted Boltzmann Machine (RBM).
+"""Restricted Boltzmann Machine, built by :class:`RestrictedBoltzmannMachine`.
 
-An RBM is a generative, stochastic, energy-based neural network model that
-learns a probability distribution over a set of inputs. It serves as a
-foundational building block for deep belief networks and other generative
-architectures.
+An RBM is an energy-based generative model on a bipartite graph of visible
+and hidden units. Unlike a general Boltzmann machine, it forbids
+intra-layer connections, so each layer is conditionally independent given
+the other. That independence is what lets the model train by alternating
+Gibbs sampling instead of full joint inference. Training uses Contrastive
+Divergence (CD-k): a cheap positive phase computed directly from data, and
+a negative phase approximated by running only ``k`` Gibbs steps from a
+data-initialized chain rather than sampling the true equilibrium
+distribution.
 
-Architectural Overview
-----------------------
-The model consists of a bipartite graph with two layers of units: a layer
-of "visible" units representing the input data and a layer of "hidden"
-units that learn to capture features or dependencies within the data.
+The layer supports binary (Bernoulli) and Gaussian visible units, chosen
+via ``visible_unit_type``. Weight updates happen inside
+:meth:`RestrictedBoltzmannMachine.contrastive_divergence`, not through
+Keras's optimizer, so the layer manages its own gradient ascent step.
 
-The key architectural constraint, which gives the model its name, is that
-there are no intra-layer connections; units in the visible layer only
-connect to units in the hidden layer, and vice-versa. This restriction
-ensures that the hidden units are conditionally independent given a visible
-vector, and visible units are conditionally independent given a hidden
-vector. This property is crucial for the efficiency of the training
-algorithm.
-
-Mathematical Foundations
-------------------------
-The RBM is defined by an energy function E(v, h) for a joint
-configuration of visible (v) and hidden (h) units:
-
-    E(v, h) = -vᵀWh - bᵀv - cᵀh
-
-where W is the weight matrix connecting the layers, and b and c are the
-bias vectors for the visible and hidden units, respectively.
-
-This energy function defines a joint probability distribution over visible
-and hidden units via the Boltzmann distribution:
-
-    p(v, h) = (1/Z) * exp(-E(v, h))
-
-The partition function Z is the sum over all possible configurations of v
-and h, making its direct computation intractable for non-trivial models.
-The primary challenge in training an RBM is to update the model parameters
-(W, b, c) to maximize the likelihood of the observed data p(v) without
-computing Z.
-
-Training with Contrastive Divergence
-------------------------------------
-The gradient of the log-likelihood with respect to a weight W_ij is:
-
-    ∂log(p(v)) / ∂W_ij = <v_i h_j>_data - <v_i h_j>_model
-
-The first term, <v_i h_j>_data, is the expectation of the product of the
-ith visible unit and jth hidden unit, averaged over the training data.
-This "positive phase" is easy to compute. The second term,
-<v_i h_j>_model, is the same expectation but averaged over the model's
-equilibrium distribution. This "negative phase" is intractable as it
-requires extensive sampling.
-
-Contrastive Divergence (CD-k) provides an efficient approximation. Instead
-of sampling from the model's true equilibrium distribution, we initialize a
-Markov chain at a data vector from the training set and run Gibbs sampling
-for only k steps. The resulting "fantasy" or "reconstruction" vector is
-then used to approximate the negative phase statistics. This procedure
-provides a biased but low-variance estimate of the true gradient, proving
-effective in practice.
-
-References
-----------
-- Hinton, G. E. (2002). Training products of experts by minimizing
-  contrastive divergence. Neural Computation, 14(8), 1771-1800.
-- Hinton, G. E. (2010). A practical guide to training restricted
-  Boltzmann machines. UTML TR 2010-003.
-
+References:
+    - Hinton, G. E., 2002. Training Products of Experts by Minimizing
+      Contrastive Divergence. Neural Computation, 14(8), 1771-1800.
+    - Hinton, G. E., 2010. A Practical Guide to Training Restricted
+      Boltzmann Machines. UTML TR 2010-003.
 """
 
 import keras
@@ -78,7 +29,6 @@ from keras import regularizers
 from typing import Optional, Tuple, Dict, Any
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.restricted_boltzmann_machine")
 class RestrictedBoltzmannMachine(keras.layers.Layer):
@@ -94,7 +44,7 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
     approximate the model expectation for the negative phase. Supports
     both binary (Bernoulli) and Gaussian visible units.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -157,7 +107,6 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if n_hidden <= 0:
             raise ValueError(f"n_hidden must be positive, got {n_hidden}")
         if learning_rate <= 0:
@@ -174,7 +123,6 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
                 f"got {visible_unit_type}"
             )
 
-        # Store configuration
         self.n_hidden = n_hidden
         self.learning_rate = learning_rate
         self.n_gibbs_steps = n_gibbs_steps
@@ -187,7 +135,6 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             regularizers.get(kernel_regularizer) if kernel_regularizer else None
         )
 
-        # Weights will be created in build()
         self.W = None
         self.visible_bias = None
         self.hidden_bias = None
@@ -202,7 +149,6 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
         if self.n_visible is None:
             raise ValueError("Last dimension of input must be defined")
 
-        # Create weight matrix W: (n_visible, n_hidden)
         self.W = self.add_weight(
             name='W',
             shape=(self.n_visible, self.n_hidden),
@@ -211,7 +157,6 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             trainable=True,
         )
 
-        # Create bias terms
         if self.use_bias:
             self.visible_bias = self.add_weight(
                 name='visible_bias',
@@ -336,7 +281,6 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             if self.visible_unit_type == 'binary':
                 return self._sample_binary(visible_probs)
             else:  # gaussian
-                # Sample from Gaussian with unit variance
                 noise = keras.random.normal(
                     shape=ops.shape(visible_probs),
                     dtype=visible_probs.dtype
@@ -355,13 +299,10 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
         :type visible: keras.KerasTensor
         :return: Tuple of (reconstructed visible, hidden probabilities).
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]"""
-        # Sample hidden given visible
         hidden = self.sample_hidden_given_visible(visible, sample=True)
 
-        # Compute hidden probabilities (for gradient computation)
         hidden_probs = self._compute_hidden_probabilities(visible)
 
-        # Sample visible given hidden
         new_visible = self.sample_visible_given_hidden(hidden, sample=True)
 
         return new_visible, hidden_probs
@@ -376,37 +317,30 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
         :type visible_data: keras.KerasTensor
         :return: Tuple of (reconstruction_error, metrics dict).
         :rtype: Tuple[keras.KerasTensor, Dict[str, keras.KerasTensor]]"""
-        # Ensure weights are built
         if not self.built:
             self.build(ops.shape(visible_data))
 
         batch_size = ops.cast(ops.shape(visible_data)[0], dtype=visible_data.dtype)
 
-        # Positive phase: compute statistics from data
         hidden_probs_data = self._compute_hidden_probabilities(visible_data)
         hidden_states_data = self._sample_binary(hidden_probs_data)
 
-        # Positive gradient contribution
         positive_grad = ops.matmul(
             ops.transpose(visible_data),
             hidden_probs_data
         )
 
-        # Negative phase: k steps of Gibbs sampling
         visible_model = visible_data
         for _ in range(self.n_gibbs_steps):
             visible_model, _ = self.gibbs_sampling_step(visible_model)
 
-        # Compute statistics from model samples
         hidden_probs_model = self._compute_hidden_probabilities(visible_model)
 
-        # Negative gradient contribution
         negative_grad = ops.matmul(
             ops.transpose(visible_model),
             hidden_probs_model
         )
 
-        # Compute gradients
         W_grad = ops.divide(
             ops.subtract(positive_grad, negative_grad),
             batch_size
@@ -422,8 +356,7 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
                 batch_size
             )
 
-        # Update weights using gradient ascent (maximize likelihood)
-        # Note: Using tf.GradientTape per requirements
+        # Gradient ascent step, applied directly via assign_add (no optimizer).
         self.W.assign_add(ops.multiply(self.learning_rate, W_grad))
 
         if self.use_bias:
@@ -434,12 +367,10 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
                 ops.multiply(self.learning_rate, hidden_bias_grad)
             )
 
-        # Compute reconstruction error
         reconstruction_error = ops.mean(
             ops.square(ops.subtract(visible_data, visible_model))
         )
 
-        # Compute free energy difference (for monitoring)
         free_energy_data = self._free_energy(visible_data)
         free_energy_model = self._free_energy(visible_model)
         free_energy_diff = ops.mean(
@@ -532,5 +463,3 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             ),
         })
         return config
-
-# ---------------------------------------------------------------------

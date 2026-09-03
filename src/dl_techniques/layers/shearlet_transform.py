@@ -1,50 +1,25 @@
-"""
-Decompose an image into multi-scale, multi-directional components.
+"""Fixed multi-scale, multi-directional shearlet transform, built by
+:class:`ShearletTransform`.
 
-This layer implements a differentiable shearlet transform, a powerful tool
-from multiscale geometric analysis that provides a sparse representation of
-images rich in directional features like edges and textures. Unlike learned
-convolutional filters, this layer acts as a fixed, mathematically-defined
-feature extractor that injects strong geometric priors into a neural
-network.
+Wavelets scale isotropically and so represent curved edges inefficiently.
+Shearlets replace isotropic scaling with a combination of anisotropic
+scaling and shearing, giving elongated, directionally oriented basis
+functions that capture edges with far fewer non-zero coefficients. This
+layer is a fixed, non-trainable filter bank, not a learned convolution: it
+computes the 2D FFT of the input, multiplies element-wise by a
+pre-computed bank of shearlet filters (one per scale and orientation),
+and inverse-transforms each result back to the spatial domain. The filter
+bank forms a tight frame, so the transform is energy-preserving and
+invertible.
 
-Architecturally, the layer operates as a non-trainable filter bank in the
-frequency domain. The transformation process involves:
-1.  Computing the 2D Fast Fourier Transform (FFT) of the input image.
-2.  Multiplying the result element-wise with a pre-computed bank of
-    shearlet filters, each corresponding to a specific scale and orientation.
-3.  Applying the inverse FFT to each filtered output to obtain the shearlet
-    coefficients in the spatial domain.
-
-The foundational mathematical principle of the shearlet transform is its
-ability to overcome the limitations of traditional wavelets. While wavelets
-use isotropic (directionally uniform) scaling, they are inefficient at
-representing anisotropic features like curves. Shearlets, in contrast, are
-constructed using a combination of anisotropic scaling and shearing matrices.
-This construction leads to basis functions that are elongated and directionally
-oriented, making them highly effective at capturing directional information.
-
-A key theoretical property is the use of "parabolic scaling," where the
-support of the shearlet filters in the frequency domain scales differently
-along different axes (e.g., size `~2^j` along one axis and `~2^(j/2)` along
-the other). This specific scaling relationship is mathematically proven to be
-optimal for providing sparse representations of "cartoon-like" images—a class
-of functions that are piecewise smooth with discontinuities along curves.
-This optimal sparsity means that complex edge information can be captured
-with very few non-zero coefficients, making it a highly efficient
-representation.
-
-The constructed filter bank forms a "tight frame," a mathematical property
-that ensures the transformation is energy-preserving and allows for perfect
-reconstruction of the original signal from its coefficients. This stability
-is crucial for its integration into deep learning models, as it guarantees
-a well-behaved and invertible feature transformation.
+The filter bank is fixed at build time from the input's height and width,
+so this layer requires a statically known spatial shape.
 
 References:
-    - Guo, K., Kutyniok, G., & Labate, D., 2006. Sparse multidimensional
-      representations using shearlets.
-    - Kutyniok, G., & Labate, D., 2012. Shearlets: Multiscale Analysis
-      for Multivariate Data.
+    - Guo, K., Kutyniok, G., Labate, D., 2006. Sparse Multidimensional
+      Representations Using Shearlets.
+    - Kutyniok, G., Labate, D., 2012. Shearlets: Multiscale Analysis for
+      Multivariate Data.
 """
 
 import keras
@@ -52,32 +27,21 @@ import numpy as np
 from keras import ops, initializers
 from typing import List, Tuple, Optional, Dict, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.shearlet_transform")
 class ShearletTransform(keras.layers.Layer):
-    """
-    Multi-scale, multi-directional shearlet transform layer for enhanced time-frequency analysis.
+    """Cone-adapted discrete shearlet transform layer.
 
-    This layer implements a cone-adapted discrete shearlet transform with improved frame
-    properties and frequency coverage. The shearlet transform provides optimal sparse
-    representation of images with edges and directional features by combining multi-scale
-    analysis with directional selectivity through parabolic scaling and Meyer window
-    functions in the frequency domain.
+    Computes the 2D FFT of the input, multiplies it with a pre-computed
+    bank of shearlet filters (each tuned to a specific scale and
+    orientation via parabolic scaling and a Meyer window), and applies
+    the inverse FFT to obtain spatial-domain coefficients. The filter
+    bank is pre-shifted (``ifftshift``) during build to match standard
+    FFT layout, avoiding a runtime shift.
 
-    The transform operates by computing the 2D FFT of the input, multiplying with a
-    pre-computed bank of shearlet filters (each tuned to a specific scale and
-    orientation), and applying the inverse FFT to obtain spatial-domain coefficients.
-    The filter bank is pre-shifted (``ifftshift``) during build to match standard FFT
-    layout, eliminating expensive runtime shift operations.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -132,7 +96,6 @@ class ShearletTransform(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if scales <= 0:
             raise ValueError(f"scales must be positive, got {scales}")
         if directions <= 0:
@@ -140,18 +103,14 @@ class ShearletTransform(keras.layers.Layer):
         if not (0 < alpha <= 1):
             raise ValueError(f"alpha must be in (0, 1], got {alpha}")
 
-        # Store configuration
         self.scales = scales
         self.directions = directions
         self.alpha = alpha
         self.high_freq = high_freq
 
-        # Initialize attributes (created in build)
         self.height: Optional[int] = None
         self.width: Optional[int] = None
 
-        # We store filters as non-trainable weights
-        # Shapes will be (num_filters, H, W)
         self.filter_bank_real: Optional[keras.Variable] = None
         self.filter_bank_imag: Optional[keras.Variable] = None
 
@@ -176,34 +135,19 @@ class ShearletTransform(keras.layers.Layer):
         self.height = input_shape[1]
         self.width = input_shape[2]
 
-        # Generate filters using NumPy (complex128 for precision during generation)
-        # We perform generation on CPU/NumPy to use standard tooling for window functions
         filters_complex = self._generate_filter_bank_numpy(self.height, self.width)
 
-        # Stack into a single array: (num_filters, H, W)
         filters_stack = np.stack(filters_complex, axis=0)
 
-        # Apply ifftshift to match standard FFT layout (DC at corner)
-        # This is a critical optimization to avoid fftshift in call()
+        # ifftshift matches standard FFT layout (DC at corner), avoiding fftshift in call().
         filters_shifted = np.fft.ifftshift(filters_stack, axes=(-2, -1))
 
-        # Split into real and imaginary parts for Keras Ops compatibility
         filters_real = np.real(filters_shifted).astype(np.float32)
         filters_imag = np.imag(filters_shifted).astype(np.float32)
 
-        # Register as non-trainable weights.
-        #
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-054
-        # ``autocast=False`` is load-bearing, not decoration. ``dtype="float32"``
-        # alone fixes only the STORAGE dtype; Keras 3 casts a float variable to
-        # ``compute_dtype`` on every READ, so under ``mixed_float16`` these two
-        # banks arrived as float16 at :367 and the complex multiply raised
-        # ``InvalidArgumentError: cannot compute Mul as input #1 ... is a half
-        # tensor``. Do NOT drop ``autocast=False`` and do NOT "fix" it by casting
-        # ``fft_r``/``fft_i`` down to half instead: ``keras.ops.fft2`` has no
-        # float16 kernel in TensorFlow at all, so the whole spectral island must
-        # be float32 and only its RESULT may return to ``compute_dtype``.
-        # See decisions.md D-054.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-054: keep autocast=False here;
+        # without it Keras casts these to float16 under mixed_float16 and fft2 has
+        # no float16 kernel. Only the result may return to compute_dtype. See decisions.md.
         self.filter_bank_real = self.add_weight(
             name="filter_bank_real",
             shape=filters_real.shape,
@@ -231,43 +175,36 @@ class ShearletTransform(keras.layers.Layer):
         :return: List of complex-valued filter arrays (centered frequency domain).
         :rtype: list[numpy.ndarray]
         """
-        # Create normalized frequency grid [-0.5, 0.5]
         fx = np.linspace(-0.5, 0.5, width)
         fy = np.linspace(-0.5, 0.5, height)
         freq_y, freq_x = np.meshgrid(fy, fx, indexing='ij')
 
         filters = []
 
-        # Polar coordinates
         rho = np.sqrt(freq_x ** 2 + freq_y ** 2)
         theta = np.arctan2(freq_y, freq_x)
 
         min_response = 1e-3
 
-        # 1. Low-pass filter
         phi_low = np.maximum(
             self._meyer_window_numpy(2.0 * rho),
             min_response
         )
         filters.append(phi_low.astype(np.complex64))
 
-        # 2. Directional filters
         for j in range(self.scales):
             scale = 2.0 ** j
 
-            # Radial window for scale j
             window_j = np.maximum(
                 self._meyer_window_numpy(rho / scale) *
                 (1.0 - self._meyer_window_numpy(2.0 * rho / scale)),
                 min_response
             )
 
-            # Directional loop
             for k in range(-self.directions // 2, self.directions // 2 + 1):
                 shear = k / (self.directions / 2.0)
                 angle = np.arctan(shear)
 
-                # Angular window
                 dir_window = np.maximum(
                     self._meyer_window_numpy(
                         (theta - angle) / (0.5 * np.pi),
@@ -276,10 +213,8 @@ class ShearletTransform(keras.layers.Layer):
                     min_response
                 )
 
-                # Combine
                 shearlet = np.maximum(window_j * dir_window, min_response)
 
-                # Normalize energy
                 norm = np.sqrt(np.mean(np.abs(shearlet) ** 2) + 1e-6)
                 shearlet = shearlet / norm
 
@@ -316,16 +251,13 @@ class ShearletTransform(keras.layers.Layer):
             filters: List[np.ndarray]
     ) -> List[np.ndarray]:
         """Normalize filter bank for tight frame property (NumPy version)."""
-        # Initial normalization
         normalized = []
         for f in filters:
             energy = np.mean(np.abs(f) ** 2)
             normalized.append(f / np.sqrt(energy + 1e-6))
 
-        # Calculate total response
         total_response = np.sum([np.abs(f) ** 2 for f in normalized], axis=0)
 
-        # Boost low response areas
         mean_response = np.mean(total_response)
         min_threshold = mean_response * 0.01
 
@@ -334,12 +266,10 @@ class ShearletTransform(keras.layers.Layer):
 
         boosted_filters = []
         for f in normalized:
-            # Apply boost only where needed
             f_boosted = f.copy()
             f_boosted[boost_needed] *= boost_factor[boost_needed]
             boosted_filters.append(f_boosted)
 
-        # Final normalization
         final_response = np.sum([np.abs(f) ** 2 for f in boosted_filters], axis=0)
         normalization = np.sqrt(final_response + 1e-6)
 
@@ -362,80 +292,53 @@ class ShearletTransform(keras.layers.Layer):
         """
         inputs = ops.cast(inputs, "float32")
 
-        # Handle 3D inputs (missing channel dim)
         if len(inputs.shape) == 3:
             inputs = ops.expand_dims(inputs, axis=-1)
 
         input_shape = ops.shape(inputs)
         batch_size = input_shape[0]
-        # height/width available as self.height/self.width
-        # channels is static if possible, else dynamic
         channels_dim = inputs.shape[-1]
 
-        # 1. Permute to (B, C, H, W) for FFT ops (which operate on last 2 axes)
+        # FFT ops operate on the last 2 axes, so permute channels forward.
         x = ops.transpose(inputs, axes=(0, 3, 1, 2))
 
-        # 2. Compute FFT
-        # Input is real, so imag part is zero
+        # Input is real, so imag part is zero.
         x_imag = ops.zeros_like(x)
         fft_r, fft_i = ops.fft2((x, x_imag))
 
-        # 3. Prepare filters for broadcasting
-        # Filters: (NumFilters, H, W) -> (1, 1, NumFilters, H, W)
         f_r = ops.reshape(self.filter_bank_real, (1, 1, -1, self.height, self.width))
         f_i = ops.reshape(self.filter_bank_imag, (1, 1, -1, self.height, self.width))
 
-        # Input FFT: (B, C, H, W) -> (B, C, 1, H, W)
         fft_r = ops.expand_dims(fft_r, axis=2)
         fft_i = ops.expand_dims(fft_i, axis=2)
 
-        # 4. Complex Multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
-        # Result shape: (B, C, NumFilters, H, W)
         out_r = (fft_r * f_r) - (fft_i * f_i)
         out_i = (fft_r * f_i) + (fft_i * f_r)
 
-        # 5. Inverse FFT
-        # We need to perform IFFT on (out_r, out_i).
-        # Since `keras.ops.ifft2` availability varies across documentation snippets,
-        # we implement it robustly using `fft2` and the property:
-        # IFFT(z) = conj(FFT(conj(z))) / N
+        # ifft2 availability varies; use IFFT(z) = conj(FFT(conj(z))) / N via fft2 instead.
 
-        # Conjugate of input z: (out_r, -out_i)
         conj_in_r = out_r
         conj_in_i = -out_i
 
-        # Apply FFT to conjugated input
         tmp_r, tmp_i = ops.fft2((conj_in_r, conj_in_i))
 
-        # Result is conj(tmp) / N
-        # conj(tmp) = (tmp_r, -tmp_i)
-        # We only need the REAL part of the final result for shearlet coefficients
-        # Real part of conj(tmp) is just tmp_r
 
         N = ops.cast(self.height * self.width, "float32")
         coeffs = tmp_r / N
 
-        # 6. Reshape and Transpose back to (B, H, W, OutChannels)
-        # Current shape: (B, C, NumFilters, H, W)
-        # Target: (B, H, W, C, NumFilters) -> (B, H, W, C * NumFilters)
 
         coeffs = ops.transpose(coeffs, axes=(0, 3, 4, 1, 2))
 
         num_base_filters = ops.shape(self.filter_bank_real)[0]
 
         if channels_dim is None:
-             # Dynamic shape handling
             out_ch = ops.shape(inputs)[3] * num_base_filters
             final_shape = (batch_size, self.height, self.width, out_ch)
         else:
-            # Static shape handling
             out_ch = channels_dim * num_base_filters
             final_shape = (-1, self.height, self.width, out_ch)
 
-        # The spectral island above is float32 by construction (see the
-        # ``autocast=False`` DECISION in ``build``); hand the caller the layer's
-        # own ``compute_dtype`` so a ``mixed_float16`` consumer is not silently
-        # promoted. Under the default float32 policy this cast is a no-op.
+        # Spectral island is float32 (see D-054 in build); cast to compute_dtype for the caller.
         return ops.cast(ops.reshape(coeffs, final_shape), self.compute_dtype)
 
     def compute_output_shape(
@@ -448,14 +351,9 @@ class ShearletTransform(keras.layers.Layer):
 
         batch_size, height, width, channels = input_shape
 
-        # Filters: 1 low-pass + scales * (directions + 1 directional options in loop?
-        # Checking logic: code loops -directions//2 to directions//2 -> directions+1 filters per scale)
-        # Wait, original code range: range(-directions // 2, directions // 2 + 1)
-        # Length is directions + 1 if directions is even?
-        # e.g., dir=2 -> -1, 0, 1 (3 filters). Usually standard is `directions`.
-        # Assuming original logic intended inclusive range.
-
-        filters_per_scale = (self.directions // 2 + 1) - (-self.directions // 2) # = directions + 1
+        # 1 low-pass filter, plus directions+1 directional filters per scale:
+        # the inclusive range -directions//2..directions//2 yields directions+1 filters.
+        filters_per_scale = (self.directions // 2 + 1) - (-self.directions // 2)
         num_filters = 1 + self.scales * filters_per_scale
 
         if channels is not None:
@@ -473,5 +371,3 @@ class ShearletTransform(keras.layers.Layer):
             'high_freq': self.high_freq,
         })
         return config
-
-# ---------------------------------------------------------------------
