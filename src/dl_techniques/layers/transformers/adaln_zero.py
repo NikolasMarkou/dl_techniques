@@ -1,71 +1,33 @@
-"""
-AdaLN-zero Conditional Transformer Block.
+"""AdaLN-zero conditional transformer block, built by :class:`AdaLNZeroConditionalBlock`.
 
-A Transformer block with adaptive layer normalization conditioned on an
-external embedding `c`, using the "AdaLN-zero" variant introduced in DiT
-(Peebles & Xie, 2023) and adopted by LeWM (Sobal et al., 2024). The final
-linear projection of the modulation MLP is zero-initialized so that, at
-initialization, each block is the identity map. This lets the optimizer
-gradually "turn on" conditioning without destabilizing the residual stream.
+A transformer block whose layer normalization carries no learnable affine
+parameters; per-channel shift and scale come instead from an external
+conditioning embedding `c` through a single zero-initialized linear
+projection (the "AdaLN-zero" variant from DiT, adopted by LeWM). Because
+that projection starts at zero, every gate starts at zero too, so the
+block is the identity map in `x` at initialization and the optimizer
+turns conditioning on gradually rather than facing it from the first step.
 
-**Architecture (per block):**
-
-.. code-block:: text
-
-    x -----> Norm (no affine) --> modulate(shift_msa, scale_msa)
-                                                       |
-                                                       v
-                             causal MultiHeadAttention (self-attn)
-                                                       |
-                                              gate_msa * (.)
-                                                       |
-    x = x + gate_msa * attn(...)  <-------------------+
-
-    x -----> Norm (no affine) --> modulate(shift_mlp, scale_mlp)
-                                                       |
-                                                       v
-                                          FFN (e.g. MLP)
-                                                       |
-                                              gate_mlp * (.)
-                                                       |
-    x = x + gate_mlp * mlp(...)   <-------------------+
-
-Where `modulate(h, shift, scale) = h * (1 + scale) + shift`.
-
-The four sublayer groups (normalization, attention, FFN, AdaLN modulation
-activation) are factory-configurable via the `*_type` / `*_args` ctor kwargs.
-When all factory kwargs are left at their defaults the block reproduces the
-original DiT/LeWM construction bit-exactly (Keras `LayerNormalization` with
-`center=False, scale=False`, `keras.layers.MultiHeadAttention`, a 2-layer
-Dense→GELU→Dropout→Dense MLP via `MLPBlock`, and `keras.layers.Activation("silu")`).
-
-The six modulation tensors are produced by a single SiLU-Linear projection
-`adaLN_modulation(c)` whose final linear is zero-initialized (both weights
-and bias). At init therefore `shift=scale=gate=0`, giving `gate * attn(...) = 0`
-and `gate * mlp(...) = 0`, i.e. the block is identity in `x`.
+Normalization, attention, FFN and the AdaLN activation are each
+factory-configurable through `*_type`/`*_args` constructor arguments.
+Leaving every one at its default reproduces the original DiT/LeWM
+construction bit-exactly.
 
 References:
-    1. Peebles, W. & Xie, S. (2023). "Scalable Diffusion Models with
-       Transformers" (DiT). https://arxiv.org/abs/2212.09748
-    2. Sobal, V. et al. (2024). "Learning the World with Minimal Supervision"
-       (LeWM). PyTorch reference: /tmp/lewm_source/module.py (ConditionalBlock).
+    - Peebles, W. & Xie, S., 2023. Scalable Diffusion Models with
+      Transformers. (https://arxiv.org/abs/2212.09748)
+    - Sobal, V. et al., 2024. Learning the World with Minimal Supervision.
 """
 
 import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.attention.factory import create_attention_layer
 from dl_techniques.layers.activations.factory import resolve_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.transformers.adaln_zero")
@@ -78,27 +40,48 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
     shift/scale/gate for the MLP sub-block) via a single zero-initialized
     Dense layer. At init the block is the identity map in `x`.
 
+    Architecture:
+
+    .. code-block:: text
+
+        x ──► Norm(no affine) ──► modulate(shift_msa, scale_msa)
+                                          │
+                                          ▼
+                            causal MultiHeadAttention (self-attn)
+                                          │
+                                   gate_msa * (.)
+                                          │
+        x = x + gate_msa * attn(...) ◄────┘
+
+        x ──► Norm(no affine) ──► modulate(shift_mlp, scale_mlp)
+                                          │
+                                          ▼
+                                    FFN (e.g. MLP)
+                                          │
+                                   gate_mlp * (.)
+                                          │
+        x = x + gate_mlp * mlp(...) ◄────┘
+
+    where `modulate(h, shift, scale) = h * (1 + scale) + shift`, and the
+    six modulation tensors above come from a single SiLU-Linear projection
+    of `c` split six ways along the last axis.
+
     The four sublayer groups are factory-configurable. Leaving every factory
     kwarg at its default reproduces the original DiT/LeWM construction.
 
-    **AdaLN-Zero affine invariant.** The two normalization layers MUST have
-    NO learnable affine parameters — AdaLN's per-channel shift/scale supplies
-    all modulation. For the default ``normalization_type="layer_norm"`` (i.e.
-    ``normalization_type=None`` on this ctor) the block enforces this by
-    passing ``center=False, scale=False``. For any other ``normalization_type``
-    you MUST disable affine yourself in ``normalization_args`` (e.g. RMSNorm:
-    ``{"use_scale": False}``). The block does NOT silently override your args.
+    The two normalization layers must carry no learnable affine parameters,
+    since AdaLN's per-channel shift/scale supplies all modulation. For the
+    default `normalization_type=None` the block enforces this itself by
+    passing `center=False, scale=False`. For any other `normalization_type`
+    the caller disables affine in `normalization_args` (for example RMSNorm:
+    `{"use_scale": False}`) — the block does not override caller-supplied args.
 
-    **Attention contract for factory swap.** Default ``attention_type=None``
-    uses ``keras.layers.MultiHeadAttention`` directly (per-head ``key_dim`` /
-    ``value_dim``, ``use_bias=True``). When you pass an explicit
-    ``attention_type``, the chosen attention layer is dispatched via
-    ``create_attention_layer`` and is called as ``self.attn(h, training=...)``;
-    no Q/K/V split is performed. The chosen layer must internally implement
-    self-attention semantics. If you need causal masking you must pass
-    ``use_causal_mask`` via ``attention_args`` or ensure your attention type
-    accepts it — the block will NOT forward ``self.use_causal_mask`` to a
-    factory-built attention layer (attention APIs vary across types).
+    Default `attention_type=None` uses `keras.layers.MultiHeadAttention`
+    directly. When `attention_type` is set, the chosen layer is dispatched
+    through `create_attention_layer` and called as `self.attn(h,
+    training=...)` with no Q/K/V split, so it must implement self-attention
+    semantics internally; `use_causal_mask` is not forwarded to it, since
+    attention APIs vary in how they accept a mask.
 
     :param dim: model (hidden) dimension.
     :param num_heads: number of attention heads.
@@ -182,16 +165,9 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
         self.adaln_activation_type = adaln_activation_type
         self.adaln_activation_args = adaln_activation_args
 
-        # -- Normalization (norm1, norm2) -----------------------------------
-        # DECISION plan_2026-05-18_d3655b1e/D-005
-        # AdaLN-Zero invariant: the two normalization layers MUST have NO
-        # learnable affine parameters — AdaLN's gate/shift/scale supplies all
-        # per-channel modulation. For the default normalization_type=None we
-        # enforce this by routing to "layer_norm" with center=False, scale=False
-        # (bit-exact original DiT/LeWM construction). For any non-default
-        # normalization_type, the caller MUST disable affine themselves via
-        # normalization_args (e.g. RMSNorm: use_scale=False). We do NOT
-        # silently override caller-supplied args — see docstring.
+        # DECISION plan_2026-05-18_d3655b1e/D-005: norm1/norm2 carry no affine
+        # params; AdaLN's shift/scale supplies all per-channel modulation.
+        # For non-default normalization_type the caller disables affine themselves. See decisions.md.
         if normalization_type is None:
             norm_type = "layer_norm"
             norm_args = {"epsilon": eps, "center": False, "scale": False}
@@ -205,12 +181,9 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
             norm_type, name="norm2", **norm_args
         )
 
-        # -- Attention ------------------------------------------------------
         if attention_type is None:
-            # Preserve bit-exact original behavior: keras.layers.MultiHeadAttention
-            # with per-head key/value dims, use_bias=True. The dl_techniques
-            # "multi_head" factory entry is a DIFFERENT class (no key_dim arg,
-            # use_bias=False default) and is NOT a drop-in default.
+            # keras.layers.MultiHeadAttention, not the "multi_head" factory
+            # entry: that one has no key_dim arg and defaults use_bias=False.
             self.attn = keras.layers.MultiHeadAttention(
                 num_heads=num_heads,
                 key_dim=dim_head,
@@ -227,17 +200,10 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
             )
             self._attn_via_factory = True
 
-        # -- FFN ------------------------------------------------------------
         if ffn_type is None:
-            # Preserve original behavior via the "mlp" factory entry. MLPBlock
-            # is Dense(hidden_dim)→activation→Dropout→Dense(output_dim), which
-            # at dropout=0.0 is numerically equivalent to the original
-            # Dense→GELU→Dropout→Dense→Dropout pair (the trailing dropout is a
-            # no-op at rate=0.0; the default test uses dropout=0.0). For
-            # dropout > 0.0 the user-supplied dropout still applies between
-            # the two dense layers — the single tail-dropout that originally
-            # followed fc2 is absorbed into the residual gate (which itself is
-            # zero at init).
+            # "mlp" factory entry (Dense-activation-Dropout-Dense) matches the
+            # original construction at dropout=0.0; at dropout>0.0 the
+            # original's trailing dropout is absorbed into the residual gate.
             self.mlp = create_ffn_layer(
                 "mlp",
                 name="mlp",
@@ -253,9 +219,7 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
                 ffn_type, name="mlp", **ffn_args_eff
             )
 
-        # -- AdaLN modulation activation + zero-init Linear -----------------
         if adaln_activation_type is None:
-            # Preserve original: keras.layers.Activation("silu").
             self.adaLN_act = keras.layers.Activation("silu", name="adaLN_act")
         else:
             act_args_eff = dict(adaln_activation_args or {})
@@ -315,28 +279,21 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
 
         super().build(input_shape)
 
-    # DECISION plan-2026-08-31T175140-a4e0c303/D-016
-    # The CALLER owns the broadcast here, and this staticmethod stays private.
-    # Do NOT merge it into `sd3_adaln.modulate`, which expands the
-    # conditioning chunks itself.
+    # DECISION plan-2026-08-31T175140-a4e0c303/D-016: caller owns the
+    # broadcast here; do not merge into sd3_adaln.modulate, which expands the conditioning chunks itself. See decisions.md.
     @staticmethod
     def _modulate(h: keras.KerasTensor, shift: keras.KerasTensor,
                   scale: keras.KerasTensor) -> keras.KerasTensor:
         """AdaLN-zero modulation: h * (1 + scale) + shift.
 
-        NO ``expand_dims`` here: the CALLER owns the broadcast. Both call sites
-        below pass ``(B, T, D)``-shaped ``shift``/``scale`` chunks that are
-        already aligned with ``h``.
+        No ``expand_dims`` here: the caller owns the broadcast. Both call sites
+        below pass ``(B, T, D)``-shaped ``shift``/``scale`` chunks already
+        aligned with ``h``.
 
-        This is NOT the same function as the module-level ``modulate`` in
-        ``layers/transformers/sd3_adaln.py`` (public since
-        ``plan-2026-08-31-a4e0c303``, because ``sd3_mmdit/blocks.py`` imports it
-        across a package boundary): that one takes ``(B, dim)`` chunks and
-        expands them to ``(B, 1, dim)`` itself. This staticmethod stays private
-        -- it has no out-of-package consumer. The two are deliberately kept
-        separate; unifying them would silently change which axis the
-        conditioning lands on. Pinned by
-        ``tests/test_layers/test_transformers/test_the_modulate_broadcast_contract.py``.
+        This is a different function from the module-level ``modulate`` in
+        ``layers/transformers/sd3_adaln.py``, which takes ``(B, dim)`` chunks
+        and expands them to ``(B, 1, dim)`` itself; this staticmethod stays
+        private, since it has no consumer outside this class.
         """
         return h * (1.0 + scale) + shift
 

@@ -1,84 +1,31 @@
-"""
-SD3 MMDiT adaptive layer normalization (AdaLN) modulation trio.
+"""SD3 MMDiT adaptive layer normalization (AdaLN) modulation trio.
 
-Keras 3 port of the three AdaLayerNorm variants used by SD3 MMDiT
-(diffusers ``AdaLayerNormZero`` / ``AdaLayerNormZeroX`` /
-``AdaLayerNormContinuous``). Each variant takes a hidden-state stream
-``x`` of shape ``(B, N, dim)`` and a single per-sample conditioning vector
-``cond`` of shape ``(B, dim)``, runs ``SiLU(cond) -> Dense(K*dim) -> split``
-to produce ``K`` modulation chunks, then modulates an affine-free
-``LayerNormalization`` of ``x``.
+Three AdaLN variants that condition a hidden-state stream `x` of shape
+`(B, N, dim)` on a single per-sample vector `cond` of shape `(B, dim)`:
+:class:`AdaLayerNormZero` (6-way, attention + MLP shift/scale/gate),
+:class:`AdaLayerNormZeroX` (9-way, adds a second attention path reusing
+the same normalized stream), and :class:`AdaLayerNormContinuous` (2-way,
+scale + shift with no gate, for the final blocks). Each runs
+`SiLU(cond) -> Dense(K*dim) -> split` to produce `K` modulation chunks,
+then modulates an affine-free `LayerNormalization` of `x`.
 
-The modulation Dense is **zero-initialized** (kernel + bias) so that at
-init every chunk is zero: the normalized stream equals a plain no-affine
-LayerNorm of ``x`` and every gate is ``0`` -- the AdaLN-Zero "identity at
-init" property that lets the optimizer gently turn conditioning on without
-destabilizing the residual stream.
+The modulation Dense is zero-initialized (kernel and bias), so at
+initialization every chunk is zero: the normalized stream equals a plain
+no-affine LayerNorm of `x` and every gate is `0`, the identity-at-init
+property that lets the optimizer turn conditioning on gradually. The
+gate and MLP-shift/scale chunks are returned at shape `(B, dim)` for the
+surrounding block to expand as needed; only the in-layer `x_norm`
+modulation is broadcast here, to `(B, 1, dim)`.
 
-**Intent**
-
-Provide the per-stream AdaLN modulation primitives consumed by the SD3
-MMDiT block:
-
-- :class:`AdaLayerNormZero` -- 6-way (shift/scale/gate for the attention
-  sub-block + shift/scale/gate for the MLP sub-block). Returns the
-  pre-modulated normalized stream plus the MLP shift/scale and both gates,
-  for the surrounding block to apply.
-- :class:`AdaLayerNormZeroX` -- 9-way: adds shift/scale/gate for a second
-  (dual) attention path. ``norm(x)`` is computed once and reused for both
-  the primary and secondary modulations (matches PyTorch ``AdaLayerNormZeroX``).
-- :class:`AdaLayerNormContinuous` -- 2-way (scale + shift, NO gate).
-  Returns a single fully-modulated tensor. Used by the final / context-final
-  blocks.
-
-**Architecture**
-
-``modulate(h, shift, scale) = h * (1 + scale[:, None, :]) + shift[:, None, :]``
-where ``norm`` is ``keras.layers.LayerNormalization(center=False, scale=False)``
-(no learnable affine -- the modulation supplies all per-channel shift/scale).
-
-::
-
-    AdaLayerNormZero(dim):
-        cond (B,dim) --SiLU--> Dense(6*dim) --split6-->
-            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp
-        x_norm = norm(x)*(1+scale_msa[:,None,:]) + shift_msa[:,None,:]
-        return x_norm, gate_msa, shift_mlp, scale_mlp, gate_mlp
-
-    AdaLayerNormZeroX(dim):
-        cond (B,dim) --SiLU--> Dense(9*dim) --split9-->
-            shift_msa, scale_msa, gate_msa,
-            shift_mlp, scale_mlp, gate_mlp,
-            shift_msa2, scale_msa2, gate_msa2
-        n = norm(x)                                  # computed once, reused
-        x_norm  = n*(1+scale_msa[:,None,:])  + shift_msa[:,None,:]
-        x_norm2 = n*(1+scale_msa2[:,None,:]) + shift_msa2[:,None,:]
-        return x_norm, gate_msa, shift_mlp, scale_mlp, gate_mlp, x_norm2, gate_msa2
-
-    AdaLayerNormContinuous(dim):
-        cond (B,dim) --SiLU--> Dense(2*dim) --split2--> scale, shift
-        return norm(x)*(1+scale[:,None,:]) + shift[:,None,:]
-
-The modulation chunks (gates / mlp shift+scale) are returned with shape
-``(B, dim)`` -- the surrounding block expands them as needed -- matching the
-PyTorch return tuples. Only the in-layer ``x_norm`` modulations are broadcast
-here via ``(B, 1, dim)``.
-
-PyTorch reference: diffusers ``models/normalization.py`` (``AdaLayerNormZero``,
-``AdaLayerNormZeroX``, ``AdaLayerNormContinuous``).
+This is a Keras 3 port of diffusers' `AdaLayerNormZero` /
+`AdaLayerNormZeroX` / `AdaLayerNormContinuous`.
 """
 
 import keras
 from typing import Any, Dict, List, Optional, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 def _unpack_pair_shape(
@@ -109,10 +56,8 @@ def _unpack_pair_shape(
     return tuple(x_shape), tuple(cond_shape)
 
 
-# DECISION plan-2026-08-31T175140-a4e0c303/D-015
-# This helper owns its broadcast, and its name is PUBLIC because another
-# package imports it. Do NOT unify it with `AdaLNZeroConditionalBlock.
-# _modulate`, and do NOT re-privatise the name.
+# DECISION plan-2026-08-31T175140-a4e0c303/D-015: this helper's name stays
+# public since models/vision_language/sd3_mmdit/blocks.py imports it. Do not unify with AdaLNZeroConditionalBlock._modulate. See decisions.md.
 def modulate(
     h: keras.KerasTensor,
     shift: keras.KerasTensor,
@@ -120,25 +65,17 @@ def modulate(
 ) -> keras.KerasTensor:
     """AdaLN modulation ``h * (1 + scale) + shift`` with ``(B, dim)`` chunks.
 
-    ``h`` is ``(B, N, dim)`` and ``shift`` / ``scale`` are ``(B, dim)``; they
-    are broadcast to ``(B, 1, dim)`` via ``expand_dims`` so the modulation is
-    graph-safe (no python-int shape access). THIS HELPER OWNS THE BROADCAST.
+    ``h`` is ``(B, N, dim)`` and ``shift`` / ``scale`` are ``(B, dim)``; this
+    function broadcasts them to ``(B, 1, dim)`` via ``expand_dims`` so the
+    modulation is graph-safe.
 
     .. note::
        A same-named ``@staticmethod`` exists on
        :class:`~dl_techniques.layers.transformers.adaln_zero.AdaLNZeroConditionalBlock`
-       with a DIFFERENT contract: it has no ``expand_dims``, so its caller owns
-       the broadcast and passes already-aligned operands. The two are
-       deliberately NOT unified -- merging them would silently move a
-       ``(B, dim)`` operand from the sample axis to the sequence axis. Owner of
-       this contract: this function, used here and by
-       ``models/vision_language/sd3_mmdit/blocks.py`` (which imports it rather
-       than re-defining it). That cross-package consumer is why this name is
-       PUBLIC: it was spelled ``_modulate`` until ``plan-2026-08-31-a4e0c303``,
-       and a leading underscore on a name imported from another package is a
-       privacy marker that lies. The ``AdaLNZeroConditionalBlock`` staticmethod
-       keeps its underscore -- nothing outside its module calls it. Pinned by
-       ``tests/test_layers/test_transformers/test_the_modulate_broadcast_contract.py``.
+       with a different contract: it has no ``expand_dims``, so its caller owns
+       the broadcast and passes already-aligned operands. The two stay separate
+       because merging them would move a ``(B, dim)`` operand from the sample
+       axis to the sequence axis.
     """
     scale = keras.ops.expand_dims(scale, axis=1)
     shift = keras.ops.expand_dims(shift, axis=1)
@@ -418,7 +355,7 @@ class AdaLayerNormZeroX(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.transformers.sd3_adaln")
 class AdaLayerNormContinuous(keras.layers.Layer):
-    """SD3 2-way AdaLN modulation (scale + shift, NO gate).
+    """SD3 2-way AdaLN modulation: scale and shift, no gate.
 
     Used by the SD3 final / context-final blocks: normalizes ``x`` (affine
     free) and applies a single conditioned scale + shift. Returns one fully

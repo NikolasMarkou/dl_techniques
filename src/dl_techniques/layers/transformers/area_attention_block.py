@@ -1,72 +1,30 @@
-"""
-A transformer-style block over 2D feature maps, built on area attention.
+"""A transformer-style block over 2D feature maps, built on area attention.
 
-The block is the yolo12 detector's attention stage. It is a *bare* residual
-pair::
+This is the yolo12 detector's attention stage, built by
+:class:`AreaAttentionBlock`. It is a bare residual pair,
+``x = inputs + attn(inputs)`` then ``x = x + mlp2(mlp1(x))``, where ``attn``
+is :class:`~dl_techniques.layers.attention.area_attention.AreaAttention`
+(multi-head self-attention over a ``(B, H, W, C)`` map, either global or
+split into ``area`` contiguous groups) and ``mlp1``/``mlp2`` are a
+1x1-convolution pair that expands the channel width by ``mlp_ratio`` and
+projects it back.
 
-    x = inputs + attn(inputs)
-    x = x + mlp2(mlp1(x))
-
-where ``attn`` is
-:class:`~dl_techniques.layers.attention.area_attention.AreaAttention` -- multi-head
-self-attention over a ``(B, H, W, C)`` map that either runs globally (``area=1``) or
-within ``area`` contiguous groups of the flattened token sequence -- and ``mlp1`` /
-``mlp2`` are a 1x1-convolution pair that expands the channel width by ``mlp_ratio``
-and projects it back.
-
-This module is the relocated home of the ``AttentionBlock`` that used to live in
-``dl_techniques.layers.yolo12_blocks``. The class was **renamed** on relocation:
-``AttentionBlock`` is a bare, unqualified name and every sibling exported from this
-package's ``__all__`` carries a prefix (``SwinTransformerBlock``, ``PFTBlock``,
-``GatedLinearAttentionBlock``). See decisions.md D-006.
-
-Two deliberate declines, both stated here because the obvious "bring it up to the
-house shape" edit is a numerics change wearing a refactor's clothes:
-
-* **No Pre/Post-Norm, no LayerScale, no StochasticDepth.** The residual shape above
-  is exactly the pre-move block's. This layer lands as a *Specialized and Hybrid
-  Block* (``transformers/README.md`` section "Specialized and Hybrid Blocks", the
-  ``SwinConvBlock`` precedent), not as a
-  :class:`~dl_techniques.layers.transformers.transformer.TransformerLayer` variant.
-  Adding a normalization before the residual branches, a learned residual scale, or a
-  drop-path would each change the function this block computes, which would make the
-  relocation's equivalence claim unsatisfiable by construction. See decisions.md D-007.
-* **``mlp1``/``mlp2`` are NOT ``create_ffn_layer('gated_mlp', ...)``.** ``'gated_mlp'``
-  is the one 4D-capable FFN type in ``ffn/factory.py``, but it carries no
-  normalization stage, so substituting it DROPS the intermediate BatchNorm that the
-  ``mlp1``/``mlp2`` ``ConvBlock`` pair applies to the hidden activation -- a numerics
-  change, not a refactor. See decisions.md D-007.
-
-Relocation notes:
-    * Normalization is **not** hardcoded here. yolo12's D-067 ``epsilon=1e-3,
-      momentum=0.97`` pair keeps exactly one home,
-      ``dl_techniques.layers.yolo12_blocks.YOLO12_NORM_KWARGS``, and arrives as data
-      through ``normalization_kwargs``; this package sits *below* ``yolo12_blocks`` in
-      the dependency order and must not import it. ``normalization_kwargs=None``
-      therefore yields the normalization factory's own defaults (``epsilon=1e-6``),
-      **not** yolo12's.
-    * ``use_bias`` defaults to ``False``, matching the convolution convention of the
-      pre-move yolo12 ``ConvBlock`` rather than
-      :class:`~dl_techniques.layers.standard_blocks.ConvBlock`'s ``True``.
-    * The normalization *type* is deliberately not a parameter. Both the block's own
-      convolutions and the attention sub-layer use ``'batch_norm'``; the only knob any
-      caller needs is the epsilon/momentum pair, which ``normalization_kwargs``
-      already carries.
+The block has no Pre/Post-Norm, no LayerScale and no stochastic depth on
+the residual stream, and its MLP is a ``ConvBlock`` pair rather than a
+`ffn/` factory type, because `'gated_mlp'`, the one 4D-capable FFN type,
+carries no normalization stage and would drop the intermediate BatchNorm
+the ``ConvBlock`` pair applies. Normalization type is fixed to
+`'batch_norm'`; only its epsilon/momentum pair is configurable, through
+`normalization_kwargs`. `use_bias` defaults to `False`.
 """
 
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.standard_blocks import ConvBlock
 from dl_techniques.layers.attention.area_attention import AreaAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.transformers.area_attention_block")
@@ -78,7 +36,7 @@ class AreaAttentionBlock(keras.layers.Layer):
     is no normalization on the residual stream, no LayerScale and no stochastic depth
     -- see the module docstring for why those are declined rather than missing.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -100,12 +58,6 @@ class AreaAttentionBlock(keras.layers.Layer):
         ┌────────────────────────────────┐
         │  Output [B, H, W, dim]         │
         └────────────────────────────────┘
-
-    **Equivalence contract.** At default arguments this block reproduces the pre-move
-    ``yolo12_blocks.AttentionBlock`` bit-for-bit on identical weights, provided
-    ``normalization_kwargs`` carries the same normalization configuration. That claim
-    is a test, not a comment:
-    ``tests/test_layers/test_the_yolo12_relocation_is_equivalent.py``.
 
     :param dim: Number of feature dimensions, and the output channel count. Must be
         positive and divisible by ``num_heads``.
@@ -164,9 +116,8 @@ class AreaAttentionBlock(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs. `dim % num_heads` is deliberately NOT checked here -- the
-        # attention sub-layer delegates it to `attention.common.validate_head_divisibility`
-        # and re-checking it here would give the same condition two error messages.
+        # `dim % num_heads` is not checked here; the attention sub-layer delegates
+        # it to `attention.common.validate_head_divisibility`.
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
@@ -176,7 +127,7 @@ class AreaAttentionBlock(keras.layers.Layer):
         if area <= 0:
             raise ValueError(f"area must be positive, got {area}")
 
-        # Store ALL configuration parameters
+        # Store configuration parameters.
         self.dim = dim
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
@@ -186,12 +137,8 @@ class AreaAttentionBlock(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.mlp_hidden_dim = int(dim * mlp_ratio)
 
-        # CREATE all sub-layers in __init__ (they are unbuilt).
-        #
-        # The creation order -- attn, mlp1, mlp2 -- is the pre-move block's, and it is
-        # the order the relocation's equivalence harness transfers weights in, by
-        # ordered `set_weights`. Reordering these three statements is a silent
-        # weight-permutation bug, not a cosmetic change.
+        # Sub-layers are created here, unbuilt. Reordering attn/mlp1/mlp2 below
+        # would silently permute weights on a `set_weights` load.
         self.attn = AreaAttention(
             dim=self.dim,
             num_heads=self.num_heads,
@@ -202,9 +149,8 @@ class AreaAttentionBlock(keras.layers.Layer):
             name="attn"
         )
 
-        # MLP: 1x1 conv expand (SiLU) -> 1x1 conv project (no activation). Each stage
-        # is a `ConvBlock`, i.e. Conv2D + normalization + activation; the intermediate
-        # normalization is load-bearing (see the module docstring's `'gated_mlp'` note).
+        # 1x1 conv expand (SiLU) then 1x1 conv project (no activation); each stage
+        # is a ConvBlock (Conv2D + normalization + activation).
         self.mlp1 = ConvBlock(
             filters=self.mlp_hidden_dim,
             kernel_size=1,
