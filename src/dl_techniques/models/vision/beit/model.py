@@ -598,10 +598,8 @@ class BeitModel(keras.Model):
                 'positional_learned',
                 max_seq_len=self.seq_len,
                 dim=self.hidden_size,
-                # The registry key is `dropout_rate`; `dropout=` would be SILENTLY
-                # dropped. It is held at 0.0 on purpose — `embed_dropout` below is the
-                # single embedding-stage dropout, and routing it here too would double
-                # it.
+                # The registry key is dropout_rate; embed_dropout below is the
+                # single embedding-stage dropout, so this stays 0.0 to avoid doubling it.
                 dropout_rate=0.0,
                 name="pos_embed",
             )
@@ -615,26 +613,21 @@ class BeitModel(keras.Model):
         # Guide §9: ALWAYS CREATE, CONDITIONALLY USE. The classifier never calls this,
         # but it MUST own the weight or its trunk stops matching the MIM trunk and the
         # warm start silently transfers a different set of layers. This is the
-        # DELIBERATE exception to "build only what call() runs" — see build().
+        # Exception to "build only what call() runs" — see build().
         self.mask_token = MaskTokenApply(name="mask_token")
 
         self.cls_token = ClassTokenPrepend(name="cls_token")
 
     def _build_encoder(self) -> None:
         """Create the stochastic-depth ramp and the `num_layers` transformer blocks."""
-        # The stochastic-depth LINEAR RAMP is a MODEL-level responsibility:
-        # `TransformerLayer` holds one float per instance and has no intra-layer
-        # schedule. `linear_drop_path_rates` is the repo's single definition of this
-        # schedule (utils/drop_path.py) and also handles num_layers == 1 without
-        # dividing by zero.
+        # The linear ramp is computed here since TransformerLayer holds one
+        # float per instance with no intra-layer schedule of its own.
         self.drop_path_rates: List[float] = linear_drop_path_rates(
             self.num_layers, self.drop_path_rate
         )
 
-        # Stored FLAT. A `List[List[Layer]]` restores FRESH kernels on a `.keras` round
-        # trip while the layer count, the weight paths and the parameter total ALL
-        # still match — a measured framework trap, invisible to every structural
-        # assertion.
+        # Stored flat, not as List[List[Layer]], which restores fresh kernels
+        # on a .keras round trip even though shape and parameter counts match.
         self.encoder_layers: List[TransformerLayer] = []
         for i in range(self.num_layers):
             self.encoder_layers.append(
@@ -643,17 +636,16 @@ class BeitModel(keras.Model):
                     num_heads=self.num_heads,
                     intermediate_size=self.intermediate_size,
                     attention_type='beit',
-                    # The PATCH GRID (Wh, Ww). `BeitAttention` expects exactly
-                    # Wh*Ww + 1 tokens (the +1 being the cls token).
+                    # The patch grid (Wh, Ww); BeitAttention expects Wh*Ww + 1
+                    # tokens, the +1 being the cls token.
                     window_size=self.grid_size,
                     attention_args={
                         'use_relative_position_bias': self.use_relative_position_bias,
                     },
                     normalization_type='layer_norm',
                     normalization_position='pre',
-                    # 1e-12 is passed EXPLICITLY at every norm site; the factory's own
-                    # default is 1e-6 and inheriting it would be a silent architecture
-                    # change.
+                    # Passed explicitly since the factory's own default, 1e-6,
+                    # would otherwise silently change the architecture.
                     attention_norm_args={'epsilon': self.layer_norm_eps},
                     ffn_norm_args={'epsilon': self.layer_norm_eps},
                     ffn_type='mlp',
@@ -755,11 +747,11 @@ class BeitModel(keras.Model):
             )
 
     def build(self, input_shape: Any) -> None:
-        """Explicitly build EVERY sub-layer from stored config.
+        """Explicitly build every sub-layer from stored config.
 
-        The shapes come from the CONFIG, never from ``input_shape``'s optional mask
-        entry, so ``mask_token`` is built identically whether or not the caller ever
-        passes a mask. A lazily-built sub-layer silently drops its weights on a
+        Shapes come from the config, never from ``input_shape``'s optional
+        mask entry, so ``mask_token`` builds identically whether or not the
+        caller passes a mask. A lazily-built sub-layer drops its weights on a
         ``.keras`` round trip.
 
         :param input_shape: Shape (or nest of shapes) of the input to ``call``. Only

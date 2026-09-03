@@ -1,29 +1,21 @@
 """The encoder skeleton every arm of the embeddings study shares.
 
 :class:`EmbeddingEncoder` is a BERT-shaped bidirectional encoder whose
-sequence-mixing block is resolved through
-:data:`~...blocks.BLOCK_REGISTRY` rather than hard-coded. Everything else --
-the ASCII embeddings, the depth and width ladder, the pooling, the output
-contract -- is identical across arms, so a difference in a reported metric is
-attributable to the block.
+sequence-mixing block is resolved through :data:`~...blocks.BLOCK_REGISTRY`
+instead of a hard-coded ``TransformerLayer``. The ASCII embeddings, the
+depth/width ladder, the pooling and the output contract are identical
+across arms, so a difference in a reported metric is attributable to the
+block.
 
-Relationship to ``models/language/bert``
-----------------------------------------
-The structure is deliberately the same, and the differences are only the ones
-the study needs:
-
-- The block is a registry lookup, not a ``TransformerLayer`` literal.
-- ``call()`` additionally returns ``pooled_output``, because an embedding model
-  needs one vector per sequence. Upstream BERT owns no pooler, so pooling is a
-  genuinely open seam; it is filled with the existing
-  :class:`~dl_techniques.layers.sequence_pooling.sequence_pooling.SequencePooling`
-  layer rather than a new one.
-- ``pad_token_id`` is READ here, to derive an attention mask when the caller
-  supplies none. In upstream BERT the same argument is stored, serialized and
-  deliberately never read (its D-007 anchor says so explicitly, pinned by a
-  test). That divergence is intentional and is stated here so nobody
-  "restores consistency" in either direction: this family's pooling is
-  mask-dependent, so a silently-absent mask would silently pool over padding.
+It differs from ``models/language/bert`` in three ways: the block is a
+registry lookup; ``call()`` additionally returns ``pooled_output``, filled
+by the existing
+:class:`~dl_techniques.layers.sequence_pooling.sequence_pooling.SequencePooling`
+layer, since an embedding model needs one vector per sequence and upstream
+BERT owns no pooler; and ``pad_token_id`` is read here to derive an
+attention mask when the caller supplies none, unlike upstream BERT, where
+the same argument is stored but never read. This family's pooling is
+mask-dependent, so a silently-absent mask would silently pool over padding.
 
 References:
     - Devlin et al., 2019. BERT: Pre-training of Deep Bidirectional
@@ -42,10 +34,6 @@ from typing import Any, Dict, List, Optional
 
 import keras
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.sequence_pooling.sequence_pooling import SequencePooling
 from dl_techniques.layers.tokenizers.ascii_char import (
@@ -57,8 +45,6 @@ from dl_techniques.utils.logger import logger
 
 from .blocks import create_encoder_block
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 __all__ = ["EmbeddingEncoder"]
 
@@ -79,7 +65,7 @@ class EmbeddingEncoder(keras.Model):
     """
     Block-agnostic bidirectional text encoder producing one embedding per sequence.
 
-    **Architecture:**
+    Architecture:
 
     .. code-block:: text
 
@@ -126,7 +112,7 @@ class EmbeddingEncoder(keras.Model):
         embeddings and the blocks.
     :type layer_norm_eps: float
     :param pad_token_id: Padding id, used to derive an attention mask when the
-        caller supplies none. Unlike upstream BERT, this IS read.
+        caller supplies none. Unlike upstream BERT, this is read.
     :type pad_token_id: int
     :param normalization_type: Normalization registry key for the embeddings.
     :type normalization_type: str
@@ -296,9 +282,9 @@ class EmbeddingEncoder(keras.Model):
     def build(self, input_shape: Any) -> None:
         """Materialise the embeddings, every block and the pooler.
 
-        Deliberately shape-driven rather than a dummy forward pass: Keras
-        rebuilds a model under a ``StatelessScope`` on load, where variables
-        created by a forward pass are discarded.
+        Shape-driven rather than a dummy forward pass: Keras rebuilds a
+        model under a ``StatelessScope`` on load, where variables created by
+        a forward pass are discarded.
 
         :param input_shape: Shape of ``input_ids`` -- ``(batch, seq_len)`` --
             or a mapping/sequence whose ``input_ids`` entry has that shape.
@@ -375,9 +361,8 @@ class EmbeddingEncoder(keras.Model):
         else:
             input_ids = inputs
 
-        # Unlike upstream BERT, the mask is resolved BEFORE the stack, because
-        # pooling and the maskless Clifford block both consume it. A missing
-        # mask would otherwise silently pool over padding.
+        # Unlike upstream BERT, the mask is resolved before the stack: both
+        # pooling and the maskless Clifford block consume it.
         if attention_mask is None:
             attention_mask = keras.ops.cast(
                 keras.ops.not_equal(input_ids, self.pad_token_id),
