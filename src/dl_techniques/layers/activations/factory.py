@@ -70,6 +70,7 @@ from .mish import Mish, SaturatedMish
 from .monotonicity_layer import MonotonicityLayer
 from .relu_k import ReLUK
 from .routing_probabilities import RoutingProbabilitiesLayer
+from .sigsoftmax import SigSoftmax
 from .soft_value_range import SoftValueRange
 from .sparsemax import Sparsemax
 from .squash import SquashLayer
@@ -94,6 +95,7 @@ ActivationType = Literal[
     'relu_k',
     'routing_probabilities',
     'saturated_mish',
+    'sigsoftmax',
     'silu',
     'soft_value_range',
     'sparsemax',
@@ -296,6 +298,19 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'use_case': (
             'Prevents activation explosion in very deep networks by '
             'saturating the Mish function.'
+        )
+    },
+    'sigsoftmax': {
+        'class': SigSoftmax,
+        'description': (
+            'Sigmoid-weighted softmax, exp(x) * sigmoid(x) normalized along '
+            'an axis, computed in log space.'
+        ),
+        'required_params': [],
+        'optional_params': {'axis': -1},
+        'use_case': (
+            'Output layer whose Jacobian does not vanish the way softmax\'s '
+            'does, e.g. language-model heads (Kanai et al., 2018).'
         )
     },
     'silu': {

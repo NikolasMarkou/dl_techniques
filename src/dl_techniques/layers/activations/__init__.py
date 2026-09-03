@@ -1,7 +1,7 @@
 """
 Public surface of ``dl_techniques.layers.activations``.
 
-Re-exports every activation layer in the package, the three serializable
+Re-exports every activation layer in the package, the five serializable
 activation functions, and the six factory helpers. Import from here rather
 than from the individual modules::
 
@@ -12,7 +12,8 @@ Three groups, matching the sections of ``__all__`` below:
 - **Factory utilities** (``factory.py``). Build a layer from a registry key
   or from a config dict. ``ActivationType`` is the ``Literal`` alias listing
   every valid key.
-- **Activation functions** (``gelu_tanh.py``, ``soft_value_range.py``).
+- **Activation functions** (``gelu_tanh.py``, ``sigsoftmax.py``,
+  ``soft_value_range.py``).
   Plain callables, registered with Keras so they survive a ``.keras``
   round-trip. Everything else exported here is a Layer.
 - **Layer classes**. One entry per activation module.
@@ -24,7 +25,7 @@ which extends ``keras.activations.get`` with the tanh-GELU spellings.
 callable and rejects Layer instances, is **not** exported and must be
 imported as ``from .common import resolve_activation``.
 
-``__all__`` is a contract: 31 names. Every name in it must also appear in an
+``__all__`` is a contract: 34 names. Every name in it must also appear in an
 import above, or ``from ... import *`` raises ``AttributeError`` on that
 name. Add the import and the ``__all__`` entry in the same change.
 """
@@ -53,6 +54,7 @@ from .mish import Mish, SaturatedMish
 from .monotonicity_layer import MonotonicityLayer
 from .relu_k import ReLUK
 from .routing_probabilities import RoutingProbabilitiesLayer
+from .sigsoftmax import log_sigsoftmax, sigsoftmax, SigSoftmax
 from .soft_value_range import soft_value_range, SoftValueRange
 from .sparsemax import Sparsemax
 from .squash import SquashLayer
@@ -70,7 +72,9 @@ __all__ = [
 
     # Activation Functions (serializable, registered)
     "gelu_tanh",
+    "log_sigsoftmax",
     "resolve_activation",
+    "sigsoftmax",
     "soft_value_range",
 
     # Layer Classes
@@ -85,6 +89,7 @@ __all__ = [
     "MonotonicityLayer",
     "ReLUK",
     "RoutingProbabilitiesLayer",
+    "SigSoftmax",
     "SoftValueRange",
     "Sparsemax",
     "SquashLayer",
