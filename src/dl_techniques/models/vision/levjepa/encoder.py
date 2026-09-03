@@ -296,7 +296,7 @@ class LeVJEPAEncoder(keras.Model):
                 f"attention_dropout_rate must be in [0, 1], got {attention_dropout_rate}"
             )
 
-        # DECISION plan-2026-09-03-2a714a91/D-013
+        # DECISION plan-2026-09-03T113223-2a714a91/D-013
         # Resolving plan.md Success Criterion 6 ("LeVJEPAEncoder(...,
         # use_rope=True, pos_embed=<non-None>) raises ValueError") against the
         # ACTUAL reference constructor, which has exactly one `use_rope: bool`

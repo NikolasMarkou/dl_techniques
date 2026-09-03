@@ -115,7 +115,7 @@ def get_3d_sincos_pos_embed(
     grid_h = np.arange(grid_size, dtype=float)
     grid_w = np.arange(grid_size, dtype=float)
 
-    # DECISION plan-2026-09-03-2a714a91/D-009
+    # DECISION plan-2026-09-03T113223-2a714a91/D-009
     # 3-argument np.meshgrid, NOT the 2-argument indexing='xy' convention
     # sincos_pos_embed_2d.py uses. With default indexing='xy', only the first
     # two positional arguments (grid_h, grid_d) have their output-shape axes

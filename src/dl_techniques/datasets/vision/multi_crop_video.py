@@ -108,7 +108,7 @@ def _replay_draw(seed_pair: tf.Tensor) -> Tuple[DrawFn, Callable[[], None]]:
     return draw, reset
 
 
-# DECISION plan-2026-09-03-2a714a91/D-019
+# DECISION plan-2026-09-03T113223-2a714a91/D-019
 # A per-frame-independent crop would make one clip's "view" flicker between
 # unrelated spatial windows every frame, defeating the point of a temporal
 # encoder. `_random_resized_crop` (from `multi_crop.py`, reused unmodified,

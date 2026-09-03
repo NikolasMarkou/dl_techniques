@@ -78,7 +78,7 @@ from dl_techniques.regularizers.sigreg import SIGRegLayer
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-03-2a714a91/D-017
+# DECISION plan-2026-09-03T113223-2a714a91/D-017
 # The reference's `multiview_forward` opens with
 # `global_frame = to_float_normalized(batch["global_frame"])`, a full
 # ImageNet-style mean/std normalization. This port's data source
@@ -265,7 +265,7 @@ class LeVJEPATrainingModel(keras.Model):
         # built=True, the same trap Step 5's EMAShadowCallback docstring
         # documents.
         #
-        # DECISION plan-2026-09-03-2a714a91/D-020
+        # DECISION plan-2026-09-03T113223-2a714a91/D-020
         # Their VALUES are seeded with plain zeros here, not the live
         # encoder's initial weight values. WHAT NOT TO DO: do not read
         # `ops.convert_to_numpy(w)` here to seed a `Constant` initializer --
@@ -393,7 +393,7 @@ class LeVJEPATrainingModel(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Return the configuration for serialization.
 
-        # DECISION plan-2026-09-03-2a714a91/D-018
+        # DECISION plan-2026-09-03T113223-2a714a91/D-018
         # `LeVJEPATrainingModel` wraps `self.encoder` BY REFERENCE, so its
         # config carries the encoder's own full config (via
         # `keras.saving.serialize_keras_object`) rather than duplicating its

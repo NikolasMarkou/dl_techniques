@@ -75,7 +75,7 @@ class TestLeVJEPAEncoderForward:
 
 class TestLeVJEPAEncoderMutualExclusion:
     def test_use_rope_true_builds_no_pos_embed(self):
-        # DECISION plan-2026-09-03-2a714a91/D-013 resolution: use_rope is the
+        # DECISION plan-2026-09-03T113223-2a714a91/D-013 resolution: use_rope is the
         # ONLY toggle, and use_rope=True must leave pos_embed unbuilt (None).
         enc = LeVJEPAEncoder(**_small_kwargs(num_frames=1, use_rope=True))
         x = keras.random.normal((2, 32, 32, 3))

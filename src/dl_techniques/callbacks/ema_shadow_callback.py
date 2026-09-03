@@ -6,7 +6,7 @@ moving average of the LIVE trainable weights but never participates in the
 forward pass or the loss -- distinct from
 ``dl_techniques.models.vision.depth_anything.teacher_ema.TeacherEMACallback``,
 which drives a second network that DOES feed the loss every step (see
-plan-2026-09-03-2a714a91/D-006). This callback reuses that module's decay
+plan-2026-09-03T113223-2a714a91/D-006). This callback reuses that module's decay
 schedules (``cosine_ema_schedule`` / ``linear_ema_schedule``) rather than
 re-deriving the math, and mirrors its duck-typed model-method contract
 (here ``update_ema_shadow(decay=...)`` instead of ``update_teacher_ema``).
@@ -98,7 +98,7 @@ class EMAShadowCallback(keras.callbacks.Callback):
         model.fit(dataset, callbacks=[callback])
     """
 
-    # DECISION plan-2026-09-03-2a714a91/D-015
+    # DECISION plan-2026-09-03T113223-2a714a91/D-015
     # The PyTorch reference's `WeightEMA` takes a flat `decay: float` only
     # (no schedule). `TeacherEMACallback` (this repo's closest sibling, per
     # D-006) takes ONLY a `Callable[[int], float]` schedule. This class
@@ -118,7 +118,7 @@ class EMAShadowCallback(keras.callbacks.Callback):
     # are real, differing only in which one the training script picks.
     # See decisions.md D-015.
     #
-    # DECISION plan-2026-09-03-2a714a91/D-016
+    # DECISION plan-2026-09-03T113223-2a714a91/D-016
     # The PyTorch reference's `WeightEMA` compounds `decay ** elapsed_steps`
     # when `current_step - self._last_ema_step > update_every` (i.e. after a
     # gap, e.g. resumed training or skipped batches), so a longer gap decays

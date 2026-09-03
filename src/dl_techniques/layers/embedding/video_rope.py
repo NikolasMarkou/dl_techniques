@@ -198,7 +198,7 @@ class VideoRoPE3D(keras.layers.Layer):
         self.head_dim = head_dim
         self.rope_theta = float(rope_theta)
 
-        # DECISION plan-2026-09-03-2a714a91/D-010
+        # DECISION plan-2026-09-03T113223-2a714a91/D-010
         # Equal three-way band split, each band rounded DOWN to the nearest
         # even width so an intra-band pair never straddles a band boundary;
         # any remainder is passed through unrotated. Ported from the

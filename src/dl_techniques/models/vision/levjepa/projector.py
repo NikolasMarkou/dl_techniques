@@ -67,7 +67,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-03-2a714a91/D-014
+# DECISION plan-2026-09-03T113223-2a714a91/D-014
 # The reference's `Projector.forward` reshapes every leading axis to
 # `(-1, input_dim)` before `nn.BatchNorm1d` and reshapes back afterwards,
 # because `nn.BatchNorm1d` cannot consume a bare rank-3 tensor without that

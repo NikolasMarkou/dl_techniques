@@ -96,7 +96,7 @@ from dl_techniques.layers.attention.common import (
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-03-2a714a91/D-011
+# DECISION plan-2026-09-03T113223-2a714a91/D-011
 # The task prompt's "Files To Modify" spec for this step (carried over from
 # plan.md's Step 4 entry, itself written against video_jepa/predictor.py's
 # `CausalSelfAttnMLPBlock` as a CODING-PATTERN template) describes
@@ -307,7 +307,7 @@ class LeVJEPABlock(keras.layers.Layer):
 
         self._scale = compute_attention_scale(self.head_dim)
 
-        # DECISION plan-2026-09-03-2a714a91/D-012
+        # DECISION plan-2026-09-03T113223-2a714a91/D-012
         # Block-depth rescaling (`_rescale_blocks` in the reference) is
         # implemented as an INITIALIZER STD, not a post-build `.assign()`.
         # The reference does `p.div_(sqrt(2*layer_id))` on `attn.proj.weight`
