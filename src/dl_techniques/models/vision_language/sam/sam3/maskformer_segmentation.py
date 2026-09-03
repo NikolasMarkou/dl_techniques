@@ -1,55 +1,20 @@
-"""
-SAM 3 MaskFormer Head: prompt-conditioned pixels, one mask per query.
-=====================================================================
+"""Sam3SegmentationHead, SAM 3's MaskFormer-style mask decoder.
 
-:class:`Sam3SegmentationHead` turns the neck's pyramid plus the decoder's object
-queries into one binary mask logit map per query, the textbook MaskFormer way:
-one pixel embedding for the whole image, every query projected into the same
-space, mask = their dot product.
+Turns the neck's feature pyramid and the decoder's object queries into one
+mask logit map per query: one pixel embedding for the whole image, every
+query projected into that same space, and the mask is their dot product.
+An optional pre-norm residual cross-attention folds the text prompt into
+the coarsest pyramid level before the top-down FPN merge runs, so the
+prompt reaches the pixel features and not only the queries.
 
-Based on:
----------
-- Cheng, B., Schwing, A., & Kirillov, A. (2021). MaskFormer.
-- Lin, T.-Y. et al. (2017). Feature Pyramid Networks for Object Detection.
+This head has no presence mechanism -- the shipped configuration drives
+presence from the decoder's own presence token instead. It is written
+channels-last throughout, unlike the channels-first reference.
 
-Key Features:
-------------
-- Optional prompt cross-attend BEFORE pixel decoding, so the prompt reaches the
-  pixel features and not only the queries.
-- Top-down FPN merge, coarsest level first.
-- Channels-LAST throughout, matching the trunk and the neck.
-
-Architecture Overview:
----------------------
-1. **Prompt cross-attend** (optional, pre-norm residual):
-   ``encoder_states += cross_attend(LayerNorm(encoder_states), prompt, prompt)``
-   -- a residual, NOT a replacement.
-2. **Pixel decoder**, top-down merge starting from the COARSEST level: for each
-   finer ``curr``, ``prev = relu(GroupNorm(8)(Conv3x3(curr + resize(prev,
-   curr.shape, "nearest"))))``.
-3. **Mask decode**: ``pixel_embed = Conv1x1(prev)`` (d_model per pixel),
-   ``mask_embed = MLP3(queries)`` (mask_dim per query), then
-   ``pred_masks = einsum("bqc,bhwc->bqhw", mask_embed, pixel_embed)`` and
-   ``semantic_seg = Conv1x1(prev)``.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam3.maskformer_segmentation import (
-    Sam3SegmentationHead)
-head = Sam3SegmentationHead(d_model=256, upsampling_stages=3, num_heads=8)
-```
-
-Measured caveats:
-----------------
-- This head has **no presence mechanism of any kind** -- not disabled, not built
-  and left unused: absent. The shipped reference configuration switches its
-  presence head off and drives presence from the decoder's presence token, so a
-  presence branch here would be a second, dead signal.
-- The cross-attend result folds back into the COARSEST pyramid level, the level
-  the merge starts from, so prompt information reaches every upsampling stage.
-- The reference is channels-first: the merge, the group normalization and the
-  mask einsum are written for channels-last directly, not transposed into it.
+References:
+    - Cheng et al., 2021. Per-Pixel Classification is Not All You Need for
+      Semantic Segmentation.
+    - Lin et al., 2017. Feature Pyramid Networks for Object Detection.
 """
 
 import keras
@@ -190,39 +155,25 @@ class Sam3SegmentationHead(keras.layers.Layer):
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.norm_epsilon = float(norm_epsilon)
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-119
-        # There is NO presence mechanism on this class -- no constructor flag,
-        # no sub-layer, no output key, no attribute. Do NOT add one "for
-        # symmetry with the reference", and do NOT add a disabled one: the
-        # shipped reference configuration constructs this head with
-        # `presence_head=False` and drives presence from the DECODER's presence
-        # token, which is the tensor the top-level model multiplies into the
-        # class logits. A second presence signal here would be dead weight that
-        # a future reader would wire up by mistake. See decisions.md D-119.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-119: no presence
+        # mechanism on this class -- no flag, sub-layer, output key or attribute.
+        # The shipped config drives presence from the decoder's presence token; a second signal here would be dead weight. See decisions.md.
         self.cross_attn_norm = create_normalization_layer(
             "layer_norm", epsilon=self.norm_epsilon, name="cross_attn_norm")
-        # Keys and values come from the SAME tensor here (the prompt), which is
-        # the contract the repository's cross-attention layer expresses exactly.
-        # Structural kwargs are set explicitly rather than inherited (D-102).
+        # Keys and values come from the SAME tensor here (the prompt).
         self.cross_attend_prompt = create_attention_layer(
             "multi_head_cross", dim=self.d_model, num_heads=self.num_heads,
             dropout_rate=self.attention_dropout_rate, use_bias=True,
             shared_qk_projections=False, probability_type="softmax",
             qk_norm_type=None, name="cross_attend_prompt")
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-118
-        # `epsilon` is passed EXPLICITLY to every group norm below. Keras
-        # `GroupNormalization` defaults to `epsilon=1e-3`; the reference's
-        # `nn.GroupNorm` defaults to `1e-5`. MEASURED here, and the same 100x
-        # silent divergence this package already measured for
-        # `LayerNormalization` at step 6. Do NOT drop the argument. See D-118.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-118: pass epsilon=1e-5
+        # explicitly to every group norm below.
+        # Keras GroupNormalization defaults to 1e-3; the reference's nn.GroupNorm defaults to 1e-5, a 100x silent divergence if dropped. See decisions.md.
         #
-        # Both stacks are stored FLAT -- one list of `Conv2D`, one list of
-        # `GroupNormalization`, never a list of per-stage pairs. A nested
-        # `List[List[Layer]]` sub-layer store silently restores freshly
-        # initialized kernels on a `.keras` round trip while the weight count,
-        # the weight paths and the parameter total all match (D-098, measured
-        # in this package on `necks.py`). Do NOT re-nest these for readability.
+        # Stacks stay flat (one list of Conv2D, one of GroupNormalization) --
+        # a nested List[List[Layer]] silently restores fresh kernels on a
+        # .keras round trip (D-098).
         self.pixel_convs: List[keras.layers.Layer] = [
             layers.Conv2D(self.d_model, kernel_size=3, padding="same",
                           use_bias=True, name=f"pixel_conv_{index}")
@@ -238,43 +189,16 @@ class Sam3SegmentationHead(keras.layers.Layer):
         self.semantic_seg_head = layers.Conv2D(
             1, kernel_size=1, use_bias=True, name="semantic_seg_head")
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-045
-        # The pixel-embedding conv is sized by `mask_dim`, NOT by `d_model`.
-        # The two are the SAME number at every shipped configuration
-        # (`mask_dim=None` resolves to `d_model` and `Sam3Image.from_variant`
-        # never passes it), which is why sizing it by `d_model` was invisible:
-        # the head constructs, validates and BUILDS fine at any
-        # `mask_dim != d_model` -- the two layers are built against different
-        # shapes and never compared -- and then raises `InvalidArgumentError`
-        # on the first forward, because `call`'s
-        # `ops.einsum("bqc,bhwc->bqhw", queries, pixel_embed)` contracts this
-        # conv's channel axis against `mask_embed_2`'s output width. MEASURED
-        # at `d_model=32, mask_dim=16`: "Expected dimension 16 at axis 3 of the
-        # input shaped [1,8,8,32]".
-        # WHAT NOT TO DO: do not "fix" the mismatch the other way by sizing
-        # `mask_embed_2` with `d_model` -- that deletes the parameter's only
-        # meaning (the mask embedding's width IS `mask_dim`; reference
-        # MaskFormer sizes the pixel-embedding conv by `mask_dim` too), and the
-        # class docstring at `:109-111` already documents this direction.
-        # See decisions.md D-045.
+        # DECISION plan-2026-08-18T140459-7991552f/D-045: size this conv by
+        # mask_dim, never d_model.
+        # The two match at every shipped config so a d_model-sized conv builds fine and only fails on the first forward's einsum. Fix mask_embed_2 to match mask_dim, not this conv. See decisions.md.
         self.instance_seg_head = layers.Conv2D(
             self.mask_dim, kernel_size=1, use_bias=True,
             name="instance_seg_head")
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-117
-        # The mask-embedding MLP is composed HERE from three `Dense` layers
-        # rather than reusing `layers/eomt_mask.py`'s `EomtMask`, whose mask
-        # branch is otherwise parameter-EXACT for this site (197,376 params at
-        # d_model=256, measured, matching the reference's 3-layer MLP to the
-        # unit). The blocker is its class head: `EomtMask` builds a
-        # `Dense(num_classes)` UNCONDITIONALLY, there is no flag that switches
-        # it off, and `num_classes=0` raises -- so reusing it ships a fixed
-        # class table (257 dead parameters at the settled width, evaluated on
-        # every forward pass) into a head whose whole point is that its
-        # vocabulary is open. Do NOT "simplify" this back to `EomtMask`: the
-        # equivalence of the two mask branches is pinned by a test that
-        # transplants weights between them, so the reuse remains checkable
-        # without paying for the class head. See decisions.md D-117.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-117: compose this MLP
+        # from three Dense layers, not layers/eomt_mask.py's EomtMask.
+        # EomtMask's mask branch matches exactly but its class head is unconditional (Dense(num_classes)), which would ship a fixed vocabulary here. See decisions.md.
         self.mask_embed: List[keras.layers.Layer] = [
             layers.Dense(self.d_model, activation="relu", use_bias=True,
                          name="mask_embed_0"),
@@ -291,9 +215,8 @@ class Sam3SegmentationHead(keras.layers.Layer):
         )
 
     # -----------------------------------------------------------------
-    # shape arithmetic -- every helper is owned by this class alone, so each
-    # is a `@staticmethod` rather than a module-level function (D-109/D-114:
-    # module level is for helpers with more than one owner).
+    # shape arithmetic -- each helper has one owner, so it stays a
+    # @staticmethod rather than a module-level function (D-109/D-114).
     # -----------------------------------------------------------------
 
     @staticmethod
@@ -341,20 +264,9 @@ class Sam3SegmentationHead(keras.layers.Layer):
         :rtype: Any
         :raises ValueError: If the fused width is not ``d_model``.
         """
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-120
-        # The skip fusion is an ADDITION and the upsample is NEAREST-neighbour.
-        # Neither is interchangeable with its obvious alternative:
-        #   * a concatenating fusion is COHERENT -- it runs, it trains, and the
-        #     following convolution simply infers a wider input. In this
-        #     package's own iteration-1 precedent a coherent concat port left
-        #     35 of 37 tests green and only the WIDTH assertions fired, which
-        #     is why the width check below is explicit and lives on the fused
-        #     tensor rather than being left to the convolution's build.
-        #   * a bilinear upsample differs from nearest only at pixels strictly
-        #     between two distinct coarse values; on a CONSTANT feature map the
-        #     two coincide exactly, so a value oracle probed at a constant
-        #     input cannot tell them apart.
-        # See decisions.md D-120.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-120: fuse by addition
+        # with nearest-neighbour upsample, not concatenation or bilinear.
+        # A concat fusion also runs and trains, catchable only by the explicit width check below; bilinear vs nearest is indistinguishable on a constant input. See decisions.md.
         size = (fine.shape[1], fine.shape[2])
         if size[0] is None or size[1] is None:
             raise ValueError(
@@ -380,12 +292,9 @@ class Sam3SegmentationHead(keras.layers.Layer):
         :return: The merged feature at the FINEST level's resolution.
         :rtype: Any
         """
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-121
-        # The merge starts at the COARSEST level (`feats[-1]`) and walks the
-        # remaining levels from coarse to fine (`feats[:-1]` REVERSED). Do NOT
-        # start from the finest and walk outward: that also runs, also produces
-        # a rank-4 map, and silently emits masks at the WRONG resolution --
-        # which is why the guard is a resolution assertion. See D-121.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-121: start the merge at
+        # feats[-1] (coarsest) and walk feats[:-1] reversed, coarse to fine.
+        # Starting from the finest also runs and produces a rank-4 map, but silently at the wrong resolution. See decisions.md.
         running = feats[-1]
         for index, lateral in enumerate(reversed(feats[:-1])):
             running = self._merge(running, lateral)

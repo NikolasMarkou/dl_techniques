@@ -1,49 +1,21 @@
-"""
-SAM 3 Dot-Product Scoring: the open-vocabulary class-score head.
-================================================================
+"""Sam3DotProductScoring, SAM 3's open-vocabulary classification head.
 
-:class:`Sam3DotProductScoring` is SAM 3's classification head and deliberately
-NOT a fixed-vocabulary classifier: no class table, no softmax over categories.
-Each decoder query gets exactly ONE scalar logit -- query and pooled text prompt
-projected into a shared space, then their scaled dot product.
+There is no class table and no softmax over categories: each decoder query
+gets one scalar logit from the scaled dot product of its own projection and
+a pooled, projected text-prompt embedding, so swapping the prompt swaps the
+detected class. The prompt is optionally refined by a small residual MLP
+first, then mean-pooled over its sequence with padding excluded and the
+divisor floored at one so an all-padding row cannot divide by zero. Query
+and prompt each get their own independent projection before the dot product.
 
-Based on:
----------
-- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
-- Radford, A. et al. (2021). CLIP -- the image-text dot-product score
-  generalized here to per-query detection logits.
+The logit clamp here (default 12.0) is a different, deliberately unrelated
+number from the decoder's presence clamp elsewhere in this package; do not
+unify them.
 
-Key Features:
-------------
-- Open vocabulary: swapping the prompt swaps the "class".
-- Masked mean-pool over the prompt sequence, divisor floored at one.
-- Two independent projections, one per operand, and a symmetric logit clamp.
-
-Architecture Overview:
----------------------
-1. prompt ``(batch, seq, d_model)`` -> optional 2-layer residual prompt MLP with
-   a terminal normalization -> masked mean-pool -> ``Dense(d_proj)``.
-2. queries ``(..., num_queries, d_model)`` -> a SECOND, INDEPENDENT
-   ``Dense(d_proj)``.
-3. ``score = clip(queries . prompt / sqrt(d_proj), -clamp_max_val, clamp_max_val)``.
-Settled configuration: ``d_model=256``, ``d_proj=256``, a ``256 -> 2048 -> 256``
-prompt MLP at dropout ``0.1``, clamp ``12.0``.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam3.model_misc import Sam3DotProductScoring
-scorer = Sam3DotProductScoring(d_model=256, d_proj=256, clamp_max_val=12.0)
-```
-
-Measured caveats:
-----------------
-- The two projections are independent; sharing one still produces the right
-  shapes and a plausible score, but it is a different model.
-- The pool is MASKED and its divisor is floored at one: padding must not
-  contribute, and an all-padding row has divisor zero under the naive spelling.
-- The clamp bound is a different number from the decoder's and they are NOT to
-  be unified; see the anchor on ``clamp_max_val``.
+References:
+    - Ravi et al., 2025. SAM 3: Segment Anything with Concepts.
+    - Radford et al., 2021. Learning Transferable Visual Models From Natural
+      Language Supervision.
 """
 
 import keras
@@ -126,15 +98,9 @@ class Sam3DotProductScoring(keras.layers.Layer):
         self.clamp_max_val = float(clamp_max_val)
         self.scale = 1.0 / math.sqrt(float(self.d_proj))
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-106
-        # The prompt MLP is composed here from plain `Dense`/`Dropout`/norm
-        # layers ON PURPOSE. Do NOT "simplify" it to the repo's `MLPBlock` FFN:
-        # that layer applies its dropout after BOTH dense layers, while the
-        # reference drops only after the activation, and it offers neither the
-        # residual add nor the terminal normalization this head needs. The
-        # contract differs from the name, so the name is not the verdict --
-        # the same failure mode already measured at six assets in this plan.
-        # See decisions.md D-106.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-106: keep this plain
+        # Dense/Dropout/norm MLP, not the repo's MLPBlock FFN.
+        # MLPBlock drops after both dense layers and has no residual/terminal norm; the contract differs from the name. See decisions.md.
         if self.use_prompt_mlp:
             self.prompt_fc1 = layers.Dense(self.prompt_mlp_hidden_dim,
                                            name="prompt_mlp_fc1")
@@ -168,16 +134,9 @@ class Sam3DotProductScoring(keras.layers.Layer):
         :type prompt_padding_mask_shape: Optional[Tuple[Optional[int], ...]]
         :raises ValueError: On a wrong rank or a width other than ``d_model``.
         """
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-136
-        # Re-entry guard, matching the other seven `build` methods in this
-        # package. Do NOT delete it as "defensive style": without it a second
-        # `build()` raises `ValueError: You cannot add new elements of state ...
-        # to a layer that is already built`, which is exactly what Keras does on
-        # `.keras` LOAD when it rebuilds a component from its recorded build
-        # config before `build_from_config` runs. `Sam3Image._build_once` hides
-        # that from this package's own gate, so the defect is invisible to any
-        # composer that copies `Sam3Image`'s wiring but not its helper.
-        # See decisions.md D-136.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-136: keep this re-entry
+        # guard, matching the package's other build() methods.
+        # A second build() without it raises on .keras load, when Keras rebuilds from a recorded build config. See decisions.md.
         if self.built:
             return
         if len(hs_shape) < 3:
@@ -200,13 +159,8 @@ class Sam3DotProductScoring(keras.layers.Layer):
         self.hs_proj.build(tuple(hs_shape))
         super().build(hs_shape)
 
-    # A `@staticmethod` because it reads no state, and because it now has TWO
-    # owners: this head and `Sam3EncoderQuerySelection`'s prompt-conditioned
-    # branch. Both must pool a padded prompt with the SAME polarity and the
-    # SAME floored divisor -- a second spelling of these three lines is exactly
-    # the duplication D-104's two traps would be re-introduced through. Calling
-    # it on an INSTANCE (`self.masked_mean_pool(...)`, as `call` below does)
-    # keeps working unchanged.
+    # A static method so `Sam3EncoderQuerySelection`'s prompt-conditioned branch
+    # can share it without a second, drift-prone copy of the pooling logic.
     @staticmethod
     def masked_mean_pool(
             prompt: keras.KerasTensor,
@@ -224,19 +178,9 @@ class Sam3DotProductScoring(keras.layers.Layer):
         """
         if prompt_padding_mask is None:
             return ops.mean(prompt, axis=1)
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-104
-        # The mask polarity is PADDING-IS-TRUE, and the divisor is floored at
-        # one. Two traps live in these three lines. (a) The reference's own
-        # inline comment on this argument says "1 is valid and 0 is padding"
-        # and its code says the opposite (`is_valid = (~prompt_mask)`); the
-        # code is what runs, and the tensor reaching it is a key-padding mask
-        # built as `(tokens != 0).ne(1)`, i.e. True at padding. Do NOT flip
-        # this to a keep predicate to match the causal KEEP mask the text tower
-        # takes -- these are two different tensors with two different
-        # conventions, and a flip is a silent value defect with no shape
-        # symptom. (b) The floor of one is NOT defensive garnish: a row whose
-        # every position is padding makes the divisor exactly zero, and the
-        # naive `sum / sum` spelling returns NaN for it. See decisions.md D-104.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-104: mask polarity is
+        # padding-is-True; do not flip it to match the text tower's keep mask.
+        # Divisor is floored at one so an all-padding row does not divide by zero. See decisions.md.
         valid = ops.cast(
             ops.logical_not(ops.cast(prompt_padding_mask, "bool")), prompt.dtype
         )
@@ -275,13 +219,9 @@ class Sam3DotProductScoring(keras.layers.Layer):
         scores = ops.matmul(
             self.hs_proj(hs), ops.expand_dims(pooled, axis=-1)) * self.scale
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-105
-        # This bound is 12.0 and the decoder's presence clamp is 10.0. They are
-        # DELIBERATELY different numbers on two different quantities. Do NOT
-        # unify them, and do NOT "fix" this one to match the other: the two
-        # clamps are indistinguishable on any probe whose scores never reach
-        # the interval (10, 12], which is exactly why the guard for this line
-        # pins a point inside that interval. See decisions.md D-105.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-105: this clamp is 12.0,
+        # the decoder's presence clamp is 10.0 -- do not unify them.
+        # The two are indistinguishable on any probe whose scores never reach (10, 12]. See decisions.md.
         if self.clamp_logits:
             scores = ops.clip(scores, -self.clamp_max_val, self.clamp_max_val)
         return scores

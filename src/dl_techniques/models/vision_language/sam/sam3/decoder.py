@@ -1,57 +1,25 @@
-"""
-SAM 3 DETR Decoder: three attention sub-blocks, boxRPB, and a presence token.
-=============================================================================
+"""Sam3DecoderLayer / Sam3TransformerDecoder, SAM 3's DETR-style detection decoder.
 
-:class:`Sam3DecoderLayer` is ONE layer of SAM 3's detection decoder;
-:class:`Sam3TransformerDecoder` is the stack that repeats it, refines the
-reference boxes and reads out the per-layer presence logits.
+``Sam3DecoderLayer`` is one layer with three attention sub-blocks (self,
+text cross, image cross), one more than plain DETR's two, plus a
+feed-forward block. Image cross-attention adds boxRPB, a log-compressed,
+box-conditioned relative position bias added to the raw scores per head and
+per query before the softmax. ``Sam3TransformerDecoder`` stacks the layer,
+refines the reference boxes across layers, and reads out the per-layer
+presence logits from a token that rides the query sequence with a zeroed
+query position, so it attends everywhere regardless of boxRPB.
 
-Based on:
----------
-- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
-- Carion, N. et al. (2020). DETR -- the decoder shape this one extends.
-- Liu, S. et al. (2023). Grounding DINO -- the text cross-attention sub-block.
+No attention layer in this repository can carry a real-valued additive bias
+into raw scores, so the boxRPB-carrying sub-blocks use a package-local
+attention implementation rather than the repository's shared one; the text
+cross-attention sub-block, which needs no such bias, uses the shared layer
+unmodified.
 
-Key Features:
-------------
-- THREE attention sub-blocks per layer, not DETR's two.
-- boxRPB: a log-compressed, box-conditioned relative position bias added to the
-  RAW image-cross-attention scores, per head and per query, before the softmax.
-- A presence token that rides the query sequence and is split back off.
-
-Architecture Overview:
----------------------
-1. **Self-attention**: ``q = k = tgt + query_pos``, ``v = tgt``; residual, norm2.
-2. **Text cross-attention**: ``q = tgt + query_pos``, ``k = v = text memory``;
-   residual, catext_norm.
-3. **Image cross-attention**: ``q = tgt + query_pos``, ``k = image memory +
-   memory_pos``, ``v = image memory``, ``scores += boxRPB``; residual, norm1.
-4. **Feed-forward**: ``fc1 -> relu -> drop -> fc2 -> drop``; residual, norm3.
-Settled configuration: ``d_model=256``, ``num_heads=8``,
-``dim_feedforward=2048``, ``dropout_rate=0.1``, ``relu``, ``box_rpb="log"``.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam3.decoder import Sam3TransformerDecoder
-decoder = Sam3TransformerDecoder(d_model=256, num_heads=8, num_layers=6,
-                                 num_queries=200, feat_size=(72, 72))
-```
-
-Measured caveats:
-----------------
-- No attention layer in this repository can carry the real-valued additive
-  boxRPB bias into raw scores -- see the ``D-080`` anchor on
-  ``_Sam3DecoderAttention`` and the measurement recorded there.
-- Neither self- nor image cross-attention draws ``k`` and ``v`` from the same
-  tensor: ``k`` carries a positional embedding ``v`` does not. That single
-  asymmetry disqualifies the repo's cross-attention layer at those two sites and
-  does NOT disqualify it at the text site, which uses it unmodified.
-- The presence token has a ZEROED query position and an all-zero bias row, so it
-  attends everywhere in image cross-attention whatever boxRPB says.
-- The reference shares one pair of boxRPB embedding MLPs across every layer, so
-  making them per-layer multiplies their parameters by the layer count with no
-  shape symptom.
+References:
+    - Ravi et al., 2025. SAM 3: Segment Anything with Concepts.
+    - Carion et al., 2020. End-to-End Object Detection with Transformers.
+    - Liu et al., 2023. Grounding DINO: Marrying DINO with Grounded
+      Pre-Training for Open-Set Object Detection.
 """
 
 import keras
@@ -174,25 +142,10 @@ def _box_rpb_bias(
         bias, (-1, num_heads, ops.shape(bias)[2], height * width))
 
 
-# DECISION plan-2026-08-04T044628-4c240b4c/D-080
-# This attention class is the ONE module-private bias-injection helper this
-# file is permitted, and it is deliberately UNREGISTERED (the `_SAM2RoPEAttention`
-# / `_Sam3ViTDetAttention` precedent, D-008 / D-085). Do NOT replace it with
-# `create_attention_layer('multi_head_cross', ...)` at either of its two call
-# sites, and do NOT route the boxRPB bias through any `attention_mask=`
-# parameter. Two independent contract failures, both MEASURED:
-#   (a) `layers/attention/common.apply_attention_mask` treats `keep` as BINARY
-#       (`> 0`). Handed boxRPB's real-valued bias it does NOT raise and does NOT
-#       full-keep: it BINARIZES -- every positive entry gets no bias at all and
-#       every non-positive entry gets the hard -1e9 mask. Measured max
-#       per-position softmax deviation from the true additive bias: 0.366. A
-#       silent value defect with no shape symptom.
-#   (b) `MultiHeadCrossAttention` derives k AND v from ONE `kv_dense` on ONE
-#       tensor. Both this layer's call sites need k from a POSITION-EMBEDDED
-#       tensor and v from the un-embedded one, which that contract cannot
-#       express at any configuration. (The text cross-attention site does NOT
-#       have this asymmetry and therefore DOES use the stock layer.)
-# See decisions.md D-080, D-107, D-109.
+# DECISION plan-2026-08-04T044628-4c240b4c/D-080: keep this module-private,
+# unregistered attention class; never replace it with
+# create_attention_layer('multi_head_cross', ...) or route boxRPB through attention_mask=.
+# The shared mask helper binarizes a real-valued bias (measured softmax deviation 0.366), and the shared cross-attention layer cannot give key and value different tensors. See decisions.md D-080, D-107, D-109.
 class _Sam3DecoderAttention(keras.layers.Layer):
     """Multi-head attention over three independent tensors, with a bias hook.
 
@@ -552,14 +505,10 @@ class Sam3DecoderLayer(keras.layers.Layer):
         :raises ValueError: If ``memory_mask`` is supplied, or if text
             cross-attention is enabled and ``memory_text`` is missing.
         """
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-080
-        # boxRPB REPLACES any other image cross-attention masking; the two are
-        # mutually exclusive and the reference asserts the same thing. Do NOT
-        # "helpfully" combine an external key mask with the bias here: a keep
-        # mask goes through a binarizing helper that would silently discard the
-        # bias's magnitude at every kept position (measured: max softmax
-        # deviation 0.366). If phase 2 ever needs both, they must be summed as
-        # ADDITIVE terms at this site, deliberately. See decisions.md D-080.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-080: boxRPB replaces any
+        # other image cross-attention masking; never combine an external key
+        # mask with it here.
+        # A keep mask would binarize and discard the bias's magnitude at every kept position. See decisions.md.
         if memory_mask is not None:
             raise ValueError(
                 "Sam3DecoderLayer does not accept an external `memory_mask`: "
@@ -767,18 +716,9 @@ class Sam3TransformerDecoder(keras.layers.Layer):
         if len(feat_size) != 2 or min(feat_size) <= 0:
             raise ValueError(f"feat_size must be a pair of positive ints, got "
                              f"{feat_size}")
-        # DECISION plan-2026-08-28T181715-3870472c/D-008
-        # The constraint is `% 4`, NOT `% 2`. This site does NOT use
-        # `PositionEmbeddingSine2D` -- `_sine_embed_for_boxes` is hand-rolled
-        # -- but it carries the identical latent halving: `num_feats =
-        # d_model // 2`, then `arange(num_feats // 2)`, then a `stack` of the
-        # sin/cos pair reshaped BACK to `num_feats`. That reshape is only
-        # size-preserving when `num_feats` is even. MEASURED at d_model=10:
-        # `InvalidArgumentError: Input to reshape is a tensor with 24 values,
-        # but the requested shape has 30 [Op:Reshape]` -- the docstring's
-        # `2 * d_model = 20` promise is correct, the value is simply
-        # unreachable. Do not "relax" this back to evenness.
-        # See decisions.md D-008.
+        # DECISION plan-2026-08-28T181715-3870472c/D-008: constraint is
+        # d_model % 4, not d_model % 2.
+        # The hand-rolled box sine embedding halves num_feats = d_model // 2 again for sin/cos; d_model=10 passes % 2 but reshape fails at runtime. See decisions.md.
         if d_model % 4 != 0:
             raise ValueError(
                 f"d_model ({d_model}) must be a multiple of 4, not merely "
@@ -821,15 +761,9 @@ class Sam3TransformerDecoder(keras.layers.Layer):
         self.norm = create_normalization_layer(
             "layer_norm", epsilon=self.norm_epsilon, name="norm")
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-112
-        # The LAST projection of the box head is ZERO-initialized. Do NOT
-        # "fix" this to a standard initializer: the whole refinement chain is
-        # `sigmoid(delta + inverse_sigmoid(reference))`, so a zero delta is what
-        # makes layer 0 an exact identity on its reference box at step 0. With
-        # any non-zero init the first layer displaces every reference box before
-        # a single gradient step, and boxRPB's bias -- which is built FROM the
-        # reference box -- is displaced with it. There is no shape, dtype or
-        # finiteness symptom. See decisions.md D-112.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-112: zero-init the box
+        # head's last projection.
+        # The refinement chain is sigmoid(delta + inverse_sigmoid(reference)); a non-zero init displaces every reference box (and boxRPB's bias with it) before the first gradient step, with no shape symptom. See decisions.md.
         self.bbox_embed = self._make_mlp(3, self.d_model, 4, "bbox_embed",
                                          zero_init_last=True)
         self.ref_point_head = self._make_mlp(2, self.d_model, self.d_model,
@@ -970,20 +904,9 @@ class Sam3TransformerDecoder(keras.layers.Layer):
             name="reference_points", shape=(self.num_queries, 4),
             initializer=normal, trainable=True)
         if self.use_presence_token:
-            # DECISION plan-2026-08-04T044628-4c240b4c/D-137
-            # GLOROT, not the `normal` above, and the asymmetry is deliberate.
-            # The reference builds all three of these as `nn.Embedding` (unit-
-            # normal), and then `TransformerWrapper._reset_parameters` xavier-
-            # uniform-initializes every `dim > 1` parameter EXCEPT names holding
-            # `box_embed` / `query_embed` / `reference_points`. `query_embed`
-            # and `reference_points` are on that exclusion list and keep N(0,1);
-            # `presence_token` is NOT, so the reference ships it at xavier scale
-            # over its `(1, d_model)` weight -- limit `sqrt(6/(d_model+1))`,
-            # std 0.0882 at d_model=256 versus 1.0 here, an 11.3x divergence on
-            # the model's ONLY presence signal. Keras `GlorotUniform` computes
-            # the identical fans for this shape. Do NOT "tidy" this back to
-            # `normal` for symmetry with its two neighbours.
-            # See decisions.md D-137.
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-137: GlorotUniform
+            # here, not the `normal` used above for its two neighbours.
+            # The reference's own reset excludes query_embed/reference_points from Xavier init but not presence_token, an 11.3x scale gap at d_model=256. See decisions.md.
             self.presence_token = self.add_weight(
                 name="presence_token", shape=(1, self.d_model),
                 initializer=keras.initializers.GlorotUniform(), trainable=True)
@@ -1090,16 +1013,9 @@ class Sam3TransformerDecoder(keras.layers.Layer):
                 image_cross_bias=image_cross_bias, presence_token=presence,
                 training=training)
 
-            # DECISION plan-2026-08-04T044628-4c240b4c/D-113
-            # The delta reads the NORMED hidden state and the next reference is
-            # DETACHED. Do NOT "simplify" either half:
-            #   * feeding the raw `output` to the box head is a silent value
-            #     defect -- same shapes, same finiteness, different boxes;
-            #   * removing `stop_gradient` re-opens a gradient path from every
-            #     later layer back through the reference chain into every
-            #     earlier layer's box head, which is the multi-layer credit
-            #     assignment iterative box refinement exists to avoid.
-            # See decisions.md D-113.
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-113: box delta reads
+            # the normed hidden state, and the next reference is detached.
+            # Feeding raw output changes the boxes silently; removing stop_gradient reopens a cross-layer credit-assignment path. See decisions.md.
             normed = self.norm(output)
             delta = self._run_mlp(
                 self.bbox_embed,
@@ -1116,19 +1032,9 @@ class Sam3TransformerDecoder(keras.layers.Layer):
                     self._run_mlp(self.presence_token_head,
                                   self.presence_token_out_norm(presence)),
                     axis=-1)
-                # DECISION plan-2026-08-04T044628-4c240b4c/D-111
-                # This bound is 10.0 and the open-vocabulary scorer's is 12.0.
-                # They are NOT the same quantity and must not be unified; only
-                # a probe inside (10, 12] can tell them apart.
-                # A DELIBERATE DIVERGENCE, recorded rather than hidden: at the
-                # pinned reference SHA this clamp is a provable NO-OP -- it
-                # calls the out-of-place `clamp` and discards the result, then
-                # appends the UNCLAMPED tensor. Both constructor parameters,
-                # the reference's own comment, and its scorer (which clamps
-                # correctly) say the intent is a live clamp, so this port makes
-                # it effective. Do NOT "restore parity" by deleting it: that
-                # would also make `clamp_presence_logits=False` unreachable by
-                # any test. See decisions.md D-111.
+                # DECISION plan-2026-08-04T044628-4c240b4c/D-111: this clamp
+                # is 10.0, the open-vocabulary scorer's is 12.0 -- do not unify them.
+                # At the reference SHA the clamp is a provable no-op (result discarded); this port makes it effective, matching the reference's stated intent. See decisions.md.
                 if self.clamp_presence_logits:
                     logits = ops.clip(logits,
                                       -self.clamp_presence_logit_max_val,

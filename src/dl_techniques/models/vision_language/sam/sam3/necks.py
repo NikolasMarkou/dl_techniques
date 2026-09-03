@@ -1,60 +1,23 @@
-"""
-SAM 3 Dual SimpleFPN Neck: one trunk map, four scales, two weight sets.
-=======================================================================
+"""Sam3DualViTDetNeck, the ViTDet-style SimpleFPN neck for SAM 3.
 
-:class:`Sam3DualViTDetNeck` is the ViTDet-style SimpleFPN that turns the ONE
-feature map emitted by :class:`Sam3ViTDetBackbone` into the multi-scale pyramid
-the detector and the tracker consume.
+Turns the single feature map from :class:`Sam3ViTDetBackbone` into a
+four-scale pyramid by resampling that one map to four resolutions (transposed
+convs to upsample, max-pool to downsample, identity at scale 1.0), rather
+than reading from a multi-block trunk pyramid. "Dual" means two structurally
+identical but independently-weighted copies of the four-branch conv stack
+read the same trunk feature: one feeds the detector, one feeds the tracker.
+Each branch adds its own fixed 2D sine positional encoding, computed on that
+branch's own grid.
 
-Based on:
----------
-- Li, Y., Mao, H., Girshick, R., & He, K. (2022). ViTDet / SimpleFPN.
-- Carion, N. et al. (2020). DETR -- the sine positional encoding reused here.
+The branch convs carry no normalization. The sine encoding omits the
+reference's half-pixel center offset (a constant angular shift, largest at
+the coarsest level), which is inert today and binding only if released SAM 3
+weights are ever loaded.
 
-Key Features:
-------------
-- ONE trunk map resampled to four resolutions; no multi-block trunk pyramid.
-- "Dual" = two structurally identical, INDEPENDENTLY-WEIGHTED copies of the
-  four-branch conv stack reading the SAME trunk feature, one feeding the SAM 3
-  detector and one the SAM-2-style tracker. One backbone, two neck weight sets,
-  never two backbones.
-- A fixed 2D sine positional encoding per branch, on that branch's OWN grid.
-
-Architecture Overview:
----------------------
-1. **Resample** the single ``(batch, grid, grid, dim)`` trunk map: scale ``4.0``
-   = ``ConvT(dim -> dim/2, k=2, s=2) -> GELU -> ConvT(dim/2 -> dim/4, k=2,
-   s=2)``; ``2.0`` = ``ConvT(dim -> dim/2, k=2, s=2)``; ``1.0`` = identity;
-   ``0.5`` = ``MaxPool(k=2, s=2)``.
-2. On EVERY branch: ``Conv(1x1 -> d_model, bias) -> Conv(3x3, pad=1 ->
-   d_model, bias)``.
-3. Add that branch's own sine encoding. A ``72x72`` trunk gives ``288 / 144 /
-   72 / 36``.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam3.necks import Sam3DualViTDetNeck
-neck = Sam3DualViTDetNeck(dim=1024, d_model=256,
-                          scale_factors=(4.0, 2.0, 1.0, 0.5))
-```
-
-Measured caveats:
-----------------
-- The branch convs carry **no normalization of any kind**. The SAM 3.1 three-way
-  neck adds an optional norm there; this is the SAM 3.0 dual neck and has none.
-- The sine encoding omits the reference's half-pixel centre offset, a constant
-  angular shift of ``pi / H`` MEASURED at ``0.010908 / 0.021815 / 0.043630 /
-  0.087266`` radians for ``H = 288 / 144 / 72 / 36`` -- largest at the coarsest
-  level, and BINDING on any future transfer of released SAM 3 weights (D-134,
-  carrying D-042 forward).
-- Per-scale encodings are not shared: the normalized coordinate pitch differs at
-  every resolution, so one encoding resampled across scales is a value defect
-  with no shape symptom.
-- The transpose check is on the OUTPUT, not on a constructor argument: the
-  reused sine layer returns channels-FIRST and emits ``2 * num_pos_feats``
-  channels, and on a square grid whose side happens to equal ``d_model`` a
-  forgotten transpose broadcasts silently instead of raising.
+References:
+    - Li et al., 2022. Exploring Plain Vision Transformer Backbones for
+      Object Detection.
+    - Carion et al., 2020. End-to-End Object Detection with Transformers.
 """
 
 import keras
@@ -124,14 +87,9 @@ def _build_scale_stack(
             f"{SUPPORTED_SCALES}"
         )
 
-    # DECISION plan-2026-08-04T044628-4c240b4c/D-095
-    # `use_bias=True` on BOTH convs and NO normalization between or after them.
-    # Do NOT add a norm here "to match the FPN elsewhere in the repo": the SAM
-    # 3.0 dual neck has none, and the SAM 3.1 tri-neck's optional `neck_norm`
-    # also flips these biases off when it is enabled. Adding a norm here would
-    # change the embedding scale the whole detector and tracker read, which is
-    # the exact class of silent divergence iteration 2 measured for SAM 2's
-    # unnormalized neck. See decisions.md D-095.
+    # DECISION plan-2026-08-04T044628-4c240b4c/D-095: use_bias=True on both
+    # convs, no normalization anywhere in this stack.
+    # The SAM 3.0 dual neck has none; adding one would change the embedding scale the whole detector and tracker read. See decisions.md.
     layers.append(keras.layers.Conv2D(
         d_model, kernel_size=1, use_bias=True, name=f"{prefix}_conv_1x1",
     ))
@@ -159,16 +117,9 @@ def _encode_position(
     :raises ValueError: If the encoding's width or spatial extent disagrees with
         ``feature`` after the transpose.
     """
-    # DECISION plan-2026-08-04T044628-4c240b4c/D-096
-    # `PositionEmbeddingSine2D` holds TWO conventions that both differ from this
-    # module's: it emits `2 * num_pos_feats` channels (so `d_model // 2` is the
-    # argument that yields a `d_model`-wide encoding), and it returns
-    # channels-FIRST `(B, C, H, W)`. Hence the explicit transpose and cast here,
-    # and hence the check below is on the RESULT rather than on the constructor
-    # argument: on a square grid whose side equals `d_model` a forgotten
-    # transpose is shape-compatible and adds a silently wrong tensor. Do NOT
-    # move this validation into `__init__` and do NOT delete the transpose.
-    # See decisions.md D-096.
+    # DECISION plan-2026-08-04T044628-4c240b4c/D-096: transpose and validate
+    # the encoding's shape here, not in __init__.
+    # PositionEmbeddingSine2D returns channels-first 2*num_pos_feats channels; on a square grid a forgotten transpose is shape-compatible but wrong. See decisions.md.
     pos = ops.transpose(pe_layer(feature), (0, 2, 3, 1))
     expected = tuple(feature.shape[1:])
     got = tuple(pos.shape[1:])
@@ -205,24 +156,16 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
               │                            │
         + per-scale sine PE          + per-scale sine PE
 
-    **Known divergence from the reference -- the sine positional encoding.**
-    This neck reuses the repo-wide :class:`PositionEmbeddingSine2D`, which
-    normalizes coordinates to pixel CENTRES, ``(k - 0.5) / H * 2*pi``, while the
-    reference normalizes to pixel EDGES, ``k / H * 2*pi``
-    (``sam3/model/position_encoding.py:102-116`` at the pinned SHA -- no
-    offset). The divergence is a constant angular shift of ``pi / H`` and it is
-    ACCEPTED, not fixed: the layer is shared with SAM 2 and other consumers and
-    changing it here would move them. MEASURED in float64 at the four SHIPPED
-    grids, with ``num_pos_feats = d_model // 2 = 128`` and an encoding amplitude
-    of 1: max absolute difference **0.010908 / 0.021815 / 0.043619 / 0.087156**
-    at ``H = 288 / 144 / 72 / 36`` -- i.e. exactly ``pi / H``, largest on the
-    COARSEST level. ``sam3_pos`` is LIVE on the detector's main path (it becomes
-    ``memory_pos``, the image cross-attention key embedding), so this is a real
-    input reparametrization, not a spare output. It is the same deviation
-    iteration 1 accepted for SAM 2 (D-042); D-134 carries it forward and states
-    the consequence for any future checkpoint load. The magnitude is PINNED by
-    ``tests/test_models/test_sam3/test_necks.py::TestReferencePeDivergence``, so
-    a change in it is loud rather than silent.
+    Known divergence from the reference: this neck's shared
+    :class:`PositionEmbeddingSine2D` normalizes coordinates to pixel centers,
+    ``(k - 0.5) / H * 2*pi``, while the reference normalizes to pixel edges,
+    ``k / H * 2*pi``. The gap is a constant ``pi / H`` angular shift, accepted
+    because the layer is shared with SAM 2 and other consumers. Measured at
+    the four shipped grids (``H = 288/144/72/36``): max absolute difference
+    ``0.010908 / 0.021815 / 0.043619 / 0.087156``, largest at the coarsest
+    level. ``sam3_pos`` feeds the detector's cross-attention key embedding
+    directly, so this is a real input reparametrization, binding on any
+    future load of released SAM 3 weights.
 
     :param dim: Trunk channel width (the neck's input width).
     :type dim: int
@@ -276,17 +219,9 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
                 f"dim ({dim}) must be a positive multiple of 4 -- the 4.0 scale "
                 f"branch narrows it to dim // 4"
             )
-        # DECISION plan-2026-08-28T181715-3870472c/D-006
-        # The constraint is `% 4`, NOT `% 2`. Do not "relax" this back to
-        # evenness: `d_model // 2` is handed to `PositionEmbeddingSine2D` as
-        # `num_pos_feats`, and THAT value must itself be even because the layer
-        # splits it between its sine and cosine halves. `d_model = 10` passed
-        # the old `% 2` check, produced `num_pos_feats = 5`, and built an
-        # encoder that could never complete a forward pass -- it died later in
-        # `ops.stack` with `InvalidArgumentError: Shapes of all inputs must
-        # match: values[0].shape = [2,6,5,3] != values[1].shape = [2,6,5,2]`.
-        # Nothing caught it because the only test using 10 constructed the neck
-        # and compared configs without ever calling it. See decisions.md D-006.
+        # DECISION plan-2026-08-28T181715-3870472c/D-006: constraint is
+        # d_model % 4, not d_model % 2.
+        # d_model // 2 becomes PositionEmbeddingSine2D's num_pos_feats, which must itself be even; d_model=10 passed the old check and built an encoder that could never forward. See decisions.md.
         if d_model <= 0 or d_model % 4 != 0:
             raise ValueError(
                 f"d_model ({d_model}) must be a positive multiple of 4, not "
@@ -315,57 +250,22 @@ class Sam3DualViTDetNeck(keras.layers.Layer):
 
         # Sub-layers -- created UNCONDITIONALLY, built explicitly in build().
         #
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-134
-        # This shared layer normalizes to pixel CENTRES, `(k - 0.5) / H`, where
-        # the reference normalizes to pixel EDGES, `k / H`. Do NOT "fix" it by
-        # editing `layers/embedding/positional_embedding_sine_2d.py`: that layer
-        # is byte-frozen for this plan and SAM 2 already depends on its current
-        # formula (D-042). Do NOT fork or wrap it here either -- a wrapper would
-        # hide a documented constant behind an indirection. The divergence is a
-        # constant `pi / H` angular shift, MEASURED at 0.010908 / 0.021815 /
-        # 0.043619 / 0.087156 for the four shipped grids H = 288/144/72/36, and
-        # it is ACCEPTED for a fresh-init port and BINDING on any future load of
-        # released SAM 3 weights. See decisions.md D-134 (and D-042).
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-134: keep this layer's
+        # pixel-center normalization; do not edit it to match the reference's
+        # pixel-edge convention.
+        # It is shared with SAM 2, which already depends on the current formula (D-042). See decisions.md.
         self.position_encoding = PositionEmbeddingSine2D(
             num_pos_feats=self.d_model // 2,
             temperature=self.pe_temperature,
             name="position_encoding",
         )
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-097
-        # These two stacks are built by two SEPARATE calls, so every weight in
-        # `sam2_convs` is independent of its `sam3_convs` twin. Do NOT
-        # "de-duplicate" this by reusing one stack for both outputs: a
-        # shared-stack port has the same shapes AND the same forward values as
-        # the reference on a fresh model and diverges only after training, so
-        # there is no value-level symptom a fresh-model test could see. The
-        # guards are therefore a trainable-weight COUNT and a weight-
-        # independence probe, never an output comparison.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-097: build sam2_convs
+        # and sam3_convs with two separate calls, never a shared stack.
+        # A shared-stack port matches the reference at init and diverges only after training, so a value-level test would miss it; guard by weight-independence instead. Corrected by D-134: the two stacks are NOT bit-identical at init here (unlike the reference's deepcopy). See decisions.md.
         #
-        # CORRECTED (D-134, was D-097): the two stacks of THIS port are NOT
-        # numerically identical at initialization. The reference clones with
-        # `sam2_convs = deepcopy(self.convs)`, so ITS two stacks are bit-
-        # identical at step 0; this port calls `_build_scale_stack` twice, so
-        # each draws its own weights. Measured by the existing
-        # `test_at_initialization_the_two_necks_already_differ` (min delta
-        # strictly > 0). Nothing reachable depends on it -- both shipped
-        # variants set `add_sam2_neck=False` -- but do not repeat the claim.
-        # See decisions.md D-097 and D-134.
-        #
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-098
-        # Both stacks are stored FLAT -- one list of layers per neck, with the
-        # per-scale branch boundaries kept separately in `_branch_sizes`. The
-        # obvious spelling is a list of per-scale lists, and it is WRONG here:
-        # a nested `List[List[Layer]]` attribute is tracked well enough that
-        # `count_params()`, `weights`, `trainable_weights` and the forward pass
-        # are all correct, but the `.keras` save/load round trip SILENTLY
-        # RESTORES FRESHLY-INITIALIZED KERNELS. MEASURED on this layer and
-        # reproduced on a 12-line stand-alone `Dense` layer: nested gives a
-        # round-trip output delta of 5.95 with matching weight COUNT and
-        # matching weight PATHS, flat gives exactly 0.0. Do NOT re-nest these
-        # lists for readability -- there is no exception and no shape symptom,
-        # only wrong weights. Pinned by
-        # `test_necks.py::TestSerialization::test_full_keras_roundtrip_preserves_outputs`
-        # and by the framework-level regression test beside it. See D-098.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-098: store both stacks
+        # flat, never as a nested per-scale list.
+        # A nested List[List[Layer]] tracks params/weights correctly but silently restores fresh kernels on a .keras round trip (measured delta 5.95 vs 0.0 flat). See decisions.md.
         sam3_branches = [
             _build_scale_stack(self.dim, self.d_model, scale, f"sam3_{index}")
             for index, scale in enumerate(self.scale_factors)

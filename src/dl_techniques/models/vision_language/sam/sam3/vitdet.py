@@ -1,66 +1,30 @@
-"""
-SAM 3 ViTDet Trunk: windowed and global pre-LN ViT blocks over one feature map.
-===============================================================================
+"""Sam3ViTDetBlock / Sam3ViTDetBackbone, SAM 3's plain-ViT detection trunk.
 
-Two public classes make up SAM 3's plain-ViT detection backbone:
-:class:`Sam3ViTDetBlock` (one pre-LN transformer block, either window-local or
-global) and :class:`Sam3ViTDetBackbone` (patch-embed stem, tiled absolute
-position embedding, the block stack, and the single output feature map).
+``Sam3ViTDetBlock`` is one pre-LN transformer block, either window-local or
+global attention; ``Sam3ViTDetBackbone`` composes the patch-embed stem, a
+tiled absolute position embedding, the block stack (mostly windowed, a few
+global), and emits a single output feature map -- the multi-scale pyramid is
+built downstream by the neck, not here.
 
-Based on:
----------
-- Li, Y., Mao, H., Girshick, R., & He, K. (2022). ViTDet.
-- Dosovitskiy, A. et al. (2021). "An Image is Worth 16x16 Words".
-- Su, J. et al. (2021). RoFormer -- the axial 2D rotary variant used here.
+Attention uses 2D axial rotary position embedding on queries and keys only.
+The rotary frequency ladder is built at each block's own token grid, scaled
+by the ratio of the pre-training grid to that grid, so a windowed block
+(whose grid is its window) and a global block (whose grid is the whole
+image) both get an angular pitch matching what they were pre-trained on.
+The absolute position embedding is tiled, not interpolated, up to the
+current grid, and any excess tile is cropped away rather than resized.
 
-Key Features:
-------------
-- Mostly window-local attention with a small set of global blocks.
-- 2D axial rotary position embedding on queries and keys, never on values.
-- Absolute position embedding stored at the PRE-TRAINING grid and TILED (not
-  interpolated) up to the current grid.
-- Exactly ONE output feature map; the pyramid is built downstream by the neck.
-- Channels-LAST throughout, and no complex dtype -- the rotation is the
-  real-valued cos/sin form from
-  :class:`~dl_techniques.layers.embedding.axial_rope_2d.AxialRoPE2D`.
+The MLP hidden width truncates ``dim * mlp_ratio`` rather than rounding it.
+This file is channels-last throughout; the reference trunk is
+channels-first.
 
-Architecture Overview:
----------------------
-1. A single strided convolution cuts the image into non-overlapping patches,
-   giving a ``(batch, h, w, embed_dim)`` grid.
-2. The tiled absolute position embedding is added, then ``ln_pre`` runs once
-   before the block stack.
-3. Each block computes ``x = x + dp(ls1(attn(norm1(x))))`` then
-   ``x = x + dp(ls2(mlp(norm2(x))))``, with ``ls1``/``ls2`` the optional
-   layer-scale gains and ``dp`` stochastic depth.
-4. The last global block's output is the single trunk feature map.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam3.vitdet import Sam3ViTDetBackbone
-trunk = Sam3ViTDetBackbone(img_size=1008, patch_size=14, embed_dim=1024,
-                           depth=32, num_heads=16, window_size=24)
-```
-
-Measured caveats:
-----------------
-- The rotary frequency ladder is built at the block's OWN token grid while
-  position indices are scaled by ``scale_pos = rope_pt_size / grid_side``. A
-  windowed block's grid IS the window (``24x24`` at the settled config, equal to
-  the rotary pre-training grid) so ``scale_pos = 1.0``; a global block's grid is
-  the full ``72x72`` image grid so ``scale_pos = 24/72``. The angular pitch of
-  the rotation therefore matches the grid it was trained on, resizing no table.
-- Position-embedding tiling is LITERAL ``tile`` + ``crop`` -- ``grid //
-  pretrain_grid + 1`` tiles per axis, then cropped -- so at the settled
-  ``72 / 24`` geometry FOUR tiles are produced and the fourth is discarded in
-  its entirety. An interpolating implementation produces different values with
-  no shape error whatsoever.
-- The MLP hidden width is ``int(dim * mlp_ratio)`` -- TRUNCATION. At the settled
-  ``1024 * 4.625 = 4736`` truncation and rounding coincide, so that
-  configuration cannot distinguish the two rules.
-- The reference transposes its trunk output to channels-first; the downstream
-  neck here is written against channels-last.
+References:
+    - Li et al., 2022. Exploring Plain Vision Transformer Backbones for
+      Object Detection.
+    - Dosovitskiy et al., 2021. An Image is Worth 16x16 Words: Transformers
+      for Image Recognition at Scale.
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding.
 """
 
 import math
@@ -138,20 +102,10 @@ def _window_unpartition(
     return ops.reshape(x, (-1, height, width, channels))
 
 
-# DECISION plan-2026-08-04T044628-4c240b4c/D-085
-# This attention class is deliberately module-PRIVATE and deliberately
-# UNREGISTERED, exactly as `models/vision_language/sam/sam2/memory_attention.py`'s
-# `_SAM2RoPEAttention` is (D-008). Do NOT promote it to a third public class in
-# this file and do NOT replace it with `create_attention_layer('multi_head', ...)`.
-# The factory's `multi_head` entry maps to `layers/attention/MultiHeadAttention`,
-# whose contract (read at `attention/factory.py:'multi_head'` and the class
-# itself) exposes NO hook for transforming q/k between the head split and the
-# score matmul -- which is precisely where 2D axial RoPE must be applied -- and
-# defaults to `use_bias=False` with three separate projections where this block
-# needs one FUSED biased `qkv`. A layer that cannot express the mechanism is not
-# a reuse candidate however well its NAME matches (G-5 refuted name-based reuse
-# at five separate assets in this repo). Module-private composition inside the
-# consuming sam3 file is the plan's sanctioned fallback (A-5). See D-085.
+# DECISION plan-2026-08-04T044628-4c240b4c/D-085: keep this attention class
+# module-private and unregistered; never replace it with
+# create_attention_layer('multi_head', ...).
+# That factory entry has no hook to apply 2D axial RoPE between the head split and the score matmul, and expects three separate projections, not one fused qkv. See decisions.md.
 class _Sam3ViTDetAttention(keras.layers.Layer):
     """Fused-qkv multi-head self-attention with 2D axial RoPE, channels-last.
 
@@ -362,24 +316,10 @@ def _make_layer_scale(
     :return: A :class:`LayerScale` or a ``keras.layers.Identity``.
     :rtype: keras.layers.Layer
     """
-    # DECISION plan-2026-08-04T044628-4c240b4c/D-086
-    # When `init_values is None` this returns a REAL, unconditionally-built
-    # `Identity` layer -- it does NOT return a `LayerScale` initialized
-    # to ones, and the block does NOT branch inside `call()`.
-    #
-    # Do NOT "simplify" this to an always-on `LayerScale`: a trainable
-    # ones-initialized gain is identity only at step 0, and it would add
-    # `dim` parameters per residual branch (2 * 1024 * 32 = 65,536 at the
-    # settled config) that the reference model does not have, silently breaking
-    # every closed-form parameter assertion and any future weight transfer.
-    # `init_values=None` IS the settled configuration, so this is the live path,
-    # not a fallback.
-    #
-    # Note also `constraint=None`: `LayerScale` DEFAULTS to a
-    # `non_neg` constraint (`layers/layer_scale.py`), which the reference's
-    # unconstrained layer-scale gain does not have. Reusing the layer by name
-    # while inheriting that default would forbid sign flips the reference
-    # permits. See decisions.md D-086.
+    # DECISION plan-2026-08-04T044628-4c240b4c/D-086: at init_values=None
+    # (the settled configuration) return a real Identity, never an
+    # always-on LayerScale initialized to ones.
+    # A trainable ones-init gain adds dim parameters the reference lacks and is identity only at step 0. Also pass constraint=None -- LayerScale's non_neg default forbids sign flips the reference permits. See decisions.md.
     if init_values is None:
         return keras.layers.Identity(name=name)
     return LayerScale(
@@ -500,16 +440,10 @@ class Sam3ViTDetBlock(keras.layers.Layer):
             raise ValueError(f"window_size must be >= 0, got {window_size}")
         if mlp_ratio <= 0:
             raise ValueError(f"mlp_ratio must be positive, got {mlp_ratio}")
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-087
-        # Non-divisible window geometry RAISES here rather than being silently
-        # padded. The reference pads by `(window_size - H % window_size) %
-        # window_size`, but at every shipped geometry (72 % 24 == 0) that branch
-        # computes a zero pad and is DEAD CODE. Do NOT add the padding branch
-        # "for completeness": an unreachable branch is an untestable branch, and
-        # the plan's edge-case rule is explicit that it must either be reachable
-        # by a test at a non-shipped geometry or not exist. Raising converts a
-        # silent behavioural divergence into a construction-time error. See
-        # decisions.md D-087.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-087: raise on
+        # non-divisible window geometry; do not add the reference's
+        # zero-padding branch.
+        # That branch is dead code at every shipped geometry (72 % 24 == 0), and an unreachable branch is untestable. See decisions.md.
         if window_size > 0 and (
                 input_size[0] % window_size or input_size[1] % window_size
         ):
@@ -537,16 +471,9 @@ class Sam3ViTDetBlock(keras.layers.Layer):
         self.rope_pt_size = rope_pt_size
         self.use_interp_rope = bool(use_interp_rope)
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-088
-        # `int()` TRUNCATION, never `round()`. The reference computes
-        # `hidden_features=int(dim * mlp_ratio)`. At the settled
-        # `1024 * 4.625 = 4736.0` the two rules COINCIDE, so the shipped
-        # configuration cannot distinguish them and a `round()` port would pass
-        # every shipped-scale check while diverging at any other fractional
-        # ratio. Do NOT "clean this up" to `round()` or to
-        # `int(round(...))`. The discriminating probe lives in
-        # `tests/test_models/test_sam3/test_vitdet.py::TestMlpWidth` at a ratio
-        # whose product is non-integral. See decisions.md D-088.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-088: int() truncation,
+        # never round(), matching the reference.
+        # The two coincide at the shipped 1024 * 4.625 = 4736.0 ratio, so only a non-integral-ratio test can tell them apart. See decisions.md.
         self.mlp_hidden_dim = int(self.dim * self.mlp_ratio)
 
         attn_grid = (
@@ -556,14 +483,10 @@ class Sam3ViTDetBlock(keras.layers.Layer):
         pt_size = (
             self.window_size if self.window_size > 0 else attn_grid[0]
         ) if self.rope_pt_size is None else int(self.rope_pt_size)
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-089
-        # `scale_pos` is the RATIO of the rotary pre-training grid to the grid
-        # attention actually runs on -- and that grid is the WINDOW for a
-        # windowed block, the IMAGE for a global block. At the settled config a
-        # windowed block gets 24/24 = 1.0 and a global block gets 24/72 = 1/3.
-        # Do NOT give the global blocks `scale_pos = 1.0`: the rotary table
-        # would then have three times the angular pitch it was pre-trained at,
-        # which is a pure value divergence with no shape symptom. See D-089.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-089: scale_pos is
+        # pt_size / this block's own attention grid (window for a windowed
+        # block, image for a global one) -- never 1.0 for global blocks.
+        # A global block at scale_pos=1.0 would triple the rotary table's angular pitch versus what it was pre-trained at, with no shape symptom. See decisions.md.
         self.rope_scale_pos = (
             float(pt_size) / float(attn_grid[0]) if self.use_interp_rope else 1.0
         )
@@ -865,27 +788,10 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
                 f"global_att_blocks {global_att_blocks} must all be in "
                 f"[0, depth={depth})"
             )
-        # DECISION plan-2026-08-18T140459-7991552f/D-046
-        # The LAST block must be global. `call` returns at
-        # `index == max(global_att_blocks)`, so every block after that index is
-        # BUILT, parameter-counted and handed to the optimizer while
-        # contributing nothing: no gradient reaches it, and AdamW still carries
-        # two moment buffers per weight for it. MEASURED at
-        # `depth=6, global_att_blocks=(1, 3)`: the trunk constructs silently,
-        # and zeroing every weight of blocks 4 and 5 (1,744 parameters) moves
-        # the output by max|delta| == 0.0 exactly. No shape error, no warning,
-        # and invisible to a parameter-count assertion -- which is why this
-        # needs a constructor guard rather than a test.
-        # WHAT NOT TO DO: do not "repair" a violating config by silently
-        # truncating `self.blocks` to `max(global_att_blocks) + 1`, and do not
-        # downgrade this to a `logger.warning`. Either would let `depth` mean
-        # something different from the block count it names, and `get_config`
-        # round-trips `depth` -- a truncating trunk would reload as a shorter
-        # one. The class docstring at `:747-748` already states the invariant;
-        # this makes it enforceable. Every shipped variant satisfies it
-        # (`sam3` 31/32, `small` 5/6, `tiny` 1/2), and
-        # `tests/test_models/test_sam3/test_model.py:990` already asserts it
-        # over the variant table. See decisions.md D-046.
+        # DECISION plan-2026-08-18T140459-7991552f/D-046: raise unless the
+        # last block is global; never silently truncate self.blocks or
+        # downgrade this to a warning.
+        # call() returns at index == max(global_att_blocks), so any block after that index is built and optimized but contributes nothing -- measured max|delta| == 0.0 with no shape or warning symptom. See decisions.md.
         if max(global_att_blocks) != depth - 1:
             raise ValueError(
                 f"global_att_blocks {global_att_blocks} must name the LAST "
@@ -1053,23 +959,9 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
         table = ops.reshape(table, (1, side, side, self.embed_dim))
         if side == self.grid_size:
             return table
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-090
-        # LITERAL tile-then-crop, NOT interpolation. The tile count per axis is
-        # `grid // side + 1` -- note the unconditional `+ 1`, which is what makes
-        # the last tile FULLY redundant whenever `side` divides `grid`: at the
-        # settled 72 / 24 geometry this produces FOUR tiles of 24 (96 rows) and
-        # the crop to 72 discards the fourth in its entirety.
-        #
-        # Do NOT "improve" this to `keras.ops.image.resize(..., 'bicubic')` or to
-        # any interpolation. The reference has BOTH code paths and SAM 3 selects
-        # the tiling one (`tile_abs_pos=True`); an interpolating port produces
-        # different values at every token with NO shape error and no exception --
-        # it is a silent value defect of exactly the class this plan exists to
-        # catch. The discriminating oracle is
-        # `tests/test_models/test_sam3/test_vitdet.py::TestTileAbsPos`, which
-        # pins the periodicity `out[i] == pretrain[i % side]` that any
-        # interpolation destroys, and the per-row multiplicity that proves the
-        # redundant tile is discarded rather than resampled. See D-090.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-090: literal tile-then-
+        # crop, never interpolation (e.g. ops.image.resize).
+        # SAM 3 selects the tiling code path; an interpolating port produces different values at every token with no shape error. See decisions.md.
         tiles_h = self.grid_size // side + 1
         tiles_w = self.grid_size // side + 1
         tiled = ops.tile(table, (1, tiles_h, tiles_w, 1))
@@ -1089,24 +981,14 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
         x = self.patch_embed(inputs)
         if self.use_abs_pos:
             x = x + ops.cast(self._abs_pos(), x.dtype)
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-091
-        # `ln_pre` runs HERE -- once, after the stem and the position-embedding
-        # addition, BEFORE the block stack. Do NOT move it after the stack: the
-        # reference's `ln_post` (a separate, differently-initialized norm that is
-        # `Identity` at the settled config) is the only post-stack norm, and the
-        # blocks are pre-LN, so a `ln_pre` moved to the end would leave the first
-        # block reading an unnormalized patch-embedding-plus-position signal.
-        # See decisions.md D-091.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-091: run norm_pre here,
+        # once, before the block stack -- never move it after.
+        # The blocks are pre-LN; moving this norm to the end would leave the first block reading an unnormalized signal. See decisions.md.
         x = self.norm_pre(x)
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-092
-        # The trunk returns ONE feature map -- the LAST global block's -- not a
-        # per-global-block pyramid. The reference gates its multi-output path on
-        # `return_interm_layers`, which SAM 3 sets to False, and the neck reads
-        # `xs[-1]`. Do NOT return a list of every global block's map "so the neck
-        # can choose": the neck builds all four pyramid scales by resampling THIS
-        # single map, so feeding it intermediate blocks would silently substitute
-        # shallower features at three of four scales. See decisions.md D-092.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-092: return one feature
+        # map (the last global block's), never a per-global-block list.
+        # The neck resamples this single map to build all four pyramid scales; a list would let it silently substitute shallower features. See decisions.md.
         for index, block in enumerate(self.blocks):
             x = block(x, training=training)
             if index == self.last_global_block:

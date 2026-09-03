@@ -1,73 +1,27 @@
-"""
-SAM 3 Encoder Query Selection: DINO-style *mixed* proposal generation.
-======================================================================
+"""Sam3EncoderQuerySelection, DINO-style mixed proposal generation for SAM 3.
 
-:class:`Sam3EncoderQuerySelection` reads the decoder's image ``memory`` -- the
-flattened finest neck level -- and emits, per position, an objectness logit and
-a ``cxcywh`` box refined from that position's grid anchor. The top
-``num_queries`` boxes replace the decoder's learned, image-INDEPENDENT
-``reference_points`` table as its initial ``reference_boxes``. This head is NOT
-a reference component: it is this package's own addition, reached through
-``Sam3Image(..., query_selection=True)``, OFF by default.
+Reads the decoder's flattened image memory and emits, per grid position, an
+objectness logit and a box refined from that position's fixed anchor. The
+top ``num_queries`` boxes replace the decoder's learned, image-independent
+reference-point table as its initial reference boxes -- following DINO's
+mixed selection, where a query's position comes from the encoder and its
+content stays a learned table. This head is not part of the SAM 3
+reference; it is reached only through ``Sam3Image(..., query_selection=True)``
+and is off by default, so nothing changes when the flag is off.
 
-Based on:
----------
-- Zhang, H. et al. (2022). DINO -- the *mixed* selection implemented here: a
-  query's POSITIONAL part comes from the encoder, its CONTENT part stays a
-  learned table.
-- Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
+An optional ``prompt_conditioned`` mode applies a FiLM-style per-channel
+affine to the memory, built from the pooled text prompt, before both MLPs,
+making the top-k selection itself prompt-dependent.
 
-Key Features:
-------------
-- Per-position objectness and box MLPs over the image memory.
-- Row-major grid anchors at pixel centres.
-- Optional, default-OFF ``prompt_conditioned`` FiLM modulation that makes the
-  top-k SELECTION itself prompt-dependent.
+Grid anchors are laid out row-major to match the memory's own flatten
+order; a transposed grid is shape-compatible and silently wrong. The box
+head's last projection is zero-initialized, so at step 0 every proposal is
+exactly its grid anchor.
 
-Architecture Overview:
----------------------
-1. ``memory (batch, H * W, d_model)`` -> objectness MLP ``-> 1`` and box MLP
-   ``-> 4`` (a delta).
-2. ``boxes = sigmoid(delta + inverse_sigmoid(anchor_j))``, with
-   ``anchor_j = ((col + 0.5) / W, (row + 0.5) / H, anchor_size, anchor_size)``.
-3. ``top_k(objectness[..., 0], k=num_queries)``, then ``gather(boxes, indices)``.
-4. Behind ``prompt_conditioned``, before either MLP reads it: ``scale, shift =
-   split(Dense(2 * d_model)(masked_mean_pool(prompt)))`` then
-   ``memory = memory * (1 + scale[:, None, :]) + shift[:, None, :]``.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam3.query_selection import (
-    Sam3EncoderQuerySelection)
-head = Sam3EncoderQuerySelection(d_model=256, num_queries=200,
-                                 feat_size=(72, 72))
-```
-
-Measured caveats:
-----------------
-- **Why this head exists, MEASURED not guessed**: SAM 3's box output was
-  image-independent BY CONSTRUCTION, not by a training-time collapse.
-  On the shipped synthetic runs ``val_box_std_across_images`` read ``6.9e-06``
-  ON GPU against an across-*query* spread of ``0.13``, and is already that low
-  at epoch 0. Below ``~1e-5`` that statistic is DEVICE-DEPENDENT (same weights,
-  split and code: ``6.94e-06`` GPU vs ``1.84e-06`` CPU, a factor of 3.8 --
-  ``train/sam3/train_sam3.py``'s module docstring is its home), so the argument
-  rests on the four-order gap to the across-query spread, not on the digits.
-  The mechanism is that the decoder's box chain is ``sigmoid(delta + inverse_sigmoid(reference))`` with a zero-init last
-  projection over a learned table broadcast across the batch, so at step 0 the
-  boxes cannot depend on the image at all.
-- With the flag off nothing changes and no weight is created, so the on-disk
-  checkpoints and the exact parameter-count oracle are untouched.
-- The flatten order is row-major and not a matter of taste: ``anchor_j`` must be
-  laid out exactly as the memory it annotates, and a transposed grid is a
-  silent, plausible-looking defect with no shape symptom.
-- The box stack's last projection is zero-initialized (D-112), so at step 0
-  every proposal is EXACTLY its grid anchor.
-- A degenerate objectness field selects positions ``0 .. k - 1``, because
-  ``top_k`` breaks ties by ascending index -- an image-INDEPENDENT selection
-  with the right shapes, dtypes and a plausible spread. That vacuity mode is
-  what this layer's guards exist to exclude.
+References:
+    - Zhang et al., 2022. DINO: DETR with Improved DeNoising Anchor Boxes
+      for End-to-End Object Detection.
+    - Ravi et al., 2025. SAM 3: Segment Anything with Concepts.
 """
 
 import keras
@@ -86,26 +40,9 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-#: Step-0 side length of every proposal anchor, in normalized image units.
-#:
-#: MEASURED, not invented: the seed-pooled mean of ``sqrt(w * h)`` over the
-#: 4547 valid ground-truth boxes of the TRAIN split at seeds 1/2/3, read through
-#: ``train.sam3.baselines.pool_train_gt`` (the single home for "read the train
-#: split's GT"). Per-seed values 0.1771 / 0.1767 / 0.1791; per-seed spread
-#: 0.00236, i.e. 1.3% of the mean and 6.2% of one standard deviation (0.0379).
-#: The scoring split (``seed + 10_000``) was never read, so no scoring-split
-#: statistic enters this model's initialization.
-#:
-#: This is a DIFFERENT constant with a DIFFERENT provenance from
-#: ``train.sam3.baselines.GRID_BOX_SIZE = 0.2``, which is a hand-written
-#: comparator geometry fitted to nothing. The two are numerically close and must
-#: never be "reconciled" into one shared constant: one is a fit, the other is
-#: deliberately not. See decisions.md D-005.
-#:
-#: The same measurement shows the data does NOT support a square anchor
-#: (``mean(w) = 0.2004`` vs ``mean(h) = 0.1632``, ``mean(w/h) = 1.374``); a
-#: square anchor is a stated modelling choice, and separate ``anchor_w`` /
-#: ``anchor_h`` is the named follow-up lever, deliberately not taken here.
+# DECISION plan-2026-08-06T185813-fd80240f/D-005: step-0 anchor side length,
+# measured as the mean sqrt(w*h) over 4547 train-split ground-truth boxes.
+# A different constant from train.sam3.baselines.GRID_BOX_SIZE=0.2 (an unrelated hand-fit comparator) -- never merge them. See decisions.md.
 DEFAULT_ANCHOR_SIZE: float = 0.1776
 
 # ---------------------------------------------------------------------
@@ -184,10 +121,7 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
         self.prompt_conditioned = bool(prompt_conditioned)
         self.num_positions = self.feat_size[0] * self.feat_size[1]
 
-        # There are only `H * W` distinct proposals to choose from, so asking
-        # for more than that is not a degraded selection -- it is an impossible
-        # one, and `ops.top_k` would raise deep inside the forward pass with a
-        # message naming neither this layer nor its configuration.
+        # Only H * W proposals exist; asking for more is impossible, not degraded.
         if self.num_positions < self.num_queries:
             raise ValueError(
                 f"feat_size {self.feat_size} holds {self.num_positions} memory "
@@ -196,52 +130,20 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
                 f"{self.num_positions} positions and cannot pick more "
                 f"proposals than the grid has positions")
 
-        # Every sub-layer store here is FLAT. A `List[List[Layer]]` restores
-        # freshly initialized kernels on a `.keras` round trip while the weight
-        # count, every weight path and the parameter total all match -- measured
-        # in this package, see decisions.md D-098.
-        #
-        # Both stacks come from the decoder's own sanctioned MLP trio
-        # (`_make_mlp` / `_build_mlp` / `_run_mlp`) rather than from a fourth
-        # hand-rolled Dense-stack builder.
+        # Sub-layers are stored flat, not List[List[Layer]] -- that shape
+        # restores freshly initialized kernels on a .keras round trip. See decisions.md D-098.
         self.objectness_head = Sam3TransformerDecoder._make_mlp(
             self.mlp_depth, self.d_model, 1, "objectness_head")
 
-        # DECISION plan-2026-08-06T185813-fd80240f/D-005
-        # The LAST projection of the box stack is ZERO-initialized, exactly as
-        # the decoder's `bbox_embed` is (D-112 of
-        # plan-2026-08-04T044628-4c240b4c). Do NOT "fix" this to a standard
-        # initializer: the proposal chain is
-        # `sigmoid(delta + inverse_sigmoid(anchor))`, so a zero delta is what
-        # makes every proposal EXACTLY its grid anchor at step 0. With any
-        # non-zero init the head displaces every anchor before a single
-        # gradient step, the decoder's initial references are displaced with
-        # it, and boxRPB's bias -- which is built FROM those references -- is
-        # displaced too. There is no shape, dtype or finiteness symptom.
-        # See decisions.md D-005.
+        # DECISION plan-2026-08-06T185813-fd80240f/D-005: zero-init the box
+        # stack's last projection, matching the decoder's bbox_embed (D-112).
+        # A non-zero init displaces every anchor before the first gradient step, with no shape/dtype symptom. See decisions.md.
         self.box_head = Sam3TransformerDecoder._make_mlp(
             self.mlp_depth, self.d_model, 4, "box_head", zero_init_last=True)
 
-        # DECISION plan-2026-08-07T065516-6add49a9/D-014
-        # Created ONLY when the flag is on, and NOT zero-initialized. Two
-        # things are pinned here and neither is style.
-        #   * Creating it unconditionally is the one change that flips
-        #     `test_query_selection.py`'s exact parameter-count oracle RED at
-        #     defaults and stops the 21 on-disk checkpoints loading. The flag
-        #     is what buys byte-identity-when-off, so do NOT hoist this out of
-        #     the `if`.
-        #   * Do NOT copy `box_head`'s `zero_init_last=True` here. A zero
-        #     initializer makes the modulation the EXACT identity at step 0, so
-        #     an untrained flag-on model is bit-identical to the flag-off one
-        #     and every prompt-liveness measurement reads exactly 0.0 -- the
-        #     head would be born degenerate on precisely the axis this flag
-        #     exists to open. The box head's zero init is correct for a
-        #     DISPLACEMENT of an anchor; this is a GATE, and the two want
-        #     opposite initializations.
-        # The stack is the decoder's sanctioned `_make_mlp` trio at depth 1
-        # (one linear projection, no activation), not a fourth Dense-stack
-        # builder, and it is stored FLAT like the two above it.
-        # See decisions.md D-014.
+        # DECISION plan-2026-08-07T065516-6add49a9/D-014: create prompt_film
+        # only when the flag is on, and never zero-initialize it.
+        # Unconditional creation breaks byte-identity-when-off and 21 on-disk checkpoints; zero-init here (unlike box_head) would make the gate born degenerate. See decisions.md.
         self.prompt_film = None
         if self.prompt_conditioned:
             self.prompt_film = Sam3TransformerDecoder._make_mlp(
@@ -268,22 +170,9 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
             leading singleton axis broadcasts over the batch.
         :rtype: np.ndarray
         """
-        # DECISION plan-2026-08-06T185813-fd80240f/D-005
-        # The layout is ROW-MAJOR: position `j` is `(row, col)` with
-        # `row = j // W` and `col = j % W`. This is NOT a free choice and NOT
-        # an assumption -- it is what the two producers of this index do:
-        #   * `Sam3Image._flatten` reshapes a channels-last `(B, H, W, C)` map
-        #     to `(B, H * W, C)`, so the WIDTH axis varies fastest;
-        #   * `decoder._box_rpb_bias` builds its key axis by outer-summing a
-        #     `height`-indexed and a `width`-indexed embedding and reshaping
-        #     `(..., height, width) -> (..., height * width)`, i.e. the same
-        #     order, on the same tensor this head annotates.
-        # Do NOT swap the two, and do NOT "simplify" this to one `arange` over
-        # `H * W`: on the square grids every shipped variant uses, a transposed
-        # anchor grid is shape-compatible, finite, plausible and silently wrong
-        # -- the exact failure class `necks.py`'s D-096 exists for. It is
-        # pinned empirically by `test_query_selection.py`'s flatten-order proof,
-        # which reads `Sam3Image._flatten` itself rather than restating it.
+        # DECISION plan-2026-08-06T185813-fd80240f/D-005: row-major layout,
+        # position j = (row, col) with row = j // W, col = j % W.
+        # Must match Sam3Image._flatten and decoder._box_rpb_bias's index order exactly; a transposed grid is silently wrong (necks.py D-096's failure class). See decisions.md.
         height, width = self.feat_size
         rows, cols = np.divmod(np.arange(self.num_positions), width)
         anchors = np.stack([
@@ -301,15 +190,10 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build every MLP stack from the memory shape.
 
-        MEASURED constraint, not a style choice: this stays a ONE-argument
-        ``build``. Keras refuses a multi-argument ``build`` whose argument
-        names do not match ``call``'s (``ValueError: ... received build()
-        argument 'input_shape', but call() does not have argument 'input'``),
-        and renaming it to ``memory_shape`` would change the key Keras records
-        in the build config -- which every on-disk checkpoint carries as
-        ``input_shape``. Nothing is lost: the FiLM projection reads the POOLED
-        prompt, whose width is ``d_model``, so no prompt shape is needed to
-        build it.
+        Stays a one-argument ``build`` (Keras requires its argument names to
+        match ``call``'s, and every on-disk checkpoint's build config carries
+        the key ``input_shape``). No prompt shape is needed: the FiLM
+        projection reads the pooled prompt, whose width is ``d_model``.
 
         :param input_shape: Memory shape ``(batch, H * W, d_model)``.
         :type input_shape: Tuple[Optional[int], ...]
@@ -317,11 +201,7 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
             ``d_model``, or a key count other than ``feat_size[0] *
             feat_size[1]``.
         """
-        # Re-entry guard, matching the other `build` methods in this package:
-        # on `.keras` LOAD Keras rebuilds a component from its recorded build
-        # config BEFORE `build_from_config` runs, and a second `build()` without
-        # this guard raises `ValueError: You cannot add new elements of state
-        # ... to a layer that is already built` (D-136).
+        # Re-entry guard, matching the other build() methods in this package (D-136).
         if self.built:
             return
         if len(input_shape) != 3:
@@ -393,19 +273,9 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
                     "head would silently fall back to the prompt-BLIND "
                     "proposals this flag exists to replace, with no shape, "
                     "dtype or finiteness symptom")
-            # DECISION plan-2026-08-07T065516-6add49a9/D-014
-            # The modulation is a per-CHANNEL affine on `memory`, applied
-            # BEFORE both MLPs, and it is placed here rather than on the
-            # objectness LOGITS on purpose: a term added to the logits that is
-            # constant across positions cannot change an argsort, so a
-            # `top_k` fed by it selects the same positions for every prompt --
-            # a prompt-conditioning that provably cannot condition the
-            # SELECTION, which is the one thing this flag is for. A per-channel
-            # SCALE reweights each position's own features differently, so the
-            # objectness ordering can (and must be shown to) move. Do NOT
-            # "simplify" this to a bias on `objectness`, and do NOT drop the
-            # scale and keep only the shift.
-            # See decisions.md D-014.
+            # DECISION plan-2026-08-07T065516-6add49a9/D-014: modulate memory
+            # before both MLPs, never add a bias to the objectness logits.
+            # A per-position-constant logit bias cannot change a top_k argsort, so the selection would stay prompt-blind. See decisions.md.
             pooled = Sam3DotProductScoring.masked_mean_pool(
                 ops.cast(prompt, memory.dtype), prompt_padding_mask)
             film = Sam3TransformerDecoder._run_mlp(self.prompt_film, pooled)
@@ -422,10 +292,8 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
         boxes = ops.sigmoid(
             delta + Sam3TransformerDecoder._inverse_sigmoid(anchors))
 
-        # `ops.top_k` breaks ties by ASCENDING index, so an objectness field
-        # that carries no image signal selects positions `0 .. k - 1` for every
-        # image. That reads as a perfectly ordinary output; only an
-        # across-image comparison separates it from a live selection.
+        # ops.top_k breaks ties by ascending index, so a signal-free
+        # objectness field selects positions 0..k-1 for every image.
         values, indices = ops.top_k(objectness[..., 0], k=self.num_queries)
         selected_boxes = ops.take_along_axis(
             boxes, ops.expand_dims(indices, axis=-1), axis=1)

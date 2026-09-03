@@ -1,79 +1,25 @@
-"""
-SAM 3 Training Wrapper: one packed supervision tensor for one joint loss.
+"""Sam3TrainingModel, wrapping Sam3Image to emit one packed supervision tensor.
 
-:class:`Sam3TrainingModel` wraps :class:`Sam3Image` and emits ONE packed
-supervision tensor. That is all it does, and the reason is that the SAM 3
-detection loss is JOINT: one Hungarian assignment is shared across the
-classification, box, presence and mask terms, so all four must be seen by ONE
-:class:`~dl_techniques.losses.sam3_detection_loss.Sam3DetectionLoss` object.
+The SAM 3 detection loss is joint: one Hungarian assignment is shared across
+the classification, box, presence and mask terms, so all four must reach a
+single :class:`~dl_techniques.losses.sam3_detection_loss.Sam3DetectionLoss`
+object. A dict of per-output-key losses would compute a different (or no)
+assignment per term, defeating the joint matcher, so this wrapper's ``call``
+instead runs :class:`Sam3Image` and packs every output into one
+``(batch, rows, C)`` tensor -- no custom ``train_step``. The packed layout
+(channel constants, ``packed_channel_count``, unpack helpers) lives entirely
+in ``losses/sam3_detection_loss.py`` and is imported here, never restated.
 
-Key Features:
-------------
-- ONE packed tensor out; no custom ``train_step``, and there must never be one.
-- :func:`compile_sam3_trainer` is the single compile site.
-- Optional deep supervision over the decoder's per-layer outputs.
-
-Architecture Overview:
----------------------
-1. ``Sam3TrainingModel.call`` runs :class:`Sam3Image` and packs its outputs into
-   one ``(batch, rows, C)`` tensor.
-2. The layout is NOT defined here. ``losses/sam3_detection_loss.py`` is its
-   single home: the ``PACKED_*`` and ``META_*`` channel constants,
-   :func:`packed_channel_count`, ``unpack_predictions``, ``unpack_targets`` and
-   ``derive_keep_loss`` all live there and are IMPORTED below. Nothing here
-   re-spells a channel index or re-derives ``C`` -- :func:`_pack_rows` places
-   its fields BY the imported constants, so a layout change moves one file.
-3. :func:`compile_sam3_trainer` compiles the wrapper against that one loss.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam3.sam3_image import Sam3Image
-from dl_techniques.models.vision_language.sam.sam3.training_model import (
-    Sam3TrainingModel, compile_sam3_trainer)
-trainer = Sam3TrainingModel(Sam3Image.from_variant("tiny"), include_masks=True)
-compile_sam3_trainer(trainer)
-```
-
-Measured caveats:
-----------------
-- A single ``Loss`` object handed a dict ``y_pred`` breaks: ``CompileLoss.build``
-  broadcasts it across every leaf via ``tree.map_structure`` and then
-  ``KeyError``s, while per-output-key dict losses would compute a different (or
-  no) assignment per term -- exactly the property the joint matcher provides.
-  The sanctioned precedent is DINO's D-024: emit ONE packed tensor, let one
-  ``Loss`` split it.
-- SAM 1's forcing reason for a wrapper is a GHOST here and was CHECKED, not
-  assumed: a plain ``keras.Model`` wrapping :class:`Sam3Image` at
-  ``jit_compile=False`` completed a real ``fit()`` step (loss ``0.0467``), so
-  ``Sam3Image.call`` traces fine and this wrapper must not be over-scoped into
-  driving submodules the way SAM 1's must.
-- The meta row's channel ``2`` is ``is_exhaustive``, not a reserved zero; it is
-  imported as ``META_IS_EXHAUSTIVE`` rather than treated as spare.
-- ``jit_compile=False`` is MANDATORY and has ONE home:
-  :func:`compile_sam3_trainer` sets it by ``setdefault``, so the invariant holds
-  by construction. It is doubly forced -- this model family already pins it, and
-  the matcher crosses an eager ``py_function`` boundary for which no
-  ``EagerPyFunc`` XLA kernel exists, so ``jit_compile=True`` fails hard.
-- ``training=`` is forwarded EXPLICITLY at every call site. ``training=None`` is
-  NOT inference at a non-zero ``drop_path_rate``: the shared ``StochasticDepth``
-  short-circuits on ``training is False`` ONLY, so the ``None`` a plain
-  ``model(inputs)`` passes down DROPS PATHS (D-123). The ``.keras`` round-trip
-  test compares values at ``training=False``; at ``training=None`` a CORRECT
-  round trip measures deltas of 0.2-2.2 that look exactly like reinitialized
-  weights.
-- Importing the TensorFlow package is FORBIDDEN in this file, whose ``keras.ops``
-  purity is gated by a grep over every file in this package -- so the two
-  literal tokens that gate greps for are deliberately NOT spelled anywhere here,
-  not even in prose, because writing one erodes the instrument (already measured
-  four times in this repository). The packing below is pure ``keras.ops``. The
-  loss module's own dependency is sanctioned as training-only and never traced
-  in a forward path; this file inherits no such exemption and takes none.
+A caller must always compile through :func:`compile_sam3_trainer`, which
+pins ``jit_compile=False`` (the matcher crosses an eager boundary with no
+XLA kernel) and must always forward ``training=`` explicitly at every call
+site -- ``training=None`` is not equivalent to inference under a non-zero
+drop-path rate. This file imports no other tensor framework; the packing is
+pure ``keras.ops``.
 
 References:
-    Ravi, N. et al. (2025). "SAM 3: Segment Anything with Concepts."
-    Carion, N. et al. (2020). DETR -- the Hungarian set-prediction loss this
-    packing serves.
+    - Ravi et al., 2025. SAM 3: Segment Anything with Concepts.
+    - Carion et al., 2020. End-to-End Object Detection with Transformers.
 """
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -150,16 +96,9 @@ def _pack_rows(score: Any, boxes: Optional[Any], masks: Optional[Any],
     :return: The packed rows.
     :rtype: Any
     """
-    # DECISION plan-2026-08-05T124709-6c4fac48/D-015
-    # This is a column SCATTER on purpose. Do NOT "simplify" it to the obvious
-    # `ops.concatenate([score[..., None], boxes, masks], axis=-1)`: that
-    # spelling encodes the field ORDER as source-code order, which is a channel
-    # index restated in a second place with nothing keeping it in step with the
-    # `PACKED_*` constants it is supposed to follow. The scatter below contains
-    # no channel literal at all and stays correct under any reassignment of
-    # those constants. It costs nothing measurable -- the stack is over
-    # `PACKED_MASK_START` (5) columns and the mask block is concatenated whole,
-    # never scattered. See decisions.md D-015.
+    # DECISION plan-2026-08-05T124709-6c4fac48/D-015: scatter columns by the
+    # PACKED_* constants, never concatenate in source-code field order.
+    # Concatenation restates the channel order in a second place with nothing keeping it in step with the constants. See decisions.md.
     zero = ops.zeros_like(score)
     columns = [zero] * PACKED_MASK_START
     columns[PACKED_SCORE_CHANNEL] = score
@@ -253,21 +192,9 @@ def pack_predictions(outputs: Dict[str, Any],
     is the exact inverse of ``unpack_predictions``, pinned value-exactly by
     test. Raises only on a missing required key.
 
-    # DECISION plan-2026-08-06T055747-1e650383/D-005
-    # An auxiliary block's mask channels are ZERO-FILLED, never filled with the
-    # segmentation head's masks -- note the `None` passed for `masks` below. Do
-    # NOT "fix" that to pack the real masks: the loss deliberately computes NO
-    # mask term for an auxiliary block (the reference's `Masks` loss defaults
-    # `compute_aux=False` and warns if set True, while `Boxes` and `IABCEMdetr`
-    # both default True; its shipped detection config ships NO mask loss at all
-    # and the commented segmentation variant beside it writes
-    # `compute_aux: false`), so packing them would ship `(L-1) * (Q+1) * P`
-    # channels of supervision nobody reads while making guard G5 -- "perturbing
-    # an auxiliary block's mask channels does not move the loss" -- pass for the
-    # wrong reason. The segmentation head has no layer axis anyway: it consumes
-    # the whole hidden stack and emits ONE set of masks, so there is no
-    # per-layer mask that packing them here could even mean.
-    # See decisions.md D-005.
+    DECISION plan-2026-08-06T055747-1e650383/D-005: an auxiliary block's mask
+    channels are zero-filled, never packed with the segmentation head's masks.
+    The loss computes no mask term for an auxiliary block, and the head has no per-layer masks to pack anyway. See decisions.md.
 
     :param outputs: ``Sam3Image``'s output dict for the MAIN (last) layer.
     :type outputs: Dict[str, Any]
@@ -325,20 +252,9 @@ def select_prediction_blocks(
     the one the compiled loss slices -- so the selection rule lives here, in one
     place, rather than being spelled twice.
 
-    # DECISION plan-2026-08-06T185813-fd80240f/D-007
-    # Do NOT "simplify" this to `blocks[1:]`. That spelling is correct at
-    # `{deep_supervision=True, query_selection=True}` and at
-    # `{True, False}` and silently WRONG at `{False, True}`: with deep
-    # supervision off and query selection on, `call_per_layer` still returns all
-    # `L` decoder blocks with the encoder block after them, so `blocks[1:]`
-    # yields `L` auxiliary blocks where `num_aux_layers` says `1`. The loss then
-    # derives `Q = rows // (1 + 1) - 1` from a tensor carrying `1 + L` blocks
-    # and slices GARBAGE -- six finite, plausible, fabricated per-term losses
-    # every epoch, with no exception and no shape symptom, because
-    # `unpack_predictions` validates nothing by design. The encoder block is
-    # taken from the END (`blocks[-1]`) and the decoder auxiliaries from the
-    # middle, so neither is identified by an index that assumes the other is
-    # present. See decisions.md D-007.
+    DECISION plan-2026-08-06T185813-fd80240f/D-007: never simplify this
+    selection to blocks[1:].
+    That spelling is silently wrong at {deep_supervision=False, query_selection=True}: it yields L auxiliary blocks where num_aux_layers says 1, and the loss then slices garbage with no exception. See decisions.md.
     :param blocks: ``call_per_layer``'s output, main block first.
     :type blocks: Sequence[Dict[str, Any]]
     :param deep_supervision: Whether the decoder's earlier layers are packed.
@@ -725,18 +641,9 @@ def compile_sam3_trainer(model: Sam3TrainingModel,
     :raises ValueError: If ``loss.include_masks`` or ``loss.num_aux_layers``
         disagrees with the model's.
     """
-    # DECISION plan-2026-08-05T124709-6c4fac48/D-015
-    # ONE compile site, and the width check lives here. Do NOT inline
-    # `model.compile(...)` in a trainer or a test: `jit_compile` would then be
-    # `'auto'` by default (XLA on a GPU, which the matcher's eager
-    # `py_function` boundary cannot run) and the model-vs-loss `include_masks`
-    # agreement would have no place to be checked at all --
-    # `unpack_predictions` / `unpack_targets` are
-    # pure slices with no validation, so a width mismatch trains on garbage
-    # instead of raising. Do NOT "helpfully" coerce a mismatched loss to the
-    # model's flag either: silently rewriting a caller's explicit configuration
-    # hides the pipeline's own disagreement, which is the leg this check cannot
-    # see. See decisions.md D-015.
+    # DECISION plan-2026-08-05T124709-6c4fac48/D-015: this is the one compile
+    # site; never inline model.compile(...) in a trainer or test.
+    # Inlining loses the include_masks agreement check and defaults jit_compile to 'auto', which the matcher's eager boundary cannot run. See decisions.md.
     if loss is None:
         loss = Sam3DetectionLoss(include_masks=model.include_masks,
                                  num_aux_layers=model.num_aux_layers)

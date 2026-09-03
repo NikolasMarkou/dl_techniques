@@ -1,125 +1,40 @@
-"""
-Concept-promptable segmentation: a text phrase in, every instance it names out.
+"""Sam3Image, concept-promptable segmentation: a text phrase in, every instance it names out.
 
-SAM 1 and SAM 2 take geometric prompts -- a click, a box, a mask -- which name
-one instance the user has already located. SAM 3 takes a noun phrase, and the
-task changes shape with the prompt: "every striped umbrella" does not identify
-an instance, it identifies a *concept*, and the model must find all of its
-instances or report that there are none. A per-prompt mask decoder cannot
-express that, so this model is a DETR-style set predictor instead. A fixed bank
-of `num_queries` object queries is decoded in parallel, each emitting one box,
-one mask, and one scalar logit, and a Hungarian assignment (in the training
-wrapper, not here) matches the set to the ground truth.
+SAM 1 and SAM 2 take geometric prompts naming one instance already located.
+SAM 3 takes a noun phrase naming a concept, so the model must find every
+instance of it or report none, which a per-prompt mask decoder cannot
+express. It is a DETR-style set predictor instead: a fixed bank of object
+queries is decoded in parallel, each emitting one box, one mask, and one
+scalar logit, matched to the ground truth by a Hungarian assignment in the
+training wrapper.
 
-What makes the vocabulary open is that the scalar logit is not a row of a class
-table. `Sam3DotProductScoring` projects the query and the masked-mean-pooled
-text prompt into a shared space and takes their scaled dot product, so swapping
-the prompt swaps the "class" with no retraining and no fixed category list. The
-model therefore carries a CLIP-style causal text tower whose *per-token*
-sequence -- never an end-of-text pooled vector -- is what flows downstream:
-pooling happens later, inside the scorer, where the padding mask is available.
+The vocabulary is open because that scalar logit is not a row of a class
+table: :class:`~.model_misc.Sam3DotProductScoring` takes the scaled dot
+product of the query and the pooled text prompt, so swapping the prompt
+swaps the class with no retraining. A `presence` token rides the decoder's
+query sequence, giving one image-level logit for whether the concept occurs
+at all, independent of which query found it.
 
-Because a concept may be absent entirely, per-query scores are not enough. A
-`presence` token rides the decoder's query sequence and is split back off,
-giving one image-level logit that answers "does this concept occur here at all"
-independently of "which query found it". The two can optionally be fused: at
-`supervise_joint_box_scores=True` the class *probability* is multiplied by the
-presence *probability* and the product re-logited. That is off by default -- the
-reference's own default and what its image-model builder leaves in place -- and
-the multiplication is deliberately in probability space, not logit space; the
-two candidates agree only along a thin curve and diverge by O(1) nats elsewhere.
-The presence being multiplied is always the decoder's, since the segmentation
-head has no presence mechanism at all and there is exactly one such signal in
-the model.
+The image path is plain-ViT detection: one backbone feature map resampled
+into a four-scale pyramid by a dual (detector + tracker), independently
+weighted neck, feeding a MaskFormer segmentation head and a three-sub-block
+decoder (query self-attention, text cross-attention, image cross-attention
+with box-conditioned relative position bias). Boxes refine iteratively in
+logit space as in DAB-DETR; the final box comes from re-applying the shared
+box head after the decoder stack, not from the decoder's own last-layer
+output, so :meth:`call_per_layer` is the supported route to per-layer boxes.
 
-The image path is plain-ViT detection rather than a hierarchical backbone.
-`Sam3ViTDetBackbone` is mostly window-local attention with a few global blocks,
-axial 2D RoPE on queries and keys, and an absolute position embedding stored at
-the pre-training grid and *tiled* (not interpolated) to the current one; it
-emits exactly ONE feature map. `Sam3DualViTDetNeck` builds the pyramid from that
-single map by resampling it to `[4x, 2x, 1x, 0.5x]` -- transposed convolutions
-up, max-pool down -- with a per-branch sine positional encoding. "Dual" means
-two structurally identical but independently weighted copies of that stack read
-the same trunk feature, one for the detector and one for a SAM-2-style tracker:
-one backbone, two neck weight sets, never two backbones. The coarsest `scalp`
-levels are then dropped, leaving the segmentation pyramid; its coarsest kept
-level, flattened, is the decoder's image memory. Masks come from a MaskFormer
-head -- one pixel embedding for the whole image, every query projected into the
-same space, mask logits as their dot product -- optionally cross-attending the
-prompt into the pixel features before decoding, so the text reaches the pixels
-and not only the queries.
+An opt-in `query_selection=True` adds a DINO-style mixed-selection head that
+replaces the decoder's learned reference-point table with the top-scoring
+image-memory positions; off by default, it adds no weight when disabled.
 
-The decoder has three attention sub-blocks per layer rather than DETR's two:
-query self-attention, text cross-attention, then image cross-attention whose raw
-scores receive boxRPB, a log-compressed relative position bias conditioned on
-each query's own current box. Boxes are refined iteratively in logit space, as
-in DAB-DETR. That refinement is the source of this file's least obvious
-behaviour: **the final box is produced here, not by the decoder.** The decoder
-returns the anchor each layer *consumed*, so the last layer's refinement has not
-been applied when the stack comes back; `_forward_all` re-applies the shared box
-head to the stacked hidden states, which reproduces layers `0..L-2` exactly and
-produces layer `L-1`. Calling the decoder directly is therefore not the
-supported route to per-layer boxes -- it skips that re-application.
-`call_per_layer` is, and it returns the blocks in *supervision* order with the
-last decoder layer FIRST, so a consumer that packs front-to-back gets the main
-block first by construction. Its `pred_masks` / `semantic_seg` are the same
-tensors in every block, because the segmentation head consumes the whole hidden
-stack and emits one set of masks; they are repeated for shape uniformity, and
-the packer zero-fills auxiliary blocks' mask channels.
-
-In the default configuration all parameters belong to the six composed
-components and this class is pure data flow -- but that is a property of the
-default, not of the class. The opt-in `query_selection=True` creates a seventh
-component here, `Sam3EncoderQuerySelection`, which does own weights. It scores every image-memory position and hands its top
-`num_queries` boxes to the decoder as initial `reference_boxes`, detached, in
-place of the learned image-independent table. Query *content* is untouched --
-that is what makes it DINO's *mixed* selection, and passing `tgt` would silently
-redefine the term. `prompt_conditioned_queries=True` additionally lets the
-pooled prompt FiLM-modulate the memory before scoring, making the selection
-itself prompt-dependent; it requires `query_selection=True` and raises rather
-than becoming a silent no-op. At the default `False` no head is created, no
-weight is added, and the decoder is called by the same expression with
-`reference_boxes=None`. Note that this head is *not* a reference component; it
-is this package's own addition. The head is constructed in `__init__` and every
-component is built explicitly in `build()`, never lazily, because a subclassed
-Keras model with lazily materializing sub-layers restores an incomplete weight
-set from a `.keras` file with no exception and no shape symptom.
-
-Three things are required here that the reference makes optional, and the reason
-in each case is the output contract: `call` returns a fixed five-key dict, and a
-key set that varies with configuration is exactly the shape a downstream
-consumer indexes blindly. So the segmentation head is mandatory, the decoder's
-presence token must be enabled, and `num_feature_levels` must be 1 -- the
-multi-level memory path needs flattened-level bookkeeping that only the deferred
-fusion encoder would consume. Every other cross-component width and grid
-agreement is likewise refused at construction rather than allowed to become a
-silent misassembly at some later call boundary.
-
-One trap deserves naming because it is invisible: the repository's shared
-`StochasticDepth` short-circuits on `training is False` only, so the
-`training=None` that a plain `model(inputs)` passes down *drops paths*. At the
-`sam3` variant's `drop_path_rate=0.1` two `.keras` round-trip outputs then
-differ by O(1) with every weight bit-identical. Pass `training=False` explicitly
-for inference on that variant; `small` and `tiny` set the rate to 0.0 so this
-package's own gates are deterministic without every test remembering the flag.
-
-Of the three variants only `sam3` is a published SAM 3 size, read from the
-pinned reference's builder. `small` and `tiny` are this package's own
-geometries -- a trainable-on-12-GB configuration derived field by field from the
-released configuration's ratios, and a degenerate development size that exists
-so there is a runnable end-to-end gate. They are named in the variant table
-rather than hidden in a test fixture so nobody mistakes either for a released
-checkpoint, and no other published size is invented.
-
-This is a phase-1 architecture with known scope limits, stated rather than
-implied. It does **not** build the vision-language early-fusion encoder the
-reference runs between neck and decoder; image memory and prompt go straight
-into the decoder, which is the largest structural divergence in the package. The
-exemplar / geometry prompt path, DAC query doubling and the `cxcywh -> xyxy`
-conversion are out of scope. And, as with SAM 2, no pretrained weights ship and
-none ever have: SAM 3's released code is under the SAM License, incompatible
-with this repository's GPL-3.0, so this is a reimplementation from the paper and
-published configuration numbers with no accuracy claim attached.
+This is a phase-1 architecture: it omits the reference's vision-language
+early-fusion encoder (image memory and prompt go straight to the decoder),
+the exemplar/geometry prompt path, and DAC query doubling. As with SAM 2, no
+pretrained weights ship or ever will (the SAM License is incompatible with
+this repository's GPL-3.0); this is a reimplementation from the paper with
+no accuracy claim. Only the `sam3` variant is a published size; `small` and
+`tiny` are this package's own development geometries.
 
 References:
     - Ravi et al., 2025. SAM 3: Segment Anything with Concepts.
@@ -279,34 +194,12 @@ class Sam3Image(keras.Model):
             "d_proj": 256, "prompt_mlp_hidden_dim": 2048,
             "prompt_mlp_dropout_rate": 0.1, "seg_num_heads": 8, "seg_num_groups": 8,
         },
-        # DECISION plan-2026-08-05T124709-6c4fac48/D-017
-        # `small` is NOT a published SAM 3 size. It exists because the two
-        # variants above are both unusable for a training run: `tiny`'s 8x8
-        # trunk grid is degenerate (the decoder must invent 16x localization out
-        # of 64 tokens -- the exact confounder the SAM 2 investigation never
-        # controlled), and `sam3`'s 10,072.9 MiB FORWARD peak leaves no room for
-        # AdamW's two moment buffers on a 12 GB card.
-        #
-        # Every field is DERIVED from the released configuration's own ratios,
-        # read at the pinned reference (`sam3/model_builder.py`), and every
-        # deviation is a SIGNED NAMED divergence. The reference publishes ONE
-        # size, so the oracle is a set of ratios, not a smaller config:
-        #   R1  trunk head width  embed_dim/num_heads = 64
-        #   R3  img_size/pretrain_img_size = 3
-        #   R4  mlp_ratio = 4.625
-        #   R5  grid/window_size = 3
-        #   R6  global_att_blocks: every 8th, and the LAST block is ALWAYS
-        #       global (the trunk's single output map IS that block's output)
-        #   R7  d_model = embed_dim/4
-        #   R8  text_width = embed_dim, text head width 64, text_depth = 0.75*depth
-        #   R9  decoder head width  d_model/decoder_heads = 32
-        #   R10 dim_feedforward = 8*d_model      R11 d_proj = d_model
-        #   R12 prompt_mlp_hidden_dim = 8*d_model     R13 seg_num_groups = 8
-        #   R14 decoder_layers/depth = 0.1875    R15 context_length = 32
-        # Do NOT "simplify" a field back to a round number: five of the values
-        # here (mlp_ratio, text_width, text_heads, dim_feedforward,
-        # context_length) are the reference's EXACT numbers and were proposed as
-        # rounder ones during planning. See decisions.md D-017.
+        # DECISION plan-2026-08-05T124709-6c4fac48/D-017: `small` is not a
+        # published SAM 3 size -- every field is derived field-by-field from
+        # the released configuration's own ratios (R1-R15), a set of ratios
+        # rather than one smaller config since the reference publishes only
+        # one size. Do not round a field back to a nicer number; five values
+        # here are the reference's exact numbers. See decisions.md.
         "small": {
             # grid 16 = 224/14. Patch 14 is the reference's exact patch size;
             # 224 is the smallest side giving a power-of-two grid (so every neck
@@ -329,21 +222,9 @@ class Sam3Image(keras.Model):
             # DIVERGENCE -1 on R3: grid 8, i.e. ratio 2 not 3 (16/3 is not an
             # integer). `tiny` uses the same ratio 2.
             "pretrain_img_size": 112,
-            # DECISION plan-2026-08-05T124709-6c4fac48/D-018
-            # 0.0 for all three rates, a DIVERGENCE -0.1 from the reference on
-            # each, taken deliberately and NOT because "a small model needs less
-            # regularization". D-123 MEASURED that the shared `StochasticDepth`
-            # short-circuits on `training is False` ONLY, so `training=None` --
-            # what a plain `model(inputs)` passes down -- DROPS PATHS, and two
-            # `.keras` round-trip outputs then differ by up to 2.22 with every
-            # weight bit-identical. `small` is the variant that gets `fit()`,
-            # round trips and a frozen-vs-joint A/B run on it, i.e. the three
-            # places where silent stochasticity corrupts a COMPARISON rather
-            # than merely adding noise. Regularization is one keyword away
-            # (`from_variant("small", drop_path_rate=0.1)`) and a caller that
-            # raises it must then pass `training=` explicitly everywhere.
-            # Do NOT "restore" the shipped variant's 0.1 here.
-            # See decisions.md D-018.
+            # DECISION plan-2026-08-05T124709-6c4fac48/D-018: 0.0 for all
+            # three rates here, not the reference's 0.1.
+            # StochasticDepth drops paths under training=None (D-123), and `small` is the variant that gets fit()/round-trip/A-B comparisons this would corrupt. See decisions.md.
             "drop_path_rate": 0.0, "dropout_rate": 0.0,
             "prompt_mlp_dropout_rate": 0.0,
             # DIVERGENCE +16 on R7 (embed_dim/4 = 48). 48 forces either a
@@ -357,17 +238,11 @@ class Sam3Image(keras.Model):
             # R8 EXACT on width (= embed_dim) and on head width (192/3 = 64).
             # text_depth is a DIVERGENCE -0.5: 0.75*6 = 4.5, floored.
             "text_width": 192, "text_depth": 4, "text_heads": 3,
-            # DECISION plan-2026-08-05T124709-6c4fac48/D-019
-            # context_length 32 is R15 EXACT (the positional table costs 6,144
-            # params, so shrinking it buys nothing and would cap step 5's
-            # phrases). vocab_size 512 is chosen against a WORKLOAD, not against
-            # the reference's 49,408 CLIP BPE table, which is meaningless for a
-            # fixed category-name -> id map: 512 clears COCO's 80 categories by
-            # 6.4x and leaves room for reserved ids, at 512*192 = 98,304 params
-            # (1.7% of the variant). `tiny`'s 64 UNDER-FITS COCO's 80 -- that is
-            # the mistake this number exists not to repeat. KNOWN CEILING: 512
-            # does NOT cover LVIS's 1,203 categories.
-            # See decisions.md D-019.
+            # DECISION plan-2026-08-05T124709-6c4fac48/D-019: vocab_size=512,
+            # sized against a workload (COCO's 80 categories), not the
+            # reference's 49,408-token CLIP BPE table, which is meaningless
+            # for a fixed category-name-to-id map. Does not cover LVIS's
+            # 1,203 categories. See decisions.md.
             "context_length": 32, "vocab_size": 512,
             # num_queries: DIVERGENCE -168. Q must exceed the max GT instances
             # per image with headroom; 200 is sized for LVIS-scale crowding.
@@ -393,23 +268,10 @@ class Sam3Image(keras.Model):
             "img_size": 32, "patch_size": 4, "embed_dim": 16, "depth": 2,
             "num_heads": 2, "mlp_ratio": 4.0, "window_size": 4,
             "global_att_blocks": (1,), "pretrain_img_size": 16,
-            # DECISION plan-2026-08-04T044628-4c240b4c/D-123
-            # 0.0 here and 0.1 in `sam3`, and this is NOT a "small model needs
-            # less regularization" choice. MEASURED: the repository's shared
-            # `StochasticDepth` short-circuits on `training is False` only --
-            # `training=None`, which is what a plain `model(inputs)` passes
-            # down, DROPS PATHS. So at any non-zero rate this model is
-            # stochastic under its most natural invocation, and two `.keras`
-            # round-trip outputs then differ by O(1) with every one of its 217
-            # weights bit-identical (measured: 2.27 on `pred_masks`, and a
-            # weight-by-weight diff finds nothing). The shipped variant keeps
-            # the reference's 0.1 because that is the reference's number; the
-            # development variant is 0.0 so this package's own gate is
-            # deterministic without every test having to remember the flag. Do
-            # NOT "restore" 0.1 here, and do NOT conclude from a green
-            # round-trip at this variant that `training=None` is inference --
-            # `test_model.py::TestTrainingFlagTrap` pins the trap itself.
-            # See decisions.md D-123.
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-123: 0.0 here, 0.1 in
+            # `sam3` -- StochasticDepth drops paths under training=None, so a
+            # non-zero rate makes .keras round trips differ by O(1) with
+            # every weight bit-identical. See decisions.md.
             "drop_path_rate": 0.0,
             "d_model": 8, "scale_factors": (4.0, 2.0, 1.0, 0.5),
             "add_sam2_neck": False, "scalp": 1,
@@ -480,17 +342,10 @@ class Sam3Image(keras.Model):
         self.kept_levels = levels
         self.d_model = int(self.neck.d_model)
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-125
-        # The segmentation head is REQUIRED and the decoder's presence token
-        # MUST be enabled. The reference makes both optional (`segmentation_head
-        # =None`, `presence_token=False`), and this port deliberately does not.
-        # The reason is the OUTPUT CONTRACT: `call` returns a fixed five-key
-        # dict, and a key set that varies with the configuration is the shape a
-        # downstream consumer indexes blindly. Both are enabled in every shipped
-        # image configuration, so nothing reachable is lost. Do NOT "restore
-        # flexibility" by making either optional without first deciding what the
-        # missing keys become -- `None` is not a value a Keras output structure
-        # can carry. See decisions.md D-125.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-125: segmentation head is
+        # required and the decoder's presence token must be enabled, unlike
+        # the reference which makes both optional.
+        # call() returns a fixed five-key dict; a key set that varies with config is the shape a downstream consumer indexes blindly. See decisions.md.
         if not self.transformer.use_presence_token:
             raise ValueError(
                 "Sam3Image requires a decoder with use_presence_token=True: "
@@ -924,22 +779,9 @@ class Sam3Image(keras.Model):
                 memory, prompt=prompt, prompt_padding_mask=padding_mask,
                 training=training)
 
-            # DECISION plan-2026-08-06T185813-fd80240f/D-006
-            # The selected proposals enter the decoder DETACHED, and that is not
-            # defensive style -- it is the design. Do NOT remove the
-            # `stop_gradient` "so the encoder head can learn from the detection
-            # loss": the head is supervised by its OWN packed block (invariant
-            # I-3), an ordinary uniform block on the packed prediction tensor
-            # carrying the same class/box/giou/presence terms. Removing it
-            # re-opens a credit-assignment path from every decoder layer back
-            # through the initial reference into the proposal head -- exactly
-            # the path `decoder.py:1090`'s own `stop_gradient` on every LATER
-            # reference exists to avoid (D-113 of
-            # plan-2026-08-04T044628-4c240b4c, reference-faithful, and a GHOST
-            # constraint G-2 of this plan: it was already refuted as a defect).
-            # Doing so has NO shape, dtype or finiteness symptom -- only the
-            # gradients change, silently and everywhere.
-            # See decisions.md D-006.
+            # DECISION plan-2026-08-06T185813-fd80240f/D-006: proposals enter
+            # the decoder detached; never remove this stop_gradient.
+            # The head is supervised by its own packed block already; removing this reopens a credit-assignment path through the decoder with no shape/dtype symptom, only silent gradient changes. See decisions.md.
             reference_boxes = ops.stop_gradient(proposals["selected_boxes"])
 
         # `tgt` is deliberately NOT passed: query CONTENT stays the decoder's
@@ -993,31 +835,14 @@ class Sam3Image(keras.Model):
         :return: Fused class logits, shaped like ``outputs_class``.
         :rtype: Any
         """
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-122
-        # The fusion multiplies PROBABILITIES and re-logits the product. Do
-        # NOT "simplify" it to a multiply in logit space: the two agree only
-        # along a thin curve (measured minimum separation 0.056 nats over a
-        # 7x7 probe grid, versus 1.099 at the origin and 5.41 at
-        # (class=-2, presence=-1)), so a wrong port is a silent value defect
-        # with correct shapes everywhere.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-122: multiply
+        # probabilities and re-logit the product; never multiply in logit
+        # space, which agrees with this only along a thin curve. The clamp
+        # below is a no-op at the reference's own eps=1e-3 but becomes live
+        # if eps shrinks -- keep it. See decisions.md.
         #
-        # MEASURED, and it corrects two premises at once. `_inverse_sigmoid`
-        # guards its argument with `eps=1e-3`, which bounds its OUTPUT to
-        # +-log(1/eps - ...) = +-6.9078 in float64. The `clamp` below is
-        # therefore a provable NO-OP at the reference's own eps: over a
-        # [-40, 40]^2 grid of (class, presence) logits the clamped and
-        # unclamped results differ by EXACTLY 0.0. It ships anyway, because
-        # it is the reference's expression and because it becomes live the
-        # moment eps shrinks (at eps=1e-7 the range is +-16.118 and the
-        # clamp binds, moving the result by up to 3.09). So: do NOT delete
-        # the clamp as dead code, and do NOT "fix" eps to make the clamp
-        # matter -- eps is the literal that sets the saturation floor, and
-        # a saturated presence drives the class logit to the EPS floor
-        # (-6.9078), not to the clamp floor (-10.0). Both facts are pinned
-        # by `test_model.py::TestFusionOracle`. See decisions.md D-122.
-        #
-        # The presence multiplied here is the DECODER's, the only presence
-        # signal in this package; the segmentation head has none at all.
+        # The presence multiplied here is the decoder's, the only presence
+        # signal in this package.
         presence = ops.sigmoid(presence_logits)
         if detach:
             presence = ops.stop_gradient(presence)
