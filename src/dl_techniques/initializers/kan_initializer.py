@@ -537,7 +537,7 @@ class KANInitializer(keras.initializers.Initializer):
         """
         if dtype is None:
             dtype = keras.config.floatx()
-        dtype = keras.backend.standardize_dtype(dtype)
+        dtype = getattr(dtype, "name", None) or str(dtype)
         shape = tuple(int(d) for d in shape)
 
         if self.target == "spline":

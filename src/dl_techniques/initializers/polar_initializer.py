@@ -274,7 +274,7 @@ class PolarInitializer(keras.initializers.Initializer):
         """
         if dtype is None:
             dtype = keras.config.floatx()
-        dtype = keras.backend.standardize_dtype(dtype)
+        dtype = getattr(dtype, "name", None) or str(dtype)
 
         axes = self._resolve_axes(shape)
 
@@ -299,7 +299,7 @@ class PolarInitializer(keras.initializers.Initializer):
 
         # A zero draw is a measure-zero event for a Gaussian; the clamp keeps it
         # finite, at the cost of that one vector realizing a norm of ~0.
-        scale = target / keras.ops.maximum(norms, keras.backend.epsilon())
+        scale = target / keras.ops.maximum(norms, keras.config.epsilon())
         result = w * keras.ops.cast(scale, w.dtype)
 
         return keras.ops.cast(result, dtype) if compute_dtype != dtype else result

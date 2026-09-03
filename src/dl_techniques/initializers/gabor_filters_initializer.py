@@ -128,6 +128,16 @@ LAMBDA_FRACTIONS = (0.30, 1.00)
 #: Filters below this L2 norm are left untouched by the normalization step.
 _NORM_EPS = 1e-12
 
+
+def _numpy_dtype(dtype: Any) -> str:
+    """Keras dtype spec -> a numpy-acceptable dtype name.
+
+    The Keras-2 ``standardize_dtype`` helper is banned tree-wide (see
+    ``tests/test_the_keras2_backend_calls_are_gone.py``, whose predicate is a
+    plain substring match, so naming the banned module even in prose trips it);
+    this is the sanctioned replacement spelling.
+    """
+    return getattr(dtype, "name", None) or str(dtype)
 # ---------------------------------------------------------------------
 
 
@@ -544,7 +554,7 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         kernel = np.repeat(kernel, in_ch, axis=2)
 
         return keras.ops.convert_to_tensor(
-            kernel.astype(keras.backend.standardize_dtype(dtype)), dtype=dtype
+            kernel.astype(_numpy_dtype(dtype)), dtype=dtype
         )
 
     @staticmethod
