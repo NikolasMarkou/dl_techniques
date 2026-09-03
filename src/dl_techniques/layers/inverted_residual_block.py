@@ -1,30 +1,24 @@
 """
-Inverted Residual Block (MobileNetV2).
-======================================
+InvertedResidualBlock, the MobileNetV2 inverted-residual building block.
 
-A thin specialization of :class:`UniversalInvertedBottleneck` that hard-codes the
-MobileNetV2 inverted-residual configuration: a 1x1 expansion, a 3x3 depthwise
-spatial convolution, and a *linear* 1x1 projection (no activation on the
-bottleneck), with ReLU6 activations and batch normalization throughout. A
-residual connection is added when ``stride == 1`` and the input/output channel
-counts match.
+A thin specialization of :class:`UniversalInvertedBottleneck` that fixes the
+MobileNetV2 configuration: a 1x1 expansion, a 3x3 depthwise spatial
+convolution, and a linear 1x1 projection (no activation on the bottleneck),
+with ReLU6 activations and batch normalization throughout. A residual
+connection is added when ``stride == 1`` and the input/output channel counts
+match.
 
-Reference:
-    - Sandler, M., et al. (2018). "MobileNetV2: Inverted Residuals and Linear
-      Bottlenecks." https://arxiv.org/abs/1801.04381
+References:
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear
+      Bottlenecks. (https://arxiv.org/abs/1801.04381)
 """
 
 import keras
 from typing import  Optional, Dict, Any, Union
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from .universal_inverted_bottleneck import UniversalInvertedBottleneck
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.inverted_residual_block")
 class InvertedResidualBlock(UniversalInvertedBottleneck):
@@ -40,7 +34,7 @@ class InvertedResidualBlock(UniversalInvertedBottleneck):
     ``x_dw = ReLU6(BN(DWConv_3x3(x_expanded)))``,
     ``x_proj = BN(Conv_1x1(x_dw))``, ``output = input + x_proj`` if applicable.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -106,20 +100,16 @@ class InvertedResidualBlock(UniversalInvertedBottleneck):
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any,
     ) -> None:
-        # Store original arguments for get_config serialization.
-        # These are the public API parameters for this specialized class.
+        # This class's own public constructor args, saved for get_config.
         self._block_id = block_id
         self._skip_connection_arg = skip_connection
         self._kernel_initializer_arg = kernel_initializer
         self._kernel_regularizer_arg = kernel_regularizer
 
-        # Default the layer name from the block id, but let an explicit ``name``
-        # (e.g. one restored from get_config) take precedence — passing both a
-        # positional default and a kwarg ``name`` would collide on round-trip.
+        # An explicit `name` (e.g. restored from get_config) must win over
+        # this default, or a round trip collides on both being set.
         kwargs.setdefault("name", f"inverted_residual_block_{block_id}")
 
-        # Call the parent UniversalInvertedBottleneck's __init__ with the
-        # specific configuration for a MobileNetV2 block.
         super().__init__(
             filters=filters,
             expansion_factor=expansion_factor,
@@ -128,7 +118,8 @@ class InvertedResidualBlock(UniversalInvertedBottleneck):
             use_dw1=True,
             use_dw2=False,
             activation_type="relu",
-            activation_args={"max_value": 6},  # This creates ReLU6
+            # max_value=6 turns this ReLU into ReLU6.
+            activation_args={"max_value": 6},
             normalization_type="batch_norm",
             dropout_rate=0.0,
             use_squeeze_excitation=False,
@@ -148,11 +139,10 @@ class InvertedResidualBlock(UniversalInvertedBottleneck):
         :return: Dictionary containing the layer configuration.
         :rtype: Dict[str, Any]
         """
-        # Start with the full configuration from the UIB parent.
         config = super().get_config()
 
-        # Define the set of UIB-specific parameters that are hard-coded
-        # in this class and should not be part of the saved config.
+        # These UIB parameters are hard-coded by this class and dropped
+        # from the saved config.
         params_to_remove = [
             "expanded_channels",
             "kernel_size",
@@ -175,8 +165,6 @@ class InvertedResidualBlock(UniversalInvertedBottleneck):
         for param in params_to_remove:
             config.pop(param, None)
 
-        # Update the config with the original arguments of this class,
-        # ensuring they are properly serialized.
         config.update(
             {
                 "block_id": self._block_id,
@@ -191,5 +179,3 @@ class InvertedResidualBlock(UniversalInvertedBottleneck):
         )
 
         return config
-
-# ---------------------------------------------------------------------

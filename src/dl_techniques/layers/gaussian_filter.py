@@ -17,15 +17,10 @@ import keras
 from keras import ops
 from typing import Tuple, Union, List, Optional, Sequence
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from ..utils.logger import logger
 from ..utils.tensors import depthwise_gaussian_kernel
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.gaussian_filter")
 class GaussianFilter(keras.layers.Layer):
@@ -37,7 +32,7 @@ class GaussianFilter(keras.layers.Layer):
     controls the blur spread. Each channel is processed independently using the
     same normalized kernel to preserve brightness and prevent channel mixing.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -83,30 +78,25 @@ class GaussianFilter(keras.layers.Layer):
             **kwargs):
         super().__init__(trainable=trainable, **kwargs)
 
-        # Validate and store kernel size
         if len(kernel_size) != 2:
             raise ValueError("kernel_size must be length 2")
         self.kernel_size = kernel_size
 
-        # Validate and store strides
         if not isinstance(strides, (tuple, list)) or len(strides) != 2:
             raise ValueError("strides must be a tuple/list of length 2")
         self.strides = strides
 
-        # Process padding
         self.padding = padding.lower()
         if self.padding not in {"valid", "same"}:
             raise ValueError(f"padding must be 'valid' or 'same', got {padding}")
 
-        # Process data_format
         self.data_format = keras.config.image_data_format() if data_format is None else data_format
         if self.data_format not in {"channels_first", "channels_last"}:
             raise ValueError(f"data_format must be 'channels_first' or 'channels_last', got {data_format}")
 
-        # Process sigma
         if (sigma is None or
                 (isinstance(sigma, (float, int)) and sigma <= 0)):
-            # Default sigma based on kernel size
+            # No sigma given: derive it from kernel size.
             self.sigma = ((kernel_size[0] - 1) / 2, (kernel_size[1] - 1) / 2)
         elif isinstance(sigma, Sequence) and len(sigma) == 2:
             self.sigma = (float(sigma[0]), float(sigma[1]))
@@ -133,7 +123,6 @@ class GaussianFilter(keras.layers.Layer):
         if self.built:
             return
 
-        # Get number of channels
         if self.data_format == "channels_last":
             channels = input_shape[-1]
         else:  # channels_first
@@ -145,7 +134,6 @@ class GaussianFilter(keras.layers.Layer):
                 "The 'channels' argument is 'None'."
             )
 
-        # Create the Gaussian kernel as a numpy array first
         kernel_np = depthwise_gaussian_kernel(
             channels=channels,
             kernel_size=self.kernel_size,
@@ -175,7 +163,6 @@ class GaussianFilter(keras.layers.Layer):
         :return: Filtered tensor with the same shape as the input.
         :rtype: keras.KerasTensor
         """
-        # Apply depthwise convolution
         outputs = ops.nn.depthwise_conv(
             inputs=inputs,
             kernel=self.kernel,
@@ -217,5 +204,3 @@ class GaussianFilter(keras.layers.Layer):
             "data_format": self.data_format
         })
         return config
-
-# ---------------------------------------------------------------------

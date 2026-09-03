@@ -1,55 +1,17 @@
 """
-Anti-aliased 2D downsampling via a fixed binomial blur (BlurPool).
+BlurPool2D, anti-aliased spatial downsampling with a fixed binomial blur.
 
-This layer embodies the principle of treating downsampling as a signal
-processing problem rather than an architectural convenience, a design paradigm
-that inserts the low-pass filter that the sampling theorem requires before
-reducing spatial resolution. The core idea addresses a defect present in every
-strided convolution and pooling layer: subsampling a signal whose spectrum
-extends above the new Nyquist frequency aliases that high-frequency content down
-into the low frequencies, where it is indistinguishable from real structure.
-Because the aliased content depends on the phase of the sampling grid, a
-one-pixel shift of the input can change the output substantially. This is why
-convolutional networks, despite their weight sharing, are not shift-invariant in
-practice.
-
-The remedy is the classical one. Instead of subsampling directly, the signal is
-first attenuated above the target Nyquist frequency and only then sampled. The
-filter used is the 1-D binomial kernel
-
-`f = [1, 3, 3, 1] / 8`
-
-outer-producted with itself to form a separable 4x4 2-D kernel normalized to sum
-to one:
-
-`K = (f x f^T)`,  `sum(K) = 1`
-
-Binomial coefficients are the natural choice here: they are the discrete
-analogue of a Gaussian, strictly non-negative (so no ringing or overshoot is
-introduced), and cheap. Unit sum makes the operation a weighted average, which
-preserves the DC level and therefore leaves activation magnitudes and downstream
-normalization statistics undisturbed. Empirically this kernel delivers roughly
--14 dB of attenuation at Nyquist, against approximately -8 dB for the 2x2 box
-filter that average pooling implicitly applies.
-
-Architecturally, the kernel is replicated once per channel and applied as a
-depthwise convolution with the configured stride, so blur and subsample are a
-single fused operation. Two properties follow from this construction. The filter
-is non-trainable and identical across channels, so the layer adds no learnable
-parameters and cannot be degraded by training away from its designed frequency
-response. And because it is depthwise, there is no cross-channel mixing: the
-layer is purely a resampling operator inserted where a strided downsample would
-otherwise sit, leaving the surrounding architecture's channel semantics
-untouched.
-
-The tradeoff is a modest loss of genuine high-frequency detail alongside the
-aliased content, since the filter cannot distinguish the two. In practice the
-shift-consistency and accuracy gains outweigh this, which is the empirical result
-Zhang reports across architectures.
-
-This layer serves as the anti-alias downsampler for axis A of the
-Clifford-algebra-compliant downsampling design space
-(analyses/analysis_2026-04-30_41b5e415/summary.md).
+A strided convolution or pooling layer subsamples a signal without first
+removing content above the new Nyquist frequency, so high-frequency detail
+aliases into low frequencies and a one-pixel input shift can change the
+output substantially. This layer applies a low-pass filter before
+subsampling instead: the 1-D binomial kernel `[1, 3, 3, 1] / 8`, outer-
+producted with itself into a 4x4 kernel that sums to 1, replicated per
+channel and applied as a single depthwise convolution with the configured
+stride. The kernel is fixed and non-trainable, adds no parameters, and
+mixes no channels, so it slots in wherever a strided downsample would sit.
+This trades a small amount of genuine high-frequency detail (which the
+filter cannot separate from aliased content) for shift-consistency.
 
 References:
     - Zhang, 2019. Making Convolutional Networks Shift-Invariant Again. ICML
@@ -59,7 +21,6 @@ References:
       (https://arxiv.org/abs/1805.12177)
     - Burt and Adelson, 1983. The Laplacian Pyramid as a Compact Image Code.
       IEEE Transactions on Communications 31(4).
-
 """
 
 import keras
@@ -67,14 +28,8 @@ import numpy as np
 from keras import ops
 from typing import Any, Dict, Optional
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.blur_pool")
@@ -85,6 +40,19 @@ class BlurPool2D(keras.layers.Layer):
     to form a 4x4 ``[1, 3, 3, 1] x [1, 3, 3, 1] / 64`` 2-D kernel that sums to
     one. The kernel is replicated per channel (depthwise) and is fixed,
     non-trainable. Spatial subsampling uses the configured stride.
+
+    Architecture:
+
+    .. code-block:: text
+
+        Input [B, H, W, C]
+              │
+              ▼
+        fixed binomial kernel (4x4, non-trainable)
+        depthwise conv, stride=strides, padding=padding
+              │
+              ▼
+        Output [B, H', W', C]
 
     :param strides: Spatial stride. ``2`` is the standard anti-alias-2x downsample.
     :type strides: int
@@ -135,8 +103,8 @@ class BlurPool2D(keras.layers.Layer):
 
         # 1-D binomial [1,3,3,1] -> 2-D outer product, normalised to sum to 1.
         f = np.array([1.0, 3.0, 3.0, 1.0], dtype=np.float32)
-        kernel_2d = np.outer(f, f) / float(f.sum() ** 2)  # (4, 4)
-        # Depthwise kernel shape: (kH, kW, C, 1)
+        kernel_2d = np.outer(f, f) / float(f.sum() ** 2)
+        # Depthwise kernel shape: (kH, kW, C, 1).
         kernel_dw = np.broadcast_to(
             kernel_2d[:, :, None, None], (4, 4, channels, 1)
         ).astype(np.float32).copy()
@@ -184,6 +152,3 @@ class BlurPool2D(keras.layers.Layer):
             }
         )
         return config
-
-
-# ---------------------------------------------------------------------

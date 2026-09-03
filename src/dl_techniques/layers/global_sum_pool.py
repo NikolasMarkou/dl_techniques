@@ -21,13 +21,8 @@ import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union, Sequence
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.global_sum_pool")
 class GlobalSumPooling(keras.layers.Layer):
@@ -41,7 +36,7 @@ class GlobalSumPooling(keras.layers.Layer):
     making it useful for object counting and density estimation where the
     integral of a learned density map corresponds to a count.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -199,5 +194,3 @@ class GlobalSumPooling(keras.layers.Layer):
             "keepdims": self.keepdims,
         })
         return config
-
-# ---------------------------------------------------------------------

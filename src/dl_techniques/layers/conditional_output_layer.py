@@ -1,74 +1,24 @@
 """
-Selectively route tensors for conditional training or data imputation.
+ConditionalOutputLayer, a per-sample switch between two same-shape tensors.
 
-This layer acts as a data-driven multiplexer, choosing between two input
-tensors (`ground_truth` and `inference`) on a sample-by-sample basis within
-a batch. Its primary function is to enable sophisticated training schemes,
-particularly in semi-supervised or generative modeling contexts, where
-different samples in a batch require different computational paths or loss
-treatments.
+For each sample in the batch, the layer inspects `ground_truth`. If every
+element of that sample is zero, the matching `inference` sample is routed to
+the output; otherwise the `ground_truth` sample is used. Feeding this output
+into a loss function masks the loss for labeled samples automatically: when
+the loss target is also `ground_truth`, a labeled sample scores `L(gt, gt) = 0`
+and stops contributing gradient, while an unlabeled (all-zero) sample trains
+through the inference path. This lets one batch mix labeled and unlabeled
+samples under a single loss call, useful for semi-supervised training and for
+inpainting-style tasks where only the missing region should contribute loss.
 
-Architecture:
-    The layer's design is a conditional switch. It takes two tensors of
-    identical shape as input. For each sample in the batch, it inspects the
-    `ground_truth` tensor. If every element of that sample is zero, it routes
-    the corresponding sample from the `inference` tensor to the output.
-    Otherwise, if the `ground_truth` sample contains at least one non-zero
-    element, it routes the `ground_truth` sample itself to the output.
-
-    This mechanism is a powerful tool for masking the loss function for
-    certain samples. When this layer's output is fed into a loss function,
-    the behavior is bifurcated:
-    1.  **"Unlabeled" samples (all-zero ground truth):** The output is the
-        model's inference. The loss is computed on the model's prediction,
-        allowing gradients to flow back and train the upstream network.
-    2.  **"Labeled" samples (non-zero ground truth):** The output is the
-        ground truth itself. If the loss function's target is also the ground
-        truth, the resulting loss will be zero (`L(gt, gt) = 0`), effectively
-        preventing any gradients from these samples from affecting the
-        upstream inference network.
-
-Foundational Mathematics and Algorithm:
-    The core of the layer is a conditional selection operation, typically
-    implemented with a `where` clause:
-    `output = where(condition, inference, ground_truth)`
-
-    The `condition` is a boolean tensor derived from the `ground_truth` input.
-    The derivation process for each sample in the batch is as follows:
-    1.  An element-wise comparison `is_zero = (ground_truth == 0.0)` is performed.
-    2.  A reduction using the logical `all` operator is applied across all
-        non-batch dimensions (e.g., height, width, channels) of `is_zero`.
-        This yields a boolean vector of shape `(batch_size,)`, where each
-        element is `True` if the corresponding sample was all zeros.
-    3.  This boolean vector is then broadcast back to the rank of the input
-        tensors by adding singleton dimensions. This allows the `where`
-        operation to perform the element-wise selection correctly across
-        the entire sample.
-
-References:
-    This layer implements a common design pattern rather than a specific, citable
-    algorithm. The underlying principle is fundamental to various advanced machine
-    learning techniques, including:
-
-    1.  **Semi-Supervised Learning:** Where a model is trained on a dataset
-        containing both labeled and unlabeled examples. This layer provides a
-        mechanism to apply a supervised loss to labeled data and an
-        unsupervised or consistency loss to unlabeled data within a single
-        training step.
-    2.  **Generative Modeling and Inpainting:** In tasks like image completion,
-        this pattern can be used to ensure the loss is only calculated on the
-        missing or "generated" regions of an image, while known regions (the
-        "ground truth") contribute zero loss.
-    3.  **Masked Modeling:** Conceptually related to techniques in self-supervised
-        learning (e.g., Masked Autoencoders), where parts of the input are
-        selectively processed or ignored by the loss function.
+The layer takes exactly two same-shape tensors, `[ground_truth, inference]`,
+and has no learnable parameters.
 """
 
 import keras
 from typing import List, Tuple, Optional, Any
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.conditional_output_layer")
 class ConditionalOutputLayer(keras.layers.Layer):
@@ -81,7 +31,7 @@ class ConditionalOutputLayer(keras.layers.Layer):
     loss masking where labeled samples contribute zero loss via
     ``L(gt, gt) = 0`` while unlabeled samples train through the inference path.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -123,19 +73,14 @@ class ConditionalOutputLayer(keras.layers.Layer):
         inputs: List[keras.KerasTensor],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of the layer.
+        """Select each batch item from ground_truth or inference.
 
-        Performs batch-wise conditional selection where each batch item is selected
-        from either ground_truth or inference based on whether ground_truth contains
-        all zeros.
-
-            :param inputs: List containing [ground_truth, inference] tensors with identical shapes.
-            :param training: Boolean indicating training mode (unused but included for consistency).
-
-            :return: keras.KerasTensor: Output tensor with values selected from either ground truth
-                             or inference based on ground truth zero detection.
-
+        :param inputs: List of ``[ground_truth, inference]`` tensors with identical shapes.
+        :type inputs: List[keras.KerasTensor]
+        :param training: Unused, kept for Layer API consistency.
+        :type training: Optional[bool]
+        :return: Tensor with each sample selected from ground_truth or inference.
+        :rtype: keras.KerasTensor
         """
         if not isinstance(inputs, (list, tuple)) or len(inputs) != 2:
             raise ValueError(
@@ -145,29 +90,22 @@ class ConditionalOutputLayer(keras.layers.Layer):
 
         ground_truth, inference = inputs
 
-        # Validate shapes match
         if ground_truth.shape != inference.shape:
             raise ValueError(
                 f"Input tensor shapes must match exactly. "
                 f"Got ground_truth: {ground_truth.shape}, inference: {inference.shape}"
             )
 
-        # Check for all zeros per batch item
-        # Reduce across all dimensions except batch (axis 0)
         reduction_axes = list(range(1, len(ground_truth.shape)))
-
-        # Detect if each batch item in ground_truth is all zeros
         is_all_zeros = keras.ops.all(
             keras.ops.equal(ground_truth, 0.0),
             axis=reduction_axes if reduction_axes else None
         )
 
-        # Reshape condition for proper broadcasting to original tensor shape
-        # Add singleton dimensions for all non-batch axes
+        # Broadcast the per-sample flag back to the input's rank.
         broadcast_shape = [-1] + [1] * (len(ground_truth.shape) - 1)
         is_all_zeros_broadcasted = keras.ops.reshape(is_all_zeros, broadcast_shape)
 
-        # Conditional selection: if ground_truth is all zeros, use inference; otherwise use ground_truth
         output = keras.ops.where(is_all_zeros_broadcasted, inference, ground_truth)
 
         return output
@@ -176,13 +114,12 @@ class ConditionalOutputLayer(keras.layers.Layer):
         self,
         input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the layer's output shape.
+        """Compute the output shape.
 
-            :param input_shape: List of input shapes for [ground_truth, inference].
-
-            :return: Tuple representing the output shape (same as input shapes).
-
+        :param input_shape: List of ``[ground_truth, inference]`` input shapes.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape, identical to each input shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
             raise ValueError(
@@ -201,14 +138,11 @@ class ConditionalOutputLayer(keras.layers.Layer):
         return ground_truth_shape
 
     def get_config(self) -> dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Return the layer configuration.
 
-            :return: dict: Layer configuration dictionary containing all necessary
-                 parameters for reconstruction.
+        :return: Configuration dictionary for serialization.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
 
         return config
-
-# ---------------------------------------------------------------------

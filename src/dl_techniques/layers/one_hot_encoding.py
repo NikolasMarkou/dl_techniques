@@ -1,60 +1,23 @@
 """
-This module provides a `OneHotEncoding` layer, a custom Keras layer that performs
-one-hot encoding for multiple categorical features simultaneously.
+OneHotEncoding, a layer that one-hot encodes several categorical columns.
 
-One-hot encoding is a standard and essential preprocessing step for machine learning models
-that work with categorical data. It converts integer-based categorical labels
-(e.g., 0, 1, 2) into a binary vector format where only one bit is "hot" (set to 1),
-representing the specific category. This prevents the model from assuming a false
-ordinal relationship between categories (i.e., that category 2 is "greater" than
-category 1).
+Converts a batch of integer-encoded categorical features into a single wide
+binary tensor, avoiding the false ordinal relationship a raw integer label
+implies. Each feature column is one-hot encoded independently with its own
+cardinality, then the results are concatenated along the last axis. Putting
+this inside the model graph means a caller feeds raw category integers and
+never needs a separate preprocessing step at inference time.
 
-While this operation can be done in an offline preprocessing step, implementing it
-as a Keras layer offers significant advantages, which this implementation provides.
-
-Key Features and Architectural Benefits:
-
-1.  **Model Encapsulation:**
-    -   By making one-hot encoding a layer, the preprocessing logic becomes an integral
-        part of the model itself.
-    -   This simplifies deployment and inference pipelines, as the model is self-contained.
-        You can feed it raw categorical integers, and it will handle the conversion
-        internally, eliminating the need to manage a separate preprocessing step in
-        production.
-
-2.  **Multi-Feature Handling:**
-    -   This layer is explicitly designed to handle tabular data with multiple
-        categorical columns. The `cardinalities` list directly corresponds to the
-        number of unique categories in each input feature column.
-    -   It processes all features in a single `call`, making it a clean and unified
-        interface for tabular data.
-
-3.  **Efficient and Vectorized Operation:**
-    -   The layer iterates through each categorical feature and applies the backend-agnostic
-        and highly optimized `keras.ops.one_hot` function.
-    -   The resulting one-hot vectors for each feature are then efficiently combined
-        using a single `keras.ops.concatenate` operation at the end. This approach
-        leverages the performance of the underlying backend (TensorFlow, JAX, or PyTorch)
-        for fast, vectorized computation.
-
-The operational flow is as follows:
--   The layer is initialized with a list of `cardinalities`, one for each input feature.
--   During the forward pass, it takes a batch of integer-encoded data of shape `(batch_size, num_features)`.
--   It loops through each feature column, creating a one-hot vector of the specified cardinality.
--   Finally, it concatenates all these vectors along the last axis to produce a single, wide one-hot encoded tensor.
+The layer is initialized with a list of cardinalities, one per input feature
+column, and expects an input of shape `(batch_size, num_features)`.
 """
 
 import keras
 from keras import ops
 from typing import Dict, List, Optional, Tuple, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.one_hot_encoding")
 class OneHotEncoding(keras.layers.Layer):
@@ -74,7 +37,7 @@ class OneHotEncoding(keras.layers.Layer):
     ``y = concat(one_hot(x[:, 0], c_1), ..., one_hot(x[:, F-1], c_F))``,
     producing an output of width ``sum(c_i)``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -118,7 +81,7 @@ class OneHotEncoding(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs (an empty list is allowed -> zero-width output)
+        # An empty list is allowed and gives a zero-width output.
         if any(card <= 0 for card in cardinalities):
             raise ValueError(
                 f"All cardinalities must be positive integers, got {cardinalities}"
@@ -134,7 +97,6 @@ class OneHotEncoding(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]"""
         if self.cardinalities:
-            # Precompute cumulative cardinalities for efficient slicing
             self.cumulative_cardinalities = [0]
             for card in self.cardinalities:
                 self.cumulative_cardinalities.append(self.cumulative_cardinalities[-1] + card)
@@ -153,15 +115,11 @@ class OneHotEncoding(keras.layers.Layer):
             batch_size = ops.shape(inputs)[0]
             return ops.zeros((batch_size, 0), dtype=self.compute_dtype)
 
-        # Convert to int32 for one_hot operation
         inputs_int = ops.cast(inputs, "int32")
 
         outputs = []
         for i, cardinality in enumerate(self.cardinalities):
-            # Extract the i-th categorical feature efficiently
             cat_feature = inputs_int[:, i]
-
-            # One-hot encode with proper dtype
             one_hot = ops.one_hot(
                 cat_feature,
                 cardinality,
@@ -169,7 +127,6 @@ class OneHotEncoding(keras.layers.Layer):
             )
             outputs.append(one_hot)
 
-        # Concatenate all one-hot encodings efficiently
         if outputs:
             return ops.concatenate(outputs, axis=-1)
         else:
@@ -195,5 +152,3 @@ class OneHotEncoding(keras.layers.Layer):
             "cardinalities": self.cardinalities,
         })
         return config
-
-# ---------------------------------------------------------------------
