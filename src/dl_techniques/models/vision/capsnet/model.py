@@ -1,13 +1,12 @@
-"""
-Implementation of the Capsule Network
-architecture that works with standard Keras training workflows (compile/fit).
-The custom training logic is integrated into the model's train_step and test_step methods.
+"""CapsNet, a capsule network with dynamic routing and an optional reconstruction decoder.
 
-Architecture Overview:
-    1. Feature Extraction: Conv2D layers for initial feature extraction
-    2. Primary Capsules: Convert conventional CNN features to capsule format
-    3. Routing Capsules: Final capsule layer with dynamic routing
-    4. Decoder Network (optional): For reconstruction-based regularization
+A stack of Conv2D layers extracts features, a primary capsule layer groups them into
+short vectors, and a routing capsule layer refines those vectors by iterative agreement
+between capsules instead of max-pooling. A capsule's output length stands for the
+probability that its class is present, and its orientation encodes pose. An optional
+decoder reconstructs the input image from the winning capsule, which regularizes
+training. The model exposes standard Keras `compile`/`fit`, with the margin loss and
+reconstruction loss implemented directly in `train_step` and `test_step`.
 
 References:
     - Sabour, S., Frosst, N., & Hinton, G. E. (2017).
@@ -37,33 +36,63 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.capsnet.model")
 class CapsNet(keras.Model):
-    """Keras-compliant Capsule Network model.
+    """Capsule network with dynamic routing and an optional reconstruction decoder.
 
-    This model implements the full CapsNet architecture with integrated training logic
-    that works seamlessly with Keras compile/fit workflow.
+    Architecture:
 
-    Args:
-        num_classes: Number of output classes.
-        routing_iterations: Number of routing iterations for capsule routing.
-        conv_filters: List of filter numbers for convolutional layers.
-        primary_capsules: Number of primary capsules.
-        primary_capsule_dim: Dimension of primary capsule vectors.
-        digit_capsule_dim: Dimension of digit/class capsule vectors.
-        reconstruction: Whether to include reconstruction network.
-        input_shape: Shape of input images (height, width, channels).
-        decoder_architecture: List of hidden layer sizes for decoder network.
-        kernel_initializer: Initializer for convolutional weights.
-        kernel_regularizer: Regularizer for convolutional weights.
-        use_batch_norm: Whether to use batch normalization after convolutions.
-        positive_margin: Positive margin for margin loss (m^+).
-        negative_margin: Negative margin for margin loss (m^-).
-        downweight: Downweight parameter for negative class loss (λ).
-        reconstruction_weight: Weight for reconstruction loss component.
-        name: Optional name for the model.
-        **kwargs: Additional keyword arguments for the base Model class.
+    .. code-block:: text
 
-    Raises:
-        ValueError: If any parameter is invalid or inconsistent.
+        input [B, H, W, C]
+          |
+          v
+        Conv2D stack (conv_filters)      -> feature map
+          |
+          v
+        PrimaryCapsule                   -> [B, N_p, D_p]
+          |
+          v
+        RoutingCapsule (dynamic routing) -> digit_caps [B, num_classes, D_d]
+          |
+          +--> length(digit_caps) -> class probabilities
+          |
+          '--> mask by true/predicted class -> Decoder (optional) -> reconstruction
+
+    :param num_classes: Number of output classes.
+    :type num_classes: int
+    :param routing_iterations: Number of dynamic-routing iterations between the primary and digit capsules.
+    :type routing_iterations: int
+    :param conv_filters: Filter counts for the convolutional feature-extraction stack.
+    :type conv_filters: Sequence[int]
+    :param primary_capsules: Number of primary capsules.
+    :type primary_capsules: int
+    :param primary_capsule_dim: Dimension of each primary capsule vector.
+    :type primary_capsule_dim: int
+    :param digit_capsule_dim: Dimension of each digit (class) capsule vector.
+    :type digit_capsule_dim: int
+    :param reconstruction: Whether to build the reconstruction decoder.
+    :type reconstruction: bool
+    :param input_shape: Shape of input images ``(height, width, channels)``. Needed at construction time only if `reconstruction` is True and the decoder should be built eagerly.
+    :type input_shape: Optional[Tuple[int, int, int]]
+    :param decoder_architecture: Hidden layer sizes for the reconstruction decoder.
+    :type decoder_architecture: Sequence[int]
+    :param kernel_initializer: Initializer for convolutional and dense weights.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for convolutional and dense weights.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param use_batch_norm: Whether to apply batch normalization after each convolution.
+    :type use_batch_norm: bool
+    :param positive_margin: Positive margin ``m+`` in the margin loss.
+    :type positive_margin: float
+    :param negative_margin: Negative margin ``m-`` in the margin loss.
+    :type negative_margin: float
+    :param downweight: Downweight factor ``lambda`` for the negative-class term in the margin loss.
+    :type downweight: float
+    :param reconstruction_weight: Weight applied to the reconstruction loss term.
+    :type reconstruction_weight: float
+    :param name: Optional model name.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments passed to `keras.Model`.
+    :raises ValueError: If any parameter is invalid or inconsistent.
     """
 
     def __init__(
@@ -96,10 +125,8 @@ class CapsNet(keras.Model):
 
         self.num_classes = num_classes
         self.routing_iterations = routing_iterations
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: `list(...)`, not
-        # `.copy()`. The default is now a TUPLE (R-009 S1), and a tuple has no
-        # `.copy()`; `list()` accepts both and keeps the stored attribute -- and
-        # therefore `get_config`'s JSON type -- exactly what it always was.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: use list(...), not .copy() —
+        # conv_filters defaults to a tuple, which has no .copy(). See decisions.md.
         self.conv_filters = list(conv_filters)
         self.primary_capsules = primary_capsules
         self.primary_capsule_dim = primary_capsule_dim
@@ -129,29 +156,12 @@ class CapsNet(keras.Model):
 
         self._layers_built = False
 
-        # Guide 1.1 Golden Rule: sub-layers are CREATED here, in `__init__`.
-        # Neither helper reads `input_shape` -- both are pure functions of the
-        # config stored above -- so neither has any reason to wait for
-        # `build()`. Only the `.build()` calls themselves are deferred, to
-        # `_build_sublayer_tree`.
+        # Sub-layers are created here in __init__; neither helper reads input_shape.
         self._build_feature_extraction()
         self._build_capsule_layers()
 
-        # DECISION plan-2026-08-18T073231-52a93f8c/D-007
-        # DELIBERATE, BOUNDED DEVIATION from the Golden Rule: the decoder is
-        # the ONE sub-layer that cannot always be created here. Its final
-        # `Dense` width is `prod(input_shape[1:])` and its `Reshape` target IS
-        # `input_shape[1:]` -- both are functions of the input shape, which is
-        # legitimately unknown until `build()` when the caller did not pass
-        # `input_shape=` to `__init__` (a supported, documented construction:
-        # `_validate_parameters` only WARNS in that case). So: create it
-        # eagerly HERE whenever `input_shape` was supplied, and only fall back
-        # to creating it in `build()` when it was not. Do NOT "simplify" this
-        # by moving decoder creation wholly back into `build()` -- that
-        # re-introduces create-in-build for the common, fully-specified case
-        # for no gain. Do NOT move it wholly into `__init__` either -- it would
-        # crash `CapsNet(reconstruction=True)` with no `input_shape`.
-        # See decisions.md D-007.
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-007: the decoder's Dense width
+        # depends on input_shape, so it is created here only when input_shape is known; otherwise build() creates it. See decisions.md.
         if self.reconstruction and self._input_shape is not None:
             self._build_decoder()
 
@@ -202,12 +212,11 @@ class CapsNet(keras.Model):
         return keras.regularizers.get(regularizer)
 
     def build(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
-        """Build the model layers based on input shape.
+        """Validate the input shape, create the decoder if still needed, and build every sub-layer.
 
-        Per guide 1.1, sub-layer CREATION happens in `__init__`; this method
-        only (a) validates the input shape, (b) captures `_input_shape`, (c)
-        creates the decoder in the one case `__init__` could not (see D-007),
-        and (d) builds the sub-layer tree (see D-006).
+        :param input_shape: 4D input shape ``(batch, height, width, channels)``.
+        :type input_shape: tuple
+        :raises ValueError: If `input_shape` is not 4D.
         """
         if self._layers_built:
             return
@@ -223,12 +232,8 @@ class CapsNet(keras.Model):
         if self.reconstruction and self._input_shape is None:
             self._input_shape = tuple(input_shape[1:])
 
-        # DECISION plan-2026-08-18T073231-52a93f8c/D-007
-        # The residual half of the decoder deviation: reached ONLY when
-        # `input_shape` was not supplied to `__init__`, so the decoder's output
-        # width was genuinely unknowable there. The `self.decoder is None`
-        # guard is what keeps this from re-creating (and thereby discarding)
-        # the decoder `__init__` already made. See decisions.md D-007.
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-007: reached only when input_shape
+        # was not supplied to __init__; the decoder is None guard stops it re-creating an already-made decoder. See decisions.md.
         if self.reconstruction and self._input_shape is not None and self.decoder is None:
             self._build_decoder()
 
@@ -238,48 +243,13 @@ class CapsNet(keras.Model):
         super().build(input_shape)
 
     def _build_sublayer_tree(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
-        """Explicitly build every sub-layer, threading shapes in dependency order.
+        """Build every sub-layer explicitly, threading shapes in dependency order.
 
-        # DECISION plan-2026-08-18T073231-52a93f8c/D-006
-        These `.build()` calls are LOAD-BEARING. Do NOT delete them as
-        "redundant because `call()` builds them anyway" -- that is exactly the
-        defect this replaced. Mechanism (measured 2026-08-18): Keras'
-        `Model.build_from_config` only falls back to build-by-run
-        (`_build_by_run_for_single_pos_arg`, an actual forward pass that builds
-        the whole sub-layer tree) when `keras.src.utils.python_utils.is_default(
-        self.build)` is True. `CapsNet` OVERRIDES `build`, so `is_default` is
-        False and that fallback is disabled; Keras instead calls `self.build(
-        input_shape)` inside a bare `try/except: pass`. The previous override
-        only CREATED the sub-layer objects and never built them, so after
-        `load_model` every sub-layer was still `built=False` with no variables
-        for the saved arrays to be written into -- and the swallowing
-        `try/except` meant nothing raised or warned. The loss was therefore
-        SILENT: layer paths, weight shapes and parameter totals all matched the
-        donor while every restored kernel was FRESH. The only instrument that
-        sees it is `len(model.weights)` BEFORE the first `call()` (it was 0;
-        after the first call, lazy build makes it 16 either way, so a post-call
-        count cannot distinguish fixed from broken). See decisions.md D-006.
-
-        QUALIFICATION -- this mechanism is NECESSARY BUT NOT SUFFICIENT, and it
-        is NOT a general law that "overriding `build` loses your weights".
-        Counterexample in this same repo: `models/vision/super_resolution/pft_sr/model.py::PFTSR` also
-        overrides `keras.Model.build`, also creates every sub-layer inside
-        `build()`, and never calls `.build()` on any of them -- yet it
-        round-trips with 22 weights BEFORE the first `call()` and an output
-        delta of exactly 0.0. MEASURED here why: `PFTSR.build` ends with a
-        CONCRETE DUMMY FORWARD (`self.call(keras.ops.zeros((1,) +
-        input_shape[1:]))`, `pft_sr/model.py:318-320`), which materializes the
-        whole sub-layer tree. Disabling only that dummy forward drops it to 0
-        weights. So the discriminating property is whether `build()`
-        MATERIALIZES the sub-layer tree at all -- by explicit `.build()` calls
-        as here, or by a forward pass as there -- not whether `build` is
-        overridden. Do not cite D-006 as evidence that some other model with an
-        overridden `build` is broken; measure `len(model.weights)` before the
-        first `call()` on that model.
-
-        Args:
-            input_shape: 4D input shape `(batch, height, width, channels)`.
+        :param input_shape: 4D input shape ``(batch, height, width, channels)``.
+        :type input_shape: tuple
         """
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-006: these .build() calls are
+        # required. CapsNet overrides build(), which disables Keras' build-by-run fallback, so a loaded model reloaded with 0 weights without them. See decisions.md.
         shape = tuple(input_shape)
 
         for i in range(len(self.conv_layers)):
@@ -311,9 +281,10 @@ class CapsNet(keras.Model):
     def _build_feature_extraction(self) -> None:
         """Build convolutional feature extraction layers."""
         for i, filters in enumerate(self.conv_filters):
+            # First layer uses a 9x9 kernel, the rest use 5x5.
             conv_layer = keras.layers.Conv2D(
                 filters=filters,
-                kernel_size=9 if i == 0 else 5,  # First layer uses 9x9, others use 5x5
+                kernel_size=9 if i == 0 else 5,
                 strides=1,
                 padding="valid",
                 kernel_initializer=self.kernel_initializer,
@@ -398,7 +369,17 @@ class CapsNet(keras.Model):
         training: Optional[bool] = None,
         mask: Optional[keras.KerasTensor] = None
     ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass through the capsule network."""
+        """Run the forward pass.
+
+        :param inputs: Input images, shape ``[B, H, W, C]``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the call is in training mode.
+        :type training: Optional[bool]
+        :param mask: One-hot labels used to select which capsule the decoder reconstructs from. Falls back to the predicted class when omitted.
+        :type mask: Optional[keras.KerasTensor]
+        :return: Dict with ``digit_caps``, ``length`` (class probabilities), and ``reconstructed`` (if reconstruction is enabled).
+        :rtype: Dict[str, keras.KerasTensor]
+        """
         if len(inputs.shape) != 4:
             raise ValueError(f"Expected 4D input [batch, height, width, channels], got shape {inputs.shape}")
 
@@ -433,17 +414,28 @@ class CapsNet(keras.Model):
         lengths: keras.KerasTensor,
         mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
-        """Perform reconstruction using the decoder network."""
+        """Reconstruct the input from the masked digit capsules.
+
+        :param digit_caps: Digit capsule output, shape ``[B, num_classes, digit_capsule_dim]``.
+        :type digit_caps: keras.KerasTensor
+        :param lengths: Capsule lengths (class probabilities), shape ``[B, num_classes]``.
+        :type lengths: keras.KerasTensor
+        :param mask: One-hot class mask to reconstruct from. Falls back to the predicted class when omitted.
+        :type mask: Optional[keras.KerasTensor]
+        :return: Reconstructed image, shape ``_input_shape``.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If `mask`'s last dimension does not equal `num_classes`.
+        """
         if mask is not None:
             if mask.shape[-1] != self.num_classes:
                 raise ValueError(
                     f"Mask shape mismatch. Expected last dimension {self.num_classes}, "
                     f"got {mask.shape[-1]}"
                 )
-            # Use provided mask (one-hot encoded labels)
+            # Provided mask is one-hot encoded labels.
             reconstruction_mask = mask
         else:
-            # Use predicted classes for reconstruction
+            # Falls back to the predicted class.
             reconstruction_mask = ops.one_hot(ops.argmax(lengths, axis=1), num_classes=self.num_classes)
 
         masked_caps = ops.multiply(digit_caps, ops.expand_dims(reconstruction_mask, -1))
@@ -452,46 +444,25 @@ class CapsNet(keras.Model):
 
         return self.decoder(decoder_input)
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-057
-    # A bare `except: continue` here dropped ANY metric whose signature or shape
-    # did not match `(y, outputs["length"])` from training AND from the returned
-    # logs, silently and with no warning -- a user's metric could simply never
-    # appear, and `except:` also swallowed `KeyboardInterrupt` and
-    # `SystemExit`. It is narrowed to the shape/dtype family a wrong-arity
-    # metric actually raises, and it WARNS once per metric name so the drop is
-    # visible in the log. DO NOT re-widen it to a bare `except`, and DO NOT
-    # convert it to a raise: `CapsNet` returns a DICT and a stock metric like
-    # `keras.metrics.Accuracy` legitimately wants the `length` head, so some
-    # mismatch is expected and must not abort a multi-hour run.
-    # See decisions.md D-057.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-057: catch is narrowed to
+    # ValueError/TypeError/InvalidArgumentError, never a bare except, which silently swallowed KeyboardInterrupt/SystemExit and dropped mismatched metrics. See decisions.md.
     def _update_metrics(self, y: Any, outputs: Dict[str, Any]) -> None:
         """Update every compiled metric, warning about ones that cannot take the data.
 
-        Args:
-            y: The batch's labels, one-hot encoded.
-            outputs: The dict this model's ``call`` returns; ``CapsuleAccuracy``
-                consumes it whole, every other metric gets ``outputs["length"]``.
+        A metric that raises ``ValueError``/``TypeError``/``tf.errors.InvalidArgumentError``
+        (wrong arity, shape, or dtype) is skipped with a one-time warning naming it. Any
+        other exception propagates.
 
-        Returns:
-            None -- metrics are updated in place.
-
-        Failure mode: a metric that raises ``ValueError``/``TypeError``/
-        ``tf.errors.InvalidArgumentError`` (wrong arity, wrong shape, wrong
-        dtype) is SKIPPED with a one-time WARNING naming it. Anything else
-        propagates.
+        :param y: The batch's labels, one-hot encoded.
+        :type y: Any
+        :param outputs: The dict this model's ``call`` returns; ``CapsuleAccuracy`` consumes it whole, every other metric gets ``outputs["length"]``.
+        :type outputs: Dict[str, Any]
+        :return: None. Metrics are updated in place.
+        :rtype: None
         """
         for metric in self.metrics:
-            # DECISION plan-2026-08-17T183311-79c63e38/D-021
-            # Skip the loss tracker. Keras' `Trainer.metrics` yields
-            # `self._loss_tracker` (a `keras.metrics.Mean` named "loss") FIRST,
-            # and `Mean.update_state(values, sample_weight)` accepts
-            # `(y_onehot, lengths)` without complaint because both are
-            # (B, num_classes) -- so this loop silently accumulated
-            # mean(y * lengths) into the loss tracker. No exception ever fired,
-            # and it stayed invisible only because `results.update({"loss":
-            # total_loss})` overwrites the reported value afterwards;
-            # `model.metrics[0].result()` was garbage. Do NOT replace this with
-            # a name check: the tracker is identified by identity, not by name.
+            # DECISION plan-2026-08-17T183311-79c63e38/D-021: skip the loss tracker by
+            # identity, not name — it silently accepted (y, lengths) as (values, sample_weight) and accumulated a garbage mean. See decisions.md.
             if metric is getattr(self, "_loss_tracker", None):
                 continue
             if isinstance(metric, CapsuleAccuracy):
@@ -502,11 +473,8 @@ class CapsNet(keras.Model):
             except (ValueError, TypeError, tf.errors.InvalidArgumentError) as error:
                 if metric.name not in self._skipped_metric_names:
                     self._skipped_metric_names.add(metric.name)
-                    # MEASURED: `self.metrics` yields Keras' `CompileMetrics`
-                    # WRAPPER, not the individual metrics, so one misshaped
-                    # metric takes the whole container down with it. Name the
-                    # contents, or the warning points at 'compile_metrics' and
-                    # the user cannot tell which of their metrics is at fault.
+                    # self.metrics yields Keras' CompileMetrics wrapper, not the
+                    # individual metrics, so name the contents or the warning points at 'compile_metrics'.
                     contained = [
                         inner.name
                         for inner in getattr(metric, "metrics", []) or []
@@ -521,15 +489,21 @@ class CapsNet(keras.Model):
                     )
 
     def train_step(self, data: Tuple[tf.Tensor, tf.Tensor]) -> Dict[str, tf.Tensor]:
-        """Custom training step with margin loss and reconstruction loss."""
+        """Run one training step: forward pass, margin + reconstruction loss, gradient update.
+
+        :param data: ``(x, y)`` batch, `y` one-hot encoded.
+        :type data: Tuple[tf.Tensor, tf.Tensor]
+        :return: Dict of metric results plus ``loss``, ``margin_loss``, and ``reconstruction_loss``.
+        :rtype: Dict[str, tf.Tensor]
+        """
         x, y = data
 
         with tf.GradientTape() as tape:
             outputs = self(x, training=True, mask=y)
 
             margin_loss_value = ops.mean(capsule_margin_loss(
-                outputs["length"],  # y_pred
-                y,                  # y_true
+                outputs["length"],
+                y,
                 self.downweight,
                 self.positive_margin,
                 self.negative_margin
@@ -539,13 +513,8 @@ class CapsNet(keras.Model):
             reconstruction_loss_value = ops.convert_to_tensor(0.0, dtype=total_loss.dtype)
 
             if self.reconstruction and "reconstructed" in outputs:
-                # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-                # Reduce in float32. `x` is float32 dataset data while
-                # `outputs["reconstructed"]` carries `compute_dtype`; under
-                # `mixed_float16` this subtraction raised
-                # `TypeError: Input 'y' of 'Sub' ...` (step 5.8). Cast the
-                # PREDICTION UP -- never cast the data down, a squared-error
-                # mean accumulated in float16 underflows on small residuals.
+                # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast the prediction up
+                # to x's dtype, never cast x down — under mixed_float16 the reverse raised a Sub dtype TypeError. See decisions.md.
                 reconstruction_loss_value = ops.mean(ops.square(
                     x - ops.cast(outputs["reconstructed"], x.dtype)
                 ))
@@ -554,25 +523,13 @@ class CapsNet(keras.Model):
                     total_loss.dtype,
                 )
 
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-            # `add_loss` terms carry `compute_dtype`; cast the AUX SUM UP.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011: add_loss terms carry
+            # compute_dtype, so cast the summed auxiliary losses up too. See decisions.md.
             if self.losses:
                 total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
 
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
-            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
-            # `tape.gradient` differentiates; the UNSCALED loss stays what is
-            # reported. Do NOT "simplify" this back to a gradient of the unscaled
-            # loss: under `mixed_float16` Keras wraps the optimizer in a
-            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
-            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
-            # divides the WHOLE weight update by the loss scale, with no warning of
-            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
-            # returns its argument unless `loss_scale_factor` is set. MEASURED here
-            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
-            # BEFORE f32 1.281255e+02 vs fp16 3.832428e-02, ratio 3.343e+03.
-            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
-            # (D-036).
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089: scale_loss must stay inside
+            # the tape and gradient must differentiate the scaled value — under mixed_float16 skipping it divides the whole update by ~2**15. See decisions.md.
             scaled_loss = self.optimizer.scale_loss(total_loss)
 
         trainable_vars = self.trainable_variables
@@ -581,8 +538,7 @@ class CapsNet(keras.Model):
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         self._update_metrics(y, outputs)
-        # The tracker `_update_metrics` deliberately skips is fed HERE, with the
-        # quantity it is named for.
+        # Feed the loss tracker that _update_metrics deliberately skips.
         loss_tracker = getattr(self, "_loss_tracker", None)
         if loss_tracker is not None:
             loss_tracker.update_state(total_loss)
@@ -600,28 +556,25 @@ class CapsNet(keras.Model):
         return results
 
     def test_step(self, data: Tuple[tf.Tensor, tf.Tensor]) -> Dict[str, tf.Tensor]:
-        """Custom test step with margin loss and reconstruction loss.
+        """Run one evaluation step: forward pass on the predicted class, margin + reconstruction loss.
 
-        Evaluation runs the decoder on the PREDICTED class, not the true one:
-        the reconstruction reported by ``evaluate()`` must be reachable at
-        inference time.
+        Evaluation runs the decoder on the predicted class, not the true one, so the
+        reconstruction reported by ``evaluate()`` is reachable at inference time.
+
+        :param data: ``(x, y)`` batch, `y` one-hot encoded.
+        :type data: Tuple[tf.Tensor, tf.Tensor]
+        :return: Dict of metric results plus ``loss``, ``margin_loss``, and ``reconstruction_loss``.
+        :rtype: Dict[str, tf.Tensor]
         """
         x, y = data
 
-        # DECISION plan-2026-08-17T183311-79c63e38/D-021
-        # No `mask=y` here. `_reconstruct` takes `reconstruction_mask = mask`
-        # whenever mask is not None, so passing the labels teacher-forced the
-        # decoder and made `evaluate()`'s reconstruction loss optimistic by
-        # construction -- the inference branch (argmax over the capsule lengths)
-        # was unreachable from this method. `train_step` DOES pass `mask=y`, and
-        # that is correct: masking by the true class during training is the
-        # paper's own recipe (Sabour et al. 2017 § 4.1). Do NOT "restore
-        # symmetry" between the two steps. See decisions.md D-021.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-021: no mask=y here — masking by the
+        # true label made evaluate()'s reconstruction loss optimistic and unreachable from inference. See decisions.md.
         outputs = self(x, training=False)
 
         margin_loss_value = ops.mean(capsule_margin_loss(
-            outputs["length"],  # y_pred
-            y,                  # y_true
+            outputs["length"],
+            y,
             self.downweight,
             self.positive_margin,
             self.negative_margin
@@ -638,8 +591,7 @@ class CapsNet(keras.Model):
             total_loss += ops.sum(self.losses)
 
         self._update_metrics(y, outputs)
-        # The tracker `_update_metrics` deliberately skips is fed HERE, with the
-        # quantity it is named for.
+        # Feed the loss tracker that _update_metrics deliberately skips.
         loss_tracker = getattr(self, "_loss_tracker", None)
         if loss_tracker is not None:
             loss_tracker.update_state(total_loss)
@@ -657,7 +609,11 @@ class CapsNet(keras.Model):
         return results
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization."""
+        """Return the model configuration for serialization.
+
+        :return: Config dict with every constructor argument.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "num_classes": self.num_classes,
@@ -681,7 +637,13 @@ class CapsNet(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CapsNet":
-        """Create model from configuration."""
+        """Build a model from a config dict, deserializing initializer and regularizer entries.
+
+        :param config: Config dict as returned by `get_config`.
+        :type config: Dict[str, Any]
+        :return: A new `CapsNet` instance.
+        :rtype: CapsNet
+        """
         if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
             config["kernel_initializer"] = keras.initializers.deserialize(
                 config["kernel_initializer"]
@@ -698,38 +660,25 @@ class CapsNet(keras.Model):
         filepath: str,
         overwrite: bool = True,
     ) -> None:
-        """Save the model to a file.
+        """Build the model if needed, then save it to a file.
 
-        `filepath` must end in `.keras` (preferred) or `.h5`; Keras 3 selects
-        the format from the extension. The `save_format` parameter this method
-        used to forward was removed in Keras 3 and RAISES for any path Keras
-        cannot classify, so passing it turned an "unknown extension" error into
-        a deprecation error naming the wrong cause.
+        `filepath` must end in ``.keras`` (preferred) or ``.h5``; Keras 3 selects the
+        format from the extension. An unbuilt model is built first from the `input_shape`
+        given to `__init__`, since saving an unbuilt model would otherwise write an
+        archive with zero weights.
 
-        An UNBUILT model is built first from the `input_shape` given to
-        `__init__`. Without that, `self.save()` writes a syntactically valid
-        `.keras` archive holding ZERO weights, and `load_model()` hands back a
-        zero-weight model -- silently, behind one `UserWarning`.
-
-        Raises:
-            ValueError: if the model is unbuilt and was constructed without an
-                `input_shape`, so there is nothing to build from.
+        :param filepath: Destination path, ending in ``.keras`` or ``.h5``.
+        :type filepath: str
+        :param overwrite: Whether to overwrite an existing file at `filepath`.
+        :type overwrite: bool
+        :raises ValueError: If the model is unbuilt and was constructed without an `input_shape`, so there is nothing to build from.
         """
-        # Ensure directory exists
         directory = os.path.dirname(filepath)
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-053
-        # Do NOT drop this build and go straight to `self.save()`. MEASURED
-        # 2026-08-22: `CapsNet(num_classes=5, input_shape=(28,28,1)).save(path)`
-        # writes a 31,587-byte archive whose reload has `built=False` and
-        # `len(trainable_weights) == 0`, against 12 for the same model built --
-        # an empty archive that looks like a model. The only signal was Keras'
-        # "You are saving a model that has not yet been built" UserWarning, and
-        # the two tests covering this path asserted only that the file existed.
-        # `__init__` already stored `_input_shape`, so the shape is known here.
-        # See decisions.md D-053.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-053: build before save — an unbuilt
+        # model.save() writes a syntactically valid archive with 0 weights, only a UserWarning flags it. See decisions.md.
         if not self.built:
             if self._input_shape is None:
                 raise ValueError(
@@ -740,13 +689,18 @@ class CapsNet(keras.Model):
                 )
             self.build((None, *self._input_shape))
 
-        # Save model
         self.save(filepath, overwrite=overwrite)
         logger.info(f"Model saved to {filepath}")
 
     @classmethod
     def load_model(cls, filepath: str) -> "CapsNet":
-        """Load a saved model."""
+        """Load a saved CapsNet model, registering its custom objects.
+
+        :param filepath: Path to a ``.keras`` or ``.h5`` archive.
+        :type filepath: str
+        :return: The loaded model.
+        :rtype: CapsNet
+        """
         custom_objects = {
             "CapsNet": cls,
             "PrimaryCapsule": PrimaryCapsule,
@@ -787,15 +741,17 @@ def create_capsnet(
 ) -> CapsNet:
     """Create and compile a CapsNet model.
 
-    Args:
-        num_classes: Number of output classes.
-        input_shape: Shape of input images.
-        optimizer: Optimizer name or instance.
-        learning_rate: Learning rate for optimizer.
-        **kwargs: Additional arguments for CapsNet.
-
-    Returns:
-        Compiled CapsNet model.
+    :param num_classes: Number of output classes.
+    :type num_classes: int
+    :param input_shape: Shape of input images.
+    :type input_shape: Tuple[int, int, int]
+    :param optimizer: Optimizer name or instance.
+    :type optimizer: Union[str, keras.optimizers.Optimizer]
+    :param learning_rate: Learning rate, applied when `optimizer` is given as a name.
+    :type learning_rate: float
+    :param kwargs: Additional keyword arguments passed to `CapsNet`.
+    :return: A compiled `CapsNet` model.
+    :rtype: CapsNet
     """
     model = CapsNet(
         num_classes=num_classes,
@@ -803,15 +759,14 @@ def create_capsnet(
         **kwargs
     )
 
-    # Handle optimizer
     if isinstance(optimizer, str):
         optimizer = keras.optimizers.get(optimizer)
         optimizer.learning_rate = learning_rate
 
-    # Compile model with dummy loss (we handle loss in train_step/test_step)
+    # Loss is None: train_step/test_step compute the margin and reconstruction losses directly.
     model.compile(
         optimizer=optimizer,
-        loss=None,  # We handle loss computation in train_step/test_step
+        loss=None,
         metrics=[CapsuleAccuracy()]
     )
 
