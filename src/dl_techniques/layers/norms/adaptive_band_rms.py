@@ -32,8 +32,9 @@ float32 rounding). Both ends of the band are reachable during training:
 assigning the ``Dense`` bias ``-5`` gives an output RMS of ``0.900000`` and
 ``+5`` gives ``1.000000`` at ``alpha=0.1``.
 
-Statistics run in ``keras.backend.result_type(input_dtype, "float32")``. That is
-float32 for float16 and float32 inputs, and float64 under a float64 policy. A
+Statistics run in ``statistics_dtype(input_dtype)`` (defined in
+``dl_techniques.utils.dtype_policy``). That is float32 for float16 and float32
+inputs, and float64 under a float64 policy. A
 hardcoded ``"float32"`` would be wrong there. Measured on the float64 input
 ``[[1e8+1, 1e8+2, 1e8+3, 1e8+4]]`` at ``alpha=0.1``: float32 statistics return
 exactly ``[[0.95, 0.95, 0.95, 0.95]]`` while float64 statistics return
@@ -82,9 +83,9 @@ class AdaptiveBandRMS(keras.layers.Layer):
     gives ``1.000000`` at ``alpha=0.1``, so training reaches both ends of the
     band.
 
-    Statistics run in ``keras.backend.result_type(input_dtype, "float32")``:
-    float32 at minimum, float64 under a float64 policy. The result is cast back
-    to the input dtype before it is returned.
+    Statistics run in ``statistics_dtype(input_dtype)``: float32 at minimum,
+    float64 under a float64 policy. The result is cast back to the input dtype
+    before it is returned.
 
     .. warning::
         **This layer does not support masking.** ``supports_masking`` stays
@@ -131,7 +132,7 @@ class AdaptiveBandRMS(keras.layers.Layer):
                 ▼
         ┌────────────────────────────────────────────────────────────┐
         │ cast inputs to stat_dtype =                                │
-        │ result_type(input dtype, "float32")                        │
+        │ statistics_dtype(input dtype)                              │
         └───────┬────────────────────────────────────────────────────┘
                 │ x_stat
                 ▼

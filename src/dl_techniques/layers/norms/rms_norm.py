@@ -23,8 +23,9 @@ plus ``numpy.random.default_rng`` and legacy ``numpy.random.seed`` at 0, 1 and
 42): ``[0.999999, 1.000000]`` at input scale 1, and ``[0.620, 0.754]`` at input
 scale 1e-3. The exact interval is draw-dependent; the closed form is not.
 
-Statistics run in ``keras.backend.result_type(input_dtype, "float32")``. That is
-float32 for float16 and float32 inputs, and float64 under a float64 policy. A
+Statistics run in ``statistics_dtype(input_dtype)`` (defined in
+``dl_techniques.utils.dtype_policy``). That is float32 for float16 and float32
+inputs, and float64 under a float64 policy. A
 hardcoded ``"float32"`` would be wrong there. Measured on the float64 input
 ``[[1e8+1, 1e8+2, 1e8+3, 1e8+4]]``: float32 statistics return exactly
 ``[[1, 1, 1, 1]]`` while float64 statistics return
@@ -71,9 +72,9 @@ class RMSNorm(keras.layers.Layer):
     and ``[0.620, 0.754]`` at input scale 1e-3. The interval at low scale is
     draw-dependent; the closed form above is not.
 
-    Statistics run in ``keras.backend.result_type(input_dtype, "float32")``:
-    float32 at minimum, float64 under a float64 policy. The result is cast back
-    to the input dtype before it is returned.
+    Statistics run in ``statistics_dtype(input_dtype)``: float32 at minimum,
+    float64 under a float64 policy. The result is cast back to the input dtype
+    before it is returned.
 
     ``supports_masking`` is a promise about the AXIS, not about the class. It is
     ``True`` only while every normalized axis is the trailing (feature) axis. At
@@ -94,7 +95,7 @@ class RMSNorm(keras.layers.Layer):
                                   ▼
           ┌───────────────────────────────────────────────┐
           │ cast inputs to stat_dtype =                   │
-          │ result_type(input dtype, "float32")           │
+          │ statistics_dtype(input dtype)                 │
           └───────────────────────┬───────────────────────┘
                                   │ x_stat
                                   ▼

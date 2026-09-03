@@ -199,8 +199,9 @@ class EnergyLayerNorm(keras.layers.Layer):
     limit rather than a mathematical singularity, and therefore as a dtype bug.
 
     ``call()`` now computes the statistics in
-    ``keras.backend.result_type(inputs.dtype, "float32")`` and casts the result
-    back, the same template as ``rms_norm.py``. Measured before vs after on a
+    ``statistics_dtype(inputs.dtype)`` (``dl_techniques.utils.dtype_policy``)
+    and casts the result back, the same template as ``rms_norm.py``. Measured
+    before vs after on a
     ``(1, 2, 8)`` input whose token 0 is ``[3.0] * 7 + [3.001]`` (variance
     ``1.09375e-07``, small but NONZERO — an exactly constant token measures the
     SAFE case), taking the gradient of ``sum(y ** 2)`` w.r.t. the input, GPU,
@@ -469,9 +470,9 @@ class EnergyLayerNorm(keras.layers.Layer):
         ``gamma = 1.7`` and ``eps = 1e-5``: ``max|layer - closed form| =
         9.537e-07``.
 
-        The statistics are computed in
-        ``keras.backend.result_type(inputs.dtype, "float32")`` and the result is
-        cast back, so the returned tensor carries the layer's own compute dtype.
+        The statistics are computed in ``statistics_dtype(inputs.dtype)`` and
+        the result is cast back, so the returned tensor carries the layer's own
+        compute dtype.
         This is not decoration: computing them in the compute dtype gave a NaN
         INPUT gradient under ``mixed_float16`` at the shipped default
         ``epsilon=1e-5`` (8 of 16 components, exactly the near-constant token's,

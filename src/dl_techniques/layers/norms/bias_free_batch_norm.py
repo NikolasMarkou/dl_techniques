@@ -167,7 +167,7 @@ class BiasFreeBatchNorm(keras.layers.Layer):
                                 │
                                 ▼
         ┌──────────────────────────────────────────────────────┐
-        │ stat_dtype   = result_type(x.dtype, float32)         │
+        │ stat_dtype   = statistics_dtype(x.dtype)             │
         │ inputs_fp32  = cast(x, stat_dtype)                   │
         └───────────┬─────────────────────────┬────────────────┘
                     │ training=True           │ training=False/None

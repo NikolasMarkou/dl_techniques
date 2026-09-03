@@ -30,8 +30,9 @@ assigning the ``Dense`` bias ``-5`` gives an output RMS of ``0.900000`` and
 ``+5`` gives ``1.000000`` at ``alpha=0.1``.
 
 Centering is what makes the statistics dtype matter here. Statistics run in
-``keras.backend.result_type(input_dtype, "float32")``, which is float64 under a
-float64 policy. Measured on the float64 input
+``statistics_dtype(input_dtype)`` (defined in
+``dl_techniques.utils.dtype_policy``), which is float64 under a float64 policy.
+Measured on the float64 input
 ``[[1e8+1, 1e8+2, 1e8+3, 1e8+4]]``: float32 statistics center it to exactly
 ``[[0, 0, 0, 0]]`` and the layer returns all zeros, while float64 statistics
 center it to ``[[-1.5, -0.5, 0.5, 1.5]]`` and the layer returns
@@ -88,9 +89,9 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
     gives ``1.000000`` at ``alpha=0.1``, so training reaches both ends of the
     band.
 
-    Statistics run in ``keras.backend.result_type(input_dtype, "float32")``:
-    float32 at minimum, float64 under a float64 policy. The result is cast back
-    to the input dtype before it is returned.
+    Statistics run in ``statistics_dtype(input_dtype)``: float32 at minimum,
+    float64 under a float64 policy. The result is cast back to the input dtype
+    before it is returned.
 
     .. warning::
         **This layer does not support masking.** ``supports_masking`` stays
@@ -138,7 +139,7 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
                 ▼
         ┌────────────────────────────────────────────────────────────┐
         │ cast inputs to stat_dtype =                                │
-        │ result_type(input dtype, "float32")                        │
+        │ statistics_dtype(input dtype)                              │
         └───────┬────────────────────────────────────────────────────┘
                 │ x_stat
                 ▼
