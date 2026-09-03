@@ -1,27 +1,18 @@
 """Sequence-mixing blocks and the registry that resolves them.
 
-Every arm of the embeddings study differs ONLY in the block it stacks. This
-module defines the contract those blocks share and the registry that maps a
-block-type string to a builder.
-
-The contract is deliberately identical to
-:class:`~dl_techniques.layers.transformers.transformer.TransformerLayer`'s, so
-the baseline arm needs no adapter at all::
+Every arm of the embeddings study differs only in the block it stacks. This
+module defines the block call contract and the registry that maps a
+block-type string to a builder. The contract matches
+:class:`~dl_techniques.layers.transformers.transformer.TransformerLayer`'s,
+so the baseline arm needs no adapter::
 
     block(hidden_states, attention_mask=..., layer_idx=..., training=...)
         -> hidden_states of the same shape (batch, seq_len, hidden_size)
 
-Registry discipline follows the house factory rules in
-``src/dl_techniques/CLAUDE.md``: an unknown block type raises, and so does a
-keyword the target builder does not declare. Filter-and-drop is never used --
-that design is what previously made ``dropout=`` (against a declared
-``dropout_rate``) a silent no-op repo-wide.
-
-Adding an arm
--------------
-Write a builder with an explicit keyword-only signature, add one entry to
-:data:`BLOCK_REGISTRY`, and the encoder, the trainer and the sweep all pick it
-up. No change to :class:`~...encoder.EmbeddingEncoder` is required.
+An unknown block type raises, and so does an undeclared keyword; a builder
+never silently drops one. To add an arm, write a builder with an explicit
+keyword-only signature and add one entry to :data:`BLOCK_REGISTRY` -- the
+encoder, trainer and sweep pick it up with no other change.
 
 References:
     - Vaswani et al., 2017. Attention Is All You Need.
@@ -43,10 +34,6 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import keras
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
@@ -54,8 +41,6 @@ from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 __all__ = [
     "BLOCK_REGISTRY",
@@ -71,14 +56,12 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------
 # Clifford encoder block
-# ---------------------------------------------------------------------
 
 def clifford_receptive_field(num_layers: int, context_kernel_size: int) -> int:
     """Return the causal-context width, in tokens, of a Clifford stack.
 
-    Each :class:`CliffordNetBlock` applies **two** stacked depthwise
+    Each :class:`CliffordNetBlock` applies two stacked depthwise
     convolutions of width ``context_kernel_size``, so one block widens the
     receptive field by ``2 * (K - 1)`` and a stack of ``num_layers`` reaches
     ``num_layers * 2 * (K - 1) + 1`` positions.
@@ -86,10 +69,10 @@ def clifford_receptive_field(num_layers: int, context_kernel_size: int) -> int:
     This matters far more at character granularity than at sub-word
     granularity: with the layer's default ``K = 3``, a 4-block stack sees 17
     characters, which is a few words rather than a sentence. The geometric
-    product does NOT help here -- it rolls along the CHANNEL axis, not the
-    sequence axis, so it contributes nothing to the token-mixing span. Choose
-    ``context_kernel_size`` (or enable the global-context branch, whose
-    cumulative mean has unbounded reach) deliberately.
+    product rolls along the channel axis, not the sequence axis, so it
+    contributes nothing to the token-mixing span. Choose
+    ``context_kernel_size``, or enable the global-context branch, whose
+    cumulative mean has unbounded reach.
 
     :param num_layers: Number of stacked blocks.
     :type num_layers: int
@@ -107,41 +90,48 @@ class CliffordEncoderBlock(keras.layers.Layer):
     Bidirectional Clifford mixing block with the transformer block's call contract.
 
     Wraps :class:`~dl_techniques.layers.geometric.clifford_block.CliffordNetBlock`
-    in sequence mode with ``causal=False`` -- the bidirectional setting, since
-    this is an encoder rather than a language model -- and adapts it to the
-    ``(inputs, attention_mask=, layer_idx=, training=)`` signature the encoder
-    calls every block with.
+    in sequence mode with ``causal=False`` and adapts it to the
+    ``(inputs, attention_mask=, layer_idx=, training=)`` signature the
+    encoder calls every block with.
 
-    Two behaviours are load-bearing and are the reason this wrapper exists.
+    Residual wiring:
 
-    **The residual is external.** ``CliffordNetBlock.call`` returns only the
-    LayerScale-gated update, not ``x + update``. Writing ``x = block(x)``
-    therefore does not "apply a block", it REPLACES the signal with a residual
-    scaled by ``layer_scale_init`` (1e-5 by default), annihilating activations
-    at roughly five orders of magnitude per block while every shape,
-    finiteness and serialization test still passes. This wrapper computes
-    ``inputs + drop_path(update)``.
+    .. code-block:: text
 
-    **The block cannot honour an attention mask.** ``CliffordNetBlock`` sets
-    ``supports_masking = False`` and its module docstring records the measured
-    consequences: the two stacked same-padded depthwise convolutions pull zero
+        inputs [B, S, D] ──┬─────────────────────────┐
+                            │ (mask zero, optional)    │
+                            ▼                          │
+                    CliffordNetBlock                   │
+                            │                           │
+                        dropout                          │
+                            │                           │
+                       drop_path                          │
+                            ▼                            ▼
+                           (+) ◄─────────────────────────
+                            │
+                            ▼
+                    output [B, S, D]
+
+    ``CliffordNetBlock.call`` returns only the LayerScale-gated update, not
+    ``x + update``; this wrapper adds the external residual, since
+    ``x = block(x)`` alone would replace the signal with a residual scaled
+    by ``layer_scale_init`` (1e-5 by default), annihilating activations at
+    roughly five orders of magnitude per block.
+
+    The block cannot honour an attention mask (``supports_masking =
+    False``): the two stacked same-padded depthwise convolutions pull zero
     padding into the receptive field of real positions near the boundary
-    (measured: the last real position of a 6-token prefix moves by 1.183 on a
-    ~2.4-scale output when padded to 8), and with ``use_global_context=True``
-    the pooled branch means over the whole padded length, so the pad LENGTH
-    shifts every real position (measured: up to 0.449). Masking is a new
-    capability there, not a repair.
-
-    What this wrapper does about it: it zeroes the masked positions before the
-    block, so padding contributes a known constant rather than whatever the
-    pad token's embedding happens to have learned, and it logs the limitation
-    once at construction so it appears in every run log. That is a mitigation,
-    not a fix -- the boundary effect survives it. The study's real answer is to
-    pretrain on PACKED fixed-length sequences that carry no padding at all, and
-    to bucket by length wherever padding is unavoidable.
-
-    ``use_global_context`` defaults to ``False`` because that is the setting
-    whose padding hazard is boundary-local rather than global.
+    (measured: the last real position of a 6-token prefix moves by 1.183 on
+    a ~2.4-scale output when padded to 8), and with
+    ``use_global_context=True`` the pooled branch means over the whole
+    padded length, shifting every real position by up to 0.449. This
+    wrapper zeroes the masked positions before the block as a partial
+    mitigation, and logs the limitation once at construction. The boundary
+    effect survives it; the study's real answer is to pretrain on packed
+    fixed-length sequences carrying no padding, and to bucket by length
+    where padding is unavoidable. ``use_global_context`` defaults to
+    ``False`` because that setting's padding hazard is boundary-local
+    rather than global.
 
     :param hidden_size: Channel dimension ``D``. Preserved by the block.
     :type hidden_size: int
@@ -169,8 +159,8 @@ class CliffordEncoderBlock(keras.layers.Layer):
         `ConvNextV2Block` apply theirs, so the arms are comparably regularized.
         `CliffordNetBlock` has no dropout parameter of its own and is shared
         with other packages, so this lives in the wrapper rather than in the
-        layer. Defaults to 0.0. **This arm trained at 0.0 for Runs 1-4 while
-        every other arm carried 0.1**; see RESULTS.md.
+        layer. Defaults to 0.0. This arm trained at 0.0 for Runs 1-4 while
+        every other arm carried 0.1; see RESULTS.md.
     :type dropout_rate: float
     :param normalization_type: Normalization inside the block. ``None`` keeps
         the layer's own sequence-mode default. Defaults to ``None``.
@@ -331,15 +321,14 @@ class CliffordEncoderBlock(keras.layers.Layer):
 
 
 def conv_receptive_field(num_layers: int, kernel_size: int) -> int:
-    """Return the token-mixing span of a stack of ONE-convolution blocks.
+    """Return the token-mixing span of a stack of one-convolution blocks.
 
-    A ConvNeXt block applies a SINGLE depthwise convolution, so a stack reaches
-    ``num_layers * (K - 1) + 1`` tokens -- half the span a Clifford stack of the
-    same depth and kernel gets, because that block applies two stacked
-    convolutions per block. Use :func:`clifford_receptive_field` for the other
-    arm; the two are deliberately separate functions rather than one with a
-    flag, because silently applying the wrong factor is the kind of error that
-    only shows up as a mediocre metric.
+    A ConvNeXt block applies a single depthwise convolution, so a stack
+    reaches ``num_layers * (K - 1) + 1`` tokens -- half the span a Clifford
+    stack of the same depth and kernel gets, because that block applies two
+    stacked convolutions per block. Use :func:`clifford_receptive_field` for
+    the other arm; the two stay separate functions so applying the wrong
+    factor cannot happen silently.
 
     :param num_layers: Number of stacked blocks.
     :type num_layers: int
@@ -358,25 +347,44 @@ class ConvNextEncoderBlock(keras.layers.Layer):
 
     Wraps :class:`~dl_techniques.layers.convnext_v1_block.ConvNextV1Block` --
     depthwise convolution, normalization, pointwise expansion, activation,
-    pointwise contraction, LayerScale -- and adapts it from images to sequences.
+    pointwise contraction, LayerScale -- and adapts it from images to
+    sequences.
 
-    **The sequence is lifted to a singleton-height image.** The wrapped block is
-    2-D, so ``(B, L, D)`` becomes ``(B, 1, L, D)`` and the depthwise kernel is
-    ``(1, K)``: convolution along the sequence axis only, never across the
-    (length-1) height axis. The result is squeezed back. This is the same lift
+    Residual wiring:
+
+    .. code-block:: text
+
+        inputs [B, S, D] ──┬───────────────────────────┐
+                            │ (mask zero, optional)      │
+                            ▼                            │
+                    lift to (B, 1, S, D)                 │
+                            │                             │
+                  ConvNextV1Block, kernel (1, K)          │
+                            │                             │
+                       squeeze back                        │
+                            │                             │
+                       drop_path                            │
+                            ▼                              ▼
+                           (+) ◄───────────────────────────
+                            │
+                            ▼
+                    output [B, S, D]
+
+    The wrapped block is 2-D, so ``(B, L, D)`` is lifted to ``(B, 1, L, D)``
+    with a ``(1, K)`` depthwise kernel: convolution along the sequence axis
+    only, never across the length-1 height axis. This is the same lift
     ``CliffordNetBlock`` performs internally for its own sequence mode.
 
-    **The residual is external**, exactly as for the Clifford arm:
-    ``ConvNextV1Block.call`` ends at ``return x`` with no ``+ inputs`` (see its
-    step 7), so this wrapper computes ``inputs + drop_path(update)``. Note the
-    default LayerScale here is ``gamma_initial_value=1.0``, not the Clifford
-    block's ``1e-5``, so the update is full-magnitude from the first step.
+    ``ConvNextV1Block.call`` ends at ``return x`` with no ``+ inputs``, so
+    this wrapper adds the external residual. The default LayerScale here is
+    ``gamma_initial_value=1.0``, not the Clifford block's ``1e-5``, so the
+    update is full-magnitude from the first step.
 
-    **Padding is not neutral**, for the same reason as the Clifford arm: a
-    same-padded depthwise convolution pulls zero padding into the receptive
-    field of real positions near the boundary. Masked positions are zeroed
-    before the block, which bounds the effect without removing it. Stage 1 of
-    the study trains on packed sequences carrying no padding at all.
+    Padding is not neutral here either, for the same reason as the Clifford
+    arm: a same-padded depthwise convolution pulls zero padding into the
+    receptive field of real positions near the boundary. Masked positions
+    are zeroed before the block, which bounds the effect without removing
+    it. Stage 1 of the study trains on packed sequences carrying no padding.
 
     :param hidden_size: Channel dimension ``D``. Preserved by the block.
     :type hidden_size: int
@@ -562,9 +570,7 @@ class ConvNextEncoderBlock(keras.layers.Layer):
         return config
 
 
-# ---------------------------------------------------------------------
 # Builders
-# ---------------------------------------------------------------------
 
 def build_transformer_block(
     *,
@@ -750,7 +756,7 @@ def build_convnext_block(
     :type normalization_type: str
     :param use_bias: Whether the convolutions carry a bias.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for the DEPTHWISE convolution. The
+    :param kernel_initializer: Initializer for the depthwise convolution. The
         two pointwise convolutions inside ``ConvNextV1Block`` hard-code their
         own ``TruncatedNormal`` and expose no override, so this reaches the
         depthwise kernel only. Declared here so the encoder's shared

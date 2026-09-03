@@ -1,28 +1,19 @@
 """ASCII BERT: the study's baseline arm.
 
-A bidirectional transformer encoder over the character-level ASCII vocabulary.
-Architecturally this is ``models/language/bert`` with two changes the study
-requires: the 101-id ASCII vocabulary in place of a 30 522-id WordPiece one,
-and a pooling head, since an embedding model must emit one vector per sequence
-and upstream BERT owns no pooler.
+A bidirectional transformer encoder over the character-level ASCII
+vocabulary. This is ``models/language/bert`` with two changes: a 101-id
+ASCII vocabulary in place of the 30 522-id WordPiece one, and a pooling
+head, since an embedding model emits one vector per sequence and upstream
+BERT owns no pooler. The embeddings, block stack, depth/width ladder and
+output contract are shared with every other arm through
+:class:`~...shared.encoder.EmbeddingEncoder`.
 
-Everything else -- the embeddings, the block stack, the depth and width ladder,
-the output contract -- is shared with every other arm through
-:class:`~...shared.encoder.EmbeddingEncoder`, which is what makes a measured
-difference attributable to the block rather than to the plumbing.
-
-Two consequences of the ASCII vocabulary are worth stating before any number
-from this arm is compared to a sub-word baseline:
-
-1. **The embedding table almost vanishes.** At ``hidden_size=256`` a 30 522-id
-   WordPiece table is 7.8 M parameters; the 101-id ASCII table is 25 856. The
-   freed budget moves into the blocks, so an arm with the same *name* as a
-   published BERT variant is not the same model.
-2. **Sequences get roughly five times longer** for the same text, because a
-   character is not a sub-word piece. Self-attention is quadratic in sequence
-   length, so this arm's cost grows as ``S**2`` where the Clifford arm's grows
-   linearly. A like-for-like comparison must say which budget is being held
-   fixed; the study's ``param_matched`` mode exists for exactly this.
+The ASCII vocabulary shrinks the embedding table from 7.8M parameters (a
+30 522-id WordPiece table at ``hidden_size=256``) to 25,856, and lengthens
+sequences roughly five times for the same text, since a character is not a
+sub-word piece. Self-attention is quadratic in sequence length, so this
+arm's cost grows as ``S**2`` where the Clifford arm's grows linearly; the
+study's ``param_matched`` mode compares them under a fixed budget.
 
 References:
     - Devlin et al., 2019. BERT: Pre-training of Deep Bidirectional
@@ -41,16 +32,10 @@ from typing import Any, Dict, Optional
 
 import keras
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 
 from ..shared.encoder import EmbeddingEncoder
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 __all__ = ["AsciiBert", "create_ascii_bert"]
 
@@ -59,6 +44,22 @@ __all__ = ["AsciiBert", "create_ascii_bert"]
 class AsciiBert(EmbeddingEncoder):
     """
     Transformer-block embedding encoder over the ASCII character vocabulary.
+
+    Architecture:
+
+    .. code-block:: text
+
+        ascii ids [B, S] ──► ASCII embedding table [101, H]
+                                        │
+                                        ▼
+                             ┌── transformer block ──┐  x num_layers
+                             │ self-attention + FFN  │
+                             └───────────┬───────────┘
+                                         ▼
+                                  pooling head
+                                        │
+                                        ▼
+                              sequence vector [B, H]
 
     :param hidden_size: Model width.
     :type hidden_size: int
@@ -81,6 +82,15 @@ class AsciiBert(EmbeddingEncoder):
     :param kwargs: Forwarded to :class:`EmbeddingEncoder` (``vocab_size``,
         ``pooling_strategy``, ``max_position_embeddings``, and so on).
     :raises ValueError: If ``hidden_size`` is not divisible by ``num_heads``.
+
+    Variants:
+
+    .. code-block:: text
+
+        variant   hidden_size   num_layers   num_heads   intermediate_size
+        tiny      128           4            4           512
+        small     256           6            8           1024
+        base      512           8            8           2048
     """
 
     #: Public variant registry. The ladder is character-level: shallower and
@@ -134,13 +144,8 @@ class AsciiBert(EmbeddingEncoder):
         self.attention_type = attention_type
         self.ffn_type = ffn_type
         self.normalization_position = normalization_position
-        # `None` means "follow hidden_dropout_rate". It previously defaulted to
-        # a hard 0.1, which made the study's `hidden_dropout_rate` knob a
-        # PARTIAL control of this arm: setting it to 0.0 left attention dropout
-        # at 0.1 and still perturbed two training passes by 3.50e-03. A config
-        # field that silently governs only part of a model is the defect class
-        # `tests/test_train/test_config_fields_are_live.py` exists to catch.
-        # Pass a float to override the two independently.
+        # `None` means "follow hidden_dropout_rate". A hard 0.1 default left
+        # this knob controlling only part of the arm; pass a float to override the two independently.
         if attention_probs_dropout_rate is None:
             attention_probs_dropout_rate = kwargs.get("hidden_dropout_rate", 0.1)
         self.attention_probs_dropout_rate = attention_probs_dropout_rate

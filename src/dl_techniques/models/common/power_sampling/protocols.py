@@ -1,21 +1,21 @@
 """Duck-typed interfaces that decouple the power sampler from any concrete model or tokenizer.
 
 The power-sampling engine never imports a specific model class or a specific
-tokenizer library (e.g. ``tiktoken``). Instead it depends only on the small,
-structural contracts defined here:
+tokenizer library. It depends only on the small, structural contracts
+defined here:
 
-- :class:`TokenizerProtocol` — anything exposing ``encode``/``decode`` can drive
-  the sampler. The sampler only ever calls those two methods (source call sites:
-  ``power_sampling.py:375/482/568/625``). ``vocab_size`` and ``special_token_ids``
-  are **optional**: they are not required on the tokenizer object and are instead
-  supplied through :class:`~dl_techniques.models.common.power_sampling.config.PowerSamplingConfig`.
-- :data:`LogitsFn` — a callable mapping a token-id array to a single logit vector
-  for the target position, letting any causal LM/VLM be injected as a closure.
+- :class:`TokenizerProtocol` — anything exposing ``encode``/``decode`` can
+  drive the sampler; those are the only two methods it calls.
+  ``vocab_size`` and ``special_token_ids`` are optional on the tokenizer
+  object, supplied instead through
+  :class:`~dl_techniques.models.common.power_sampling.config.PowerSamplingConfig`.
+- :data:`LogitsFn` — a callable mapping a token-id array to a single logit
+  vector for the target position, letting any causal LM/VLM be injected as
+  a closure.
 
-Keeping these as ``typing.Protocol`` interfaces means callers pass plain
-duck-typed objects with no
-inheritance requirement, and the package stays free of TensorFlow/tiktoken
-imports at module load (constraint C6).
+These are ``typing.Protocol`` interfaces, so callers pass plain duck-typed
+objects with no inheritance requirement, and the package stays free of
+TensorFlow/tiktoken imports at module load.
 """
 
 from typing import Callable, List, Protocol, runtime_checkable
@@ -29,8 +29,8 @@ class TokenizerProtocol(Protocol):
 
     Only :meth:`encode` and :meth:`decode` are required — they are the sole
     tokenizer methods the sampler calls. Token-vocabulary metadata such as
-    ``vocab_size`` and ``special_token_ids`` is intentionally **not** part of
-    this contract; it is provided via
+    ``vocab_size`` and ``special_token_ids`` is not part of this contract;
+    it is provided via
     :class:`~dl_techniques.models.common.power_sampling.config.PowerSamplingConfig`
     so that tokenizers lacking those attributes still satisfy the protocol.
     """

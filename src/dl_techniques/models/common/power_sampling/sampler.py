@@ -1,64 +1,25 @@
-"""General-purpose power sampling for any causal LLM/VLM + any tokenizer.
+"""General-purpose power sampling for any causal LLM/VLM, with any tokenizer.
 
-Implements scalable power sampling for inference-time reasoning improvement,
-adapting the autoregressive MCMC approach from:
+:class:`PowerSampler` samples from the power distribution p^alpha (alpha =
+1 / temperature) instead of the base model distribution p. Low temperature
+sharpens local token confidence; power sampling instead sharpens global
+trajectory quality, by proposing alternative continuations in an MCMC loop
+and accepting those with higher trajectory-level probability under p^alpha.
 
-    - Karan, A. & Du, Y. (2025). *Reasoning with Sampling: Your Base Model
-      is Smarter Than You Think*. arXiv:2510.14901.
-    - Bou Ammar, H. et al. (2026). *Scalable Power Sampling for LLM
-      Reasoning*. arXiv:2601.21590.
-
-**Core idea**: Instead of sampling from the base model distribution *p*,
-sample from the power distribution *p^alpha* (alpha = 1/temperature).  Low
-temperature sharpens *local* token confidence; power sampling sharpens
-*global trajectory* quality.  The MCMC loop refines generated text by
-proposing alternative continuations and accepting those with higher
-trajectory-level probability under *p^alpha*.
-
-This engine is fully decoupled from any concrete model or tokenizer: it is
-driven by an injected :data:`~dl_techniques.models.common.power_sampling.protocols.LogitsFn`
+The sampler is decoupled from any concrete model or tokenizer. It is driven
+by an injected :data:`~dl_techniques.models.common.power_sampling.protocols.LogitsFn`
 closure (built automatically from any callable Keras model via
-:func:`~dl_techniques.models.common.power_sampling.forward.make_logits_fn`) and any
-object satisfying
-:class:`~dl_techniques.models.common.power_sampling.protocols.TokenizerProtocol`
-(``encode``/``decode``). CliffordNetLM + tiktoken is just ONE example — the
-same sampler drives a GPT-2, a generic HF model, or a VLM (via
-:class:`~dl_techniques.models.common.power_sampling.forward.VLMForwardAdapter`).
+:func:`~dl_techniques.models.common.power_sampling.forward.make_logits_fn`)
+and any object satisfying
+:class:`~dl_techniques.models.common.power_sampling.protocols.TokenizerProtocol`.
+The same sampler drives CliffordNetLM, a GPT-2, a generic HF model, or a VLM
+(via :class:`~dl_techniques.models.common.power_sampling.forward.VLMForwardAdapter`).
 
-Usage::
-
-    import numpy as np
-    from dl_techniques.models.common.power_sampling import (
-        PowerSampler, PowerSamplingConfig,
-    )
-
-    # Any callable model returning {"logits": float32[B, T, V]} works.
-    # CliffordNetLM is one example; a GPT-2 or generic LM works the same way.
-    model = build_my_causal_lm()          # any callable Keras model
-    tokenizer = get_my_tokenizer()        # any object with encode/decode
-
-    # Generalized config: supply only the IDs your model needs. Defaults carry
-    # NO GPT-2/CliffordNet IDs (cls/pad/special are None/empty, ctx_len=None).
-    config = PowerSamplingConfig(
-        cls_token_id=50257,               # optional; None => no CLS prepend
-        pad_token_id=50260,               # required for fixed ctx_len AND for
-                                          # mcmc_steps >= 2 (ragged proposal
-                                          # batches are right-padded)
-        special_token_ids={50257, 50258, 50259, 50260},
-        ctx_len=511,                      # None => variable-length forward
-    )
-    sampler = PowerSampler(model, tokenizer, config)
-
-    # Standard nucleus sampling (baseline)
-    ids = sampler.generate_standard("The capital of France is", max_tokens=50)
-    print(tokenizer.decode(ids[0]))
-
-    # MCMC power sampling (improved reasoning)
-    ids, info = sampler.mcmc_power_sample("The capital of France is", max_tokens=50)
-    print(tokenizer.decode(ids))
-
-A pre-built ``LogitsFn`` closure (e.g. from a VLM adapter) can be injected
-directly via the ``logits_fn=`` keyword.
+References:
+    - Karan, A. & Du, Y., 2025. Reasoning with Sampling: Your Base Model is
+      Smarter Than You Think. (https://arxiv.org/abs/2510.14901)
+    - Bou Ammar, H. et al., 2026. Scalable Power Sampling for LLM Reasoning.
+      (https://arxiv.org/abs/2601.21590)
 """
 
 import time
@@ -78,9 +39,7 @@ from dl_techniques.models.common.power_sampling.forward import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Power Sampler
-# ---------------------------------------------------------------------------
 
 
 class PowerSampler:
@@ -92,13 +51,31 @@ class PowerSampler:
     rejections: an acceptance moves the chain state, so the proposals queued
     behind it are discarded and re-generated from the new state.
 
-    The sampler is fully decoupled from concrete model/tokenizer types: it is
+    The sampler is decoupled from concrete model/tokenizer types: it is
     driven by a :data:`LogitsFn` closure (single-position) plus an optional
     batched closure, and a :class:`TokenizerProtocol` object.
 
-    :param model_or_logits_fn: EITHER a callable Keras model (wrapped
+    MCMC block loop:
+
+    .. code-block:: text
+
+        gen (chain state) ──► naive_temp_generate ──► gen + block tokens
+                                                             │
+                                     cut points idx ~ U[c,t) │
+                                                             ▼
+                                   ┌──── _batch_proposals ────┐
+                                   │ regenerate gen[idx:] per │
+                                   │   cut, batched forward   │
+                                   └────────────┬─────────────┘
+                                                 ▼
+                                  MH accept/reject, one at a time
+                                  accept ──► gen updated, rest of
+                                  batch discarded, re-drawn from
+                                  the new state
+
+    :param model_or_logits_fn: Either a callable Keras model (wrapped
         automatically via :func:`make_logits_fn` using ``config.ctx_len`` /
-        ``config.pad_token_id``) OR a pre-built :data:`LogitsFn` closure. To
+        ``config.pad_token_id``) or a pre-built :data:`LogitsFn` closure. To
         pass a ``LogitsFn`` unambiguously, use the ``logits_fn=`` kwarg.
     :param tokenizer: Any object satisfying :class:`TokenizerProtocol`
         (``encode``/``decode``).
@@ -110,6 +87,31 @@ class PowerSampler:
         driven with ``pad_token_id=None`` and ``ctx_len=None`` — the proposal
         batch is ragged and cannot be padded. See
         :meth:`_require_pad_id_for_batched_proposals`.
+
+    Example::
+
+        model = build_my_causal_lm()    # any callable Keras model
+        tokenizer = get_my_tokenizer()  # any object with encode/decode
+
+        # Supply only the IDs the model needs; defaults carry no
+        # GPT-2/CliffordNet IDs (cls/pad/special are None/empty, ctx_len=None).
+        config = PowerSamplingConfig(
+            cls_token_id=50257,          # None => no CLS prepend
+            pad_token_id=50260,          # required for fixed ctx_len and for
+                                          # mcmc_steps >= 2
+            special_token_ids={50257, 50258, 50259, 50260},
+            ctx_len=511,                 # None => variable-length forward
+        )
+        sampler = PowerSampler(model, tokenizer, config)
+
+        ids = sampler.generate_standard("The capital of France is", max_tokens=50)
+        print(tokenizer.decode(ids[0]))
+
+        ids, info = sampler.mcmc_power_sample("The capital of France is", max_tokens=50)
+        print(tokenizer.decode(ids))
+
+    A pre-built ``LogitsFn`` closure (e.g. from a VLM adapter) can be injected
+    directly via the ``logits_fn=`` keyword.
     """
 
     def __init__(
@@ -122,7 +124,8 @@ class PowerSampler:
     ):
         self.config = config or PowerSamplingConfig()
         self.tokenizer = tokenizer
-        self.model = model_or_logits_fn  # kept for reference/back-compat
+        # Kept for reference/back-compat.
+        self.model = model_or_logits_fn
         cfg = self.config
         if logits_fn is not None:
             self._logits_fn = logits_fn
@@ -145,18 +148,10 @@ class PowerSampler:
 
         self._require_pad_id_for_batched_proposals(cfg.mcmc_steps)
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-017: the pad-token
-    # precondition of the batched proposal path is checked HERE, eagerly, at
-    # construction and again when a per-call `mcmc_steps` override raises the
-    # proposal count. Do NOT rely on `make_batch_logits_fn`'s inner `fn` to
-    # report it: that raise fires mid-generation, names the closure's `pad_id`
-    # parameter rather than the `PowerSamplingConfig.pad_token_id` field the
-    # caller must set, and only fires on the batches that happen to be ragged —
-    # so a run can proceed for several blocks before dying. The four guarded
-    # conditions are each load-bearing; widening the check to "mcmc_steps >= 2"
-    # alone would reject the injected-`logits_fn` path, which never batches and
-    # needs no pad id (`test_logits_fn_injection` covers exactly that config).
-    # See decisions.md D-017.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-017: check the pad-token
+    # precondition here, eagerly, not inside `make_batch_logits_fn`'s `fn` —
+    # that raise fires mid-generation, several blocks in, and names the wrong
+    # field. See decisions.md D-017.
     def _require_pad_id_for_batched_proposals(self, steps: int) -> None:
         """Refuse a config whose MCMC proposals cannot be batched.
 
@@ -167,12 +162,15 @@ class PowerSampler:
             ``pad_token_id=None`` and ``ctx_len=None``.
         """
         if steps < 2:
-            return  # one proposal per block: batch of 1, never ragged
+            # One proposal per block: batch of 1, never ragged.
+            return
         if self._batch_logits_fn is None:
-            return  # injected logits_fn: the batched path loops the single fn
+            # Injected logits_fn: the batched path loops the single fn.
+            return
         cfg = self.config
         if cfg.ctx_len is not None:
-            return  # fixed-shape path; pad_id already validated by the closure
+            # Fixed-shape path; pad_id already validated by the closure.
+            return
         if cfg.pad_token_id is not None:
             return
         raise ValueError(
@@ -195,7 +193,7 @@ class PowerSampler:
         :param token_ids: Token IDs for the sequence.
         :return: Logits array of shape ``(vocab_size,)``.
         """
-        return self._logits_fn(token_ids)  # (V,)
+        return self._logits_fn(token_ids)
 
     def _forward_batch(
         self, batch_token_ids: List[List[int]],
@@ -209,8 +207,8 @@ class PowerSampler:
         :return: Logits array of shape ``(B, vocab_size)``.
         """
         if self._batch_logits_fn is not None:
-            return self._batch_logits_fn(batch_token_ids)  # (B, V)
-        # caller supplied only a single-position logits_fn: loop
+            return self._batch_logits_fn(batch_token_ids)
+        # Caller supplied only a single-position logits_fn: loop it.
         return np.stack(
             [self._logits_fn(ids) for ids in batch_token_ids], axis=0,
         )
@@ -232,7 +230,7 @@ class PowerSampler:
         :return: ``(token_id, log_prob_norm, log_prob_unnorm)`` where
             ``log_prob_norm`` is the log probability under the proposal —
             special-token masking, repetition penalty, temperature scaling
-            **and** the renormalized top-p nucleus, i.e. the exact distribution
+            and the renormalized top-p nucleus, i.e. the exact distribution
             the token was drawn from — and ``log_prob_unnorm`` is
             ``(1/temperature) * log p(token)`` under the base model.
         """
@@ -267,8 +265,8 @@ class PowerSampler:
         # renormalized nucleus, which _log_softmax(scaled_logits) is not.
         token_id, log_prob_norm = _nucleus_sample(scaled_logits, cfg.top_p)
 
-        # Target (power) log-probability: alpha * log p(token) under the BASE
-        # model, i.e. before masking, repetition penalty and truncation.
+        # Target (power) log-probability: alpha * log p(token) under the base
+        # model, before masking, repetition penalty and truncation.
         log_prob_unnorm = base_log_probs[token_id] / temperature
 
         return int(token_id), float(log_prob_norm), float(log_prob_unnorm)
@@ -372,18 +370,11 @@ class PowerSampler:
 
         return seqs, log_probs_norm, log_probs_unnorm
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-018: proposals are batched
-    # ONLY across a run of rejections. Do NOT restore the previous shape --
-    # one pre-loop `_batched_generate` for all `steps` proposals, consumed by
-    # an acceptance loop that mutates `gen` -- it generated proposal i+1 from
-    # a prefix of the PRE-BLOCK state and then compared it against the
-    # POST-acceptance target log-probs, so an accepted improvement was silently
-    # overwritten by the next stale proposal. A rejection leaves the chain
-    # state unchanged, so the proposals still queued behind it remain valid
-    # draws from q(.|x) and stay batched; an acceptance moves the state, so
-    # everything queued behind it is discarded and re-drawn from the new state.
-    # The cut points themselves are pre-drawn per block on purpose: idx ~
-    # Uniform[c, t-1] does not depend on the state. See decisions.md D-018.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-018: batch proposals only
+    # across a run of rejections, not once per block — a pre-loop batch
+    # compared proposal i+1 against a state an earlier acceptance had already
+    # moved past, silently overwriting the accepted improvement. See
+    # decisions.md D-018.
     def _batch_proposals(
         self,
         gen: List[int],
@@ -410,19 +401,11 @@ class PowerSampler:
     # MCMC Power Sampling
     # -----------------------------------------------------------------
 
-    # DECISION plan-2026-08-18T140459-7991552f/D-037
-    # Both MCMC entry points size their blocks HERE, and neither may go back to
-    # the bare `jump_size = max_tok // blocks` they used until 2026-08-19. That
-    # expression dropped the remainder, so the shipped `block_num=16` turned a
-    # requested `max_tokens=50` into 48 generated tokens with no warning, and
-    # when `max_tokens < block_num` it produced `jump_size == 0`: every block
-    # appended nothing, `t == c`, and `random.randint(c, t - 1)` raised a bare
-    # `ValueError: empty range` from inside stdlib `random`, which is what a
-    # short smoke run got. Spreading the remainder over the leading blocks
-    # makes the returned length exactly `max_tokens`; clamping the block count
-    # keeps every block non-empty, which is the precondition the cut-point draw
-    # below actually needs. Do NOT "simplify" this back to a single division.
-    # See decisions.md.
+    # DECISION plan-2026-08-18T140459-7991552f/D-037: spread the remainder
+    # over the leading blocks and clamp block_num to max_tokens. The plain
+    # `max_tok // blocks` dropped the remainder (50 tokens requested, 48
+    # generated) and could yield an empty block, which crashed the cut-point
+    # draw. See decisions.md.
     @staticmethod
     def _block_sizes(max_tokens: int, block_num: int) -> List[int]:
         """Split ``max_tokens`` into per-block generation counts.
@@ -464,7 +447,7 @@ class PowerSampler:
         Samples from *p^alpha* where ``alpha = 1 / temperature``.  The
         generation is split into ``block_num`` blocks; after each block,
         ``mcmc_steps`` proposals are evaluated with Metropolis-Hastings
-        acceptance.  Each proposal regenerates the suffix of the **current**
+        acceptance.  Each proposal regenerates the suffix of the current
         chain state from its own cut point; proposals are batched across a run
         of rejections (which leave the state unchanged) and re-generated after
         every acceptance, so the chain is a valid sequential MH chain rather
@@ -503,10 +486,10 @@ class PowerSampler:
         else:
             prompt_ids = list(encoded)
             strip = 0
-        c = len(prompt_ids)  # context boundary
+        # Context boundary.
+        c = len(prompt_ids)
 
-        # Per-block token counts: they sum to exactly `max_tok` and none is
-        # zero (see the D-032 anchor on `_block_sizes`).
+        # Per-block token counts sum to exactly `max_tok`; none is zero.
         block_sizes = self._block_sizes(max_tok, blocks)
 
         gen = list(prompt_ids)
@@ -525,9 +508,9 @@ class PowerSampler:
             log_probs_norm.extend(lp_norm)
             log_probs_unnorm.extend(lp_unnorm)
 
-            # Cut points are drawn once per block: idx ~ Uniform[c, t-1] is
-            # independent of the chain state, so pre-drawing them changes
-            # nothing about the kernel. The CONTINUATIONS are not.
+            # Cut points idx ~ Uniform[c, t-1] are drawn once per block; they
+            # do not depend on the chain state. The continuations they
+            # generate do.
             t = len(gen)
             indices = [random.randint(c, t - 1) for _ in range(steps)]
 
@@ -558,7 +541,8 @@ class PowerSampler:
                         log_probs_unnorm[idx - c:] = list(
                             target_lp_props_list[k],
                         )
-                        break  # the rest of this batch is stale; re-batch
+                        # The rest of this batch is stale; re-batch.
+                        break
 
         elapsed = time.time() - t0
         acceptance_ratio = acceptances / max(attempts, 1)
@@ -576,7 +560,8 @@ class PowerSampler:
             "elapsed_s": elapsed,
             "alpha": alpha,
         }
-        return gen[strip:], info  # strip CLS only when prepended
+        # Strip the CLS token only when one was prepended.
+        return gen[strip:], info
 
     def max_swap(
         self,
@@ -670,7 +655,8 @@ class PowerSampler:
                         log_probs_unnorm[idx - c:] = list(
                             target_lp_props_list[k],
                         )
-                        break  # the rest of this batch is stale; re-batch
+                        # The rest of this batch is stale; re-batch.
+                        break
 
         elapsed = time.time() - t0
         acceptance_ratio = acceptances / max(attempts, 1)
@@ -687,7 +673,8 @@ class PowerSampler:
             "acceptances": acceptances,
             "elapsed_s": elapsed,
         }
-        return gen[strip:], info  # strip CLS only when prepended
+        # Strip the CLS token only when one was prepended.
+        return gen[strip:], info
 
     def generate_standard(
         self,
@@ -721,14 +708,9 @@ class PowerSampler:
 
         t0 = time.time()
 
-        # DECISION plan_2026-06-16_535b4f02/D-001: C8/I4 no-config-mutation.
-        # Per-call top_p/repetition_penalty overrides are applied via a
-        # dataclasses.replace COPY bound transiently, then the original is
-        # rebound in `finally`. Do NOT restore the source's in-place
-        # cfg.field = X mutate-then-restore (source:573-587): it is not
-        # exception-safe and leaves observable self.config altered if the
-        # loop raises. The swap-and-restore keeps config fields identical
-        # before==after (SC5/I4). See decisions.md D-001.
+        # DECISION plan_2026-06-16_535b4f02/D-001: swap in a `dataclasses.
+        # replace` copy and restore in `finally`, not an in-place mutate-then
+        # -restore — the in-place form is not exception-safe. See decisions.md D-001.
         original = self.config
         self.config = replace(
             original, repetition_penalty=repetition_penalty, top_p=top_p,
@@ -741,7 +723,9 @@ class PowerSampler:
                 )
                 ids.append(token_id)
         finally:
-            self.config = original  # guaranteed restore -> before==after
+            # Restore unconditionally so config is unchanged even if the
+            # loop raised.
+            self.config = original
 
         elapsed = time.time() - t0
         info = {
@@ -749,7 +733,8 @@ class PowerSampler:
             "tokens_generated": max_tokens,
             "tok_per_s": max_tokens / max(elapsed, 0.01),
         }
-        return ids[strip:], info  # strip CLS only when prepended
+        # Strip the CLS token only when one was prepended.
+        return ids[strip:], info
 
     # -----------------------------------------------------------------
     # Convenience: string-in / string-out

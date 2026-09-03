@@ -1,27 +1,17 @@
-"""Model-call indirection: turn ANY causal LM/VLM into a :data:`LogitsFn`.
+"""Model-call indirection: turn any causal LM/VLM into a :data:`LogitsFn`.
 
-The power sampler never calls a concrete model directly. Instead it is driven by
-a closure that maps a token-id sequence to a single ``float32[V]`` logit vector
-for the target position. This module builds those closures, generalizing the
-two hardcoded model call-sites in the original CliffordNet implementation
-(``cliffordnet/power_sampling.py`` ``_forward`` / ``_forward_batch``), which
-assumed:
+The power sampler never calls a concrete model directly. This module builds
+the closure that does: it maps a token-id sequence to a single
+``float32[V]`` logit vector for the target position. The output key
+(``logits_key``), the context length and padding (``ctx_len``/``pad_id``),
+and the last-token gather position are all parameters here, so one function
+drives any causal LM/VLM instead of one hardcoded model shape.
 
-- the model output is a dict keyed ``"logits"``,
-- a fixed ``ctx_len`` with right-padding by a known ``pad_id``,
-- last-token gather via ``tf.gather_nd``.
-
-Here all three are parameterized:
-
-- ``logits_key`` selects the output tensor (or ``None`` for a plain-tensor model);
-- ``ctx_len``/``pad_id`` are optional — ``ctx_len is None`` means a
-  variable-length forward pass with no padding (G1);
-- the last-token gather is pure numpy (constraint C3 — **no** ``tf.gather_nd``,
-  **no** ``import tensorflow``).
-
-For vision-language models, :class:`VLMForwardAdapter` binds a fixed image (or
-other extra inputs) and a ``text_slice_start`` offset so the sampler can drive
-the text suffix while the image prefix stays fixed.
+The last-token gather is pure numpy indexing, never ``tf.gather_nd`` or a
+top-level ``import tensorflow``. For vision-language models,
+:class:`VLMForwardAdapter` binds a fixed image (or other extra inputs) and a
+``text_slice_start`` offset so the sampler drives the text suffix while the
+image prefix stays fixed.
 """
 
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -31,9 +21,7 @@ import numpy as np
 from dl_techniques.models.common.power_sampling.protocols import LogitsFn
 
 
-# ---------------------------------------------------------------------------
 # Small coercion / extraction helpers
-# ---------------------------------------------------------------------------
 def _to_numpy(x: Any) -> np.ndarray:
     """Coerce a model output tensor to a numpy array.
 
@@ -89,9 +77,7 @@ def _extract_logits(out: Any, logits_key: Optional[str]) -> np.ndarray:
     return logits
 
 
-# ---------------------------------------------------------------------------
 # Single-sequence forward closure
-# ---------------------------------------------------------------------------
 def make_logits_fn(
     model: Any,
     ctx_len: Optional[int] = None,
@@ -115,7 +101,7 @@ def make_logits_fn(
     :param ctx_len: Fixed context length. If ``None`` (default), the sequence is
         passed through unpadded (variable-length forward, G1). If set, the last
         ``ctx_len`` tokens are kept and right-padded with ``pad_id``.
-    :param pad_id: Padding token id. **Required** when ``ctx_len`` is not ``None``.
+    :param pad_id: Padding token id. Required when ``ctx_len`` is not ``None``.
     :param logits_key: Key into a dict-like model output, or ``None`` to treat
         the output as a bare logits tensor (constraint C2).
     :param position: Target position. ``-1`` (default) selects the last *real*
@@ -148,15 +134,15 @@ def make_logits_fn(
             padded = ids
             real = len(ids)
 
-        arr = np.array([padded], dtype="int32")  # (1, T_text)
+        arr = np.array([padded], dtype="int32")
 
         if extra_inputs is None:
             out = model(arr, training=False)
         else:
             out = model({**extra_inputs, token_key: arr}, training=False)
 
-        logits = _extract_logits(out, logits_key)  # (1, T, V)
-        # T is the FULL output sequence length (vision prefix + text); for a
+        logits = _extract_logits(out, logits_key)
+        # T is the full output sequence length (vision prefix + text); for a
         # VLM it exceeds the text token-array length by text_slice_start.
         T = logits.shape[1]
 
@@ -165,11 +151,9 @@ def make_logits_fn(
         else:
             gather_idx = text_slice_start + position
 
-        # DECISION plan_2026-06-16_535b4f02/D-001: last-token gather is pure
-        # numpy indexing on the host-side array (constraint C3). Do NOT
-        # reintroduce tf.gather_nd or a top-level `import tensorflow` — the
-        # model returns .numpy()-able eager tensors, so we gather after
-        # _to_numpy. See decisions.md D-001.
+        # DECISION plan_2026-06-16_535b4f02/D-001: gather with plain numpy
+        # indexing, not `tf.gather_nd` or a top-level `import tensorflow`.
+        # See decisions.md D-001.
         if not (0 <= gather_idx < T):
             raise ValueError(
                 f"gather_idx={gather_idx} out of range for output sequence "
@@ -178,14 +162,12 @@ def make_logits_fn(
                 "text_slice_start (vision-token offset)."
             )
 
-        return logits[0, gather_idx].astype("float32")  # (V,)
+        return logits[0, gather_idx].astype("float32")
 
     return fn
 
 
-# ---------------------------------------------------------------------------
 # Batched forward closure
-# ---------------------------------------------------------------------------
 def make_batch_logits_fn(
     model: Any,
     ctx_len: Optional[int] = None,
@@ -209,7 +191,7 @@ def make_batch_logits_fn(
         When ``None`` and the batch contains prefixes of differing lengths,
         sequences are right-padded to the batch maximum with ``pad_id`` and each
         sequence is gathered at its own real length.
-    :param pad_id: Padding token id. **Required** when ``ctx_len`` is set, and
+    :param pad_id: Padding token id. Required when ``ctx_len`` is set, and
         also required for a variable-length batch with unequal prefix lengths.
     :param logits_key: Key into a dict-like model output, or ``None``.
     :param position: Target position; ``-1`` selects each sequence's last real
@@ -253,20 +235,19 @@ def make_batch_logits_fn(
                 )
             batch_ctx = [ids + [pad_id] * (max_len - len(ids)) for ids in seqs]
 
-        batch_input = np.array(batch_ctx, dtype="int32")  # (B, T_text)
+        batch_input = np.array(batch_ctx, dtype="int32")
 
         if extra_inputs is None:
             out = model(batch_input, training=False)
         else:
             out = model({**extra_inputs, token_key: batch_input}, training=False)
 
-        logits = _extract_logits(out, logits_key)  # (B, T, V)
-        # T is the FULL output sequence length (vision prefix + text).
+        logits = _extract_logits(out, logits_key)
+        # T is the full output sequence length (vision prefix + text).
         T = logits.shape[1]
 
-        # DECISION plan_2026-06-16_535b4f02/D-001: numpy fancy indexing replaces
-        # tf.gather_nd (source:177) — constraint C3. Do NOT reintroduce
-        # tf.gather_nd / tensorflow. See decisions.md D-001.
+        # DECISION plan_2026-06-16_535b4f02/D-001: numpy fancy indexing
+        # replaces `tf.gather_nd`. Do NOT reintroduce it. See decisions.md D-001.
         idx = np.array(
             [
                 text_slice_start + (real_lens[i] - 1 if position == -1 else position)
@@ -280,14 +261,12 @@ def make_batch_logits_fn(
                 f"real_lens={real_lens}, position={position})."
             )
 
-        return logits[np.arange(B), idx].astype("float32")  # (B, V)
+        return logits[np.arange(B), idx].astype("float32")
 
     return fn
 
 
-# ---------------------------------------------------------------------------
 # VLM adapter
-# ---------------------------------------------------------------------------
 class VLMForwardAdapter:
     """Bridges a dict-input VLM to the :data:`LogitsFn` interface.
 

@@ -15,16 +15,13 @@ class PowerSamplingConfig:
     """Configuration for power-sampling inference.
 
     The algorithm hyperparameters are kept verbatim from the original
-    CliffordNet implementation. The tokenizer/model identity fields are
-    **generalized**: they default to empty/``None`` so the engine drives any
-    LLM/VLM with any tokenizer, instead of hard-coding GPT-2/CliffordNet IDs.
+    CliffordNet implementation. The tokenizer/model identity fields default
+    to empty/``None`` so the engine drives any LLM/VLM with any tokenizer,
+    instead of hard-coding GPT-2/CliffordNet IDs.
 
-    # DECISION plan_2026-06-16_535b4f02/D-001: identity fields are generalized
-    # to empty-set / None defaults (C7/G1/G2). Do NOT restore the GPT-2 defaults
-    # {50257..50260}/cls=50257/pad=50260/ctx_len=511 — that would re-couple this
-    # general package to CliffordNet and silently mis-mask any other model.
-    # CliffordNet behavior is preserved by the consumer passing those IDs
-    # explicitly at the call site (see decisions.md D-001 / infer_cliffordnet_nlp.py).
+    # DECISION plan_2026-06-16_535b4f02/D-001: identity fields default to
+    # empty/None, not the GPT-2 IDs. Consumers pass CliffordNet's own IDs at
+    # the call site instead. See decisions.md.
 
     :param temperature: Controls the power-distribution exponent.
         ``alpha = 1 / temperature``.  Lower temperature → sharper

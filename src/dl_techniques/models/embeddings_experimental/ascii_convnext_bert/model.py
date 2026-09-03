@@ -1,36 +1,28 @@
 """ASCII ConvNeXt BERT: the study's convolutional arm.
 
-The same BERT skeleton as :mod:`...ascii_bert` -- same ASCII embeddings, same
-depth and width ladder, same pooling, same output contract -- with
-self-attention replaced by a ConvNeXt V1 block applied along the sequence axis:
-depthwise convolution, normalization, pointwise expansion by 4, activation,
-pointwise contraction, LayerScale.
+Same skeleton as :mod:`...ascii_bert` -- same ASCII embeddings, depth/width
+ladder, pooling, output contract -- with self-attention replaced by a
+ConvNeXt V1 block applied along the sequence axis: depthwise convolution,
+normalization, pointwise expansion by 4, activation, pointwise contraction,
+LayerScale.
 
-This is the third arm of a three-way comparison, and it is the one that
-isolates a specific question. The Clifford arm differs from the transformer
-baseline in TWO ways at once -- it is convolutional instead of attentional, AND
-it mixes channels through a geometric product. This arm is convolutional
-WITHOUT the geometric product, so the three together separate "convolution
-instead of attention" from "the geometric product on top of convolution".
-Without it, any Clifford-vs-transformer result is confounded between the two.
+This is the third arm of a three-way comparison. The Clifford arm differs
+from the transformer baseline in two ways at once: convolutional instead of
+attentional, and mixing channels through a geometric product. This arm is
+convolutional without the geometric product, so the three together separate
+"convolution instead of attention" from "the geometric product on top of
+convolution".
 
-Properties it shares with the Clifford arm, and one it does not:
-
-- **Cost is linear in sequence length.** No ``S x S`` matrix is built.
-- **Token mixing is local**, and the span is a design parameter. But a ConvNeXt
-  block applies a SINGLE depthwise convolution where ``CliffordNetBlock``
-  applies two, so at equal depth and kernel this arm's receptive field is
-  **half** the Clifford arm's: ``num_layers * (K - 1) + 1`` against
-  ``num_layers * 2 * (K - 1) + 1``. Matching the two on ``K`` does NOT match
-  them on span. :func:`~...shared.blocks.conv_receptive_field` is the one for
-  this arm.
-- **Padding is not neutral**: a same-padded depthwise convolution pulls zero
-  padding into the receptive field of real positions near the boundary, exactly
-  as in the Clifford arm. Masked positions are zeroed before the block, which
-  bounds the effect without removing it; the study trains stage 1 on packed
-  sequences carrying no padding.
-- **Unlike the Clifford arm, LayerScale starts at 1.0**, not 1e-5, so the
-  block contributes at full magnitude from the first step rather than easing in.
+Cost is linear in sequence length: no ``S x S`` matrix is built. Token
+mixing is local, and the span is a design parameter. A ConvNeXt block
+applies one depthwise convolution where ``CliffordNetBlock`` applies two, so
+at equal depth and kernel this arm's receptive field is half the Clifford
+arm's: ``num_layers * (K - 1) + 1`` against ``num_layers * 2 * (K - 1) + 1``.
+Use :func:`~...shared.blocks.conv_receptive_field` for this arm. Padding is
+not neutral here either, for the same reason as the Clifford arm, and
+mitigated the same way, by zeroing masked positions before the block.
+LayerScale starts at 1.0 here, not 1e-5, so the block contributes at full
+magnitude from the first step.
 
 References:
     - Liu et al., 2022. A ConvNet for the 2020s (ConvNeXt).
@@ -49,17 +41,11 @@ from typing import Any, Dict, Optional
 
 import keras
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 
 from ..shared.blocks import conv_receptive_field
 from ..shared.encoder import EmbeddingEncoder
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 __all__ = ["AsciiConvNextBert", "create_ascii_convnext_bert"]
 
@@ -68,6 +54,24 @@ __all__ = ["AsciiConvNextBert", "create_ascii_convnext_bert"]
 class AsciiConvNextBert(EmbeddingEncoder):
     """
     ConvNeXt-block embedding encoder over the ASCII character vocabulary.
+
+    Architecture:
+
+    .. code-block:: text
+
+        ascii ids [B, S] ──► ASCII embedding table [101, H]
+                                        │
+                                        ▼
+                    ┌───────── convnext block ─────────┐  x num_layers
+                    │ depthwise conv (sequence axis)    │
+                    │ + norm + pointwise 4x + act        │
+                    │ + pointwise contract + LayerScale  │
+                    └──────────────────┬─────────────────┘
+                                        ▼
+                                  pooling head
+                                        │
+                                        ▼
+                              sequence vector [B, H]
 
     :param hidden_size: Model width.
     :type hidden_size: int
@@ -84,6 +88,15 @@ class AsciiConvNextBert(EmbeddingEncoder):
     :param block_normalization_type: Normalization inside the block.
     :type block_normalization_type: str
     :param kwargs: Forwarded to :class:`EmbeddingEncoder`.
+
+    Variants:
+
+    .. code-block:: text
+
+        variant   hidden_size   num_layers   kernel_size
+        tiny      128           4            7
+        small     256           6            7
+        base      512           8            7
     """
 
     #: Public variant registry, depth- and width-matched to
@@ -155,7 +168,7 @@ class AsciiConvNextBert(EmbeddingEncoder):
                 f"Token-mixing span ({span}) is shorter than "
                 f"max_position_embeddings ({self.max_position_embeddings}): "
                 "positions further apart than the span cannot interact. Raise "
-                "kernel_size or num_layers. Note this arm applies ONE conv per "
+                "kernel_size or num_layers. This arm applies one conv per "
                 "block, so its span is half a Clifford stack's at equal depth "
                 "and kernel."
             )
