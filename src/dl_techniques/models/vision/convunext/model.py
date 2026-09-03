@@ -1,70 +1,20 @@
-"""
-ConvUNext: Modern U-Net with ConvNeXt-Inspired Architecture
+"""create_convunext, a functional builder for a U-Net with ConvNeXt-style blocks.
 
-The single home for BOTH ConvUNext arms. ``create_convunext(..., use_bias=True)``
-builds a bias-carrying network; ``use_bias=False`` builds the bias-free denoiser
-that ``models/vision/bias_free_denoisers/bfconvunext.py`` wraps. The model is a Keras
-FUNCTIONAL graph — the subclassed ``ConvUNextModel`` that used to live here (with
-its own ``ConvUNextStem``, its own variant dict, a bespoke inference-model helper
-and pretrained-weight placeholders) has been deleted in favour of it.
-
-ConvUNext combines U-Net and ConvNeXt:
-
-- U-Net's encoder-decoder structure with skip connections
-- ConvNeXt's modern architectural innovations via the existing
-  ``ConvNextV1Block`` / ``ConvNextV2Block`` implementations
-- Depthwise separable convolutions and an inverted bottleneck
-- Global Response Normalization (GRN) for V2 blocks
-- Larger kernel sizes (7x7) for better receptive fields
-- Layer scaling for training stability and optional stochastic depth
-
-Under ``use_bias=False`` the architecture aims at the bias-free principle: if the
-input is scaled by alpha, the output is scaled by alpha, which is what makes a
-denoiser generalize across noise levels and enables the Miyasawa/Tweedie
-residual-as-score reading. ``create_convunext``'s docstring names the three
-deliberate exceptions to that (the exempt activations, two hardcoded bias-free
-sites, and GRN's un-threaded ``beta``).
-
-Deep supervision provides better gradient flow to deeper layers, multi-scale
-feature learning, more stable training of very deep networks, and curriculum
-learning through weight scheduling. With it enabled the model outputs multiple
-scales: output 0 is the final inference output (highest resolution) and outputs
-1..N are intermediate supervision outputs at progressively lower resolutions.
-
-Optional Laplacian-pyramid downsample/skip path (``use_laplacian_pyramid``, OFF by
-default): every encoder down<->skip junction stops using ``MaxPooling2D`` + a raw
-full-resolution skip and instead applies a single ``LaplacianPyramidLevel`` split::
-
-    low, high = split(x)   # low = blur-then-subsample(x); high = x - upsample(low)
-
-The coarse, anti-aliased ``low`` band descends the encoder; the high-frequency
-residual ``high`` band becomes the skip. The two bands are exactly complementary
-(``merge(low, high) == x``), so the split is lossless *taken together*.
-
-The reason for it is NOT just lossless downsampling -- it is that **no single path
-then carries all the information needed for reconstruction**. The skip holds only
-the high band and the descending/bottleneck path holds only the low band, so
-neither is a sufficient statistic; the decoder is forced to FUSE both to rebuild
-the signal. This removes the classic U-Net shortcut where a full-resolution skip
-carries the whole image, letting the network learn a near-identity copy and leaving
-the encoder->bottleneck->decoder pathway lazy and underused. For a denoiser this
-doubly matters: the trivial "copy the noisy input, do nothing" solution that hides
-in a full-resolution skip is gone once that skip only holds the high-frequency
-residual.
-
-Secondary benefit -- an inductive bias matched to denoising: white Gaussian noise
-is flat across frequency while natural-image signal concentrates in low
-frequencies, so per band the SNR differs sharply. Splitting at every scale gives
-the network the subband structure of classical optimal denoising
-(wavelet-shrinkage / per-band Wiener). Crucially this costs nothing on the theory
-side: ``LaplacianPyramidLevel`` is built only from linear ops (bias-free Gaussian
-blur -> blur-pool -> bilinear upsample -> subtraction), so it is homogeneous of
-degree 1 with zero additive offset.
-
-Based on ConvNeXt innovations from "A ConvNet for the 2020s" (Liu et al., CVPR
-2022) and "ConvNeXt V2: Co-designing and Scaling ConvNets with Masked
-Autoencoders" (Woo et al., CVPR 2023). The Laplacian-pyramid split follows Burt &
-Adelson, "The Laplacian Pyramid as a Compact Image Code" (1983).
+The same builder produces both arms: `use_bias=True` builds a bias-carrying network,
+`use_bias=False` builds the bias-free denoiser that `bias_free_denoisers/bfconvunext.py`
+wraps. It combines U-Net's encoder-decoder shape with skip connections and
+`ConvNextV1Block`/`ConvNextV2Block` (depthwise 7x7 convolution, inverted bottleneck,
+optional Global Response Normalization for V2, layer scale, optional stochastic
+depth). Under `use_bias=False` the network keeps the bias-free property (scaling the
+input by alpha scales the output by alpha), which lets a denoiser generalize across
+noise levels; `create_convunext`'s own docstring names the few sites that are
+exceptions to that. Deep supervision, when enabled, returns multiple outputs: output
+0 is the final full-resolution result, outputs 1..N are intermediate supervision
+outputs at lower resolutions. An optional Laplacian-pyramid downsample/skip path
+(`use_laplacian_pyramid`, off by default) replaces `MaxPooling2D` plus a raw
+full-resolution skip with a lossless low/high frequency split at every encoder-skip
+junction, so the skip alone is never a sufficient statistic for reconstruction and
+the decoder must combine both bands.
 
 References:
     - Ronneberger et al., 2015. U-Net: Convolutional Networks for Biomedical
@@ -282,9 +232,7 @@ class ConvUNextStem(keras.layers.Layer):
             'filters': self.filters,
             'kernel_size': self.kernel_size,
             # DECISION plan_2026-06-21_eb7fd829/D-005: serialize a layer-instance stem
-            # activation so LeakyReLU(alpha) round-trips through .keras; the string path
-            # stays raw for backward-compat. Mirrors the block fix (D-001). Do NOT emit a
-            # dict for a plain string activation — that would break existing 'gelu' configs.
+            # activation so LeakyReLU(alpha) round-trips through .keras; a plain string stays raw for backward-compat. See decisions.md.
             'activation': serialize_activation(self.activation_name),
             'use_bias': self.use_bias,
             'stem_normalization': self.stem_normalization,
@@ -313,14 +261,15 @@ class ConvUNextStem(keras.layers.Layer):
 # Spatial wrapper around bias-free LinearAttention (4D <-> 3D)
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.models.convunext.model")  # DECISION plan_2026-07-11_bb4b38b5/D-002
+# DECISION plan_2026-07-11_bb4b38b5/D-002: registered under this module's path.
+@register_dl_technique("dl_techniques.models.convunext.model")
 class SpatialLinearAttention(keras.layers.Layer):
     """Apply a bias-free LinearAttention over a 4D spatial feature map.
 
     ``LinearAttention`` (the repo's only Miyasawa-compliant, degree-1-homogeneous
     attention) accepts strictly 3D sequence input ``(B, N, dim)`` and raises on 4D.
     This thin wrapper flattens a bottleneck tensor ``(B, H, W, C)`` to
-    ``(B, H*W, C)`` using DYNAMIC ``ops.shape`` (H/W are ``None`` at graph-build
+    ``(B, H*W, C)`` using dynamic ``ops.shape`` (H/W are ``None`` at graph-build
     time whenever the model is built with ``input_shape=(None, None, C)``), attends,
     and reshapes back to ``(B, H, W, C)``. Output shape equals input shape.
 
@@ -350,11 +299,8 @@ class SpatialLinearAttention(keras.layers.Layer):
         self.dim = dim
         self.num_heads = num_heads
 
-        # DECISION plan_2026-07-11_bb4b38b5/D-001: construct the bias-free attention via the
-        # factory with a HARDCODED 'linear' type (the only degree-1-homogeneity-safe attention),
-        # keeping use_bias=False + default feature_map='relu'. Do NOT import LinearAttention
-        # directly (factory-first policy) and do NOT expose a type knob (any softmax type
-        # silently breaks the Miyasawa property the denoiser depends on).
+        # DECISION plan_2026-07-11_bb4b38b5/D-001: use the factory with a hardcoded 'linear'
+        # type, the only degree-1-homogeneity-safe attention — a type knob would let a softmax type silently break the Miyasawa property. See decisions.md.
         self.attn = create_attention_layer(
             'linear', dim=self.dim, num_heads=self.num_heads,
             use_bias=False, name=f'{self.name}_linear'
@@ -505,27 +451,10 @@ def _apply_residual_convnext_block(
     caused (the full denoiser is init-stable across gamma in [1e-6, 1.0], verified by sweep).
     """
     residual = x
-    # DECISION plan-2026-08-11T201945-91938f65/D-002 + D-004: ConvNextV1Block /
-    # ConvNextV2Block are the residual BRANCH ONLY (they end at gamma(x), no add), so the
-    # CALLER must supply the residual and the drop-path — which is what this helper is.
-    # The drop-path schedule goes to StochasticDepth (drop-path on the residual BRANCH),
-    # NEVER to the block's `dropout_rate=` kwarg: that kwarg is ordinary elementwise
-    # dropout INSIDE the inverted-bottleneck MLP (convnext_v1_block.py:103-121) and has
-    # nothing to do with stochastic depth. Do NOT collapse this to `x = block(x)` — that
-    # silently drops the skip connection and makes stochastic depth meaningless. (These
-    # anchors were carried here when the subclassed `ConvUNextModel`, whose inline encoder
-    # loop originally held them, was deleted; this helper is now the ONE place the
-    # invariant lives.) See that plan's decisions.md D-002, D-004.
-    # DECISION plan_2026-06-21_eb7fd829/D-002: block activation is threaded via this single
-    # choke-point (mirrors the kernel_regularizer / depthwise_* precedent) so one factory arg
-    # reaches every encoder/bottleneck/decoder block at once. Factory default stays 'gelu' so
-    # non-bfunet callers are byte-identical. (That claim was originally justified against two
-    # named callers, `convnext` and `convnext_patch_vae`; the latter package has since been
-    # deleted, so only the `convnext` half is still checkable.) NOTE (iter-2,
-    # D-005/D-006 superseded the original iter-1 scope): the stem (ConvUNextStem, D-005) and the
-    # deep-supervision head (_make_supervision_activation, D-006) are now ALSO configurable via
-    # the factory's stem_activation / supervision_activation params (each default 'gelu'). See
-    # decisions.md D-002/D-005/D-006.
+    # DECISION plan-2026-08-11T201945-91938f65/D-002 + D-004: ConvNextV1Block/V2Block are
+    # the residual branch only (end at gamma(x), no add) — the caller supplies the residual and drop-path here; never collapse to `x = block(x)`. See decisions.md.
+    # DECISION plan_2026-06-21_eb7fd829/D-002: block activation threads through this one
+    # choke-point so every encoder/bottleneck/decoder block shares it; factory default stays 'gelu' so existing callers are byte-identical. See decisions.md D-002/D-005/D-006.
     y = block_cls(
         kernel_size=kernel_size,
         filters=filters,
@@ -568,24 +497,8 @@ def _make_supervision_activation(activation, name):
 # Bias-free (use_bias=False) guardrails
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-08-14T092357-0e3d792d/D-012: this is an ALLOWLIST of positively
-# homogeneous activation NAMES, and it is deliberately NARROW and deliberately
-# INCOMPLETE as a homogeneity certificate. Do NOT convert it to a denylist of
-# {'gelu', 'tanh', 'sigmoid', ...}: a denylist silently admits every activation
-# nobody thought of, which is exactly the failure a bias-free denoiser cannot
-# observe (its outputs stay finite and its tests stay green while f(a*x) != a*f(x)).
-# Do NOT widen this set to admit a value some caller happens to pass -- widening a
-# rule to accommodate what the same change discovered is a self-serving edit; the
-# correct response is to escalate. Note what is NOT here and why:
-#   * 'gelu' -- the shipped default of `block_activation`, `stem_activation` and
-#     `supervision_activation`. Those three are DELIBERATELY EXEMPT from the guard
-#     (decisions.md D-006 / plan invariant I-6): guarding them would make the
-#     model's own default configuration raise, which is a breakage, not a guard.
-#   * `downsample_pool_type='max'` -- NOT guarded anywhere. Max pooling is
-#     non-linear but IS positively homogeneous (max(a*x) == a*max(x) for a > 0);
-#     conflating "non-linear" with "non-homogeneous" would wrongly ban it.
-# Consequence, stated so no reader mistakes it: passing these guards is NOT a
-# homogeneity certificate. See decisions.md D-006 and D-012.
+# DECISION plan-2026-08-14T092357-0e3d792d/D-012: this is a narrow, incomplete allowlist
+# of positively-homogeneous activations, not a denylist — a denylist would silently admit any activation nobody thought of. Passing it is not a homogeneity certificate. See decisions.md D-006/D-012.
 POSITIVELY_HOMOGENEOUS_ACTIVATIONS: FrozenSet[Optional[str]] = frozenset(
     {None, 'linear', 'relu', 'leaky_relu'}
 )
@@ -730,16 +643,7 @@ def create_convunext(
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         block_activation: Union[str, keras.layers.Layer] = 'gelu',
         # DECISION plan_2026-07-01_8054f023/D-001: 'batchnorm' selects the variance-only
-        # BiasFreeBatchNorm inside every ConvNeXt block. A FIXED-STAT norm (dividing by a
-        # frozen running_var constant at inference, no mean, no beta) restores degree-1
-        # homogeneity f(ax)=a*f(x); the default per-input LayerNorm divides by a per-sample
-        # std that itself scales with the input, so it is scale-INVARIANT (degree-0). Do NOT
-        # substitute stock keras.layers.BatchNormalization(center=False) or any RMS-family
-        # norm here — both were empirically non-homogeneous (moving_mean subtraction /
-        # per-input RMS); only BiasFreeBatchNorm is degree-1 at inference. Default 'layernorm'
-        # is byte-identical to the prior hardcoded LayerNorm, and stays 'layernorm' for BOTH
-        # the bias-on and bias-off arms (plan invariant I-3): only
-        # `bfconvunext.create_convunext_variant` selects 'batchnorm'. See decisions.md D-001.
+        # BiasFreeBatchNorm, which is degree-1 homogeneous at inference; do not substitute stock BatchNormalization or an RMS-family norm — both measured non-homogeneous. See decisions.md.
         block_normalization: str = "layernorm",
         stem_activation: Union[str, keras.layers.Layer] = 'gelu',
         drop_path_rate: float = 0.1,
@@ -1141,12 +1045,8 @@ def create_convunext(
             f"build); got final_projection_groups={final_projection_groups}"
         )
 
-    # DECISION plan-2026-08-14T092357-0e3d792d/D-012: the homogeneity guardrails fire
-    # ONLY on the bias-off arm. Do NOT hoist this call out of the `if` -- under
-    # use_bias=True a 'sigmoid' final activation and a centered supervision norm are
-    # ordinary, supported configurations (`ConvUNextModel`'s own deleted trainers used
-    # exactly those), and an unconditional validator would break the bias-ON arm to
-    # protect an invariant the bias-ON arm never claimed. See decisions.md D-012.
+    # DECISION plan-2026-08-14T092357-0e3d792d/D-012: guardrails fire only on the
+    # bias-off arm — an unconditional validator would break bias-on configs (e.g. sigmoid final activation) that never claimed homogeneity. See decisions.md.
     if use_bias is False:
         _validate_bias_free_arguments(
             final_activation=final_activation,
@@ -1162,10 +1062,8 @@ def create_convunext(
     # Input layer
     inputs = keras.Input(shape=input_shape, name='input_images')
 
-    # DECISION plan_2026-06-19_ed071c02/D-001: default-OFF additive frozen Gabor stem.
-    # Non-learnable depthwise Gabor bank + mandatory bias-free 1x1 projection (output
-    # channels of a depthwise conv = in_ch * gabor_filters). Reuse the existing builder,
-    # do not rebuild. With use_gabor_stem=False this is a no-op rename (stem_input=inputs).
+    # DECISION plan_2026-06-19_ed071c02/D-001: default-off additive frozen Gabor stem —
+    # a non-learnable depthwise Gabor bank plus a mandatory bias-free 1x1 projection. See decisions.md.
     if use_gabor_stem:
         gabor = create_gabor_depthwise_conv2d(
             filters_per_channel=gabor_filters,
@@ -1336,22 +1234,8 @@ def create_convunext(
             name=junction_name,
         )(x)
 
-        # DECISION plan_2026-07-10_be906be8/D-002: optionally process the Laplacian
-        # high-frequency band with N ConvNeXt blocks before it becomes the
-        # decoder skip. Gated on use_laplacian_pyramid (the high band only exists then);
-        # high_freq_blocks=0 (default) adds ZERO layers -> byte-identical OFF path, so
-        # existing `.keras` checkpoints (whose layer names are load-bearing) still load.
-        # Do NOT drop the use_laplacian_pyramid gate or the >0 gate: without the pyramid
-        # there is no high band and this would rename/insert layers into the raw-skip path.
-        # This SUPERSEDES plan_2026-07-06_b17c1f83/D-001, which pinned every high-freq block
-        # to drop_path_rate=0.0 (no StochasticDepth at all). The high-freq stack now carries
-        # a LOCAL linear drop-path ramp `drop_path_rate * hf_idx / high_freq_blocks` that
-        # restarts at 0.0 per encoder level, mirroring the encoder/decoder "first block = 0.0"
-        # convention. hf_idx=0 -> 0.0 => still NO StochasticDepth layer for the first block
-        # (the round-trip-determinism concern is preserved for it); hf_idx>=1 gain a weightless
-        # StochasticDepth sublayer. The `high_freq_blocks > 0` gate guarantees the denominator
-        # is nonzero. StochasticDepth is inference-identity, so this only changes training-time
-        # regularization; the OFF-by-default path (high_freq_blocks=0) is untouched.
+        # DECISION plan_2026-07-10_be906be8/D-002: high_freq_blocks=0 (default) adds zero
+        # layers so existing checkpoints still load — keep both the use_laplacian_pyramid gate and the >0 gate, dropping either inserts layers into the raw-skip path. See decisions.md.
         if high_freq_blocks > 0 and use_laplacian_pyramid:
             for hf_idx in range(high_freq_blocks):
                 # Local linearly-scaled drop-path ramp (restarts at 0.0 per level's HF stack).
@@ -1393,10 +1277,8 @@ def create_convunext(
             )(x)
 
     # Optional bias-free attention blocks at the bottleneck (before the ConvNeXt stack).
-    # DECISION plan_2026-07-11_bb4b38b5/D-002: gated on bottleneck_attention_blocks > 0 so the
-    # default (0) adds ZERO layers -> byte-identical OFF path (existing .keras checkpoints
-    # depend on this). Local drop-path ramp `drop_path_rate * attn_idx / bottleneck_attention_blocks`
-    # restarts at 0.0 (first block gets no StochasticDepth), mirroring the ConvNeXt loop below.
+    # DECISION plan_2026-07-11_bb4b38b5/D-002: gated on bottleneck_attention_blocks > 0 so
+    # the default (0) adds zero layers, keeping existing checkpoints byte-identical. See decisions.md.
     if bottleneck_attention_blocks > 0:
         if bottleneck_filters % bottleneck_attention_heads != 0:
             raise ValueError(
@@ -1414,19 +1296,8 @@ def create_convunext(
             x = keras.layers.Add(name=f'bottleneck_attention_add_{attn_idx}')([residual, y])
 
     # Bottleneck ConvNeXt blocks (residual + drop-path)
-    # DECISION plan_2026-07-10_be906be8/D-001: the bottleneck now uses a LOCAL linear
-    # drop-path ramp that restarts at 0.0, mirroring the encoder ramp shape and the
-    # decoder's "first block = 0.0" convention (see decoder loop below). This SUPERSEDES
-    # plan_2026-06-20_0433c2f2/D-003, which pinned every bottleneck block to the flat
-    # (unscaled) max drop_path_rate. The ramp `drop_path_rate * block_idx / blocks_per_level`
-    # stays strictly in [0, drop_path_rate) for every block -> it can NEVER exceed
-    # drop_path_rate (the exact concern D-003 raised about continuing the encoder's GLOBAL
-    # index into the bottleneck). block_idx=0 -> 0.0 => _apply_residual_convnext_block adds
-    # NO StochasticDepth layer for the first block. blocks_per_level >= 1 is guaranteed by
-    # the validator above, so the denominator is never zero. StochasticDepth is
-    # inference-identity, so existing trained checkpoints load and infer unchanged (block_0
-    # only drops a weightless SD sublayer). Do NOT revert to a flat rate — in particular do
-    # NOT restore the deleted ConvUNextModel's constant `drop_path_rate` bottleneck.
+    # DECISION plan_2026-07-10_be906be8/D-001: local linear drop-path ramp restarting at
+    # 0.0, mirroring the encoder/decoder shape — do not revert to a flat rate (supersedes plan_2026-06-20_0433c2f2/D-003). See decisions.md.
     for block_idx in range(blocks_per_level):
         # Local linearly-scaled drop-path ramp (restarts at 0.0 in the bottleneck stack).
         current_drop_path = drop_path_rate * block_idx / blocks_per_level
@@ -1481,12 +1352,8 @@ def create_convunext(
             )(x)
 
         # Merge skip connection.
-        # DECISION plan_2026-06-26_90d8cbe6/D-003: under zero_pad_channels the decoder cannot
-        # zero-pad (it must REDUCE channels). The literal "slice the [skip, up] concat to C" is
-        # degenerate (concat order is [skip(C), up(2C)] so the first C channels are skip ONLY,
-        # discarding the entire upsampled branch). Instead slice the UPSAMPLED tensor (2C) down
-        # to C and ADD the C-channel skip — parameter-free, keeps both branches, bias-free,
-        # homogeneous. OFF arm below is the verbatim original Concatenate + 1x1 Conv2D.
+        # DECISION plan_2026-06-26_90d8cbe6/D-003: under zero_pad_channels, slice the
+        # upsampled tensor down to C and add the skip — slicing the [skip, up] concat instead would discard the entire upsampled branch. See decisions.md.
         if zero_pad_channels:
             x = keras.layers.Add(name=f'decoder_level_{level}_match_add')(
                 [skip, MatchChannels(current_filters, name=f'decoder_level_{level}_match_channels')(x)]
@@ -1509,12 +1376,8 @@ def create_convunext(
                 )(x)
 
         # Optionally grow output channels at the finest decoder stage (level 0).
-        # DECISION plan_2026-06-26_0ec1a304/D-001: append `output_channels` zero
-        # channels here (before the level-0 blocks) and widen those blocks so their
-        # residuals learn to write the image into the zero tail; the final projection
-        # is then replaced by a tail-slice (see final-output block below). Level 0 only;
-        # OFF path is byte-identical. Compose-safe with zero_pad_channels (pad happens
-        # AFTER the skip-merge Add).
+        # DECISION plan_2026-06-26_0ec1a304/D-001: append output_channels zero channels
+        # at level 0 so those blocks' residuals learn to write into the tail; the final projection becomes a tail-slice instead. See decisions.md.
         block_filters = current_filters
         if extra_zero_output_channels and level == 0:
             block_filters = current_filters + output_channels
@@ -1603,20 +1466,8 @@ def create_convunext(
             "latter drops the learned final_output Conv2D in favor of a parameter-free tail "
             "slice, so there is no projection to group. Use one or the other."
         )
-    # DECISION plan-2026-08-14T092357-0e3d792d/D-013: include_top=False does NOT
-    # construct the final projection. The deleted `ConvUNextModel` built its head in
-    # __init__ and merely skipped APPLYING it, so its headless variant still carried
-    # the head's weights (an explicit weight-compat contract). That contract is NOT
-    # reproducible here and is deliberately not faked: `keras.Model(inputs, outputs)`
-    # prunes every layer that is not on a path to an output, so a
-    # constructed-but-unapplied Conv2D would own no weights, would not appear in
-    # `model.layers`, and `get_layer('final_output')` would still raise -- MEASURED,
-    # not assumed (decisions.md D-013 records the probe). Do NOT "fix" this by calling
-    # the projection and dropping its tensor (identical pruning), nor by appending it
-    # as a second output (that changes the output signature and silently re-adds the
-    # head this argument exists to remove). The honest contract is: include_top=False
-    # returns the decoder features and a STRICTLY SMALLER weight list; `set_weights`
-    # between the two settings raises.
+    # DECISION plan-2026-08-14T092357-0e3d792d/D-013: include_top=False does not construct
+    # the final projection at all — a functional graph prunes any unapplied layer, so a built-but-unused Conv2D would own no weights anyway. See decisions.md.
     if not include_top:
         final_output = keras.layers.Activation(
             'linear', name='decoder_features'
@@ -1626,10 +1477,8 @@ def create_convunext(
             f"feature map with {final_output.shape[-1]} channels"
         )
     elif extra_zero_output_channels:
-        # DECISION plan_2026-06-26_0ec1a304/D-001: keep ONLY the zero-grown tail
-        # channels (last `output_channels`) as the output, dropping the learned 1x1
-        # projection. Parameter-free, bias-free, homogeneous. final_activation is
-        # applied so the contract (e.g. 'linear') matches the OFF path.
+        # DECISION plan_2026-06-26_0ec1a304/D-001: keep only the zero-grown tail channels
+        # as the output, dropping the learned 1x1 projection — parameter-free and bias-free. See decisions.md.
         final_output = MatchChannels(
             output_channels, slice_side='tail', name='final_output_tail_slice'
         )(x)
