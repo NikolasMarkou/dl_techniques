@@ -1,26 +1,41 @@
-"""Advanced Keras Regularizers for Deep Learning.
+"""Custom Keras regularizers.
 
-This package provides a collection of sophisticated regularization techniques
-implemented as Keras regularizers. These tools are designed to go beyond
-standard L1/L2 penalties, offering advanced control over the learning dynamics
-and representational structure of neural networks.
+These go beyond L1/L2 to control the structure of a layer's weights: their
+value distribution, their information content, or the geometry of the linear
+map they define. Each is fully serializable.
 
-Available Regularizers:
------------------------
--   `BinaryPreferenceRegularizer`: Encourages weights to adopt binary values (0, 1).
--   `TriStatePreferenceRegularizer`: Encourages weights towards ternary values (-1, 0, 1).
--   `EntropyRegularizer`: Controls the information distribution in weight
-    matrices by targeting a specific Shannon entropy level.
--   `SoftOrthogonalConstraintRegularizer`: Encourages weight matrix columns to be
-    mutually orthogonal, improving gradient flow.
--   `SoftOrthonormalConstraintRegularizer`: A stricter version that encourages both
-    orthogonality and unit-norm columns.
--   `SRIPRegularizer`: Enforces near-orthonormality using a spectral norm
-    penalty (Spectral Restricted Isometry Property).
--   `BinaryPressureScheduler` / `TriStatePressureScheduler`: Keras callbacks that anneal the paired regularizer's multiplier during training.
+Available regularizers:
 
-Each regularizer is designed to be easily integrated into existing Keras
-models and is fully serializable.
+-   ``BinaryPreferenceRegularizer``: double-well penalty that pulls weights
+    toward two targets, {0, 1} by default. Use ``for_gates`` for gates and
+    masks, ``for_bipolar_weights`` for layer kernels.
+-   ``TriStatePreferenceRegularizer``: triple-well penalty that pulls weights
+    toward {-target, 0, +target}. Match ``target`` to the scale the weights
+    actually occupy; ``from_weight_scale`` does that from ``fan_in``.
+-   ``EntropyRegularizer``: penalizes the distance from a target normalized
+    Shannon entropy, controlling whether a layer develops concentrated or
+    distributed weights.
+-   ``SoftOrthogonalConstraintRegularizer``: penalizes the off-diagonal entries
+    of the kernel's Gram matrix, so the compared directions decorrelate while
+    magnitudes are left alone.
+-   ``SoftOrthonormalConstraintRegularizer``: penalizes the full deviation from
+    the identity, so the directions decorrelate and reach unit norm.
+-   ``SRIPRegularizer``: enforces near-orthonormality through the spectral norm
+    of ``W^T W - I``, approximated by power iteration.
+
+Both preference regularizers pair with a callback that ramps their multiplier
+during training, ``BinaryPressureScheduler`` and ``TriStatePressureScheduler``.
+Annealing is not optional for either: at full strength from step zero the
+barriers freeze each weight into whichever well its initializer placed it in.
+
+The ``create_*`` functions are thin constructor forwarders kept for interface
+consistency; all validation lives in the constructors.
+
+Two more live in this package but are not exported here, since neither is a
+weight regularizer in the Keras sense. Import them from their own modules:
+``L2_custom`` (``l2_custom.py``), an L2 penalty whose factor may be negative,
+and ``SIGRegLayer`` (``sigreg.py``), an activation-based sliced Gaussian
+regularizer built as a Layer.
 """
 
 from .binary_preference import (

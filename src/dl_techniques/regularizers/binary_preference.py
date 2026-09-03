@@ -1,25 +1,27 @@
-"""
-Double-well regularizer that encourages weights toward two target values.
+"""Double-well regularizer that pulls weights toward two target values.
 
-This regularizer adds a penalty with two zero-gradient minima, at `low` and
-`high`, and a barrier between them. Weights sitting exactly at a target feel
-no force; weights between the targets are pushed toward whichever one they
-are closer to. It is a smooth, differentiable stand-in for a hard binarizing
-constraint.
+Provides :class:`BinaryPreferenceRegularizer`, a penalty with zero-gradient
+minima at ``low`` and ``high`` and a barrier between them,
+:class:`BinaryPressureScheduler`, a callback that anneals its strength, and
+:func:`create_binary_preference_regularizer`, a thin constructor forwarder.
+
+A weight sitting exactly at a target feels no force; a weight between the
+targets is pushed toward whichever one it is closer to. It is a smooth,
+differentiable stand-in for a hard binarizing constraint.
 
 Foundational mathematics
 ------------------------
-For half-gap ``h = (high - low) / 2`` the per-weight penalty is:
+For half-gap ``h = (high - low) / 2`` the per-weight penalty is::
 
     L(w) = m * (w - low)^2 * (w - high)^2 / h^4
 
-For the canonical ``low=0, high=1`` case this reduces to ``L(w) = 16 m w^2 (1-w)^2``,
-the standard Cahn-Hilliard / Ginzburg-Landau double-well potential. The
-normalization by ``h^4`` fixes the barrier height at the midpoint to exactly
-``m``, independent of the chosen targets, so `multiplier` means the same thing
-whether the targets are {0, 1} or {-1, +1}.
+For the canonical ``low=0, high=1`` case this reduces to
+``L(w) = 16 m w^2 (1-w)^2``, the standard Cahn-Hilliard / Ginzburg-Landau
+double-well potential. Dividing by ``h^4`` fixes the barrier height at the
+midpoint to exactly ``m`` whatever the targets, so `multiplier` means the same
+thing for {0, 1} as for {-1, +1}.
 
-Key quantities (per weight):
+Key quantities, per weight::
 
     L'(w)                      = 2m (w-low)(w-high)(2w-low-high) / h^4
     L(midpoint)                = m                      (barrier height)
@@ -28,42 +30,42 @@ Key quantities (per weight):
     local L2-equivalent lambda = 4m / h^2
 
 That last line is the number to reason about when picking `multiplier`. Near a
-minimum this regularizer behaves exactly like L2 pull toward that target with
-``lambda = 4m/h^2``. For {0, 1} targets that is ``16 m``, so ``multiplier=1.0``
-is a very strong penalty, not a mild one.
+minimum this behaves exactly like L2 pull toward that target with
+``lambda = 4m/h^2``. For {0, 1} targets that is ``16 m``, so
+``multiplier=1.0`` is a very strong penalty, not a mild one.
 
 Read this before using it
 -------------------------
-1.  DO NOT attach the {0, 1} configuration to a `Dense` or `Conv2D` kernel.
+1.  Do not attach the {0, 1} configuration to a `Dense` or `Conv2D` kernel.
     Glorot/He initializers are zero-centered, so every weight starts in the
     ``w=0`` well and cannot climb the barrier to reach ``w=1``. The result is
-    not binarization, it is aggressive L2 that collapses the layer to zero and
-    forbids negative weights. For kernels use ``low=-1.0, high=1.0``
-    (see `for_bipolar_weights`). For gates and masks initialized inside
-    [0, 1] the {0, 1} configuration is the right one (see `for_gates`).
+    not binarization; it is aggressive L2 that collapses the layer to zero and
+    forbids negative weights. For kernels use ``low=-1.0, high=1.0`` (see
+    `for_bipolar_weights`). For gates and masks initialized inside [0, 1] the
+    {0, 1} configuration is the right one (see `for_gates`).
 
-2.  ANNEAL THE MULTIPLIER. The total loss is non-convex: the barrier means
-    each weight's well assignment gets frozen early by initialization noise.
-    Standard practice is to ramp `multiplier` from 0 over training, which is
-    why it is stored as a non-trainable `keras.Variable` by default and can be
-    updated from a callback via `set_multiplier`.
+2.  Anneal the multiplier. The total loss is non-convex: the barrier freezes
+    each weight's well assignment early, from initialization noise alone. Ramp
+    `multiplier` from 0 over training. It is stored as a non-trainable
+    `keras.Variable` by default so a callback can update it via
+    `set_multiplier`.
 
-3.  REDUCTION MATTERS. `sum` (the default, matching Keras built-ins) keeps the
+3.  Reduction matters. `sum` (the default, matching Keras built-ins) keeps the
     per-weight gradient independent of layer size. `mean` normalizes the loss
     across layers but divides the per-weight gradient by the parameter count,
-    so a `multiplier` tuned on a small layer silently does nothing on a large
-    one. Choose deliberately.
+    so a `multiplier` tuned on a small layer does nothing on a large one.
+    Choose knowingly.
 
 4.  The tails are quartic and unbounded: gradients grow cubically outside
-    [low, high]. Set ``quadratic_tails=True`` to swap in the C2-continuous
-    quadratic extension beyond the targets, which caps gradient growth at
-    linear and is much safer without gradient clipping.
+    [low, high]. Set ``quadratic_tails=True`` for the C2-continuous quadratic
+    extension beyond the targets, which caps gradient growth at linear and is
+    much safer without gradient clipping.
 
 References
 ----------
-The potential itself is the classic double-well of Ginzburg-Landau /
-Cahn-Hilliard theory, not a novel construction. Its use for weight
-binarization has direct prior art:
+The potential is the classic double-well of Ginzburg-Landau / Cahn-Hilliard
+theory, not a novel construction. Its use for weight binarization has direct
+prior art:
 
 - Courbariaux, Bengio, David. "BinaryConnect." NeurIPS 2015.
 - Hubara et al. "Binarized Neural Networks." NeurIPS 2016.
@@ -118,69 +120,113 @@ STR_LEGACY_SCALE: str = "scale"
 class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     """Double-well penalty with zero-gradient minima at `low` and `high`.
 
-        L(w) = multiplier * (w - low)^2 * (w - high)^2 / h^4,   h = (high - low) / 2
+    The per-weight penalty is::
 
-    The barrier height at the midpoint equals `multiplier` for any choice of
-    targets. Curvature at each minimum is ``8 * multiplier / h^2``, i.e. the
-    local behaviour is L2-toward-the-target with ``lambda = 4 * multiplier / h^2``
+        L(w) = multiplier * (w - low)^2 * (w - high)^2 / h^4,  h = (high-low)/2
+
+    The barrier height at the midpoint equals `multiplier` for any targets.
+    Curvature at each minimum is ``8 * multiplier / h^2``, so locally this is
+    L2-toward-the-target with ``lambda = 4 * multiplier / h^2``
     (``16 * multiplier`` for the default {0, 1} targets).
 
-    Parameters
-    ----------
-    multiplier : float, optional
-        Barrier height, and the overall strength of the penalty. Must be
-        non-negative. Note the L2-equivalence above before picking a value;
-        1.0 is strong. Default ``DEFAULT_MULTIPLIER``.
-    low : float, optional
-        Lower target value, a zero of the penalty. Default ``DEFAULT_LOW``.
-    high : float, optional
-        Upper target value, a zero of the penalty. Must exceed `low`.
-        Default ``DEFAULT_HIGH``.
-    reduction : {"sum", "mean"}, optional
-        How per-weight costs are combined. ``"sum"`` matches the Keras
-        built-in regularizers and keeps the per-weight gradient independent of
-        layer size. ``"mean"`` divides that gradient by the parameter count.
-        Default ``DEFAULT_REDUCTION``.
-    quadratic_tails : bool, optional
-        If True, replace the quartic growth outside [low, high] with the
-        C2-continuous quadratic ``4 * multiplier * d^2 / h^2`` (where ``d`` is
-        the signed distance past the nearer target). Value, slope and
-        curvature all match at the targets, so the well shape is untouched;
-        only the far tails change, from cubic to linear gradients. Recommended
-        when weights can leave the target interval. Default False.
-    annealable : bool, optional
-        If True, `multiplier` is held in a non-trainable ``keras.Variable`` so
-        it can be updated during training via `set_multiplier`. If False it is
-        a Python float folded into the graph as a constant. Default True.
-    name : str, optional
-        Name for the multiplier variable. Ignored when ``annealable=False``.
+    **Penalty shape:**
 
-    Raises
-    ------
-    ValueError
-        If `multiplier` is negative, `high` is not greater than `low`, or
-        `reduction` is not one of ``"sum"`` / ``"mean"``.
+    .. code-block:: text
 
-    Warnings
-    --------
-    The default {0, 1} targets are intended for gates and masks initialized
-    inside [0, 1], NOT for zero-centered layer kernels. Applied to a
-    Glorot-initialized kernel this cannot binarize (no weight can cross the
-    barrier to reach 1) and instead acts as strong L2 with a hard floor at
-    zero. Use `for_bipolar_weights` for kernels.
+        L(w)
+          |
+        m +- - - - - - -*- - - - - - -     barrier = multiplier
+          |    quartic /|\\ quartic
+          |   tail    / | \\    tail
+          |          /  |  \\
+          |  ___    /   |   \\    ___
+          | .   '--'    |    '--'   '.
+        0 +------*------+------*-------> w
+                low   midpoint high
 
-    Examples
-    --------
-    >>> # Learnable feature-selection gates, pressure annealed in by a callback.
-    >>> reg = BinaryPreferenceRegularizer.for_gates(multiplier=0.0)
-    >>> gate = layer.add_weight(
-    ...     shape=(units,), initializer="random_uniform", regularizer=reg
-    ... )
-    >>> reg.set_multiplier(0.5)  # call from on_epoch_begin
+        quadratic_tails=True replaces both outer arms with
+        4*multiplier*d^2/h^2, matching value, slope and curvature
+        at the targets, so only the far tails change.
 
-    >>> # Binarizing a kernel toward {-1, +1}, with safe tails.
-    >>> reg = BinaryPreferenceRegularizer.for_bipolar_weights(multiplier=0.01)
-    >>> layer = keras.layers.Dense(64, kernel_regularizer=reg)
+    **Presets:**
+
+    .. code-block:: text
+
+        constructor            targets    reduction  tails      use on
+        --------------------   --------   ---------  ---------  ------------
+        for_gates()            {0, 1}     mean       quadratic  gates, masks
+        for_bipolar_weights()  {-1, +1}   sum        quadratic  layer kernels
+        BinaryPreference...()  {0, 1}     sum        quartic    (raw default)
+
+    :param multiplier: Barrier height, and the overall strength of the penalty.
+        Must be non-negative. Read the L2-equivalence above before picking a
+        value; 1.0 is strong.
+    :type multiplier: float
+    :param low: Lower target value, a zero of the penalty.
+    :type low: float
+    :param high: Upper target value, a zero of the penalty. Must exceed `low`.
+    :type high: float
+    :param reduction: How per-weight costs are combined, ``"sum"`` or
+        ``"mean"``. ``"sum"`` matches the Keras built-in regularizers and keeps
+        the per-weight gradient independent of layer size; ``"mean"`` divides
+        that gradient by the parameter count.
+    :type reduction: str
+    :param quadratic_tails: If ``True``, replace the quartic growth outside
+        [low, high] with the C2-continuous quadratic
+        ``4 * multiplier * d^2 / h^2``, where ``d`` is the signed distance past
+        the nearer target. Value, slope and curvature all match at the targets,
+        so the well shape is untouched and only the far tails change, from
+        cubic to linear gradients. Recommended when weights can leave the
+        target interval.
+    :type quadratic_tails: bool
+    :param annealable: If ``True``, `multiplier` lives in a non-trainable
+        ``keras.Variable`` and can be updated during training via
+        :meth:`set_multiplier`. If ``False`` it is a Python float folded into
+        the graph as a constant.
+    :type annealable: bool
+    :param name: Name for the multiplier variable. Ignored when
+        ``annealable=False``.
+    :type name: str or None
+    :param kwargs: Only the deprecated ``scale`` key is accepted, and it is
+        translated to ``low=0.0, high=1.0/scale``. Any other keyword raises.
+
+    :ivar low: The lower target.
+    :vartype low: float
+    :ivar high: The upper target.
+    :vartype high: float
+    :ivar reduction: The selected reduction.
+    :vartype reduction: str
+    :ivar quadratic_tails: Whether the softened tails are in use.
+    :vartype quadratic_tails: bool
+    :ivar annealable: Whether the multiplier is a variable.
+    :vartype annealable: bool
+    :ivar multiplier: The penalty strength, a ``keras.Variable`` when
+        ``annealable`` is ``True`` and a ``float`` otherwise.
+    :vartype multiplier: keras.Variable or float
+
+    :raises ValueError: If `multiplier` is negative, `high` is not greater than
+        `low`, `reduction` is not ``"sum"`` or ``"mean"``, or a deprecated
+        ``scale`` is not positive.
+    :raises TypeError: If an unrecognized keyword argument is supplied.
+
+    Warning:
+        The default {0, 1} targets are for gates and masks initialized inside
+        [0, 1], not for zero-centered layer kernels. On a Glorot-initialized
+        kernel this cannot binarize, since no weight can cross the barrier to
+        reach 1, and instead acts as strong L2 with a hard floor at zero. Use
+        :meth:`for_bipolar_weights` for kernels.
+
+    Example:
+        >>> # Learnable feature-selection gates, pressure annealed in by a callback.
+        >>> reg = BinaryPreferenceRegularizer.for_gates(multiplier=0.0)
+        >>> gate = layer.add_weight(
+        ...     shape=(units,), initializer="random_uniform", regularizer=reg
+        ... )
+        >>> reg.set_multiplier(0.5)  # call from on_epoch_begin
+
+        >>> # Binarizing a kernel toward {-1, +1}, with safe tails.
+        >>> reg = BinaryPreferenceRegularizer.for_bipolar_weights(multiplier=0.01)
+        >>> layer = keras.layers.Dense(64, kernel_regularizer=reg)
     """
 
     def __init__(
@@ -194,6 +240,26 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
         name: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
+        """Validate the targets and set up the multiplier.
+
+        :param multiplier: Non-negative barrier height and penalty strength.
+        :type multiplier: float
+        :param low: Lower target value.
+        :type low: float
+        :param high: Upper target value; must exceed `low`.
+        :type high: float
+        :param reduction: ``"sum"`` or ``"mean"``.
+        :type reduction: str
+        :param quadratic_tails: Whether to soften the tails beyond the targets.
+        :type quadratic_tails: bool
+        :param annealable: Whether the multiplier is an updatable variable.
+        :type annealable: bool
+        :param name: Name for the multiplier variable.
+        :type name: str or None
+        :param kwargs: Only the deprecated ``scale`` key is accepted.
+        :raises ValueError: See the class docstring.
+        :raises TypeError: If an unrecognized keyword argument is supplied.
+        """
         # `keras.regularizers.Regularizer` defines no __init__, so forwarding
         # **kwargs to super() would hit object.__init__ and raise. Accept the
         # legacy `scale` argument, reject everything else loudly.
@@ -203,7 +269,7 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
                 f"unexpected keyword arguments: {sorted(kwargs)}"
             )
         if legacy_scale is not None:
-            # Old semantics: zeros at 0 and 1/scale. Translate, do not silently
+            # Old semantics: zeros at 0 and 1/scale. Translate rather than
             # ignore, so previously serialized models keep their behaviour.
             if legacy_scale <= 0.0:
                 raise ValueError(f"scale must be positive, got {legacy_scale}")
@@ -232,15 +298,15 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
         self.annealable = bool(annealable)
         self.name = name
 
-        # Precomputed shape constants. h is the half-gap; h^4 normalizes the
-        # barrier height to `multiplier`, h^2 normalizes the quadratic tails.
+        # h is the half-gap; h^4 normalizes the barrier height to `multiplier`,
+        # h^2 normalizes the quadratic tails.
         half_gap = (self.high - self.low) / 2.0
         self._h2 = half_gap ** 2
         self._h4 = half_gap ** 4
 
         if self.annealable:
-            # Non-trainable so the optimizer ignores it; a callback can assign
-            # to it mid-training to ramp the binarization pressure.
+            # Non-trainable so the optimizer ignores it; a callback assigns to
+            # it mid-training to ramp the binarization pressure.
             self.multiplier = keras.Variable(
                 initializer=float(multiplier),
                 shape=(),
@@ -264,11 +330,18 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     def for_gates(
         cls, multiplier: float = 0.0, **kwargs: Any
     ) -> "BinaryPreferenceRegularizer":
-        """Preset for {0, 1} gates or masks initialized inside [0, 1].
+        """Build the {0, 1} preset for gates or masks initialized inside [0, 1].
 
         Uses ``reduction="mean"`` so the loss contribution does not scale with
         the number of gates, and defaults `multiplier` to 0.0 on the assumption
         that it will be annealed up from zero.
+
+        :param multiplier: Initial penalty strength.
+        :type multiplier: float
+        :param kwargs: Forwarded to the constructor; ``reduction`` and
+            ``quadratic_tails`` are only defaults here and can be overridden.
+        :return: The configured regularizer.
+        :rtype: BinaryPreferenceRegularizer
         """
         kwargs.setdefault(STR_REDUCTION, "mean")
         kwargs.setdefault(STR_QUADRATIC_TAILS, True)
@@ -278,13 +351,19 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     def for_bipolar_weights(
         cls, multiplier: float = 0.0, **kwargs: Any
     ) -> "BinaryPreferenceRegularizer":
-        """Preset for {-1, +1} kernel binarization.
+        """Build the {-1, +1} preset for kernel binarization.
 
-        This is the configuration to use on `Dense` / `Conv2D` kernels: it is
+        This is the configuration for `Dense` and `Conv2D` kernels. It is
         symmetric about zero, so a standard zero-centered initializer places
-        weights at the top of the barrier and lets task gradients decide which
-        well each one falls into. Half-gap is 1, so the local L2-equivalent
-        lambda is ``4 * multiplier``.
+        weights at the top of the barrier and task gradients decide which well
+        each one falls into. Half-gap is 1, so the local L2-equivalent lambda
+        is ``4 * multiplier``.
+
+        :param multiplier: Initial penalty strength.
+        :type multiplier: float
+        :param kwargs: Forwarded to the constructor.
+        :return: The configured regularizer.
+        :rtype: BinaryPreferenceRegularizer
         """
         kwargs.setdefault(STR_QUADRATIC_TAILS, True)
         return cls(multiplier=multiplier, low=-1.0, high=1.0, **kwargs)
@@ -294,10 +373,18 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     def set_multiplier(self, value: float) -> None:
         """Update the penalty strength during training.
 
-        Only available when ``annealable=True``. Intended to be called from a
-        callback to ramp binarization pressure in over training, e.g.::
+        Available only when ``annealable=True``. Call it from a callback to
+        ramp binarization pressure in over training::
 
             reg.set_multiplier(target * min(1.0, epoch / warmup_epochs))
+
+        :param value: New non-negative penalty strength.
+        :type value: float
+        :return: Nothing.
+        :rtype: None
+        :raises RuntimeError: If the instance was built with
+            ``annealable=False``.
+        :raises ValueError: If ``value`` is negative.
         """
         if not self.annealable:
             raise RuntimeError(
@@ -310,14 +397,22 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
 
     @property
     def multiplier_value(self) -> float:
-        """Current penalty strength as a Python float."""
+        """Current penalty strength as a Python float.
+
+        :return: The multiplier, read out of the variable when annealable.
+        :rtype: float
+        """
         if self.annealable:
             return float(keras.ops.convert_to_numpy(self.multiplier))
         return float(self.multiplier)
 
     @property
     def equivalent_l2_lambda(self) -> float:
-        """L2 coefficient this is locally equivalent to near either minimum."""
+        """L2 coefficient this is locally equivalent to near either minimum.
+
+        :return: ``4 * multiplier / h^2``.
+        :rtype: float
+        """
         return 4.0 * self.multiplier_value / self._h2
 
     # -- penalty -----------------------------------------------------------
@@ -327,9 +422,14 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
 
         Uses the factored form ``((w-low)(w-high))^2 / h^4`` rather than the
         algebraically identical ``(1 - (w-c)^2/h^2)^2``. Both are the same
-        polynomial, but the factored one is cheaper and, more importantly, has
-        no subtractive cancellation: the expanded form subtracts near-equal
-        floats right at the minima, which is exactly where the weights end up.
+        polynomial, but the factored one is cheaper and has no subtractive
+        cancellation: the expanded form subtracts near-equal floats right at
+        the minima, which is where the weights end up.
+
+        :param weights: Weight tensor to regularize.
+        :type weights: tensor
+        :return: The scalar penalty.
+        :rtype: tensor
         """
         dtype = weights.dtype
         low = keras.ops.cast(self.low, dtype)
@@ -369,7 +469,12 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     # -- serialization -----------------------------------------------------
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the constructor arguments needed to rebuild this instance."""
+        """Return the constructor arguments for serialization.
+
+        :return: A dict holding the multiplier, targets, reduction, tail mode,
+            annealability and name.
+        :rtype: dict
+        """
         return {
             STR_MULTIPLIER: self.multiplier_value,
             STR_LOW: self.low,
@@ -382,10 +487,25 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "BinaryPreferenceRegularizer":
-        """Rebuild from config, tolerating configs written by the old version."""
+        """Rebuild a regularizer from a config dict.
+
+        A config carrying the deprecated ``scale`` key is accepted and
+        translated by the constructor.
+
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: dict
+        :return: A new regularizer.
+        :rtype: BinaryPreferenceRegularizer
+        """
         return cls(**dict(config))
 
     def __repr__(self) -> str:
+        """Return the constructor-like representation.
+
+        :return: A string naming the multiplier, targets, reduction and tail
+            mode.
+        :rtype: str
+        """
         return (
             f"{type(self).__name__}(multiplier={self.multiplier_value:g}, "
             f"low={self.low:g}, high={self.high:g}, "
@@ -402,11 +522,22 @@ def create_binary_preference_regularizer(
     high: float = DEFAULT_HIGH,
     **kwargs: Any,
 ) -> BinaryPreferenceRegularizer:
-    """Thin forwarder kept for backwards compatibility.
+    """Build a :class:`BinaryPreferenceRegularizer`.
 
-    Prefer constructing `BinaryPreferenceRegularizer` directly, or use the
-    `for_gates` / `for_bipolar_weights` presets. All validation lives in the
-    constructor; this function adds nothing but the call.
+    Prefer constructing the class directly, or use the
+    :meth:`BinaryPreferenceRegularizer.for_gates` /
+    :meth:`BinaryPreferenceRegularizer.for_bipolar_weights` presets. All
+    validation lives in the constructor; this adds nothing but the call.
+
+    :param multiplier: Barrier height and penalty strength.
+    :type multiplier: float
+    :param low: Lower target value.
+    :type low: float
+    :param high: Upper target value.
+    :type high: float
+    :param kwargs: Forwarded to the constructor.
+    :return: The configured regularizer.
+    :rtype: BinaryPreferenceRegularizer
     """
     return BinaryPreferenceRegularizer(
         multiplier=multiplier, low=low, high=high, **kwargs
@@ -418,20 +549,39 @@ def create_binary_preference_regularizer(
 class BinaryPressureScheduler(keras.callbacks.Callback):
     """Linearly ramp a regularizer's multiplier from 0 to `target`.
 
-    Annealing is not optional in practice: applied at full strength from step
-    zero, the barrier freezes each weight into whichever well its initializer
-    happened to place it in, before the task loss has had any say.
+    Annealing is not optional in practice: at full strength from step zero the
+    barrier freezes each weight into whichever well its initializer happened to
+    place it in, before the task loss has had any say.
 
-    Parameters
-    ----------
-    regularizer : BinaryPreferenceRegularizer
-        Must have been constructed with ``annealable=True``.
-    target : float
-        Final multiplier value.
-    warmup_epochs : int
-        Epochs of pure task-loss training before the ramp begins.
-    ramp_epochs : int
-        Epochs over which the multiplier climbs from 0 to `target`.
+    **Ramp:**
+
+    .. code-block:: text
+
+        multiplier
+             |                 ______________
+             |                /
+        target - - - - - - - +
+             |              /
+             |             /
+           0 +------------+--------------------> epoch
+             0      warmup_epochs
+                          |<-ramp_epochs->|
+
+        value = target * clamp((epoch - warmup_epochs) / ramp_epochs, 0, 1)
+
+    :param regularizer: The regularizer to drive. Must have been constructed
+        with ``annealable=True``.
+    :type regularizer: BinaryPreferenceRegularizer
+    :param target: Final multiplier value.
+    :type target: float
+    :param warmup_epochs: Epochs of pure task-loss training before the ramp
+        begins.
+    :type warmup_epochs: int
+    :param ramp_epochs: Epochs over which the multiplier climbs from 0 to
+        `target`. Must be positive.
+    :type ramp_epochs: int
+
+    :raises ValueError: If ``ramp_epochs`` is not positive.
     """
 
     def __init__(
@@ -441,6 +591,18 @@ class BinaryPressureScheduler(keras.callbacks.Callback):
         warmup_epochs: int = 0,
         ramp_epochs: int = 10,
     ) -> None:
+        """Store the regularizer and the ramp schedule.
+
+        :param regularizer: The annealable regularizer to drive.
+        :type regularizer: BinaryPreferenceRegularizer
+        :param target: Final multiplier value.
+        :type target: float
+        :param warmup_epochs: Epochs before the ramp begins.
+        :type warmup_epochs: int
+        :param ramp_epochs: Positive number of epochs the ramp spans.
+        :type ramp_epochs: int
+        :raises ValueError: If ``ramp_epochs`` is not positive.
+        """
         super().__init__()
         if ramp_epochs <= 0:
             raise ValueError(f"ramp_epochs must be positive, got {ramp_epochs}")
@@ -450,6 +612,15 @@ class BinaryPressureScheduler(keras.callbacks.Callback):
         self.ramp_epochs = int(ramp_epochs)
 
     def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        """Set the multiplier for the epoch about to start.
+
+        :param epoch: Index of the epoch about to begin.
+        :type epoch: int
+        :param logs: Keras metrics dict; unused.
+        :type logs: dict or None
+        :return: Nothing.
+        :rtype: None
+        """
         progress = (epoch - self.warmup_epochs) / self.ramp_epochs
         value = self.target * min(1.0, max(0.0, progress))
         self.regularizer.set_multiplier(value)

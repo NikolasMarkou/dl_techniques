@@ -1,65 +1,41 @@
-"""
-Encourage a target entropy level in network weight distributions.
+"""Push a weight tensor toward a target Shannon entropy.
 
-This regularizer applies principles from information theory to shape the
-representational structure of a neural network's weights. Instead of
-penalizing the magnitude of weights like traditional L1/L2 norms, it
-penalizes the deviation of a weight vector's Shannon entropy from a
-predefined target. This provides a mechanism to control whether a layer
-develops sparse, specialized features (low entropy) or dense,
-distributed representations (high entropy).
+Provides :class:`EntropyRegularizer`, which penalizes the distance between a
+weight vector's normalized Shannon entropy and a target, and
+:func:`create_entropy_regularizer`, which builds one from a named preset.
 
-Architecturally, this component acts as a constraint on the information
-distribution within a layer's weight tensor. By setting a target
-entropy, one can guide the learning process to favor certain types of
-solutions. For example, a low target entropy encourages a few weights to
-become dominant, effectively performing a soft form of feature
-selection. Conversely, a high target entropy promotes a more uniform
-distribution of weight importance, which can lead to more robust,
-fault-tolerant representations.
+Unlike L1/L2, this penalizes the *shape* of the weight distribution rather than
+its magnitude. A low target makes a few weights dominate, which is a soft form
+of feature selection. A high target spreads importance evenly, which gives more
+distributed, fault-tolerant representations.
 
-Foundational Mathematics
-------------------------
-The regularizer's penalty is derived from Shannon's definition of
-entropy. For a discrete probability distribution `P = {p_1, p_2, ...,
-p_n}`, the entropy `H(P)` is:
+How the penalty is computed
+---------------------------
+Shannon entropy of a discrete distribution ``P = {p_1, ..., p_n}`` is::
 
-    H(P) = - Σ p_i * log(p_i)
+    H(P) = - sum_i p_i * log(p_i)
 
-To apply this to a vector of network weights `w`, which are not
-inherently a probability distribution, the following steps are taken:
-1.  **Probabilistic Transformation**: The absolute values of the weights
-    are transformed into a probability-like distribution `p` using the
-    softmax function: `p = softmax(|w|)`. This ensures that all `p_i`
-    are positive and sum to 1.
-2.  **Entropy Calculation**: The Shannon entropy `H(p)` is calculated for
-    this derived distribution.
-3.  **Normalization**: The raw entropy is normalized by the maximum
-    possible entropy for a distribution of size `n`, which is `log(n)`.
-    This maps the calculated entropy to a consistent `[0, 1]` range,
-    making the target hyperparameter independent of layer size.
-    `H_norm = H(p) / log(n)`.
-4.  **Penalty Formulation**: The final regularization loss is the
-    squared difference between the normalized entropy and the desired
-    target entropy, `H_target`.
-    `Loss = (H_norm - H_target)^2`.
-    This quadratic penalty creates a smooth optimization landscape that
-    drives the weight distribution towards the specified entropy level.
+Weights are not a probability distribution, so four steps get there:
+
+1. **Probabilistic transformation**: ``p = softmax(|w|)``, which makes every
+   ``p_i`` positive and the vector sum to 1. Absolute values make the result
+   independent of weight signs.
+2. **Entropy**: compute ``H(p)``.
+3. **Normalization**: divide by the maximum possible entropy ``log(n)``, which
+   maps the result into ``[0, 1]`` and makes the target independent of layer
+   size. ``H_norm = H(p) / log(n)``.
+4. **Penalty**: ``Loss = (H_norm - H_target)^2``. The quadratic gives a smooth
+   landscape that drives the distribution toward the target entropy.
 
 References
 ----------
-The conceptual basis for using information-theoretic measures like
-entropy in deep learning is well-established and explored in several key
-works:
-
 -   Shannon, C. E. (1948). "A Mathematical Theory of Communication".
     *Bell System Technical Journal*.
--   Tishby, N., & Zaslavsky, N. (2015). "Deep learning and the
-    information bottleneck principle". *IEEE Information Theory Workshop
-    (ITW)*.
--   Yang, G., & Schoenholz, S. (2017). "Mean Field Residual Networks:
-    On the Edge of Chaos". *Advances in Neural Information Processing
-    Systems (NeurIPS)*.
+-   Tishby, N., & Zaslavsky, N. (2015). "Deep learning and the information
+    bottleneck principle". *IEEE Information Theory Workshop (ITW)*.
+-   Yang, G., & Schoenholz, S. (2017). "Mean Field Residual Networks: On the
+    Edge of Chaos". *Advances in Neural Information Processing Systems
+    (NeurIPS)*.
 """
 
 import keras
@@ -102,53 +78,84 @@ MODE_HIGH: str = "high"
 
 @register_dl_technique("dl_techniques.regularizers.entropy_regularizer")
 class EntropyRegularizer(keras.regularizers.Regularizer):
-    """Custom regularizer that promotes entropy-based structure in neural network weights.
+    """Penalize the squared distance from a target normalized Shannon entropy.
 
-    This regularizer calculates the Shannon entropy of weight matrices and penalizes
-    deviations from a target entropy value. By enforcing specific entropy profiles,
-    we can control how information is distributed within the network, potentially
-    improving generalization capabilities.
+    Controls how information is spread across a weight tensor: a low target
+    concentrates it in a few weights, a high target spreads it out.
 
-    The regularizer creates a "thermodynamic"-like control over the network, allowing
-    different parts to operate at different "temperatures" (entropy levels), which
-    influences how they process and transform information.
+    **Penalty pipeline:**
 
-    Parameters
-    ----------
-    strength : float, optional
-        Scaling factor for the regularization penalty. Higher values enforce
-        stronger adherence to the target entropy profile, by default DEFAULT_ENTROPY_STRENGTH
-    target_entropy : float, optional
-        Normalized target entropy value between 0 and 1 to encourage.
-        Values closer to 0 lead to more concentrated weights, while values closer
-        to 1 encourage more uniformly distributed weights, by default DEFAULT_TARGET_ENTROPY
-    axis : int, optional
-        The axis along which to compute entropy, by default DEFAULT_ENTROPY_AXIS
-    epsilon : float, optional
-        Small constant added for numerical stability when taking logarithms,
-        by default DEFAULT_ENTROPY_EPSILON
+    .. code-block:: text
 
-    Raises
-    ------
-    ValueError
-        If strength is negative, target_entropy is not in [0, 1], or epsilon is non-positive
+        weights  [..., n, ...]        n = shape[axis]
+             |
+             v
+        ┌──────────────────────────────┐
+        │ p = softmax(|w|, axis)       │  signs discarded, sums to 1
+        └──────────────┬───────────────┘
+                       v
+        ┌──────────────────────────────┐
+        │ H = -sum(p * log(max(p,eps))) │  reduced over `axis`
+        └──────────────┬───────────────┘
+                       v
+        ┌──────────────────────────────┐
+        │ H_norm = H / log(n)          │  into [0, 1]
+        └──────────────┬───────────────┘
+                       v
+        ┌──────────────────────────────┐
+        │ mean((H_norm - target)^2)     │
+        └──────────────┬───────────────┘
+                       v
+                  * strength
+                       v
+                    scalar
 
-    Notes
-    -----
-    The regularization encourages different information distribution patterns:
-    - Low target entropy (≈0.2): Encourages concentrated, sparse-like weights
-    - Medium target entropy (≈0.5): Balanced information distribution
-    - High target entropy (≈0.8): Encourages broadly distributed weights
+    **Target presets:**
 
-    Examples
-    --------
-    >>> # Apply medium entropy regularization to a layer
-    >>> regularizer = EntropyRegularizer(strength=0.01, target_entropy=0.5)
-    >>> layer = keras.layers.Dense(64, kernel_regularizer=regularizer)
+    .. code-block:: text
 
-    >>> # Apply low entropy regularization (more concentrated weights)
-    >>> regularizer = EntropyRegularizer(strength=0.02, target_entropy=0.2)
-    >>> layer = keras.layers.Dense(64, kernel_regularizer=regularizer)
+        mode      target   effect on the weight distribution
+        -------   ------   ---------------------------------
+        'low'     0.2      concentrated, sparse-like weights
+        'medium'  0.5      balanced distribution
+        'high'    0.8      broadly distributed weights
+        None      0.7      the module default
+
+    :param strength: Scaling factor for the penalty. Larger values enforce the
+        target more strongly. Must be non-negative.
+    :type strength: float
+    :param target_entropy: Normalized target entropy in ``[0, 1]``. Values near
+        0 concentrate the weights; values near 1 spread them out.
+    :type target_entropy: float
+    :param axis: Axis along which entropy is computed.
+    :type axis: int
+    :param epsilon: Floor applied inside the logarithm for numerical stability.
+        Must be positive.
+    :type epsilon: float
+    :param kwargs: Must be empty. ``keras.regularizers.Regularizer`` defines no
+        ``__init__``, so any keyword forwarded here reaches ``object.__init__``
+        and raises ``TypeError``.
+
+    :ivar strength: The penalty scaling factor.
+    :vartype strength: float
+    :ivar target_entropy: The normalized target entropy.
+    :vartype target_entropy: float
+    :ivar axis: The reduction axis.
+    :vartype axis: int
+    :ivar epsilon: The logarithm floor.
+    :vartype epsilon: float
+
+    :raises ValueError: If ``strength`` is negative, ``target_entropy`` is
+        outside ``[0, 1]``, or ``epsilon`` is not positive.
+
+    Example:
+        >>> # Medium entropy: balanced information distribution
+        >>> regularizer = EntropyRegularizer(strength=0.01, target_entropy=0.5)
+        >>> layer = keras.layers.Dense(64, kernel_regularizer=regularizer)
+
+        >>> # Low entropy: more concentrated weights
+        >>> regularizer = EntropyRegularizer(strength=0.02, target_entropy=0.2)
+        >>> layer = keras.layers.Dense(64, kernel_regularizer=regularizer)
     """
 
     def __init__(
@@ -159,29 +166,22 @@ class EntropyRegularizer(keras.regularizers.Regularizer):
         epsilon: float = DEFAULT_ENTROPY_EPSILON,
         **kwargs: Any
     ) -> None:
-        """Initialize the entropy regularizer.
+        """Validate and store the entropy target and penalty settings.
 
-        Parameters
-        ----------
-        strength : float, optional
-            Scaling factor for the regularization penalty, by default DEFAULT_ENTROPY_STRENGTH
-        target_entropy : float, optional
-            Target normalized entropy value (between 0 and 1), by default DEFAULT_TARGET_ENTROPY
-        axis : int, optional
-            The axis along which to compute entropy, by default DEFAULT_ENTROPY_AXIS
-        epsilon : float, optional
-            Small constant for numerical stability, by default DEFAULT_ENTROPY_EPSILON
-        **kwargs : Any
-            Additional arguments passed to parent regularizer
-
-        Raises
-        ------
-        ValueError
-            If parameters are outside valid ranges
+        :param strength: Non-negative scaling factor for the penalty.
+        :type strength: float
+        :param target_entropy: Target normalized entropy, in ``[0, 1]``.
+        :type target_entropy: float
+        :param axis: Axis along which entropy is computed.
+        :type axis: int
+        :param epsilon: Positive floor applied inside the logarithm.
+        :type epsilon: float
+        :param kwargs: Must be empty; see the class docstring.
+        :raises ValueError: If any parameter is outside its valid range.
+        :raises TypeError: If any keyword argument is supplied.
         """
         super().__init__(**kwargs)
 
-        # Validate input parameters
         if strength < 0.0:
             raise ValueError(f"strength must be non-negative, got {strength}")
         if not (0.0 <= target_entropy <= 1.0):
@@ -200,78 +200,47 @@ class EntropyRegularizer(keras.regularizers.Regularizer):
         )
 
     def __call__(self, weights: Union[keras.KerasTensor, Any]) -> Union[keras.KerasTensor, Any]:
-        """Apply the entropy regularization to weights.
+        """Compute the entropy penalty for a weight tensor.
 
-        This method implements the entropy regularization in several steps:
-        1. Normalize weights using softmax to create a probability distribution
-        2. Calculate Shannon entropy: H = -∑(p_i * log(p_i))
-        3. Normalize entropy by dividing by maximum possible entropy (log(n))
-        4. Compute penalty as squared difference from target entropy
-
-        Parameters
-        ----------
-        weights : Union[keras.KerasTensor, Any]
-            Weight tensor to apply regularization to
-
-        Returns
-        -------
-        Union[keras.KerasTensor, Any]
-            Regularization loss value (scalar tensor)
-
-        Notes
-        -----
-        The regularization encourages different information distribution patterns:
-        - Low target entropy (≈0.2): Encourages concentrated, sparse-like weights
-        - Medium target entropy (≈0.5): Balanced information distribution
-        - High target entropy (≈0.8): Encourages broadly distributed weights
+        :param weights: Weight tensor to regularize.
+        :type weights: tensor
+        :return: The scalar penalty.
+        :rtype: tensor
         """
-        # Step 1: Convert weights to a probability distribution via softmax
-        # We use absolute values to make the distribution independent of weight signs
+        # Softmax over |w| turns the weights into a distribution whose shape
+        # does not depend on their signs.
         weights_abs = ops.abs(weights)
         weights_normalized = ops.softmax(weights_abs, axis=self.axis)
 
-        # Step 2: Calculate Shannon entropy: H = -∑(p_i * log(p_i))
-        # Add epsilon for numerical stability when taking logarithms
+        # Shannon entropy, with epsilon flooring the logarithm's argument.
         epsilon_tensor = ops.cast(self.epsilon, dtype=weights.dtype)
         safe_weights = ops.maximum(weights_normalized, epsilon_tensor)
 
-        # Compute entropy using Shannon's formula
         log_weights = ops.log(safe_weights)
         entropy_terms = ops.multiply(weights_normalized, log_weights)
         entropy = ops.negative(ops.sum(entropy_terms, axis=self.axis))
 
-        # Step 3: Normalize by maximum possible entropy (log(n)) to get value between 0 and 1
-        # Maximum entropy occurs when all weights have equal probability (1/n)
+        # log(n) is the entropy of the uniform distribution, the maximum, so
+        # dividing by it puts the result in [0, 1].
         n_weights = ops.cast(ops.shape(weights)[self.axis], dtype=weights.dtype)
         max_entropy = ops.log(n_weights)
         normalized_entropy = ops.divide(entropy, max_entropy)
 
-        # Step 4: Penalize deviation from target entropy using squared error loss
-        # This creates a penalty that grows quadratically with distance from target
+        # Squared error grows quadratically with distance from the target.
         target_tensor = ops.cast(self.target_entropy, dtype=weights.dtype)
         deviation = ops.subtract(normalized_entropy, target_tensor)
         squared_deviation = ops.square(deviation)
         penalty = ops.mean(squared_deviation)
 
-        # Scale penalty by strength hyperparameter and return
         strength_tensor = ops.cast(self.strength, dtype=weights.dtype)
         return ops.multiply(strength_tensor, penalty)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get the regularizer configuration for serialization.
+        """Return the constructor arguments for serialization.
 
-        This method enables the regularizer to be serialized and deserialized,
-        which is essential for saving and loading models.
-
-        Returns
-        -------
-        Dict[str, Any]
-            Dictionary containing the regularizer configuration parameters
-
-        Notes
-        -----
-        This method is required for proper serialization and deserialization
-        of models containing this regularizer.
+        :return: A dict holding ``strength``, ``target_entropy``, ``axis`` and
+            ``epsilon``.
+        :rtype: dict
         """
         return {
             STR_STRENGTH: self.strength,
@@ -289,53 +258,39 @@ def create_entropy_regularizer(
     mode: Optional[str] = None,
     **kwargs: Any
 ) -> EntropyRegularizer:
-    """Factory function to create entropy regularizers with common configurations.
+    """Build an :class:`EntropyRegularizer` from an explicit target or a preset.
 
-    This convenience function provides predefined entropy targets based on
-    common use cases, accessible through the 'mode' parameter.
+    ``target_entropy`` wins when both it and ``mode`` are given.
 
-    Parameters
-    ----------
-    strength : float, optional
-        Regularization strength factor, by default DEFAULT_ENTROPY_STRENGTH
-    target_entropy : Optional[float], optional
-        Specific target entropy value (overrides mode if provided), by default None
-    mode : Optional[str], optional
-        Predefined entropy target mode, by default None
-        Available modes:
-        - 'low': Low entropy (0.2) for sparse, concentrated weights
-        - 'medium': Medium entropy (0.5) for balanced distribution
-        - 'high': High entropy (0.8) for widely distributed weights
-        - None: Uses default target_entropy (0.7)
-    **kwargs : Any
-        Additional arguments passed to EntropyRegularizer
+    :param strength: Non-negative penalty scaling factor.
+    :type strength: float
+    :param target_entropy: Explicit normalized target entropy in ``[0, 1]``.
+        ``None`` selects by ``mode`` instead.
+    :type target_entropy: float or None
+    :param mode: Preset target: ``'low'`` (0.2) for sparse, concentrated
+        weights, ``'medium'`` (0.5) for a balanced distribution, ``'high'``
+        (0.8) for widely distributed weights, or ``None`` for the module
+        default of 0.7.
+    :type mode: str or None
+    :param kwargs: Forwarded to :class:`EntropyRegularizer`.
+    :return: The configured regularizer.
+    :rtype: EntropyRegularizer
+    :raises ValueError: If ``strength`` is negative, ``target_entropy`` is
+        outside ``[0, 1]``, or ``mode`` is not a recognized preset.
 
-    Returns
-    -------
-    EntropyRegularizer
-        Configured EntropyRegularizer instance
+    Example:
+        >>> # Low-entropy regularizer for concentrated weights
+        >>> reg = create_entropy_regularizer(strength=0.01, mode='low')
 
-    Raises
-    ------
-    ValueError
-        If an invalid mode is specified
+        >>> # High-entropy regularizer for distributed weights
+        >>> reg = create_entropy_regularizer(strength=0.02, mode='high')
 
-    Examples
-    --------
-    >>> # Create a low-entropy regularizer for concentrated weights
-    >>> reg = create_entropy_regularizer(strength=0.01, mode='low')
-
-    >>> # Create a high-entropy regularizer for distributed weights
-    >>> reg = create_entropy_regularizer(strength=0.02, mode='high')
-
-    >>> # Create with specific target entropy
-    >>> reg = create_entropy_regularizer(strength=0.01, target_entropy=0.6)
+        >>> # Explicit target
+        >>> reg = create_entropy_regularizer(strength=0.01, target_entropy=0.6)
     """
-    # Validate strength parameter
     if strength < 0.0:
         raise ValueError(f"strength must be non-negative, got {strength}")
 
-    # If specific target_entropy provided, use it directly
     if target_entropy is not None:
         if not (0.0 <= target_entropy <= 1.0):
             raise ValueError(f"target_entropy must be in [0, 1], got {target_entropy}")
@@ -346,7 +301,6 @@ def create_entropy_regularizer(
             **kwargs
         )
 
-    # Otherwise select based on mode
     mode_targets = {
         MODE_LOW: ENTROPY_LOW,
         MODE_MEDIUM: ENTROPY_MEDIUM,
