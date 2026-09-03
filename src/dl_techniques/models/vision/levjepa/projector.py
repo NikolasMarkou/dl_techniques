@@ -1,54 +1,14 @@
-"""
-``LeVJEPAProjector``: the SIGReg projection head.
+"""``LeVJEPAProjector``: the SIGReg projection head.
 
-Ports the LeVJEPA PyTorch reference's ``Projector`` class (``module.py``)
-verbatim in structure:
+Ports the LeVJEPA PyTorch reference's ``Projector`` class: ``Dense ->
+BatchNorm -> GELU -> Dense``, projecting encoder embeddings into the space
+SIGReg's uniformity statistic is computed in.
 
-.. code-block:: python
-
-    class Projector(nn.Module):
-        def __init__(self, input_dim, hidden_dim=2048, output_dim=None,
-                     norm_layer=nn.BatchNorm1d, act_layer=nn.GELU):
-            output_dim = output_dim or input_dim
-            norm = norm_layer(hidden_dim) if norm_layer is not None else nn.Identity()
-            self.net = nn.Sequential(
-                nn.Linear(input_dim, hidden_dim), norm, act_layer(),
-                nn.Linear(hidden_dim, output_dim),
-            )
-
-        def forward(self, x):
-            shape = x.shape
-            x = x.reshape(-1, shape[-1])
-            x = self.net(x)
-            return x.reshape(*shape[:-1], x.shape[-1])
-
-The reference flattens every leading axis to ``(-1, input_dim)`` before
-``BatchNorm1d`` and reshapes back afterwards, because ``nn.BatchNorm1d``
-only accepts rank-2 (or rank-3 with a channel-second layout) input. Keras'
-``BatchNormalization(axis=-1)`` has no such rank restriction -- it already
-treats every axis except the last as a batch axis for its per-channel
-statistics. MEASURED (bash-tool run, ``.venv/bin/python3``): applying
-``BatchNormalization(axis=-1)`` directly to a rank-3 tensor ``(4, 5, 8)``
-versus reshaping to ``(20, 8)``, calling the SAME layer, and reshaping the
-result back produced an EXACTLY IDENTICAL output (``max abs diff == 0.0``)
-and identical ``moving_mean``/``moving_variance`` updates. So the explicit
-reshape-around is unneeded complexity for this port and is deliberately
-NOT implemented -- see the DECISION note below.
-
-Architecture:
-    .. code-block:: text
-
-        x [..., input_dim]
-          │
-        Dense(hidden_dim)
-          │
-        BatchNormalization(axis=-1)
-          │
-        GELU
-          │
-        Dense(output_dim or input_dim)
-          ▼
-        y [..., output_dim]
+The PyTorch reference flattens every leading axis to ``(-1, input_dim)``
+before ``BatchNorm1d`` and reshapes back afterwards, since ``BatchNorm1d``
+only accepts rank-2 input. Keras' ``BatchNormalization(axis=-1)`` has no
+such restriction: it treats every axis but the last as a batch axis
+regardless of rank, so this port applies it directly with no reshape.
 
 References:
     - LeVJEPA PyTorch reference, ``module.py::Projector`` (pasted transcript;
@@ -67,19 +27,9 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-03T113223-2a714a91/D-014
-# The reference's `Projector.forward` reshapes every leading axis to
-# `(-1, input_dim)` before `nn.BatchNorm1d` and reshapes back afterwards,
-# because `nn.BatchNorm1d` cannot consume a bare rank-3 tensor without that
-# rearrangement. MEASURED (bash-tool run): Keras' `BatchNormalization(axis=-1)`
-# applied DIRECTLY to a rank-3 input is numerically IDENTICAL (max abs diff
-# 0.0, including moving-stat updates) to the reshape-to-2D-then-back path,
-# because both compute statistics over every axis except the last regardless
-# of rank. WHAT NOT TO DO: do not add a `reshape(-1, dim) -> ... -> reshape
-# back` wrapper here "to match the PyTorch reference's rank handling" -- that
-# reshape is a PyTorch/`BatchNorm1d`-API workaround with no Keras counterpart
-# to work around, and adding it back would be unneeded complexity (KISS) with
-# zero numerical effect. See decisions.md D-014.
+# DECISION plan-2026-09-03T113223-2a714a91/D-014: no reshape-around BatchNorm.
+# Measured: BatchNormalization(axis=-1) on a rank-3 input matches the reference's
+# reshape-to-2D-then-back path exactly (max abs diff 0.0). See decisions.md.
 
 
 @register_dl_technique("dl_techniques.models.levjepa.projector")
@@ -90,6 +40,22 @@ class LeVJEPAProjector(keras.layers.Layer):
     is computed in. The input dimension is inferred from ``build()``'s
     ``input_shape`` (Keras-idiomatic), rather than requiring an explicit
     ``input_dim`` constructor argument as the PyTorch reference does.
+
+    Architecture:
+
+    .. code-block:: text
+
+        x [..., input_dim]
+            |
+        Dense(hidden_dim)
+            |
+        BatchNormalization(axis=-1)
+            |
+        GELU
+            |
+        Dense(output_dim or input_dim)
+            |
+        y [..., output_dim]
 
     :param hidden_dim: Width of the hidden ``Dense`` layer. Must be positive.
         Defaults to ``2048``, matching the reference.

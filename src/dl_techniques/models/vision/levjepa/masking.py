@@ -1,35 +1,17 @@
-"""Block-causal attention mask + random token-dropping utilities for LeVJEPA.
+"""Block-causal attention mask and random token-dropping for LeVJEPA.
 
-Model-internal helpers, not registered Keras layers/models — plain functions
-operating on ``keras.KerasTensor``/backend tensors, consumed by
+Two functions, :func:`build_block_causal_mask` and :func:`random_token_drop`,
+operating directly on ``keras.KerasTensor``/backend tensors and consumed by
 :mod:`dl_techniques.models.vision.levjepa.blocks` and
-:mod:`dl_techniques.models.vision.levjepa.encoder` (Step 4). Following the
-package's registration convention (``keras_registration.CLAUDE.md`` /
-``dl_techniques/CLAUDE.md`` § Registration), only serializable
-``Layer``/``Model``/``Loss``/etc. classes are decorated with
-``@register_dl_technique`` — a bare function has no config to round-trip and
-registering it would be a no-op, so neither function here carries the
-decorator.
+:mod:`dl_techniques.models.vision.levjepa.encoder`. Neither carries
+``@register_dl_technique``: both are plain functions with no config to
+round-trip, unlike the ``Layer``/``Model`` classes the decorator serializes.
 
-Ported from the pasted PyTorch reference's ``build_block_causal_mask`` and the
-random-token-drop block inside ``VisionTransformer.forward``. The mask
-semantics below are re-derived line-by-line from that source (not a
-paraphrase — see the plan's Step 3 execution prompt, which corrects
-``plan.md``'s Assumption A2 hedge):
-
-- ``mask[..., i, j] = True`` means query position ``i`` MAY attend to key
-  position ``j`` (row = query, column = key — the standard attention-mask
-  convention).
-- Patch-to-patch: ``frame_ids[query] >= frame_ids[key]`` — causal across
-  frames, bidirectional *within* a frame (the comparison is satisfied both
-  ways when the two frame ids are equal).
-- CLS row (CLS as query): all-True — CLS attends to every key, including
-  itself and every patch in every frame.
-- CLS column for patch queries: all-False — a patch can never attend to CLS
-  as a key. This is the branch the PyTorch source leaves at its tensor's
-  ``zeros()`` initial value (never explicitly set), so it is easy to
-  transcribe backwards; the delta-impulse probe in
-  ``tests/test_models/test_levjepa/test_masking.py`` pins it explicitly.
+In the mask, ``mask[..., i, j] = True`` means query position ``i`` may
+attend to key position ``j``. Patch-to-patch attention is causal across
+frames and bidirectional within a frame (``frame_ids[query] >=
+frame_ids[key]``). A CLS query attends to every key; a patch query never
+attends to CLS as a key.
 """
 
 from __future__ import annotations
@@ -55,7 +37,7 @@ def build_block_causal_mask(
     :param tokens_per_frame: Number of patch tokens per frame,
         ``H_patches * W_patches``.
     :param token_ids: Optional integer tensor of shape ``(B, num_patches)``
-        giving the TRUE flat grid index of each patch position in the
+        giving the true flat grid index of each patch position in the
         (possibly token-dropped) sequence. When given, frame membership is
         computed from these true positions rather than from the sequence's
         own (post-drop) ordering — required so the mask stays consistent
@@ -158,7 +140,7 @@ def random_token_drop(
         true no-op, not a degenerate keep-everything gather) and
         ``token_ids`` is ``None``. Otherwise ``dropped_x`` has shape
         ``(B, keep_len, C)`` and ``token_ids`` has shape ``(B, keep_len)``,
-        holding the TRUE (pre-drop) grid index of each kept position — feed
+        holding the true (pre-drop) grid index of each kept position — feed
         this straight into :func:`build_block_causal_mask`'s ``token_ids``
         argument so the mask and the dropped sequence stay consistent.
     """

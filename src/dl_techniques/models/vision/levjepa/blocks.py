@@ -1,73 +1,16 @@
-"""
-``LeVJEPABlock``: pre-norm self-attention + MLP transformer block for LeVJEPA.
+"""``LeVJEPABlock``: pre-norm self-attention + MLP transformer block for LeVJEPA.
 
-Ports the LeVJEPA PyTorch reference's ``Block`` class (``module.py``) verbatim:
+Ports the LeVJEPA PyTorch reference's ``Block`` class:
+``x = x + Attn(LN(x)); x = x + MLP(LN(x))``, with
+``Attn(y) = softmax(Q K^T / sqrt(d_head) + mask) V``. No ``LayerScale`` on
+either residual branch, matching the reference (see the ``DECISION`` note
+below for why this diverges from an earlier draft of this file's spec).
 
-.. code-block:: python
-
-    class Block(nn.Module):
-        def forward(self, x, ...):
-            y, _ = self.attn(self.norm1(x), ...)
-            x = x + y
-            x = x + self.mlp(self.norm2(x))
-            return x
-
-No ``LayerScale`` on either residual branch -- see the module docstring's
-"DECISION" note below for why this diverges from ``plan.md``'s Step 4 file
-spec, which was written against ``video_jepa/predictor.py``'s
-``CausalSelfAttnMLPBlock`` as a CODING-PATTERN template rather than the actual
-pasted reference.
-
-The attention itself is hand-rolled (QKV -> reshape -> optional RoPE ->
-scaled-dot-product -> proj) rather than built on
-``layers/attention/multi_head_attention.py``, because ``VideoRoPE3D`` must
-rotate ``q``/``k`` AFTER the head split and BEFORE the softmax -- a hook no
-existing attention layer in this package exposes. This mirrors the reference's
-own ``Attention``/``RoPEAttention`` classes, which are likewise a bespoke QKV
-+ SDPA implementation, not a call into a generic attention module.
-
-Architecture:
-    .. code-block:: text
-
-        x [B, N, D]
-          │
-          ├──────────────────────────────┐  residual
-          ▼                               │
-        LayerNorm(eps=1e-6)               │
-          │                               │
-        Dense(3D) -> reshape (B,N,3,H,d)  │
-          │                               │
-        split q,k,v  [B,H,N,d] each       │
-          │                               │
-        (use_rope) VideoRoPE3D rotates    │
-        q[:,:,prefix:,:], k[:,:,prefix:,:]│
-          │                               │
-        logits = (q k^T) * scale          │
-        + block-causal mask (optional)    │
-        softmax -> attn_drop              │
-          │                               │
-        out = attn @ v -> reshape (B,N,D) │
-          │                               │
-        Dense(D) -> proj_drop             │
-          ▼                               │
-         (+) ◄─────────────────────────────
-          │
-          ├──────────────────────────────┐  residual
-          ▼                               │
-        LayerNorm(eps=1e-6)               │
-          │                               │
-        Dense(hidden) -> GELU -> drop     │
-        Dense(D) -> drop                  │
-          ▼                               │
-         (+) ◄─────────────────────────────
-          │
-          ▼
-        x' [B, N, D]
-
-Foundational Mathematics:
-    Standard pre-norm Transformer block,
-    ``x = x + Attn(LN(x)); x = x + MLP(LN(x))``, with
-    ``Attn(y) = softmax(Q K^T / sqrt(d_head) + mask) V``.
+The attention is hand-rolled (QKV, reshape, optional RoPE, scaled dot
+product, projection) rather than built on
+``layers/attention/multi_head_attention.py``, because :class:`VideoRoPE3D`
+must rotate ``q``/``k`` after the head split and before the softmax, a hook
+the generic attention layer does not expose.
 
 References:
     - LeVJEPA PyTorch reference, ``module.py::Block`` / ``Attention`` /
@@ -95,20 +38,9 @@ from dl_techniques.layers.attention.common import (
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-03T113223-2a714a91/D-011
-# The task prompt's "Files To Modify" spec for this step (carried over from
-# plan.md's Step 4 entry, itself written against video_jepa/predictor.py's
-# `CausalSelfAttnMLPBlock` as a CODING-PATTERN template) describes
-# `LeVJEPABlock` with two `LayerScale` sub-layers (`gamma_a`/`gamma_m`).
-# Re-deriving the ACTUAL pasted PyTorch reference's `Block.forward` directly:
-#     y, _ = self.attn(self.norm1(x), ...); x = x + y
-#     x = x + self.mlp(self.norm2(x))
-# -- plain residual addition, no LayerScale on either branch. The
-# LayerScale suggestion came from the coding-pattern template, not from the
-# reference this plan ports. WHAT NOT TO DO: do not add `gamma_a`/`gamma_m`
-# LayerScale sub-layers here "for consistency with video_jepa" -- that would
-# ship a mechanism the reference does not have, and this plan's whole point
-# is a faithful port. See decisions.md D-011.
+# DECISION plan-2026-09-03T113223-2a714a91/D-011: no LayerScale sub-layers here.
+# An earlier draft of this file's spec described gamma_a/gamma_m LayerScale gates,
+# but the actual pasted PyTorch reference uses plain residual addition. See decisions.md.
 
 REFERENCE_INIT_STD = 0.02
 
@@ -118,19 +50,53 @@ class LeVJEPABlock(keras.layers.Layer):
     """Pre-norm self-attention + MLP block, with an optional 3-axis video RoPE.
 
     Ports the LeVJEPA reference's ``Block`` verbatim: ``x = x + Attn(LN(x));
-    x = x + MLP(LN(x))``, no ``LayerScale`` on either residual (see the
-    module-level ``DECISION`` note -- this deliberately diverges from
-    ``plan.md``'s Step 4 file spec, which described a LayerScale-gated block
-    against the wrong template).
+    x = x + MLP(LN(x))``, with no ``LayerScale`` on either residual (see the
+    module-level ``DECISION`` note).
 
-    The attention is a bespoke QKV projection + scaled-dot-product, not a
+    The attention is a bespoke QKV projection and scaled-dot-product, not a
     call into ``layers/attention/multi_head_attention.py``: ``VideoRoPE3D``
-    (when ``use_rope=True``) must rotate ``q``/``k`` AFTER the head split and
-    BEFORE the softmax, a hook the generic attention layer does not expose.
+    (when ``use_rope=True``) must rotate ``q``/``k`` after the head split and
+    before the softmax, a hook the generic attention layer does not expose.
     A block-causal (or any other) attention mask is accepted as a pre-built
-    boolean KEEP predicate (``True`` = attend), applied via
-    ``layers/attention/common.py::apply_attention_mask`` -- this layer infers
+    boolean keep predicate (``True`` = attend), applied via
+    ``layers/attention/common.py::apply_attention_mask``; this layer infers
     no polarity of its own.
+
+    Architecture:
+
+    .. code-block:: text
+
+        x [B, N, D]
+            |
+            +---------------------------------+  (residual)
+        LayerNorm(eps=1e-6)                    |
+            |                                  |
+        Dense(3D) -> reshape [B, N, 3, H, d]    |
+            |                                  |
+        split q, k, v  [B, H, N, d] each        |
+            |                                  |
+        (use_rope) VideoRoPE3D rotates          |
+        q[:, :, prefix:, :], k[:, :, prefix:, :] |
+            |                                  |
+        logits = (q k^T) * scale                |
+        + block-causal mask (optional)          |
+        softmax -> attn_drop                    |
+            |                                  |
+        out = attn @ v -> reshape [B, N, D]     |
+            |                                  |
+        Dense(D) -> proj_drop                   |
+            |                                  |
+           (+) <-------------------------------+
+            |
+            +---------------------------------+  (residual)
+        LayerNorm(eps=1e-6)                    |
+            |                                  |
+        Dense(hidden) -> GELU -> drop           |
+        Dense(D) -> drop                        |
+            |                                  |
+           (+) <-------------------------------+
+            |
+        x' [B, N, D]
 
     :param dim: Model / embedding dimension. Must be positive and divisible
         by ``num_heads``.
@@ -162,7 +128,7 @@ class LeVJEPABlock(keras.layers.Layer):
         attention weights. Must be in ``[0, 1]``. Defaults to ``0.0``.
     :type attention_dropout_rate: float
     :param layer_id: 1-indexed block position within the encoder stack. Used
-        ONLY to compute the block-depth-rescaled initializer std for
+        only to compute the block-depth-rescaled initializer std for
         ``proj`` and ``fc2`` (``init_std / sqrt(2 * layer_id)``), matching
         the reference's ``_rescale_blocks`` post-hoc weight division. ``None``
         (default) disables rescaling -- both kernels use ``init_std``
@@ -306,22 +272,10 @@ class LeVJEPABlock(keras.layers.Layer):
 
         self._scale = compute_attention_scale(self.head_dim)
 
-        # DECISION plan-2026-09-03T113223-2a714a91/D-012
-        # Block-depth rescaling (`_rescale_blocks` in the reference) is
-        # implemented as an INITIALIZER STD, not a post-build `.assign()`.
-        # The reference does `p.div_(sqrt(2*layer_id))` on `attn.proj.weight`
-        # and `mlp.fc2.weight` AFTER trunc_normal(std=init_std) init.
-        # Dividing a `TruncatedNormal(std=S)` sample by a constant `c` is
-        # DISTRIBUTIONALLY IDENTICAL to drawing from `TruncatedNormal(std=S/c)`
-        # directly: Keras' TruncatedNormal truncates at +/-2*std, and scaling
-        # a sample by `c` scales its truncation bound by the same `c`, landing
-        # exactly on `TruncatedNormal(std=S/c)`'s own bound. So passing the
-        # pre-scaled std to `kernel_initializer` at construction reproduces
-        # the reference's post-hoc rescale exactly, WITHOUT a `.assign()`
-        # inside `build()` -- which this package's own docs (sincos_pos_embed
-        # modules) flag as DISCARDED by Keras 3's `StatelessScope`. Do NOT
-        # "simplify" this back to a post-build assign; that is the documented
-        # trap, not a simplification. See decisions.md D-012.
+        # DECISION plan-2026-09-03T113223-2a714a91/D-012: block-depth rescaling is
+        # a pre-scaled initializer std, not a post-build `.assign()` (which
+        # StatelessScope discards). Dividing a TruncatedNormal sample by a
+        # constant is distributionally identical to scaling its std. See decisions.md.
         rescale_std = self.init_std
         if self.layer_id is not None:
             rescale_std = self.init_std / ((2.0 * float(self.layer_id)) ** 0.5)
