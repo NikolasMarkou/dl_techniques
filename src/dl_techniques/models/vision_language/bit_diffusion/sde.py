@@ -120,9 +120,9 @@ def bridge_math_dtype(*dtypes: Any) -> str:
             continue
         # DECISION plan-2026-09-02T094601-77d4a04e/D-015
         # `getattr(dtype, "name", None) or str(dtype)` rather than
-        # `keras.backend.standardize_dtype`: the repo-wide Keras-2-residue guard
-        # in `tests/test_models/test_package_api_contract.py` forbids any
-        # `keras.backend.*` call under `models/`, and a backend tensor's dtype
+        # `keras.backend.standardize_dtype`: the Keras-2-residue guard in
+        # `tests/test_the_keras2_backend_calls_are_gone.py` forbids any
+        # `keras.backend.*` call across all of `src/`, and a backend tensor's dtype
         # already carries its own `.name` (a `tf.DType` stringifies as
         # "<dtype: 'float64'>", so `str` alone is not enough). A plain-string
         # dtype has no `.name` and falls through to `str` unchanged.

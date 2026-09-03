@@ -7,12 +7,23 @@ files**, and unpinned in the same plan once the last one was converted; that
 history lives in ``plans/plan-2026-09-03T033750-9bdf25f4`` and its
 ``findings/keras-backend-inventory.md``, not in this file's behaviour.
 
-What is banned, and why all six spellings at once
--------------------------------------------------
-The predicate is a plain substring match on the literal text ``keras.backend.``.
-It is therefore not a check about one symbol: it bans every attribute reached
-through that module. Six spellings were present in this tree before the
-migration, each with the Keras 3 replacement it took::
+What is banned, exactly
+------------------------
+Two static checks run per line, after full-line ``#`` comments and docstring
+lines have been dropped:
+
+1. the literal text ``keras.backend.`` appears anywhere on the line -- so the
+   ban is not about one symbol, it covers **every attribute reached by that
+   spelling**, and it fires on ``tf.keras.backend.`` too (see below);
+2. the line is an ``import`` statement that binds ``keras.backend`` under any
+   name -- ``import keras.backend as kb``, ``from keras import backend as K``,
+   ``from keras.backend import epsilon``, and the ``tensorflow.keras``-prefixed
+   forms of all three. These are the canonical Keras-2 import idioms; check 1
+   is blind to every one of them, because none of them contains a ``.`` after
+   ``backend``.
+
+Six call spellings were present in this tree before the migration, each with the
+Keras 3 replacement it took::
 
     keras.backend.standardize_dtype(d)   ->  getattr(d, "name", None) or str(d)
     keras.backend.epsilon()              ->  keras.config.epsilon()
@@ -21,6 +32,27 @@ migration, each with the Keras 3 replacement it took::
     keras.backend.clear_session()        ->  keras.utils.clear_session()
     keras.backend.result_type(d, "f32")  ->  dl_techniques.utils.dtype_policy
                                              .statistics_dtype(d)
+
+What is NOT banned -- the named residue
+----------------------------------------
+This is a per-line text scan, not an import-graph or a dataflow analysis. It is
+defeated by, and makes no claim about:
+
+* a call through an **alias already bound** -- ``K.epsilon()`` on a later line.
+  Check 2 catches the ``import`` that binds ``K``, so the alias cannot be
+  introduced without tripping the guard, but a ``K.`` call whose binding came
+  from somewhere this walk does not read is invisible;
+* dynamic reach: ``getattr(keras, "backend").epsilon()``,
+  ``exec("keras." + "backend.epsilon()")``, ``importlib.import_module``;
+* a call split across lines, by ``\``-continuation or inside parentheses, such
+  that no single line carries the literal text;
+* ``keras.src.backend.*``. That is Keras 3's own private module, not the Keras-2
+  compatibility surface this ban is about; reaching into it is a different
+  (also bad) idea and this guard deliberately says nothing about it.
+
+None of those spellings exists anywhere in ``src/`` today -- measured, not
+assumed. An honest narrow guard is worth more than a broad claim: if you widen
+the predicate, widen this list too.
 
 ``result_type`` is the one with no drop-in: ``keras.config`` does not expose it
 and ``keras.ops.result_type`` raises ``AttributeError``. It performs Keras's own
@@ -53,9 +85,13 @@ whole step with nothing able to catch it. The walk is now ``src/dl_techniques/``
 (``models/`` included -- the old scope is a subset, not a sibling), ``src/train/``
 and ``src/applications/``.
 
-``TestNoKeras2Residues`` is DELETED rather than kept alongside this file. Two
-guards over one claim is a hand-maintained lockstep invariant, which this repo
-treats as a latent defect and not a belt-and-braces.
+``TestNoKeras2Residues`` is DELETED rather than kept alongside this file. So is
+the hand-rolled second copy of the scan that lived in
+``tests/test_models/test_bit_diffusion/test_the_package_keeps_the_repo_contracts.py``
+-- this walk strictly subsumes it (that package's 8 modules are a subset of these
+1,070 files, and an injected offender is reported by both at the same
+``file:line``). Two guards over one claim is a hand-maintained lockstep
+invariant, which this repo treats as a latent defect and not a belt-and-braces.
 
 ``tf.keras.backend.*`` is deliberately IN scope
 ------------------------------------------------
@@ -84,10 +120,12 @@ second walk would count every module docstring that *warns* about
 comments are excluded by the same argument. Both exclusions are load-bearing and
 both were proven so, by injections placed in a docstring and on a comment line
 that must NOT fire, alongside one real-code injection per banned spelling that
-must. If you change the predicate, re-run all eight: a guard that only ever
-passes is indistinguishable from a guard that cannot fail.
+must, and one per import form. If you change the predicate, re-run all eleven
+(six call spellings + three import forms, and the two that must NOT fire): a
+guard that only ever passes is indistinguishable from a guard that cannot fail.
 """
 
+import re
 from pathlib import Path
 from typing import List
 
@@ -97,6 +135,17 @@ from typing import List
 from tests.test_models.test_package_api_contract import _docstring_line_numbers
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+
+#: An ``import`` statement that binds ``keras.backend`` under any name. Check 1
+#: (the ``keras.backend.`` substring) cannot see any of these: there is no ``.``
+#: after ``backend`` in an import line. The optional ``[\w.]+\.`` prefix picks up
+#: the ``tensorflow.keras`` spellings, which are the same Keras-2 surface. The
+#: trailing ``\b`` keeps it off ``from keras import backend_config``.
+_IMPORT_FORM = re.compile(
+    r"(?:^|\s)import\s+(?:[\w.]+\.)?keras\.backend\b"
+    r"|(?:^|\s)from\s+(?:[\w.]+\.)?keras\s+import\s+backend\b"
+    r"|(?:^|\s)from\s+(?:[\w.]+\.)?keras\.backend\s+import\b"
+)
 
 #: Every root under ``src/``. Not ``SRC_ROOT.iterdir()``: a new top-level
 #: package should be a deliberate addition here, visible in a diff.
@@ -108,12 +157,15 @@ SCANNED_ROOTS = (
 
 
 def keras_backend_offenders(root: Path) -> List[str]:
-    """``root``-relative ``line:source`` for every non-prose ``keras.backend.`` use.
+    """``root``-relative ``line:source`` for every non-prose ``keras.backend`` use.
 
-    The loop is the one from ``TestNoKeras2Residues::test_no_keras_backend_calls``,
-    unchanged: full-line ``#`` comments and any line inside a module/class/function
-    docstring are excluded; everything else that contains the literal text is an
-    offender.
+    The exclusions are the ones from
+    ``TestNoKeras2Residues::test_no_keras_backend_calls``, unchanged: full-line
+    ``#`` comments and any line inside a module/class/function docstring are
+    skipped. What counts as an offender is that file's substring check PLUS
+    ``_IMPORT_FORM``, which was added after a review measured the three
+    canonical Keras-2 import idioms evading the substring alone. See this
+    module's docstring for what is still not caught.
     """
     offenders: List[str] = []
     for path in sorted(root.rglob("*.py")):
@@ -127,7 +179,7 @@ def keras_backend_offenders(root: Path) -> List[str]:
             # suite -- the guard could not be documented in the tree it guards.
             if i in docstring_lines:
                 continue
-            if "keras.backend." in line:
+            if "keras.backend." in line or _IMPORT_FORM.search(line):
                 offenders.append(f"{path.relative_to(root)}:{i} {stripped}")
     return offenders
 
@@ -168,6 +220,44 @@ These arms were GREEN from the day this file landed, through the whole
         )
         offenders = keras_backend_offenders(tmp_path)
         assert offenders == ["offender.py:5 return keras.backend.epsilon()"], offenders
+
+    def test_each_keras2_import_form_is_detected(self, tmp_path):
+        """The three canonical Keras-2 import idioms, none of which check 1 sees.
+
+        Measured before ``_IMPORT_FORM`` existed: all three were MISSED, because
+        an import line carries no ``.`` after ``backend``. ``from keras import
+        backend as K`` is *the* historical spelling this ban exists to retire.
+        """
+        forms = [
+            "from keras import backend as K",
+            "from keras import backend",
+            "import keras.backend as kb",
+            "import keras.backend",
+            "from keras.backend import epsilon",
+            "from tensorflow.keras import backend as K",
+            "import tensorflow.keras.backend as kb",
+            "from tensorflow.keras.backend import epsilon",
+        ]
+        for form in forms:
+            (tmp_path / "offender.py").write_text(f"{form}\n")
+            assert keras_backend_offenders(tmp_path) == [
+                f"offender.py:1 {form}"
+            ], form
+
+    def test_lookalike_imports_are_not_offenders(self, tmp_path):
+        """The widened check must not fire on ordinary Keras 3 or local imports.
+
+        Anti-vacuity in the other direction: a predicate that flags every line
+        containing the word ``backend`` would make the census unfalsifiable.
+        """
+        (tmp_path / "clean.py").write_text(
+            "import keras\n"
+            "from keras import ops\n"
+            "from keras import backend_config\n"
+            "from dl_techniques.utils import backend_helpers\n"
+            "import numpy as np  # backend, keras, whatever\n"
+        )
+        assert keras_backend_offenders(tmp_path) == []
 
     def test_prose_and_comments_are_not_offenders(self, tmp_path):
         """The exclusion is load-bearing: this very file would fail without it."""

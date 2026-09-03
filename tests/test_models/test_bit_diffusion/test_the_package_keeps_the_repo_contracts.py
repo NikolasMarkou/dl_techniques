@@ -5,13 +5,25 @@ repo-wide suite; `tests/test_models/test_bit_diffusion/` is a scoped one. At ste
 of this port the scoped suite was green at 256 passed while the repo-wide one was
 red on two failures THIS PACKAGE had introduced three steps earlier:
 
-1. `sde.py` called `keras.backend.standardize_dtype` -- a Keras-2 residue banned
-   under `models/` by `TestNoKeras2Residues::test_no_keras_backend_calls`;
+1. `sde.py` called `keras.backend.standardize_dtype` -- a Keras-2 residue which,
+   at the time, was banned under `models/` only, by a class since deleted;
 2. `create_bridge_sde(variant=...)` matched the model-factory shape that
    `TestCreateFactoriesDelegateToFromVariant` requires to carry a `from_variant`
    classmethod, and so silently joined that suite's scope-exclusion pin.
 
 Both went unseen for three steps because no gate the package ran could see them.
+
+**Defect (1) is no longer restated here.** This file used to carry its own copy
+of the `keras.backend.*` scan. That rule now lives in exactly one place,
+`tests/test_the_keras2_backend_calls_are_gone.py`, which walks all of
+`src/dl_techniques/`, `src/train/` and `src/applications/` and asserts a census of
+zero. The copy was DELETED rather than rewired, because the tree-wide guard
+strictly subsumes it: this package's 8 modules are a subset of that walk's 1,070
+files, the two predicates agree file-for-file on the real sources, and a
+`keras.backend.standardize_dtype` call injected back into `sde.py:130` is
+reported by both, at the same `file:line`. Two guards over one claim is a
+hand-maintained lockstep invariant, and this repo treats that as a latent defect
+(decisions.md D-008 of `plan-2026-09-03T033750-9bdf25f4`).
 
 **What this file is NOT.** It is not a substitute for running
 `tests/test_models/test_package_api_contract.py`. Defect (2) above is asserted
@@ -24,7 +36,6 @@ This file buys early detection, not coverage.
 import ast
 import re
 from pathlib import Path
-from typing import Set
 
 PACKAGE_DIR = (
     Path(__file__).resolve().parents[3]
@@ -42,77 +53,13 @@ def _package_modules():
     return [(p.name, p.read_text(), p) for p in paths]
 
 
-def _docstring_lines(source: str) -> Set[int]:
-    """1-based line numbers covered by any module/class/function docstring.
+def test_the_package_module_walk_is_not_empty():
+    """Anti-vacuity for ``_package_modules``, which every arm below reads.
 
-    Same exclusion the repo-wide guard applies: prose explaining *why*
-    ``keras.backend.`` is banned must not itself trip the ban.
-    """
-    lines: Set[int] = set()
-    tree = ast.parse(source)
-    holders = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
-    for node in ast.walk(tree):
-        if not isinstance(node, holders):
-            continue
-        body = getattr(node, "body", None)
-        if not body:
-            continue
-        first = body[0]
-        if (
-            isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-        ):
-            lines.update(range(first.lineno, first.end_lineno + 1))
-    return lines
-
-
-def _keras_backend_offenders(source: str, name: str):
-    """Executable lines in ``source`` that call ``keras.backend.*``."""
-    docstrings = _docstring_lines(source)
-    offenders = []
-    for i, line in enumerate(source.splitlines(), start=1):
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue
-        if i in docstrings:
-            continue
-        if "keras.backend." in line:
-            offenders.append(f"{name}:{i} {stripped}")
-    return offenders
-
-
-def test_the_package_has_no_keras_backend_calls():
-    """The banned Keras-2 residue, asserted where this package can see it.
-
-    Reproduces the predicate of
-    ``test_package_api_contract.py::TestNoKeras2Residues::test_no_keras_backend_calls``
-    over this package's own files only, so it costs milliseconds and no
-    tree-wide import. RED-proved by reinstating the
-    ``keras.backend.standardize_dtype`` call in ``bridge_math_dtype``.
-
-    The sanctioned replacement is ``getattr(dtype, "name", None) or str(dtype)``,
-    the same two-step ``colbert/components.py``, ``sd3_mmdit/text_encoders.py``
-    and ``utils/geometry/poincare_math.py`` already use.
-    """
-    offenders = []
-    for name, source, _path in _package_modules():
-        offenders.extend(_keras_backend_offenders(source, name))
-    assert not offenders, (
-        "keras.backend.* is a Keras-2 residue banned under models/ by "
-        "tests/test_models/test_package_api_contract.py::TestNoKeras2Residues. "
-        'Use `getattr(dtype, "name", None) or str(dtype)`, keras.config.floatx() '
-        f"or keras.config.epsilon(). Found: {offenders}"
-    )
-
-
-def test_the_scan_can_actually_see_a_keras_backend_call():
-    """Anti-vacuity: the arm above is worthless if the scanner reads nothing.
-
-    A scanner pointed at an empty file list, or one whose docstring exclusion
-    swallowed the whole module, would report zero offenders forever. This pins
-    that the scanner (a) reads a non-trivial number of modules and (b) DOES flag
-    the exact line shape it is meant to flag.
+    A walk pointed at the wrong directory reports zero offenders forever, and
+    each ``assert not offenders`` below would pass without ever looking at a
+    line of this package. This pins that the walk reaches a realistic number of
+    real modules.
     """
     modules = _package_modules()
     assert len(modules) >= 5, (
@@ -120,14 +67,6 @@ def test_the_scan_can_actually_see_a_keras_backend_call():
         f"scanner found {len(modules)}: it is pointed at the wrong directory"
     )
     assert sum(len(s.splitlines()) for _n, s, _p in modules) > 1000
-
-    injected = (
-        '"""A docstring naming keras.backend. must NOT count."""\n'
-        "# a comment naming keras.backend. must NOT count\n"
-        'x = keras.backend.standardize_dtype(d) == "float64"\n'
-    )
-    hits = _keras_backend_offenders(injected, "injected.py")
-    assert len(hits) == 1 and hits[0].startswith("injected.py:3"), hits
 
 
 def test_every_create_factory_taking_a_variant_backs_it_with_from_variant():

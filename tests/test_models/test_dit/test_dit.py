@@ -325,9 +325,10 @@ class TestUnderEveryDtypePolicy:
         out = model(inputs, training=False)
         # `np_()` round-trips through NumPy, whose `.dtype.name` is a plain
         # string. `keras.backend.standardize_dtype` would read the same value
-        # and is BANNED under `models/` by
-        # `test_package_api_contract.py::TestNoKeras2Residues`; not spelling it
-        # here keeps the tests off an API the source is not allowed to use.
+        # and is BANNED across all of `src/` by
+        # `tests/test_the_keras2_backend_calls_are_gone.py`; `tests/` is out of
+        # that ban's scope, but not spelling it here keeps the tests off an API
+        # the source is not allowed to use.
         assert np_(out).dtype.name == COMPUTE_DTYPE[policy]
 
     def test_the_float32_and_float16_arms_are_not_the_same_computation(self) -> None:

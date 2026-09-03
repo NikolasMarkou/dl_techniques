@@ -449,9 +449,9 @@ class GaussianDiffusion:
         # DECISION plan-2026-09-02T170923-1285ed83/D-018
         # `getattr(dtype, "name", None) or str(dtype)` rather than
         # `keras.backend.standardize_dtype`. WHAT NOT TO DO: do not "simplify"
-        # this to the standardize_dtype call -- the repo-wide Keras-2-residue
-        # guard in `tests/test_models/test_package_api_contract.py` forbids
-        # every `keras.backend.*` call under `models/`, and it is a whole-tree
+        # this to the standardize_dtype call -- the Keras-2-residue guard in
+        # `tests/test_the_keras2_backend_calls_are_gone.py` forbids every
+        # `keras.backend.*` call across all of `src/`, and it is a whole-tree
         # AST sweep, so the failure lands on an unrelated suite. `str` alone is
         # not enough either: a `tf.DType` stringifies as "<dtype: 'float64'>".
         # Same call as `bit_diffusion/sde.py:123`. See decisions.md D-018.

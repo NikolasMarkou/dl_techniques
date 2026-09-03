@@ -314,9 +314,10 @@ class MaxSimScorer(keras.layers.Layer):
         """
         # DECISION plan-2026-08-25T121346-c71fc3ad/D-014
         # NOT `keras.backend.standardize_dtype`: `keras.backend.*` is a Keras-2
-        # residue banned repo-wide by
-        # `test_package_api_contract.py::TestNoKeras2Residues`, and this call
-        # site was the tree's only live offender. A `tf.DType` stringifies as
+        # residue banned across all of `src/` by
+        # `tests/test_the_keras2_backend_calls_are_gone.py`, and this call site
+        # was the tree's only live offender under the ban's older, `models/`-only
+        # scope. A `tf.DType` stringifies as
         # "<dtype: 'float16'>", so read `.name` when it is there and fall back
         # to `str` for a plain-string dtype -- the same two-step
         # `tests/test_models/gradient_flow_oracle.py:default_loss` uses.

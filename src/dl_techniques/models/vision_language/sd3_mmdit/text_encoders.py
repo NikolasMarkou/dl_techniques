@@ -763,9 +763,10 @@ class T5Encoder(keras.Model):
             # The sentinel is the minimum of the BIAS's OWN dtype, so it is
             # always representable: -3.40e+38 in float32, -65504.0 in float16.
             # `getattr(dtype, "name", dtype)` rather than
-            # `keras.backend.standardize_dtype`: the repo-wide guard in
-            # `tests/test_models/test_package_api_contract.py` forbids any
-            # `keras.backend.*` call under `models/` (Keras-2 residue rule), and
+            # `keras.backend.standardize_dtype`: the guard in
+            # `tests/test_the_keras2_backend_calls_are_gone.py` forbids any
+            # `keras.backend.*` call across all of `src/` (Keras-2 residue
+            # rule), and
             # a backend tensor's dtype already carries its own `.name`.
             bias_dtype = getattr(position_bias.dtype, "name", position_bias.dtype)
             masked_value = ops.cast(

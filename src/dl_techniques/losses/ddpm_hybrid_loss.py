@@ -399,10 +399,11 @@ class DDPMHybridLoss(keras.losses.Loss):
         # `getattr(dtype, "name", None) or str(dtype)` rather than
         # `keras.backend.standardize_dtype`. WHAT NOT TO DO: do not "simplify"
         # this back to the standardize_dtype call. It is a Keras-2 residue that
-        # `tests/test_models/test_package_api_contract.py::TestNoKeras2Residues`
-        # bans -- that sweep is scoped to `models/` and cannot see this file, so
-        # the ban would not catch a regression here, but the same rule applies
-        # and the sibling `dit/diffusion.py:449-460` spells it this way. `str`
+        # `tests/test_the_keras2_backend_calls_are_gone.py` bans across the whole
+        # of `src/` -- `losses/` included, so a regression here IS caught now.
+        # (It used to be a `models/`-only sweep that could not see this file;
+        # that scope, and the class that held it, are both gone.) The sibling
+        # `dit/diffusion.py:449-460` spells it the same way. `str`
         # alone is not enough either: a `tf.DType` stringifies as
         # "<dtype: 'float64'>". Same call as `bit_diffusion/sde.py:123`.
         # See decisions.md D-018.

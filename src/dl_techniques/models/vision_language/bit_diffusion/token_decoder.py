@@ -298,7 +298,8 @@ class SharedTokenDecoder(keras.Model):
             token_flat, (batch, self.token_seq_len, self.token_emb_dim)
         )
         # The sanctioned two-step for naming a backend dtype; `keras.backend.*`
-        # is a Keras-2 residue banned under `models/`.
+        # is a Keras-2 residue banned across all of `src/` by
+        # `tests/test_the_keras2_backend_calls_are_gone.py`.
         dtype_name = getattr(tokens.dtype, "name", None) or str(tokens.dtype)
         epsilon = _normalize_epsilon_for(self.normalize_epsilon, dtype_name)
         return keras.ops.normalize(tokens, axis=-1, order=2, epsilon=epsilon)

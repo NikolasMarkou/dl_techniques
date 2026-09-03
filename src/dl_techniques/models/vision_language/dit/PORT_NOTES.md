@@ -328,25 +328,34 @@ comparing one integer. Pinned, including the `T = 1` exception and the census ar
 originally stated that `'linear'` is undefined below `num_timesteps = 50`. It is not; the docstring
 was corrected in the same commit.
 
-### 4.13 `keras.backend.standardize_dtype` is forbidden under `models/` — **D-018**
+### 4.13 `keras.backend.standardize_dtype` is forbidden across `src/` — **D-018**
 
 The natural spelling of "what floating dtype is this tensor" is `keras.backend.standardize_dtype`.
-Under `models/` it is banned by a whole-tree AST sweep
-(`tests/test_models/test_package_api_contract.py::TestNoKeras2Residues::test_no_keras_backend_calls`),
-and the first version of `diffusion.py` took that repo-wide contract from **3 failed / 600 passed to
-4 failed / 599 passed**.
+It is banned by a whole-tree AST sweep, and the first version of `diffusion.py` took that contract
+from **3 failed / 600 passed to 4 failed / 599 passed**.
+
+*Scope, as of `plan-2026-09-03T033750-9bdf25f4`:* when this port was written the sweep was
+`tests/test_models/test_package_api_contract.py::TestNoKeras2Residues::test_no_keras_backend_calls`
+and it walked `models/` only. That class is **deleted**. The rule now lives once, at
+`tests/test_the_keras2_backend_calls_are_gone.py`, and walks `src/dl_techniques/`, `src/train/` and
+`src/applications/` — so everything below that reads "under `models/`" now reads "anywhere in
+`src/`".
 
 The port uses `getattr(dtype, "name", None) or str(dtype)` — the same call `bit_diffusion/sde.py:123`
 makes — plus `keras.config.floatx()` in place of `keras.backend.floatx()`. `str` alone is
 insufficient: a `tf.DType` stringifies as `"<dtype: 'float64'>"`.
 
-**Resolved at REFLECT (completion fix 14.1):** the guard is scoped to `models/`, so this plan's own
-`losses/ddpm_hybrid_loss.py:398` was *unguarded* rather than approved and shipped the banned call —
-the "a scoped gate cannot see an outside consumer" shape. The loss now uses the same idiom, so one
-question has one spelling across this plan's output. The loss's value is unchanged: measured
-bit-identical at `atol=0` before and after on the float32, the float64-input and the
-`dtype="float64"` paths (`2.87980366` / `2.87980366` / `2.8798074`). The `models/`-scoped sweep still
-cannot see `losses/`, so this remains a convention there, not a gate.
+**Resolved at REFLECT (completion fix 14.1):** the guard was scoped to `models/` at the time, so
+this plan's own `losses/ddpm_hybrid_loss.py:398` was *unguarded* rather than approved and shipped the
+banned call — the "a scoped gate cannot see an outside consumer" shape. The loss now uses the same
+idiom, so one question has one spelling across this plan's output. The loss's value is unchanged:
+measured bit-identical at `atol=0` before and after on the float32, the float64-input and the
+`dtype="float64"` paths (`2.87980366` / `2.87980366` / `2.8798074`).
+
+*Superseded:* this section used to close with "the `models/`-scoped sweep still cannot see
+`losses/`, so this remains a convention there, not a gate". That is no longer true —
+`plan-2026-09-03T033750-9bdf25f4` widened the sweep to all of `src/` and converted the whole tree, so
+`losses/ddpm_hybrid_loss.py` is now covered by the gate rather than by convention.
 
 ### 4.14 Sampling is seeded explicitly, because `set_random_seed` does not reproduce here
 
