@@ -26,8 +26,14 @@ References:
 import keras
 import tensorflow as tf
 from typing import Dict, Any, Optional, Union, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.clahe")
 class CLAHE(keras.layers.Layer):
@@ -250,3 +256,4 @@ class CLAHE(keras.layers.Layer):
         """
         return input_shape
 
+# ---------------------------------------------------------------------

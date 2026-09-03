@@ -20,8 +20,13 @@ import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.film")
 class FiLMLayer(keras.layers.Layer):

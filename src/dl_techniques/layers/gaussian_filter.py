@@ -17,10 +17,15 @@ import keras
 from keras import ops
 from typing import Tuple, Union, List, Optional, Sequence
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from ..utils.logger import logger
 from ..utils.tensors import depthwise_gaussian_kernel
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.gaussian_filter")
 class GaussianFilter(keras.layers.Layer):
@@ -204,3 +209,5 @@ class GaussianFilter(keras.layers.Layer):
             "data_format": self.data_format
         })
         return config
+
+# ---------------------------------------------------------------------

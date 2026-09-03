@@ -25,8 +25,13 @@ References:
 import keras
 from typing import Optional, Dict, Any, Callable, Union, Tuple, Sequence
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.bitlinear_layer")
 class BitLinear(keras.layers.Layer):
@@ -635,3 +640,5 @@ class BitLinear(keras.layers.Layer):
             )
 
         return cls(**config)
+
+# ---------------------------------------------------------------------

@@ -18,9 +18,14 @@ import keras
 from typing import Optional, Any, Tuple, Union, Dict, List
 from keras import ops, layers, initializers, regularizers, activations, constraints
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .norms import create_normalization_layer, NormalizationType
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.eomt_mask")
 class EomtMask(keras.layers.Layer):
@@ -444,3 +449,5 @@ class EomtMask(keras.layers.Layer):
             'bias_constraint': constraints.serialize(self.bias_constraint),
         })
         return config
+
+# ---------------------------------------------------------------------

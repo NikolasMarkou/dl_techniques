@@ -20,6 +20,10 @@ import copy
 import keras
 from typing import Optional, Dict, Union, Tuple, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .layer_scale import LayerScale
 from .norms.global_response_norm import GlobalResponseNormalization
 from ..constraints.value_range_constraint import ValueRangeConstraint
@@ -30,6 +34,7 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.convnext_v2_block")
 class ConvNextV2Block(keras.layers.Layer):

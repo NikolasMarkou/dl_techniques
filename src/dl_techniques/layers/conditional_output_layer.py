@@ -17,8 +17,14 @@ and has no learnable parameters.
 
 import keras
 from typing import List, Tuple, Optional, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.conditional_output_layer")
 class ConditionalOutputLayer(keras.layers.Layer):
@@ -146,3 +152,5 @@ class ConditionalOutputLayer(keras.layers.Layer):
         config = super().get_config()
 
         return config
+
+# ---------------------------------------------------------------------

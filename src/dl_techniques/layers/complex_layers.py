@@ -23,9 +23,14 @@ import numpy as np
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any
 
-from ..utils.random import rayleigh
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.random import rayleigh
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexLayer(keras.layers.Layer):
@@ -111,6 +116,7 @@ class ComplexLayer(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexConv2D(ComplexLayer):
@@ -311,6 +317,7 @@ class ComplexConv2D(ComplexLayer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexDense(ComplexLayer):
@@ -330,11 +337,11 @@ class ComplexDense(ComplexLayer):
         │ split: real, imag         │
         └─────────────┬─────────────┘
                        ▼
-        ┌───────────────────────────┐
-        │ 4 real matmuls            │
+        ┌────────────────────────────┐
+        │ 4 real matmuls             │
         │  real_out = re@Wre - im@Wim│
         │  imag_out = re@Wim + im@Wre│
-        └─────────────┬─────────────┘
+        └─────────────┬──────────────┘
                        ▼
         combine + bias, complex(real_out, imag_out)
                        │
@@ -462,6 +469,7 @@ class ComplexDense(ComplexLayer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexReLU(keras.layers.Layer):
@@ -549,10 +557,10 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         Input [B, H, W, C] (complex)
                     │
                     ▼
-        ┌───────────────────────────┐
-        │ split: real, imag         │
+        ┌────────────────────────────┐
+        │ split: real, imag          │
         │ avg-pool each independently│
-        └─────────────┬─────────────┘
+        └─────────────┬──────────────┘
                        ▼
         Output [B, H', W', C] (complex)
 
@@ -663,6 +671,7 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexDropout(keras.layers.Layer):
@@ -756,6 +765,7 @@ class ComplexDropout(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexGlobalAveragePooling2D(keras.layers.Layer):

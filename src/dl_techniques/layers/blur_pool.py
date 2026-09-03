@@ -28,9 +28,14 @@ import numpy as np
 from keras import ops
 from typing import Any, Dict, Optional
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.blur_pool")
 class BlurPool2D(keras.layers.Layer):
@@ -152,3 +157,5 @@ class BlurPool2D(keras.layers.Layer):
             }
         )
         return config
+
+# ---------------------------------------------------------------------

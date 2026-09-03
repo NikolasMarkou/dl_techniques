@@ -19,8 +19,14 @@ References:
 import keras
 from keras import ops
 from typing import Tuple, Any, Dict, List, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.anchor_generator")
 class AnchorGenerator(keras.layers.Layer):
@@ -224,3 +230,5 @@ class AnchorGenerator(keras.layers.Layer):
             'strides_config': self.strides_config,
         })
         return config
+
+# ---------------------------------------------------------------------

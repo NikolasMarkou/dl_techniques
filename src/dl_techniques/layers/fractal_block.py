@@ -19,10 +19,15 @@ References:
 import keras
 from typing import Tuple, Optional, Any, Dict
 
-from ..utils.logger import logger
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
 from .standard_blocks import ConvBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.fractal_block")
 class FractalBlock(keras.layers.Layer):
@@ -304,3 +309,5 @@ class FractalBlock(keras.layers.Layer):
             "drop_path_rate": self.drop_path_rate,
         })
         return config
+
+# ---------------------------------------------------------------------

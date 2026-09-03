@@ -13,6 +13,10 @@ import copy
 import keras
 from typing import Optional, Dict, Union, Tuple, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .layer_scale import LayerScale
 from ..constraints.value_range_constraint import ValueRangeConstraint
 from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
@@ -23,6 +27,7 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.convnext_v1_block")
 class ConvNextV1Block(keras.layers.Layer):
@@ -493,3 +498,4 @@ class ConvNextV1Block(keras.layers.Layer):
 
         return cls(**config_copy)
 
+# ---------------------------------------------------------------------

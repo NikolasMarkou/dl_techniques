@@ -26,6 +26,10 @@ import math
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .embedding.positional_embedding import PositionalEmbedding
 from .embedding.rotary_position_embedding import RotaryPositionEmbedding
 from .reasoning.hrm_reasoning_module import HierarchicalReasoningModule
@@ -38,6 +42,7 @@ from .blt_blocks import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.blt_core")
 class ByteLatentReasoningCore(keras.layers.Layer):
@@ -647,6 +652,6 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             "embeddings_regularizer": keras.regularizers.serialize(self.embeddings_regularizer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
-        # DECISION plan_2026-06-14_080e7636/D-003: get_config must return config;
-        # a version that built it but returned None broke .keras round-trip. See decisions.md.
         return config
+
+# ---------------------------------------------------------------------

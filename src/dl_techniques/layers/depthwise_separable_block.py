@@ -23,11 +23,16 @@ References:
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from .norms import create_normalization_layer
 from .activations import create_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.depthwise_separable_block")
 class DepthwiseSeparableBlock(keras.layers.Layer):
@@ -282,3 +287,5 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
             'activation_kwargs': self.activation_kwargs,
         })
         return config
+
+# ---------------------------------------------------------------------

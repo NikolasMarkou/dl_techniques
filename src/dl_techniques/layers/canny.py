@@ -24,8 +24,13 @@ import numpy as np
 import tensorflow as tf
 from typing import Optional, Tuple, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.canny")
 class Canny(keras.layers.Layer):
@@ -379,3 +384,5 @@ class Canny(keras.layers.Layer):
         """
         return input_shape
 
+
+# ---------------------------------------------------------------------
