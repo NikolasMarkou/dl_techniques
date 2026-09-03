@@ -23,6 +23,7 @@ task subdirectory (`image_restoration/`, `keypoints/`, `super_resolution/`).
   supervision, for image restoration. The name misattributes; see `models/CLAUDE.md`
 - `image_restoration/scunet/` — SCUNet denoiser
 - `keypoints/superpoint/` — SuperPoint keypoint detector + descriptor
+- `levjepa/` — LeVJEPA joint-embedding video pretraining ViT encoder
 - `lewm/` — latent-energy world model
 - `masked_autoencoder/` — MAE
 - `mobilenet/` — MobileNet variants (V1, V2, V3, V4)

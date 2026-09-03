@@ -35,7 +35,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **35** | image backbones, detectors, segmenters, denoisers, generators |
+| [`vision/`](vision/) | **36** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
@@ -47,9 +47,9 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **87** | |
+| **Sum** | **88** | |
 
-### `vision/` (35)
+### `vision/` (36)
 
 | Package | |
 |---|---|
@@ -72,6 +72,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `image_restoration/pw_fnet/` | 2-level U-Net, FFT token mixing, multi-scale supervision. No wavelet op despite the paper's pyramid-wavelet design |
 | `image_restoration/scunet/` | SCUNet denoiser |
 | `keypoints/superpoint/` | SuperPoint keypoint detector + descriptor |
+| `levjepa/` | LeVJEPA joint-embedding video pretraining ViT encoder |
 | `lewm/` | latent-energy world model |
 | `masked_autoencoder/` | MAE |
 | `mobilenet/` | MobileNet V1, V2, V3, V4 |
