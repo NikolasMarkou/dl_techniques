@@ -54,7 +54,7 @@ class MLPProjector(keras.layers.Layer):
         self.use_layer_norm = use_layer_norm
 
         self.fc1 = keras.layers.Dense(hidden_dim, activation=None, name="fc1")
-        # DECISION plan_2026-04-21_8416bc0b/D-002: LayerNorm, not BatchNorm; a batch of 1 would break BatchNorm.
+        # DECISION plan_2026-04-21_8416bc0b/D-002 [STALE]: LayerNorm, not BatchNorm; a batch of 1 would break BatchNorm.
         # Matches upstream MLP's norm_fn default. See decisions.md.
         self.norm = (
             keras.layers.LayerNormalization(epsilon=1e-6, name="norm")
