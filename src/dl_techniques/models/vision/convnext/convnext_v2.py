@@ -1,43 +1,19 @@
-"""
-ConvNeXt V2: ConvNeXt with Global Response Normalization, co-designed with
-fully-convolutional masked autoencoding.
+"""ConvNeXtV2, ConvNeXt with Global Response Normalization, co-designed with masked autoencoding.
 
-V1 was designed and evaluated under supervised training. Carrying it directly
-into masked-autoencoder pretraining underperforms, and the reason is visible in
-the features: across the channels of the inverted bottleneck's expanded `4F`
-representation, many collapse onto near-duplicates of each other. The MLP learns
-redundant filters, and adding capacity does not help because the redundancy is
-the problem. Global Response Normalization is the architectural answer, and it is
-the only structural change from V1.
-
-GRN sits immediately after the GELU inside the expanded part of the block. It
-computes each channel's L2 norm over the spatial dimensions, divides those norms
-by their mean across channels to get a relative measure of how active each
-channel is compared with its peers, and rescales each channel by that ratio.
-Channels that are globally quiet relative to the rest are suppressed further and
-channels that carry signal are amplified -- an explicit competition between
-channels that increases their contrast and prevents the collapse. Because it is
-computed from a global spatial statistic rather than a local window, it costs
-almost nothing and adds only two learnable per-channel parameters.
-
-Everything else is V1: a depthwise `KxK` convolution (default 7), a 1x1
-expansion to `4F`, one GELU, now GRN, a 1x1 reduction back to `F`, and a
-learnable `gamma` layer scale. As in V1 the block is TRANSFORM-ONLY -- it returns
-`F(x)`, and the residual plus drop-path wiring is the caller's responsibility,
-which this model performs in `call`. The drop-path ramp is global across the
-network rather than per stage, and DOWNSAMPLING is a separate LayerNorm +
-strided convolution with `padding="same"` for the same small-input reason
-documented in V1. As in V1 the STEM is the exception and keeps `"valid"` at
-`stem_stride > 1`; V1's module docstring carries the measurement and the
-ruling.
-
-The variant table spans a much wider range than V1's because the FCMAE recipe
-was evaluated from Atto (3.7M parameters) to Huge (660M), and the small end is
-where GRN's benefit is most visible.
-
-No pretrained ConvNeXt V2 weights are distributed with this package.
-`pretrained=True` raises `NotImplementedError` rather than warning and returning
-a randomly initialized model. Local checkpoints load by path.
+V1 was designed for supervised training, and carrying it directly into masked-autoencoder
+pretraining underperforms: many channels of the inverted bottleneck's expanded `4F`
+representation collapse onto near-duplicates of each other. Global Response Normalization
+(GRN) is the fix, and the only structural change from V1. GRN sits after the GELU inside
+the expanded part of the block: it computes each channel's L2 norm over the spatial
+dimensions, divides by the mean across channels, and rescales each channel by that ratio,
+suppressing channels that are quiet relative to their peers and amplifying ones that carry
+signal. It is computed from a global statistic, so it costs almost nothing and adds only
+two learnable per-channel parameters. Everything else matches V1: a depthwise `KxK`
+convolution, a 1x1 expansion to `4F`, GELU, now GRN, a 1x1 reduction back to `F`, and a
+learnable `gamma` layer scale, with the block transform-only and the residual/drop-path
+wiring owned by `call`. The variant table spans a wider range than V1's, from Atto (3.7M
+parameters) to Huge (660M), since GRN's benefit is most visible at the small end. No
+pretrained weights are distributed: `pretrained=True` raises `NotImplementedError`.
 
 References:
     - Woo et al., 2023. ConvNeXt V2: Co-designing and Scaling ConvNets with
@@ -77,18 +53,17 @@ class ConvNeXtV2(keras.Model):
 
     A modern ConvNet that adds Global Response Normalization inside the
     inverted bottleneck, an explicit inter-channel competition that prevents
-    the feature collapse V1 exhibits under masked-autoencoder pretraining. GRN
-    is the ONLY structural change from :class:`ConvNeXtV1`: a patchify stem
+    the feature collapse V1 exhibits under masked-autoencoder pretraining. GRN is the only structural change from :class:`ConvNeXtV1`: a patchify stem
     feeds ``len(depths)`` stages of :class:`ConvNextV2Block` -- depthwise
     ``KxK`` convolution, LayerNorm, ``F -> 4F`` expansion, GELU, GRN, ``4F ->
     F`` reduction, and a learnable ``gamma`` -- separated by LayerNorm +
-    strided-convolution downsample layers. The block is TRANSFORM-ONLY: it
+    strided-convolution downsample layers. The block is transform-only: it
     returns ``F(x)``, and the residual add plus the optional drop-path are
     owned by :meth:`call`. The drop-path ramp is global across ``sum(depths)``
     blocks, not per stage. The model is fully convolutional and global-pools
     before the head, so the spatial dims of ``input_shape`` may be ``None``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -153,7 +128,7 @@ class ConvNeXtV2(keras.Model):
         │   num_classes=0     → [B, d₃] pooled │
         └──────────────────────────────────────┘
 
-    **Variants:**
+    Variants:
 
     .. code-block:: text
 
@@ -180,7 +155,7 @@ class ConvNeXtV2(keras.Model):
     :type dims: Optional[List[int]]
     :param drop_path_rate: Terminal stochastic-depth rate. The per-block rate
         ramps linearly from 0.0 at the first block of stage 0 to this value at
-        the last block of the last stage, indexed GLOBALLY over
+        the last block of the last stage, indexed globally over
         ``sum(depths)`` blocks. Defaults to 0.0 (disabled).
     :type drop_path_rate: float
     :param stochastic_mode: What the per-block regularizer does. ``'depth'``
@@ -381,17 +356,8 @@ class ConvNeXtV2(keras.Model):
             filters=self.dims[0],
             kernel_size=stem_kernel_size,
             strides=stem_stride,
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-125
-            # Deliberately NOT the unconditional `padding="same"` the
-            # downsample layers use. MEASURED at kernel == stride == 4:
-            # the two are identical on a divisible input ((32,32,3) ->
-            # 8x8 either way) and differ only on a non-divisible one
-            # ((30,30,3) -> 7x7 valid vs 8x8 same), so "making it
-            # consistent" would silently move the spatial geometry of
-            # every checkpoint trained at a non-divisible size --
-            # weight-shape-compatible, activation-value different. The
-            # 0x0-collapse-to-NaN the downsample fix was for cannot reach
-            # the stem, whose input is the image. See decisions.md D-125.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-125: not the unconditional
+            # "same" the downsample layers use — "same" here would silently shift the spatial geometry of checkpoints trained at a non-divisible input size. See decisions.md.
             padding="same" if stem_stride == 1 else "valid",
             use_bias=self.use_bias,
             kernel_initializer=self.STEM_INITIALIZER,
@@ -424,11 +390,8 @@ class ConvNeXtV2(keras.Model):
             filters=self.dims[stage_idx],
             kernel_size=downsample_kernel_size,
             strides=downsample_stride,
-            # DECISION plan_2026-06-15_e6a0391c/D-003: "same" (not "valid") so the
-            # kernel==stride downsample never collapses to 0x0 on small inputs
-            # (CIFAR 32x32 / 16x16 — sizes the convnext tests exercise), which
-            # previously yielded non-finite (NaN) output. Identical to "valid"
-            # when the spatial dim is divisible by the stride.
+            # DECISION plan_2026-06-15_e6a0391c/D-003: "same" not "valid" — at
+            # kernel==stride, "valid" collapses small CIFAR-scale inputs to 0x0 and produced NaN output. Identical to "valid" when the spatial dim divides the stride. See decisions.md.
             padding="same",
             use_bias=self.use_bias,
             kernel_initializer=self.STEM_INITIALIZER,
@@ -452,7 +415,7 @@ class ConvNeXtV2(keras.Model):
         dim = self.dims[stage_idx]
         total_blocks = sum(self.depths)
         block_start_idx = sum(self.depths[:stage_idx])
-        # The drop-path ramp is GLOBAL across stages, not per-stage: the index is
+        # The drop-path ramp is global across stages, not per-stage: the index is
         # `block_start_idx + block_idx` over `sum(self.depths)` blocks, so stage 0
         # starts at 0.0 and the last block of the last stage reaches drop_path_rate.
         # `linear_drop_path_rates` already handles total_blocks <= 1 (all-zero).
@@ -582,21 +545,12 @@ class ConvNeXtV2(keras.Model):
     def _pretrained_build_shape(self) -> Tuple[int, ...]:
         """Resolve a concrete ``(H, W, C)`` for the pre-load dummy forward.
 
-        DECISION plan-2026-08-14T233721-d4f9beb2/D-067: resolve the None spatial
-        dims instead of passing ``self.input_shape`` through. Do NOT go back to
-        ``keras.random.normal((1,) + tuple(self.input_shape))``: the DEFAULT
-        ``input_shape`` is ``(None, None, 3)``, so that built ``(1, None, None,
-        3)`` and made the factories' own documented ``pretrained=<local path>``
-        call fail for every caller who did not also pass a concrete
-        ``input_shape``. The channel count is never defaulted -- a ``None``
-        there is a real configuration error and is raised as one. See
-        decisions.md D-067.
-
-        :return: ``(height, width, channels)`` with any ``None`` spatial dim
-            replaced by ``PRETRAINED_BUILD_SPATIAL``.
+        :return: ``(height, width, channels)`` with any ``None`` spatial dim replaced by `PRETRAINED_BUILD_SPATIAL`.
         :rtype: Tuple[int, ...]
-        :raises ValueError: If ``input_shape`` has no channel count.
+        :raises ValueError: If `input_shape` has no channel count.
         """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-067: resolve None spatial dims
+        # here rather than pass self.input_shape through — the default (None, None, 3) built (1, None, None, 3) and broke pretrained=<path> loads. See decisions.md.
         height, width, channels = self.input_shape
         if channels is None:
             raise ValueError(
