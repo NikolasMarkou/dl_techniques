@@ -658,7 +658,15 @@ class TestPretrainedNeverSilentlyRandom:
 
 
 def _docstring_line_numbers(path: Path) -> set:
-    """1-based line numbers covered by any module/class/function docstring."""
+    """1-based line numbers covered by any module/class/function docstring.
+
+    SHARED, and not dead code if nothing in this file calls it. The tree-wide
+    ``keras.backend.*`` ban -- ``tests/test_the_keras2_backend_calls_are_gone.py``,
+    which replaced this file's ``TestNoKeras2Residues`` -- imports this exact
+    function so that one predicate serves both scans. Deleting or narrowing it
+    here changes that guard too, which is the point: two copies of a rule is a
+    lockstep invariant nobody maintains.
+    """
     lines: set = set()
     tree = _parse_or_fail(path)
     if tree is None:
@@ -676,35 +684,6 @@ def _docstring_line_numbers(path: Path) -> set:
         ):
             lines.update(range(first.lineno, first.end_lineno + 1))
     return lines
-
-
-class TestNoKeras2Residues:
-    """The forward path must use Keras 3 spellings.
-
-    ``keras.backend.GradientTape`` does not exist in Keras 3 at all: it sat in
-    ``latent_gmm_registration.train_step`` and made the model untrainable while
-    its suite stayed green, because every test was forward-pass only.
-    """
-
-    def test_no_keras_backend_calls(self):
-        offenders = []
-        for path in MODELS_DIR.rglob("*.py"):
-            docstring_lines = _docstring_line_numbers(path)
-            for i, line in enumerate(path.read_text().splitlines(), start=1):
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    continue
-                # Prose is not code. Before this exclusion, a module docstring
-                # explaining *why* `keras.backend.` must not be used failed the
-                # suite -- the guard could not be documented in the tree it guards.
-                if i in docstring_lines:
-                    continue
-                if "keras.backend." in line:
-                    offenders.append(f"{path.relative_to(MODELS_DIR)}:{i} {stripped}")
-        assert not offenders, (
-            "use keras.config.floatx()/epsilon() and tf.GradientTape; "
-            f"keras.backend.* found at: {offenders}"
-        )
 
 
 # ---------------------------------------------------------------------------
