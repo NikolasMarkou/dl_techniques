@@ -1,94 +1,29 @@
-"""The DiTXA transformer block and the three embedders that feed it.
+"""The DiTXA transformer block, built by ``DiTXABlock``, and the three
+embedders that feed it: ``DiTXATimestepEmbedder`` and ``get_2d_sincos_pos_embed``
+here, plus the shared ``ClassLabelEmbedding`` layer.
 
-A plain DiT block conditions two sub-ops (self-attention and an MLP) from one
-conditioning vector, so its ``adaLN_modulation`` emits ``6 * hidden_size``
-numbers. The bidirectional bridge's block conditions **four** things and emits
-``12 * hidden_size``: the third triple does not gate a residual at all -- it
-FiLM-modulates the conditioning tokens on their way into cross-attention's K/V
-projection, from the same ``c`` that drives the query stream's own modulation.
+A plain DiT block conditions self-attention and an MLP from one vector,
+emitting ``6 * hidden_size`` modulation numbers. This block conditions four
+things and emits ``12 * hidden_size``: a third chunk triple modulates the
+conditioning tokens on their way into cross-attention's K/V projection
+instead of gating a residual. See :class:`DiTXABlock` for the diagram and
+exact chunk order.
 
-That asymmetry is the whole point of the module. It is also invisible to every
-conventional test: a permutation of the twelve chunks, or of the three residual
-adds, preserves the parameter count, every tensor shape, ``get_config()`` and a
-``.keras`` round trip, and changes only which learned scalar multiplies which
-sub-op. It is pinned instead by a per-chunk attribution probe in
-``tests/test_models/test_bit_diffusion/test_the_twelve_way_modulation_is_wired.py``.
+Attention, the MLP and the modulation broadcast are not reimplemented here:
+``MultiHeadCrossAttention`` covers both attention modes,
+``create_ffn_layer('gelu_tanh', ...)`` matches upstream's tanh-approximate
+GELU MLP, and ``modulate`` is imported from ``layers/transformers/sd3_adaln.py``.
+The 12-way split stays here rather than becoming a sibling there; see
+``decisions.md`` D-004.
 
-Ported from ``DiTBlockWithCrossAttention`` (upstream ``dit.py:344-366``).
+The timestep embedder and the positional table are numerically specified
+and differ from the closest house-layer substitute on several measured
+axes (see each function's own docstring); ``ClassLabelEmbedding`` is
+genuinely reusable and lives at
+``src/dl_techniques/layers/embedding/class_label_embedding.py`` instead.
 
-.. code-block:: text
-
-    c (B, hidden)                                cond_tokens (B, N, hidden)
-      |                                                     |
-      v                                                     |
-    SiLU -> Dense(12*hidden, zero-init kernel AND bias)      |
-      |                                                     |
-      +-> split 12 -> the chunk order, exactly:              |
-      |                                                     |
-      |   0 shift_msa  1 scale_msa  2 gate_msa   -- triple 1 |
-      |   3 shift_xa   4 scale_xa   5 gate_xa    -- triple 2 |
-      |   6 shift_cond 7 scale_cond 8 gate_cond  -- triple 3 |
-      |   9 shift_mlp 10 scale_mlp 11 gate_mlp   -- triple 4 |
-      |                                                     |
-    x (B, N, hidden)                                         |
-      |                                                     |
-      |--------------------------------+                     |
-      v                                |                     |
-    norm1 -> modulate(shift_msa, scale_msa)                   |
-      v                                |                     |
-    attn  (self-attention, fused QKV, non-affine per-head     |
-      |    RMSNorm on Q/K, 1/sqrt(head_dim) applied ONCE)     |
-      v                                |                     |
-    * gate_msa ---------------------> (+)  residual 1         |
-                                       |                     |
-      +--------------------------------+                     |
-      |                                |                     v
-      v                                |          norm_cond -> modulate(
-    norm_cross -> modulate(shift_xa,   |             shift_cond, scale_cond)
-      |            scale_xa)           |                     |
-      |            = the QUERY         |            = the K/V stream
-      v                                |                     |
-    cross_attn(query, kv) <------------|---------------------+
-      |                                |
-      v                                |     NOTE: gate_cond is emitted and
-    * gate_xa ----------------------> (+)    consumed by NO residual add. It is
-                                       |     the one dead chunk, reproduced on
-      +--------------------------------+     purpose -- see the module docstring.
-      |                                |
-      v                                |
-    norm2 -> modulate(shift_mlp, scale_mlp)
-      v                                |
-    mlp   (tanh-approximate GELU)      |
-      v                                |
-    * gate_mlp ---------------------> (+)  residual 3
-                                       |
-                                       v
-                              output (B, N, hidden)
-
-**Reuse.** Nothing here re-implements attention, an MLP or the modulation
-broadcast. ``MultiHeadCrossAttention`` covers both attention modes (fused QKV in
-self-attention mode, fused KV in cross-attention mode) with the per-head
-non-affine RMSNorm the upstream ``qk_norm=True`` / ``elementwise_affine=False``
-combination asks for; ``create_ffn_layer('gelu_tanh', ...)`` is exactly
-upstream's ``Mlp(act_layer=nn.GELU(approximate="tanh"))``; and the ``modulate``
-broadcast contract is imported from ``layers/transformers/sd3_adaln.py`` rather
-than re-spelled. The 12-way split itself stays here rather than becoming an
-``sd3_adaln.py`` sibling -- see ``decisions.md`` D-004.
-
-**Also here.** :class:`DiTXATimestepEmbedder` and :func:`get_2d_sincos_pos_embed`.
-Both are numerically specified, both have a plausible house-layer substitute, and
-neither substitute is correct:
-
-* the timestep embedder differs from ``layers/embedding/ScalarSinusoidalEmbedding``
-  on three independent numeric axes and one structural one -- see that class's
-  docstring, which quotes the measured deltas;
-* the positional table is upstream's MAE helper, whose ``np.meshgrid(grid_w,
-  grid_h)`` ordering and ``concat([emb_h, emb_w])`` split are invisible to any
-  shape assertion, because both halves have the same width.
-
-The third embedder, ``ClassLabelEmbedding``, is genuinely reusable and therefore
-does NOT live here: it is a shared layer at
-``src/dl_techniques/layers/embedding/class_label_embedding.py`` with a factory key.
+References:
+    - Ported from ``DiTBlockWithCrossAttention``, upstream ``dit.py``.
 """
 
 import math
@@ -97,10 +32,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import keras
 import numpy as np
 
-# ---------------------------------------------------------------------
-# Local Imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.layers.attention.multi_head_cross_attention import (
     MultiHeadCrossAttention,
 )
@@ -108,10 +39,6 @@ from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.transformers.sd3_adaln import modulate
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
-
-# ---------------------------------------------------------------------
-# The chunk order -- a fact, not a style choice
-# ---------------------------------------------------------------------
 
 #: The order the 12 modulation chunks are consumed in, upstream ``dit.py:351-352``.
 #: Index ``k`` of ``ops.split(adaLN_modulation(c), 12, axis=-1)`` is
@@ -168,14 +95,63 @@ def _unpack_triple_shape(
 class DiTXABlock(keras.layers.Layer):
     """DiT block with cross-attention and a 12-way adaLN-Zero modulation.
 
-    Three residual adds, in the order ``msa -> xa -> mlp``, each gated by its own
-    chunk; a fourth chunk triple modulates the conditioning tokens entering
-    cross-attention's K/V projection and gates nothing. See the module docstring
-    for the diagram and the exact chunk order.
+    A plain DiT block conditions self-attention and an MLP from one vector,
+    emitting ``6 * hidden_size`` modulation numbers. This block conditions
+    four things and emits ``12 * hidden_size``: the third chunk triple does
+    not gate a residual at all, it modulates the conditioning tokens on
+    their way into cross-attention's K/V projection.
 
-    The conditioning stream is **not** carried forward: ``cond_tokens`` is
-    modulated per block and consumed, never updated, so block ``n + 1`` receives
-    the same tensor block ``n`` did. Only ``x`` accumulates.
+    .. code-block:: text
+
+        c (B, hidden)                                cond_tokens (B, N, hidden)
+          |                                                     |
+          v                                                     |
+        SiLU -> Dense(12*hidden, zero-init)                      |
+          |                                                     |
+          +-> split into 12 chunks, in order:                    |
+          |                                                     |
+          |   0 shift_msa  1 scale_msa  2 gate_msa   -- triple 1 |
+          |   3 shift_xa   4 scale_xa   5 gate_xa    -- triple 2 |
+          |   6 shift_cond 7 scale_cond 8 gate_cond  -- triple 3 |
+          |   9 shift_mlp 10 scale_mlp 11 gate_mlp   -- triple 4 |
+          |                                                     |
+        x (B, N, hidden)                                         |
+          |                                                     |
+          |--------------------------------+                     |
+          v                                |                     |
+        norm1 -> modulate(shift_msa, scale_msa)                   |
+          v                                |                     |
+        attn (self-attention, fused QKV, per-head RMSNorm on Q/K) |
+          v                                |                     |
+        * gate_msa ---------------------> (+)  residual 1         |
+                                           |                     |
+          +--------------------------------+                     |
+          |                                |                     v
+          v                                |          norm_cond -> modulate(
+        norm_cross -> modulate(shift_xa,   |             shift_cond, scale_cond)
+          |            scale_xa)           |                     |
+          |            = the query         |            = the K/V stream
+          v                                |                     |
+        cross_attn(query, kv) <------------|---------------------+
+          |                                |
+          v                                |     gate_cond is emitted and
+        * gate_xa ----------------------> (+)    consumed by no residual add;
+                                           |     it is the one dead chunk.
+          +--------------------------------+
+          |                                |
+          v                                |
+        norm2 -> modulate(shift_mlp, scale_mlp)
+          v                                |
+        mlp (tanh-approximate GELU)        |
+          v                                |
+        * gate_mlp ---------------------> (+)  residual 3
+                                           |
+                                           v
+                                  output (B, N, hidden)
+
+    The conditioning stream is not carried forward: ``cond_tokens`` is
+    modulated per block and consumed, never updated, so block ``n + 1``
+    receives the same tensor block ``n`` did. Only ``x`` accumulates.
 
     :param hidden_size: Model width. Must be positive and divisible by
         ``num_heads``.
@@ -186,8 +162,8 @@ class DiTXABlock(keras.layers.Layer):
         ``int(hidden_size * mlp_ratio)``. Must be positive.
     :type mlp_ratio: float
     :param norm_epsilon: Epsilon of the four non-affine ``LayerNormalization``
-        sub-layers. Explicit on purpose: bare Keras defaults to ``1e-3``, a
-        silent 1000x error with no shape symptom.
+        sub-layers. Bare Keras defaults to ``1e-3``, a silent 1000x error
+        with no shape symptom.
     :type norm_epsilon: float
     :param qk_norm_epsilon: Epsilon of the per-head Q/K ``RMSNorm``s inside both
         attention sub-layers.
@@ -222,7 +198,7 @@ class DiTXABlock(keras.layers.Layer):
         (2, 16, 64)
 
     Note:
-        At initialisation the modulation ``Dense`` is zero in **both** kernel and
+        At initialisation the modulation ``Dense`` is zero in both kernel and
         bias (adaLN-Zero), so all three gates are ``0`` and the block is the
         exact identity on ``x``. That is not a quirk to be optimised away: it is
         what makes a deep stack trainable, and it is also the premise the
@@ -274,8 +250,8 @@ class DiTXABlock(keras.layers.Layer):
 
         qk_norm_kwargs = {"use_scale": False, "epsilon": self.qk_norm_epsilon}
 
-        # CREATE sub-layers. Every one gets an explicit name so the weight paths
-        # are stable across a `.keras` round trip.
+        # Every sub-layer gets an explicit name so weight paths stay stable
+        # across a .keras round trip.
         self.norm1 = keras.layers.LayerNormalization(
             epsilon=self.norm_epsilon, center=False, scale=False, name="norm1"
         )
@@ -316,9 +292,8 @@ class DiTXABlock(keras.layers.Layer):
             use_bias=self.use_bias,
             name="mlp",
         )
-        # Two SEPARATE Zeros() instances. A shared Initializer object draws
-        # bit-identically forever; that is invisible for Zeros here, but the XL
-        # variant stacks 28 of these blocks and the habit is what matters.
+        # Two separate Zeros() instances -- a shared Initializer object
+        # draws bit-identically forever, invisible for Zeros but not the habit to keep across 28-block variants.
         self.adaln_dense = keras.layers.Dense(
             NUM_ADALN_CHUNKS * self.hidden_size,
             use_bias=True,
@@ -374,12 +349,8 @@ class DiTXABlock(keras.layers.Layer):
         """
         x, c, cond_tokens = inputs[0], inputs[1], inputs[2]
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-004
-        # This 12-way split stays INSIDE the block. Do NOT hoist it into an
-        # `sd3_adaln.py` sibling: the four triples apply to THREE different
-        # normed streams (norm1(x), norm_cross(x), norm_cond(cond_tokens)), which
-        # is not the one-norm-plus-one-chunk-tuple shape that family has, and a
-        # 12-way sibling would have exactly one call site. See decisions.md D-004.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-004: keep this 12-way split
+        # inside the block, not an sd3_adaln.py sibling -- the four triples apply to three different normed streams, not that family's one-norm shape. See decisions.md.
         chunks = keras.ops.split(
             self.adaln_dense(keras.ops.silu(c)), NUM_ADALN_CHUNKS, axis=-1
         )
@@ -389,9 +360,8 @@ class DiTXABlock(keras.layers.Layer):
             shift_cond, scale_cond, _gate_cond,
             shift_mlp, scale_mlp, gate_mlp,
         ) = chunks
-        # `_gate_cond` is chunk 8 and gates NOTHING. Upstream emits it and never
-        # consumes it (dit.py:351-366); dropping it here would renumber chunks
-        # 9-11 and silently rewire the MLP triple. Reproduced deliberately.
+        # _gate_cond is chunk 8 and gates nothing. Upstream emits it and never
+        # consumes it; dropping it here would renumber chunks 9-11 and silently rewire the MLP triple.
 
         x = x + keras.ops.expand_dims(gate_msa, axis=1) * self.attn(
             modulate(self.norm1(x), shift_msa, scale_msa),
@@ -445,79 +415,68 @@ class DiTXABlock(keras.layers.Layer):
         return config
 
 
-# ---------------------------------------------------------------------
-# Timestep embedding
-# ---------------------------------------------------------------------
-
-
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.blocks")
 class DiTXATimestepEmbedder(keras.layers.Layer):
     """Sinusoidal embedding of a scalar timestep, refined by ``Dense -> SiLU -> Dense``.
 
-    Ported from upstream ``TimestepEmbedder`` (``dit.py:30-68``), which is in
-    turn OpenAI's GLIDE ``timestep_embedding``.
+    Ported from upstream ``TimestepEmbedder``, in turn OpenAI's GLIDE
+    ``timestep_embedding``.
 
     .. code-block:: text
 
-        t  (B,)  -- ALREADY scaled by the caller (DiTXA multiplies by
+        t  (B,)  -- already scaled by the caller (DiTXA multiplies by
           |         time_scale = 1000 before calling; this layer does not)
           v
         freqs = exp(-log(max_period) * arange(half) / half)     half = F // 2
-          |     a NON-TRAINABLE weight, F = frequency_embedding_size
+          |     a non-trainable weight, F = frequency_embedding_size
           v
         args = t[:, None] * freqs[None]                          (B, half)
           v
         concat([cos(args), sin(args)], axis=-1)                  (B, 2*half)
-          |   ^^^ COS FIRST. Not a style choice -- see below.
+          |   cos first, not sin first -- see below
           v
         (odd F only) one trailing zero column                    (B, F)
           v
         Dense(hidden_size) -> SiLU -> Dense(hidden_size)         (B, hidden_size)
 
-    Why this is not :class:`~dl_techniques.layers.embedding.scalar_sinusoidal_embedding.ScalarSinusoidalEmbedding`:
-        The house layer looks like a drop-in and is not, on **three independent
-        numeric axes** plus a structural one. The numbers below were MEASURED at
-        ``dim = 8`` on ``t = [0, 0.25, 0.5, 1]``
-        (``plans/.../probes/step6_scalar_sinusoidal_differences.txt``); they are
-        not estimates.
+    This differs from the house layer,
+    :class:`~dl_techniques.layers.embedding.scalar_sinusoidal_embedding.ScalarSinusoidalEmbedding`,
+    on three numeric axes plus a structural one. Measured at ``dim = 8`` on
+    ``t = [0, 0.25, 0.5, 1]``:
 
-        1. **Concat order.** The house layer emits ``concat([sin, cos])``, this
-           one emits ``concat([cos, sin])``. At ``t = 0`` the house basis is
-           ``[0,0,0,0,1,1,1,1]`` and this one is ``[1,1,1,1,0,0,0,0]``:
-           ``max|delta| = 1.0``, the largest a bounded sinusoid can be.
-        2. **Frequency-ladder denominator.** The house ladder divides the
-           exponent by ``half - 1``, so its last frequency lands on
-           ``1e-4`` (``9.9999997e-05`` in float32). This one divides by
-           ``half``, so its last frequency is ``exp(-log(1e4)*(half-1)/half)``,
-           **10x larger** at ``half = 4`` (``9.9999993e-04``) and never reaching
-           ``1 / max_period``. Same ``max_period``, different ladder:
-           ``max|delta| = 0.0534341932``.
-        3. **Input rescale.** The house layer rescales its input onto
-           ``[0, 1e4]`` before the sinusoidal map (``t = 0.25`` becomes
-           ``2500.0``, a ``10000x`` larger sinusoidal argument). This layer does
-           NO input rescale: the caller pre-scales ``t`` by ``time_scale = 1000``
-           and this layer feeds it straight in. ``max|delta| = 1.8825995338``.
-        4. **Structural.** The house layer's single ``dim`` sets the basis width
-           AND both Dense widths. Here ``frequency_embedding_size`` (256) is
-           decoupled from ``hidden_size`` (384/768/896/1024/1152 for the shipped
-           DiTXA variants -- never 256), so the MLP is ``256 -> hidden -> hidden``.
+    1. Concat order: the house layer emits ``concat([sin, cos])``, this one
+       ``concat([cos, sin])``. At ``t = 0`` the house basis is
+       ``[0,0,0,0,1,1,1,1]`` and this one ``[1,1,1,1,0,0,0,0]``,
+       ``max|delta| = 1.0``.
+    2. Frequency-ladder denominator: the house ladder divides the exponent
+       by ``half - 1``, landing its last frequency on ``1e-4``; this one
+       divides by ``half``, landing 10x larger at ``half = 4``.
+       ``max|delta| = 0.0534341932``.
+    3. Input rescale: the house layer rescales its input onto ``[0, 1e4]``
+       before the sinusoidal map; this layer does no input rescale, since
+       the caller pre-scales ``t`` by ``time_scale = 1000`` already.
+       ``max|delta| = 1.8825995338``.
+    4. Structural: the house layer's single ``dim`` sets both the basis
+       width and the Dense widths. Here ``frequency_embedding_size`` (256)
+       is decoupled from ``hidden_size`` (384-1152 across the shipped
+       DiTXA variants, never 256), so the MLP is ``256 -> hidden -> hidden``.
 
-        All four are pinned by
-        ``tests/test_models/test_bit_diffusion/test_the_embedders.py``, so
-        "simplifying" this back to the house layer reddens rather than drifts.
+    All four are pinned by
+    ``tests/test_models/test_bit_diffusion/test_the_embedders.py``.
 
     :param hidden_size: Output width, and the width of both Dense layers.
     :type hidden_size: int
-    :param frequency_embedding_size: Width of the sinusoidal basis feeding the
-        MLP. Deliberately independent of ``hidden_size``; upstream's default is
-        256 for every variant.
+    :param frequency_embedding_size: Width of the sinusoidal basis feeding
+        the MLP, independent of ``hidden_size``; upstream's default is 256
+        for every variant.
     :type frequency_embedding_size: int
     :param max_period: Base of the frequency ladder. Upstream's ``10000``.
     :type max_period: float
     :param kernel_stddev: Standard deviation of the ``RandomNormal`` kernel
-        initializer of both Dense layers, upstream's ``nn.init.normal_(std=0.02)``
-        (``dit.py:213-214``). A **fresh** initializer instance is constructed per
-        Dense: a shared instance draws bit-identically forever.
+        initializer of both Dense layers, upstream's
+        ``nn.init.normal_(std=0.02)``. A fresh initializer instance is
+        constructed per Dense, since a shared instance draws bit-identically
+        forever.
     :type kernel_stddev: float
     :param kwargs: Standard ``keras.layers.Layer`` keyword arguments.
 
@@ -580,9 +539,8 @@ class DiTXATimestepEmbedder(keras.layers.Layer):
         self.kernel_stddev = float(kernel_stddev)
         self.half = self.frequency_embedding_size // 2
 
-        # A FRESH RandomNormal per Dense. Sharing one instance across layers
-        # makes every one of them draw the same numbers forever, and no default
-        # exposes it.
+        # A fresh RandomNormal per Dense -- a shared instance draws the
+        # same numbers at every layer, forever, with no default that exposes it.
         self.mlp_in = keras.layers.Dense(
             self.hidden_size,
             use_bias=True,
@@ -611,12 +569,9 @@ class DiTXATimestepEmbedder(keras.layers.Layer):
         if self.built:
             return
 
-        # Computed with NumPy, installed as a NON-TRAINABLE WEIGHT through a
-        # constant initializer. Do NOT replace this with
-        # `self.freqs = keras.ops.exp(...)` in __init__ or build: a plain tensor
-        # attribute does not survive a `.keras` round trip, and an `.assign()`
-        # inside build() is DISCARDED by StatelessScope, leaving the table all
-        # zeros in every real model. Both are recorded repo failures.
+        # Computed with NumPy, installed as a non-trainable weight through a
+        # constant initializer -- a plain tensor attribute does not survive a
+        # .keras round trip, and .assign() inside build() is discarded by StatelessScope.
         freqs_np = np.exp(
             -math.log(self.max_period)
             * np.arange(self.half, dtype="float32")
@@ -639,7 +594,7 @@ class DiTXATimestepEmbedder(keras.layers.Layer):
     def timestep_embedding(self, t: keras.KerasTensor) -> keras.KerasTensor:
         """Map a scalar timestep onto the sinusoidal basis, cos first.
 
-        Exposed as a method so the guard test can compare the BASIS against the
+        Exposed as a method so the guard test can compare the basis against the
         house layer's basis without the two MLPs in the way.
 
         :param t: Timesteps, shape ``(B,)``. Already scaled by the caller.
@@ -648,17 +603,14 @@ class DiTXATimestepEmbedder(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         args = keras.ops.expand_dims(keras.ops.cast(t, "float32"), axis=-1) * self.freqs
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-033
-        # COS FIRST (`dit.py:60`). Do NOT swap to sin-first, do NOT unify with
-        # `ScalarSinusoidalEmbedding` or the sin-first 1D helper in this module:
-        # the swap is a column permutation, so shape/norm/round-trip are blind
-        # and the model trains on a basis no checkpoint uses. decisions.md D-033.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-033: cos first, matching
+        # upstream -- swapping to sin-first is a column permutation invisible to shape/norm/round-trip checks. See decisions.md.
         embedding = keras.ops.concatenate(
             [keras.ops.cos(args), keras.ops.sin(args)], axis=-1
         )
         if self.frequency_embedding_size % 2:
             # An odd width leaves the basis one column short; upstream pads one
-            # trailing ZERO column, it does not drop a frequency.
+            # trailing zero column, it does not drop a frequency.
             embedding = keras.ops.pad(embedding, [(0, 0), (0, 1)])
         return embedding
 
@@ -669,8 +621,8 @@ class DiTXATimestepEmbedder(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Embed the timestep.
 
-        :param inputs: Timesteps, ``(B,)`` or ``(B, 1)``. **No rescale happens
-            here**: the caller is expected to have applied ``time_scale``.
+        :param inputs: Timesteps, ``(B,)`` or ``(B, 1)``. No rescale happens
+            here: the caller is expected to have applied ``time_scale``.
         :type inputs: keras.KerasTensor
         :param training: Forwarded to both Dense sub-layers.
         :type training: Optional[bool]
@@ -716,23 +668,18 @@ class DiTXATimestepEmbedder(keras.layers.Layer):
         return config
 
 
-# ---------------------------------------------------------------------
-# 2D sin-cos positional table -- pure NumPy, from facebookresearch/mae
-# ---------------------------------------------------------------------
-
-
 def get_1d_sincos_pos_embed_from_grid(
     embed_dim: int, pos: np.ndarray
 ) -> np.ndarray:
-    """Sinusoidally embed a flat array of positions, **sin first**.
+    """Sinusoidally embed a flat array of positions, sin first.
 
-    Ported verbatim from ``dit.py:621-639`` (MAE ``util/pos_embed.py``).
+    Ported from MAE's ``util/pos_embed.py`` (via upstream ``dit.py``).
 
     Two things here contradict :class:`DiTXATimestepEmbedder` and are correct
     anyway, because the two are independently specified upstream:
 
     * the concat is ``[sin, cos]``, not ``[cos, sin]``;
-    * ``omega`` is built in **float64** and the whole computation stays float64,
+    * ``omega`` is built in float64 and the whole computation stays float64,
       whereas the timestep ladder is float32.
 
     :param embed_dim: Output width per position. Must be even.
@@ -762,26 +709,25 @@ def get_2d_sincos_pos_embed_from_grid(
 ) -> np.ndarray:
     """Concatenate two 1D embeddings, one per meshgrid output.
 
-    Ported verbatim from ``dit.py:610-618``.
+    Ported from upstream ``dit.py``.
 
     .. code-block:: text
 
         grid (2, 1, G, G)   from np.meshgrid(grid_w, grid_h)  -- "w goes first"
           |
-          +-- grid[0]  value at (row, col) == col   (the W / COLUMN position)
+          +-- grid[0]  value at (row, col) == col   (the w / column position)
           |      -> get_1d(embed_dim // 2)  -> first  half of the output
           |
-          +-- grid[1]  value at (row, col) == row   (the H / ROW position)
+          +-- grid[1]  value at (row, col) == row   (the h / row position)
                  -> get_1d(embed_dim // 2)  -> second half of the output
 
-    Upstream names those halves ``emb_h`` and ``emb_w``, which is **backwards**
-    relative to what they encode -- ``emb_h = get_1d(grid[0])`` actually encodes
-    the column. That naming inversion is cosmetic and is reproduced here only in
-    the sense that the ORDER is reproduced; the names below say what the arrays
-    are. What a port must match is the order: **the first ``embed_dim // 2``
-    columns encode the column index, the last ``embed_dim // 2`` encode the row
-    index.** Swapping them preserves the shape, the dtype, every norm and every
-    per-row statistic on a square grid, so only an elementwise comparison sees it.
+    Upstream names those halves ``emb_h`` and ``emb_w``, backwards relative
+    to what they encode: ``emb_h = get_1d(grid[0])`` actually encodes the
+    column. Only the order matters for a correct port, not those names: the
+    first ``embed_dim // 2`` columns encode the column index, the last
+    ``embed_dim // 2`` encode the row index. Swapping them preserves the
+    shape, the dtype, every norm and every per-row statistic on a square
+    grid, so only an elementwise comparison sees it.
 
     :param embed_dim: Total output width. Must be even (each half is again
         halved by the 1D helper, so a multiple of 4 is the practical constraint).
@@ -809,22 +755,17 @@ def get_2d_sincos_pos_embed(
 ) -> np.ndarray:
     """Build the fixed 2D sin-cos positional table for a square patch grid.
 
-    Ported verbatim from ``dit.py:592-607``. Pure NumPy: no Keras op runs here,
-    so it is safe to call at ``build()`` time and feed to
+    Ported from upstream ``dit.py``. Pure NumPy: no Keras op runs here, so
+    it is safe to call at ``build()`` time and feed to
     ``add_weight(trainable=False, initializer=keras.initializers.Constant(...))``.
 
-    **How to install this, and how not to.** The returned array is a constant,
-    but it must still become a non-trainable WEIGHT:
-
-    * NEVER a plain tensor attribute (``self.pos_embed = ops.convert_to_tensor(
-      get_2d_sincos_pos_embed(...))``) -- that does not round-trip through
-      ``.keras`` save/load. That is the legacy ``TimestepEmbedding`` bug this
-      repo already paid for once.
-    * NEVER ``add_weight(...)`` followed by ``.assign(...)`` inside ``build()``
-      -- ``StatelessScope`` DISCARDS the assign and the table stays all zeros in
-      every real model, with no shape symptom.
-
-    The one correct form is a ``Constant`` initializer passed to ``add_weight``.
+    The returned array is a constant, but it must still become a
+    non-trainable weight: never a plain tensor attribute (does not
+    round-trip through ``.keras`` save/load), and never
+    ``add_weight(...)`` followed by ``.assign(...)`` inside ``build()``
+    (``StatelessScope`` discards the assign and the table stays all zeros
+    in every real model, with no shape symptom). The one correct form is a
+    ``Constant`` initializer passed to ``add_weight``.
 
     :param embed_dim: Width of the embedding per grid position.
     :type embed_dim: int
@@ -834,7 +775,7 @@ def get_2d_sincos_pos_embed(
     :param cls_token: Whether to prepend ``extra_tokens`` zero rows.
     :type cls_token: bool
     :param extra_tokens: Number of zero rows prepended when ``cls_token`` is
-        true. Upstream prepends only when BOTH are set; reproduced exactly.
+        true. Upstream prepends only when both are set; reproduced exactly.
     :type extra_tokens: int
     :return: ``(grid_size**2, embed_dim)``, or
         ``(extra_tokens + grid_size**2, embed_dim)`` with a cls token. float64.
@@ -852,29 +793,12 @@ def get_2d_sincos_pos_embed(
 
     grid_h = np.arange(grid_size, dtype=np.float32)
     grid_w = np.arange(grid_size, dtype=np.float32)
-    # "here w goes first" -- upstream's own annotation, and NumPy's default
-    # indexing='xy'. So grid[0] holds the COLUMN index and grid[1] the ROW index.
-    #
-    # MEASURED, and worth stating because it is the obvious mutation and it is
-    # the WRONG one: passing (grid_h, grid_w) instead is an exact NO-OP here,
-    # not a transposition. `grid_h` and `grid_w` are both `np.arange(grid_size)`
-    # -- this function takes a single `grid_size` and so can only build a SQUARE
-    # grid -- and `meshgrid(a, a)` is argument-order invariant (`np.array_equal`
-    # True on both outputs at grid_size 2, 3, 4, 7, 16). On a non-square grid the
-    # same swap does not produce a same-shape transpose either: it changes the
-    # SHAPE outright ((3, 5) vs (5, 3) for H=3, W=5). Anyone reaching for that
-    # injection to prove a guard works will get a false GREEN.
-    #
-    # The two mutations that DO transpose the table are passing indexing="ij"
-    # here, or swapping grid[0]/grid[1] (equivalently the two output halves) in
-    # get_2d_sincos_pos_embed_from_grid -- and on a square grid they are the same
-    # mutation. Either is a pure permutation: shape, dtype, every norm and every
-    # per-row statistic are IDENTICAL, so only an elementwise comparison against
-    # an independently computed destination index can see it. A model trained on
-    # the transposed table trains fine and is incompatible with every published
-    # checkpoint. Do not "clean up" the w-first meshgrid. The same fact, with the
-    # same measurement, is stated on the DiT-owned copy of these functions in
-    # layers/embedding/sincos_pos_embed_2d.py.
+    # "w goes first" (upstream's own annotation, NumPy's default indexing='xy'):
+    # grid[0] holds the column index, grid[1] the row index. Swapping to
+    # (grid_h, grid_w) is a no-op on a square grid, not a transposition -- the
+    # transposing mutations are indexing="ij" here, or swapping grid[0]/grid[1]
+    # in get_2d_sincos_pos_embed_from_grid, both invisible to shape/dtype/norm
+    # checks. Same fact, same measurement, in layers/embedding/sincos_pos_embed_2d.py.
     grid = np.meshgrid(grid_w, grid_h)
     grid = np.stack(grid, axis=0)
 

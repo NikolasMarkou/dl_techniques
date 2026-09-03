@@ -1,68 +1,12 @@
-"""``DiTXA`` -- the bidirectional bridge's cross-attention diffusion transformer.
+"""``DiTXA``, the bidirectional bridge's cross-attention diffusion
+transformer, built by the ``DiTXA`` class with size presets reachable
+through ``DiTXA.from_variant`` / ``create_ditxa``.
 
-One network runs the bridge in both directions. Text->image and image->text are
-not two models sharing weights; they are one model told, per sample, which way
-time runs. That flag selects three things at once upstream -- the conditioning
-timestep, which conditioning patch embedder reads ``x_cond``, and whether the
-raw conditioning pixels are rescaled -- and upstream selects them with a Python
-``bool`` because a PyTorch ``forward`` may branch on one.
-
-A Keras ``call()`` may not. So ``direction`` here is a **per-sample tensor**:
-both conditioning embedders are built and both run on every sample, and
-``keras.ops.where`` picks the answer (D-005). That buys a single traced graph,
-stock ``fit()``, and mixed-direction batches; it costs one extra patch-embedding
-convolution per forward pass. The cost was measured before it was accepted, and
-the per-row locality of the selection was measured too: flipping one sample's
-flag moves that sample's output and moves every other row by exactly ``0.0``.
-
-.. code-block:: text
-
-    x_t (B,H,W,C)      t (B,)   y (B,)     x_cond (B,H,W,C)   direction (B,)
-        |                |        |              |               |
-        v                v        v              |               | 0 = forward
-    PatchEmbedding2D  t_embedder  |              |               | 1 = reverse
-    (kernel=stride=p) (x1000)     |              |               |
-        |                |        |     +--------+--------+      |
-        v                |        |     |                 |      |
-    + pos_embed          |        |  x_cond * fwd_scale  x_cond  |
-    (fixed 2D sin-cos,   |        |     |                 |      |
-     ONE table, shared)  |        |     v                 v      |
-        |                |        |  cond_embedder_   cond_embedder_
-        |                |        |     forward          reverse
-        |                |        |     |                 |      |
-        |                |        |     +----> where(dir) <------+
-        |                |        |              |
-        |         t_cond = where(dir, 1, 0)      v
-        |                |        |          + pos_embed   (the SAME table)
-        |          cond_t_embedder|              |
-        |            (x1000)      |              v
-        |                |        |          * cond_mask[:, None, None]
-        +--> c = (t + t_cond) / 2 + y           |   ONCE, AFTER pos_embed:
-                         |                      |   a masked sample's stream is
-                         |                      |   the EXACT zero tensor
-                         v                      v
-                    +----------------------------------+
-                    |  depth x DiTXABlock(x, c, cond)  |
-                    |  12-way adaLN, msa -> xa -> mlp  |
-                    +----------------------------------+
-                                     |
-                                     v
-                      DiTXAFinalLayer: 2-way adaLN,
-                      Dense(p*p*out_channels), unpatchify
-                                     |
-                                     v
-                            output (B, H, W, C)
-
-Two upstream details are reproduced rather than repaired, and both are recorded
-in ``PORT_NOTES.md``:
-
-* ``c = (t + t_cond) / 2 + y`` -- the average, not ``t + y`` as in plain DiT.
-* ``forward_cond_scale`` multiplies the raw ``x_cond`` pixels in the **forward
-  direction only**. Upstream's comment justifies it as ``sqrt(4096) = 64``,
-  which reconciles with neither the per-token ``token_scale = sqrt(64) = 8``
-  that actually builds ``x_cond``'s bridge tensor nor anything else derivable
-  from the ``sd`` preset. The CODE is ported; the comment's arithmetic is not
-  treated as a derived constant, and the default stays ``1.0``.
+Text-to-image and image-to-text are not two models sharing weights; they
+are one model told, per sample, which way time runs, via a ``direction``
+tensor rather than a Python branch. See :class:`DiTXA` for the forward-path
+diagram and the two upstream oddities this port reproduces rather than
+repairs.
 
 References:
     - Peebles & Xie (2023). *Scalable Diffusion Models with Transformers*.
@@ -84,10 +28,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import keras
 import numpy as np
 
-# ---------------------------------------------------------------------
-# Local Imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.layers.embedding.class_label_embedding import ClassLabelEmbedding
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.stochastic_depth import StochasticDepth
@@ -98,10 +38,6 @@ from dl_techniques.utils.logger import logger
 
 from .blocks import DiTXABlock, DiTXATimestepEmbedder, get_2d_sincos_pos_embed
 from .config import PROMPT_NUM_CLASSES
-
-# ---------------------------------------------------------------------
-# Module constants
-# ---------------------------------------------------------------------
 
 #: Keys :meth:`DiTXA.call` requires of its input dictionary.
 REQUIRED_INPUT_KEYS: Tuple[str, ...] = ("x_t", "t", "y", "x_cond", "direction")
@@ -121,19 +57,12 @@ NUM_FINAL_ADALN_CHUNKS: int = 2
 def flattened_linear_xavier(
     fan_in: int, fan_out: int
 ) -> keras.initializers.Initializer:
-    """Xavier-uniform for a conv kernel treated as a **flattened** ``Linear``.
+    """Xavier-uniform for a conv kernel treated as a flattened ``Linear``.
 
-    # DECISION plan-2026-09-02T094601-77d4a04e/D-016
-    WHAT NOT TO DO: do not pass ``"glorot_uniform"`` to :class:`PatchEmbedding2D`
-    and call it equivalent. Keras computes a convolution's fans over the full
-    kernel shape ``(p, p, C_in, D)``, so ``fan_out = p * p * D``; upstream
-    reshapes the kernel to ``(D, p * p * C_in)`` first (``dit.py:204-207``), so
-    its ``fan_out`` is ``D`` with **no** ``p * p`` factor. At ``p = 2`` that is a
-    4x difference in ``fan_out`` and a real difference in the sampled range,
-    with no shape symptom and no error. The exact upstream limit is written here
-    from statically known integers instead. See decisions.md D-016.
+    # DECISION plan-2026-09-02T094601-77d4a04e/D-016: do not pass "glorot_uniform"
+    # to PatchEmbedding2D as equivalent -- Keras computes fan_out over the full kernel (p*p*D), upstream reshapes first (fan_out=D), a 4x difference at p=2. See decisions.md.
 
-    A **fresh** initializer object is returned on every call: a shared
+    A fresh initializer object is returned on every call: a shared
     :class:`~keras.initializers.Initializer` instance draws bit-identically
     forever, and this model has three patch embedders.
 
@@ -169,10 +98,10 @@ def _as_batch_vector(value: Any) -> Any:
 class DiTXAFinalLayer(keras.layers.Layer):
     """2-way adaLN, a zero-init projection, and the channels-last unpatchify.
 
-    The projection is zero in weight **and** bias, so a freshly built model
-    predicts exactly zero. That is deliberate (adaLN-Zero): combined with the
-    zero-init gates in every block it makes the whole stack the zero map at
-    step 0, which is what makes a 28-block stack trainable.
+    The projection is zero in weight and bias, so a freshly built model
+    predicts exactly zero (adaLN-Zero). Combined with the zero-init gates in
+    every block, this makes the whole stack the zero map at step 0, which is
+    what makes a 28-block stack trainable.
 
     .. code-block:: text
 
@@ -192,7 +121,7 @@ class DiTXAFinalLayer(keras.layers.Layer):
                                     v
                             (B, H, W, out_channels)
 
-    The width dimension is written ``w * p`` on purpose. Upstream writes
+    The width dimension is written ``w * p``. Upstream writes
     ``h * p`` for both (``dit.py:239``), which is correct only because it also
     asserts ``H == W``; copying the shortcut would make the first non-square
     preset a silent transposition rather than an error.
@@ -264,8 +193,8 @@ class DiTXAFinalLayer(keras.layers.Layer):
         self.norm_final = keras.layers.LayerNormalization(
             epsilon=self.norm_epsilon, center=False, scale=False, name="norm_final"
         )
-        # Four SEPARATE Zeros() instances, one per initializer slot. See D-016's
-        # sibling rule: an Initializer instance is never shared across layers.
+        # Four separate Zeros() instances, one per initializer slot -- an
+        # Initializer instance is never shared across layers.
         self.adaln_dense = keras.layers.Dense(
             NUM_FINAL_ADALN_CHUNKS * self.hidden_size,
             use_bias=True,
@@ -382,8 +311,55 @@ class DiTXAFinalLayer(keras.layers.Layer):
 class DiTXA(keras.Model):
     """Bidirectional bridge diffusion transformer with cross-attention.
 
-    See the module docstring for the forward-path diagram and for the two
-    upstream oddities this port reproduces deliberately.
+    One network runs the bridge in both directions: ``direction`` is a
+    per-sample tensor, not a Python branch, so both conditioning embedders
+    are built and run on every sample and ``keras.ops.where`` picks the
+    answer. That costs one extra patch-embedding convolution per forward
+    pass and buys a single traced graph, stock ``fit()``, and
+    mixed-direction batches.
+
+    .. code-block:: text
+
+        x_t (B,H,W,C)      t (B,)   y (B,)     x_cond (B,H,W,C)   direction (B,)
+            |                |        |              |               |
+            v                v        v              |               | 0 = forward
+        PatchEmbedding2D  t_embedder  |              |               | 1 = reverse
+        (kernel=stride=p) (x1000)     |              |               |
+            |                |        |     +--------+--------+      |
+            v                |        |     |                 |      |
+        + pos_embed          |        |  x_cond * fwd_scale  x_cond  |
+        (fixed 2D sin-cos,   |        |     |                 |      |
+         one table, shared)  |        |     v                 v      |
+            |                |        |  cond_embedder_   cond_embedder_
+            |                |        |     forward          reverse
+            |                |        |     |                 |      |
+            |                |        |     +----> where(dir) <------+
+            |                |        |              |
+            |         t_cond = where(dir, 1, 0)      v
+            |                |        |          + pos_embed   (the same table)
+            |          cond_t_embedder|              |
+            |            (x1000)      |              v
+            |                |        |          * cond_mask[:, None, None]
+            +--> c = (t + t_cond) / 2 + y           |   applied once, after pos_embed:
+                             |                      |   a masked sample's stream is
+                             |                      |   the exact zero tensor
+                             v                      v
+                        +----------------------------------+
+                        |  depth x DiTXABlock(x, c, cond)  |
+                        |  12-way adaLN, msa -> xa -> mlp  |
+                        +----------------------------------+
+                                         |
+                                         v
+                          DiTXAFinalLayer: 2-way adaLN,
+                          Dense(p*p*out_channels), unpatchify
+                                         |
+                                         v
+                                output (B, H, W, C)
+
+    Two upstream details are reproduced rather than repaired: ``c = (t +
+    t_cond) / 2 + y`` is an average, not ``t + y`` as in plain DiT, and
+    ``forward_cond_scale`` multiplies the raw ``x_cond`` pixels in the
+    forward direction only. See ``PORT_NOTES.md`` for both.
 
     :param input_size: Side of the square bridge tensor. Upstream asserts
         ``H == W``; so does this port, and the fixed positional table is built
@@ -430,7 +406,7 @@ class DiTXA(keras.Model):
         ``qkv_bias=True``.
     :type use_bias: bool
     :param frequency_embedding_size: Width of both timestep embedders'
-        sinusoidal basis. Decoupled from ``hidden_size`` on purpose.
+        sinusoidal basis, decoupled from ``hidden_size``.
     :type frequency_embedding_size: int
     :param label_seed: Seed of the label embedder's own dropout RNG.
     :type label_seed: Optional[int]
@@ -605,8 +581,7 @@ class DiTXA(keras.Model):
 
         patch_fan_in = self.patch_size * self.patch_size * self.in_channels
 
-        # -- CREATE sub-layers -------------------------------------------
-        # Every `flattened_linear_xavier(...)` call below returns a FRESH
+        # Every flattened_linear_xavier(...) call below returns a fresh
         # instance; the three patch embedders must not share one.
         self.x_embedder = PatchEmbedding2D(
             patch_size=self.patch_size,
@@ -671,15 +646,8 @@ class DiTXA(keras.Model):
             for i in range(self.depth)
         ]
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-017
-        # WHAT NOT TO DO: do not wrap the block's OUTPUT in StochasticDepth.
-        # `DiTXABlock` performs its own three residual adds internally, so
-        # `drop_path(block(x))` would drop the residual stream itself and zero
-        # the whole activation for that sample -- not the block's contribution.
-        # The delta form below drops exactly the contribution, and at rate 0
-        # (upstream's only behaviour, and this model's default) NO layer is
-        # created at all, so `call()` returns the block output untouched rather
-        # than `x + (out - x)`. See decisions.md D-017.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-017: apply StochasticDepth to
+        # the block's delta, never its raw output -- DiTXABlock does its own residual adds, so dropping the output zeros the whole activation, not the contribution. See decisions.md.
         rates = linear_drop_path_rates(self.depth, self.drop_path_rate)
         self.drop_path_rates = list(rates)
         self.drop_paths = [
@@ -700,8 +668,6 @@ class DiTXA(keras.Model):
         )
 
         self.pos_embed = None
-
-    # -- shape plumbing ---------------------------------------------------
 
     @staticmethod
     def _input_shapes(input_shape: Any) -> Dict[str, Tuple[Optional[int], ...]]:
@@ -751,10 +717,8 @@ class DiTXA(keras.Model):
         c_shape = (batch, self.hidden_size)
 
         # The fixed 2D sin-cos table, computed with NumPy and installed through a
-        # Constant initializer. NEVER a plain tensor attribute (it would not
-        # survive a `.keras` round trip) and NEVER `add_weight(...).assign(...)`
-        # inside build() (StatelessScope discards the assign and leaves the table
-        # all zeros in every real model, with no shape symptom).
+        # Constant initializer -- never a plain tensor attribute (no .keras round
+        # trip) and never add_weight().assign() inside build() (StatelessScope discards it).
         table = get_2d_sincos_pos_embed(self.hidden_size, self.grid_size)
         self.pos_embed = self.add_weight(
             name="pos_embed",
@@ -791,8 +755,6 @@ class DiTXA(keras.Model):
             self.num_patches,
         )
 
-    # -- forward path -----------------------------------------------------
-
     def _is_reverse(self, direction: Any) -> Any:
         """``(B,)`` direction flag -> a ``(B, 1, 1)`` boolean selector.
 
@@ -828,12 +790,8 @@ class DiTXA(keras.Model):
         """
         is_reverse = self._is_reverse(direction)
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-005
-        # `forward_cond_scale` is FORWARD-ONLY (`dit.py:522-536`). Do NOT hoist
-        # it onto `x_cond` before this split and do NOT fold it into a single
-        # embedder: selecting between two already-embedded streams is what makes
-        # "the reverse embedder never sees a scaled input" structural, not a
-        # convention. decisions.md D-005.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-005: forward_cond_scale applies
+        # only inside the forward branch, before two separate embedders -- selecting between already-embedded streams keeps that structural, not conventional. See decisions.md.
         forward_tokens = self.cond_embedder_forward(
             x_cond * self.forward_cond_scale, training=training
         )
@@ -842,11 +800,8 @@ class DiTXA(keras.Model):
 
         cond_tokens = cond_tokens + keras.ops.cast(self.pos_embed, cond_tokens.dtype)
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-034
-        # The mask is applied AFTER the positional add, never before it
-        # (`dit.py:533-542`). Masking first leaves a masked sample carrying the
-        # positional signal instead of the exact zero tensor -- same shape, same
-        # dtype, finite, and it makes CFG's null pass a positions-only pass.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-034: apply the mask after the
+        # positional add, never before -- masking first leaves a masked sample carrying the positional signal instead of the exact zero tensor. See decisions.md.
         if cond_mask is not None:
             mask = keras.ops.cast(
                 _as_batch_vector(cond_mask), cond_tokens.dtype
@@ -904,11 +859,8 @@ class DiTXA(keras.Model):
             t_cond * self.time_scale, training=training
         )
         y_emb = self.y_embedder(y, training=training)
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-035
-        # The AVERAGE of the two timestep embeddings, not their sum and not
-        # `t + y` as in plain DiT (`dit.py:531`). Do NOT drop the `/ 2` and do
-        # NOT reuse `t_embedder` for `t_cond`: both only rescale/retie what the
-        # zero-init adaLN sees, so nothing raises. decisions.md D-035.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-035: average the two timestep
+        # embeddings, not their sum and not t + y as in plain DiT -- dropping the /2 or reusing t_embedder for t_cond raises nothing but changes what adaLN sees. See decisions.md.
         c = (t_emb + t_cond_emb) / 2.0 + y_emb
 
         cond_tokens = self._embed_conditioning(
@@ -930,7 +882,7 @@ class DiTXA(keras.Model):
         cfg_scale: float,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Classifier-free guidance, in upstream's **non-standard** algebra.
+        """Classifier-free guidance, in upstream's non-standard algebra.
 
         Two forward passes: one with the conditioning stream intact, one with
         ``cond_mask`` all-false so every conditioning token is the exact zero
@@ -938,14 +890,14 @@ class DiTXA(keras.Model):
 
             cond + cfg_scale * (cond - uncond)
 
-        **This is NOT the DiT paper's formula.** The textbook form is
-        ``uncond + s * (cond - uncond)``; upstream (``dit.py:584``) starts from
-        ``cond``, which is the textbook formula evaluated at ``s + 1``. The two
-        differ by exactly one unit of guidance at every ``s``, so a "corrected"
-        implementation reproduces none of the reference results at any published
-        ``cfg_scale`` -- and produces perfectly plausible images while doing it.
-        Ported as-written, deliberately; recorded in ``PORT_NOTES.md`` and
-        pinned by ``test_the_cfg_formula_is_the_nonstandard_one.py``.
+        This is not the DiT paper's formula. The textbook form is
+        ``uncond + s * (cond - uncond)``; upstream starts from ``cond``,
+        which is the textbook formula evaluated at ``s + 1``. The two differ
+        by exactly one unit of guidance at every ``s``, so a "corrected"
+        implementation reproduces none of the reference results at any
+        published ``cfg_scale`` and produces perfectly plausible images
+        while doing it. Ported as written; pinned by
+        ``test_the_cfg_formula_is_the_nonstandard_one.py``.
 
         Note the consequence at ``s = 0``: this formula returns ``cond``
         unchanged, so guidance is off. The sampler still gates on
@@ -975,13 +927,8 @@ class DiTXA(keras.Model):
 
         cond = self(cond_inputs, training=training)
         uncond = self(uncond_inputs, training=training)
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-018
-        # Do NOT change this to the textbook `uncond + cfg_scale * (cond - uncond)`.
-        # It is not a typo upstream and it is not a bug: it is the formula the
-        # reference checkpoints and every published `cfg_scale` value were tuned
-        # against, and it equals the textbook form at `cfg_scale + 1`. Nothing in
-        # a shape, dtype, finiteness or round-trip test can tell the two apart.
-        # See decisions.md D-018.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-018: keep this non-textbook
+        # form -- it is what the reference checkpoints and every published cfg_scale value were tuned against, equal to the textbook form at cfg_scale + 1. See decisions.md.
         return cond + cfg_scale * (cond - uncond)
 
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
@@ -1084,7 +1031,7 @@ class DiTXA(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
         if pretrained is True:
-            # Raised BEFORE anything is allocated, so a caller who asked for
+            # Raised before anything is allocated, so a caller who asked for
             # trained weights never receives a randomly initialized model.
             cls._download_weights(variant)
 

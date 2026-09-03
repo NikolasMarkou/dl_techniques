@@ -1,82 +1,28 @@
-"""The four base processes the text<->image bridge is built on.
+"""The four base processes the text<->image bridge is built on, and the
+never-narrow dtype helper (``bridge_math_dtype``) every closed form runs in.
 
-A bridge diffusion needs a *base* stochastic process to bridge: a law for how a
-sample wanders between the two anchored endpoints when nothing is conditioning
-it. Three quantities specify that law completely, and the whole port depends on
-them being right:
+A bridge diffusion needs a base stochastic process: a law for how a sample
+wanders between the two anchored endpoints when nothing is conditioning it.
+Three quantities specify that law: ``sigma(t)``, the diffusion coefficient;
+``phi(start, end)``, the deterministic drift transition
+``exp(-A*(end-start))``, identically ``1`` for every driftless variant; and
+``C(start, t_a, t_b)``, the covariance ``Cov(X_{t_a}, X_{t_b} | X_start)``.
+``C`` is the one that matters most: both analytic score targets divide by
+it, it is exactly zero at the anchored endpoint, and a wrong constant
+silently mistrains the model rather than crashing. Every closed form below
+is pinned to hand-derived float64 golden values in
+``tests/.../test_the_sde_closed_forms.py``.
 
-``sigma(t)``
-    The diffusion coefficient at time ``t`` -- how violently the process is
-    shaken there. It multiplies the Brownian increment of every sampler step.
-``phi(start, end)``
-    The deterministic transition factor of the drift, ``exp(-A*(end-start))``.
-    It is identically ``1`` for every driftless (``A == 0``) variant.
-``C(start, t_a, t_b)``
-    The covariance ``Cov(X_{t_a}, X_{t_b} | X_start)``. For a driftless process
-    it is simply ``\\int_start^{min(t_a,t_b)} sigma(s)^2 ds``.
-
-``C`` is the dangerous one. It DIVIDES both analytic score targets and scales
-both direction-specific loss weightings, and it is exactly zero at the anchored
-endpoint, so a wrong constant is a silently mistrained model rather than a
-crash. Every closed form below is pinned to hand-derived float64 golden values
-in ``tests/.../test_the_sde_closed_forms.py``.
-
-The bridge timeline::
-
-    t = 0                                                          t = 1
-    text endpoint                                          image endpoint
-    x_0 (packed token embeddings)                 x_1 (VAE image latent)
-      |------------------------------------------------------------|
-      |                     x_t ~ N(mu(t), s^2(t) I)                |
-      |                                                             |
-      |   mu(t)  = phi(0,t) x_0 + C(0,t,1)/C(0,1,1) (x_1 - phi(0,1) x_0)
-      |   s^2(t) = C(0,t,t) - C(0,t,1)^2 / C(0,1,1)                 |
-      |                                                             |
-      |   C(0,t,t) -> 0                             C(t,1,1) -> 0   |
-      |   (reverse target divides by it)   (forward target does)    |
-
-    PeriodicVolatilitySDE, alpha = 0.95, k = 1.0, eps = 0.05:
-
-      sigma
-      1.00 |               ****
-           |            ***    ***
-           |          **          **
-      0.50 |        **              **
-           |      **                  **
-           |   ***                      ***
-      0.05 |***                            ****
-           +-------------------------------------> t
-          0.0        0.25      0.5       0.75      1.0
-
-    CosineDecayingVolatilitySDE is the SAME curve shifted by one time unit
-    (``k = 0.5``, ``sigma(t) = Periodic.sigma(t - 1)``), so it starts LOUD at
-    ``alpha + eps`` and decays monotonically to ``eps``:
-
-      sigma
-      1.00 |****
-           |    ****
-      0.50 |        ****
-           |            *****
-      0.05 |                 **********
-           +-------------------------------------> t
-          0.0        0.25      0.5       0.75      1.0
-
-Two deliberate divergences from upstream, both recorded in ``decisions.md``:
-
-1. **No ``score_network`` attribute.** Upstream stores the network on the SDE
-   object (``SDE.__init__(self, A, score_network)``). These classes are pure
-   math objects; the network is passed in at sampling time. See D-009.
-2. **``dX_t`` / ``simulate`` take the network as an argument.** Same reason:
-   the sampler is a method on the math object, but the network reaches it
-   through the call, and passing ``score_network=None`` raises rather than
-   silently sampling from the base process.
+Unlike upstream, these classes store no ``score_network`` attribute (they
+are pure math objects; the network is passed in at sampling time, see
+D-009), and ``dX_t``/``simulate`` take the network as an argument rather
+than raise if none is supplied.
 
 References:
-    - Upstream ``sde_utils_sde.py``, staged verbatim under the plan's
-      ``reference/`` directory.
-    - ``findings/source-model-semantics.md`` section 3 -- the formula table every
-      closed form here is transcribed from, and section 4 for the sampler that
-      will consume them.
+    - Upstream ``sde_utils_sde.py``.
+    - ``findings/source-model-semantics.md`` section 3, the formula table
+      every closed form here is transcribed from, and section 4 for the
+      sampler that consumes them.
 """
 
 import math
@@ -84,31 +30,19 @@ from typing import Any, Dict, Optional
 
 import keras
 
-# ---------------------------------------------------------------------
-# Local Imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
 
-# ---------------------------------------------------------------------
-# Never-narrow working dtype
-# ---------------------------------------------------------------------
 
-
-# DECISION plan-2026-09-02T094601-77d4a04e/D-010
-# Do NOT replace this with an import from `losses/brier_spiegelhalters_ztest_loss.py`
-# or the two other hand-rolled copies: all three are module-private and promoting one
-# is a repo-wide refactor this port has no gate for. Do NOT add a fifth copy either --
-# every module in this package imports THIS one. See decisions.md D-010.
+# DECISION plan-2026-09-02T094601-77d4a04e/D-010: do not replace with an import
+# from another hand-rolled copy, and do not add a fifth -- every module in this package imports this one. See decisions.md.
 def bridge_math_dtype(*dtypes: Any) -> str:
     """Return the never-narrowing dtype the bridge closed forms run in.
 
-    ``C`` is ``O(1e-4)`` near either endpoint and is then DIVIDED by, so a
-    ``mixed_float16`` policy is an accuracy hazard rather than a speed win. The
-    rule is a FLOOR, ``max(inputs, float32)``, not a hard-coded ``"float32"``:
-    pinning float32 would silently narrow a float64 policy, which is the exact
-    mistake the floor exists to prevent.
+    ``C`` is ``O(1e-4)`` near either endpoint and is then divided by, so a
+    ``mixed_float16`` policy is an accuracy hazard rather than a speed win.
+    The rule is a floor, ``max(inputs, float32)``, not a hard-coded
+    ``"float32"``, so a float64 policy is never silently narrowed.
 
     :param dtypes: Candidate dtypes -- typically the input tensors' dtypes.
     :type dtypes: Any
@@ -118,15 +52,8 @@ def bridge_math_dtype(*dtypes: Any) -> str:
     for dtype in dtypes:
         if dtype is None:
             continue
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-015
-        # `getattr(dtype, "name", None) or str(dtype)` rather than
-        # `keras.backend.standardize_dtype`: the Keras-2-residue guard in
-        # `tests/test_the_keras2_backend_calls_are_gone.py` forbids any
-        # `keras.backend.*` call across all of `src/`, and a backend tensor's dtype
-        # already carries its own `.name` (a `tf.DType` stringifies as
-        # "<dtype: 'float64'>", so `str` alone is not enough). A plain-string
-        # dtype has no `.name` and falls through to `str` unchanged.
-        # See decisions.md D-015.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-015: name via getattr(dtype,
+        # "name", None) or str(dtype), never keras.backend.standardize_dtype -- that Keras-2 call is banned across src/. See decisions.md.
         if (getattr(dtype, "name", None) or str(dtype)) == "float64":
             return "float64"
     return "float32"
@@ -138,7 +65,7 @@ def _expand_like(scalars: Any, reference: Any) -> Any:
     ``t`` and every quantity derived from it (``sigma(t)``, ``phi``, ``C``) is
     one value per sample, while the bridge tensor is rank-4 in production.
     Broadcasting a ``(B,)`` against a ``(B, H, W, C)`` without an explicit
-    reshape aligns it with the LAST axis, silently weighting channels instead of
+    reshape aligns it with the last axis, silently weighting channels instead of
     samples -- a wrong answer with the right shape.
 
     Interface contract: returns ``scalars`` unchanged when either operand is
@@ -214,18 +141,10 @@ def _as_working(*tensors: Any) -> Any:
     return tuple(keras.ops.cast(x, dtype) for x in converted)
 
 
-# ---------------------------------------------------------------------
-# Base class
-# ---------------------------------------------------------------------
-
-
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.sde")
 class BridgeSDE:
-    # DECISION plan-2026-09-02T094601-77d4a04e/D-009
-    # Do NOT add a `score_network` attribute the way upstream does. It makes the
-    # object unserializable (get_config would have to embed a whole DiTXA or drop
-    # it) and untestable without a model. Pass the network to `dX_t`/`simulate`.
-    # See decisions.md D-009.
+    # DECISION plan-2026-09-02T094601-77d4a04e/D-009: no score_network attribute --
+    # it would make the object unserializable and untestable without a model. Pass the network to dX_t/simulate instead. See decisions.md.
     """Interface of a bridge base process: ``sigma``, ``phi`` and ``C``.
 
     Concrete subclasses supply the three closed forms. The base raises for all
@@ -239,8 +158,6 @@ class BridgeSDE:
 
     def __init__(self, A: float = 0.0) -> None:
         self.A = float(A)
-
-    # -- the three closed forms -----------------------------------------
 
     def sigma(self, t: Any) -> Any:
         """Diffusion coefficient at time ``t``.
@@ -287,8 +204,6 @@ class BridgeSDE:
             f"{type(self).__name__} does not define the base-process covariance C"
         )
 
-    # -- sampler surface --------------------------------------------------
-
     def _time_vector(self, x_t: Any, t_value: float) -> Any:
         """A ``(B,)`` constant-time vector matching ``x_t``'s batch and dtype."""
         work = bridge_math_dtype(x_t.dtype)
@@ -325,15 +240,8 @@ class BridgeSDE:
         }
         if cond_mask is not None:
             inputs["cond_mask"] = cond_mask
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-018
-        # Do NOT "simplify" this to always calling `forward_with_cfg` and letting
-        # `cfg_scale = 0` be a no-op. Upstream gates on `if cfg_scale > 0`
-        # (`sde_utils_sde.py:18`) and the gate is load-bearing for COST, not for
-        # value: `forward_with_cfg` runs the network TWICE, so an ungated call
-        # doubles every sampler step of every unguided run. The two formulas do
-        # coincide at `s = 0` (this port's `cond + 0*(cond - uncond) == cond`),
-        # which is exactly why no value-level test can see the regression.
-        # See decisions.md D-018.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-018: keep this gate on
+        # cfg_scale > 0, matching upstream -- an ungated forward_with_cfg call runs the network twice on every step, and s=0 hides the regression. See decisions.md.
         if cfg_scale > 0:
             score = score_network.forward_with_cfg(
                 inputs, cfg_scale=cfg_scale, training=training
@@ -368,13 +276,13 @@ class BridgeSDE:
             A_eff = +A if reverse else -A
             dX_t  = A_eff * x_t * dt + sigma(t) * dB_P
 
-        The ``ode=True`` branch does **not** integrate the full probability-flow
-        drift. It integrates only the model's DEVIATION from the analytically
+        The ``ode=True`` branch does not integrate the full probability-flow
+        drift. It integrates only the model's deviation from the analytically
         known base-process score for the endpoint the trajectory is anchored to::
 
             dX_t = 1/2 * sigma(t)^2 * (score - analytic_base_score) * dt
 
-        and the analytic term is the **swapped** one: ``reverse`` uses
+        and the analytic term is the swapped one: ``reverse`` uses
         :func:`~...bridge_process.score_target_forward` (upstream's
         ``grad_wrt_x_t_log_p_base_x_1_cond_x_t``) because a reverse trajectory
         starts at ``t = 1`` and is anchored to ``x_1``; the forward direction
@@ -486,7 +394,7 @@ class BridgeSDE:
             branch =     SDE       ODE?      ODE?      ODE?
                           ^          ^
                           |          `-- ode=True from here on
-                          `-- ALWAYS the SDE branch, even when ode=True
+                          `-- always the SDE branch, even when ode=True
 
         The first-step skip is ``ode and i > 0``, and it is not a style choice.
         The analytic base score divides by ``C(start, t, t)``, which is exactly
@@ -536,15 +444,8 @@ class BridgeSDE:
         if x_cond is None:
             x_cond = x_t
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-019
-        # Do NOT pass a bare integer `seed` down to the per-step
-        # `keras.random.normal`. `keras.random.*` is STATELESS given an int: the
-        # same integer draws the same tensor every call, so every step of the
-        # trajectory would get the IDENTICAL Brownian increment. The result is
-        # still finite, still shaped right, and still varies with the seed, so
-        # no finiteness, shape or reproducibility arm can see it. Promoting the
-        # int to one SeedGenerator here -- once, outside the loop -- is what
-        # makes the increments independent. See decisions.md D-019.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-019: promote a bare int seed to
+        # one SeedGenerator here, once -- keras.random.* is stateless given an int, so every step would get an identical increment otherwise. See decisions.md.
         if seed is not None and not isinstance(seed, keras.random.SeedGenerator):
             seed = keras.random.SeedGenerator(seed)
 
@@ -572,8 +473,6 @@ class BridgeSDE:
                 trajectory.append(x_t)
         return trajectory if return_all else x_t
 
-    # -- serialization ----------------------------------------------------
-
     def get_config(self) -> Dict[str, Any]:
         """:return: Constructor arguments. :rtype: Dict[str, Any]"""
         return {"A": self.A}
@@ -588,9 +487,6 @@ class BridgeSDE:
         return f"{type(self).__name__}({args})"
 
 
-# ---------------------------------------------------------------------
-# Uniform volatility -- Brownian motion (A = 0) or Ornstein-Uhlenbeck (A != 0)
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.sde")
@@ -659,9 +555,6 @@ class UniformVolatilitySDE(BridgeSDE):
         return config
 
 
-# ---------------------------------------------------------------------
-# Periodic volatility
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.sde")
@@ -680,7 +573,7 @@ class PeriodicVolatilitySDE(BridgeSDE):
                      + (a^2/8)       cos(4 pi k s) second harmonic
 
     whose antiderivative is the ``first_term - second_term + third_term`` below.
-    The MINUS on the middle term is the sign of the fundamental and it is the
+    The minus on the middle term is the sign of the fundamental and it is the
     single easiest thing to get wrong; it is golden-pinned.
 
     :param alpha: Peak-to-trough amplitude of the volatility.
@@ -748,28 +641,23 @@ class PeriodicVolatilitySDE(BridgeSDE):
         return config
 
 
-# ---------------------------------------------------------------------
-# Cosine-decaying volatility
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.sde")
 class CosineDecayingVolatilitySDE(PeriodicVolatilitySDE):
-    """Periodic volatility at ``k = 0.5``, shifted so it DECAYS across the bridge.
+    """Periodic volatility at ``k = 0.5``, shifted so it decays across the bridge.
 
-    Two things define it, and a port that ships only the first is wrong while
-    looking right:
+    Two things define it: ``k = 0.5``, a half cycle over the unit interval
+    so there is no second peak, and a ``t - 1`` time shift applied to both
+    ``sigma`` and ``C``, which turns the rising half-cosine into a falling
+    one::
 
-    1. ``k = 0.5`` -- a half cycle over the unit interval, so no second peak.
-    2. A ``t - 1`` time shift applied to **both** ``sigma`` and ``C``, which
-       turns the rising half-cosine into a falling one::
+        sigma(t) = alpha/2 * (1 + cos(pi t)) + eps
+                   alpha + eps  at t = 0   ->   eps  at t = 1
 
-           sigma(t) = alpha/2 * (1 + cos(pi t)) + eps
-                      alpha + eps  at t = 0   ->   eps  at t = 1
-
-    Beware ``t = 0.5``: it is exactly a half-period of the ``k = 0.5`` cosine, so
-    the shift is INVISIBLE there (``sigma(0.5) = 0.525`` with or without it). Any
-    guard on the shift must sample somewhere else.
+    At ``t = 0.5`` the shift is invisible (``sigma(0.5) = 0.525`` with or
+    without it, exactly a half-period of the ``k = 0.5`` cosine); any guard
+    on the shift must sample somewhere else.
 
     :param alpha: Peak-to-trough amplitude of the volatility.
     :type alpha: float
@@ -786,7 +674,7 @@ class CosineDecayingVolatilitySDE(PeriodicVolatilitySDE):
         return super().sigma(t - 1.0)
 
     def C(self, start: Any, t_a: Any, t_b: Any) -> Any:
-        """``Periodic.C(start - 1, t_a - 1, t_b - 1)`` -- the SAME shift.
+        """``Periodic.C(start - 1, t_a - 1, t_b - 1)``, the same shift.
 
         Shifting ``sigma`` alone leaves ``C`` inconsistent with its own
         integrand while every ``sigma`` assertion stays green.
@@ -801,24 +689,21 @@ class CosineDecayingVolatilitySDE(PeriodicVolatilitySDE):
         return config
 
 
-# ---------------------------------------------------------------------
-# Flow-matching baseline -- deliberately NOT a diffusion
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.sde")
 class FlowMatchingODE(BridgeSDE):
     """Deterministic rectified-flow transport wearing the bridge SDE interface.
 
-    It has no diffusion coefficient, no transition factor and no covariance --
-    not "not yet", but *never*: the transport is deterministic, so the three
-    quantities are undefined rather than unimplemented. All three therefore
-    RAISE. Returning ``0.0`` would be worse than a crash, because the bridge
-    process math divides by ``C`` and a zero there yields a plausible-looking
-    infinite or degenerate score with no exception to trace it back to.
+    It has no diffusion coefficient, no transition factor and no covariance:
+    the transport is deterministic, so the three quantities are undefined
+    rather than unimplemented, and all three raise. Returning ``0.0`` would
+    be worse than a crash, because the bridge process math divides by ``C``
+    and a zero there yields a plausible-looking infinite or degenerate score
+    with no exception to trace it back to.
 
-    The paper uses this variant as a deliberate failure case, which is why it is
-    in scope at all (see D-002).
+    The paper uses this variant as a failure case, which is why it is in
+    scope at all (see D-002).
 
     :param force_unconditional: Sample with the conditioning stream masked off.
         Read by :meth:`dX_t`, which then feeds the network an all-false
@@ -872,19 +757,19 @@ class FlowMatchingODE(BridgeSDE):
             signed_dt = -dt if reverse else dt
             dX_t      = velocity * signed_dt
 
-        There is no Brownian term, no drift term and **no call to** ``sigma``,
-        ``phi`` or ``C`` anywhere on this path -- which is exactly what lets
-        those three keep raising while the variant remains sampleable. The
-        inherited :meth:`BridgeSDE.dX_t` cannot serve here: its very first step
-        after the network call is ``self.sigma(t)``.
+        There is no Brownian term, no drift term and no call to ``sigma``,
+        ``phi`` or ``C`` anywhere on this path, which lets those three keep
+        raising while the variant remains sampleable. The inherited
+        :meth:`BridgeSDE.dX_t` cannot serve here: its very first step after
+        the network call is ``self.sigma(t)``.
 
-        ``ode`` and ``x_start`` are **accepted and ignored**, matching upstream
-        (``reference/sde_utils_sde.py:69-82``, whose override takes both and
-        references neither). A deterministic flow has no separate
-        probability-flow branch to switch into: the transport already *is* the
-        ODE, and the ``ode=True`` branch of the base class exists only to
-        subtract an analytic base score that needs ``C``. ``seed`` is ignored
-        for the same reason -- nothing here is stochastic.
+        ``ode`` and ``x_start`` are accepted and ignored, matching upstream's
+        override, which takes both and references neither. A deterministic
+        flow has no separate probability-flow branch to switch into: the
+        transport already is the ODE, and the ``ode=True`` branch of the base
+        class exists only to subtract an analytic base score that needs
+        ``C``. ``seed`` is ignored for the same reason: nothing here is
+        stochastic.
 
         :param x_t: Current state, ``(B, ...)``.
         :type x_t: Any
@@ -926,16 +811,8 @@ class FlowMatchingODE(BridgeSDE):
         x_t = keras.ops.convert_to_tensor(x_t)
         t = keras.ops.convert_to_tensor(t)
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-029
-        # Do NOT pass the outer `reverse` to the network on this branch, and do
-        # NOT drop the all-false `cond_mask` as "what `cfg_scale=0` already
-        # does". Upstream (reference/sde_utils_sde.py:71-76) hard-codes
-        # `reverse=False` here because a forced-unconditional flow is ONE shared
-        # velocity field for both directions; the outer `reverse` then only
-        # flips the sign of `dt`. Threading `reverse` through instead calls the
-        # reverse conditioning embedder and the reverse `t_cond`, which is a
-        # different field -- finite, same shape, plausible trajectories, and
-        # invisible to every shape/finiteness arm. See decisions.md D-029.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-029: hard-code reverse=False
+        # here, matching upstream -- a forced-unconditional flow is one shared velocity field; threading the outer reverse in calls a different, wrong field. See decisions.md.
         if self.force_unconditional:
             if cfg_scale != 0:
                 raise ValueError(
@@ -970,13 +847,9 @@ class FlowMatchingODE(BridgeSDE):
         return config
 
 
-# ---------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------
 
-#: Name -> class, for a config-driven build of the base process.
-#:
-#: Deliberately NOT named ``SDE_VARIANTS``: see the D-015 anchor below.
+#: Name -> class, for a config-driven build of the base process. Not named
+#: ``SDE_VARIANTS``: see the D-015 anchor below.
 SDE_TYPES: Dict[str, type] = {
     "uniform": UniformVolatilitySDE,
     "periodic": PeriodicVolatilitySDE,
@@ -985,20 +858,8 @@ SDE_TYPES: Dict[str, type] = {
 }
 
 
-# DECISION plan-2026-09-02T094601-77d4a04e/D-015
-# Do NOT rename this parameter back to `variant`, and do NOT rename `SDE_TYPES`
-# back to `SDE_VARIANTS`. `variant` is a RESERVED word in this tree: the
-# repo-wide sweep `_sweep_create_delegation` in
-# `tests/test_models/test_package_api_contract.py` classifies every module-level
-# `create_*` that takes a parameter literally named `variant` as a MODEL factory
-# and requires a matching `from_variant` classmethod -- which this module can
-# never have, because it builds a pure-math object that is not a `keras.Model`
-# and has no `MODEL_VARIANTS` table. Spelling it `variant` here made this
-# function land in the `_CREATE_WITHOUT_FROM_VARIANT` scope-exclusion pin and
-# turned that set-equality assertion red. The fix is the honest one -- an SDE
-# family is not a model variant -- not an entry in a shared exception list.
-# `SDE_TYPES` also avoids `_LEGACY_VARIANT_TABLE_RE` (`[A-Z0-9]+_VARIANTS`) in
-# the same file. See decisions.md D-015.
+# DECISION plan-2026-09-02T094601-77d4a04e/D-015: do not rename this parameter to
+# variant or SDE_TYPES to SDE_VARIANTS -- the repo-wide create_* sweep in test_package_api_contract.py classifies a "variant" parameter as a model factory requiring from_variant, which this pure-math builder cannot have. See decisions.md.
 def create_bridge_sde(sde_type: str, **kwargs: Any) -> BridgeSDE:
     """Build one of the four base processes by name.
 

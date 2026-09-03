@@ -1,12 +1,12 @@
 """Lossless channels-last packing of a token sequence into the bridge tensor.
 
 A diffusion process can only carry one tensor. To diffuse text and image into
-each other, the caption's token embeddings are re-tiled -- not projected, not
-compressed -- into a latent-shaped tensor, so that the two endpoints of the
-bridge live in one space and the model never has to learn the correspondence.
-Because the map is a pure permutation, it is exactly invertible: whatever the
-sampler produces can be read back as tokens with no reconstruction error of its
-own, and `SharedTokenDecoder` sees the sampler's error alone.
+each other, the caption's token embeddings are re-tiled, not projected or
+compressed, into a latent-shaped tensor, so both endpoints of the bridge
+live in one space. The map is a pure permutation, so it is exactly
+invertible: whatever the sampler produces reads back as tokens with no
+reconstruction error of its own, and `SharedTokenDecoder` sees only the
+sampler's error.
 
 The permutation, for the ``sd`` preset::
 
@@ -26,23 +26,22 @@ The permutation, for the ``sd`` preset::
       v
     bridge                          (B, 32, 32, 4)
 
-    one patch, payload index -> pixel offset  (channel varies FASTEST)
+    one patch, payload index -> pixel offset (channel varies fastest)
 
         payload   0  1  2  3 | 4  5  6  7 | 8  9 10 11 |12 13 14 15
         (p, q)    (0,0)      | (0,1)      | (1,0)      | (1,1)
         channel   0  1  2  3 | 0  1  2  3 | 0  1  2  3 | 0  1  2  3
 
-Channels-last note: upstream is PyTorch and spells the same permutation
-``einsum("nhwpqc->nchpwq")``. Here the channel axis is already last, so no
-channel move is needed at all and the whole thing is one axis swap,
-``transpose(0, 1, 3, 2, 4, 5)`` -- the same chain `sd3_mmdit/transformer.py`
-uses for its unpatchify. The width dimension is written ``w * p`` rather than
-``h * p`` even though every shipped preset is square; the day a non-square
-preset appears, a hardcoded ``h * p`` is a silent transposition, not an error.
+Upstream is PyTorch and spells the same permutation as
+``einsum("nhwpqc->nchpwq")``; here the channel axis is already last, so the
+whole thing is one axis swap, ``transpose(0, 1, 3, 2, 4, 5)``, matching the
+unpatchify in ``sd3_mmdit/transformer.py``. The width dimension is written
+``w * p`` rather than ``h * p`` even though every shipped preset is square,
+so a future non-square preset does not silently transpose.
 
 References:
-    - Upstream ``token_bridge.py`` (staged under the plan's ``reference/``).
-    - ``src/dl_techniques/models/vision_language/sd3_mmdit/transformer.py`` --
+    - Upstream ``token_bridge.py``.
+    - ``src/dl_techniques/models/vision_language/sd3_mmdit/transformer.py``,
       the channels-last unpatchify this chain matches.
 """
 
@@ -51,17 +50,9 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 import numpy as np
 
-# ---------------------------------------------------------------------
-# Local Imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 
 from .config import TOKEN_LAYOUTS, BridgeConfig
-
-# ---------------------------------------------------------------------
-# Layout permutation
-# ---------------------------------------------------------------------
 
 
 def _patch_positions(config: BridgeConfig, layout: str = "row_major") -> np.ndarray:
@@ -83,11 +74,6 @@ def _patch_positions(config: BridgeConfig, layout: str = "row_major") -> np.ndar
         config.token_seq_len * config.patches_per_token, dtype="int64"
     )
     return positions.reshape(config.token_seq_len, config.patches_per_token).reshape(-1)
-
-
-# ---------------------------------------------------------------------
-# Patch <-> pixel
-# ---------------------------------------------------------------------
 
 
 def _unpatchify_payloads(payloads: Any, config: BridgeConfig) -> Any:
@@ -123,11 +109,6 @@ def _patchify_bridge(x: Any, config: BridgeConfig) -> Any:
     x = keras.ops.reshape(x, (batch, h, p, w, p, c))
     x = keras.ops.transpose(x, (0, 1, 3, 2, 4, 5))
     return keras.ops.reshape(x, (batch, h * w, p * p * c))
-
-
-# ---------------------------------------------------------------------
-# Public packing API
-# ---------------------------------------------------------------------
 
 
 def token_flat_to_bridge(
@@ -180,11 +161,6 @@ def bridge_to_token_flat(
     positions = _patch_positions(config, layout)
     token_payloads = keras.ops.take(patch_payloads, positions, axis=1)
     return keras.ops.reshape(token_payloads, (batch, config.token_flat_dim))
-
-
-# ---------------------------------------------------------------------
-# Padding / stop detection
-# ---------------------------------------------------------------------
 
 
 def compute_token_norms(
@@ -271,11 +247,6 @@ def pad_id_token_stops(pred_ids: Any, pad_id: int) -> Any:
     :return: ``(B,)`` stop indices; ``T`` when the row holds no padding.
     """
     return _first_true_index(keras.ops.equal(pred_ids, int(pad_id)))
-
-
-# ---------------------------------------------------------------------
-# Batch preparation
-# ---------------------------------------------------------------------
 
 
 def prepare_bridge_batch(
