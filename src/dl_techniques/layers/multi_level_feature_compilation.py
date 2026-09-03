@@ -1,79 +1,18 @@
 """
-Multi Level Feature Compilation (MLFC) Layer for Cross-Scale Feature Fusion.
+Multi Level Feature Compilation (MLFC) layer for cross-scale feature fusion.
 
-This layer implements one of the key innovations of ACC-UNet: multi-level feature compilation
-that enables cross-scale information exchange between different encoder levels. Unlike standard
-U-Net skip connections that only pass features from corresponding encoder-decoder levels,
-MLFC allows each encoder level to be enriched with semantic information from all other levels.
+Implements the ACC-UNet MLFC block, ``MLFCLayer``, which enriches each of 4
+encoder-level feature maps with information from the other 3. A standard
+U-Net skip connection carries only a single encoder level to its matching
+decoder level; MLFC instead resizes all 4 levels to each level's own spatial
+size, concatenates them, and compiles the result back down through a 1x1
+convolution before adding it as a residual. This runs ``num_iterations``
+times, each iteration mixing further using the previous iteration's output.
 
-Core Functionality:
-    The MLFC layer addresses the semantic gap problem in U-Net architectures by implementing
-    a sophisticated feature fusion mechanism that:
-
-    1. **Multi-Scale Aggregation**: Collects features from all 4 encoder levels simultaneously
-    2. **Adaptive Resizing**: Intelligently resizes features to match target spatial dimensions
-       using appropriate pooling (downsampling) or interpolation (upsampling) strategies
-    3. **Cross-Level Fusion**: Concatenates multi-scale features to create rich representations
-    4. **Iterative Refinement**: Applies multiple compilation iterations to strengthen feature mixing
-    5. **Residual Enhancement**: Uses residual connections to preserve original feature information
-    6. **Channel Recalibration**: Applies squeeze-excitation for adaptive channel weighting
-
-Architectural Innovation:
-    Traditional U-Net skip connections suffer from semantic gaps between encoder and decoder
-    features due to the absence of sufficient abstraction. MLFC solves this by:
-
-    - **Semantic Bridging**: Low-level features gain high-level semantic context
-    - **Detail Preservation**: High-level features retain fine-grained spatial details
-    - **Multi-Scale Context**: Each level receives information from all other scales
-    - **Progressive Refinement**: Multiple iterations allow gradual feature enhancement
-
-Technical Implementation:
-    For each compilation iteration and each encoder level, the layer:
-
-    1. **Collects** features from all 4 encoder levels: [h1×w1×c1, h2×w2×c2, h3×w3×c3, h4×w4×c4]
-    2. **Resizes** all features to current level's spatial dimensions using:
-       - Average pooling for downsampling (higher → lower resolution)
-       - Bilinear upsampling for upsampling (lower → higher resolution)
-       - Exact resizing to ensure precise dimension matching
-    3. **Concatenates** resized features: total_channels = c1 + c2 + c3 + c4
-    4. **Compiles** through 1×1 convolution: total_channels → current_level_channels
-    5. **Merges** with original features via concatenation and residual connection
-    6. **Refines** through batch normalization and activation functions
-
-Multi-Iteration Process:
-    The layer performs num_iterations compilation cycles, where each iteration:
-    - Uses outputs from the previous iteration as inputs
-    - Strengthens cross-level feature mixing progressively
-    - Allows gradual semantic information propagation
-    - Typical range: 1-4 iterations (3 recommended for optimal performance)
-
-Mathematical Formulation:
-    For level i at iteration t:
-    ```
-    # Feature collection and resizing
-    F_resized = [Resize(F_j^t, size_i) for j in [1,2,3,4]]
-
-    # Multi-level compilation
-    F_concat = Concat(F_resized)  # shape: (H_i, W_i, C_total)
-    F_compiled = Conv1x1(F_concat)  # shape: (H_i, W_i, C_i)
-
-    # Residual enhancement
-    F_merged = Conv1x1(Concat([F_compiled, F_i^t]))  # shape: (H_i, W_i, C_i)
-    F_i^{t+1} = F_merged + F_i^t  # Residual connection
-    ```
-
-Performance Characteristics:
-    - **Memory Overhead**: Moderate increase due to feature concatenation and resizing
-    - **Computational Cost**: O(HW × C_total × num_iterations) for compilation convolutions
-    - **Parameter Count**: Relatively lightweight (mainly 1×1 convolutions)
-    - **Training Stability**: Residual connections ensure stable gradient flow
-    - **Inference Speed**: Parallelizable operations with minimal sequential dependencies
-
-Comparison to Alternatives:
-    - **vs. Standard Skip Connections**: Provides cross-level information vs. single-level
-    - **vs. Feature Pyramid Networks**: More sophisticated fusion vs. simple concatenation
-    - **vs. Attention Mechanisms**: Computationally efficient vs. quadratic complexity
-    - **vs. Transformer Approaches**: Convolutional efficiency vs. global modeling
+The layer takes and returns a list of exactly 4 tensors, one per encoder
+level, and ``channels_list`` must give their 4 channel counts in that order.
+A trailing squeeze-excitation recalibration is applied to each level once,
+after the last iteration.
 """
 
 import keras
@@ -173,7 +112,7 @@ class MLFCLayer(keras.layers.Layer):
         if num_iterations <= 0:
             raise ValueError(f"num_iterations must be positive, got {num_iterations}")
 
-        # Store ALL configuration parameters
+        # Store configuration parameters.
         self.channels_list = channels_list
         self.num_iterations = num_iterations
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -183,7 +122,7 @@ class MLFCLayer(keras.layers.Layer):
 
         self.total_channels = sum(channels_list)
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
+        # Create all sub-layers in __init__.
         # These layers are created but not built yet
 
         # Use flat lists for sub-layers for robust serialization

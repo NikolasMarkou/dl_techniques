@@ -303,8 +303,8 @@ class FNetEncoderBlock(keras.layers.Layer):
                 )
             return residual + ffn_output
 
-        # POST-norm (default, the original FNet/BERT arrangement): the residual
-        # is added FIRST and the sum is then normalized.
+        # Post-norm (default, the original FNet/BERT arrangement): the residual
+        # is added first and the sum is then normalized.
         fourier_output = self.fourier_transform(
             inputs, attention_mask=attention_mask, training=training
         )

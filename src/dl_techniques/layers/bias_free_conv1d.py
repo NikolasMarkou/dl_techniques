@@ -108,8 +108,6 @@ class BiasFreeConv1D(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_batch_norm = use_batch_norm
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
-        # Bias-free convolution
         # No bias, to keep the layer scaling-invariant.
         self.conv = keras.layers.Conv1D(
             filters=self.filters,
@@ -320,7 +318,7 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
+        # Create all sub-layers in __init__.
         # First conv layer with batch norm and activation
         self.conv1 = BiasFreeConv1D(
             filters=self.filters,
@@ -332,11 +330,11 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
             name=f'{self.name}_conv1'
         )
 
-        # Second conv layer with batch norm but no activation (before addition)
+        # Second conv layer: no activation, applied before the residual add.
         self.conv2 = BiasFreeConv1D(
             filters=self.filters,
             kernel_size=self.kernel_size,
-            activation=None,  # No activation before addition
+            activation=None,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             use_batch_norm=True,
