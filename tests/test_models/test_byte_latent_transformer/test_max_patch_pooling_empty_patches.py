@@ -29,7 +29,7 @@ import keras
 from keras import ops
 import pytest
 
-from dl_techniques.layers.blt_blocks import PatchPooling
+from dl_techniques.layers.blt.blt_blocks import PatchPooling
 
 
 BATCH, SEQ, HID, OUT_DIM, MAX_PATCHES = 2, 6, 8, 16, 8

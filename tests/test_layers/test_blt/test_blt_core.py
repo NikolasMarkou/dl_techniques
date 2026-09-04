@@ -1,4 +1,4 @@
-"""Tests for ``ByteLatentReasoningCore`` (``dl_techniques.layers.blt_core``).
+"""Tests for ``ByteLatentReasoningCore`` (``dl_techniques.layers.blt.blt_core``).
 
 This is the FIRST test for this layer. The layer was dead-on-forward until the
 3-bug-chain fix (entropy 3-D tile, ``stop_gradient`` is a function not a context
@@ -22,7 +22,7 @@ import tensorflow as tf
 from keras import ops
 from typing import Any, Dict
 
-from dl_techniques.layers.blt_core import ByteLatentReasoningCore
+from dl_techniques.layers.blt.blt_core import ByteLatentReasoningCore
 
 
 class TestByteLatentReasoningCore:

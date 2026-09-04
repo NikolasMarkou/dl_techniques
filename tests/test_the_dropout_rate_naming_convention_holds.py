@@ -123,7 +123,7 @@ NON_RATE_PARAMS: Set[Tuple[str, str, str]] = {
 #: was deleted from the tree.
 EXEMPT_KEYWORD_CALLS: Set[Tuple[str, str, str]] = {
     # --- stock keras.layers.MultiHeadAttention -----------------------------
-    ("src/dl_techniques/layers/blt_blocks.py", "MultiHeadAttention", "dropout"),
+    ("src/dl_techniques/layers/blt/blt_blocks.py", "MultiHeadAttention", "dropout"),
     ("src/dl_techniques/layers/transformers/adaln_zero.py", "MultiHeadAttention", "dropout"),
     ("src/dl_techniques/layers/graphs/entity_graph_refinement.py", "MultiHeadAttention", "dropout"),
     ("src/dl_techniques/layers/graphs/graph_neural_network.py", "MultiHeadAttention", "dropout"),

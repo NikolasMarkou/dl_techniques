@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.layers.blt_blocks import EntropyModel
+from dl_techniques.layers.blt.blt_blocks import EntropyModel
 from dl_techniques.models.language.byte_latent_transformer.model import ByteLatentTransformer
 
 

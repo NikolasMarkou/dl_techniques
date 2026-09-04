@@ -35,8 +35,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking import create_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from .transformers.transformer import TransformerLayer
-from .embedding.positional_embedding import PositionalEmbedding
+from ..transformers.transformer import TransformerLayer
+from ..embedding.positional_embedding import PositionalEmbedding
 
 # ---------------------------------------------------------------------
 
@@ -75,7 +75,7 @@ def causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.blt_blocks")
+@register_dl_technique("dl_techniques.layers.blt.blt_blocks")
 class ByteTokenizer(keras.layers.Layer):
     """Converts text strings to and from byte token sequences.
 
@@ -199,7 +199,7 @@ class ByteTokenizer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.blt_blocks")
+@register_dl_technique("dl_techniques.layers.blt.blt_blocks")
 class EntropyModel(keras.layers.Layer):
     """Small causal transformer predicting next-byte entropy for patching.
 
@@ -385,7 +385,7 @@ class EntropyModel(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.blt_blocks")
+@register_dl_technique("dl_techniques.layers.blt.blt_blocks")
 class DynamicPatcher(keras.layers.Layer):
     """Segments a byte sequence into patches by thresholding entropy.
 
@@ -644,7 +644,7 @@ class DynamicPatcher(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.blt_blocks")
+@register_dl_technique("dl_techniques.layers.blt.blt_blocks")
 class PatchPooling(keras.layers.Layer):
     """Pools byte hidden states within each patch into one patch vector.
 
@@ -909,7 +909,7 @@ class PatchPooling(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.blt_blocks")
+@register_dl_technique("dl_techniques.layers.blt.blt_blocks")
 class LocalEncoder(keras.layers.Layer):
     """Processes bytes within patches with causal attention, then pools to patches.
 
@@ -1106,7 +1106,7 @@ class LocalEncoder(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.blt_blocks")
+@register_dl_technique("dl_techniques.layers.blt.blt_blocks")
 class GlobalTransformer(keras.layers.Layer):
     """Applies causal self-attention across patch representations.
 
@@ -1243,7 +1243,7 @@ class GlobalTransformer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.blt_blocks")
+@register_dl_technique("dl_techniques.layers.blt.blt_blocks")
 class LocalDecoder(keras.layers.Layer):
     """Generates next-byte logits from causal self-attention and patch context.
 

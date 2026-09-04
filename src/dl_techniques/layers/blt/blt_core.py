@@ -30,10 +30,10 @@ from typing import Optional, Union, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from .embedding.positional_embedding import PositionalEmbedding
-from .embedding.rotary_position_embedding import RotaryPositionEmbedding
-from .reasoning.hrm_reasoning_module import HierarchicalReasoningModule
-from .reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
+from ..embedding.positional_embedding import PositionalEmbedding
+from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
+from ..reasoning.hrm_reasoning_module import HierarchicalReasoningModule
+from ..reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 
 from .blt_blocks import (
     ByteTokenizer, EntropyModel,
@@ -44,7 +44,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.blt_core")
+@register_dl_technique("dl_techniques.layers.blt.blt_core")
 class ByteLatentReasoningCore(keras.layers.Layer):
     """Core hierarchical reasoning model that operates on dynamic byte patches.
 

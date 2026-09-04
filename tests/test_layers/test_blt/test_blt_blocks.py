@@ -14,7 +14,7 @@ import logging
 import numpy as np
 import pytest
 
-from dl_techniques.layers.blt_blocks import (
+from dl_techniques.layers.blt.blt_blocks import (
     ByteTokenizer,
     EntropyModel,
     DynamicPatcher,

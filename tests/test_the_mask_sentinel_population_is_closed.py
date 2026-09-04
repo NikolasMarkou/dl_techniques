@@ -376,7 +376,7 @@ SENTINEL_ALLOWLIST: Dict[Tuple[str, str], str] = {
         "the site. The entry is KEPT so that reintroducing a literal here lands "
         "on a written reason rather than on a fresh decision."
     ),
-    ("dl_techniques/layers/blt_blocks.py", "PatchPooling._max_pooling"): (
+    ("dl_techniques/layers/blt/blt_blocks.py", "PatchPooling._max_pooling"): (
         "where-form (ops.where(mask, hiddens, -1e9)) so the fp16 -inf is never "
         "multiplied and cannot NaN a kept position. NOT in the plan's findings "
         "inventory -- discovered by this census at step 3. FLAGGED, NOT FIXED: "
