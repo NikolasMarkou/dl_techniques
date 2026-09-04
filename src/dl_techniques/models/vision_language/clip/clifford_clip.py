@@ -54,7 +54,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     SparseRollingGeometricProduct,
 )
 from dl_techniques.layers.layer_scale import LayerScale
-from dl_techniques.layers.patch_merging import PatchMerging
+from dl_techniques.layers.pooling.patch_merging import PatchMerging
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.clip_utils import (

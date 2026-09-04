@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.patch_merging import PatchMerging
+from dl_techniques.layers.pooling.patch_merging import PatchMerging
 
 B, H, W, C = 2, 8, 8, 6
 

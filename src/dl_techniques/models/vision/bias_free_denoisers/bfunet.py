@@ -52,7 +52,7 @@ from dl_techniques.layers.conv_blocks.bias_free_conv2d import (
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 
-from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
+from dl_techniques.layers.pooling.downsample_and_skip import DownsampleAndSkip
 
 # ---------------------------------------------------------------------
 # Model Variant Configurations

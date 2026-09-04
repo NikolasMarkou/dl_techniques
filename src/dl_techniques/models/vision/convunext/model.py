@@ -51,7 +51,7 @@ from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
-from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
+from dl_techniques.layers.pooling.downsample_and_skip import DownsampleAndSkip
 from dl_techniques.layers.attention.factory import create_attention_layer
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.utils.activation_serialization import (

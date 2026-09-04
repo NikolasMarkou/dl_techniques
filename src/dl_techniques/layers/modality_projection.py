@@ -24,7 +24,7 @@ from typing import Optional, Tuple, Union, Any, Dict
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from .pixel_shuffle import PixelShuffle
+from .pooling.pixel_shuffle import PixelShuffle
 
 
 @register_dl_technique("dl_techniques.layers.modality_projection")

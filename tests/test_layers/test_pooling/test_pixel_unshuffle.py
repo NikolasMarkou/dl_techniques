@@ -1,4 +1,4 @@
-"""Tests for :class:`dl_techniques.layers.pixel_unshuffle.PixelUnshuffle2D`."""
+"""Tests for :class:`dl_techniques.layers.pooling.pixel_unshuffle.PixelUnshuffle2D`."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.pixel_unshuffle import PixelUnshuffle2D
+from dl_techniques.layers.pooling.pixel_unshuffle import PixelUnshuffle2D
 
 
 # ---------------------------------------------------------------------

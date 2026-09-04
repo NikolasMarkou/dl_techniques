@@ -25,7 +25,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.pixel_shuffle")
+@register_dl_technique("dl_techniques.layers.pooling.pixel_shuffle")
 class PixelShuffle(keras.layers.Layer):
     """Pixel shuffle for reducing spatial tokens in vision transformers.
 

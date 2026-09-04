@@ -1,4 +1,4 @@
-"""Tests for :class:`dl_techniques.layers.blur_pool.BlurPool2D`."""
+"""Tests for :class:`dl_techniques.layers.pooling.blur_pool.BlurPool2D`."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.blur_pool import BlurPool2D
+from dl_techniques.layers.pooling.blur_pool import BlurPool2D
 
 
 # ---------------------------------------------------------------------

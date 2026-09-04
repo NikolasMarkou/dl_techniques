@@ -21,7 +21,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.downsample_and_skip")
+@register_dl_technique("dl_techniques.layers.pooling.downsample_and_skip")
 class DownsampleAndSkip(keras.layers.Layer):
     """Produce ``(skip, downsampled)`` for one encoder junction.
 

@@ -43,7 +43,7 @@ from typing import List, Optional, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
+from dl_techniques.layers.pooling.pixel_unshuffle import PixelShuffle2D
 
 from .components import FreMLP, DilatedBranch, SimpleGate, _add_list
 from dl_techniques.utils.keras_registration import register_dl_technique

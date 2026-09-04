@@ -22,7 +22,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.patch_merging")
+@register_dl_technique("dl_techniques.layers.pooling.patch_merging")
 class PatchMerging(keras.layers.Layer):
     """Patch merging layer for hierarchical downsampling in Swin Transformers.
 

@@ -13,7 +13,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
+from dl_techniques.layers.pooling.downsample_and_skip import DownsampleAndSkip
 
 
 # ---------------------------------------------------------------------
@@ -546,7 +546,7 @@ class TestConfig:
         assert (
             keras.saving.get_registered_name(DownsampleAndSkip)
             # normalized 2026-08-29 from the coarse `dl_techniques.layers`
-            == "dl_techniques.layers.downsample_and_skip>DownsampleAndSkip"
+            == "dl_techniques.layers.pooling.downsample_and_skip>DownsampleAndSkip"
         )
 
 

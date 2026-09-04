@@ -42,7 +42,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
-from dl_techniques.layers.patch_merging import PatchMerging
+from dl_techniques.layers.pooling.patch_merging import PatchMerging
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.transformers.swin_transformer_block import SwinTransformerBlock
 from dl_techniques.utils.keras_registration import register_dl_technique

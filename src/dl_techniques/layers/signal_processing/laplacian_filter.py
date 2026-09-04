@@ -21,7 +21,7 @@ from typing import Tuple, Union, List, Optional, Sequence, Any, Dict, Literal
 # ---------------------------------------------------------------------
 
 from .gaussian_filter import GaussianFilter
-from dl_techniques.layers.blur_pool import BlurPool2D
+from dl_techniques.layers.pooling.blur_pool import BlurPool2D
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

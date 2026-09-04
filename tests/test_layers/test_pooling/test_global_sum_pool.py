@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.global_sum_pool import GlobalSumPooling
+from dl_techniques.layers.pooling.global_sum_pool import GlobalSumPooling
 
 
 class TestGlobalSumPoolingForward:
@@ -284,8 +284,8 @@ class TestGlobalSumPoolingSerialization:
         np.testing.assert_allclose(original, reloaded, rtol=1e-6, atol=1e-6)
 
     def test_registered_under_the_package_qualified_key(self):
-        """The layer resolves under ``dl_techniques.layers.global_sum_pool``."""
-        key = "dl_techniques.layers.global_sum_pool>GlobalSumPooling"
+        """The layer resolves under ``dl_techniques.layers.pooling.global_sum_pool``."""
+        key = "dl_techniques.layers.pooling.global_sum_pool>GlobalSumPooling"
 
         assert keras.saving.get_registered_name(GlobalSumPooling) == key
         assert keras.saving.get_registered_object(key) is GlobalSumPooling

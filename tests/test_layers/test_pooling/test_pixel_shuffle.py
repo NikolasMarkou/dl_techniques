@@ -16,7 +16,7 @@ import keras
 from typing import Dict, Any, Tuple
 
 # Assuming the fixed file is in this path
-from dl_techniques.layers.pixel_shuffle import PixelShuffle
+from dl_techniques.layers.pooling.pixel_shuffle import PixelShuffle
 
 
 # Test fixtures

@@ -38,7 +38,7 @@ from typing import Any, Dict, Optional, List, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
+from dl_techniques.layers.pooling.pixel_unshuffle import PixelShuffle2D
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
 from dl_techniques.utils.keras_registration import register_dl_technique

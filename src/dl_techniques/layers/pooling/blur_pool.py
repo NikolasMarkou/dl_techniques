@@ -37,7 +37,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.blur_pool")
+@register_dl_technique("dl_techniques.layers.pooling.blur_pool")
 class BlurPool2D(keras.layers.Layer):
     """Anti-aliased depthwise downsampling with a fixed binomial blur.
 

@@ -48,7 +48,7 @@ from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormal
 from dl_techniques.layers.stochastic_depth import StochasticDepth  # noqa: F401
 from dl_techniques.initializers import create_gabor_depthwise_conv2d  # noqa: F401
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels  # noqa: F401
-from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip  # noqa: F401
+from dl_techniques.layers.pooling.downsample_and_skip import DownsampleAndSkip  # noqa: F401
 
 from dl_techniques.utils.logger import logger
 

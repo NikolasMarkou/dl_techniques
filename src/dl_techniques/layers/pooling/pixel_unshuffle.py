@@ -31,7 +31,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.pixel_unshuffle")
+@register_dl_technique("dl_techniques.layers.pooling.pixel_unshuffle")
 class PixelUnshuffle2D(keras.layers.Layer):
     """Lossless space-to-depth downsampling with optional 1x1 projection.
 
@@ -216,7 +216,7 @@ class PixelUnshuffle2D(keras.layers.Layer):
 # DECISION plan_2026-06-15_00924f53/D-002: keras.layers.DepthToSpace does not
 # exist in Keras 3.8; do not replace this reshape/transpose/reshape with it,
 # with keras.ops.nn.depth_to_space, or a Lambda (breaks .keras round-trip). See decisions.md.
-@register_dl_technique("dl_techniques.layers.pixel_unshuffle")
+@register_dl_technique("dl_techniques.layers.pooling.pixel_unshuffle")
 class PixelShuffle2D(keras.layers.Layer):
     """Lossless depth-to-space upsampling (pixel-shuffle), NHWC.
 

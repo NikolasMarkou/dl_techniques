@@ -61,7 +61,7 @@ import tensorflow as tf
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
-from dl_techniques.layers.patch_merging import PatchMerging
+from dl_techniques.layers.pooling.patch_merging import PatchMerging
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.models.vision.cliffordnet import CliffordNet
 from dl_techniques.optimization import (

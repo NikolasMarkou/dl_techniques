@@ -24,7 +24,7 @@ from typing import Optional, Any, Dict, Tuple, Union, Sequence
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.global_sum_pool")
+@register_dl_technique("dl_techniques.layers.pooling.global_sum_pool")
 class GlobalSumPooling(keras.layers.Layer):
     """
     Global sum pooling operation over configurable spatial axes.

@@ -1,4 +1,4 @@
-"""Tests for :class:`dl_techniques.layers.pixel_unshuffle.PixelShuffle2D`.
+"""Tests for :class:`dl_techniques.layers.pooling.pixel_unshuffle.PixelShuffle2D`.
 
 ``PixelShuffle2D`` is the NHWC depth-to-space (pixel-shuffle) layer that
 replaces the nonexistent ``keras.layers.DepthToSpace`` (D-002). It must be the
@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D, PixelUnshuffle2D
+from dl_techniques.layers.pooling.pixel_unshuffle import PixelShuffle2D, PixelUnshuffle2D
 
 
 # ---------------------------------------------------------------------
