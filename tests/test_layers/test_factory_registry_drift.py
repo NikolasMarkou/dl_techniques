@@ -189,7 +189,7 @@ FACTORIES = {
     # declared, validated and stored it, so `create_sampling_layer` silently
     # dropped every caller's value. This entry is the guard, not the fix; the
     # registry entry itself is in `layers/sampling.py`.
-    "sampling": ("dl_techniques.layers.sampling", "SAMPLING_REGISTRY"),
+    "sampling": ("dl_techniques.layers.generative.sampling", "SAMPLING_REGISTRY"),
     "sequence_pooling": (
         "dl_techniques.layers.sequence_pooling.factory",
         "SEQUENCE_POOLING_REGISTRY",

@@ -41,7 +41,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.sampling")
+@register_dl_technique("dl_techniques.layers.generative.sampling")
 class Sampling(keras.layers.Layer):
     """Sample from a latent Normal distribution via the reparameterisation trick.
 
@@ -209,7 +209,7 @@ class Sampling(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.sampling")
+@register_dl_technique("dl_techniques.layers.generative.sampling")
 class HypersphereSampling(keras.layers.Layer):
     """Sample from a thin Gaussian shell of a scaled unit hypersphere.
 
@@ -597,7 +597,7 @@ def vmf_kl_divergence(
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.sampling")
+@register_dl_technique("dl_techniques.layers.generative.sampling")
 class VMFSampling(keras.layers.Layer):
     """Sample from a von Mises-Fisher posterior on the unit hypersphere.
 

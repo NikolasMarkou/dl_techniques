@@ -27,8 +27,8 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.layers.vector_quantizer import VectorQuantizer
-from dl_techniques.layers.vector_quantizer_rotation_trick import (
+from dl_techniques.layers.generative.vector_quantizer import VectorQuantizer
+from dl_techniques.layers.generative.vector_quantizer_rotation_trick import (
     VectorQuantizerRotationTrick,
 )
 

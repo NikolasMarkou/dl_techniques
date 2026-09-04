@@ -251,10 +251,10 @@ Both disable `jit_compile` automatically when `sampling_type="vmf"` (see §10).
 
 | Layer | Location |
 | :--- | :--- |
-| `Sampling` | `dl_techniques.layers.sampling.Sampling` |
-| `HypersphereSampling` | `dl_techniques.layers.sampling.HypersphereSampling` |
-| `VMFSampling` | `dl_techniques.layers.sampling.VMFSampling` |
-| `vmf_kl_divergence` | `dl_techniques.layers.sampling.vmf_kl_divergence` |
+| `Sampling` | `dl_techniques.layers.generative.sampling.Sampling` |
+| `HypersphereSampling` | `dl_techniques.layers.generative.sampling.HypersphereSampling` |
+| `VMFSampling` | `dl_techniques.layers.generative.sampling.VMFSampling` |
+| `vmf_kl_divergence` | `dl_techniques.layers.generative.sampling.vmf_kl_divergence` |
 
 ---
 

@@ -28,7 +28,7 @@ from typing import Optional, Tuple, Dict, Any, Union, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.vector_quantizer import VectorQuantizer
+from dl_techniques.layers.generative.vector_quantizer import VectorQuantizer
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -41,7 +41,7 @@ class VQVAEModel(keras.Model):
     """VQ-VAE: an encoder-decoder model with a discrete codebook bottleneck.
 
     Wraps a caller-supplied encoder and decoder around a
-    :class:`~dl_techniques.layers.vector_quantizer.VectorQuantizer`. Loss
+    :class:`~dl_techniques.layers.generative.vector_quantizer.VectorQuantizer`. Loss
     computation happens inside :meth:`train_step`, so ``compile`` only needs
     an optimizer.
 

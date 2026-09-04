@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.sampling import create_sampling_layer, vmf_kl_divergence
+from dl_techniques.layers.generative.sampling import create_sampling_layer, vmf_kl_divergence
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,

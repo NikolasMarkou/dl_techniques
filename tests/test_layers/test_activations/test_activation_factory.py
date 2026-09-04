@@ -146,7 +146,7 @@ class TestStrictDroppedKeys:
         from dl_techniques.layers.ffn.factory import (
             STRICT_DROPPED_KEY_MARKER as ffn_marker,
         )
-        from dl_techniques.layers.sampling import (
+        from dl_techniques.layers.generative.sampling import (
             STRICT_DROPPED_KEY_MARKER as sampling_marker,
         )
         markers = {

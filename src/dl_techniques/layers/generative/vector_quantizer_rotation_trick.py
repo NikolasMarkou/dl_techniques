@@ -42,7 +42,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.vector_quantizer_rotation_trick")
+@register_dl_technique("dl_techniques.layers.generative.vector_quantizer_rotation_trick")
 class VectorQuantizerRotationTrick(keras.layers.Layer):
     """Vector quantizer with Rotation Trick gradient and multi-head codebook.
 

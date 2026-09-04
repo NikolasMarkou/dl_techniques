@@ -81,7 +81,7 @@ from sklearn.decomposition import PCA
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.vae.model import VAE
-from dl_techniques.layers.sampling import Sampling, HypersphereSampling
+from dl_techniques.layers.generative.sampling import Sampling, HypersphereSampling
 
 from train.common import set_seeds
 

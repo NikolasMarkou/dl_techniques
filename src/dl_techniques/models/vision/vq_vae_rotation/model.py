@@ -28,7 +28,7 @@ from dl_techniques.layers.norms.factory import (
     NormalizationType,
     create_normalization_layer,
 )
-from dl_techniques.layers.vector_quantizer_rotation_trick import (
+from dl_techniques.layers.generative.vector_quantizer_rotation_trick import (
     VectorQuantizerRotationTrick,
 )
 from dl_techniques.utils.model_build import materialize_sublayers

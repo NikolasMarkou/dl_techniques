@@ -41,7 +41,7 @@ registration in §3):
 | PyTorch source component | dl_techniques reuse | Import path | Note |
 |---|---|---|---|
 | SD3 VAE (ResNet enc/dec, GroupNorm32, attn mid-block, KL reparam) | `AutoEncoder` with `z_channels=16` | `dl_techniques.models.vision_language.ideogram4.vae.AutoEncoder` | Architecture is structurally equivalent; only the latent-norm convention differs — **D-002** / **D-008** |
-| `DiagonalGaussianDistribution` (reparameterization) | `Sampling` | `dl_techniques.layers.sampling.Sampling` | Used internally by the reused `AutoEncoder` |
+| `DiagonalGaussianDistribution` (reparameterization) | `Sampling` | `dl_techniques.layers.generative.sampling.Sampling` | Used internally by the reused `AutoEncoder` |
 | rectified-flow velocity MSE objective | `FlowMatchingVelocityLoss` | `dl_techniques.losses.flow_matching_velocity_loss.FlowMatchingVelocityLoss` | Plain MSE; logit-normal weighting kept in the trainer (HARD constraint) |
 | timestep sinusoidal embedding | `ScalarSinusoidalEmbedding(dim, input_range=(0, 1000))` | `dl_techniques.layers.embedding.scalar_sinusoidal_embedding.ScalarSinusoidalEmbedding` | SD3 timestep range is `[0, 1000]`, not `[0, 1]` |
 | patchify Conv2D projection | `PatchEmbedding2D` | `dl_techniques.layers.embedding.patch_embedding.PatchEmbedding2D` | `kernel=stride=patch_size` (see §4 source-bug note) |

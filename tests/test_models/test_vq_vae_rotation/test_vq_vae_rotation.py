@@ -176,7 +176,7 @@ class TestRotationTrickForwardIdentity:
         output SHAPE, which is invariant under a sign flip -- that is why this
         survived.
         """
-        from dl_techniques.layers.vector_quantizer_rotation_trick import (
+        from dl_techniques.layers.generative.vector_quantizer_rotation_trick import (
             VectorQuantizerRotationTrick,
         )
 
@@ -230,7 +230,7 @@ def _structured_images(n: int = 8, size: int = 32, seed: int = 0) -> np.ndarray:
 class TestEMACodebookStability:
     """F-65 in the per-head quantizer.
 
-    Same defect as `layers/vector_quantizer.py`: `ema_cluster_size` starts at
+    Same defect as `layers/generative/vector_quantizer.py`: `ema_cluster_size` starts at
     zeros, `ema_embeddings` started at the codebook initializer, and the
     normalize divided by `count + 1e-5`. On step 1 an unassigned code became
     `0.99 * init / 1e-5` ~= 99000 * init.
@@ -286,7 +286,7 @@ class TestEMACodebookStability:
         debias cancels `1 - decay` exactly), and an unassigned code must be
         ~0 (its numerator is exactly 0).
         """
-        from dl_techniques.layers.vector_quantizer_rotation_trick import (
+        from dl_techniques.layers.generative.vector_quantizer_rotation_trick import (
             VectorQuantizerRotationTrick,
         )
 
@@ -362,7 +362,7 @@ class TestRotationNormFloorDoesNotLeakMagnitude:
     @pytest.mark.parametrize("input_scale", [1.0, 0.1, 0.01])
     def test_call_emits_the_codebook_vector_at_every_input_scale(
             self, mode, input_scale):
-        from dl_techniques.layers.vector_quantizer_rotation_trick import (
+        from dl_techniques.layers.generative.vector_quantizer_rotation_trick import (
             VectorQuantizerRotationTrick,
         )
 
@@ -388,7 +388,7 @@ class TestRotationNormFloorDoesNotLeakMagnitude:
 
     def test_the_leak_is_scale_independent_after_the_floor(self):
         """The defect's signature was scale DEPENDENCE, so pin its absence."""
-        from dl_techniques.layers.vector_quantizer_rotation_trick import (
+        from dl_techniques.layers.generative.vector_quantizer_rotation_trick import (
             VectorQuantizerRotationTrick,
         )
 
@@ -613,7 +613,7 @@ class TestVQVAERotationGradientFlow:
 
 import tensorflow as tf
 
-from dl_techniques.layers.vector_quantizer_rotation_trick import (
+from dl_techniques.layers.generative.vector_quantizer_rotation_trick import (
     VectorQuantizerRotationTrick,
 )
 

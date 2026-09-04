@@ -14,7 +14,7 @@ import tempfile
 import os
 from typing import Tuple, List
 
-from dl_techniques.layers.sampling import (
+from dl_techniques.layers.generative.sampling import (
     Sampling,
     HypersphereSampling,
     VMFSampling,
@@ -1005,7 +1005,7 @@ class TestVMFSampling:
         the expected resultant E[z . mu] = A_{m/2}(k) = I_{m/2}(k)/I_{m/2-1}(k),
         which is exactly ``_bessel_ratio_cf(k, m/2)``.
         """
-        from dl_techniques.layers.sampling import _bessel_ratio_cf
+        from dl_techniques.layers.generative.sampling import _bessel_ratio_cf
 
         for m, k in [(2, 5.0), (4, 10.0), (8, 20.0)]:
             n = 8000

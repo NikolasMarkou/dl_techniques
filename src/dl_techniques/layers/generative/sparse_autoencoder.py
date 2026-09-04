@@ -46,7 +46,7 @@ SAEVariant = Literal['relu', 'topk', 'batch_topk', 'jumprelu', 'gated']
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.sparse_autoencoder")
+@register_dl_technique("dl_techniques.layers.generative.sparse_autoencoder")
 class SparseAutoencoder(keras.layers.Layer):
     """
     Sparse Autoencoder layer with multiple sparsity enforcement variants.

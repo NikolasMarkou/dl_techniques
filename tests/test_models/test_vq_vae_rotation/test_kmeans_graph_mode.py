@@ -23,7 +23,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
-from dl_techniques.layers.vector_quantizer_rotation_trick import (
+from dl_techniques.layers.generative.vector_quantizer_rotation_trick import (
     VectorQuantizerRotationTrick,
 )
 

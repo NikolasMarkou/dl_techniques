@@ -129,7 +129,7 @@ compares encoder outputs against codebook vectors directly.
 
 ### 4.2 `VectorQuantizer` Layer
 
-Lives at `dl_techniques.layers.vector_quantizer.VectorQuantizer`. It holds:
+Lives at `dl_techniques.layers.generative.vector_quantizer.VectorQuantizer`. It holds:
 
 - **The codebook** — an embedding table of shape `(num_embeddings, embedding_dim)`, initialized
   by `initializer` (`"uniform"` by default).
@@ -240,7 +240,7 @@ model = create_vq_vae(encoder, decoder, num_embeddings=256, embedding_dim=16)
 
 ### 6.3 `VectorQuantizer`
 
-**Location**: `dl_techniques.layers.vector_quantizer.VectorQuantizer` — note that the layer
+**Location**: `dl_techniques.layers.generative.vector_quantizer.VectorQuantizer` — note that the layer
 lives in `layers/`, not in this package. `VQVAEModel` constructs one named `vector_quantizer`;
 you only need to import it directly if you are building your own wrapper.
 
@@ -331,7 +331,7 @@ commitment terms show up in `.losses` on the enclosing model, ready to add to yo
 
 ```python
 import keras
-from dl_techniques.layers.vector_quantizer import VectorQuantizer
+from dl_techniques.layers.generative.vector_quantizer import VectorQuantizer
 
 inputs = keras.Input(shape=(16, 16, 32))
 quantized = VectorQuantizer(num_embeddings=256, embedding_dim=32)(inputs)

@@ -30,7 +30,7 @@ from typing import Optional, Tuple, Dict, Any
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.restricted_boltzmann_machine")
+@register_dl_technique("dl_techniques.layers.generative.restricted_boltzmann_machine")
 class RestrictedBoltzmannMachine(keras.layers.Layer):
     """Restricted Boltzmann Machine layer for unsupervised feature learning.
 

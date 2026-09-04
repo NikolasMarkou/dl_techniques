@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.restricted_boltzmann_machine import RestrictedBoltzmannMachine
+from dl_techniques.layers.generative.restricted_boltzmann_machine import RestrictedBoltzmannMachine
 
 B, NV, NH = 4, 10, 5
 

@@ -32,7 +32,7 @@ from typing import Optional, Tuple, Dict, Any, Union
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.vector_quantizer")
+@register_dl_technique("dl_techniques.layers.generative.vector_quantizer")
 class VectorQuantizer(keras.layers.Layer):
     """
     Vector Quantization layer for discrete latent representations.

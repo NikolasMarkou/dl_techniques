@@ -26,7 +26,7 @@ import tensorflow as tf
 from typing import Dict, Any
 
 
-from dl_techniques.layers.vector_quantizer import VectorQuantizer
+from dl_techniques.layers.generative.vector_quantizer import VectorQuantizer
 
 
 # ============================================================================

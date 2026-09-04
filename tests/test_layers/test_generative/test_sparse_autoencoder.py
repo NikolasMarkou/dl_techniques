@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.sparse_autoencoder import SparseAutoencoder
+from dl_techniques.layers.generative.sparse_autoencoder import SparseAutoencoder
 
 B, DIN, DLAT = 4, 10, 20
 
