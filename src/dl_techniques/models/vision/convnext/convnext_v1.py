@@ -39,8 +39,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
-from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.stochastic_gradient import StochasticGradient
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_gradient import StochasticGradient
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,

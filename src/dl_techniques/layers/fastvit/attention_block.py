@@ -80,7 +80,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 
 from .conv_mlp import FastVitConvMlp
 from .rep_mixer import _create_layer_scale, _REFERENCE_LAYER_SCALE_INIT
-from ..stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from ..attention.factory import create_attention_layer
 from ..norms.factory import create_normalization_layer
 from .reference import REFERENCE_NORM_EPSILON

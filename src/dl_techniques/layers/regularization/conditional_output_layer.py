@@ -26,7 +26,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.conditional_output_layer")
+@register_dl_technique("dl_techniques.layers.regularization.conditional_output_layer")
 class ConditionalOutputLayer(keras.layers.Layer):
     """Batch-wise conditional tensor selector for semi-supervised training.
 

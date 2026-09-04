@@ -59,7 +59,7 @@ import tensorflow as tf
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.norms.global_response_norm import (

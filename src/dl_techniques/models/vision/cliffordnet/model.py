@@ -49,7 +49,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CtxMode,
     CliffordNetBlock,
 )
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint

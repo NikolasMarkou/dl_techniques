@@ -30,7 +30,7 @@ import numpy as np
 
 from dl_techniques.layers.embedding.class_label_embedding import ClassLabelEmbedding
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.transformers.sd3_adaln import modulate
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.keras_registration import register_dl_technique

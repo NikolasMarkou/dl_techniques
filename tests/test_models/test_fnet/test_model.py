@@ -21,7 +21,7 @@ from dl_techniques.models.language.fnet.model import (
     create_fnet_with_head,
 )
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 

@@ -30,7 +30,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.scheduled_dropout")
+@register_dl_technique("dl_techniques.layers.regularization.scheduled_dropout")
 class ScheduledDropout(keras.layers.Layer):
     """Dropout whose rate is driven by a schedule over this layer's own steps.
 
@@ -115,7 +115,7 @@ class ScheduledDropout(keras.layers.Layer):
         schedule's ``decay_steps``::
 
             import keras
-            from dl_techniques.layers.scheduled_dropout import ScheduledDropout
+            from dl_techniques.layers.regularization.scheduled_dropout import ScheduledDropout
 
             epochs, steps_per_epoch = 50, 200
             schedule = keras.optimizers.schedules.CosineDecay(

@@ -25,11 +25,11 @@ import keras
 from typing import Optional, Union, Any, Dict, Tuple
 from keras import layers, initializers, regularizers, ops
 
-from .transformers.transformer import TransformerLayer
+from dl_techniques.layers.transformers.transformer import TransformerLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.router")
+@register_dl_technique("dl_techniques.layers.regularization.router")
 class RouterLayer(keras.layers.Layer):
     """Dynamic router wrapping a TransformerLayer for adaptive computation.
 

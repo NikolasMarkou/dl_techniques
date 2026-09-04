@@ -61,10 +61,10 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from .conv_mlp import FastVitConvMlp
-from ..layer_scale import LayerScale
+from dl_techniques.layers.regularization.layer_scale import LayerScale
 from ..conv_blocks.mobile_one_block import MobileOneBlock
 from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
-from ..stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

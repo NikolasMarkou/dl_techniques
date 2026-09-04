@@ -23,7 +23,7 @@ from typing import Optional, Tuple, Dict, Any
 
 from .ffn.factory import FFN_REGISTRY
 from .ffn import create_ffn_layer, FFNType
-from .stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from .norms import create_normalization_layer, NormalizationType
 from .attention.fnet_fourier_transform import FNetFourierTransform
 from dl_techniques.utils.keras_registration import register_dl_technique

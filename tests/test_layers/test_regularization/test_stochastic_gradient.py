@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.stochastic_gradient import StochasticGradient
+from dl_techniques.layers.regularization.stochastic_gradient import StochasticGradient
 
 B, D = 4, 6
 

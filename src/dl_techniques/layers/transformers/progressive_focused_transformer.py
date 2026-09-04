@@ -24,7 +24,7 @@ from typing import Optional, Tuple, Literal, Union, Dict, Any
 
 from ..ffn.factory import create_ffn_layer
 from ..norms import create_normalization_layer
-from ..stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from ..attention.progressive_focused_attention import ProgressiveFocusedAttention
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,

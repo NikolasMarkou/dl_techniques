@@ -14,7 +14,7 @@ import numpy as np
 import tensorflow as tf
 
 
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 
 
 # Test fixtures

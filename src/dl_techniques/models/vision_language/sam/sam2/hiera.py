@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,

@@ -236,7 +236,7 @@ class TestResidualStochasticDepth:
     no residual / no drop-path must not recur)."""
 
     def test_residual_and_stochastic_depth_present(self):
-        from dl_techniques.layers.stochastic_depth import StochasticDepth
+        from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
         model = create_convunext_denoiser(
             input_shape=(64, 64, 3), depth=3, initial_filters=16,
             blocks_per_level=2, convnext_version="v1", drop_path_rate=0.2,
@@ -258,7 +258,7 @@ class TestResidualStochasticDepth:
         assert tuple(y.shape) == (2, 64, 64, 3)
 
     def test_drop_path_zero_has_no_stochastic_depth(self):
-        from dl_techniques.layers.stochastic_depth import StochasticDepth
+        from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
         model = create_convunext_denoiser(
             input_shape=(64, 64, 3), depth=3, initial_filters=16,
             blocks_per_level=1, convnext_version="v1", drop_path_rate=0.0,

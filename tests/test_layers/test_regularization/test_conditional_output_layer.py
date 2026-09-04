@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.conditional_output_layer import ConditionalOutputLayer
+from dl_techniques.layers.regularization.conditional_output_layer import ConditionalOutputLayer
 
 B, D = 4, 5
 

@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.selective_gradient_mask import SelectiveGradientMask
+from dl_techniques.layers.regularization.selective_gradient_mask import SelectiveGradientMask
 
 B, D = 4, 6
 

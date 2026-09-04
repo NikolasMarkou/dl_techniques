@@ -28,7 +28,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import window_reverse, window_partition
 
 from ..ffn import SwinMLP
-from ..stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from ..attention.window_attention import WindowAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
 

@@ -28,7 +28,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.selective_gradient_mask")
+@register_dl_technique("dl_techniques.layers.regularization.selective_gradient_mask")
 class SelectiveGradientMask(keras.layers.Layer):
     """
     Selectively stop gradients based on a binary mask.

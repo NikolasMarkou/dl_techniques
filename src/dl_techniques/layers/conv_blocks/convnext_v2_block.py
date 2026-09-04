@@ -24,7 +24,7 @@ from typing import Optional, Dict, Union, Tuple, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from ..layer_scale import LayerScale
+from dl_techniques.layers.regularization.layer_scale import LayerScale
 from ..norms.global_response_norm import GlobalResponseNormalization
 from ...constraints.value_range_constraint import ValueRangeConstraint
 from ...regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
@@ -102,7 +102,7 @@ class ConvNextV2Block(keras.layers.Layer):
         in ``models/vision/convnext/convnext_v2.py`` and
         ``models/vision/bias_free_denoisers/bfconvunext.py`` is::
 
-            from dl_techniques.layers.stochastic_depth import StochasticDepth
+            from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
             residual = x
             y = ConvNextV2Block(...)(x)
             y = StochasticDepth(drop_path_rate)(y)

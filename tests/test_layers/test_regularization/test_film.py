@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.film import FiLMLayer
+from dl_techniques.layers.regularization.film import FiLMLayer
 
 B, H, W, C = 2, 4, 4, 8
 S = 6  # style vector dim

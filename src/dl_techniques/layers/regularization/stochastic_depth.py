@@ -28,7 +28,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.stochastic_depth")
+@register_dl_technique("dl_techniques.layers.regularization.stochastic_depth")
 class StochasticDepth(keras.layers.Layer):
     """
     Stochastic Depth regularization for deep networks.

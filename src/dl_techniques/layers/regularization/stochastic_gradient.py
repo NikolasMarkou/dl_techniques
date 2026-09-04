@@ -27,7 +27,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.stochastic_gradient")
+@register_dl_technique("dl_techniques.layers.regularization.stochastic_gradient")
 class StochasticGradient(keras.layers.Layer):
     """
     Stochastic Gradient dropping regularization for deep networks.

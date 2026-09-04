@@ -288,8 +288,8 @@ class TestTheArchitecturalDeclinesAreReal:
 
     def test_the_residual_stream_carries_no_norm_layerscale_or_droppath(self):
         """S-2 declined: the block's own sub-layers are exactly attn, mlp1, mlp2."""
-        from dl_techniques.layers.layer_scale import LayerScale
-        from dl_techniques.layers.stochastic_depth import StochasticDepth
+        from dl_techniques.layers.regularization.layer_scale import LayerScale
+        from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 
         block = self._built_block()
         direct = list(block._layers) if hasattr(block, "_layers") else []

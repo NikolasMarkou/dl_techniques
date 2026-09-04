@@ -731,7 +731,7 @@ class TestFastVLMStochasticDepthWiring:
 
     def test_stage3_blocks_carry_stochastic_depth_at_schedule_rate(self) -> None:
         """(a) WIRING PROOF: real StochasticDepth on BOTH residual branches."""
-        from dl_techniques.layers.stochastic_depth import StochasticDepth
+        from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 
         model = self._build(dropout_rate=0.0, drop_path_rate=self.DROP_PATH_RATE)
         transformers = self._stage3_transformers(model)

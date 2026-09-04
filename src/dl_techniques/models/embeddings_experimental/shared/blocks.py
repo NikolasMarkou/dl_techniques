@@ -37,7 +37,7 @@ import keras
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique

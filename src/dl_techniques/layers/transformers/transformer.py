@@ -33,8 +33,8 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 # ---------------------------------------------------------------------
 
 from ..moe import MixtureOfExperts, MoEConfig
-from ..stochastic_depth import StochasticDepth
-from ..layer_scale import LayerScale
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.layer_scale import LayerScale
 from ..ffn import assemble_ffn_config, create_ffn_from_config, FFNType
 from ..ffn.factory import FFN_REGISTRY
 from ..attention import create_attention_layer, AttentionType

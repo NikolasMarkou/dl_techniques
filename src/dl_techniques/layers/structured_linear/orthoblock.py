@@ -33,7 +33,7 @@ References:
 import keras
 from typing import Optional, Union, Any, Tuple, Dict, Callable
 
-from dl_techniques.layers.layer_scale import LayerScale
+from dl_techniques.layers.regularization.layer_scale import LayerScale
 from dl_techniques.layers.norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 from dl_techniques.regularizers.binary_preference import BinaryPreferenceRegularizer

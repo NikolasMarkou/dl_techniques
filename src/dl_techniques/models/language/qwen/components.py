@@ -57,7 +57,7 @@ from typing import Optional, List, Any, Dict, Tuple
 from dl_techniques.layers.moe import MoEConfig
 from dl_techniques.layers.moe import MixtureOfExperts
 from dl_techniques.layers.transformers import GatedLinearAttentionBlock
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.attention.gated_attention import GatedAttention
 from dl_techniques.utils.masking import create_mask, combine_masks, MaskConfig

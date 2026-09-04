@@ -72,8 +72,8 @@ from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 from dl_techniques.layers.embedding.register_tokens import RegisterTokens
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.layer_scale import LayerScale
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.layer_scale import LayerScale
 from dl_techniques.models.vision.dino.common import reject_input_shape
 from dl_techniques.utils.keras_registration import register_dl_technique
 

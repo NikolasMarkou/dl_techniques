@@ -28,7 +28,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
     CliffordNetBlock,
 )
-from dl_techniques.layers.layer_scale import LayerScale
+from dl_techniques.layers.regularization.layer_scale import LayerScale
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 #: Variance epsilon for every ``LayerNormalization`` authored in this module.

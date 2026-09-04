@@ -13,7 +13,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.scheduled_dropout import ScheduledDropout
+from dl_techniques.layers.regularization.scheduled_dropout import ScheduledDropout
 from tests.optimizer_state import build_optimizer_state
 
 B, D = 8, 16

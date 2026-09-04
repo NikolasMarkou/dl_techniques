@@ -31,7 +31,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.losses.jacobian_symmetry import jacobian_symmetry_penalty
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 
 
 # ---------------------------------------------------------------------

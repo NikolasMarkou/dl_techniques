@@ -8,7 +8,7 @@ import tensorflow as tf
 from keras import ops
 
 from dl_techniques.layers.transformers.transformer import TransformerLayer
-from dl_techniques.layers.router import RouterLayer
+from dl_techniques.layers.regularization.router import RouterLayer
 
 B, SEQ, HID = 2, 12, 16
 

@@ -18,7 +18,7 @@ from typing import Tuple, Dict, Any
 
 from dl_techniques.layers.fractal_block import FractalBlock
 from dl_techniques.layers.standard_blocks import ConvBlock
-from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.models.vision.fractalnet.model import FractalNet, create_fractal_net
 
 class TestFractalNet:

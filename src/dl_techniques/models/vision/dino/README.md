@@ -62,7 +62,7 @@ this code does not.
 | iBOT-style patch masking on the forward path | no | **yes** — the backbone takes `[images, masks]` and applies a learnable mask token (`MaskTokenApply`) | no |
 | The iBOT **loss** half | — | **not wired here.** `iBOTPatchLoss` exists in `src/dl_techniques/losses/dino_loss.py`; connecting it to the masked forward pass is the trainer's job, not the model's | — |
 | Register tokens (Darcet et al. 2023) | no | **yes** — `num_register_tokens`, defaulting to 4 on `large`/`giant` | **NOT IMPLEMENTED** |
-| LayerScale (`layers/layer_scale.py`) | no | yes — `init_values` | no |
+| LayerScale (`layers/regularization/layer_scale.py`) | no | yes — `init_values` | no |
 | SwiGLU FFN | opt-in via `ffn_type` | **yes**, and it is the `giant` variant's default | opt-in via `ffn_type` |
 | RoPE positional embedding | no | no | **yes — but 1-D, not the paper's 2-D axial.** See note below |
 | Gram anchoring | — | — | **NOT IMPLEMENTED** (needs a third frozen "Gram teacher" network) |

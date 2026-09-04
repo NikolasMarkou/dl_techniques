@@ -89,7 +89,7 @@ class MultiplierType(Enum):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.layer_scale")
+@register_dl_technique("dl_techniques.layers.regularization.layer_scale")
 class LayerScale(keras.layers.Layer):
     """Learnable element-wise multiplier for adaptive feature scaling.
 

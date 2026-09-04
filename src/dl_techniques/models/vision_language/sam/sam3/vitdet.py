@@ -38,8 +38,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
-from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.layer_scale import LayerScale
+from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
+from dl_techniques.layers.regularization.layer_scale import LayerScale
 from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D

@@ -28,7 +28,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.film")
+@register_dl_technique("dl_techniques.layers.regularization.film")
 class FiLMLayer(keras.layers.Layer):
     """
     Configurable Feature-wise Linear Modulation (FiLM) layer.

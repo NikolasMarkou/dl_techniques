@@ -15,7 +15,7 @@ import tempfile
 import os
 from typing import Tuple, Dict, Any
 
-from dl_techniques.layers.layer_scale import (
+from dl_techniques.layers.regularization.layer_scale import (
     MultiplierType,
     LayerScale
 )
