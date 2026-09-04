@@ -22,7 +22,7 @@ Two details are load-bearing and easy to get silently wrong:
 
 1. **``group_size=1`` on the large-kernel conv means ``groups = in_channels``**
    (timm's ``num_groups`` semantics — see
-   :func:`~dl_techniques.layers.mobile_one_block.resolve_num_groups`). A grouped
+   :func:`~dl_techniques.layers.conv_blocks.mobile_one_block.resolve_num_groups`). A grouped
    convolution partitions the output channel axis too, so ``embed_dim`` MUST be an
    exact multiple of the incoming channel count. Every MCi variant satisfies this
    because the channel width exactly doubles from stage to stage, but a variant
@@ -49,7 +49,7 @@ from keras import initializers, regularizers, activations
 # ---------------------------------------------------------------------
 
 from .reparam_large_kernel_conv import ReparamLargeKernelConv
-from ..mobile_one_block import MobileOneBlock
+from ..conv_blocks.mobile_one_block import MobileOneBlock
 from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
 from dl_techniques.utils.keras_registration import register_dl_technique
 

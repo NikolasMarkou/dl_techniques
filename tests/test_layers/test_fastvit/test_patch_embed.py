@@ -24,7 +24,7 @@ from dl_techniques.layers.fastvit.patch_embed import FastVitPatchEmbed
 from dl_techniques.layers.fastvit.reparam_large_kernel_conv import (
     ReparamLargeKernelConv,
 )
-from dl_techniques.layers.mobile_one_block import MobileOneBlock
+from dl_techniques.layers.conv_blocks.mobile_one_block import MobileOneBlock
 
 
 

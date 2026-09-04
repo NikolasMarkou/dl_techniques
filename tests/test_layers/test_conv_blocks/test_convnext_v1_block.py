@@ -1,18 +1,11 @@
 """
-Test suite for ConvNextV2 block implementation.
+Test suite for ConvNext block implementation.
 
 This module provides comprehensive tests for:
-- ConvNextV2Block layer initialization and configuration
-- Layer behavior under different configurations and parameters
-- Output shape computation and validation
-- Training vs inference behavior with dropout
-- Serialization and deserialization (including build configs)
-- Model integration, compilation, and training
-- Model save/load functionality (weights and Keras format)
-- Global Response Normalization (GRN) feature validation
-- Gradient flow and regularization effects
-- Edge cases and error handling
-- Parametrized testing for various configurations
+- ConvNextV1Block layer
+- Layer behavior under different configurations
+- Serialization and deserialization
+- Model integration and persistence
 """
 
 import pytest
@@ -21,7 +14,7 @@ import numpy as np
 import keras
 from typing import Dict, Any
 
-from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
+from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 
 
 # Test fixtures
@@ -33,8 +26,8 @@ def sample_inputs() -> tf.Tensor:
 
 
 @pytest.fixture
-def default_params() -> Dict[str, Any]:
-    """Default parameters for ConvNextV2Block."""
+def default_block_params() -> Dict[str, Any]:
+    """Default parameters for ConvNextV1Block."""
     return {
         "kernel_size": 7,
         "filters": 64,
@@ -49,35 +42,35 @@ def default_params() -> Dict[str, Any]:
 
 
 @pytest.fixture
-def minimal_params() -> Dict[str, Any]:
-    """Minimal parameters for ConvNextV2Block."""
+def minimal_block_params() -> Dict[str, Any]:
+    """Minimal parameters for ConvNextV1Block."""
     return {
         "kernel_size": 7,
         "filters": 64,
     }
 
 
-# ConvNextV2Block tests
-def test_block_initialization(default_params: Dict[str, Any]) -> None:
-    """Test initialization of ConvNextV2Block."""
-    block = ConvNextV2Block(**default_params)
+# ConvNextV1Block tests
+def test_block_initialization(default_block_params: Dict[str, Any]) -> None:
+    """Test initialization of ConvNextV1Block."""
+    block = ConvNextV1Block(**default_block_params)
 
-    assert block.kernel_size == default_params["kernel_size"]
-    assert block.filters == default_params["filters"]
-    assert block.activation_name == default_params["activation"]
-    assert block.use_bias == default_params["use_bias"]
-    assert block.dropout_rate == default_params["dropout_rate"]
-    assert block.spatial_dropout_rate == default_params["spatial_dropout_rate"]
-    assert block.use_gamma == default_params["use_gamma"]
-    assert block.use_softorthonormal_regularizer == default_params["use_softorthonormal_regularizer"]
+    assert block.kernel_size == default_block_params["kernel_size"]
+    assert block.filters == default_block_params["filters"]
+    assert block.activation_name == default_block_params["activation"]
+    assert block.use_bias == default_block_params["use_bias"]
+    assert block.dropout_rate == default_block_params["dropout_rate"]
+    assert block.spatial_dropout_rate == default_block_params["spatial_dropout_rate"]
+    assert block.use_gamma == default_block_params["use_gamma"]
+    assert block.use_softorthonormal_regularizer == default_block_params["use_softorthonormal_regularizer"]
 
 
-def test_block_minimal_initialization(minimal_params: Dict[str, Any]) -> None:
+def test_block_minimal_initialization(minimal_block_params: Dict[str, Any]) -> None:
     """Test initialization with minimal parameters."""
-    block = ConvNextV2Block(**minimal_params)
+    block = ConvNextV1Block(**minimal_block_params)
 
-    assert block.kernel_size == minimal_params["kernel_size"]
-    assert block.filters == minimal_params["filters"]
+    assert block.kernel_size == minimal_block_params["kernel_size"]
+    assert block.filters == minimal_block_params["filters"]
     assert block.activation_name == "gelu"
     assert block.use_bias is True
     assert block.dropout_rate == 0.0
@@ -86,26 +79,41 @@ def test_block_minimal_initialization(minimal_params: Dict[str, Any]) -> None:
     assert block.use_softorthonormal_regularizer is False
 
 
-def test_block_output_shape(sample_inputs: tf.Tensor, default_params: Dict[str, Any]) -> None:
+def test_block_constants() -> None:
+    """Test that class constants are properly defined."""
+    assert ConvNextV1Block.EXPANSION_FACTOR == 4
+    assert ConvNextV1Block.INITIALIZER_MEAN == 0.0
+    assert ConvNextV1Block.INITIALIZER_STDDEV == 0.02
+    assert ConvNextV1Block.LAYERNORM_EPSILON == 1e-6
+    assert ConvNextV1Block.POINTWISE_KERNEL_SIZE == 1
+    assert ConvNextV1Block.GAMMA_L2_REGULARIZATION == 1e-5
+    assert ConvNextV1Block.GAMMA_INITIAL_VALUE == 1.0
+    assert ConvNextV1Block.GAMMA_MIN_VALUE == 1e-6
+    assert ConvNextV1Block.GAMMA_MAX_VALUE == 1.0
+
+
+def test_block_output_shape(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
     """Test if block preserves input shape when using same padding and stride=1."""
-    block = ConvNextV2Block(**default_params)
+    block = ConvNextV1Block(**default_block_params)
     outputs = block(sample_inputs)
 
+    # With stride (1, 1), output shape should be the same as input
     assert outputs.shape == sample_inputs.shape
 
 
-def test_block_compute_output_shape(sample_inputs: tf.Tensor, default_params: Dict[str, Any]) -> None:
+def test_block_compute_output_shape(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
     """Test compute_output_shape method."""
-    block = ConvNextV2Block(**default_params)
+    block = ConvNextV1Block(**default_block_params)
+
 
     computed_shape = block.compute_output_shape(sample_inputs.shape)
-    expected_shape = (sample_inputs.shape[0], sample_inputs.shape[1], sample_inputs.shape[2], default_params["filters"])
+    expected_shape = (sample_inputs.shape[0], sample_inputs.shape[1], sample_inputs.shape[2], default_block_params["filters"])
     assert computed_shape == expected_shape
 
 
-def test_block_training_behavior(sample_inputs: tf.Tensor, default_params: Dict[str, Any]) -> None:
+def test_block_training_behavior(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
     """Test block behavior in training vs inference modes."""
-    block = ConvNextV2Block(**default_params)
+    block = ConvNextV1Block(**default_block_params)
 
     # Training mode
     train_output = block(sample_inputs, training=True)
@@ -117,16 +125,13 @@ def test_block_training_behavior(sample_inputs: tf.Tensor, default_params: Dict[
     assert not np.allclose(train_output.numpy(), inference_output.numpy())
 
 
-def test_block_without_dropout(sample_inputs: tf.Tensor) -> None:
+def test_block_without_dropout(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
     """Test block without dropout."""
-    block = ConvNextV2Block(
-        kernel_size=7,
-        filters=64,
-        activation="gelu",
-        dropout_rate=0.0,  # Explicitly set to 0.0
-        spatial_dropout_rate=0.0,  # Explicitly set to 0.0
-        use_gamma=True
-    )
+    no_dropout_params = default_block_params.copy()
+    no_dropout_params["dropout_rate"] = 0.0
+    no_dropout_params["spatial_dropout_rate"] = 0.0
+
+    block = ConvNextV1Block(**no_dropout_params)
 
     # Training and inference outputs should be the same when no dropout is used
     train_output = block(sample_inputs, training=True)
@@ -135,35 +140,17 @@ def test_block_without_dropout(sample_inputs: tf.Tensor) -> None:
     assert np.allclose(train_output.numpy(), inference_output.numpy(), rtol=1e-5, atol=1e-5)
 
 
-def test_block_with_none_dropout(sample_inputs: tf.Tensor) -> None:
-    """Test block with None dropout rates."""
-    block = ConvNextV2Block(
-        kernel_size=7,
-        filters=64,
-        activation="gelu",
-        dropout_rate=None,  # None instead of 0.0
-        spatial_dropout_rate=None,  # None instead of 0.0
-        use_gamma=True
-    )
-
-    # Training and inference outputs should be the same when no dropout is used
-    train_output = block(sample_inputs, training=True)
-    inference_output = block(sample_inputs, training=False)
-
-    assert np.allclose(train_output.numpy(), inference_output.numpy(), rtol=1e-5, atol=1e-5)
-
-
-def test_block_serialization(default_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
-    """Test serialization of ConvNextV2Block."""
+def test_block_serialization(default_block_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
+    """Test serialization of ConvNextV1Block."""
     # Create and build the original block
-    original_block = ConvNextV2Block(**default_params)
+    original_block = ConvNextV1Block(**default_block_params)
     original_block.build(sample_inputs.shape)  # Build the layer
 
     # Get config and recreate from config
     config = original_block.get_config()
     build_config = original_block.get_build_config()
 
-    restored_block = ConvNextV2Block.from_config(config)
+    restored_block = ConvNextV1Block.from_config(config)
     restored_block.build_from_config(build_config)
 
     # Check if the key properties match
@@ -185,20 +172,20 @@ def test_block_serialization(default_params: Dict[str, Any], sample_inputs: tf.T
     assert set(restored_config.keys()) == set(config.keys())
 
 
-def test_block_serialization_with_regularizer(default_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
+def test_block_serialization_with_regularizer(default_block_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
     """Test serialization with kernel regularizer."""
     # Create block with regularizer
-    regularizer_params = default_params.copy()
+    regularizer_params = default_block_params.copy()
     regularizer_params["kernel_regularizer"] = keras.regularizers.L2(0.01)
 
-    original_block = ConvNextV2Block(**regularizer_params)
+    original_block = ConvNextV1Block(**regularizer_params)
     original_block.build(sample_inputs.shape)  # Build the layer
 
     # Get config and recreate from config
     config = original_block.get_config()
     build_config = original_block.get_build_config()
 
-    restored_block = ConvNextV2Block.from_config(config)
+    restored_block = ConvNextV1Block.from_config(config)
     restored_block.build_from_config(build_config)
 
     # Check that regularizer is properly serialized/deserialized
@@ -207,10 +194,10 @@ def test_block_serialization_with_regularizer(default_params: Dict[str, Any], sa
     assert restored_block.built
 
 
-def test_block_build_configuration(default_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
+def test_block_build_configuration(default_block_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
     """Test get_build_config and build_from_config methods."""
     # Create and build the original block
-    original_block = ConvNextV2Block(**default_params)
+    original_block = ConvNextV1Block(**default_block_params)
     original_block.build(sample_inputs.shape)
 
     # Get build config
@@ -221,7 +208,7 @@ def test_block_build_configuration(default_params: Dict[str, Any], sample_inputs
     assert build_config["input_shape"] == sample_inputs.shape
 
     # Create new block and build from config
-    new_block = ConvNextV2Block(**default_params)
+    new_block = ConvNextV1Block(**default_block_params)
     new_block.build_from_config(build_config)
 
     # Check that new block is built
@@ -229,45 +216,40 @@ def test_block_build_configuration(default_params: Dict[str, Any], sample_inputs
 
 
 @pytest.mark.parametrize("activation", ["relu", "gelu", "swish", "silu"])
-def test_block_activations(activation: str, sample_inputs: tf.Tensor) -> None:
+def test_block_activations(activation: str, default_block_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
     """Test different activation functions."""
-    block = ConvNextV2Block(
-        kernel_size=7,
-        filters=64,
-        activation=activation,
-        dropout_rate=None,
-        spatial_dropout_rate=None
-    )
+    act_params = default_block_params.copy()
+    act_params["activation"] = activation
+    act_params["dropout_rate"] = 0.0  # Disable dropout for consistent testing
+    act_params["spatial_dropout_rate"] = 0.0
 
+    block = ConvNextV1Block(**act_params)
     output = block(sample_inputs)
     assert not tf.reduce_any(tf.math.is_nan(output))
 
 
 @pytest.mark.parametrize("kernel_size", [3, 5, 7, 9])
-def test_different_kernel_sizes(kernel_size: int, sample_inputs: tf.Tensor) -> None:
+def test_block_kernel_sizes(kernel_size: int, default_block_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
     """Test different kernel sizes."""
-    block = ConvNextV2Block(
-        kernel_size=kernel_size,
-        filters=64,
-        activation="gelu",
-        dropout_rate=0.0,
-        spatial_dropout_rate=0.0
-    )
+    kernel_params = default_block_params.copy()
+    kernel_params["kernel_size"] = kernel_size
+    kernel_params["dropout_rate"] = 0.0
+    kernel_params["spatial_dropout_rate"] = 0.0
 
+    block = ConvNextV1Block(**kernel_params)
     output = block(sample_inputs)
-    assert output.shape == sample_inputs.shape
+    assert output.shape == sample_inputs.shape  # Same shape with stride=1
 
 
 @pytest.mark.parametrize("filters", [32, 64, 128, 256])
-def test_block_filter_counts(filters: int, sample_inputs: tf.Tensor) -> None:
+def test_block_filter_counts(filters: int, default_block_params: Dict[str, Any], sample_inputs: tf.Tensor) -> None:
     """Test different filter counts."""
-    block = ConvNextV2Block(
-        kernel_size=7,
-        filters=filters,
-        dropout_rate=0.0,
-        spatial_dropout_rate=0.0
-    )
+    filter_params = default_block_params.copy()
+    filter_params["filters"] = filters
+    filter_params["dropout_rate"] = 0.0
+    filter_params["spatial_dropout_rate"] = 0.0
 
+    block = ConvNextV1Block(**filter_params)
     output = block(sample_inputs)
 
     # Output should have the specified number of filters
@@ -275,9 +257,9 @@ def test_block_filter_counts(filters: int, sample_inputs: tf.Tensor) -> None:
     assert output.shape == expected_shape
 
 
-def test_block_gradient_flow(sample_inputs: tf.Tensor, default_params: Dict[str, Any]) -> None:
+def test_block_gradient_flow(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
     """Test gradient flow through the block."""
-    block = ConvNextV2Block(**default_params)
+    block = ConvNextV1Block(**default_block_params)
 
     with tf.GradientTape() as tape:
         output = block(sample_inputs, training=True)
@@ -292,25 +274,23 @@ def test_block_gradient_flow(sample_inputs: tf.Tensor, default_params: Dict[str,
     assert len(block.trainable_variables) > 0
 
 
-def test_gamma_scaling(sample_inputs: tf.Tensor) -> None:
+def test_gamma_scaling(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
     """Test the effect of the gamma scaling parameter."""
     # Block with gamma scaling
-    with_gamma = ConvNextV2Block(
-        kernel_size=7,
-        filters=64,
-        use_gamma=True,
-        dropout_rate=None,  # Disable dropout to ensure deterministic output
-        spatial_dropout_rate=None
-    )
+    with_gamma_params = default_block_params.copy()
+    with_gamma_params["use_gamma"] = True
+    with_gamma_params["dropout_rate"] = 0.0  # Disable dropout for deterministic comparison
+    with_gamma_params["spatial_dropout_rate"] = 0.0
+
+    with_gamma = ConvNextV1Block(**with_gamma_params)
 
     # Block without gamma scaling
-    without_gamma = ConvNextV2Block(
-        kernel_size=7,
-        filters=64,
-        use_gamma=False,
-        dropout_rate=None,  # Disable dropout to ensure deterministic output
-        spatial_dropout_rate=None
-    )
+    without_gamma_params = default_block_params.copy()
+    without_gamma_params["use_gamma"] = False
+    without_gamma_params["dropout_rate"] = 0.0
+    without_gamma_params["spatial_dropout_rate"] = 0.0
+
+    without_gamma = ConvNextV1Block(**without_gamma_params)
 
     # Process the same inputs
     out_with_gamma = with_gamma(sample_inputs)
@@ -320,25 +300,23 @@ def test_gamma_scaling(sample_inputs: tf.Tensor) -> None:
     assert not np.allclose(out_with_gamma.numpy(), out_without_gamma.numpy())
 
 
-def test_softorthonormal_regularizer(sample_inputs: tf.Tensor) -> None:
+def test_softorthonormal_regularizer(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
     """Test the effect of soft orthonormal regularizer."""
     # Block with soft orthonormal regularizer
-    ortho_block = ConvNextV2Block(
-        kernel_size=7,
-        filters=64,
-        use_softorthonormal_regularizer=True,
-        dropout_rate=0.0,
-        spatial_dropout_rate=0.0
-    )
+    ortho_params = default_block_params.copy()
+    ortho_params["use_softorthonormal_regularizer"] = True
+    ortho_params["dropout_rate"] = 0.0
+    ortho_params["spatial_dropout_rate"] = 0.0
+
+    ortho_block = ConvNextV1Block(**ortho_params)
 
     # Block without soft orthonormal regularizer
-    regular_block = ConvNextV2Block(
-        kernel_size=7,
-        filters=64,
-        use_softorthonormal_regularizer=False,
-        dropout_rate=0.0,
-        spatial_dropout_rate=0.0
-    )
+    regular_params = default_block_params.copy()
+    regular_params["use_softorthonormal_regularizer"] = False
+    regular_params["dropout_rate"] = 0.0
+    regular_params["spatial_dropout_rate"] = 0.0
+
+    regular_block = ConvNextV1Block(**regular_params)
 
     # Process the same inputs
     ortho_output = ortho_block(sample_inputs)
@@ -349,10 +327,23 @@ def test_softorthonormal_regularizer(sample_inputs: tf.Tensor) -> None:
     assert not tf.reduce_any(tf.math.is_nan(regular_output))
 
 
-def test_model_compilation_and_training(sample_inputs: tf.Tensor, default_params: Dict[str, Any]) -> None:
-    """Test compiling and training a model with ConvNextV2Block."""
+def test_model_integration(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
+    """Test integrating the ConvNextV1Block into a Keras model."""
     inputs = keras.Input(shape=sample_inputs.shape[1:])
-    x = ConvNextV2Block(**default_params)(inputs)
+    block = ConvNextV1Block(**default_block_params)
+    outputs = block(inputs)
+
+    model = keras.Model(inputs=inputs, outputs=outputs)
+
+    # Test forward pass
+    result = model(sample_inputs)
+    assert result.shape == sample_inputs.shape
+
+
+def test_model_compilation_and_training(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
+    """Test compiling and training a model with ConvNextV1Block."""
+    inputs = keras.Input(shape=sample_inputs.shape[1:])
+    x = ConvNextV1Block(**default_block_params)(inputs)
     x = keras.layers.GlobalAveragePooling2D()(x)
     outputs = keras.layers.Dense(10, activation="softmax")(x)
 
@@ -367,77 +358,11 @@ def test_model_compilation_and_training(sample_inputs: tf.Tensor, default_params
     assert len(history.history["loss"]) == 1
 
 
-def test_model_save_load_keras_format(sample_inputs: tf.Tensor, default_params: Dict[str, Any], tmp_path) -> None:
-    """Test saving and loading a model in Keras format with ConvNextV2Block."""
+def test_model_save_load(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any], tmp_path) -> None:
+    """Test saving and loading a model with ConvNextV1Block."""
     # Create a simple model with the block
     inputs = keras.Input(shape=sample_inputs.shape[1:])
-    block = ConvNextV2Block(**default_params)
-    outputs = block(inputs)
-    model = keras.Model(inputs=inputs, outputs=outputs)
-
-    # Generate output before saving
-    original_output = model(sample_inputs, training=False).numpy()
-
-    # Save model in Keras format
-    save_path = str(tmp_path / "model.keras")
-    model.save(save_path)
-
-    # Import all necessary custom objects
-    from dl_techniques.layers.layer_scale import LayerScale
-    from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
-    from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
-    from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
-
-    # Load model with custom objects
-    loaded_model = keras.models.load_model(
-        save_path,
-        custom_objects={
-            "ConvNextV2Block": ConvNextV2Block,
-            "LayerScale": LayerScale,
-            "SoftOrthonormalConstraintRegularizer": SoftOrthonormalConstraintRegularizer,
-            "ValueRangeConstraint": ValueRangeConstraint,
-            "GlobalResponseNormalization": GlobalResponseNormalization,
-        }
-    )
-
-    # Generate output after loading
-    loaded_output = loaded_model(sample_inputs, training=False).numpy()
-
-    # Outputs should be identical
-    assert np.allclose(original_output, loaded_output, rtol=1e-5, atol=1e-5)
-
-
-def test_error_handling_invalid_input_shape(default_params: Dict[str, Any]) -> None:
-    """Test error handling for invalid input shapes."""
-    block = ConvNextV2Block(**default_params)
-
-    # Test with 3D input (should raise ValueError)
-    with pytest.raises(ValueError, match="Expected 4D input tensor"):
-        block.compute_output_shape((32, 32, 64))  # Missing batch dimension
-
-    # Test with 2D input (should raise ValueError)
-    with pytest.raises(ValueError, match="Expected 4D input tensor"):
-        block.compute_output_shape((32, 64))
-
-
-def test_model_integration(sample_inputs: tf.Tensor, default_params: Dict[str, Any]) -> None:
-    """Test integrating the ConvNextV2Block into a Keras model."""
-    inputs = keras.Input(shape=sample_inputs.shape[1:])
-    block = ConvNextV2Block(**default_params)
-    outputs = block(inputs)
-
-    model = keras.Model(inputs=inputs, outputs=outputs)
-
-    # Test forward pass
-    result = model(sample_inputs)
-    assert result.shape == sample_inputs.shape
-
-
-def test_model_save_load(sample_inputs: tf.Tensor, default_params: Dict[str, Any], tmp_path) -> None:
-    """Test saving and loading a model with ConvNextV2Block."""
-    # Create a simple model with the block
-    inputs = keras.Input(shape=sample_inputs.shape[1:])
-    block = ConvNextV2Block(**default_params)
+    block = ConvNextV1Block(**default_block_params)
     outputs = block(inputs)
     model = keras.Model(inputs=inputs, outputs=outputs)
 
@@ -458,96 +383,55 @@ def test_model_save_load(sample_inputs: tf.Tensor, default_params: Dict[str, Any
     assert np.allclose(original_output, loaded_output, rtol=1e-5, atol=1e-5)
 
 
-def test_compute_output_shape_list_input() -> None:
-    """Test compute_output_shape with list of shapes."""
-    block = ConvNextV2Block(
-        kernel_size=7,
-        filters=128,
+def test_model_save_load_keras_format(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any], tmp_path) -> None:
+    """Test saving and loading a model in Keras format with ConvNextV1Block."""
+    # Create a simple model with the block
+    inputs = keras.Input(shape=sample_inputs.shape[1:])
+    block = ConvNextV1Block(**default_block_params)
+    outputs = block(inputs)
+    model = keras.Model(inputs=inputs, outputs=outputs)
+
+    # Generate output before saving
+    original_output = model(sample_inputs, training=False).numpy()
+
+    # Save model in Keras format
+    save_path = str(tmp_path / "model.keras")
+    model.save(save_path)
+
+    # Import all necessary custom objects
+    from dl_techniques.layers.layer_scale import LayerScale
+    from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+    from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+
+    # Load model with custom objects
+    loaded_model = keras.models.load_model(
+        save_path,
+        custom_objects={
+            "ConvNextV1Block": ConvNextV1Block,
+            "LayerScale": LayerScale,
+            "SoftOrthonormalConstraintRegularizer": SoftOrthonormalConstraintRegularizer,
+            "ValueRangeConstraint": ValueRangeConstraint,
+        }
     )
 
-    input_shapes = [(None, 32, 32, 64), (None, 16, 16, 64)]
-    output_shapes = block.compute_output_shape(input_shapes)
+    # Generate output after loading
+    loaded_output = loaded_model(sample_inputs, training=False).numpy()
 
-    expected_shapes = [(None, 32, 32, 128), (None, 16, 16, 128)]
-    assert output_shapes == expected_shapes
+    # Outputs should be identical
+    assert np.allclose(original_output, loaded_output, rtol=1e-5, atol=1e-5)
 
 
-def test_compute_output_shape_invalid_input() -> None:
-    """Test compute_output_shape with invalid input."""
-    block = ConvNextV2Block(
-        kernel_size=7,
-        filters=128,
-    )
+def test_error_handling_invalid_input_shape(default_block_params: Dict[str, Any]) -> None:
+    """Test error handling for invalid input shapes."""
+    block = ConvNextV1Block(**default_block_params)
 
+    # Test with 3D input (should raise ValueError)
     with pytest.raises(ValueError, match="Expected 4D input tensor"):
-        block.compute_output_shape((32, 32))
+        block.compute_output_shape((32, 32, 64))  # Missing batch dimension
 
-
-def test_constants() -> None:
-    """Test that all constants are properly defined."""
-    assert ConvNextV2Block.EXPANSION_FACTOR == 4
-    assert ConvNextV2Block.INITIALIZER_MEAN == 0.0
-    assert ConvNextV2Block.INITIALIZER_STDDEV == 0.02
-    assert ConvNextV2Block.LAYERNORM_EPSILON == 1e-6
-    assert ConvNextV2Block.GRN_EPSILON == 1e-6
-    assert ConvNextV2Block.POINTWISE_KERNEL_SIZE == 1
-    assert ConvNextV2Block.GAMMA_L2_REGULARIZATION == 1e-5
-    assert ConvNextV2Block.GAMMA_INITIAL_VALUE == 1.0
-    assert ConvNextV2Block.GAMMA_MIN_VALUE == 1e-6
-    assert ConvNextV2Block.GAMMA_MAX_VALUE == 1.0
-
-
-def test_global_response_normalization_feature(sample_inputs: tf.Tensor) -> None:
-    """Test that Global Response Normalization is properly integrated."""
-    block = ConvNextV2Block(
-        kernel_size=7,
-        filters=64,
-        dropout_rate=0.0,
-        spatial_dropout_rate=0.0
-    )
-
-    # Build the block to initialize GRN
-    _ = block(sample_inputs)
-
-    # Check that GRN layer exists and is properly configured
-    assert hasattr(block, 'grn')
-    assert block.grn is not None
-
-    # Verify GRN is built
-    assert block.grn.built
-
-
-def test_grn_vs_no_grn_difference(sample_inputs: tf.Tensor) -> None:
-    """Test that GRN makes a difference in the output (key V2 feature)."""
-    # Since we can't easily disable GRN in the current implementation,
-    # we test that the GRN layer produces different outputs than identity
-    block = ConvNextV2Block(
-        kernel_size=7,
-        filters=64,
-        dropout_rate=0.0,
-        spatial_dropout_rate=0.0,
-        use_gamma=False  # Disable gamma to focus on GRN effect
-    )
-
-    # Process inputs
-    output = block(sample_inputs)
-
-    # GRN should produce valid, non-NaN outputs
-    assert not tf.reduce_any(tf.math.is_nan(output))
-
-    # Outputs should not be identical to inputs (transformation occurred)
-    assert not np.allclose(output.numpy(), sample_inputs.numpy())
-    """Test that all constants are properly defined."""
-    assert ConvNextV2Block.EXPANSION_FACTOR == 4
-    assert ConvNextV2Block.INITIALIZER_MEAN == 0.0
-    assert ConvNextV2Block.INITIALIZER_STDDEV == 0.02
-    assert ConvNextV2Block.LAYERNORM_EPSILON == 1e-6
-    assert ConvNextV2Block.GRN_EPSILON == 1e-6
-    assert ConvNextV2Block.POINTWISE_KERNEL_SIZE == 1
-    assert ConvNextV2Block.GAMMA_L2_REGULARIZATION == 1e-5
-    assert ConvNextV2Block.GAMMA_INITIAL_VALUE == 1.0
-    assert ConvNextV2Block.GAMMA_MIN_VALUE == 1e-6
-    assert ConvNextV2Block.GAMMA_MAX_VALUE == 1.0
+    # Test with 2D input (should raise ValueError)
+    with pytest.raises(ValueError, match="Expected 4D input tensor"):
+        block.compute_output_shape((32, 64))
 
 
 class TestDepthwiseInitRegularizer:
@@ -559,12 +443,12 @@ class TestDepthwiseInitRegularizer:
     def _build_block(self, **overrides):
         params = dict(kernel_size=self.KERNEL, filters=self.CHANNELS)
         params.update(overrides)
-        block = ConvNextV2Block(**params)
+        block = ConvNextV1Block(**params)
         block.build((None, 32, 32, self.CHANNELS))
         return block
 
     def test_off_path_byte_identical_no_kernel_reg(self) -> None:
-        """SC2: params unset (None) reproduces TruncatedNormal(0,0.02) + None regularizer."""
+        """SC1: params unset (None) reproduces TruncatedNormal(0,0.02) + None regularizer."""
         block = self._build_block()
         dw_cfg = block.conv_1.get_config()
 
@@ -577,7 +461,7 @@ class TestDepthwiseInitRegularizer:
         assert dw_cfg["depthwise_regularizer"] is None
 
     def test_off_path_byte_identical_with_kernel_reg(self) -> None:
-        """SC2: with kernel_regularizer set and depthwise params unset, the depthwise
+        """SC1: with kernel_regularizer set and depthwise params unset, the depthwise
         regularizer equals deepcopy(kernel_regularizer)."""
         block = self._build_block(kernel_regularizer=keras.regularizers.L2(0.01))
         dw_cfg = block.conv_1.get_config()
@@ -594,7 +478,7 @@ class TestDepthwiseInitRegularizer:
 
     def test_on_path_orthonormal_unit_norm_and_roundtrip(self, tmp_path) -> None:
         """SC3: Orthogonal(gain=1.0) init + L2 regularizer; unit-norm kernel; .keras round-trip."""
-        block = ConvNextV2Block(
+        block = ConvNextV1Block(
             kernel_size=self.KERNEL,
             filters=self.CHANNELS,
             depthwise_initializer=keras.initializers.Orthogonal(gain=1.0),
@@ -619,7 +503,7 @@ class TestDepthwiseInitRegularizer:
         cfg = block.get_config()
         assert cfg["depthwise_initializer"]["class_name"] == "Orthogonal"
         assert cfg["depthwise_regularizer"]["class_name"] == "L2"
-        rebuilt = ConvNextV2Block.from_config(cfg)
+        rebuilt = ConvNextV1Block.from_config(cfg)
         assert isinstance(rebuilt.depthwise_initializer, keras.initializers.Orthogonal)
         assert isinstance(rebuilt.depthwise_regularizer, keras.regularizers.L2)
 
@@ -665,7 +549,7 @@ class TestActivationSerialization:
             spatial_dropout_rate=0.0,
         )
         params.update(overrides)
-        return ConvNextV2Block(**params)
+        return ConvNextV1Block(**params)
 
     def test_leaky_relu_instance_get_config_roundtrip(self) -> None:
         """LeakyReLU(0.1) instance: get_config emits a dict; from_config rebuilds equal block."""
@@ -676,7 +560,7 @@ class TestActivationSerialization:
         config = block.get_config()
         assert isinstance(config["activation"], dict)
 
-        rebuilt = ConvNextV2Block.from_config(config)
+        rebuilt = ConvNextV1Block.from_config(config)
         # Share weights so outputs are comparable (config alone carries no weights).
         rebuilt.build((None, 8, 8, self.CHANNELS))
         rebuilt.set_weights(block.get_weights())
@@ -735,13 +619,11 @@ class TestNormalizationTypeOption:
     """Step 10b: additive ``normalization_type`` ('layernorm' default | 'batchnorm').
 
     The 'batchnorm' branch swaps the pre-activation LayerNorm slot for the
-    variance-only ``BiasFreeBatchNorm`` (D-001/D-003/D-004); the V2 GRN path is
-    untouched by this param. Covers: build/forward, ``get_config`` round-trip,
-    byte-identical default (LayerNormalization named "layer_norm"), invalid-value
-    ValueError, INFERENCE homogeneity of a LeakyReLU(0.1) + use_bias=False
-    batchnorm block (V2 GRN has beta=0 / gamma=1 at init -> stays homogeneous),
-    and a ``.keras`` round-trip. All homogeneity / round-trip checks run at
-    ``training=False`` on CPU.
+    variance-only ``BiasFreeBatchNorm`` (D-001/D-003/D-004). Covers: build/forward,
+    ``get_config`` round-trip, byte-identical default (LayerNormalization named
+    "layer_norm"), invalid-value ValueError, INFERENCE homogeneity of a
+    LeakyReLU(0.1) + use_bias=False batchnorm block, and a ``.keras`` round-trip.
+    All homogeneity / round-trip checks run at ``training=False`` on CPU.
     """
 
     CHANNELS = 16
@@ -753,7 +635,7 @@ class TestNormalizationTypeOption:
             dropout_rate=0.0, spatial_dropout_rate=0.0,
         )
         params.update(overrides)
-        block = ConvNextV2Block(**params)
+        block = ConvNextV1Block(**params)
         block.build((None, 8, 8, self.CHANNELS))
         return block
 
@@ -778,14 +660,14 @@ class TestNormalizationTypeOption:
         block = self._build(normalization_type="batchnorm")
         cfg = block.get_config()
         assert cfg["normalization_type"] == "batchnorm"
-        rebuilt = ConvNextV2Block.from_config(cfg)
+        rebuilt = ConvNextV1Block.from_config(cfg)
         assert rebuilt.normalization_type == "batchnorm"
         # Default omitted -> serializes as 'layernorm'.
         assert self._build().get_config()["normalization_type"] == "layernorm"
 
     def test_invalid_normalization_type_raises(self) -> None:
         with pytest.raises(ValueError, match="normalization_type"):
-            ConvNextV2Block(kernel_size=7, filters=16, normalization_type="rmsnorm")
+            ConvNextV1Block(kernel_size=7, filters=16, normalization_type="rmsnorm")
 
     def test_batchnorm_block_homogeneous_at_inference(self) -> None:
         block = self._build(
@@ -814,7 +696,7 @@ class TestNormalizationTypeOption:
 
     def test_batchnorm_block_keras_round_trip(self, tmp_path) -> None:
         inputs = keras.Input(shape=(8, 8, self.CHANNELS))
-        block = ConvNextV2Block(
+        block = ConvNextV1Block(
             kernel_size=self.KERNEL, filters=self.CHANNELS,
             normalization_type="batchnorm",
             activation=keras.layers.LeakyReLU(negative_slope=0.1),

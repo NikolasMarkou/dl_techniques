@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
+from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
 )
@@ -335,7 +335,7 @@ class SAM2MaskDownSampler(keras.layers.Layer):
 class SAM2Fuser(keras.layers.Layer):
     """Stack of residual ConvNeXt V1 blocks fusing mask and pixel features.
 
-    Each block is a :class:`~dl_techniques.layers.convnext_v1_block.ConvNextV1Block`
+    Each block is a :class:`~dl_techniques.layers.conv_blocks.convnext_v1_block.ConvNextV1Block`
     -- depthwise ``KxK`` convolution, ``LayerNormalization``, ``1x1`` expansion
     to ``4 * dim``, GELU, ``1x1`` reduction, learnable per-channel ``gamma``
     -- which reproduces the reference fuser block exactly.

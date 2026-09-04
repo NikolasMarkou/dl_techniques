@@ -34,7 +34,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
+from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.stochastic_gradient import StochasticGradient
 from dl_techniques.utils.activation_serialization import (

@@ -44,13 +44,13 @@ from typing import Optional, Union, Tuple, List, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.layers.bias_free_conv2d import (
+from dl_techniques.layers.conv_blocks.bias_free_conv2d import (
     BiasFreeConv2D,
     BiasFreeResidualBlock,
     resolve_denoiser_normalization,
 )
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
-from dl_techniques.layers.match_channels import MatchChannels
+from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 
 from dl_techniques.layers.downsample_and_skip import DownsampleAndSkip
 

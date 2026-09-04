@@ -25,7 +25,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.bias_free_conv1d")
+@register_dl_technique("dl_techniques.layers.conv_blocks.bias_free_conv1d")
 class BiasFreeConv1D(keras.layers.Layer):
     """Bias-free 1D convolutional layer with optional batch normalization and activation.
 
@@ -236,7 +236,7 @@ class BiasFreeConv1D(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.bias_free_conv1d")
+@register_dl_technique("dl_techniques.layers.conv_blocks.bias_free_conv1d")
 class BiasFreeResidualBlock1D(keras.layers.Layer):
     """Bias-free residual block for 1D convolutions with skip connections.
 

@@ -26,8 +26,8 @@ from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_variant,
     CONVUNEXT_CONFIGS,
 )
-from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
-from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
+from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
+from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 
 
 # ---------------------------------------------------------------------
@@ -768,7 +768,7 @@ class TestZeroPadChannels:
         # SC4: ON model .keras save/load identity on CPU (atol=1e-4). MatchChannels
         # is registered, but pass it in custom_objects defensively (mirrors the
         # LESSONS guidance for the model package + custom layers).
-        from dl_techniques.layers.match_channels import MatchChannels
+        from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 
         model = self._build(zero_pad_channels=True)
         rng = np.random.RandomState(2)
@@ -946,7 +946,7 @@ class TestExtraZeroOutputChannels:
     def test_extra_zero_keras_round_trip(self, tmp_path) -> None:
         # SC8: ON model .keras save/load identity on CPU (atol=1e-4). MatchChannels
         # is registered, but pass it in custom_objects defensively.
-        from dl_techniques.layers.match_channels import MatchChannels
+        from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 
         model = self._build(extra_zero_output_channels=True)
         rng = np.random.RandomState(2)

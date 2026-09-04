@@ -21,7 +21,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.squeeze_excitation")
+@register_dl_technique("dl_techniques.layers.conv_blocks.squeeze_excitation")
 class SqueezeExcitation(keras.layers.Layer):
     """
     Squeeze-and-Excitation block for channel-wise feature recalibration.

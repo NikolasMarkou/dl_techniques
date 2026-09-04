@@ -19,7 +19,7 @@ from keras import ops
 import tensorflow as tf
 
 # Import the layer being tested
-from dl_techniques.layers.mobile_one_block import MobileOneBlock
+from dl_techniques.layers.conv_blocks.mobile_one_block import MobileOneBlock
 
 
 class TestMobileOneBlock:

@@ -15,7 +15,7 @@ import os
 from typing import Dict, Any
 import tensorflow as tf
 
-from dl_techniques.layers.res_path import ResPath
+from dl_techniques.layers.conv_blocks.res_path import ResPath
 
 
 class TestResPath:

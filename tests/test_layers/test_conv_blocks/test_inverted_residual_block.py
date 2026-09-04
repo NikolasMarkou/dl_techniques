@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.inverted_residual_block import InvertedResidualBlock
+from dl_techniques.layers.conv_blocks.inverted_residual_block import InvertedResidualBlock
 
 B, H, W, C = 2, 8, 8, 8
 

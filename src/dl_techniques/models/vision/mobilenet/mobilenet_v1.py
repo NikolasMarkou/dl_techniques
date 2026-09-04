@@ -35,7 +35,7 @@ from typing import Tuple, Optional, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.depthwise_separable_block import DepthwiseSeparableBlock
+from dl_techniques.layers.conv_blocks.depthwise_separable_block import DepthwiseSeparableBlock
 from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_EPSILON,
     REFERENCE_BN_MOMENTUM,

@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.depthwise_separable_block import DepthwiseSeparableBlock
+from dl_techniques.layers.conv_blocks.depthwise_separable_block import DepthwiseSeparableBlock
 
 B, H, W, C = 2, 16, 16, 4
 F = 8

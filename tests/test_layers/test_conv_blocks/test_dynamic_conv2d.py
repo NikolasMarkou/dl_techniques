@@ -6,7 +6,7 @@ import tensorflow as tf
 import keras
 from typing import Dict, Any
 
-from dl_techniques.layers.dynamic_conv2d import DynamicConv2D
+from dl_techniques.layers.conv_blocks.dynamic_conv2d import DynamicConv2D
 
 
 class TestDynamicConv2D:

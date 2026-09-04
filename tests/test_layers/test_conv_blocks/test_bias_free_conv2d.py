@@ -14,7 +14,7 @@ from typing import Any, Dict
 import keras
 import tensorflow as tf
 
-from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
+from dl_techniques.layers.conv_blocks.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 from dl_techniques.layers.norms.bias_free_batch_norm import BiasFreeBatchNorm
 
 

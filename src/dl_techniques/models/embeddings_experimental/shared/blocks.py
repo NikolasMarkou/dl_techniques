@@ -34,8 +34,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import keras
 
-from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
-from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
+from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
+from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.transformers import TransformerLayer
@@ -345,7 +345,7 @@ class ConvNextEncoderBlock(keras.layers.Layer):
     """
     ConvNeXt V1 mixing block over a token sequence, with the block call contract.
 
-    Wraps :class:`~dl_techniques.layers.convnext_v1_block.ConvNextV1Block` --
+    Wraps :class:`~dl_techniques.layers.conv_blocks.convnext_v1_block.ConvNextV1Block` --
     depthwise convolution, normalization, pointwise expansion, activation,
     pointwise contraction, LayerScale -- and adapts it from images to
     sequences.

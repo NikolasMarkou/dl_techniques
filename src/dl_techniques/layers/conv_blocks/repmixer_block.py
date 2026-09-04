@@ -32,7 +32,7 @@ from .mobile_one_block import MobileOneBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.repmixer_block")
+@register_dl_technique("dl_techniques.layers.conv_blocks.repmixer_block")
 class RepMixerBlock(keras.layers.Layer):
     """RepMixer block for efficient spatial and channel feature mixing.
 
@@ -309,7 +309,7 @@ class RepMixerBlock(keras.layers.Layer):
         return config
 
 
-@register_dl_technique("dl_techniques.layers.repmixer_block")
+@register_dl_technique("dl_techniques.layers.conv_blocks.repmixer_block")
 class ConvolutionalStem(keras.layers.Layer):
     """Convolutional stem for FastVLM using MobileOne blocks.
 

@@ -18,11 +18,11 @@ copies drift and nothing in the suite can tell.
     ``setdefault``s ``1e-6``. Every one of those differs from the reference, so the
     value must be passed EXPLICITLY at every construction site.
 :var REFERENCE_PADDING_MODE: ``padding_mode`` to pass to
-    :class:`~dl_techniques.layers.mobile_one_block.MobileOneBlock` (and to use for
+    :class:`~dl_techniques.layers.conv_blocks.mobile_one_block.MobileOneBlock` (and to use for
     the convolutions authored here). PyTorch pads SYMMETRICALLY by
     ``kernel_size // 2``; Keras' ``padding='same'`` pads asymmetrically, which at
     stride > 1 makes the sampled grid depend on the kernel size. See
-    :func:`~dl_techniques.layers.mobile_one_block.resolve_conv_padding`.
+    :func:`~dl_techniques.layers.conv_blocks.mobile_one_block.resolve_conv_padding`.
 """
 
 #: See the module docstring.

@@ -31,7 +31,7 @@ from dl_techniques.models.vision.accunet.model import (
 )
 
 from dl_techniques.layers.hanc_block import HANCBlock
-from dl_techniques.layers.res_path import ResPath
+from dl_techniques.layers.conv_blocks.res_path import ResPath
 from dl_techniques.layers.multi_level_feature_compilation import MLFCLayer
 
 

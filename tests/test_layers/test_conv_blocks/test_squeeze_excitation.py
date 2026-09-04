@@ -6,7 +6,7 @@ import numpy as np
 import keras
 import tensorflow as tf
 
-from dl_techniques.layers.squeeze_excitation import SqueezeExcitation
+from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from tests.optimizer_state import build_optimizer_state
 
 

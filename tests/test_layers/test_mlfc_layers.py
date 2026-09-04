@@ -90,7 +90,7 @@ class TestMLFCLayer:
         # Check sub-layer types
         assert isinstance(layer.compilation_convs[0], keras.layers.Conv2D)
         assert isinstance(layer.batch_norms[0], keras.layers.BatchNormalization)
-        from dl_techniques.layers.squeeze_excitation import SqueezeExcitation # Import for isinstance
+        from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation # Import for isinstance
         assert isinstance(layer.squeeze_excitations[0], SqueezeExcitation)
         assert isinstance(layer.activation, keras.layers.LeakyReLU)
 

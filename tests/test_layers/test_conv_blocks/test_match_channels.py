@@ -24,7 +24,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.match_channels import MatchChannels
+from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 
 
 def _rewrite_keras_dropping_slice_side(src_path: str, dst_path: str) -> None:

@@ -32,7 +32,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.bias_free_conv2d import (
+from dl_techniques.layers.conv_blocks.bias_free_conv2d import (
     BiasFreeConv2D,
     BiasFreeResidualBlock,
     resolve_denoiser_normalization,

@@ -25,7 +25,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.dynamic_conv2d")
+@register_dl_technique("dl_techniques.layers.conv_blocks.dynamic_conv2d")
 class DynamicConv2D(keras.layers.Layer):
     """
     Dynamic 2D Convolution with attention over convolution kernels.

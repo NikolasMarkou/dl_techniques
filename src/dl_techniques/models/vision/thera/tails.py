@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
+from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.transformers.swin_transformer_block import (
     SwinTransformerBlock,
 )

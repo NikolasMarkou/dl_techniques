@@ -15,7 +15,7 @@ import os
 from typing import Tuple, List
 
 from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
-from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
+from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,

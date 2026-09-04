@@ -5,7 +5,7 @@ This module transcribes timm's ``ReparamLargeKernelConv``, the downsampling
 primitive that FastViT uses inside every ``PatchEmbed``.
 
 The design idea is the same structural-reparameterization trick that
-:class:`~dl_techniques.layers.mobile_one_block.MobileOneBlock` uses, applied to a
+:class:`~dl_techniques.layers.conv_blocks.mobile_one_block.MobileOneBlock` uses, applied to a
 *large* kernel: a ``k x k`` Conv-BN branch (``k = 7`` at every MCi call site) is
 summed with a parallel ``small_kernel x small_kernel`` Conv-BN branch (``3 x 3``).
 Both branches are affine at inference, share a stride and a group count, and are
@@ -60,12 +60,12 @@ from keras import layers, ops, initializers, regularizers, activations
 # ---------------------------------------------------------------------
 
 from ..norms.factory import create_normalization_layer
-from ..squeeze_excitation import SqueezeExcitation
+from ..conv_blocks.squeeze_excitation import SqueezeExcitation
 # Single definition of timm's `num_groups` mapping, shared with MobileOneBlock.
 # Do NOT re-implement it here: the two layers must resolve `group_size`
 # identically or a FastViT block and the MobileOneBlock beside it would disagree
 # about what `group_size=1` means.
-from ..mobile_one_block import (
+from ..conv_blocks.mobile_one_block import (
     resolve_num_groups,
     resolve_conv_padding,
     conv_output_size,

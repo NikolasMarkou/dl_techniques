@@ -28,7 +28,7 @@ from dl_techniques.utils.activation_serialization import (
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.universal_inverted_bottleneck")
+@register_dl_technique("dl_techniques.layers.conv_blocks.universal_inverted_bottleneck")
 class UniversalInvertedBottleneck(keras.layers.Layer):
     """
     Universal Inverted Bottleneck (UIB) for efficient CNNs.

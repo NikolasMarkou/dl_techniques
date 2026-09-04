@@ -11,7 +11,7 @@ from typing import Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
+from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1, create_convnext_v1
 
 from dl_techniques.visualization import (

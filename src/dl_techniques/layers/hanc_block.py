@@ -21,7 +21,7 @@ import keras
 from typing import Optional, Union, Tuple, Any, Dict
 
 from .hanc_layer import HANCLayer
-from .squeeze_excitation import SqueezeExcitation
+from .conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 

@@ -24,7 +24,7 @@ from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 from ..utils.logger import logger
 from ..initializers import clone_initializer
 from .yolo12_blocks import yolo12_conv_block
-from .squeeze_excitation import SqueezeExcitation
+from .conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

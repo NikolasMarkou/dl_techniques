@@ -56,7 +56,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Mapping
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
-from dl_techniques.layers.mobile_one_block import MobileOneBlock
+from dl_techniques.layers.conv_blocks.mobile_one_block import MobileOneBlock
 from dl_techniques.layers.fastvit import FastVitStage
 from dl_techniques.layers.fastvit.reference import (
     REFERENCE_NORM_EPSILON,

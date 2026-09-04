@@ -45,7 +45,7 @@ from typing import Optional, Tuple, Any, Dict, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.squeeze_excitation import SqueezeExcitation
+from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -1010,7 +1010,7 @@ class _SEWeights(layers.Layer):
     needs the logits so it can add them to spatial logits in logit space.
 
     Its bottleneck width differs from the standard SE block's:
-    :class:`~dl_techniques.layers.squeeze_excitation.SqueezeExcitation`
+    :class:`~dl_techniques.layers.conv_blocks.squeeze_excitation.SqueezeExcitation`
     computes ``max(1, int(round(C * reduction_ratio)))``; this class truncates
     instead, ``max(1, int(C * reduction_ratio))``. They agree except when the
     product lands between integers (measured: ``C=24, reduction_ratio=0.0625``

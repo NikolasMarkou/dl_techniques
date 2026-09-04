@@ -138,7 +138,7 @@ def conv_output_size(
     return (size + 2 * pad - kernel_size) // stride + 1
 
 
-@register_dl_technique("dl_techniques.layers.mobile_one_block")
+@register_dl_technique("dl_techniques.layers.conv_blocks.mobile_one_block")
 class MobileOneBlock(keras.layers.Layer):
     """MobileOne building block with structural reparameterization.
 

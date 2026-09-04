@@ -23,7 +23,7 @@ from typing import Optional, Union, Tuple, List, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from .squeeze_excitation import SqueezeExcitation
+from .conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

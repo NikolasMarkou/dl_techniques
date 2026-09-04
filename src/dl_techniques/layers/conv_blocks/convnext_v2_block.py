@@ -1,12 +1,19 @@
-"""ConvNeXt V1 block: depthwise conv, LayerNorm, and an inverted MLP.
+"""ConvNeXt V2 block: depthwise conv, LayerNorm, and an inverted MLP with
+Global Response Normalization.
 
 The block runs a depthwise convolution, LayerNorm, a 4x channel expansion,
-GELU, optional dropout, then a channel reduction back to the input width,
-with an optional learnable per-channel gamma scale on the output.
+GELU, then Global Response Normalization (GRN) before reducing back down.
+GRN computes a per-channel L2 norm across the spatial dimensions and rescales
+each channel with it, sharpening channel competition that plain LayerNorm
+cannot express. That is the one change from ConvNeXt V1.
+
+This block is only the residual branch: it does not add the skip connection
+or apply stochastic depth. See the class docstring for the wiring a caller
+must add.
 
 References:
-    - Liu et al., 2022. A ConvNet for the 2020s.
-      (https://arxiv.org/abs/2201.03545)
+    - Woo et al., 2023. ConvNeXt V2: Co-designing and Scaling ConvNets with
+      Masked Autoencoders. (https://arxiv.org/abs/2301.00808)
 """
 
 import copy
@@ -17,10 +24,10 @@ from typing import Optional, Dict, Union, Tuple, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from .layer_scale import LayerScale
-from ..constraints.value_range_constraint import ValueRangeConstraint
-from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
-from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from ..layer_scale import LayerScale
+from ..norms.global_response_norm import GlobalResponseNormalization
+from ...constraints.value_range_constraint import ValueRangeConstraint
+from ...regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -29,15 +36,17 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.convnext_v1_block")
-class ConvNextV1Block(keras.layers.Layer):
-    """ConvNeXt V1 block with depthwise convolution and inverted bottleneck MLP.
+@register_dl_technique("dl_techniques.layers.conv_blocks.convnext_v2_block")
+class ConvNextV2Block(keras.layers.Layer):
+    """ConvNeXt V2 block with Global Response Normalization.
 
-    Implements the block from "A ConvNet for the 2020s" (Liu et al., 2022).
-    The computation is ``x = DepthwiseConv -> LayerNorm -> Conv1x1(4x expand)
-    -> GELU -> Dropout -> Conv1x1(reduce) -> gamma * x``, using large-kernel
-    depthwise convolutions and an inverted bottleneck design with a 4x
-    expansion factor in the pointwise MLP.
+    Implements the block from "ConvNeXt V2: Co-designing and Scaling ConvNets
+    with Masked Autoencoders" (Woo et al., 2023). Extends V1 by inserting a
+    Global Response Normalization (GRN) layer after GELU activation, which
+    computes per-channel L2 norms across spatial dimensions and applies
+    learnable scaling to enhance inter-channel feature competition. The
+    computation is ``DepthwiseConv -> LayerNorm -> Conv1x1(4x) -> GELU ->
+    GRN -> Dropout -> Conv1x1(reduce) -> gamma * x``.
 
     Architecture:
 
@@ -64,6 +73,10 @@ class ConvNextV1Block(keras.layers.Layer):
         └────────────────┬──────────────────┘
                          ▼
         ┌───────────────────────────────────┐
+        │  Global Response Normalization    │  ← V2 innovation
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
         │  Dropout / SpatialDropout         │
         └────────────────┬──────────────────┘
                          ▼
@@ -86,16 +99,16 @@ class ConvNextV1Block(keras.layers.Layer):
         inside the inverted-bottleneck MLP, not drop-path on the residual.
 
         The caller adds the residual and drop-path wiring. The pattern used
-        in ``models/vision/convnext/convnext_v1.py`` and
+        in ``models/vision/convnext/convnext_v2.py`` and
         ``models/vision/bias_free_denoisers/bfconvunext.py`` is::
 
             from dl_techniques.layers.stochastic_depth import StochasticDepth
             residual = x
-            y = ConvNextV1Block(...)(x)
+            y = ConvNextV2Block(...)(x)
             y = StochasticDepth(drop_path_rate)(y)
             x = keras.layers.add([residual, y])
 
-        Calling this block standalone, e.g. ``x = ConvNextV1Block(...)(x)``,
+        Calling this block standalone, e.g. ``x = ConvNextV2Block(...)(x)``,
         drops the residual connection and the stochastic-depth
         regularization. Always wrap it as shown above.
 
@@ -121,7 +134,7 @@ class ConvNextV1Block(keras.layers.Layer):
     :param depthwise_initializer: Optional override for the depthwise convolution's
         kernel initializer (a string name or a ``keras.initializers.Initializer``
         instance). ``None`` (default) reproduces the current hardcoded behavior:
-        ``TruncatedNormal(mean=0.0, stddev=0.02)``. For an *orthonormal* depthwise
+        ``TruncatedNormal(mean=0.0, stddev=0.02)``. For an orthonormal depthwise
         init, pass ``keras.initializers.Orthogonal(gain=1.0)``: a depthwise
         ``(K, K, C, 1)`` kernel flattens to a single column, so "orthonormal" here
         means unit-norm (``||w|| = 1.0``); per-channel mutual orthonormality is not
@@ -143,6 +156,7 @@ class ConvNextV1Block(keras.layers.Layer):
     INITIALIZER_MEAN = 0.0
     INITIALIZER_STDDEV = 0.02
     LAYERNORM_EPSILON = 1e-6
+    GRN_EPSILON = 1e-6
     POINTWISE_KERNEL_SIZE = 1
     GAMMA_L2_REGULARIZATION = 1e-5
     GAMMA_INITIAL_VALUE = 1.0
@@ -277,8 +291,6 @@ class ConvNextV1Block(keras.layers.Layer):
                 )
             )
 
-            conv_params["kernel_initializer"] = OrthogonalHypersphereInitializer()
-
         # First pointwise convolution (expansion)
         self.conv_2 = keras.layers.Conv2D(
             filters=self.filters * self.EXPANSION_FACTOR,
@@ -297,6 +309,12 @@ class ConvNextV1Block(keras.layers.Layer):
         self.activation_layer = keras.layers.Activation(
             self.activation_name,
             name="activation"
+        )
+
+        # Global Response Normalization (GRN) - key feature of ConvNeXt V2
+        self.grn = GlobalResponseNormalization(
+            eps=self.GRN_EPSILON,
+            name="global_response_norm"
         )
 
         # Dropout layers
@@ -367,6 +385,8 @@ class ConvNextV1Block(keras.layers.Layer):
 
         self.activation_layer.build(expansion_shape)
 
+        self.grn.build(expansion_shape)
+
         self.dropout.build(expansion_shape)
         self.spatial_dropout.build(expansion_shape)
 
@@ -388,7 +408,7 @@ class ConvNextV1Block(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass of the ConvNext block.
+        Forward pass of the ConvNextV2 block.
 
             :param inputs: Input tensor of shape (batch_size, height, width, channels).
             :param training: Boolean indicating whether in training mode.
@@ -403,6 +423,8 @@ class ConvNextV1Block(keras.layers.Layer):
 
         x = self.activation_layer(x, training=training)
 
+        x = self.grn(x, training=training)
+
         x = self.dropout(x, training=training)
         x = self.spatial_dropout(x, training=training)
 
@@ -414,7 +436,7 @@ class ConvNextV1Block(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
-        Compute the output shape of the ConvNext block.
+        Compute the output shape of the ConvNextV2 block.
 
             :param input_shape: Shape tuple representing input shape
                 (batch_size, height, width, channels).
@@ -464,13 +486,13 @@ class ConvNextV1Block(keras.layers.Layer):
         return config
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ConvNextV1Block":
+    def from_config(cls, config: Dict[str, Any]) -> "ConvNextV2Block":
         """
         Create layer from configuration dictionary.
 
             :param config: Configuration dictionary.
 
-            :return: ConvNextV1Block instance.
+            :return: ConvNextV2Block instance.
         """
         # Make a copy to avoid modifying the original config
         config_copy = config.copy()

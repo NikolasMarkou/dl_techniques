@@ -12,7 +12,7 @@ Names that are already distinctive in the reference (``ReparamLargeKernelConv``,
 
 .. note::
    ``FastVitRepMixerBlock`` is NOT the same class as the pre-existing standalone
-   ``dl_techniques.layers.repmixer_block.RepMixerBlock``. The two are different
+   ``dl_techniques.layers.conv_blocks.repmixer_block.RepMixerBlock``. The two are different
    architectures that happen to share a name; the standalone one is consumed by
    ``models/vision_language/fastvlm/`` and is left untouched.
 """

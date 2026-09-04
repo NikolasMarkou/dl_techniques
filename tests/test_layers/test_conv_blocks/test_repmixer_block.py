@@ -14,7 +14,7 @@ from typing import Any, Dict
 import keras
 import tensorflow as tf
 
-from dl_techniques.layers.repmixer_block import RepMixerBlock, ConvolutionalStem
+from dl_techniques.layers.conv_blocks.repmixer_block import RepMixerBlock, ConvolutionalStem
 from tests.optimizer_state import build_optimizer_state
 
 

@@ -12,7 +12,7 @@ attention stage runs.
 
 This is a hybrid classifier assembled from this repository's own blocks,
 not a weight-compatible port of a published FastViT/FastVLM checkpoint.
-``dl_techniques.layers.repmixer_block.RepMixerBlock`` shares a name with
+``dl_techniques.layers.conv_blocks.repmixer_block.RepMixerBlock`` shares a name with
 FastViT's RepMixer but is a different construction; the FastViT port lives
 in ``dl_techniques.layers.fastvit``. No pretrained weights are distributed
 for this package.
@@ -31,7 +31,7 @@ from typing import Optional, Union, List, Dict, Any, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.factory import AttentionType
-from dl_techniques.layers.repmixer_block import RepMixerBlock, ConvolutionalStem
+from dl_techniques.layers.conv_blocks.repmixer_block import RepMixerBlock, ConvolutionalStem
 
 from .components import AttentionBlockVLM
 from dl_techniques.utils.keras_registration import register_dl_technique

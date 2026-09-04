@@ -42,7 +42,7 @@ round trip is pinned elementwise per block by
 
 .. note::
    ``FastVitRepMixerBlock`` is NOT the pre-existing standalone
-   :class:`~dl_techniques.layers.repmixer_block.RepMixerBlock`. See the package
+   :class:`~dl_techniques.layers.conv_blocks.repmixer_block.RepMixerBlock`. See the package
    ``README.md`` for the full disambiguation.
 
 References:

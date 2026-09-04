@@ -43,7 +43,7 @@ from typing import Tuple, Optional, Dict, Any, Literal, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations.hard_swish import HardSwish
-from dl_techniques.layers.universal_inverted_bottleneck import UniversalInvertedBottleneck
+from dl_techniques.layers.conv_blocks.universal_inverted_bottleneck import UniversalInvertedBottleneck
 from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_EPSILON,
     REFERENCE_BN_MOMENTUM,

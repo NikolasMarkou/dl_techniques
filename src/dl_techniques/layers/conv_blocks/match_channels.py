@@ -21,7 +21,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.match_channels")
+@register_dl_technique("dl_techniques.layers.conv_blocks.match_channels")
 class MatchChannels(keras.layers.Layer):
     """Match an input tensor's channel count to a target, parameter-free.
 

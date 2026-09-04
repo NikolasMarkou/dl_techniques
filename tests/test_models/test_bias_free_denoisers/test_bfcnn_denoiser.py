@@ -19,7 +19,7 @@ from dl_techniques.models.vision.bias_free_denoisers.bfcnn import (
     create_bfcnn_variant,
     BFCNN_CONFIGS
 )
-from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
+from dl_techniques.layers.conv_blocks.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 
 from .conftest import HOMOGENEITY_RTOL, HOMOGENEITY_SCALES, fit_one_step
 from ..knob_sensitivity_oracle import (

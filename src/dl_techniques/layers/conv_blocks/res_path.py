@@ -33,7 +33,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.res_path")
+@register_dl_technique("dl_techniques.layers.conv_blocks.res_path")
 class ResPath(keras.layers.Layer):
     """Residual path for bridging the semantic gap in U-Net skip connections.
 
