@@ -19,7 +19,7 @@ import tensorflow as tf
 from dl_techniques.layers.standard_blocks import ConvBlock
 from dl_techniques.layers.attention.area_attention import AreaAttention
 from dl_techniques.layers.transformers.area_attention_block import AreaAttentionBlock
-from dl_techniques.layers.yolo12_blocks import (
+from dl_techniques.layers.yolo12.yolo12_blocks import (
     Bottleneck,
     C3k2Block,
     A2C2fBlock

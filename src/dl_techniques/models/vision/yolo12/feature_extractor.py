@@ -38,7 +38,7 @@ from typing import Optional, Tuple, Dict, Any, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.yolo12_blocks import (
+from dl_techniques.layers.yolo12.yolo12_blocks import (
     yolo12_conv_block,
     A2C2fBlock,
     C3k2Block,

@@ -18,8 +18,8 @@ from typing import Optional, Tuple, Union, Dict, Any
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from . import standard_blocks
-from .transformers.area_attention_block import AreaAttentionBlock
+from dl_techniques.layers import standard_blocks
+from dl_techniques.layers.transformers.area_attention_block import AreaAttentionBlock
 
 # DECISION plan-2026-09-01T055648-e6d380a5/D-005: keep epsilon/momentum in one
 # dict, not per-site literals -- 26 construction sites across 4 modules depend
@@ -96,7 +96,7 @@ def yolo12_conv_block(
 
 
 
-@register_dl_technique("dl_techniques.layers.yolo12_blocks")
+@register_dl_technique("dl_techniques.layers.yolo12.yolo12_blocks")
 class Bottleneck(keras.layers.Layer):
     """
     Standard bottleneck block with optional residual connection for YOLOv12.
@@ -235,7 +235,7 @@ class Bottleneck(keras.layers.Layer):
 
 
 
-@register_dl_technique("dl_techniques.layers.yolo12_blocks")
+@register_dl_technique("dl_techniques.layers.yolo12.yolo12_blocks")
 class C3k2Block(keras.layers.Layer):
     """
     CSP-like block with dual paths and Bottleneck layers for YOLOv12.
@@ -417,7 +417,7 @@ class C3k2Block(keras.layers.Layer):
 
 
 
-@register_dl_technique("dl_techniques.layers.yolo12_blocks")
+@register_dl_technique("dl_techniques.layers.yolo12.yolo12_blocks")
 class A2C2fBlock(keras.layers.Layer):
     """
     Attention-enhanced ELAN block with progressive feature extraction for YOLOv12.

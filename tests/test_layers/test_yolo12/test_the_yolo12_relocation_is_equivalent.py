@@ -77,16 +77,22 @@ pytestmark = pytest.mark.usefixtures("tf32_disabled")
 #: itself), which is why `test_the_pinned_module_is_not_the_live_module` exists.
 PINNED_BASE_COMMIT = "607ffcea9"
 
+#: Path at PINNED_BASE_COMMIT -- pre-dates plan-2026-09-04's `layers/yolo12/` relocation, so
+#: this stays the OLD root-level path for the `git show <commit>:<path>` lookup.
 _PINNED_REPO_PATH = "src/dl_techniques/layers/yolo12_blocks.py"
+
+#: Path in the CURRENT worktree, used only for the content-diff check against the pinned
+#: blob (`test_the_pinned_module_is_not_the_live_module`). Must track the live location.
+_LIVE_REPO_PATH = "src/dl_techniques/layers/yolo12/yolo12_blocks.py"
 
 #: Loading the scratch copy re-runs `@register_dl_technique`, which OVERWRITES the live
 #: entries in `keras.saving.get_custom_objects()`. That is a process-global side effect on
 #: every later test in the session, so the dict is snapshotted and restored around the load.
-_LIVE_MODULE = "dl_techniques.layers.yolo12_blocks"
+_LIVE_MODULE = "dl_techniques.layers.yolo12.yolo12_blocks"
 
 
 def _repo_root() -> pathlib.Path:
-    return pathlib.Path(__file__).resolve().parents[2]
+    return pathlib.Path(__file__).resolve().parents[3]
 
 
 def _git_show(ref_path: str) -> str:
@@ -201,7 +207,7 @@ def build_new_area_attention(pinned_module: Any, **kwargs: Any) -> keras.layers.
     :return: an unbuilt layer.
     """
     from dl_techniques.layers.attention.area_attention import AreaAttention
-    from dl_techniques.layers.yolo12_blocks import YOLO12_NORM_KWARGS
+    from dl_techniques.layers.yolo12.yolo12_blocks import YOLO12_NORM_KWARGS
 
     return AreaAttention(normalization_kwargs=dict(YOLO12_NORM_KWARGS), **kwargs)
 
@@ -233,7 +239,7 @@ def build_new_area_attention_block(pinned_module: Any, **kwargs: Any) -> keras.l
     :return: an unbuilt layer.
     """
     from dl_techniques.layers.transformers.area_attention_block import AreaAttentionBlock
-    from dl_techniques.layers.yolo12_blocks import YOLO12_NORM_KWARGS
+    from dl_techniques.layers.yolo12.yolo12_blocks import YOLO12_NORM_KWARGS
 
     return AreaAttentionBlock(normalization_kwargs=dict(YOLO12_NORM_KWARGS), **kwargs)
 
@@ -495,7 +501,7 @@ class TestTheHarnessIsMeasuringWhatItClaims:
         assert not hasattr(pinned, "YOLO12_NORM_KWARGS")
 
         # 3. The pinned source text differs from the current worktree file.
-        worktree = (_repo_root() / _PINNED_REPO_PATH).read_text()
+        worktree = (_repo_root() / _LIVE_REPO_PATH).read_text()
         assert pinned._pinned_source != worktree
 
         # 4. The pinned classes are distinct objects that build their OWN sub-layers, i.e.

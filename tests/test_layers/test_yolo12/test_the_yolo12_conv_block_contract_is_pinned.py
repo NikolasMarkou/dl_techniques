@@ -36,7 +36,7 @@ import keras
 import pytest
 
 from dl_techniques.layers import standard_blocks
-from dl_techniques.layers.yolo12_blocks import YOLO12_NORM_KWARGS, yolo12_conv_block
+from dl_techniques.layers.yolo12.yolo12_blocks import YOLO12_NORM_KWARGS, yolo12_conv_block
 
 
 class TestTheHelperReturnsTheSharedConvBlock:

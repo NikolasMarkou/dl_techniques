@@ -15,7 +15,7 @@ import tensorflow as tf
 
 # Assuming the file is in dl_techniques/layers/
 # Adjust the import path if your structure is different.
-from dl_techniques.layers.yolo12_heads import (
+from dl_techniques.layers.yolo12.yolo12_heads import (
     YOLOv12DetectionHead,
     YOLOv12SegmentationHead,
     YOLOv12ClassificationHead

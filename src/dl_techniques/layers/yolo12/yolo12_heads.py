@@ -21,16 +21,16 @@ from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from ..initializers import clone_initializer
-from .yolo12_blocks import yolo12_conv_block
-from .conv_blocks.squeeze_excitation import SqueezeExcitation
+from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
+from dl_techniques.layers.yolo12.yolo12_blocks import yolo12_conv_block
+from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.yolo12_heads")
+@register_dl_technique("dl_techniques.layers.yolo12.yolo12_heads")
 class YOLOv12DetectionHead(keras.layers.Layer):
     """
     YOLOv12 detection head with separate classification and regression branches.
@@ -320,7 +320,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.yolo12_heads")
+@register_dl_technique("dl_techniques.layers.yolo12.yolo12_heads")
 class YOLOv12SegmentationHead(keras.layers.Layer):
     """
     Segmentation head for YOLOv12 multitask learning.
@@ -752,7 +752,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.yolo12_heads")
+@register_dl_technique("dl_techniques.layers.yolo12.yolo12_heads")
 class YOLOv12ClassificationHead(keras.layers.Layer):
     """
     Classification head for YOLOv12 multitask learning.

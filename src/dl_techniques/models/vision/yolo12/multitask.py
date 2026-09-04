@@ -48,7 +48,7 @@ from dl_techniques.layers.heads.vision.task_types import (
     TaskConfiguration,
     parse_task_list
 )
-from dl_techniques.layers.yolo12_heads import (
+from dl_techniques.layers.yolo12.yolo12_heads import (
     YOLOv12DetectionHead,
     YOLOv12SegmentationHead,
     YOLOv12ClassificationHead

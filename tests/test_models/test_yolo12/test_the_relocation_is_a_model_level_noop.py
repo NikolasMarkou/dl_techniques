@@ -235,7 +235,7 @@ class TestTheReferenceArmIsReallyThePinnedTree:
 
     def test_the_base_tree_predates_the_plan_by_content_not_by_path(self, base_arm) -> None:
         """A path check can be satisfied by a copy of the CURRENT tree. Content cannot."""
-        from dl_techniques.layers import yolo12_blocks as live
+        from dl_techniques.layers.yolo12 import yolo12_blocks as live
 
         assert hasattr(live, "YOLO12_NORM_KWARGS"), (
             "the LIVE module lost YOLO12_NORM_KWARGS -- this guard's discriminator is "
@@ -255,7 +255,7 @@ class TestTheReferenceArmIsReallyThePinnedTree:
                 f"{name!r} is absent from the base tree's yolo12_blocks.py -- the pinned "
                 "commit is not the pre-deletion state this file claims to compare against"
             )
-        live = (_repo_root() / "src/dl_techniques/layers/yolo12_blocks.py").read_text()
+        live = (_repo_root() / "src/dl_techniques/layers/yolo12/yolo12_blocks.py").read_text()
         for name in ("class ConvBlock", "class AreaAttention", "class AttentionBlock"):
             assert name not in live, (
                 f"{name!r} is back in the live yolo12_blocks.py; the relocation this file "
@@ -366,7 +366,7 @@ class TestTheD067PairSurvivesIntoTheAssembledModel:
 
     def test_the_momentum_census_can_observe_a_moved_momentum(self) -> None:
         """Liveness. Without this arm an empty census would pass the assertion above."""
-        from dl_techniques.layers.yolo12_blocks import yolo12_conv_block
+        from dl_techniques.layers.yolo12.yolo12_blocks import yolo12_conv_block
 
         block = yolo12_conv_block(filters=4)
         moved = keras.Sequential([block])
