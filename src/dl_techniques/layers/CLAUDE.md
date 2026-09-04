@@ -29,12 +29,23 @@ see § Naming traps.
 | `moe/` | — | Full MoE framework: `config.py`, `experts.py`, `gating.py`, `layer.py`, `integration.py` |
 | `graphs/` | — | Graph neural network, relational graph transformer, simplified hyperbolic GCN, entity graph refinement, Fermi-Dirac decoder |
 | `geometric/` | — | Clifford algebra block, point cloud autoencoder, supernode pooling, and `fields/` (connection, field embedding, gauge-invariant attention, holonomic transformer, holonomy, manifold stress, parallel transport) |
-| `statistics/` | — | Deep kernel PCA, invertible kernel PCA, MDN layer, moving std, normalizing flow, residual ACF, scaler |
+| `statistics/` | — | Deep kernel PCA, invertible kernel PCA, MDN layer, moving std, normalizing flow, residual ACF, scaler, split-conformal prediction interval |
 | `time_series/` | — | Adaptive lag attention, DeepAR blocks, EMA layer, forecasting layers, mixed sequential block, N-BEATS/N-BEATSx blocks, PRISM blocks, quantile heads, TCN, temporal fusion, xLSTM blocks |
 | `reasoning/` | — | HRM reasoning core, reasoning module, sparse puzzle embedding |
 | `physics/` | — | Lagrange layer, approximate Lagrange layer |
 | `fusion/` | — | Multimodal fusion layer |
 | `tokenizers/` | — | BPE tokenizer |
+| `complex/` | — | Complex-valued (complex-number) layers: `ComplexConv2D`, `ComplexDense`, `ComplexReLU`, complex pooling/dropout, raw-TF backend only |
+| `conv_blocks/` | — | Convolutional building blocks: bias-free Conv1D/2D, ConvNeXt v1/v2, depthwise separable, dynamic Conv2D, inverted residual, MobileOne, RepMixer, ResPath, universal inverted bottleneck, plus the shared `SqueezeExcitation` gate and `MatchChannels` skip helper |
+| `signal_processing/` | — | Classical/fixed signal and image primitives: Canny, CLAHE, Gaussian filter/pyramid, Laplacian filter family, Haar wavelet decomposition, shearlet transform, FFT/IFFT, strong (color-jitter + CutMix) augmentation |
+| `pooling/` | — | Spatial/channel layout changes with ~0 learned params: blur pool, pixel shuffle/unshuffle, patch merging, global sum pool, U-Net downsample-and-skip junction |
+| `structured_linear/` | — | Alternative parameterizations to a dense weight matrix: BitLinear (1.58-bit), MPS/tensor-train, OrthoBlock, orthogonal butterfly, random Fourier features, rigid simplex, KANvolution |
+| `regularization/` | — | Regularization and routing: layer scale, scheduled dropout, stochastic depth, stochastic gradient, selective gradient mask, router, FiLM, conditional output |
+| `generative/` | — | Generative / latent-variable layers: restricted Boltzmann machine, sparse autoencoder, VAE reparameterization samplers, vector quantizer (+ rotation-trick variant) |
+| `blt/` | — | Byte Latent Transformer stack: tokenizer, entropy model, dynamic patcher, patch pooling, local encoder/decoder, global transformer, plus the HRM-fused reasoning core |
+| `acc_unet/` | — | ACC-UNet cluster: HANC block + layer (hierarchical-context aggregation), multi-level feature compilation (cross-scale fusion) |
+| `yolo12/` | — | YOLOv12 backbone blocks (`Bottleneck`, `C3k2Block`, `A2C2fBlock`) and task heads (detection/segmentation/classification) |
+| `tabular/` | — | TabM batched-ensemble MLP building blocks (D-007: named for the domain, not the paper acronym) |
 
 ### Semantics worth knowing before you reuse
 
@@ -67,17 +78,25 @@ dispatch facade and per-domain factories. **`heads/CLAUDE.md` owns it** — read
 
 ### Standalone layers (top-level files)
 
-`ls src/dl_techniques/layers/*.py` is the authoritative list; the families are convolutional blocks
-(bias-free Conv1D/2D, ConvNeXt v1/v2, depthwise separable, dynamic Conv2D, inverted residual,
-mobile-one, universal inverted bottleneck, RepMixer, patch merging, pixel shuffle), signal/image
-primitives (Canny, CLAHE, Gaussian filter and pyramid, Laplacian, shearlet, FFT, augmentation),
-structured-linear layers (BitLinear, KAN linear, KANvolution, MPS, orthoblock, orthogonal
-butterfly, rigid simplex, Tversky projection, random Fourier features), regularization and routing
-(layer scale, scheduled dropout, stochastic depth/gradient, selective gradient mask,
-squeeze-excitation, router, FiLM, conditional output), and model-specific blocks (BLT, capsules,
-EoMT mask, FNet encoder, fractal, HANC, hierarchical MLP stem, MothNet, TabM, YOLO12).
-`sampling.py` adds Gaussian-ball / thin-shell hypersphere / von Mises-Fisher reparameterization
-samplers plus an inline factory; `vmf` adds `VMFSampling` and `vmf_kl_divergence`.
+`ls src/dl_techniques/layers/*.py` is the authoritative list. As of this reorg, 13 files remain at
+`layers/` root — each a single-architecture or general-utility layer with no sibling file in scope
+for a subpackage (see D-005: a 1-file subpackage adds a directory for zero organizational gain):
+
+| File | Holds |
+|---|---|
+| `anchor_generator.py` | `AnchorGenerator` — precomputed multi-scale detection anchor/center grid |
+| `capsules.py` | `PrimaryCapsule`, `RoutingCapsule`, `CapsuleBlock` — capsule layers with dynamic routing |
+| `eomt_mask.py` | `EomtMask` — query-token class+mask segmentation head for Encoder-only Mask Transformer |
+| `fnet_encoder_block.py` | `FNetEncoderBlock` — full FNet encoder block (Fourier token mixing + FFN) |
+| `fractal_block.py` | `FractalBlock` — recursive FractalNet block |
+| `hierarchical_mlp_stem.py` | `HierarchicalMLPStem` — hierarchical non-overlapping-conv ViT patch stem |
+| `io_preparation.py` | `ClipLayer` (+ normalize/denormalize sibling) — tensor clipping/normalization pre/post-processing |
+| `modality_projection.py` | `ModalityProjection` — pixel-shuffle + dense projection of vision tokens into a language embedding space |
+| `mothnet_blocks.py` | `AntennalLobeLayer`, `MushroomBodyLayer`, `HebbianReadoutLayer` — insect-olfaction-inspired few-shot feature cascade |
+| `one_hot_encoding.py` | `OneHotEncoding` — in-graph multi-column one-hot encoder |
+| `spatial_layer.py` | `SpatialLayer` (+ `coordinate_grid`, `interpolate_grid`) — CoordConv-style coordinate grid + bilinear grid sampling |
+| `standard_blocks.py` | `ConvBlock`, `DenseBlock`, `ResidualDenseBlock`, `BasicBlock`, `BottleneckBlock` — generic factory-driven building blocks; `ConvBlock` is a heavily-reused shared asset (attention/, transformers/, resnet, fractalnet, yolo12) |
+| `thera_heat_field.py` | `ThermalActivation`, `HeatField` — THERA neural heat field for anti-aliased arbitrary-scale super-resolution |
 
 ### Naming traps
 
@@ -96,7 +115,7 @@ The `layers/__init__.py` root **is** empty. Most subpackages are **not**.
 | Shape | Subpackages | How to import |
 |---|---|---|
 | **Curated re-export with `__all__`** | `activations`, `attention` (44 names), `embedding`, `fastvit`, `ffn`, `heads`, `logic`, `memory`, `mixtures`, `moe`, `norms`, `sequence_pooling`, `time_series`, `transformers` | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
-| **Empty** | `fusion`, `geometric`, `graphs`, `physics`, `reasoning`, `statistics`, `tokenizers`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
+| **Empty** | `fusion`, `geometric`, `graphs`, `physics`, `reasoning`, `statistics`, `tokenizers`, `complex`, `conv_blocks`, `signal_processing`, `pooling`, `structured_linear`, `regularization`, `generative`, `blt`, `acc_unet`, `yolo12`, `tabular`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
 | **No `__init__.py` at all** | `experimental/` — a namespace package | submodule imports only |
 
 Submodule imports keep working in both cases — e.g.
