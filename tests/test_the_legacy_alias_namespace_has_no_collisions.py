@@ -428,7 +428,7 @@ class TestTheLegacyAliasNamespace:
         ("dl_techniques.layers.standard_blocks", ("ConvBlock",)),
         ("dl_techniques.layers.attention.area_attention", ("AreaAttention",)),
         ("dl_techniques.layers.ffn.mlp", ("MLPBlock",)),
-        ("dl_techniques.layers.tabm_blocks", ("TabMMLPBlock", "MLPBlock")),
+        ("dl_techniques.layers.tabular.tabm_blocks", ("TabMMLPBlock", "MLPBlock")),
         (
             "dl_techniques.models.vision.image_restoration.pw_fnet.model",
             ("PWFNetDownsample", "Downsample"),

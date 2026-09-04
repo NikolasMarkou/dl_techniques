@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.tabm_blocks import (
+from dl_techniques.layers.tabular.tabm_blocks import (
     ScaleEnsemble,
     LinearEfficientEnsemble,
     NLinear,
