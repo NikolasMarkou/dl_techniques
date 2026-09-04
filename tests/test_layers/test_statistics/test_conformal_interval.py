@@ -18,7 +18,7 @@ import pytest
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.conformal_interval import ConformalIntervalLayer
+from dl_techniques.layers.statistics.conformal_interval import ConformalIntervalLayer
 
 # ---------------------------------------------------------------------
 

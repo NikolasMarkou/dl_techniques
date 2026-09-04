@@ -41,7 +41,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.conformal_interval")
+@register_dl_technique("dl_techniques.layers.statistics.conformal_interval")
 class ConformalIntervalLayer(keras.layers.Layer):
     """Non-trainable, fixed-weights conformal prediction-interval layer.
 
