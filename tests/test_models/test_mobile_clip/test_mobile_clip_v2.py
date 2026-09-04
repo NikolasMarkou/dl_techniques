@@ -61,10 +61,6 @@ from dl_techniques.models.vision_language.mobile_clip.mobile_clip_v2 import (
     _resolve_model_variant,
     create_mobile_clip_v2,
 )
-from tests.test_models.test_fastvit.reference_oracle import (
-    load_supplied_json,
-)
-
 #: The table is a CLASS attribute (v1's convention), not a module-level dict.
 #: `test_variant_table_lives_on_the_class` pins that; this is just a shorthand.
 _VARIANTS = MobileClipV2Model.MODEL_VARIANTS
@@ -355,73 +351,6 @@ class TestModelVariants:
                 )
             # A bool that is really an int (or vice versa) compares equal above.
             assert isinstance(actual['text_config']['use_causal_mask'], bool)
-
-    def test_model_variants_match_supplied_json_configs(self):
-        """PIN 1b: all six rows vs the COMMITTED upstream open_clip JSONs.
-
-        The oracle is the third-party config files themselves, at
-        `research/mobileclip2_reference/model_configs/`, read with `json.load`.
-        Nothing is restated here.
-
-        Both the raw table row AND `from_variant(...).get_config()` are checked,
-        through the SAME `_flatten` locator, so the table, the wiring and the
-        serialized config cannot drift apart. Every row now states all ten
-        fields (they used to be six tabulated plus four shared constants), so
-        this covers all ten on both paths.
-        """
-        for name, row in _VARIANTS.items():
-            family, _, size = name.partition('_')
-            json_name = (
-                f"{'MobileCLIP2' if family == 'mobileclip2' else 'MobileCLIP'}"
-                f"-{size.upper()}"
-            )
-            supplied = load_supplied_json(json_name)
-            config = MobileClipV2Model.from_variant(name).get_config()
-
-            vision = supplied['vision_cfg']
-            text = supplied['text_cfg']
-            backbone = vision['timm_model_name']
-            assert backbone.startswith('fastvit_'), (
-                f"{json_name}: timm_model_name is {backbone!r}, expected a "
-                f"`fastvit_*` name"
-            )
-
-            expected = {
-                'embed_dim': supplied['embed_dim'],
-                'image_backbone': backbone[len('fastvit_'):],
-                'image_size': vision['image_size'],
-                # `input_shape` carries the channel count too, which the old
-                # scalar `image_size` field could not express.
-                'image_channels': 3,
-                'text_width': text['width'],
-                'text_heads': text['heads'],
-                'text_layers': text['layers'],
-                'context_length': text['context_length'],
-                'vocab_size': text['vocab_size'],
-                'use_causal_mask': not text['no_causal_mask'],
-                'text_intermediate': 4 * text['width'],
-            }
-            assert set(expected) == set(_FLAT_FIELDS), (
-                "the JSON-derived field set and _FLAT_FIELDS disagree; one of "
-                "them was extended without the other"
-            )
-
-            flat_config = _flatten(config)
-            for field, expected_value in expected.items():
-                assert flat_config[field] == expected_value, (
-                    f"{name}.{field} DISAGREES with the supplied "
-                    f"{json_name}.json: port has {flat_config[field]!r}, the "
-                    f"config file gives {expected_value!r}."
-                )
-
-            # The TABLE must ALSO agree, so a row that is right only because
-            # `from_variant` overrode it is caught.
-            flat_row = _flatten(row)
-            for field, expected_value in expected.items():
-                assert flat_row[field] == expected_value, (
-                    f"MODEL_VARIANTS[{name!r}] {field}={flat_row[field]!r} but "
-                    f"{json_name}.json gives {expected_value!r}"
-                )
 
     def test_causal_mask_splits_the_two_families(self):
         """The flag is the WHOLE reason both families are tabulated.

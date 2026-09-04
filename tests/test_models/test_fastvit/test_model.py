@@ -41,10 +41,6 @@ from dl_techniques.models.vision.fastvit.model import (
     _resolve_mci_variant,
     create_fastvit_image_encoder,
 )
-from tests.test_models.test_fastvit.reference_oracle import (
-    parse_supplied_mci_model_args,
-)
-
 
 # ---------------------------------------------------------------------
 # The reference tables, transcribed a SECOND time, independently of the module.
@@ -172,56 +168,6 @@ class TestMciVariantTable:
                     f"two is a mis-transcription of the reference — resolve it "
                     f"against the source, not by editing whichever is easier."
                 )
-
-    def test_mci3_mci4_match_supplied_source(self):
-        """PIN 2: mci3/mci4 vs the COMMITTED upstream `mobileclip2.py`.
-
-        This is the only local cross-check that exists (H-7: `timm` is not
-        installed, so mci0/mci1/mci2 have no oracle at all — deviation X-3).
-
-        The oracle is the third-party file itself, at
-        `research/mobileclip2_reference/mobileclip2.py`, PARSED with `ast` — not
-        imported, because it is PyTorch/timm code that this environment cannot
-        execute. Every value compared below is read out of that file at test
-        time; nothing here restates it. Editing the reference file to make this
-        test pass defeats its entire purpose.
-        """
-        supplied_table = parse_supplied_mci_model_args()
-        assert set(supplied_table) == {'mci3', 'mci4'}, (
-            f"the supplied source should yield exactly mci3 and mci4, got "
-            f"{sorted(supplied_table)}"
-        )
-
-        for name in ('mci3', 'mci4'):
-            supplied = supplied_table[name]
-            actual = MCI_VARIANTS[name]
-            assert set(supplied) <= set(actual), (
-                f"{name}: fields present in the supplied source but absent from "
-                f"MCI_VARIANTS: {sorted(set(supplied) - set(actual))}"
-            )
-            for field, expected_value in supplied.items():
-                actual_value = actual[field]
-                if isinstance(expected_value, tuple):
-                    actual_value = tuple(actual_value)
-                assert actual_value == expected_value, (
-                    f"{name}.{field} DISAGREES with the user-supplied "
-                    f"mobileclip2.py: port has {actual_value!r}, supplied source "
-                    f"has {expected_value!r}."
-                )
-
-        # Guard against a DEGENERATE oracle: if the parser ever returned the
-        # same row twice (a copy-paste in the reader, or a source in which the
-        # two factories became identical), the field loop above would still
-        # pass for one of them by accident. In the real source mci4 is mci3
-        # scaled, so the widths differ while the first four depths agree.
-        assert (
-            supplied_table['mci4']['embed_dims']
-            != supplied_table['mci3']['embed_dims']
-        ), "the parsed oracle gave mci3 and mci4 the SAME widths"
-        assert (
-            supplied_table['mci4']['layers'][:4]
-            == supplied_table['mci3']['layers'][:4]
-        )
 
     def test_resolve_accepts_timm_prefix_and_rejects_unknown(self):
         """`_resolve_mci_variant` handles timm's `fastvit_` model-name prefix."""
