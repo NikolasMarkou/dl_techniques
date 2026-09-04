@@ -367,6 +367,7 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     add_common_arguments(parser)
+    parser.set_defaults(expose_bottleneck=True)
     parser.add_argument("--variant", choices=list(CONVUNEXT_CONFIGS), default="base")
     parser.add_argument("--convnext-version", choices=["v1", "v2"], default="v1")
     parser.add_argument("--extra-zero-output-channels", action="store_true", help="Grow output channels at decoder level 0: append output_channels zero-initialized channels before the level-0 ConvNeXt blocks (widened), then keep ONLY those as the output instead of the learned 1x1 projection. Bias-free; default OFF.")
