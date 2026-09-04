@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.layers.rigid_simplex_layer import RigidSimplexLayer
+from dl_techniques.layers.structured_linear.rigid_simplex_layer import RigidSimplexLayer
 
 
 class TestRigidSimplexLayerInstantiation:

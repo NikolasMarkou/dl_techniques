@@ -12,7 +12,7 @@ import keras
 import tempfile
 import os
 
-from dl_techniques.layers.orthoblock import OrthoBlock
+from dl_techniques.layers.structured_linear.orthoblock import OrthoBlock
 from dl_techniques.regularizers.binary_preference import BinaryPreferenceRegularizer
 from dl_techniques.initializers.hypersphere_orthogonal_initializer import (
     OrthogonalHypersphereInitializer,
@@ -507,7 +507,7 @@ class TestOrthoBlockDefaultPins:
     never a changed default.
 
     Every expected value below is the DECLARED default read off
-    `src/dl_techniques/layers/orthoblock.py:270-283`, cross-checked against
+    `src/dl_techniques/layers/structured_linear/orthoblock.py:270-283`, cross-checked against
     the same file's own prose:
 
       * `use_bias=False`   -- justified in the module docstring

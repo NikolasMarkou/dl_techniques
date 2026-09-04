@@ -9,7 +9,7 @@ import pytest
 import tensorflow as tf
 from keras import ops
 
-from dl_techniques.layers.orthogonal_butterfly import OrthogonalButterfly
+from dl_techniques.layers.structured_linear.orthogonal_butterfly import OrthogonalButterfly
 
 
 def _random_angle_layer(num_blocks, seed):

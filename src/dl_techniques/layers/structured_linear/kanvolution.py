@@ -34,7 +34,7 @@ from dl_techniques.utils.activation_serialization import (
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.kanvolution")
+@register_dl_technique("dl_techniques.layers.structured_linear.kanvolution")
 class KANvolution(keras.layers.Layer):
     """Convolution layer whose per-tap activation is a learnable B-spline
     combined with SiLU, instead of a fixed kernel weight and activation.

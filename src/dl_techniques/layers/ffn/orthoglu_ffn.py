@@ -21,7 +21,7 @@ import keras
 from keras import ops, layers, activations
 from typing import Optional, Union, Any, Dict, Callable, Tuple
 
-from ..orthoblock import OrthoBlock
+from dl_techniques.layers.structured_linear.orthoblock import OrthoBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 

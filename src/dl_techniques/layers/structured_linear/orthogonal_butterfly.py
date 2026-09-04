@@ -78,7 +78,7 @@ def _butterfly_apply(
     return x
 
 
-@register_dl_technique("dl_techniques.layers.orthogonal_butterfly")
+@register_dl_technique("dl_techniques.layers.structured_linear.orthogonal_butterfly")
 class OrthogonalButterfly(keras.layers.Layer):
     """Structured, exactly-orthogonal ``d x d`` linear layer (butterfly Givens).
 

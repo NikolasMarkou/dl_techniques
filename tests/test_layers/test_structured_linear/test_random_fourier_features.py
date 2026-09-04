@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.random_fourier_features import RFFKernelLayer
+from dl_techniques.layers.structured_linear.random_fourier_features import RFFKernelLayer
 
 B, D, OUT = 3, 8, 4
 

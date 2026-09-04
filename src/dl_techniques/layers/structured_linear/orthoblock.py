@@ -33,12 +33,12 @@ References:
 import keras
 from typing import Optional, Union, Any, Tuple, Dict, Callable
 
-from .layer_scale import LayerScale
-from .norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
-from ..constraints.value_range_constraint import ValueRangeConstraint
-from ..regularizers.binary_preference import BinaryPreferenceRegularizer
-from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
-from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from dl_techniques.layers.layer_scale import LayerScale
+from dl_techniques.layers.norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.regularizers.binary_preference import BinaryPreferenceRegularizer
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -47,7 +47,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 _ZERO_DERIVATIVE_AT_ORIGIN = frozenset({"relu", "relu6"})
 
 
-@register_dl_technique("dl_techniques.layers.orthoblock")
+@register_dl_technique("dl_techniques.layers.structured_linear.orthoblock")
 class OrthoBlock(keras.layers.Layer):
     """Structured feature learning block with orthonormal regularization and gating.
 

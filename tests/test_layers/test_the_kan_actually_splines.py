@@ -3,7 +3,7 @@
 Plan ``plan-2026-08-22T035419-a11304c8``, ruling **D-052**.
 
 The inventory recorded one dead weight -- ``control_points``, ``add_weight``-ed
-in ``KANvolution.build`` (``layers/kanvolution.py``) and read nowhere in ``src/``.
+in ``KANvolution.build`` (``layers/structured_linear/kanvolution.py``) and read nowhere in ``src/``.
 Cited by symbol, not by line number: the address it originally carried has
 already rotted, the symbol has not. Measurement found the defect is larger than
 that -- the whole learnable-univariate-function apparatus was decorative. The
@@ -39,7 +39,7 @@ import pytest
 import keras
 from keras import ops
 
-from dl_techniques.layers.kanvolution import KANvolution
+from dl_techniques.layers.structured_linear.kanvolution import KANvolution
 
 
 def _reference_kanvolution(x, layer):

@@ -23,7 +23,7 @@ from typing import Tuple, Optional, Union, Dict, Any
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.mps_layer")
+@register_dl_technique("dl_techniques.layers.structured_linear.mps_layer")
 class MPSLayer(keras.layers.Layer):
     """Matrix Product State (MPS) layer for efficient tensor decomposition.
 

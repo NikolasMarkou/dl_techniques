@@ -22,7 +22,8 @@ def is_power_of_two(n: int) -> bool:
     Zero and negative values are ``False``, so this is safe to call on any int
     -- including an unresolved ``-1`` dimension. It is the guard both binary-tree
     layers use to reject a last dimension they cannot pair:
-    ``layers/orthogonal_butterfly.py`` and ``layers/norms/polar_weight_norm.py``,
+    ``layers/structured_linear/orthogonal_butterfly.py`` and
+    ``layers/norms/polar_weight_norm.py``,
     which held byte-identical private copies until
     ``plan-2026-08-31-a4e0c303/iter-1/step-4``. This module imports nothing from
     either of them; the dependency is one-way and stays that way.

@@ -414,7 +414,8 @@ class TestIsPowerOfTwo:
     """Exhaustive contract for :func:`is_power_of_two` over ``[-8, 64]``.
 
     Promoted out of two byte-identical private copies
-    (``layers/orthogonal_butterfly.py`` and ``layers/norms/polar_weight_norm.py``)
+    (``layers/structured_linear/orthogonal_butterfly.py`` and
+    ``layers/norms/polar_weight_norm.py``)
     by ``plan-2026-08-31-a4e0c303/iter-1/step-4``. Both consumers only ever
     called it on a happy-path dimension, so the boundary behaviour below was
     unpinned by anything in the tree.
@@ -469,7 +470,7 @@ class TestIsPowerOfTwo:
 
     def test_the_two_consumers_route_through_this_function(self):
         """No private copy may survive at either former definition site."""
-        from dl_techniques.layers import orthogonal_butterfly
+        from dl_techniques.layers.structured_linear import orthogonal_butterfly
         from dl_techniques.layers.norms import polar_weight_norm
 
         for mod in (orthogonal_butterfly, polar_weight_norm):

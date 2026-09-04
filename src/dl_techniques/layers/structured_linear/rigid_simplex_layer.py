@@ -34,7 +34,7 @@ from dl_techniques.constraints.value_range_constraint import ValueRangeConstrain
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.rigid_simplex_layer")
+@register_dl_technique("dl_techniques.layers.structured_linear.rigid_simplex_layer")
 class RigidSimplexLayer(keras.layers.Layer):
     """
     Project inputs onto a rigid simplex with a learnable rotation and scale.

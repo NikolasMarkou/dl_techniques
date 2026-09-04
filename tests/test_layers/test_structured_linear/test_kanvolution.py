@@ -7,7 +7,7 @@ import tempfile
 import os
 from typing import Any, Dict, Tuple
 
-from dl_techniques.layers.kanvolution import KANvolution
+from dl_techniques.layers.structured_linear.kanvolution import KANvolution
 
 
 # --- Test Class ---

@@ -14,7 +14,7 @@ import tempfile
 import os
 
 # Adjust the import path as necessary for your project structure.
-from dl_techniques.layers.mps_layer import MPSLayer
+from dl_techniques.layers.structured_linear.mps_layer import MPSLayer
 
 
 class TestMPSLayer:

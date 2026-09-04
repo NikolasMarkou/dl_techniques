@@ -24,7 +24,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.kanvolution import KANvolution
+from dl_techniques.layers.structured_linear.kanvolution import KANvolution
 from dl_techniques.layers.ffn.kan_linear import KANLinear
 
 

@@ -60,7 +60,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.bitlinear_layer import BitLinear
+from dl_techniques.layers.structured_linear.bitlinear_layer import BitLinear
 
 # ---------------------------------------------------------------------
 

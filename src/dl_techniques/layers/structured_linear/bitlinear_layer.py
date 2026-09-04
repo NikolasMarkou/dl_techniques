@@ -33,7 +33,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.bitlinear_layer")
+@register_dl_technique("dl_techniques.layers.structured_linear.bitlinear_layer")
 class BitLinear(keras.layers.Layer):
     """Bit-aware linear layer for quantization-aware training.
 

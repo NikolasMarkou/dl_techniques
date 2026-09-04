@@ -21,7 +21,7 @@ from typing import Optional, Union, Tuple, Any, Dict, Callable
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.random_fourier_features")
+@register_dl_technique("dl_techniques.layers.structured_linear.random_fourier_features")
 class RFFKernelLayer(keras.layers.Layer):
     """Random Fourier Features layer for efficient kernel approximation.
 
