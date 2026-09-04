@@ -42,7 +42,7 @@ def resolve_denoiser_normalization(normalization_type: str) -> str:
     (``models/vision/bias_free_denoisers/``): inside a model whose entire reason to exist
     is degree-1 homogeneity ``f(a*x) = a*f(x)``, the name ``'batchnorm'`` means the
     homogeneous variance-only :class:`~dl_techniques.keras.layers.norms.bias_free_batch_norm.BiasFreeBatchNorm`,
-    never stock ``keras.keras.layers.BatchNormalization``. Every other name passes through
+    never stock ``keras.layers.BatchNormalization``. Every other name passes through
     unchanged, so the function is idempotent and the set of reachable layer types is
     unchanged.
 
@@ -80,7 +80,7 @@ def resolve_denoiser_normalization(normalization_type: str) -> str:
 
 
 @register_dl_technique("dl_techniques.layers.conv_blocks.bias_free_conv2d")
-class BiasFreeConv2D(keras.keras.layers.Layer):
+class BiasFreeConv2D(keras.layers.Layer):
     """Bias-free 2D convolutional layer with optional batch normalization and activation.
 
     Implements a convolution without bias, followed by bias-free batch
@@ -216,7 +216,7 @@ class BiasFreeConv2D(keras.keras.layers.Layer):
         else:
             self.batch_norm = None
 
-        # Activation layer (if specified). keras.keras.layers.Activation accepts a string,
+        # Activation layer (if specified). keras.layers.Activation accepts a string,
         # an activation function, or a callable Layer instance (e.g. LeakyReLU(0.1));
         # the instance is held as a callable and round-trips via get_config/from_config.
         if self.activation is not None:
@@ -295,7 +295,7 @@ class BiasFreeConv2D(keras.keras.layers.Layer):
         if self.activation_layer is not None:
             x = self.activation_layer(x)
 
-        # Apply dropout if enabled (training-only, handled by keras.keras.layers.Dropout)
+        # Apply dropout if enabled (training-only, handled by keras.layers.Dropout)
         if self.dropout_layer is not None:
             x = self.dropout_layer(x, training=training)
 
@@ -325,8 +325,8 @@ class BiasFreeConv2D(keras.keras.layers.Layer):
             # DECISION plan_2026-07-04_58ac8e73/D-002: serialize a layer-instance activation
             # (e.g. LeakyReLU(0.1)) so it round-trips; string/function path stays byte-identical. See decisions.md.
             'activation': (
-                keras.keras.layers.serialize(self.activation)
-                if isinstance(self.activation, keras.keras.layers.Layer)
+                keras.layers.serialize(self.activation)
+                if isinstance(self.activation, keras.layers.Layer)
                 else keras.activations.serialize(keras.activations.get(self.activation))
             ),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
@@ -342,7 +342,7 @@ class BiasFreeConv2D(keras.keras.layers.Layer):
         """Deserialize, reviving a layer-instance activation from its dict form."""
         config = dict(config)
         if isinstance(config.get('activation'), dict):
-            config['activation'] = keras.keras.layers.deserialize(config['activation'])
+            config['activation'] = keras.layers.deserialize(config['activation'])
         return cls(**config)
 
 
@@ -350,7 +350,7 @@ class BiasFreeConv2D(keras.keras.layers.Layer):
 
 
 @register_dl_technique("dl_techniques.layers.conv_blocks.bias_free_conv2d")
-class BiasFreeResidualBlock(keras.keras.layers.Layer):
+class BiasFreeResidualBlock(keras.layers.Layer):
     """Bias-free residual block for 2D convolutions with skip connections.
 
     Implements a residual block using two ``BiasFreeConv2D`` layers: the first
@@ -598,8 +598,8 @@ class BiasFreeResidualBlock(keras.keras.layers.Layer):
             # DECISION plan_2026-07-04_58ac8e73/D-002: layer-instance activation round-trip
             # mirrors BiasFreeConv2D; string path stays byte-identical. See decisions.md.
             'activation': (
-                keras.keras.layers.serialize(self.activation)
-                if isinstance(self.activation, keras.keras.layers.Layer)
+                keras.layers.serialize(self.activation)
+                if isinstance(self.activation, keras.layers.Layer)
                 else keras.activations.serialize(keras.activations.get(self.activation))
             ),
             'use_batch_norm': self.use_batch_norm,
@@ -615,7 +615,7 @@ class BiasFreeResidualBlock(keras.keras.layers.Layer):
         """Deserialize, reviving a layer-instance activation from its dict form."""
         config = dict(config)
         if isinstance(config.get('activation'), dict):
-            config['activation'] = keras.keras.layers.deserialize(config['activation'])
+            config['activation'] = keras.layers.deserialize(config['activation'])
         return cls(**config)
 
 # ---------------------------------------------------------------------

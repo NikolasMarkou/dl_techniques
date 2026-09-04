@@ -149,21 +149,21 @@ class TestBuildBlockCausalMask:
 class TestRandomTokenDrop:
     def test_drop_rate_zero_is_true_identity(self):
         x = keras.random.normal((2, 10, 4), seed=0)
-        out, token_ids = random_token_drop(x, drop_rate=0.0, training=True)
+        out, token_ids = random_token_drop(x, dropout_rate=0.0, training=True)
         assert out is x
         assert token_ids is None
         np.testing.assert_array_equal(_to_numpy(out), _to_numpy(x))
 
     def test_training_false_is_true_identity(self):
         x = keras.random.normal((2, 10, 4), seed=0)
-        out, token_ids = random_token_drop(x, drop_rate=0.9, training=False)
+        out, token_ids = random_token_drop(x, dropout_rate=0.9, training=False)
         assert out is x
         assert token_ids is None
 
     def test_shape_and_keep_len_math(self):
         x = keras.random.normal((4, 40, 8), seed=1)
         out, token_ids = random_token_drop(
-            x, drop_rate=0.95, training=True, seed=42
+            x, dropout_rate=0.95, training=True, seed=42
         )
         expected_keep_len = max(1, round(40 * (1 - 0.95)))
         assert expected_keep_len == 2
@@ -183,7 +183,7 @@ class TestRandomTokenDrop:
         n = num_frames * tokens_per_frame
         x = keras.random.normal((1, n, 5), seed=7)
         dropped_x, token_ids = random_token_drop(
-            x, drop_rate=0.5, training=True, seed=123
+            x, dropout_rate=0.5, training=True, seed=123
         )
         mask = build_block_causal_mask(
             num_frames=num_frames,

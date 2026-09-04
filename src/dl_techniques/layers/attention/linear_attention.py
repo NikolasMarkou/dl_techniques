@@ -231,7 +231,7 @@ class LinearAttention(keras.layers.Layer):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
         if feature_map in _FORBIDDEN_FEATURE_MAPS:
             raise ValueError(
-                f"feature_map '{feature_map}' is forbidden: it breaks degree-1 "
+                f"feature_map '{feature_map}' is FORBIDDEN: it breaks degree-1 "
                 f"homogeneity (the '+1' additive constant in elu_plus_one, or the "
                 f"exp/softmax non-homogeneous kernel). Allowed values: "
                 f"{list(_SUPPORTED_FEATURE_MAPS)}"

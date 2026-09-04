@@ -299,8 +299,15 @@ class TestGradientReachesTheEncoder:
         all-negative at exactly 2 of 6 seeds, so the unseeded form was a coin
         flip that happened to land. D-043 had already recorded this hazard for
         ``models/vision_language/sam/sam2/test_model.py``; step 1 reintroduced it here.
+
+        RE-MEASURED 2026-09-04 after further unrelated import-graph churn
+        (module moves elsewhere in the tree shift the process-global seed
+        stream the same way): seed 1 now lands all-POSITIVE. Over seeds 0..9,
+        3 of 10 land all-negative (3, 7, 9); reseeded to 3. This is the exact
+        hazard the paragraph above already names -- expect this seed to need
+        re-picking again after a future import-graph change, not to be wrong.
         """
-        keras.utils.set_random_seed(1)
+        keras.utils.set_random_seed(3)
         model = trainer()
         outputs = model(clip_inputs(model), training=True)
         scores = np.asarray(outputs[SAM2_OBJECT_SCORE_LOGITS])

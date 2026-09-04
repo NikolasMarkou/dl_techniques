@@ -1559,6 +1559,18 @@ def _b_models_sam3_decoder():
     return Sam3DecoderLayer(d_model=16, num_heads=2, dim_feedforward=32).ffn
 
 
+def _b_models_dit_blocks():
+    from dl_techniques.models.vision_language.dit.blocks import DiTBlock
+    # `mlp` is created in `__init__`, not `build`, so no build call is needed.
+    return DiTBlock(hidden_size=16, num_heads=2).mlp
+
+
+def _b_models_bit_diffusion_blocks():
+    from dl_techniques.models.vision_language.bit_diffusion.blocks import DiTXABlock
+    # `mlp` is created in `__init__`, not `build`, so no build call is needed.
+    return DiTXABlock(hidden_size=16, num_heads=2).mlp
+
+
 def _b_models_sam3_vitdet():
     from dl_techniques.models.vision_language.sam.sam3.vitdet import Sam3ViTDetBlock
     b = Sam3ViTDetBlock(dim=16, num_heads=2, input_size=(8, 8))
@@ -1612,6 +1624,8 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/neural_computer/nam/cell.py": _b_models_nam,
     "models/vision/image_restoration/pw_fnet/model.py": _b_models_pw_fnet,
     "models/graph/relgt/model.py": _b_models_relgt,
+    "models/vision_language/bit_diffusion/blocks.py": _b_models_bit_diffusion_blocks,
+    "models/vision_language/dit/blocks.py": _b_models_dit_blocks,
     "models/vision_language/sam/sam1/image_encoder.py": _b_models_sam_image_encoder,
     "models/vision_language/sam/sam1/transformer.py": _b_models_sam_transformer,
     "models/vision_language/sam/sam3/decoder.py": _b_models_sam3_decoder,

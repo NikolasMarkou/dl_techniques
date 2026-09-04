@@ -38,6 +38,10 @@ from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -454,7 +458,7 @@ class ConvNextEncoderBlock(keras.layers.Layer):
 
         self.hidden_size = hidden_size
         self.kernel_size = kernel_size
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.dropout_rate = dropout_rate
         self.drop_path_rate = drop_path_rate
         self.gamma_initial_value = gamma_initial_value
@@ -552,7 +556,7 @@ class ConvNextEncoderBlock(keras.layers.Layer):
             {
                 "hidden_size": self.hidden_size,
                 "kernel_size": self.kernel_size,
-                "activation": self.activation,
+                "activation": serialize_activation(self.activation),
                 "dropout_rate": self.dropout_rate,
                 "drop_path_rate": self.drop_path_rate,
                 "gamma_initial_value": self.gamma_initial_value,

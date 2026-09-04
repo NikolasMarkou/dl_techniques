@@ -46,6 +46,10 @@ from dl_techniques.utils.logger import logger
 from ..shared.blocks import conv_receptive_field
 from ..shared.encoder import EmbeddingEncoder
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 
 __all__ = ["AsciiConvNextBert", "create_ascii_convnext_bert"]
 
@@ -136,7 +140,7 @@ class AsciiConvNextBert(EmbeddingEncoder):
         **kwargs: Any,
     ) -> None:
         self.kernel_size = kernel_size
-        self.block_activation = block_activation
+        self.block_activation = deserialize_activation(block_activation)
         self.gamma_initial_value = gamma_initial_value
         self.use_gamma = use_gamma
         self.block_normalization_type = block_normalization_type
@@ -236,7 +240,7 @@ class AsciiConvNextBert(EmbeddingEncoder):
         config.update(
             {
                 "kernel_size": self.kernel_size,
-                "block_activation": self.block_activation,
+                "block_activation": serialize_activation(self.block_activation),
                 "gamma_initial_value": self.gamma_initial_value,
                 "use_gamma": self.use_gamma,
                 "block_normalization_type": self.block_normalization_type,

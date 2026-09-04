@@ -1236,6 +1236,96 @@ _extra("tree_transformer", _b_tree_transformer,
        lambda: {"input_ids": _ids(64, 1, 8)})
 
 
+#: The four ``embeddings_experimental`` arms plus their shared base, added
+#: 2026-09-04 (R-135 coverage: they landed in ``models/`` with no round-trip
+#: subject). ``ascii_bert``/``ascii_clifford_bert``/``ascii_convnext_bert``
+#: are the three study arms; ``embeddings_experimental_shared`` builds
+#: ``EmbeddingEncoder`` directly at its default ``block_type='transformer'``,
+#: the base class the three arms subclass.
+def _b_ascii_bert():
+    from dl_techniques.models.embeddings_experimental.ascii_bert import AsciiBert
+    return AsciiBert(hidden_size=32, num_layers=1, num_heads=2, intermediate_size=64)
+
+
+def _ascii_inputs():
+    from dl_techniques.layers.tokenizers.ascii_char import VOCAB_SIZE
+    return {"input_ids": _ids(VOCAB_SIZE, 1, 16)}
+
+
+_extra("ascii_bert", _b_ascii_bert, _ascii_inputs)
+
+
+def _b_ascii_clifford_bert():
+    from dl_techniques.models.embeddings_experimental.ascii_clifford_bert import (
+        AsciiCliffordBert,
+    )
+    return AsciiCliffordBert(hidden_size=32, num_layers=1)
+
+
+_extra("ascii_clifford_bert", _b_ascii_clifford_bert, _ascii_inputs)
+
+
+def _b_ascii_convnext_bert():
+    from dl_techniques.models.embeddings_experimental.ascii_convnext_bert import (
+        AsciiConvNextBert,
+    )
+    return AsciiConvNextBert(hidden_size=32, num_layers=1, kernel_size=3)
+
+
+_extra("ascii_convnext_bert", _b_ascii_convnext_bert, _ascii_inputs)
+
+
+def _b_embeddings_experimental_shared():
+    from dl_techniques.models.embeddings_experimental.shared import EmbeddingEncoder
+    return EmbeddingEncoder(
+        vocab_size=64, hidden_size=32, num_layers=1, block_type="transformer",
+        block_config={"num_heads": 2, "intermediate_size": 64},
+    )
+
+
+_extra("shared", _b_embeddings_experimental_shared,
+       lambda: {"input_ids": _ids(64, 1, 16)})
+
+
+def _b_colbert():
+    from dl_techniques.models.language.colbert.model import create_colbert
+    return create_colbert(
+        "tiny", vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
+        intermediate_size=64, query_maxlen=16, doc_maxlen=16, dim=16,
+    )
+
+
+_extra("colbert", _b_colbert,
+       lambda: {"query_input_ids": _ids(64, 1, 16), "doc_input_ids": _ids(64, 1, 16)})
+
+
+def _b_dit():
+    from dl_techniques.models.vision_language.dit.model import DiT
+    return DiT(input_size=8, patch_size=2, in_channels=3, hidden_size=16,
+               depth=1, num_heads=2, num_classes=4)
+
+
+_extra("dit", _b_dit,
+       lambda: [_f32(1, 8, 8, 3), np.array([1.0], dtype="float32"),
+                np.array([0], dtype="int32")])
+
+
+def _b_ets():
+    from dl_techniques.models.time_series.ets.model import ETSModel
+    return ETSModel(variant="AAA", horizon=2, seasonal_period=4)
+
+
+_extra("ets", _b_ets, lambda: _f32(2, 16, 1))
+
+
+def _b_levjepa():
+    from dl_techniques.models.vision.levjepa.model import create_levjepa
+    return create_levjepa(variant="vit_tiny", input_shape=(32, 32, 3))
+
+
+_extra("levjepa", _b_levjepa, lambda: _f32(1, 32, 32, 3))
+
+
 #: The one ``models/`` package with NO round-trip subject, and why. Its own
 #: ``__init__.py`` states it: "nothing subclasses ``keras.Model``, so there is
 #: nothing for a model factory to build". ``PowerSampler`` is a sampling

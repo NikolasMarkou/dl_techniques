@@ -78,7 +78,7 @@ def test_the_activation_round_trips_through_a_saved_model(tmp_path) -> None:
     x = _x()
     before = np.asarray(model(x, training=False))
     ffn_cfg = model.layers[-1].ffn.get_config()["activation"]
-    assert ffn_cfg["config"] == "dl_techniques.activations>gelu_tanh", ffn_cfg
+    assert ffn_cfg["config"] == "dl_techniques.layers.activations.gelu_tanh>gelu_tanh", ffn_cfg
 
     path = tmp_path / "gemma_block.keras"
     model.save(path)

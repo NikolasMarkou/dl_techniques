@@ -83,7 +83,7 @@ class VectorQuantizer(keras.layers.Layer):
     :param commitment_cost: Weight for commitment loss (beta). Defaults to 0.25.
     :type commitment_cost: float
     :param initializer: Initializer for embedding vectors. Defaults to ``'uniform'``.
-    :type initializer: str or keras.keras.initializers.Initializer
+    :type initializer: str or keras.initializers.Initializer
     :param use_ema: Whether to use EMA for codebook updates. Defaults to False.
     :type use_ema: bool
     :param ema_decay: Decay rate for EMA updates. Defaults to 0.99.

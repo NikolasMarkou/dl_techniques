@@ -114,13 +114,13 @@ def build_block_causal_mask(
 
 def random_token_drop(
     x: Any,
-    drop_rate: float,
+    dropout_rate: float,
     training: Optional[bool] = None,
     seed: Optional[int] = None,
 ) -> Tuple[Any, Optional[Any]]:
     """Randomly drop a fraction of patch tokens (train-time only).
 
-    Ports the PyTorch reference's ``token_drop_rate`` block: for each
+    Ports the PyTorch reference's ``token_dropout_rate`` block: for each
     sample independently, draws uniform noise over the ``N`` sequence
     positions, keeps the ``keep_len`` lowest-noise positions (an
     ``argsort``-of-noise permutation-sample, matching
@@ -128,11 +128,11 @@ def random_token_drop(
     down to that shortened sequence.
 
     :param x: Input tensor of shape ``(B, N, C)``.
-    :param drop_rate: Fraction of tokens to drop, in ``[0, 1)``. Values
+    :param dropout_rate: Fraction of tokens to drop, in ``[0, 1)``. Values
         ``<= 0`` degenerate to the identity branch below.
     :param training: Standard Keras training flag. ``False``/``None``
         degenerates to the identity branch below, matching the reference's
-        ``self.training and self.token_drop_rate > 0`` guard.
+        ``self.training and self.token_dropout_rate > 0`` guard.
     :param seed: Optional seed forwarded to ``keras.random.uniform`` for
         deterministic/testable dropping.
     :return: ``(dropped_x, token_ids)``. When the identity branch is taken,
@@ -144,7 +144,7 @@ def random_token_drop(
         this straight into :func:`build_block_causal_mask`'s ``token_ids``
         argument so the mask and the dropped sequence stay consistent.
     """
-    if not training or drop_rate <= 0:
+    if not training or dropout_rate <= 0:
         return x, None
 
     # `num_patches` must be a concrete Python int at trace time (it drives
@@ -153,7 +153,7 @@ def random_token_drop(
     # unlike `batch_size`, which stays dynamic via `ops.shape`.
     num_patches = int(x.shape[1])
     batch_size = keras.ops.shape(x)[0]
-    keep_len = max(1, int(round(num_patches * (1.0 - drop_rate))))
+    keep_len = max(1, int(round(num_patches * (1.0 - dropout_rate))))
 
     noise = keras.random.uniform((batch_size, num_patches), seed=seed)
     token_ids = keras.ops.argsort(noise, axis=1)[:, :keep_len]

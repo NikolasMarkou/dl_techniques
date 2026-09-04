@@ -204,19 +204,27 @@ class TestPFTSRGradientFlow:
 # were corrected to the paper's own two released configs and `large` was renamed
 # `repo_medium`. The derivation of each new number, MEASURED at scale=4 on a
 # (1, 32, 32, 3) input:
-#   light  52-wide, [2,4,6,6,6], 4 heads, mlp 1.0, window 32 -> 13_219_603 total
-#          (  636_691 trainable; the rest is 12 shifted blocks x a (1,1024,1024)
-#          non-trainable attention_mask buffer, which count_params() includes)
-#   base   240-wide, [4,4,4,6,6,6], 6 heads, mlp 2.0, window 32 -> 34_384_803 total
-#          (18_656_163 trainable, same mask-buffer inflation)
-#   repo_medium  unchanged in every field from the old `large` -> 4_120_739 total
-#          (2_744_483 trainable), which is the point of asserting it here: the
-#          rename moved no number.
+#   light  52-wide, [2,4,6,6,6], 4 heads, mlp 1.0, window 32 -> 636_691 trainable
+#   base   240-wide, [4,4,4,6,6,6], 6 heads, mlp 2.0, window 32 -> 18_656_163 trainable
+#   repo_medium  unchanged in every field from the old `large` -> 2_744_483 trainable
+#          (the rename moved no number)
+#
+# At the time those three numbers were first pinned, `count_params()` also
+# included a non-trainable SW-MSA `attention_mask` buffer -- 12 (light) / 15
+# (base) shifted blocks x one (1, 1024, 1024) array at window_size=32 -- that
+# was registered as a weight, inflating the totals to 13_219_603 / 34_384_803
+# (repo_medium's window_size=8 mask is tiny: 4_120_739 total). A later fix to
+# `ProgressiveFocusedAttention` (the SW-MSA mask crashing every enclosing
+# `Model`) made the mask a plain numpy array cached at build time, converted
+# to a tensor only inside `call()`, so `count_params()` no longer counts it.
+# The three pins below are the TRAINABLE totals from the derivation above --
+# re-measured 2026-09-04 after that fix, and now identical to the trainable
+# figures the original derivation already recorded.
 # ---------------------------------------------------------------------------
 _PFT_VARIANT_PARAMS = {
-    "light": 13_219_603,
-    "base": 34_384_803,
-    "repo_medium": 4_120_739,
+    "light": 636_691,
+    "base": 18_656_163,
+    "repo_medium": 2_744_483,
 }
 
 

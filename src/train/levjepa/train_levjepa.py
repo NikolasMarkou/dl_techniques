@@ -82,17 +82,17 @@ class TrainingConfig:
     # These three defaults are deliberately the encoder's RISKIEST config,
     # not its degenerate ("full", no RoPE, no drop) defaults. CRITICAL-2 of
     # the iter-1 adversarial review found the trainer never wired
-    # attn_mode/use_rope/token_drop_rate at all, so the block-causal mask
+    # attn_mode/use_rope/token_dropout_rate at all, so the block-causal mask
     # (Step 3), VideoRoPE3D (Step 2) and random_token_drop (Step 3) -- the
     # plan's own defining, paper-differentiating mechanisms -- were
     # unreachable from every real run, including the smoke run backing
     # Success Criterion 10. Do NOT quietly revert these to
-    # attn_mode="full"/use_rope=False/token_drop_rate=0.0 "to match the
+    # attn_mode="full"/use_rope=False/token_dropout_rate=0.0 "to match the
     # encoder's own constructor defaults" -- that would silently reopen the
     # exact gap this decision closes. See decisions.md D-023.
     attn_mode: str = "block_causal"
     use_rope: bool = True
-    token_drop_rate: float = 0.5
+    token_dropout_rate: float = 0.5
 
     def __post_init__(self) -> None:
         if self.dataset not in ("synthetic_drone", "bdd100k"):
@@ -105,9 +105,9 @@ class TrainingConfig:
                 f"attn_mode must be one of 'full', 'block_causal', got "
                 f"{self.attn_mode!r}"
             )
-        if not (0.0 <= self.token_drop_rate < 1.0):
+        if not (0.0 <= self.token_dropout_rate < 1.0):
             raise ValueError(
-                f"token_drop_rate must be in [0, 1), got {self.token_drop_rate}"
+                f"token_dropout_rate must be in [0, 1), got {self.token_dropout_rate}"
             )
         if self.variant not in SCALE_CONFIGS:
             raise ValueError(
@@ -165,7 +165,7 @@ _SMOKE_OVERRIDES: Dict[str, Any] = {
     # run back to the degenerate config CRITICAL-2 found. See D-023.
     "attn_mode": "block_causal",
     "use_rope": True,
-    "token_drop_rate": 0.5,
+    "token_dropout_rate": 0.5,
 }
 
 
@@ -216,7 +216,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
              "use sincos instead.",
     )
     parser.add_argument(
-        "--token-drop-rate", type=float, default=0.5,
+        "--token-dropout-rate", type=float, default=0.5,
         help="Train-time patch-token drop fraction, in [0, 1). Default 0.5 "
              "is deliberately modest relative to the paper's 0.95 -- see "
              "D-023 for why a smoke-scale token grid needs a gentler rate.",
@@ -299,10 +299,10 @@ def _build_dataset(config: TrainingConfig) -> "tf.data.Dataset":
 
 def _build_model(config: TrainingConfig) -> LeVJEPATrainingModel:
     """Construct the encoder + training-model, forwarding the config's
-    attn_mode/use_rope/token_drop_rate through to :func:`create_levjepa`.
+    attn_mode/use_rope/token_dropout_rate through to :func:`create_levjepa`.
 
     Split out from :func:`main` so a test can build the model (and inspect
-    ``model.encoder.attn_mode``/``use_rope``/``token_drop_rate``) without
+    ``model.encoder.attn_mode``/``use_rope``/``token_dropout_rate``) without
     also running a full ``model.fit()`` — see
     ``tests/test_train/test_levjepa/test_train_levjepa.py::TestSmokeConfigWiring``.
     """
@@ -313,7 +313,7 @@ def _build_model(config: TrainingConfig) -> LeVJEPATrainingModel:
         tubelet_size=config.tubelet_size,
         attn_mode=config.attn_mode,
         use_rope=config.use_rope,
-        token_drop_rate=config.token_drop_rate,
+        token_dropout_rate=config.token_dropout_rate,
     )
     return LeVJEPATrainingModel(
         encoder=encoder,

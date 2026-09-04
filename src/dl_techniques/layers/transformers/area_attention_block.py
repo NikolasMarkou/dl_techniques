@@ -150,7 +150,13 @@ class AreaAttentionBlock(keras.layers.Layer):
         )
 
         # 1x1 conv expand (SiLU) then 1x1 conv project (no activation); each stage
-        # is a ConvBlock (Conv2D + normalization + activation).
+        # is a ConvBlock (Conv2D + normalization + activation). `mlp1`
+        # (mlp_hidden_dim channels) and `mlp2` (dim channels) are
+        # different-shape siblings whenever `mlp_ratio != 1` (every caller in
+        # this tree), and `attn` decorrelates its own internal conv siblings
+        # regardless of what `kernel_initializer` object it receives -- see
+        # `AreaAttention._fresh_initializer`. None of the three needs its own
+        # fresh instance here.
         self.mlp1 = ConvBlock(
             filters=self.mlp_hidden_dim,
             kernel_size=1,

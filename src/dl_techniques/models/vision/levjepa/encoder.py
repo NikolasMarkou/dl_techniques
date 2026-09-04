@@ -78,8 +78,8 @@ class LeVJEPAEncoder(keras.Model):
         + frozen 3D sincos table            (use_rope=False)
         or rotate inside each block instead  (use_rope=True)
             |
-        random_token_drop(x, token_drop_rate, training) -> (x, token_ids)
-            |  (identity when drop_rate <= 0 or not training)
+        random_token_drop(x, token_dropout_rate, training) -> (x, token_ids)
+            |  (identity when dropout_rate <= 0 or not training)
         prepend cls_token (+ cls pos_embed row, if not use_rope)
             |
         build_block_causal_mask(...) if attn_mode == "block_causal" else None
@@ -133,9 +133,9 @@ class LeVJEPAEncoder(keras.Model):
         ``'block_causal'`` for the bidirectional-within-frame /
         causal-across-frame mask (:func:`build_block_causal_mask`).
     :type attn_mode: AttnMode
-    :param token_drop_rate: Fraction of patch tokens dropped at train time
+    :param token_dropout_rate: Fraction of patch tokens dropped at train time
         only (:func:`random_token_drop`). ``0.0`` (default) is a true no-op.
-    :type token_drop_rate: float
+    :type token_dropout_rate: float
     :param dropout_rate: Dropout rate forwarded to every block's output/MLP
         dropout. Defaults to ``0.0``.
     :type dropout_rate: float
@@ -208,7 +208,7 @@ class LeVJEPAEncoder(keras.Model):
         use_rope: bool = False,
         rope_theta: float = 10000.0,
         attn_mode: AttnMode = "full",
-        token_drop_rate: float = 0.0,
+        token_dropout_rate: float = 0.0,
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
         init_std: float = REFERENCE_INIT_STD,
@@ -250,8 +250,8 @@ class LeVJEPAEncoder(keras.Model):
             raise ValueError(
                 f"attn_mode must be one of 'full', 'block_causal', got {attn_mode!r}"
             )
-        if not (0.0 <= token_drop_rate < 1.0):
-            raise ValueError(f"token_drop_rate must be in [0, 1), got {token_drop_rate}")
+        if not (0.0 <= token_dropout_rate < 1.0):
+            raise ValueError(f"token_dropout_rate must be in [0, 1), got {token_dropout_rate}")
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
         if not (0.0 <= attention_dropout_rate <= 1.0):
@@ -274,7 +274,7 @@ class LeVJEPAEncoder(keras.Model):
         self.use_rope = bool(use_rope)
         self.rope_theta = float(rope_theta)
         self.attn_mode = str(attn_mode)
-        self.token_drop_rate = float(token_drop_rate)
+        self.token_dropout_rate = float(token_dropout_rate)
         self.dropout_rate = float(dropout_rate)
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.init_std = float(init_std)
@@ -431,7 +431,7 @@ class LeVJEPAEncoder(keras.Model):
         :type inputs: keras.KerasTensor
         :param training: Standard Keras training flag. Token dropping is a
             no-op unless ``training`` is exactly truthy and
-            ``token_drop_rate > 0``.
+            ``token_dropout_rate > 0``.
         :type training: Optional[bool]
         :return: ``(batch, 1 + num_patches_kept, embed_dim)``, CLS at index 0.
         :rtype: keras.KerasTensor
@@ -442,7 +442,7 @@ class LeVJEPAEncoder(keras.Model):
             patch_pos_embed = self.pos_embed[:, 1:, :]
             x = x + patch_pos_embed
 
-        x, token_ids = random_token_drop(x, self.token_drop_rate, training=training)
+        x, token_ids = random_token_drop(x, self.token_dropout_rate, training=training)
 
         batch_size = keras.ops.shape(x)[0]
         cls_token = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
@@ -511,7 +511,7 @@ class LeVJEPAEncoder(keras.Model):
                 "use_rope": self.use_rope,
                 "rope_theta": self.rope_theta,
                 "attn_mode": self.attn_mode,
-                "token_drop_rate": self.token_drop_rate,
+                "token_dropout_rate": self.token_dropout_rate,
                 "dropout_rate": self.dropout_rate,
                 "attention_dropout_rate": self.attention_dropout_rate,
                 "init_std": self.init_std,

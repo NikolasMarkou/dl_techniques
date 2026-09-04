@@ -11,8 +11,8 @@ validity flag (division by zero gives ``valid = 0.0``).
 
 .. warning::
 
-   This model handles one operator per expression and integers only,
-   measured and pinned by
+   **Scope: single-operator, integer-only.** This model handles one
+   operator per expression and integers only, measured and pinned by
    ``tests/test_models/test_nam/test_operand_derivation_through_call.py``.
    Operands are assembled only from the raw ``token_ids`` (``cell.py`` step
    5), split at ``argmax(reduction_weights)``; ``NAM.call`` re-reads
@@ -83,9 +83,9 @@ class NAM(keras.Model):
     Evaluates arithmetic expressions by parsing them into tree structures
     and recursively reducing sub-expressions with fixed arithmetic
     operations. Each operation returns a result and a validity flag (0.0
-    for an invalid operation such as division by zero). It handles one
-    operator per expression and integers only; see the module docstring
-    for what that means for multi-operator expressions and decimals.
+    for an invalid operation such as division by zero). **Scope:
+    single-operator, integer-only** — see the module docstring for what
+    that means for multi-operator expressions and decimals.
 
     The model uses Adaptive Computation Time (ACT), from TRM, to decide how
     many steps to run. Extra steps re-score the same token sequence; they

@@ -7,12 +7,13 @@ means no additive constants anywhere in the forward path, which makes the
 residual degree-1 homogeneous in the input and therefore equal to a scaled
 score, in the Miyasawa sense.
 
-One exception: homogeneity also depends on the normalization used.
-`create_convunext_denoiser`'s `block_normalization` defaults to LayerNorm,
-which divides by a per-sample std that scales with the input, making the
-residual scale-invariant (degree 0) rather than degree-1. That builder
-defaults the argument to a `None` sentinel and warns when the choice was
-not made explicitly. The other five entry points here default to
+One exception: homogeneity is also NORM-dependent. Removing the biases is
+necessary but not sufficient. `create_convunext_denoiser`'s
+`block_normalization` defaults to LayerNorm, which divides by a per-sample
+std that scales with the input, making the residual scale-invariant
+(degree 0) rather than degree-1. That builder defaults the argument to a
+`None` sentinel and warns when the choice was not made explicitly. The
+other five entry points here default to
 `'batchnorm'`, `BiasFreeBatchNorm`, and stay homogeneous. Pass
 `block_normalization='batchnorm'` to `create_convunext_denoiser` for the
 Miyasawa reading.

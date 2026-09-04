@@ -8,7 +8,8 @@ arithmetic with validity tracking, a writeback to NTM memory, and a halt
 decision. Arithmetic itself is fixed, not learned; the cell learns to
 parse, route, and decide when to halt.
 
-The cell handles one operator at a time and integers only. Operand
+**Scope: single-operator, integer-only.** The cell handles one operator
+at a time and integers only. Operand
 assembly reads only ``token_ids`` (the NTM read heads feed the controller,
 not the operands), so a multi-operator expression concatenates the far
 side's digits instead of reducing them first (``"1 + 2 * 3"`` gives

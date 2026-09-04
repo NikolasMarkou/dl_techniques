@@ -249,13 +249,11 @@ def soft_value_range(
 
     # Degenerate interval: the two branches collapse onto the single point `lo`, so
     # short-circuit rather than divide by a zero width in the relative-sharpness rule.
+    # No `logger.warning` here on purpose (R-033): `min_value`/`max_value` are
+    # constructor-time constants for every caller in this tree, so
+    # `SoftValueRange.__init__` warns once at construction instead of on
+    # every call through this forward-path helper.
     if hi is not None and hi == lo:
-        logger.warning(
-            f"soft_value_range called with min_value == max_value == {lo}; the "
-            f"interval has zero width, so the output is the constant {lo} everywhere "
-            f"and carries no gradient. `sharpness` and `relative_sharpness` are "
-            f"ignored in this case."
-        )
         return keras.ops.full_like(x, lo)
 
     # DECISION plan-2026-09-01T175024-5a32e889/D-001
@@ -452,6 +450,19 @@ class SoftValueRange(keras.layers.Layer):
         # ONE validator, shared with the function -- see `_validated_bounds`. The
         # checks are NOT restated here: a second copy is a second thing to drift.
         lo, hi = _validated_bounds(min_value, max_value, sharpness)
+
+        # The degenerate-interval warning lives HERE, not inside `call()`'s
+        # `soft_value_range()` helper: `lo`/`hi` are constructor-time
+        # constants, so the condition is knowable now, once, rather than on
+        # every forward pass -- a `logger.*` call reachable from `call()`
+        # runs once at trace time and never again under `tf.function` (R-033).
+        if hi is not None and hi == lo:
+            logger.warning(
+                f"SoftValueRange constructed with min_value == max_value == {lo}; "
+                f"the interval has zero width, so the output is the constant {lo} "
+                f"everywhere and carries no gradient. `sharpness` and "
+                f"`relative_sharpness` are ignored in this case."
+            )
 
         self.min_value = lo
         self.max_value = hi

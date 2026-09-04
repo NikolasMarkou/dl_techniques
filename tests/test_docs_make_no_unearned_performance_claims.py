@@ -83,14 +83,10 @@ PUFFERY_RE = re.compile(
 # list self-liquidates: fix the file and this test tells you to delete the entry.
 # It is NOT a general-purpose allowlist -- do not add to it to silence a failure.
 PENDING_PUFFERY = (
-    # `vision/vit/model.py` left this set on 2026-08-25. It was NOT cleaned up
-    # here: its puffery was removed earlier by whoever rewrote its docstring,
-    # and this table could not tell, because the restructure had left the key
-    # spelled `vit/model.py` -- so `MODELS_DIR / rel` raised FileNotFoundError
-    # and the self-liquidation arm errored instead of firing. Repointing the key
-    # made the arm run and it immediately demanded the deletion it was built to
-    # demand. `vision/swin_transformer/model.py` still matches and stays.
-    "vision/swin_transformer/model.py",
+    # `vision/vit/model.py` left this set on 2026-08-25, and
+    # `vision/swin_transformer/model.py` left it on 2026-09-04 -- both had
+    # their puffery removed by whoever rewrote the docstring, caught here by
+    # the self-liquidation arm this table exists to run.
 )
 
 # A period only ends a sentence when the next token starts one. Without the
@@ -294,7 +290,7 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # is caught by `test_no_readme_advertises_a_pretrained_path_that_raises`,
         # not by this pin; this one only tracks WHO is in the conversation.
         "ascii_bert", "ascii_clifford_bert", "ascii_convnext_bert",
-        "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "fnet",
+        "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "dit", "fnet",
         "gpt2", "kan", "masked_autoencoder", "mobile_clip", "mobilenet",
         "modern_bert", "resnet", "tree_transformer", "vit", "wave_field",
     }, sorted(p.parent.name for p in with_pretrained_true)

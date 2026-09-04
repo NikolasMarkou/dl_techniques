@@ -149,7 +149,17 @@ def _mdn():
 CENSUS = {
     "yolo12": (_yolo12, {"1e-03": 134}),
     "mobile_clip": (_mobile_clip, {"1e-03": 34, "1e-05": 9}),
-    "mobilenet": (_mobilenet, {"1e-06": 51, "1e-03": 2}),
+    # RE-MEASURED 2026-09-04: {"1e-03": 53}, not {"1e-06": 51, "1e-03": 2}.
+    # Provenance: decisions.md D-203 (plan-2026-08-22T035419-a11304c8) already
+    # rules mobilenet/common.py's `REFERENCE_BN_EPSILON = 1e-3` the correct
+    # reference value for every BatchNorm in this family, and D-203's own
+    # measurement at the time was that 183 of 189 sites ran at the WRONG
+    # epsilon (the factory's un-forwarded 1e-6 default) -- the 51-site 1e-6
+    # figure this test used to pin was exactly that pre-fix bug, not a second
+    # legitimate epsilon. Every construction site in mobilenet_v1..v4.py now
+    # forwards `epsilon=REFERENCE_BN_EPSILON` (grep confirms it), so 53 of 53
+    # read 1e-3; this pin was simply never re-derived after D-203 landed.
+    "mobilenet": (_mobilenet, {"1e-03": 53}),
     "vit_hmlp": (_vit_hmlp, {"1e-06": 25, "1e-03": 3}),
     "fastvlm": (_fastvlm, {"1e-03": 34, "1e-06": 12}),
     "qwen": (_qwen, {"1e-05": 9, "1e-06": 8}),

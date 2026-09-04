@@ -55,7 +55,7 @@ def from_variant(
     use_rope: bool = False,
     rope_theta: float = 10000.0,
     attn_mode: AttnMode = "full",
-    token_drop_rate: float = 0.0,
+    token_dropout_rate: float = 0.0,
     dropout_rate: float = 0.0,
     attention_dropout_rate: float = 0.0,
     init_std: float = 0.02,
@@ -85,9 +85,9 @@ def from_variant(
     :param attn_mode: ``'full'`` or ``'block_causal'``. Defaults to
         ``'full'``.
     :type attn_mode: AttnMode
-    :param token_drop_rate: Train-time patch-token drop fraction. Defaults to
+    :param token_dropout_rate: Train-time patch-token drop fraction. Defaults to
         ``0.0``.
-    :type token_drop_rate: float
+    :type token_dropout_rate: float
     :param dropout_rate: General dropout rate. Defaults to ``0.0``.
     :type dropout_rate: float
     :param attention_dropout_rate: Attention-weight dropout rate. Defaults to
@@ -133,7 +133,7 @@ def from_variant(
         use_rope=use_rope,
         rope_theta=rope_theta,
         attn_mode=attn_mode,
-        token_drop_rate=token_drop_rate,
+        token_dropout_rate=token_dropout_rate,
         dropout_rate=dropout_rate,
         attention_dropout_rate=attention_dropout_rate,
         init_std=init_std,
@@ -151,7 +151,7 @@ def create_levjepa(
     use_rope: bool = False,
     rope_theta: float = 10000.0,
     attn_mode: AttnMode = "full",
-    token_drop_rate: float = 0.0,
+    token_dropout_rate: float = 0.0,
     dropout_rate: float = 0.0,
     attention_dropout_rate: float = 0.0,
     init_std: float = 0.02,
@@ -178,8 +178,8 @@ def create_levjepa(
     :type rope_theta: float
     :param attn_mode: ``'full'`` or ``'block_causal'``.
     :type attn_mode: AttnMode
-    :param token_drop_rate: Train-time patch-token drop fraction.
-    :type token_drop_rate: float
+    :param token_dropout_rate: Train-time patch-token drop fraction.
+    :type token_dropout_rate: float
     :param dropout_rate: General dropout rate.
     :type dropout_rate: float
     :param attention_dropout_rate: Attention-weight dropout rate.
@@ -211,7 +211,7 @@ def create_levjepa(
         use_rope=use_rope,
         rope_theta=rope_theta,
         attn_mode=attn_mode,
-        token_drop_rate=token_drop_rate,
+        token_dropout_rate=token_dropout_rate,
         dropout_rate=dropout_rate,
         attention_dropout_rate=attention_dropout_rate,
         init_std=init_std,

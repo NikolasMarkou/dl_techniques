@@ -59,8 +59,8 @@ class ScaleLayer(keras.layers.Layer):
 
     - Gaussian ``mu`` **and** ``sigma``: pass ``nu``. The forward path divides
       ``z`` by ``nu`` exactly once, so ``mu = nu * mu~`` and
-      ``sigma = nu * sigma~``. Here ``sigma`` scales like a first moment, not
-      like a variance.
+      ``sigma = nu * sigma~``; ``sigma`` is a first-moment-scale quantity
+      here, not a variance.
     - Negative-binomial shape ``alpha``: pass ``1 / sqrt(nu)``.
 
     **Architecture Overview:**
@@ -90,9 +90,11 @@ class ScaleLayer(keras.layers.Layer):
     is False. The layer then returns its input untouched.
 
     Note:
-        Do not restore ``sqrt(nu)`` for the Gaussian ``sigma``. This docstring
-        claimed that until 2026-08-15. No call site ever did it, and the
-        diagram above (``x * scale``) always contradicted it.
+        Do not restore ``sqrt(nu)`` for the Gaussian ``sigma``. This
+        docstring said until 2026-08-15 that inverse scaling for the
+        Gaussian ``sigma`` "scales by sqrt(nu)". That is wrong: no call site
+        ever did it, and the diagram above (``x * scale``) always
+        contradicted it.
 
     :param scale_per_sample: If True, compute the scale from the input when the
         caller passes none. If False, use only the provided scale. Defaults to

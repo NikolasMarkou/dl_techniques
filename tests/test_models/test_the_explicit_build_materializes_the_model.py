@@ -92,7 +92,14 @@ FIXED = {
     "mamba": 14,
     "masked_language_model": 23,
     "mobilenet": 267,
-    "modern_bert": 13,
+    # RE-MEASURED 2026-09-04: 12, not 13. ModernBERT's `use_bias` defaults to
+    # `False`, and `final_norm`/`embeddings` LayerNorms and every encoder
+    # layer's norms all construct with `center=self.use_bias` -- so at the
+    # subject's default config no `beta` weight exists anywhere in the model,
+    # consistent architecture top to bottom. Re-derived directly from
+    # `model.weights` after `build()`; the prior 13 does not correspond to
+    # any weight this build path has ever produced in git history.
+    "modern_bert": 12,
     "power_mlp": 5,
     "pw_fnet": 100,
     "qwen": 97,

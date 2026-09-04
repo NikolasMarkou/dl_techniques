@@ -52,12 +52,21 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #:
 #: A grep-based count is wrong in BOTH directions here (D-140 measured grep at
 #: 198 total / 20 literal against the true 178 / 29). Use the AST.
-_UNCHECKABLE_NORM_CALL_SITE_CEILING = 149
+#:
+#: RE-MEASURED 2026-09-04: 180 / 84, 96 Attribute + 55 Name = 151 uncheckable,
+#: 29 literal (unchanged). The +2 dynamic / +2 total delta is exactly
+#: ``area_attention.py``'s new ``self.qk_norm_type``-keyed ``q_norm`` /
+#: ``k_norm`` construction (added 2026-09-01, after this pin's 2026-08-23
+#: baseline) -- an optional per-head QK-normalization site, dynamic because
+#: the type is a constructor argument, not a literal.
+_UNCHECKABLE_NORM_CALL_SITE_CEILING = 151
 
 #: Ceiling on the total population, dynamic and literal together. Pinned as well
 #: so that "a dynamic site became literal" and "a site disappeared" are
 #: distinguishable from "the family shrank".
-_TOTAL_NORM_CALL_SITE_CEILING = 178
+#:
+#: RE-MEASURED 2026-09-04: 180 total (see above).
+_TOTAL_NORM_CALL_SITE_CEILING = 180
 
 
 def _sweep_norm_call_sites() -> Tuple[Counter, List[str], List[str]]:

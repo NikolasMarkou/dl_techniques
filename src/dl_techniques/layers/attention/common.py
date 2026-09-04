@@ -12,6 +12,33 @@ everything rather than producing a NaN softmax (``rescue_axis=None`` opts
 out). Adoption of these helpers across sibling modules is partial; a module
 that declines one says so in a comment naming what it measured instead.
 
+``validate_head_divisibility`` (13 importers) and ``compute_attention_scale``
+(16 importers) are consolidated here. **Those two counts are MECHANICAL.
+Re-derive them before editing either**, from the repository root, with an AST
+walk over ``layers/`` matching ``ast.ImportFrom`` whose last dotted module
+component is ``common`` — a text search over-counts, since both names also
+appear in prose (including in this docstring)::
+
+    .venv/bin/python - <<'PY'
+    import ast, collections, pathlib
+    c = collections.Counter()
+    for p in pathlib.Path("src/dl_techniques/layers").rglob("*.py"):
+        for n in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+            if isinstance(n, ast.ImportFrom):
+                if (n.module or "").split(".")[-1] == "common":
+                    c.update(a.name for a in n.names)
+    print(c["validate_head_divisibility"], c["compute_attention_scale"])
+    PY
+
+It prints ``13 16``.
+
+``apply_attention_mask``'s ``rescue_axis`` names the axis the CALLER's softmax
+reduces over — never inferred, for the same reason polarity is never inferred.
+**NINE of the TWELVE adopters** DERIVE the axis from their own
+``probability_config`` rather than inheriting the ``-1`` default; the other
+three (``beit_attention.py``, ``capsule_routing_attention.py``,
+``ring_attention.py``) each have their own documented reason not to.
+
 Flat: no classes, no registry, no Keras serialization. A Keras
 layer imports these the way it imports ``math``.
 

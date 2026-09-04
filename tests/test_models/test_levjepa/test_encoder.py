@@ -55,7 +55,7 @@ class TestLeVJEPAEncoderForward:
         assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
 
     def test_token_dropping_active_only_when_training(self):
-        enc = LeVJEPAEncoder(**_small_kwargs(num_frames=1, token_drop_rate=0.5))
+        enc = LeVJEPAEncoder(**_small_kwargs(num_frames=1, token_dropout_rate=0.5))
         x = keras.random.normal((2, 32, 32, 3))
 
         out_infer = enc(x, training=False)
@@ -63,11 +63,11 @@ class TestLeVJEPAEncoderForward:
         assert out_infer.shape == (2, 5, 16)
 
         out_train = enc(x, training=True)
-        # drop_rate=0.5 over 4 patches -> keep_len = round(4*0.5) = 2, + 1 CLS.
+        # dropout_rate=0.5 over 4 patches -> keep_len = round(4*0.5) = 2, + 1 CLS.
         assert out_train.shape == (2, 3, 16)
 
     def test_token_drop_rate_zero_is_identity_length(self):
-        enc = LeVJEPAEncoder(**_small_kwargs(num_frames=1, token_drop_rate=0.0))
+        enc = LeVJEPAEncoder(**_small_kwargs(num_frames=1, token_dropout_rate=0.0))
         x = keras.random.normal((2, 32, 32, 3))
         out_train = enc(x, training=True)
         assert out_train.shape == (2, 5, 16)

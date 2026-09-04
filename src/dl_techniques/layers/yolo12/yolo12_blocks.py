@@ -31,6 +31,24 @@ from dl_techniques.layers.transformers.area_attention_block import AreaAttention
 YOLO12_NORM_KWARGS: Dict[str, Any] = {"epsilon": 1e-3, "momentum": 0.97}
 
 
+def _fresh_initializer(
+        initializer: keras.initializers.Initializer,
+) -> keras.initializers.Initializer:
+    """A new instance with the same config, never the same object.
+
+    Every block below resolves ``kernel_initializer`` once in ``__init__`` and
+    reuses that ONE instance across several sibling sub-layers (``cv1``/
+    ``cv2``, the bottleneck stack, ...). Keras does not clone an
+    already-constructed ``Initializer`` at each call site, so two sub-layers
+    of the same shape sharing that instance draw the IDENTICAL flat sequence
+    of numbers -- a same-shape, different-role weight collision invisible to
+    every shape-based check. Round-tripping through
+    ``serialize``/``get`` gives each site its own instance (and, for a
+    seeded initializer, a fresh seed) while keeping the exact same config.
+    """
+    return keras.initializers.get(keras.initializers.serialize(initializer))
+
+
 def yolo12_conv_block(
     filters: int,
     kernel_size: int = 3,
@@ -160,11 +178,20 @@ class Bottleneck(keras.layers.Layer):
             name="cv1"
         )
 
+        # `cv2` gets its OWN fresh instance: `cv1` and `cv2` are same-shape
+        # (both 3x3, `self.filters` output channels) siblings of ONE instance
+        # that would otherwise draw the identical flat weight sequence from
+        # the shared `self.kernel_initializer` object -- a different-ROLE
+        # collision (D-057). `cv1` deliberately keeps the shared object AS-IS
+        # so that same-role cross-block correlation (e.g. this `cv1` against
+        # another `Bottleneck`'s `cv1`) is untouched -- decorrelating that too
+        # would be a far larger change than this fix. See
+        # tests/test_layers/test_the_shared_initializer_symmetry_is_broken.py.
         self.cv2 = yolo12_conv_block(
             filters=self.filters,
             kernel_size=3,
             activation=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=_fresh_initializer(self.kernel_initializer),
             name="cv2"
         )
 
@@ -309,14 +336,24 @@ class C3k2Block(keras.layers.Layer):
             name="cv1"
         )
 
+        # `cv2` is same-shape as `cv1` (both 1x1, `hidden_filters` output
+        # channels) -- a fresh instance keeps it from tying to `cv1` as the
+        # same function. `cv1` keeps the shared object so cross-block `cv1`
+        # correlation is untouched. See Bottleneck's `cv2` for the identical
+        # reasoning.
         self.cv2 = yolo12_conv_block(
             filters=self.hidden_filters,
             kernel_size=1,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=_fresh_initializer(self.kernel_initializer),
             name="cv2"
         )
 
-        # Create bottleneck layers - store as list attributes for proper serialization
+        # Create bottleneck layers - store as list attributes for proper serialization.
+        # Every `Bottleneck` gets the SAME shared `self.kernel_initializer`
+        # object (not a fresh one): each `Bottleneck` decorrelates its OWN
+        # cv1/cv2 pair internally, and sharing the object here is what keeps
+        # `bottleneck_0/cv1` and `bottleneck_1/cv1` same-role correlated
+        # across the loop, matching this module's existing behavior.
         self.bottlenecks = []
         for i in range(self.n):
             bottleneck = Bottleneck(
@@ -487,6 +524,13 @@ class A2C2fBlock(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.hidden_filters = filters // 2
 
+        # `cv1` (hidden_filters, 1x1) and `cv2` (self.filters, 1x1) below are
+        # different shapes (`filters = 2 * hidden_filters` in every registered
+        # scale), so they cannot collide, and the two `AreaAttentionBlock`s
+        # per iteration decorrelate their own `v`/`proj` pair internally
+        # (see `AreaAttention._fresh_initializer`) regardless of what
+        # `kernel_initializer` object is handed to them here. None of the
+        # three needs its own fresh instance.
         self.cv1 = yolo12_conv_block(
             filters=self.hidden_filters,
             kernel_size=1,

@@ -673,8 +673,9 @@ class DiT(keras.Model):
         model_out = self([combined, t, y], training=training)
 
         # DECISION plan-2026-09-02T170923-1285ed83/D-014: guides exactly three channels,
-        # not `self.in_channels` — upstream does the same for exact reproducibility;
-        # the obvious `model_out[..., :self.in_channels]` fix changes published cfg_scale results. See decisions.md.
+        # not `self.in_channels` — upstream does the same for exact reproducibility.
+        # WHAT NOT TO DO: the obvious `model_out[..., :self.in_channels]` fix
+        # changes published cfg_scale results. See decisions.md.
         eps = model_out[..., :CFG_GUIDED_CHANNELS]
         rest = model_out[..., CFG_GUIDED_CHANNELS:]
 

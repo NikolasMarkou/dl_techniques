@@ -4168,6 +4168,7 @@ _CREATE_WITHOUT_FROM_VARIANT = {
     ("models/vision_language/sd3_mmdit/pipeline.py", "create_sd3_pipeline"),
     ("models/vision_language/sd3_mmdit/transformer.py", "create_sd3_mmdit"),
     ("models/time_series/tirex/model_extended.py", "create_tirex_extended"),
+    ("models/time_series/ets/model.py", "create_ets"),
 }
 
 
@@ -4696,10 +4697,6 @@ def _sweep_call_closure_hygiene(roots=None, src_root=None):
 _CALL_LOGGER_WAIVERS = {
     ("src/dl_techniques/layers/attention/wave_field_attention.py",
      "WaveFieldAttention", "call"),
-    ("src/dl_techniques/layers/logic/arithmetic_operators.py",
-     "LearnableArithmeticOperator", "call"),
-    ("src/dl_techniques/layers/logic/logic_operators.py",
-     "LearnableLogicOperator", "call"),
     ("src/dl_techniques/losses/clip_contrastive_loss.py",
      "CLIPContrastiveLoss", "_validate_logits"),
     ("src/dl_techniques/losses/nano_vlm_loss.py", "NanoVLMLoss", "call"),

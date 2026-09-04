@@ -334,7 +334,11 @@ class TextDecoder(keras.layers.Layer):
             return
 
         # DECISION plan-2026-07-31T132403-b3f540cb/D-018: static seq_len guard
-        # stays here, not in call() or a lower-level helper. Cannot fire on a dynamic sequence axis or on a later call to an already-built layer -- callers must bound seq_len themselves. See decisions.md.
+        # stays here, not in call() or a lower-level helper. LIMITATION: cannot
+        # fire on a dynamic sequence axis or on a later call to an
+        # already-built layer -- callers must bound seq_len themselves, since
+        # an out-of-range index reaching the positional embedding fails in a
+        # DEVICE-dependent way instead. See decisions.md.
         if input_shape is not None and len(input_shape) >= 2:
             static_seq_len = input_shape[1]
             if static_seq_len is not None and static_seq_len > self.max_seq_len:

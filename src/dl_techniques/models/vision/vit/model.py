@@ -20,6 +20,17 @@ is the main cost knob. Attention type, FFN type, normalization type and
 normalization position come from the dl_techniques factories rather than
 being fixed in this file.
 
+`normalization_position` defaults to `"post"`, and published ViT is pre-LN.
+Dosovitskiy et al. 2020 normalize BEFORE each sub-layer; the default here
+takes `TransformerLayer.call`'s post-LN branch instead, so `ViT(scale='base')`
+and `create_vit()` are a different function from any checkpoint ported from
+the paper's release. Pass `normalization_position='pre'` for the published
+architecture. The sibling `vit_hmlp/model.py` defaults to `"pre"`, so the
+repository's two ViTs deliberately disagree on this one knob: the default is
+NOT flipped here because it would silently change the function every existing
+`vit` checkpoint and training script was fitted under. This is a documented
+divergence, not an oversight -- see D-047 in `__init__`.
+
 References:
     - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers for
       Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
@@ -254,7 +265,7 @@ class ViT(keras.Model):
         pre-plumbing version and keeps existing checkpoints bit-exact.
     :type normalization_kwargs: Optional[Dict[str, Any]]
     :param normalization_position: ``'post'`` (default) or ``'pre'``. The
-        default is not the published ViT configuration; pass ``'pre'`` to
+        default is NOT the published ViT configuration; pass ``'pre'`` to
         reproduce the paper or to load a checkpoint ported from its release.
         See the module docstring for why the default stays unflipped.
     :type normalization_position: Literal['pre', 'post']

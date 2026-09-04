@@ -235,6 +235,14 @@ ROUNDTRIP_NO_SUBJECT_YET = {
     "prism": "no subject; the time_series subject builds nbeats",
     "tirex": "no subject; the time_series subject builds nbeats",
     "xlstm": "no subject; the time_series subject builds nbeats",
+    # Added 2026-09-04: `bit_diffusion` landed with no round-trip subject.
+    # Its `DiTXA.call()` takes a dict with `x_t`/`t`/`y`/`x_cond`/`direction`
+    # (and optional `cond_mask`) for a bridge process mixing both forward and
+    # reverse directions in one batch -- unlike every other subject in this
+    # family, a MINIMAL correct instance needs a verified `direction`
+    # encoding and `x_cond` shape, not just small dims. Owed work, not ruled
+    # impossible.
+    "bit_diffusion": "no subject yet; DiTXA's dict call contract needs its own study",
 }
 
 
@@ -247,8 +255,9 @@ def test_the_unsubjected_set_does_not_grow():
     on_disk = set(package_names())
     unknown = sorted(set(ROUNDTRIP_NO_SUBJECT_YET) - on_disk)
     assert not unknown, f"ROUNDTRIP_NO_SUBJECT_YET names non-packages: {unknown}"
-    assert len(ROUNDTRIP_NO_SUBJECT_YET) == 8, (
-        "eight packages were owed a round-trip subject on 2026-08-25; found "
+    assert len(ROUNDTRIP_NO_SUBJECT_YET) == 9, (
+        "eight packages were owed a round-trip subject on 2026-08-25, plus "
+        "`bit_diffusion` added 2026-09-04; found "
         f"{len(ROUNDTRIP_NO_SUBJECT_YET)}. Growing this set means a package "
         "joined models/ without an instrument; shrinking it means one was "
         "written -- update the count in the same commit either way."
@@ -285,7 +294,11 @@ def test_every_model_package_has_a_roundtrip_subject():
     # second-level nestings -- sam1/2/3, darkir, pw_fnet, scunet, pft_sr,
     # superpoint, power_sampling -- are now reached, while the 11 family
     # containers are excluded).
-    assert len(on_disk) == 79, f"expected 79 packages, found {len(on_disk)}"
+    #
+    # 88 as of 2026-09-04: nine packages landed since -- ascii_bert,
+    # ascii_clifford_bert, ascii_convnext_bert, bit_diffusion, colbert, dit,
+    # ets, levjepa and shared (embeddings_experimental's leaf base package).
+    assert len(on_disk) == 88, f"expected 88 packages, found {len(on_disk)}"
 
 
 def test_every_waiver_table_names_only_real_subjects():
