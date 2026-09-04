@@ -32,7 +32,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.complex_layers")
+@register_dl_technique("dl_techniques.layers.complex.complex_layers")
 class ComplexLayer(keras.layers.Layer):
     """Base class for complex-valued layers.
 
@@ -118,7 +118,7 @@ class ComplexLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.complex_layers")
+@register_dl_technique("dl_techniques.layers.complex.complex_layers")
 class ComplexConv2D(ComplexLayer):
     """Complex-valued 2D convolution layer.
 
@@ -319,7 +319,7 @@ class ComplexConv2D(ComplexLayer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.complex_layers")
+@register_dl_technique("dl_techniques.layers.complex.complex_layers")
 class ComplexDense(ComplexLayer):
     """Complex-valued fully connected layer.
 
@@ -471,7 +471,7 @@ class ComplexDense(ComplexLayer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.complex_layers")
+@register_dl_technique("dl_techniques.layers.complex.complex_layers")
 class ComplexReLU(keras.layers.Layer):
     """Complex ReLU activation.
 
@@ -543,7 +543,7 @@ class ComplexReLU(keras.layers.Layer):
         return super().get_config()
 
 
-@register_dl_technique("dl_techniques.layers.complex_layers")
+@register_dl_technique("dl_techniques.layers.complex.complex_layers")
 class ComplexAveragePooling2D(keras.layers.Layer):
     """Complex-valued 2D average pooling layer.
 
@@ -673,7 +673,7 @@ class ComplexAveragePooling2D(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.complex_layers")
+@register_dl_technique("dl_techniques.layers.complex.complex_layers")
 class ComplexDropout(keras.layers.Layer):
     """Complex-valued dropout layer.
 
@@ -767,7 +767,7 @@ class ComplexDropout(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.complex_layers")
+@register_dl_technique("dl_techniques.layers.complex.complex_layers")
 class ComplexGlobalAveragePooling2D(keras.layers.Layer):
     """Complex-valued global 2D average pooling layer.
 

@@ -72,7 +72,7 @@ from typing import Optional, Tuple, List, Dict, Any, Sequence, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.signal_processing.shearlet_transform import ShearletTransform
-from dl_techniques.layers.complex_layers import (
+from dl_techniques.layers.complex.complex_layers import (
     ComplexDense,
     ComplexConv2D,
     ComplexReLU,
@@ -250,7 +250,7 @@ class CoShNet(keras.Model):
     :type include_top: bool
     :param epsilon: Has no effect. Validated, stored, serialized and forwarded
         to every complex layer, but never used in a computation: ``grep -n
-        "epsilon" layers/complex_layers.py`` returns 6 hits, all of them
+        "epsilon" layers/complex/complex_layers.py`` returns 6 hits, all of them
         docstring, signature, validation or ``get_config``; no complex layer
         performs a division at all, so there is no numerical-stability term for
         it to be. Measured on one built ``nano`` (rebuilding under

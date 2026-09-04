@@ -14,7 +14,7 @@ import tensorflow as tf
 from dataclasses import dataclass
 from typing import Tuple, List, Optional
 
-from dl_techniques.layers.complex_layers import (
+from dl_techniques.layers.complex.complex_layers import (
     ComplexLayer,
     ComplexConv2D,
     ComplexDense,
