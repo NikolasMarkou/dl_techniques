@@ -17,6 +17,10 @@ import keras
 from keras import ops
 from typing import Tuple, Union, Optional, Sequence, List, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from ...utils.logger import logger
 from .gaussian_filter import GaussianFilter
 from dl_techniques.utils.keras_registration import register_dl_technique

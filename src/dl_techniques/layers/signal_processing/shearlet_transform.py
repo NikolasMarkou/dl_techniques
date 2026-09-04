@@ -27,8 +27,13 @@ import numpy as np
 from keras import ops, initializers
 from typing import List, Tuple, Optional, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.signal_processing.shearlet_transform")
 class ShearletTransform(keras.layers.Layer):
@@ -371,3 +376,5 @@ class ShearletTransform(keras.layers.Layer):
             'high_freq': self.high_freq,
         })
         return config
+
+# ---------------------------------------------------------------------
