@@ -21,11 +21,11 @@ import keras
 from typing import Optional, Union, Tuple, Any, Dict
 
 from .hanc_layer import HANCLayer
-from .conv_blocks.squeeze_excitation import SqueezeExcitation
+from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.hanc_block")
+@register_dl_technique("dl_techniques.layers.acc_unet.hanc_block")
 class HANCBlock(keras.layers.Layer):
     """Hierarchical Aggregation of Neighborhood Context (HANC) block.
 

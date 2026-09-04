@@ -48,8 +48,8 @@ from typing import Optional, Union, Tuple, Any, List, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.conv_blocks.res_path import ResPath
-from dl_techniques.layers.hanc_block import HANCBlock
-from dl_techniques.layers.multi_level_feature_compilation import MLFCLayer
+from dl_techniques.layers.acc_unet.hanc_block import HANCBlock
+from dl_techniques.layers.acc_unet.multi_level_feature_compilation import MLFCLayer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -58,7 +58,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 def _force_no_xla(kwargs: Dict[str, Any], owner: str) -> None:
     """Force ``jit_compile=False`` into a ``compile()`` keyword dictionary.
 
-    :class:`~dl_techniques.layers.hanc_layer.HANCLayer` resizes its pooled
+    :class:`~dl_techniques.layers.acc_unet.hanc_layer.HANCLayer` resizes its pooled
     summaries back to full resolution with nearest-neighbour interpolation. The
     backward pass of that op, ``ResizeNearestNeighborGrad``, has no registered
     XLA-GPU kernel in TF 2.18, so Keras' default ``jit_compile="auto"`` -- which

@@ -36,8 +36,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.hanc_layer import HANCLayer
-from dl_techniques.layers.multi_level_feature_compilation import MLFCLayer
+from dl_techniques.layers.acc_unet.hanc_layer import HANCLayer
+from dl_techniques.layers.acc_unet.multi_level_feature_compilation import MLFCLayer
 
 
 SIZE, CHANNELS = 16, 8

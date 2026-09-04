@@ -23,12 +23,12 @@ from typing import Optional, Union, Tuple, List, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from .conv_blocks.squeeze_excitation import SqueezeExcitation
+from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.multi_level_feature_compilation")
+@register_dl_technique("dl_techniques.layers.acc_unet.multi_level_feature_compilation")
 class MLFCLayer(keras.layers.Layer):
     """Multi Level Feature Compilation (MLFC) Layer.
 

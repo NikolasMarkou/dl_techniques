@@ -30,9 +30,9 @@ from dl_techniques.models.vision.accunet.model import (
     create_acc_unet_multiclass
 )
 
-from dl_techniques.layers.hanc_block import HANCBlock
+from dl_techniques.layers.acc_unet.hanc_block import HANCBlock
 from dl_techniques.layers.conv_blocks.res_path import ResPath
-from dl_techniques.layers.multi_level_feature_compilation import MLFCLayer
+from dl_techniques.layers.acc_unet.multi_level_feature_compilation import MLFCLayer
 
 
 class TestAccUNetConfigurations:

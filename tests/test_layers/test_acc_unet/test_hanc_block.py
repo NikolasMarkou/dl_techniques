@@ -14,7 +14,7 @@ import os
 from typing import Dict, Any
 import tensorflow as tf
 
-from dl_techniques.layers.hanc_block import HANCBlock
+from dl_techniques.layers.acc_unet.hanc_block import HANCBlock
 
 
 class TestHANCBlock:

@@ -24,7 +24,7 @@ from typing import Optional, Union, Tuple, Any, List, Dict
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.hanc_layer")
+@register_dl_technique("dl_techniques.layers.acc_unet.hanc_layer")
 class HANCLayer(keras.layers.Layer):
     """Hierarchical Aggregation of Neighborhood Context (HANC) Layer.
 
