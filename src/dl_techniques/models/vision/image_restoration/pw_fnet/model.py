@@ -36,7 +36,7 @@ from typing import Optional, Tuple, List, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.ffn import create_ffn_layer
-from dl_techniques.layers.fft_layers import FFTLayer, IFFTLayer
+from dl_techniques.layers.signal_processing.fft_layers import FFTLayer, IFFTLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique

@@ -32,7 +32,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.canny")
+@register_dl_technique("dl_techniques.layers.signal_processing.canny")
 class Canny(keras.layers.Layer):
     """Multi-stage Canny edge detection layer for single-channel images.
 

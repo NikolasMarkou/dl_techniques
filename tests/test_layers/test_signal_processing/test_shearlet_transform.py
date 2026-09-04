@@ -19,7 +19,7 @@ from typing import Tuple, Dict, List, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.shearlet_transform import ShearletTransform
+from dl_techniques.layers.signal_processing.shearlet_transform import ShearletTransform
 
 
 # ---------------------------------------------------------------------

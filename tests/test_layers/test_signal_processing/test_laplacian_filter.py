@@ -6,7 +6,7 @@ import keras
 from typing import Any, Dict, List, Tuple, Literal
 
 # Import the layers to test
-from dl_techniques.layers.laplacian_filter import (
+from dl_techniques.layers.signal_processing.laplacian_filter import (
     LaplacianFilter,
     AdvancedLaplacianFilter,
     LaplacianPyramidLevel,

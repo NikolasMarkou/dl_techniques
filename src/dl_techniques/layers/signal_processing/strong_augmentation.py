@@ -39,7 +39,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.strong_augmentation")
+@register_dl_technique("dl_techniques.layers.signal_processing.strong_augmentation")
 class StrongAugmentation(keras.layers.Layer):
     """
     Strong augmentation layer for consistency-based regularization.

@@ -60,7 +60,7 @@ from typing import Dict, Tuple, Optional, Union, Any, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.layers.strong_augmentation import StrongAugmentation
+from dl_techniques.layers.signal_processing.strong_augmentation import StrongAugmentation
 from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
 from dl_techniques.models.vision.vit.model import ViT

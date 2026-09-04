@@ -31,7 +31,7 @@ from typing import Optional, Union, Tuple, List, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.ffn import create_ffn_layer
-from dl_techniques.layers.haar_wavelet_decomposition import HaarWaveletDecomposition
+from dl_techniques.layers.signal_processing.haar_wavelet_decomposition import HaarWaveletDecomposition
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 

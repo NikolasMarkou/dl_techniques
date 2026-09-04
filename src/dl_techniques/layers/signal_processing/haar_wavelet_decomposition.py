@@ -27,7 +27,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.haar_wavelet_decomposition")
+@register_dl_technique("dl_techniques.layers.signal_processing.haar_wavelet_decomposition")
 class HaarWaveletDecomposition(keras.layers.Layer):
     """
     Perform Haar Discrete Wavelet Transform (DWT) decomposition.

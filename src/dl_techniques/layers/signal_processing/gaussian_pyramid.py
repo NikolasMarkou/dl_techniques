@@ -17,12 +17,12 @@ import keras
 from keras import ops
 from typing import Tuple, Union, Optional, Sequence, List, Dict, Any
 
-from ..utils.logger import logger
+from ...utils.logger import logger
 from .gaussian_filter import GaussianFilter
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.gaussian_pyramid")
+@register_dl_technique("dl_techniques.layers.signal_processing.gaussian_pyramid")
 class GaussianPyramid(keras.layers.Layer):
     """
     Gaussian Pyramid layer for multi-scale image representation.

@@ -46,7 +46,7 @@ from dl_techniques.models.vision.depth_anything import (
     linear_ema_schedule,
 )
 from dl_techniques.models.vision.depth_anything import create_depth_anything
-from dl_techniques.layers.strong_augmentation import StrongAugmentation
+from dl_techniques.layers.signal_processing.strong_augmentation import StrongAugmentation
 
 
 # ---------------------------------------------------------------------

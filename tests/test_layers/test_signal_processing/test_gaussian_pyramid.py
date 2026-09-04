@@ -6,7 +6,7 @@ import keras
 from typing import Any, Dict, List, Tuple
 
 # Import the layer to test
-from dl_techniques.layers.gaussian_pyramid import GaussianPyramid, gaussian_pyramid
+from dl_techniques.layers.signal_processing.gaussian_pyramid import GaussianPyramid, gaussian_pyramid
 
 
 class TestGaussianPyramid:

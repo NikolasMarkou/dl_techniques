@@ -71,7 +71,7 @@ from typing import Optional, Tuple, List, Dict, Any, Sequence, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.shearlet_transform import ShearletTransform
+from dl_techniques.layers.signal_processing.shearlet_transform import ShearletTransform
 from dl_techniques.layers.complex_layers import (
     ComplexDense,
     ComplexConv2D,

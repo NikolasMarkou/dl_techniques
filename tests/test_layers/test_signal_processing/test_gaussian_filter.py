@@ -16,7 +16,7 @@ from typing import Tuple, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.gaussian_filter import (
+from dl_techniques.layers.signal_processing.gaussian_filter import (
     depthwise_gaussian_kernel,
     GaussianFilter
 )

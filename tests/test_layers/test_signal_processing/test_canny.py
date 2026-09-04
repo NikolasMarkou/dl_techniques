@@ -14,7 +14,7 @@ import tensorflow as tf
 import keras
 from typing import Tuple, List, Dict, Any
 
-from dl_techniques.layers.canny import Canny
+from dl_techniques.layers.signal_processing.canny import Canny
 
 
 class TestCannyLayer:

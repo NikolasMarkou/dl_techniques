@@ -30,7 +30,7 @@ from typing import List, Tuple, Optional, Dict, Any
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.shearlet_transform")
+@register_dl_technique("dl_techniques.layers.signal_processing.shearlet_transform")
 class ShearletTransform(keras.layers.Layer):
     """Cone-adapted discrete shearlet transform layer.
 

@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.fft_layers import FFTLayer, IFFTLayer
+from dl_techniques.layers.signal_processing.fft_layers import FFTLayer, IFFTLayer
 
 B, H, W, C = 2, 8, 8, 3
 

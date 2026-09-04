@@ -11,7 +11,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.clahe import CLAHE
+from dl_techniques.layers.signal_processing.clahe import CLAHE
 
 HH, WW = 32, 32
 N_BINS = 256

@@ -25,7 +25,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.fft_layers")
+@register_dl_technique("dl_techniques.layers.signal_processing.fft_layers")
 class FFTLayer(keras.layers.Layer):
     """
     Apply 2D Fast Fourier Transform and output concatenated real/imaginary parts.
@@ -138,7 +138,7 @@ class FFTLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.fft_layers")
+@register_dl_technique("dl_techniques.layers.signal_processing.fft_layers")
 class IFFTLayer(keras.layers.Layer):
     """
     Apply 2D Inverse FFT to concatenated real/imaginary parts.

@@ -5,7 +5,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.strong_augmentation import StrongAugmentation
+from dl_techniques.layers.signal_processing.strong_augmentation import StrongAugmentation
 
 B, H, W, C = 4, 8, 8, 3
 

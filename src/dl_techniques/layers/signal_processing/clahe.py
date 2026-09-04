@@ -35,7 +35,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.clahe")
+@register_dl_technique("dl_techniques.layers.signal_processing.clahe")
 class CLAHE(keras.layers.Layer):
     """Trainable Contrast Limited Adaptive Histogram Equalization layer.
 

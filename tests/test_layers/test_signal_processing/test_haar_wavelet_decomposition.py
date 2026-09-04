@@ -13,7 +13,7 @@ import pytest
 import keras
 from keras import ops
 
-from dl_techniques.layers.haar_wavelet_decomposition import HaarWaveletDecomposition
+from dl_techniques.layers.signal_processing.haar_wavelet_decomposition import HaarWaveletDecomposition
 
 
 class TestHaarWaveletDecompositionInit:

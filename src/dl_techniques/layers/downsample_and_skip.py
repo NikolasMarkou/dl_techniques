@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
+from dl_techniques.layers.signal_processing.laplacian_filter import LaplacianPyramidLevel
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -35,7 +35,7 @@ class DownsampleAndSkip(keras.layers.Layer):
     linear where a bias-free / Miyasawa denoiser arm needs that.
 
     With ``use_laplacian_pyramid=True``: a channel-preserving, bias-free
-    :class:`~dl_techniques.layers.laplacian_filter.LaplacianPyramidLevel`
+    :class:`~dl_techniques.layers.signal_processing.laplacian_filter.LaplacianPyramidLevel`
     split. The full-resolution high-frequency band becomes the skip; the
     half-resolution low band continues down the encoder. ``pool_type`` is
     inert on this path -- the pyramid already pools linearly.
