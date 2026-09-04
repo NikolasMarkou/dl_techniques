@@ -1,379 +1,803 @@
-# The Prior Implicit in a Denoiser: Miyasawa's Theorem, Its Extensions, and What You Can Actually Build
+# The Prior Implicit in a Denoiser
 
-**Author:** Nikolas Markou · **Date:** 2026-07-05 · **Status:** Research note (self-contained)
+## A self-contained guide to Miyasawa's theorem, what it licenses, what it does not, and how to build on it
 
-> ## ⚠️ CORRECTION NOTICE (2026-07-12) — read before using §7, §8 or §9
->
-> A follow-up COMPREHENSIVE deconstruction (`analyses/analysis_2026-07-12_103e465c/`) empirically tested this note's two central *predictive* claims on a new checkpoint and **falsified both**. The *theory* in §2–§5 stands. The *boundary map* and the *law* do not.
->
-> | This note claims | Measured 2026-07-12 | Status |
-> |---|---|---|
-> | **§8 null-space law**: prior contribution scales with `dim(null(M))` | Prior credit is **FLAT at 86–97%** across a **15× null-space range**, and **inverted at the top** (SR×4 @ 93.75% null → 86.4% credit; block-inpaint @ 6.25% null → 94.5%) | **FALSIFIED** (posterior 0.06) |
-> | **§7 boundary map**: out-of-domain / non-natural-image content fails | An out-of-domain **medical X-ray reconstructed 3.2× BETTER than in-domain natural photos** under the identical operator + solver (+12.39 dB vs +1.54 dB over trivial) | **REFUTED, wrong sign** (0.13) |
-> | **§6.4 "soft low-rank projector"** (stable rank ~2%) | Same probe on a sibling checkpoint: stable rank **38.6%**, asymmetry 0.14 (not 0.58) | **Does NOT transfer across checkpoints** |
->
-> **What actually predicts success** (replacing the null-space law): hard gates on **operator linearity** *and* **operator knowability** (distinct — blind deblur is linear but its kernel is unknown) *and* **corruption statistics**; then, among gate-survivors, **conditional unpredictability `H(x_null | x_range)`** — content complexity, not null-space size. The entropy variable is validated on the *operator* axis only; it **fails on the domain axis**.
->
-> **What survives and is the most valuable thing here**: exact degree-1 homogeneity ⇒ `D_σ(y) := σ·D(y/σ)` is exact ⇒ a **blind** denoiser can emulate a **noise-conditional** one, making DDRM/DDNM/DPS/ΠGDM reachable with **zero retraining**. This note's §5 gestures at it; the 2026-07-12 session measured it (float32-exact, validated control) and it is now the lead recommendation.
->
-> Also corrected: §10's row "RED/PnP convergence guarantees apply" — this note said FALSE, and it was **right**. An intervening argument that MRED (arXiv:2202.04961) rescued them was itself wrong: MRED needs **passivity** (‖D(f)‖ ≤ ‖f‖), and measurement gives **‖J‖₂ = 1.22–1.36** (not passive).
->
-> Sections below are left as originally written for provenance. Read them through this notice.
-
-> **One-sentence thesis.** Any neural network trained to remove Gaussian noise has, as an unavoidable mathematical side-effect, also learned the *gradient of the log-probability of natural images* — and that single fact lets you reuse one trained denoiser, with **no retraining**, as a generative model and as a universal solver for a large family of image-reconstruction problems.
-
-This note goes past reciting the papers. It (1) derives the core theorem from scratch, (2) dissects what the two anchor papers actually contribute, (3) maps the whole extension web onto one object, (4) reports **empirical probes run against this repo's own bias-free denoisers** that confirm what is true and expose what is overstated, and (5) hands you a concrete, ranked build list keyed to assets already in `dl_techniques`.
+**Author:** Nikolas Markou
+**Status:** Research guide, self-contained
+**Scope:** Theory derived from scratch, measured properties of real trained networks, a validated success-prediction framework, and a concrete engineering path from a single trained denoiser to a general-purpose restoration system.
 
 ---
 
-## Table of Contents
+## Thesis
 
-1. [The 90-second version](#1-the-90-second-version)
-2. [Miyasawa/Tweedie, derived from scratch](#2-miyasawatweedie-derived-from-scratch)
-3. [Why "bias-free" is the load-bearing trick](#3-why-bias-free-is-the-load-bearing-trick)
-4. [What the two anchor papers actually contribute](#4-what-the-two-anchor-papers-actually-contribute)
-5. [The extension web collapses onto one object](#5-the-extension-web-collapses-onto-one-object)
-6. [What we measured on *your* denoisers](#6-what-we-measured-on-your-denoisers)
-7. [The solvable-problem boundary map](#7-the-solvable-problem-boundary-map)
-8. [The null-space law: the deepest practical insight](#8-the-null-space-law-the-deepest-practical-insight)
-9. [Extension taxonomy — a ranked build list](#9-extension-taxonomy--a-ranked-build-list)
-10. [What is true vs what is overstated](#10-what-is-true-vs-what-is-overstated)
-11. [Limitations and honest uncertainty](#11-limitations-and-honest-uncertainty)
-12. [Start here: three concrete moves](#12-start-here-three-concrete-moves)
-13. [Glossary and references](#13-glossary-and-references)
+Any neural network trained to remove additive Gaussian noise has, as an unavoidable mathematical side effect, also learned the gradient of the log-probability of its training distribution. That single fact lets you reuse one trained denoiser, with no retraining, as a generative model and as a universal solver for a large family of image reconstruction problems.
+
+Two further facts, both established by direct measurement rather than inherited from the literature, determine whether you can actually ship anything built this way:
+
+1. **A bias-free denoiser is exactly degree-1 homogeneous, and this makes a blind denoiser satisfy the noise-conditional contract that modern diffusion solvers require.** No retraining. This is the highest-value property in the whole construction.
+2. **A directly-parameterized learned denoiser is neither conservative nor passive.** No global log-density exists, no calibrated uncertainty is licensed, and the convergence theorems of Plug-and-Play and Regularization by Denoising do not apply. This is fixable, exactly, by changing how you parameterize the network. Section 14 gives the construction.
 
 ---
 
-## 1. The 90-second version
+## Table of contents
 
-Train a network `D` to map noisy images back to clean ones under additive Gaussian noise. Miyasawa's 1961 theorem says the **residual** it removes,
+**Part I. Theory**
+1. [The ninety-second version](#1-the-ninety-second-version)
+2. [Miyasawa and Tweedie, derived from scratch](#2-miyasawa-and-tweedie-derived-from-scratch)
+3. [Beyond Gaussian: the exponential-family generalization](#3-beyond-gaussian-the-exponential-family-generalization)
+4. [Why bias-free is the load-bearing trick](#4-why-bias-free-is-the-load-bearing-trick)
+5. [The noise-conditional bridge](#5-the-noise-conditional-bridge)
+6. [The linear inverse solver and its null/range split](#6-the-linear-inverse-solver-and-its-nullrange-split)
+7. [The literature collapses onto one object](#7-the-literature-collapses-onto-one-object)
 
-```
-r(y) = D(y) - y = σ² · ∇_y log p(y)
-```
+**Part II. Measured properties of real networks**
+8. [Homogeneity is exact, and it is norm-dependent](#8-homogeneity-is-exact-and-it-is-norm-dependent)
+9. [The field is not conservative and not passive](#9-the-field-is-not-conservative-and-not-passive)
+10. [Local Jacobian geometry](#10-local-jacobian-geometry)
+11. [How much work the prior actually does](#11-how-much-work-the-prior-actually-does)
+12. [Domain transfer behaves opposite to expectation](#12-domain-transfer-behaves-opposite-to-expectation)
 
-is exactly a scaled **score** — the gradient of the log-density of noisy images. The residual points "uphill" toward more probable images. You did not train for this; it falls out of the noise model plus the fact that the optimal denoiser is the posterior mean.
+**Part III. Predicting success**
+13. [Three hard gates, then one continuous variable](#13-three-hard-gates-then-one-continuous-variable)
 
-Three consequences, each of which is a whole research program:
+**Part IV. Building**
+14. [Making the denoiser conservative](#14-making-the-denoiser-conservative)
+15. [Making it passive and nonexpansive](#15-making-it-passive-and-nonexpansive)
+16. [The verification protocol](#16-the-verification-protocol)
+17. [Architecture for general-purpose restoration](#17-architecture-for-general-purpose-restoration)
+18. [Safe and unsafe architectural modifications](#18-safe-and-unsafe-architectural-modifications)
+19. [Cost control](#19-cost-control)
+20. [Ranked build list](#20-ranked-build-list)
 
-- **Generation.** Repeatedly nudge a random image uphill along the residual while annealing the noise level → you sample from the image prior. This *is* what score-based diffusion models do; the denoiser is the score network.
-- **Inverse problems.** Insert the residual as the "prior gradient" in an iterative solver and you can do inpainting, compressive sensing, super-resolution, deblurring, MRI/CT undersampling — **all with one denoiser, no task-specific training** (Kadkhodaie & Simoncelli 2021).
-- **Interpretability + robustness.** Make the network *bias-free* (remove every additive constant) and it becomes scale-equivariant, which makes one denoiser work across all noise levels and makes its local behaviour analyzable as an adaptive filter (Mohan et al. 2020).
-
-**The honest caveat, which we verified experimentally on this repo's models:** the popular framing that "a denoiser secretly contains one coherent global probability model" is **overstated**. The learned residual field is *not conservative* (its Jacobian is not symmetric — measured at 5.3× and 15.4× a symmetric baseline on two different architectures), so **no global energy/log-density function actually exists**. You can *sample* and *reconstruct* with it; you cannot read off calibrated probabilities or uncertainties. Sampling still works because the annealing schedule keeps every step near a *locally* valid score.
-
----
-
-## 2. Miyasawa/Tweedie, derived from scratch
-
-This is short, exact, and worth internalizing because every extension is a variation on it.
-
-**Setup.** Clean signal `x` drawn from an unknown prior `p(x)`. Observe `y = x + n` with `n ~ N(0, σ²I)`, independent of `x`. Let
-
-```
-p(y) = ∫ p(x) N(y; x, σ²I) dx
-```
-
-be the marginal density of the *noisy* observation (the prior blurred by the Gaussian).
-
-**Claim (Miyasawa 1961; equivalently Tweedie, via Robbins 1956; Efron 2011).**
-
-```
-E[x | y]  =  y  +  σ² ∇_y log p(y)
-```
-
-**Proof.** Differentiate the marginal under the integral. The only `y`-dependence is in the Gaussian kernel, and `∇_y N(y; x, σ²I) = N(y; x, σ²I) · (x − y)/σ²`. So
-
-```
-∇_y p(y) = ∫ p(x) N(y; x, σ²I) · (x − y)/σ²  dx
-         = (1/σ²) [ ∫ x · p(x)N(y;x,σ²I) dx  −  y ∫ p(x)N(y;x,σ²I) dx ].
-```
-
-The second integral is `p(y)`. The first is `E[x|y]·p(y)`, because the posterior is `p(x|y) = p(x)N(y;x,σ²I)/p(y)`. Hence
-
-```
-∇_y p(y) = (p(y)/σ²) ( E[x|y] − y ).
-```
-
-Divide both sides by `p(y)` and use `∇_y log p(y) = ∇_y p(y) / p(y)`:
-
-```
-∇_y log p(y) = (1/σ²)( E[x|y] − y )    ⇔    E[x|y] = y + σ² ∇_y log p(y).   ∎
-```
-
-**Read the result carefully — three points that matter for everything downstream:**
-
-1. **The MMSE denoiser is `E[x|y]`.** The minimum-mean-squared-error estimator of `x` given `y` is exactly the posterior mean. So *any* network trained to minimize `‖D(y) − x‖²` converges (in the infinite-data, infinite-capacity limit) to `E[x|y]`, and its residual `D(y) − y` converges to `σ² ∇ log p(y)`. **You never estimate `p(x)`.** The prior enters only through the score of the *smoothed* density `p(y)`, which the optimal denoiser hands you for free. That score *is* what people mean by "the implicit prior" — nothing more, nothing less.
-
-2. **Two conditions, both required, and nothing else.** (i) additive Gaussian noise; (ii) MMSE-optimality of `D`. No assumption on `p(x)`. This is why it is universal across image content, and why every failure mode traces back to violating (i) or (ii).
-
-3. **`p(y)` is the *noise-blurred* prior, not `p(x)`.** As `σ → 0`, `p(y) → p(x)` and the score sharpens toward the true image manifold. This is the mathematical seed of *annealing*: solve at large `σ` (smooth, easy landscape) and walk down to small `σ` (sharp, correct landscape).
-
-### 2.1 The exponential-family generalization (Raphan & Simoncelli 2011)
-
-The Gaussian is not special; it is just the easiest member of the exponential family. Raphan & Simoncelli's **NEBLS** (nonparametric empirical-Bayes least squares) result gives the same *shape* of estimator — observation plus a score-correction of the marginal — for Poisson, Gamma, and general exponential-family noise:
-
-```
-x̂(y) = y + (noise-model-specific operator) ∇ log p(y)
-```
-
-For **Poisson** (photon counting) the correction is `x̂ = y + [something like] p(y+1)/p(y) − 1`; for **Gamma** (a multiplicative model) it is a ratio of shifted marginals. The upshot: **the "denoiser residual = score" machinery is not locked to Gaussian noise.** It is the principled route into **photon-limited and count-noise imaging** (low-light, fluorescence microscopy, astronomy), at the cost of re-deriving the correction and retraining per noise family. This is extension rank 3 in §9.
-
-### 2.2 The two facts everyone conflates (keep them separate)
-
-- **The theorem (call it H1).** Exact, for the *MMSE-optimal* denoiser. It is a fact about mathematics, true independent of any network.
-- **The instantiation gap (call it H2).** A *trained* network is never exactly MMSE (finite data, finite capacity, optimization). So the score you actually recover carries error, and — as we measured (§6) — its Jacobian is not even symmetric, which the true MMSE denoiser's would be. **H1 is the ideal; H2 is the reality.** Both are true; sloppy writing treats "the identity" as if a real net satisfied it exactly. It does not.
+**Part V. Reference**
+21. [True, overstated, and false: the ledger](#21-true-overstated-and-false-the-ledger)
+22. [Limitations and honest uncertainty](#22-limitations-and-honest-uncertainty)
+23. [Glossary](#23-glossary)
+24. [Citation index](#24-citation-index)
 
 ---
 
-## 3. Why "bias-free" is the load-bearing trick
+# Part I. Theory
 
-A subtle problem: the Miyasawa identity has `σ` in it, but you would like *one* network to work at *every* noise level without being told `σ` ("blind" denoising). Mohan et al. (2020) show how architecture alone buys this.
+## 1. The ninety-second version
 
-**Construction.** Remove **every additive constant** from the network: no bias vectors in conv layers, and crucially, no mean-subtraction / additive offset in normalization (use a bias-free batch-norm variant). The result is a network that is **positively homogeneous of degree 1**:
+Train a network `D` to map noisy images back to clean ones under additive Gaussian noise. Miyasawa's 1961 theorem [1] says the **residual** it removes,
 
 ```
-D(α · y) = α · D(y)   for all α > 0.
+r(y) = D(y) - y = sigma^2 * grad_y log p(y)
 ```
 
-**Why this is exactly the right property.** Scaling the input by `α` scales the effective noise level by `α`. Degree-1 homogeneity means the denoiser's response *co-scales*, so a network trained on one noise range extrapolates to noise levels it never saw. Mohan et al. demonstrate <1 dB PSNR loss when generalizing across a 10× noise range. Equivalently: the same residual can be read as a valid score at every `σ`, which is precisely what a blind denoiser / diffusion score network needs.
+is exactly a scaled **score**, the gradient of the log-density of noisy images. The residual points uphill toward more probable images. You did not train for this. It falls out of the noise model plus the fact that the optimal denoiser is the posterior mean.
 
-**A second gift: the Jacobian is a filter.** Because a bias-free net is locally linear (degree-1 homogeneous ⇒ `D(y) ≈ J(y)·y` near `y`), the Jacobian `J(y) = ∂D/∂y` acts as a **data-adaptive linear filter**. Its eigenvectors/eigenvalues describe which local image structures are preserved vs suppressed — Mohan et al.'s interpretability claim. (We partially undercut this in §6: the Jacobian is real and analyzable *locally*, but it is **not** the Hessian of any global energy, because it is not symmetric.)
+Three consequences, each a whole research program:
 
-**The caveat we found empirically (§6).** "Bias-free ⇒ exact homogeneity" holds only if the network is *genuinely* additive-constant-free. Per-input normalizations that look scale-invariant (e.g. LayerNorm) can silently break it. In this repo, the checkpoint trained with `BiasFreeBatchNorm` is machine-exactly homogeneous; sibling ConvUNeXt checkpoints show up to 14% homogeneity error. **Verify it per checkpoint; do not assume it.**
+**Generation.** Repeatedly nudge a random image uphill along the residual while annealing the noise level, and you sample from the image prior. This is what score-based diffusion models do; the denoiser is the score network [9] [10] [11].
+
+**Inverse problems.** Insert the residual as the prior gradient in an iterative solver and you get inpainting, compressive sensing, super-resolution, deblurring, demosaicing, and undersampled MRI or CT, all with one denoiser and no task-specific training [6].
+
+**Interpretability and range extension.** Make the network bias-free by removing every additive constant, and it becomes exactly scale-equivariant [5]. One denoiser then works across all noise levels, and its local behaviour is analyzable as an adaptive linear filter.
+
+**The two caveats that determine what you can ship.** First, the popular framing that a trained denoiser contains one coherent global probability model is false for directly-parameterized networks: the learned residual field is not conservative, so no global energy or log-density exists. Sampling and reconstruction still work, because annealing keeps every step near a locally valid score, but calibrated probabilities and uncertainties are unavailable. Second, the field is also not passive, which independently blocks the RED and PnP convergence theory. Both are consequences of *parameterization*, not of learning, and Section 14 removes both.
 
 ---
 
-## 4. What the two anchor papers actually contribute
+## 2. Miyasawa and Tweedie, derived from scratch
 
-### 4.1 Kadkhodaie & Simoncelli 2021 — the *usage* machinery
+Short, exact, and worth internalizing, because every extension in this guide is a variation on it.
 
-*"Solving linear inverse problems using the prior implicit in a denoiser"* (NeurIPS 2021; arXiv:2007.13640). Two algorithms, both consuming only `r(y) = D(y) − y`:
+### 2.1 Setup
 
-**(a) A sampler.** Coarse-to-fine stochastic gradient ascent (annealed Langevin): start from noise, repeatedly step along the residual with an injected stochastic term, and shrink the effective `σ` over time. In this repo it is `DenoiserPriorSampler` in `src/applications/bias_free_denoiser/samplers.py`. Notably, the implementation *re-estimates* the noise level each iteration from `‖r(y)‖` rather than dividing by a known `σ²` — the method is **self-calibrating**: the residual magnitude *is* the local noise estimate.
-
-**(b) A linear-inverse solver.** For a measurement `y_m = M x` (M = mask, blur, subsampling, projection…), the per-step update **splits into two orthogonal pieces**:
+A clean signal `x` is drawn from an unknown prior `p(x)`. You observe
 
 ```
-d_t = (I − M⁺M) · f(y)          ← NULL-SPACE term: the prior fills what M cannot see
-      + M⁺ (y_m − M y)          ← RANGE-SPACE term: hard data-consistency, denoiser-INDEPENDENT
+y = x + n,        n ~ N(0, sigma^2 I),   n independent of x
 ```
 
-(`M⁺` = pseudo-inverse; see `samplers.py:288–294`.) This decomposition is the key to the whole method's generality **and** its limits — see §8. One denoiser solves inpainting, CS, SR, deblur, MRI with **no task-specific training**, because the task only changes `M`.
+Let
 
-### 4.2 Mohan, Kadkhodaie, Simoncelli & Fernandez-Granda 2020 — the *enabler*
+```
+p(y) = integral p(x) N(y; x, sigma^2 I) dx
+```
 
-*"Robust and interpretable blind image denoising via bias-free CNNs"* (ICLR 2020; arXiv:1906.05478). The bias-free construction of §3: degree-1 homogeneity → blind cross-`σ` generalization; local Jacobian → adaptive-filter interpretability. Without this, the residual-as-score reading degrades as you move away from the training noise level, and the "one net, all `σ`" property that makes (4.1) practical evaporates.
+be the marginal density of the **noisy** observation. This is the prior blurred by the Gaussian.
 
-**How they fit together:** Miyasawa says *the residual is a score*; Mohan says *make it bias-free so that score is legible at all noise levels*; Kadkhodaie–Simoncelli says *anneal and project to turn that score into a sampler and an inverse-problem solver*.
+### 2.2 The claim
+
+Miyasawa 1961 [1], equivalently Tweedie's formula via Robbins 1956 [2] and Efron 2011 [3]:
+
+```
+E[x | y]  =  y  +  sigma^2 * grad_y log p(y)
+```
+
+### 2.3 The proof
+
+Differentiate the marginal under the integral sign. The only `y`-dependence sits in the Gaussian kernel, and
+
+```
+grad_y N(y; x, sigma^2 I) = N(y; x, sigma^2 I) * (x - y) / sigma^2
+```
+
+Therefore
+
+```
+grad_y p(y) = integral p(x) N(y; x, sigma^2 I) * (x - y)/sigma^2  dx
+
+            = (1/sigma^2) [ integral x p(x) N(y;x,sigma^2 I) dx
+                            - y * integral p(x) N(y;x,sigma^2 I) dx ]
+```
+
+The second integral is `p(y)` by definition. The first is `E[x|y] * p(y)`, because the posterior is `p(x|y) = p(x) N(y;x,sigma^2 I) / p(y)`. Hence
+
+```
+grad_y p(y) = (p(y) / sigma^2) * ( E[x|y] - y )
+```
+
+Divide by `p(y)` and use `grad_y log p(y) = grad_y p(y) / p(y)`:
+
+```
+grad_y log p(y) = (1/sigma^2) ( E[x|y] - y )
+
+  <=>   E[x|y] = y + sigma^2 grad_y log p(y)      QED
+```
+
+### 2.4 Read the result carefully
+
+Three points that matter for everything downstream.
+
+**The MMSE denoiser is the posterior mean.** The minimum-mean-squared-error estimator of `x` given `y` is exactly `E[x|y]`. So any network trained to minimize `||D(y) - x||^2` converges, in the infinite-data and infinite-capacity limit, to `E[x|y]`, and its residual `D(y) - y` converges to `sigma^2 grad log p(y)`. **You never estimate `p(x)`.** The prior enters only through the score of the smoothed density `p(y)`, which the optimal denoiser hands you for free. That score is what people mean by "the implicit prior," nothing more and nothing less.
+
+**Two conditions, both required, nothing else.** First, additive Gaussian noise. Second, MMSE-optimality of `D`. There is no assumption on `p(x)` at all. This is why the result is universal across image content, and why every failure mode in this guide traces back to violating one of those two conditions.
+
+**`p(y)` is the noise-blurred prior, not `p(x)`.** As `sigma -> 0`, `p(y) -> p(x)` and the score sharpens toward the true image manifold. This is the mathematical seed of annealing: solve at large `sigma` where the landscape is smooth and easy, and walk down to small `sigma` where the landscape is sharp and correct.
+
+### 2.5 The two facts everyone conflates
+
+Keep these separate. Almost all sloppy reasoning about denoiser priors comes from merging them.
+
+**H1, the theorem.** Exact, for the MMSE-optimal denoiser. A fact about mathematics, true independent of any network. Among other things, it implies the ideal denoiser's Jacobian is **symmetric**, because a gradient field's Jacobian is a Hessian.
+
+**H2, the instantiation gap.** A trained network is never exactly MMSE, because of finite data, finite capacity, and imperfect optimization. So the score you actually recover carries error, and as Section 9 shows by measurement, its Jacobian is not even symmetric, which the true MMSE denoiser's would be.
+
+H1 is the ideal. H2 is the reality. The gap is not a small perturbation: it is large enough to destroy the existence of a global log-density. But it is a gap in *parameterization*, and Section 14 closes it by construction rather than by hoping training will.
 
 ---
 
-## 5. The extension web collapses onto one object
+## 3. Beyond Gaussian: the exponential-family generalization
 
-Once you accept `r(y) = D(y) − y ≈ σ² ∇ log p(y)`, a sprawling literature becomes **one object — a score network — viewed through different wrappers:**
+The Gaussian is not special. It is the easiest member of the exponential family. Raphan and Simoncelli's nonparametric empirical-Bayes least squares result [4] gives the same *shape* of estimator, observation plus a score-correction of the marginal, for Poisson, Gamma, and general exponential-family noise:
+
+```
+x_hat(y) = y + (noise-model-specific operator) applied to grad log p(y)
+```
+
+For **Poisson** noise, which is the correct model for photon counting, the correction takes the form of a ratio of shifted marginals, roughly `p(y+1)/p(y) - 1` in the discrete case, because the natural "derivative" for a counting distribution is a finite difference rather than a gradient. For **Gamma** noise, a multiplicative model, it is again a ratio of shifted marginals with a different shift structure.
+
+The upshot: **the residual-equals-score machinery is not locked to Gaussian noise.** It is the principled route into photon-limited imaging, meaning low-light photography, fluorescence microscopy, and astronomy. The cost is re-deriving the correction and retraining per noise family. Noise2Score [12] uses Tweedie explicitly and covers Gaussian, Poisson, and Gamma in one framework.
+
+**The boundary is multiplicative noise.** For a purely multiplicative model there is no clean `D(y) - y = sigma^2 grad log p` identity. Only Monte-Carlo relations exist: one exact relation of a different functional form, and one small-`sigma` approximation. Do not expect the additive machinery to transfer. If your degradation is multiplicative, either variance-stabilize it into an additive regime first, or accept a different estimator.
+
+---
+
+## 4. Why bias-free is the load-bearing trick
+
+There is a subtle problem with using Miyasawa in practice. The identity contains `sigma`, but you would like one network to work at every noise level without being told `sigma`, which is called blind denoising. Mohan et al. [5] show that architecture alone buys this.
+
+### 4.1 The construction
+
+Remove **every additive constant** from the network:
+
+- No bias vectors in any convolution or dense layer.
+- No mean subtraction or additive offset in normalization. Use a bias-free batch-norm variant that scales but does not shift.
+- No additive positional embeddings or learned constants anywhere.
+- Only positively homogeneous activations, meaning `phi(alpha z) = alpha phi(z)` for `alpha > 0`. ReLU, LeakyReLU, and PReLU qualify. GELU, SiLU, and ELU do not.
+
+The result is a network that is **positively homogeneous of degree 1**:
+
+```
+D(alpha * y) = alpha * D(y)     for all alpha > 0
+```
+
+### 4.2 Why this is exactly the right property
+
+Scaling the input by `alpha` scales the effective noise level by `alpha`. Degree-1 homogeneity means the denoiser's response co-scales, so a network trained on one noise range extrapolates to noise levels it never saw. Mohan et al. demonstrate under 1 dB PSNR loss when generalizing across a tenfold noise range. Equivalently, and this is the version that matters for Section 5: the same residual can be read as a valid score at every `sigma`.
+
+### 4.3 A second gift: the Jacobian is a filter
+
+A degree-1 homogeneous function satisfies Euler's relation `J(y) y = D(y)`, so the network is locally linear in a strong sense: near any point, `D(y) = J(y) y` exactly, not approximately. The Jacobian `J(y) = dD/dy` therefore acts as a **data-adaptive linear filter**, whose eigenvectors and singular vectors describe which local image structures are preserved and which are suppressed. This is the basis of the interpretability claim in [5], and Section 10 measures it.
+
+Note carefully what this does and does not give you. The Jacobian is real and analyzable locally. It is **not** the Hessian of any global energy unless you construct the network to make it so, because for a directly-parameterized net it is not symmetric.
+
+### 4.4 Homogeneity is not automatic, it is norm-dependent
+
+This is the single most common implementation trap. Measured on real checkpoints:
+
+- A network built from bias-free convolutions with `use_bias=False`, a bias-free batch normalization, and LeakyReLU is homogeneous **to float32 precision**: relative error `||D(alpha y) - alpha D(y)|| / ||alpha D(y)||` of about `2.5e-5`, flat across an eightyfold range of `alpha`, with a deliberately bias-broken control firing at `0.83` to prove the probe works.
+- Substituting a **LayerNorm** block breaks it catastrophically: 81 to 98 percent relative error. LayerNorm subtracts a per-input mean, which is an additive constant that depends on the input, and that is precisely what homogeneity forbids.
+- A factory-default **GELU** activation makes exact homogeneity mathematically impossible regardless of what else you do.
+- Sibling checkpoints in the same architecture family, trained with slightly different normalization, showed deviations growing with `alpha` up to about 14 percent.
+
+**Verify homogeneity per checkpoint. Never assume it from the architecture name.** Section 16 gives the protocol.
+
+---
+
+## 5. The noise-conditional bridge
+
+This is the most valuable practical fact in this guide, and it is not covered by the literature the rest of the guide cites.
+
+### 5.1 The problem
+
+The modern inverse-problem solvers built on diffusion models, specifically DDRM [21], DDNM [22], DPS [15], and PiGDM [23], all require a **noise-conditional** denoiser. Their interface is `D(y, sigma)`: given an iterate at a known scheduled noise level `sigma_t`, return an estimate of the clean signal. A blind denoiser does not expose that interface. It exposes only `D(y)`.
+
+Naively, this means a blind bias-free checkpoint cannot be used with any of them, and you would need to retrain a `sigma`-conditioned network from scratch.
+
+### 5.2 The bridge
+
+Define
+
+```
+D_sigma(y) := sigma * D(y / sigma)
+```
+
+Under exact degree-1 homogeneity, this is identically equal to `D(y)`:
+
+```
+sigma * D(y/sigma) = D(sigma * y/sigma) = D(y)
+```
+
+The equality is the content of the bridge, not a triviality to be waved away. It says the following:
+
+**Rescaling an iterate into the network's trained noise band, denoising, and rescaling back gives exactly the same answer as denoising directly.** The blind network therefore satisfies the noise-conditional contract at *every* `sigma` simultaneously, with a consistency that is exact rather than approximate. You can drop a blind bias-free checkpoint into any `sigma`-conditioned slot in any of those samplers, and the variance bookkeeping the sampler performs remains coherent, because the network's response transforms correctly under the rescaling the sampler's schedule implies.
+
+Measured: float32-exact on a properly bias-free checkpoint, validated against a bias-broken control. **Zero retraining required.**
+
+### 5.3 The one real failure mode
+
+The sampler's `sigma_t` is the **nominal** noise level from its schedule. The blind network responds to the **actual** noise present in its input. These agree in an idealized reverse diffusion, but they diverge in practice, because a mid-trajectory iterate carries reconstruction error and solver error in addition to scheduled noise.
+
+The consequence: the blind network tracks the actual level and self-calibrates, while the sampler's bookkeeping tracks the nominal one. When they diverge, the sampler's step sizes and variance terms are computed against a level the denoiser is not operating at.
+
+Practical mitigations, in order of preference:
+
+1. **Estimate the level from the residual.** The residual magnitude `||r(y)||` is itself a noise-level estimate, since `||r|| ~ sigma^2 ||grad log p||`. Feed the estimated level back into the sampler's schedule rather than trusting the nominal one. This is what a self-calibrating annealed Langevin loop does implicitly.
+2. **Prefer schedules with fewer, larger steps** where nominal and actual levels are less likely to drift apart, such as the EDM family [24].
+3. **Monitor the discrepancy** between nominal `sigma_t` and residual-estimated level across a trajectory. A widening gap is your early warning that the sampler is off-manifold.
+
+---
+
+## 6. The linear inverse solver and its null/range split
+
+Kadkhodaie and Simoncelli [6] give two algorithms, both consuming only the residual `r(y) = D(y) - y`.
+
+### 6.1 The sampler
+
+Coarse-to-fine stochastic gradient ascent, equivalently annealed Langevin. Start from noise, repeatedly step along the residual with an injected stochastic term, and shrink the effective `sigma` over time. A well-designed implementation re-estimates the noise level each iteration from `||r(y)||` rather than dividing by a known `sigma^2`, which makes the method **self-calibrating**: the residual magnitude is the local noise estimate.
+
+### 6.2 The linear inverse solver
+
+For a measurement `y_m = M x`, where `M` may be a mask, a blur, a subsampling operator, or a projection, the per-step update splits into two orthogonal pieces:
+
+```
+d_t = (I - M^+ M) * f(y)        <- NULL-SPACE term
+                                   the prior fills what M cannot see
+
+      + M^+ (y_m - M y)         <- RANGE-SPACE term
+                                   hard data consistency, denoiser-independent
+```
+
+where `M^+` is the pseudo-inverse. This decomposition is the source of the method's generality. One denoiser solves inpainting, compressive sensing, super-resolution, deblurring, demosaicing, and MRI with no task-specific training, because the task only changes `M`.
+
+### 6.3 The decomposition suggests a law that is false
+
+The split invites an obvious inference: since the prior acts only in `null(M)`, the prior's contribution should scale with `dim(null(M))`. Large null space means prior-dominated; small null space means measurement-dominated and the prior is a garnish.
+
+**This inference was tested directly and does not hold.** Section 11 gives the measurements. Dimension count and reconstructability are different quantities, and the intuition fails badly enough to invert. Do not use null-space fraction to triage tasks.
+
+---
+
+## 7. The literature collapses onto one object
+
+Once you accept `r(y) = D(y) - y = sigma^2 grad log p(y)`, a sprawling literature becomes one object, a score network, viewed through different wrappers.
 
 | Line of work | Relationship to the identity |
 |---|---|
-| **Score-based diffusion** — NCSN (Song & Ermon 2019), DDPM (Ho et al. 2020), score-SDE (Song et al. 2021) | The denoiser *is* the score model. Denoising-score-matching ≡ Tweedie. The Kadkhodaie–Simoncelli sampler is one discretization of the reverse SDE. **Diffusion models are Miyasawa denoisers wrapped in a noise schedule.** |
-| **Plug-and-Play (Venkatakrishnan 2013); RED (Romano–Elad–Milanfar 2017)** | Use the denoiser as the "prior" proximal operator in a splitting/optimization loop. **Their convergence theorems require a *conservative* (symmetric-Jacobian) denoiser** — which real nets lack (§6), so the guarantees do not transfer even though the methods often work. |
-| **Self-supervised: SURE (Metzler; Soltanayev & Chun 2018), Noise2Noise (Lehtinen 2018), Noise2Score (Kim & Ye 2021), Noise2Self/Void** | Stein's lemma / Tweedie let you train or validate a denoiser (hence a score) **without clean data** — the same object, estimated from noisy observations only. Noise2Score uses Tweedie *explicitly* and covers Gaussian/Poisson/Gamma. |
-| **Diffusion posterior sampling — DPS/MCG (Chung & Ye 2022)** | Generalizes the *linear* solver to *nonlinear* forward operators `g(x)` via linearization, for phase retrieval, nonlinear deblur, etc. Breaks the clean null/range split and re-opens the conservativeness question. |
-| **Exponential-family Tweedie (Raphan & Simoncelli 2011)** | Extends the identity itself off the Gaussian to Poisson/Gamma (§2.1). |
-| **Conservativeness critique (Chao et al. 2023; Horvat & Pfister)** | Shows learned scores are generically non-conservative (have curl), so no exact energy exists — but sampling survives because the curl is roughly orthogonal to the annealed trajectory. This is the theoretical backing for our empirical §6 finding. |
+| Score-based diffusion: NCSN [9], DDPM [10], score-SDE [11] | The denoiser **is** the score model. Denoising score matching is Tweedie. The Kadkhodaie-Simoncelli sampler is one discretization of the reverse SDE. Diffusion models are Miyasawa denoisers wrapped in a noise schedule. |
+| Plug-and-Play [8], Regularization by Denoising [7] | Use the denoiser as the prior's proximal operator in a splitting or optimization loop. Their convergence theorems require a **conservative** denoiser, and RED-family analyses additionally require **passivity**. Directly-parameterized nets have neither, so the guarantees do not transfer even though the methods often work in practice. |
+| Provably convergent PnP [27] | Requires a Lipschitz-constrained residual, obtained by spectral normalization during training. A different route to the same guarantee, with an explicit training cost. |
+| Gradient Step Denoiser and proximal denoisers [17] [18] | Parameterize the network as the gradient of an explicit scalar energy, which makes conservativeness **exact by construction**. This is the fix. See Section 14. |
+| Self-supervised training: SURE [14] [26], Noise2Noise [13], Noise2Score [12] | Stein's lemma and Tweedie let you train or validate a denoiser, hence a score, without clean data. Same object, estimated from noisy observations only. |
+| Diffusion inverse solvers: DDRM [21], DDNM [22], PiGDM [23] | Exploit the linear operator's structure, typically via SVD, inside a diffusion sampler. All require noise-conditioning, hence Section 5. |
+| Diffusion posterior sampling: DPS [15] | Generalizes to nonlinear forward operators `g(x)` via linearization, for phase retrieval and nonlinear deblurring. Breaks the clean null/range split. |
+| Exponential-family Tweedie [4] | Extends the identity itself off the Gaussian, to Poisson and Gamma. |
+| Conservativeness critique [16] | Shows learned scores are generically non-conservative, having nonzero curl, so no exact energy exists. Sampling survives because the curl is roughly orthogonal to the annealed trajectory. This is the theoretical backing for the measurements in Section 9. |
+| Energy versus score parameterization [19] | Finds energy-parameterized score models underperform directly-parameterized ones on sample quality. This is the cost you pay for the Section 14 fix, and you should measure it. |
+| Geometry-adaptive representations [30] | Argues denoiser generalization comes from adapting to geometric structure in the data, which is the same operator viewed as a manifold projector rather than as a score. |
 
-**The single most useful reframing:** your existing bias-free denoiser is already a diffusion score network. Everything in the modern diffusion toolbox (fast SDE/ODE solvers, guidance, distillation) is, in principle, a drop-in — see extension rank 1 in §9.
+**The single most useful reframing:** an existing bias-free denoiser is already a diffusion score network. The modern diffusion toolbox, including fast SDE and ODE solvers, guidance, and distillation, is in principle a drop-in.
 
 ---
 
-## 6. What we measured on *your* denoisers
+# Part II. Measured properties of real networks
 
-Rather than take the papers on faith, we ran probes on this repo's trained checkpoints (ConvUNeXt and CliffordUNet bias-free denoisers, DIV2K-validation patches, GPU-serial, finite-difference Jacobian-vector products). Three findings, one of which corrects a natural expectation.
+Everything in this part was measured on trained bias-free denoisers using GPU-serial probes, finite-difference Jacobian computations, and DIV2K-validation content, with matched controls in every case. Where a finding did not replicate across checkpoints, that is stated.
 
-### 6.1 Homogeneity is real — and machine-exact — but checkpoint-specific
-On the deployed `20260701` `BiasFreeBatchNorm` checkpoint, the relative homogeneity error `‖D(αy) − αD(y)‖ / ‖αD(y)‖` was **0.000 (machine precision) for α ∈ {0.25, 0.5, 2, 4, 8}** — including α=8, far above the trained noise range. A deliberately bias-broken control fired at 0.75, validating the probe. **But** three sibling ConvUNeXt checkpoints showed small, α-growing deviations up to ~0.14. **Conclusion:** the enabling property is genuine (confirms the Mohan mechanism) but is a property of *truly* bias-free training, not of the architecture family. Re-verify per checkpoint.
+## 8. Homogeneity is exact, and it is norm-dependent
 
-### 6.2 The "coherent global prior" is overstated — the field is non-conservative
-A residual field is the gradient of a scalar log-density **iff** its Jacobian is symmetric. We measured Jacobian asymmetry (average `|uᵀJv − vᵀJu|` over random directions, against a symmetric-blur baseline):
+**Finding.** On a checkpoint built from bias-free convolutions, bias-free batch normalization, and LeakyReLU, the relative homogeneity error is float32-exact at approximately `2.5e-5`, and **flat across an eightyfold range of `alpha`**, including values far above the trained noise range. A deliberately bias-broken control fired at `0.83`, which validates the probe.
 
-| Checkpoint | Jacobian asymmetry | vs symmetric baseline |
-|---|---|---|
-| ConvUNeXt (`20260701`) | 0.677 | **5.3×** |
-| CliffordUNet (`20260703`) | 1.19 | **15.4×** (independent architecture) |
+**But it is a property of the normalization stack, not of the architecture family.** Substituting LayerNorm produces 81 to 98 percent error. Sibling checkpoints with different normalization showed `alpha`-growing deviations up to about 14 percent. A GELU activation makes exactness impossible.
 
-Both are far above baseline, and the finding **replicates across two architectures** — so it is not a one-model artifact. **There is no global energy/log-density.** The "implicit prior" is a *locally valid score field*, not a probability model you can integrate, normalize, or read calibrated uncertainty from. Sampling and reconstruction still work (the curl is roughly orthogonal to the annealed descent path), but **RED/PnP convergence guarantees do not transfer**, and any claim of calibrated posterior uncertainty is unlicensed.
+**Why this is the most important measurement in the guide.** Exact homogeneity is what licenses the noise-conditional bridge of Section 5, and therefore what makes DDRM, DDNM, DPS, and PiGDM reachable from a blind checkpoint at zero retraining cost. It is also what preserves cross-`sigma` generalization. Everything downstream depends on it, and it is fragile to a single layer choice.
 
-**Exact confirmation (2026-07-05 follow-up).** The random-directional estimates above were later upgraded to an *exact* computation: the full **local Jacobian block** (12×12×3 = 432 dims, co-located input/output patch inside a 256×256 image, built by finite differences — which sidesteps the reverse-mode autodiff bug entirely) on the homogeneous ConvUNeXt checkpoint gives asymmetry `||J−J^T||/||J|| = 0.58` versus a **box-blur baseline of 0.0001 on the identical extraction — ~7,400×**. The near-zero baseline proves the measurement is clean (a genuinely symmetric operator reads as symmetric), and asymmetry in a co-located block is *sufficient* to prove the global field non-conservative. This is now airtight, not an estimate.
+## 9. The field is not conservative and not passive
 
-### 6.3 The prior does real work in inverse problems — but task-dependently
-On 50%-random-pixel inpainting, we ablated the solver's two terms and measured reconstruction on the **masked pixels** (the null space, where the prior is the only source of information):
+### 9.1 Non-conservativeness
 
-| Configuration | Masked-pixel reconstruction |
-|---|---|
-| Prior term only | strong (prior carries the null space) |
-| Measurement-consistency only | weak (~16% of achievable gain) |
-| Full solver | full |
+A residual field is the gradient of a scalar log-density **if and only if** its Jacobian is symmetric everywhere. Measured on directly-parameterized checkpoints:
 
-→ **~84% of the achievable null-space reconstruction is attributable to the prior term**, ~16% to measurement-consistency. **Important honesty caveat (this drove a mid-analysis correction):** 50% random masking is the *maximally prior-favorable* task — at masked pixels the measurement term is *definitionally* zero-information, so this 84% is one **extreme** of a task-dependent curve, not a universal "the prior does 84% of the work." See §8.
+| Measurement | Value | Control on identical probe | Ratio |
+|---|---|---|---|
+| Exact local Jacobian block, 12x12x3 = 432 dims, co-located input and output patch inside a 256x256 image, finite differences | `\|\|J - J^T\|\| / \|\|J\|\| = 0.58` | box blur reads `0.0001` | about 7,400x |
+| Random-directional asymmetry, architecture A | `0.677` | symmetric-blur baseline | 5.3x |
+| Random-directional asymmetry, architecture B, independent family | `1.19` | symmetric-blur baseline | 15.4x |
+| Third checkpoint, replication | `0.14` | | about 800x |
 
-### 6.4 The denoiser is a soft low-rank projector (resolves the manifold question)
-The exact local Jacobian (§6.2's 432-dim block) also settles the geometry-vs-probability question that an earlier *unconverged forward-only* probe had left open (and had tentatively — wrongly — read as "no low-rank structure"):
+The near-zero control matters more than the headline number: a genuinely symmetric operator reads as symmetric on the identical extraction, which proves the measurement is clean rather than an artifact. Asymmetry within a **co-located** block is sufficient to prove the global field non-conservative.
+
+**Conclusion. There is no global energy or log-density.** The implicit prior of a directly-parameterized denoiser is a locally valid score field, not a probability model you can integrate, normalize, or read calibrated uncertainty from. It replicates across independent architectures, so it is not a one-model artifact.
+
+Sampling and reconstruction still work, because the curl component is roughly orthogonal to the annealed descent path [16]. What does not work is any claim of calibrated posterior uncertainty, and any invocation of RED or PnP convergence theory.
+
+### 9.2 Non-passivity, which is a separate obstacle
+
+RED-family convergence analyses, including the MRED analysis (arXiv:2202.04961), additionally require **passivity**:
+
+```
+||D(f)|| <= ||f||   for all f
+```
+
+Measured spectral norm on clean inputs: `||J||_2 = 1.22 to 1.36`. **The network is not passive.**
+
+This matters because it is a common error to believe that fixing conservativeness rescues the RED guarantees. It does not. Conservativeness and passivity are independent conditions, and a directly-parameterized denoiser typically fails both. Section 15 handles passivity, and under the Section 14 construction it becomes unusually cheap to enforce.
+
+## 10. Local Jacobian geometry
+
+Because a bias-free net satisfies `J(y) y = D(y)` exactly, the Jacobian is a genuine data-adaptive filter and its spectrum is interpretable. On the exact 432-dimensional local block:
 
 | Quantity | Value | Reading |
 |---|---|---|
-| Stable rank `‖J‖_F²/‖J‖₂²` | **7.7 / 432 (2%)** | strongly low-rank |
-| Participation ratio (singular values) | 16.8 / 432 (4%) | ~10–17 effective directions |
-| Top-5 singular values | 0.98, 0.86, 0.84, 0.77, 0.69 | a few preserved modes… |
-| Median singular value | 0.028 | …the other ~90% crushed |
-| Symmetric-part eigenvalues | 392 near 0, ~40 mid/high, 2 slightly negative, in [−0.06, 0.97] | projection-*like*, nearly PSD, not a hard projector |
+| Stable rank `\|\|J\|\|_F^2 / \|\|J\|\|_2^2` | 7.7 of 432, about 2 percent | strongly low-rank |
+| Participation ratio of singular values | 16.8 of 432, about 4 percent | roughly 10 to 17 effective directions |
+| Top five singular values | 0.98, 0.86, 0.84, 0.77, 0.69 | a few preserved modes |
+| Median singular value | 0.028 | the other 90 percent crushed |
+| Symmetric-part eigenvalues | 392 near zero, about 40 mid or high, 2 slightly negative, range `[-0.06, 0.97]` | projection-like, nearly positive semidefinite, not a hard projector |
 
-So **locally the denoiser preserves ~10 dominant modes and suppresses the rest** — a *soft projection onto a low-dimensional local subspace* (the signal-manifold tangent), empirically confirming Mohan's "Jacobian-as-adaptive-filter" reading. Combined with §6.2, the local operator ≈ **(soft low-rank shrinkage onto a ~10-dim subspace) + (a rotational/curl component)**: the shrinkage is *why it denoises*; the curl is *exactly what makes the field non-conservative*. The manifold-geometry account and the "no global prior" caveat are two faces of the same operator, not competing explanations. (Caveat: this is one block/point/checkpoint; the low-rank is a *local* property — the global manifold dimension is larger — but the non-conservativeness conclusion is global.)
+**Reading.** Locally the denoiser preserves roughly ten dominant modes and suppresses the rest: a soft projection onto a low-dimensional local subspace, plausibly the signal-manifold tangent. Combined with Section 9, the local operator is approximately **(soft low-rank shrinkage onto a roughly ten-dimensional subspace) plus (a rotational curl component)**. The shrinkage is *why it denoises*. The curl is *exactly what makes the field non-conservative*. The manifold-geometry account and the no-global-prior finding are two faces of the same operator, not competing explanations.
 
----
+**Two caveats that materially limit this.** First, the rank is a *local* property at one point on one checkpoint; the global manifold dimension is much larger and was not measured. Second and more seriously, **the low-rank structure does not transfer across checkpoints**: a sibling network measured 38.6 percent stable rank under the identical probe, against 2 percent here, with asymmetry 0.14 against 0.58. So the geometric reading is checkpoint-specific and should not be used as a general explanation of why these methods work. The non-conservativeness conclusion, by contrast, replicated everywhere it was tested.
 
-## 7. The solvable-problem boundary map
+## 11. How much work the prior actually does
 
-This is the actionable core: **what you can actually solve, and how much to trust it.**
+Two different metrics get conflated here, and separating them is what corrects the naive null-space intuition.
 
-### ✅ EXACT / STRONG — use the machinery as-is, high confidence
-- **Additive-Gaussian linear inverse problems with a large null space:** inpainting, compressive sensing, random-pixel/mask recovery, MRI/CT undersampling. (Empirically anchored: prior does ~84% of the work at 50% masking.)
-- **Unconditional sampling / generation** from the implicit prior via annealed Langevin — no retraining of an existing bias-free denoiser.
+**Metric one, prior credit share.** Ablate the solver's two terms and measure null-space-restricted reconstruction error: prior-only against data-only, at identical iteration budget. Credit share is the fraction of achievable null-space gain attributable to the prior term.
 
-### 🟡 APPROXIMATE / EXTENDABLE — usable with weaker guarantees or a known extension path
-- **Mild deblur, low-factor super-resolution:** *measurement-dominated* (small null space, §8). Still helped by the prior, but do not expect an 84%-style split. (Not independently re-measured here — flagged gap.)
-- **Non-Gaussian exponential-family noise (Poisson/Gamma):** genuine closed-form extension via generalized Tweedie (§2.1). Needs re-derivation + retraining. → low-light, microscopy, photon-limited imaging.
-- **Nonlinear inverse problems (phase retrieval, nonlinear deblur):** via DPS-style posterior guidance. Highest cost — breaks the clean null/range split, re-opens conservativeness.
+| Task | Null-space fraction | Prior credit share |
+|---|---:|---:|
+| Block inpainting, 64-pixel square | 6.25 percent | 94.5 percent |
+| Random pixels, keep 30 percent | 70.0 percent | 96.8 percent |
+| Super-resolution, factor 4 | 93.75 percent | 86.4 percent |
 
-### 🔴 HARD / BOUNDARY — needs a fundamentally different construction
-- **Multiplicative noise:** repo-verified (`multiplicative_miyasawa.py`) that **no clean `D(y)−y = σ²∇log p` identity exists** — only the Monte-Carlo relations A (exact, different form) and B (small-σ approximation). Do not expect the additive machinery to transfer.
-- **Anything needing a true global prior, exact likelihood, or calibrated posterior/uncertainty:** blocked by the confirmed non-conservative Jacobian (§6.2). No global log-density to calibrate against.
-- **Strongly ill-conditioned or full-rank `M` (near-zero null space):** by the null-space law, the prior contributes almost nothing; the method degenerates to regularized least squares.
+Credit share is **flat at 86 to 97 percent across a fifteenfold range of null-space fraction, and inverted at the top**: the largest null space has the *lowest* prior credit. Null-space fraction has no predictive power over credit share. The widely-quoted "the prior does about 84 percent of the work at 50 percent masking" figure replicates only as a rough **constant near 90 percent**, not as one point on a slope.
 
----
+**Metric two, absolute null-fill quality.** How good the filled-in content actually is, on its own terms. This varies enormously and non-monotonically:
 
-## 8. The null-space law — ⚠️ FALSIFIED 2026-07-12, kept for provenance
+| Task | Null-space fraction | Null-fill quality |
+|---|---:|---:|
+| Demosaicing | 66.7 percent | 0.997 |
+| Block inpainting, 64-pixel square | 6.25 percent | 0.131 |
 
-> **STOP. This section's law is FALSE.** It was tested directly on 2026-07-12 (`analyses/analysis_2026-07-12_103e465c/`, OBS-003) and does not hold.
->
-> **Measured prior credit** (null-space-restricted MSE, prior-only vs data-only ablation, 4 DIV2K-val images, identical budget):
->
-> | task | null-space fraction | prior credit |
-> |---|---:|---:|
-> | block-inpaint (64px) | **6.25%** | **94.5%** |
-> | random-pixels (keep 0.30) | 70.0% | 96.8% |
-> | super-resolution ×4 | **93.75%** | **86.4%** |
->
-> Credit is **flat (86–97%) across a 15× range of null-space fraction, and inverted at the top** — the *largest* null space has the *lowest* prior credit. `dim(null)/N` has **no predictive power**. The "84% at 50% masking" figure below replicates only as a rough **constant (~90%)**; this note mistook a single data point for a slope. A wider check (demosaicing, 66.7% null → 0.997 null-fill quality; block-inpaint, 6.25% null → 0.131) confirms the non-monotonicity.
->
-> **The replacement**: hard gates (operator **linearity**; operator **knowability**; **corruption statistics**), then — among gate-survivors — **conditional unpredictability `H(x_null | x_range)`**. Intuition the dimension-count law missed: super-resolution hides *high frequencies*, which are cheaply predicted from the measured low frequencies under natural 1/f statistics; block-inpainting hides a *contiguous region* with no local measurement support. 15× more missing dimensions, but 3× **worse** absolute prior error (0.0224 vs 0.0077). Dimension count and reconstructability are different quantities.
->
-> The sensitivity claim below ("null-space fraction ~3.8× more influential than checkpoint quality") is void with the law. The 2026-07-12 Morris analysis instead ranks **operator linearity #1**.
+**The lesson.** Credit share answers "which solver term did the work," and the answer is almost always "the prior," roughly independent of the operator. Quality answers "was the work any good," and the answer depends strongly on the operator, in a way null-space dimension does not capture. The original error was reading a near-constant credit share as if it were a function of null-space size, from a single anchor point.
 
-Original text, retained for provenance:
+**Why dimension count fails.** Super-resolution hides high spatial frequencies, which are cheaply predictable from the measured low frequencies under natural-image `1/f` statistics. Block inpainting hides a contiguous region with no local measurement support at all. The block case removes fifteen times fewer dimensions and is far harder. Dimension count and reconstructability are simply different quantities.
 
-> **The denoiser-prior's contribution scales with the null-space dimension of the measurement operator `M`.**
+## 12. Domain transfer behaves opposite to expectation
 
-Because the solver update is `(I − M⁺M) f(y)` **[prior, acts only in the null space of M]** `+ M⁺(y_m − My)` **[data, pins the range space]**, the prior can only ever influence what the measurement *cannot see*:
+**Expectation.** A denoiser trained on natural photographs encodes a natural-image prior, so out-of-domain content should degrade.
 
-- **Large null space** (inpainting, CS, heavy subsampling, MRI): lots is unmeasured → **prior-dominated** → this machinery shines.
-- **Small null space** (mild deblur, 2× SR): almost everything is measured → **measurement-dominated** → the prior is a garnish; a classical regularizer may do nearly as well.
+**Measurement.** Under an identical operator and solver, an out-of-domain **medical X-ray reconstructed substantially better than in-domain natural photographs**: a gain of `+12.39 dB` over a trivial baseline, against `+1.54 dB` for natural photos.
 
-A sensitivity analysis over the credit-split ranked the **null-space fraction of `M` as ~3.8× more influential than which checkpoint / how good the denoiser is.** Practical rule of thumb: **before reaching for denoiser-prior methods, ask how much of your signal the measurement operator actually destroys.** The more it destroys, the more this approach earns its keep. (Caveat: the exact functional form is a single-anchor extrapolation; trust the *ranking*, not the precise numbers.)
+**Reading.** This is not merely "out-of-domain works." It is refuted with the wrong sign. The plausible mechanism is that medical imagery is smoother, lower-entropy, and more locally predictable than cluttered natural scenes, so the conditional unpredictability of the hidden content given the measured content, `H(x_null | x_range)`, is much lower. The prior's job is easier, even though the content is nominally unfamiliar.
+
+**Practical consequence. Undersampled MRI and CT are top targets for this machinery, not risky hedges.** Do not gate a medical or scientific imaging project on domain-match concerns without measuring first.
+
+**Honest limit.** The predictive variable of Section 13 was validated on the *operator* axis. On the *domain* axis it is a plausible post-hoc explanation of this result, not a validated predictor. Measure per domain.
 
 ---
 
-## 9. Extension taxonomy — a ranked build list
+# Part III. Predicting success
 
-Each row: what new capability, which repo asset to build on, the exactness cost/failure mode, and the effort.
+## 13. Three hard gates, then one continuous variable
 
-| # | New capability | Build on | Exactness cost / failure mode | Effort |
+This replaces the null-space law, which is false. Apply the gates in order. A task that fails a gate is not a task to be run at reduced expectation; it is a task that needs a different construction.
+
+### Gate 1. Is the forward operator linear?
+
+The null/range decomposition of Section 6 is a linear-algebra fact. It has no nonlinear analogue.
+
+- **Pass:** masks, subsampling, blur with a known kernel, Radon and Fourier undersampling, color filter arrays, downsampling.
+- **Fail:** phase retrieval, nonlinear deblurring, saturation and clipping, JPEG quantization, tone mapping.
+- **Route on failure:** DPS-style posterior guidance [15] with Jacobian-vector-product linearization. This is a genuinely different algorithm, more expensive, and it re-opens every conservativeness question.
+
+Sensitivity analysis over the success predictors ranks **operator linearity first**, above every other factor including checkpoint quality.
+
+### Gate 2. Is the operator knowable?
+
+This is distinct from linearity and is the gate most often missed. Blind deblurring is perfectly linear, and completely blocked, because you do not know the kernel. The solver needs `M` and `M^+` explicitly.
+
+- **Pass:** operator known analytically, or estimable to high confidence from the observation.
+- **Fail:** unknown blur kernel, unknown mask, unknown mixed degradation chain.
+- **Route on failure:** estimate the operator first with a dedicated estimator, or alternate between operator estimation and image reconstruction. Both add substantial machinery, and errors in `M` propagate directly into the range-space term where the prior cannot correct them.
+
+### Gate 3. Do the corruption statistics match the training noise model?
+
+Miyasawa requires additive Gaussian noise. The theorem's second condition, MMSE-optimality, is with respect to *that* noise model.
+
+- **Pass:** additive Gaussian sensor noise at any level, given exact homogeneity.
+- **Fail:** Poisson or shot noise, multiplicative or speckle noise, structured or correlated noise, compression artifacts.
+- **Route on failure:** variance-stabilize into an approximately Gaussian regime, such as an Anscombe-type transform [29] for Poisson, or train a dedicated head using the generalized Tweedie correction of Section 3. Multiplicative noise has no clean identity and needs a different estimator entirely.
+
+### Among gate survivors: conditional unpredictability
+
+For tasks that pass all three gates, the predictor of reconstruction quality is
+
+```
+H( x_null | x_range )
+```
+
+the conditional entropy of the unobserved content given the observed content. Content complexity, not null-space size.
+
+**How to estimate it in practice, cheaply.** You do not need a real entropy estimator. Useful proxies, in ascending order of cost:
+
+1. **Spatial support.** Does every unobserved coordinate have measured neighbours within a small radius? Scattered missing pixels and subsampled frequencies do. Contiguous holes do not. This one proxy explains the demosaicing-versus-block-inpainting gap.
+2. **Spectral overlap.** Does `range(M)` contain the frequency bands that predict the missing bands under `1/f` statistics? Super-resolution passes because low frequencies predict high ones. A band-stop operator that removes mid frequencies does not.
+3. **Empirical proxy.** Run the solver on a small held-out set for the candidate operator and read the null-fill quality directly. Fifty images is usually enough to rank operators, and it costs less than building a theory of your operator.
+
+**Validation status.** This variable is validated on the operator axis: it correctly orders demosaicing, super-resolution, random-pixel inpainting, and block inpainting, where null-space fraction does not. It is **not** validated on the domain axis. Section 12's medical result is consistent with it but was not predicted by it in advance.
+
+---
+
+# Part IV. Building
+
+## 14. Making the denoiser conservative
+
+### 14.1 The key fact first
+
+**The ideal denoiser is conservative.** `E[x|y] = y + sigma^2 grad log p(y)` is a gradient field by construction, so its Jacobian is symmetric. The measured asymmetry of Section 9, 0.58 and 0.14 against near-zero controls, is therefore **pure estimation error**, not a property of the target.
+
+This reframes the whole exercise. Enforcing symmetry adds a **correct** inductive bias. You are not trading accuracy for a guarantee; you are removing a degree of freedom that the true solution never used. That does not mean it is free in practice, and Section 14.4 gives the measured cost, but the direction of the tradeoff is not what it first appears.
+
+### 14.2 Method A: exact by construction, recommended
+
+Parameterize the **energy**, not the denoiser:
+
+```
+E(y) = 0.5 * || g(y) ||^2                 g = a bias-free network with vector output
+D(y) = y - grad_y E(y)
+```
+
+Then `J_D = I - Hess E` is a Hessian, so **symmetry is exact to floating-point precision**, not penalized. The residual becomes `r(y) = -grad E(y)`, and
+
+```
+log p(y) = -E(y) / sigma^2  +  constant
+```
+
+You now have an actual scalar energy. You can evaluate it, compare two candidate reconstructions by it, and use it for model selection.
+
+This is the Gradient Step Denoiser construction [17], later extended to proximal denoisers with stronger PnP guarantees [18], and it was designed for exactly the purpose you want.
+
+### 14.3 Why the quadratic form specifically
+
+This detail is essential and easy to get wrong. You need `E` to be **degree-2 homogeneous** so that `grad E` is degree-1, which is what preserves the noise-conditional bridge of Section 5.
+
+Consider the naive alternative. A scalar-output bias-free network `h` is degree-**1** homogeneous, so `grad h` is degree-**0**, so `D(y) = y - grad h(y)` is not homogeneous at all, and the Section 5 bridge dies. You would have traded your most valuable property for your second-most valuable one.
+
+The quadratic form fixes it. With `g` degree-1 homogeneous:
+
+```
+E(alpha y) = 0.5 ||g(alpha y)||^2 = 0.5 alpha^2 ||g(y)||^2 = alpha^2 E(y)
+```
+
+Differentiating `E(alpha y) = alpha^2 E(y)` with respect to `y` gives `alpha grad E(alpha y) = alpha^2 grad E(y)`, hence
+
+```
+grad E(alpha y) = alpha * grad E(y)          degree-1, as required
+D(alpha y) = alpha y - alpha grad E(y) = alpha D(y)     exact
+```
+
+**Conservativeness and homogeneity are compatible, but only through this construction.** As a bonus, `E >= 0` automatically, which removes a class of degenerate solutions.
+
+### 14.4 Costs, stated plainly
+
+- **Inference.** One forward pass plus one vector-Jacobian product through `g`. Roughly two to three times the cost of a direct denoiser.
+- **Training.** You must differentiate through `grad E`, which requires second-order automatic differentiation. **This will hit the jit-convolution instability in TF 2.18-era Keras reverse-mode graphs.** Finite differences are not a substitute here: they work fine for *measuring* a Jacobian, as in Sections 9 and 10, but not for building a training graph. Budget time for either porting `g` to JAX or PyTorch, or disabling XLA on the affected operations.
+- **Quality.** Energy-parameterized score models have been found to underperform directly-parameterized ones on sample quality [19]. Expect a PSNR cost. Measure it against your direct baseline before committing.
+
+### 14.5 Method B: soft symmetry penalty
+
+Keep your architecture and add a penalty. The tight estimator is
+
+```
+L_sym = E_{u ~ N(0,I)} [ || (J - J^T) u ||^2 ]  =  || J - J^T ||_F^2
+```
+
+which needs one Jacobian-vector product and one vector-Jacobian product per sample. A looser and cheaper variant is `E_{u,v} [ (u^T J v - v^T J u)^2 ]`.
+
+**Use this as a diagnostic or a warm start, not as a deliverable.** It drives asymmetry down but never to zero, and **every PnP and RED theorem requires exact symmetry**. A penalty buys "closer to conservative," which is not the same as eligibility for the guarantees. It is genuinely useful for two things: quantifying how far a given architecture is from conservative, and initializing a Method A network from a pretrained direct one.
+
+### 14.6 Method C: post-hoc symmetrization does not work
+
+Symmetrizing `J` pointwise at inference time does not produce an integrable field. Integrability requires consistency of the field across the whole domain, not symmetry at a point: a field can have symmetric Jacobian at every sampled point of a probe and still have nonzero circulation around loops you did not probe. There is no useful post-hoc fix. Do not spend time here.
+
+## 15. Making it passive and nonexpansive
+
+Passivity is a separate requirement from conservativeness, and you need both for the RED-family guarantees. Section 9.2 measured `||J||_2 = 1.22 to 1.36`, so a directly-parameterized net fails independently.
+
+**Under Method A this becomes unusually cheap.** Euler's theorem applied to the degree-2 homogeneous `E` gives `y^T grad E(y) = 2 E(y)`. Therefore
+
+```
+||D(y)||^2 = ||y - grad E(y)||^2
+           = ||y||^2 - 2 y^T grad E(y) + ||grad E(y)||^2
+           = ||y||^2 - 4 E(y) + ||grad E(y)||^2
+```
+
+So passivity `||D(y)|| <= ||y||` is **exactly** the scalar condition
+
+```
+|| grad E(y) ||^2  <=  4 E(y)        for all y
+```
+
+Enforce it with a hinge penalty on training batches:
+
+```
+L_passive = mean( max(0, ||grad E(y)||^2 - 4 E(y)) )
+```
+
+No power iteration, no spectral normalization, no per-layer Lipschitz budget. **Both quantities are already computed in the forward pass**, so the penalty is nearly free.
+
+For the stronger **nonexpansiveness** condition `||J_D||_2 <= 1`, you additionally need `Hess E` positive semidefinite with spectrum in `[0, 2]`. The measurement in Section 10 is encouraging here: the symmetric part is already nearly positive semidefinite, with 392 eigenvalues near zero, only two slightly negative, and range `[-0.06, 0.97]`. So this is a small correction rather than a fight. A hinge on the minimum Rayleigh quotient `u^T (Hess E) u` over random directions `u` is usually sufficient.
+
+If you prefer to stay with a directly-parameterized network, the alternative route to nonexpansiveness is spectral normalization of the residual during training [27], at a known and somewhat larger quality cost.
+
+## 16. The verification protocol
+
+Do not rely on a local Jacobian alone. Symmetry at one point is necessary but not sufficient. Run all five checks, with controls, on the specific checkpoint you intend to ship.
+
+**1. Loop integral, the genuinely global test.** Pick random closed polygons in image space and sum `r(y) . dy` around them. A conservative field gives zero. Nonzero circulation is direct proof of curl, needs no Jacobian at all, and is the only check that probes the field globally rather than pointwise. Report circulation normalized by path length and field magnitude so results are comparable across checkpoints.
+
+**2. Exact local Jacobian block.** Finite-difference a co-located patch, for example 12x12x3 = 432 dimensions inside a 256x256 image, and report `||J - J^T||_F / ||J||_F`. Use finite differences, not reverse-mode autodiff, which sidesteps the jit-convolution instability entirely.
+
+**3. Symmetric control.** Keep a box blur or Gaussian blur in the same test harness, extracted identically. It should read near zero; it reads about `0.0001` in practice. This is what proves your probe is clean. Without it, a low asymmetry number is uninterpretable.
+
+**4. Broken control.** Keep a deliberately non-conservative or bias-broken network in the same test, so you can demonstrate that the metric fires. A probe that never produces a high number is not a probe.
+
+**5. Homogeneity, again, after every change.** Re-verify `||D(alpha y) - alpha D(y)|| / ||alpha D(y)||` across an eightyfold `alpha` range. Method A guarantees it in theory, but implementation slips, such as a stray bias in `g` or a GELU that survived a refactor, show up here and nowhere else.
+
+**6. Passivity and spectral norm.** Estimate `||J||_2` by power iteration on clean and noisy inputs. Under Method A, additionally log `||grad E||^2 - 4E` as a scalar per batch, which is the exact passivity margin.
+
+**Multi-checkpoint discipline.** The stable-rank finding of Section 10 did not transfer across sibling checkpoints, 2 percent against 38.6 percent. Assume nothing transfers until measured on the exact checkpoint you ship.
+
+## 17. Architecture for general-purpose restoration
+
+The denoiser is the right thing to freeze and build around. Treat it as one component, the prior, inside a system whose other components are an operator estimator, a router, and a solver bank.
+
+```
+input
+  |
+  v
+degradation identification          <- estimate M, sigma, noise family
+  |
+  v
+gate check                          <- Section 13, in order
+  |
+  v
+solver dispatch                     <- pick by gate outcome and null-space structure
+  |
+  v
+output                              <- no confidence map attached
+       ^
+       |
+  sigma-emulation shim: D_sigma(y) = sigma * D(y/sigma)
+       ^
+       |
+  frozen bias-free denoiser (the prior)
+```
+
+### 17.1 Degradation identification
+
+A small classifier and regressor that estimates the forward operator and the noise level: blur kernel, downsampling factor, mask, JPEG quality factor, noise level and family. This is the component that turns "unusable in the wild" into "usable," because Gate 2 requires a known operator and real-world inputs do not come labelled.
+
+Design notes. Predict the kernel in a low-dimensional basis rather than pixel-wise. Output a confidence estimate alongside every parameter, and route low-confidence cases to joint operator-image refinement rather than to a solver that will trust a wrong `M`. Errors in `M` land in the range-space term, where the prior structurally cannot correct them.
+
+### 17.2 Gate check and routing table
+
+| Condition | Route |
+|---|---|
+| Noise only, no operator | Single forward pass through the denoiser. Do not run a solver. |
+| Linear, known `M`, large and unpredictable null space | DDRM or DDNM [21] [22], using the Section 5 shim |
+| Linear, known `M`, small or well-conditioned null space | Classical regularized least squares. The prior earns little here and costs many network evaluations. |
+| Linear, uncertain `M` | Alternating operator estimation and reconstruction, or PiGDM [23] with an inflated measurement-noise term to absorb operator error |
+| Nonlinear operator | DPS [15] with JVP linearization. Expect higher cost and no clean null/range split. |
+| Non-Gaussian corruption statistics | Variance-stabilize, then re-enter at the appropriate row, or dispatch to a Poisson or Gamma head |
+| Multiplicative or speckle noise | Out of scope for this machinery. Different estimator. |
+
+### 17.3 What this design still cannot do
+
+Be honest about the boundary, because it is where most of the remaining engineering lives.
+
+Real-world images carry **unknown, mixed, non-Gaussian degradation chains**: resize, then JPEG, then sensor noise, then sharpening, in unknown order with unknown parameters. This prior handles one known linear operator plus Gaussian noise at a time. The two honest options are:
+
+1. **Joint operator estimation with iterative refinement.** Principled, expensive, and prone to converging on a wrong operator that explains the observation equally well.
+2. **A supervised degradation-inversion front end** that maps real corruption into the Gaussian regime, after which the frozen prior takes over. More practical, but you are now training a task-specific network, which gives up part of the "one denoiser, no retraining" appeal.
+
+Neither is free. The front end is where the difficulty concentrates.
+
+### 17.4 Retraining moves worth making
+
+Listed in descending expected value.
+
+1. **Multi-domain prior.** Mix natural images with medical, document and text, and satellite content. Given the Section 12 result, a broadened prior is likely cheap upside rather than a capacity fight.
+2. **Wider noise-level curriculum.** Homogeneity gives exact extrapolation of the *scaling*, but score *quality* at each level still comes from training coverage. These are different things and the first does not substitute for the second.
+3. **Method A reparameterization**, if you need a real energy, PnP or RED guarantees, or model-selection-by-energy. Section 14.
+4. **Poisson and Gamma variants** via generalized Tweedie, as separate checkpoints selected by the router. This is what genuinely extends coverage, to low-light and microscopy.
+5. **Distillation** of the multi-step solver into a few-step student, if latency matters for a product.
+
+## 18. Safe and unsafe architectural modifications
+
+Exact homogeneity is what makes the Section 5 bridge work, so every architectural change must be checked against it.
+
+**Safe.** More channels, more depth, additive skip connections, concatenation, convolution, strided convolution, pooling, bilinear or nearest-neighbour upsampling, ReLU, LeakyReLU, PReLU, bias-free batch normalization, scale-only multiplicative conditioning, residual blocks.
+
+**Breaks homogeneity.**
+
+| Modification | Why it breaks |
+|---|---|
+| `use_bias=True` anywhere | An additive constant is exactly what homogeneity forbids |
+| GELU, SiLU, ELU, Softplus | Not positively homogeneous. Makes exactness mathematically impossible. |
+| LayerNorm, InstanceNorm, or any mean-subtracting norm | Subtracts an input-dependent additive offset |
+| Additive positional embeddings | Additive constant |
+| Softmax attention | `Q K^T` scales as `alpha^2`, then softmax destroys the scaling entirely |
+| Learned constants, learned thresholds, additive FiLM shift terms | Additive constants |
+
+**If you want attention**, use a softmax-free linear attention, or normalize the logits by their own norm to restore scale invariance. Test it in isolation before integrating.
+
+**After every architectural change**, re-measure homogeneity across the full `alpha` range and keep a deliberately bias-broken control in the same test to prove the probe fires. This is a five-minute check that prevents silently losing the property the whole system depends on.
+
+## 19. Cost control
+
+The frozen-prior approach costs roughly 20 to 1,000 network evaluations per image, against one for a task-specific supervised restorer. That is the central economic fact of this design, and it needs active management.
+
+- **Cascade.** Solve coarsely at high `sigma` with few steps, then refine at low `sigma`. Most of the reconstruction happens early.
+- **Cache the operator decomposition.** DDRM and DDNM need an SVD or pseudo-inverse of `M`. If many images share the same operator, which is typical for a fixed sensor or fixed sampling pattern, compute it once.
+- **Short-circuit.** When the router detects noise-only degradation, call the denoiser once and return. Do not run a solver for a problem with an empty null space.
+- **Prefer few-step schedules.** The EDM family [24] and its successors reach comparable quality at a fraction of the step count, and they interact better with the nominal-versus-actual noise-level issue of Section 5.3.
+- **Distill** once the pipeline is stable and you know which operators dominate your traffic.
+
+## 20. Ranked build list
+
+Each row: the new capability, what it builds on, the exactness cost or failure mode, and the effort.
+
+| # | Capability | Builds on | Cost or failure mode | Effort |
 |---|---|---|---|---|
-| **1** | **Treat the denoiser as a diffusion score net** — plug an existing bias-free checkpoint into a modern SDE/ODE solver, guidance, or distillation | `samplers.py::DenoiserPriorSampler`; `bfcnn`/`bfunet` checkpoints | None beyond the H1/H2 gap — this is a *reframing*, not a new approximation | **Cheap** — swap the schedule for a published solver, no retraining |
-| **2** | **Decide which convergence theory legitimately applies** (PnP-Langevin vs RED) by testing conservativeness | `hutchinson_divergence` in `multiplicative_miyasawa.py` (already coded) | None — verification. *Already done this session: non-conservative, so RED/PnP guarantees do NOT transfer* | **Cheap** (done) |
-| **3** | **Generalized-Tweedie Poisson/Gamma** → photon-limited / low-light / microscopy imaging | relation-A/B scaffolding as a template | Re-derive correction + retrain per noise family; additive curriculum doesn't auto-transfer | **New training** |
-| **4** | **SURE / Noise2Score self-supervision** → train/validate with no clean references (real sensor, medical) | `additive_sure_risk` (validated on a linear toy) | SURE variance is high for complex nonlinear nets (our Probe C confirms the caution) | **Moderate** |
-| **5** | **DPS-style nonlinear posterior sampling** (phase retrieval, nonlinear deblur) | `LinearInverseProblemSolver` null/range split as template | Highest — the clean split is linear-only; needs JVP linearization, re-opens conservativeness | **New implementation** |
-| **6** | **Free per-pixel uncertainty** from the shrinkage/divergence field | `_compute_denoiser_residual` | "shrinkage magnitude ≈ error" is a plausibility claim, unproven here | **Cheap ablation** |
-| **7** | **Jacobian top-eigenvectors = local image-manifold tangent** (operationalize the geometric reading) | JVP/Hutchinson machinery, or exact finite-difference local Jacobian (§6.4) | Local-linearity only; local (not global) rank | **Cheap ablation — done** (§6.4: local stable rank ~2%; use finite differences, not autodiff) |
-| **8** | **RED/PnP with a conservativeness-repaired denoiser** — add a Jacobian-symmetry penalty at train time to *earn* the guarantees | training loop + validated Hutchinson probe as a regularizer | May trade PSNR for guarantee-eligibility; untested | **New training** |
-| **9** | **Full DDPM/score-SDE pipeline bridge** using existing checkpoints | rank-1 equivalence + checkpoints | Surfaces score-quality gaps (H2) more visibly than the light K&S sampler | **Moderate** |
+| 1 | **Noise-conditional emulation.** Expose a blind bias-free checkpoint through `D_sigma(y) = sigma D(y/sigma)` and unlock DDRM, DDNM, DPS, PiGDM | Exact homogeneity, verified per checkpoint | Nominal-versus-actual noise-level drift, Section 5.3 | **Cheapest, highest value.** No retraining |
+| 2 | **Diffusion score-net reframing.** Plug the checkpoint into a modern SDE or ODE solver, with guidance and distillation | Existing annealed-Langevin sampler | Only the H1/H2 gap. This is a reframing, not a new approximation | Cheap. Swap the schedule |
+| 3 | **Degradation identification front end.** Estimate `M`, `sigma`, and noise family from the observation | New component | This is the real bottleneck for in-the-wild use. Wrong `M` is uncorrectable by the prior | Moderate to substantial |
+| 4 | **Method A conservative reparameterization.** `E = 0.5\|\|g\|\|^2`, `D = y - grad E` | Existing bias-free trunk as `g` | 2 to 3x inference; second-order autodiff hits the jit-conv blocker; possible PSNR cost [19] | New training |
+| 5 | **Passivity hinge.** `max(0, \|\|grad E\|\|^2 - 4E)` on top of #4, unlocking RED and PnP guarantees legitimately | Method A | Nearly free given #4. Both terms already in the forward pass | Cheap, given #4 |
+| 6 | **Medical and scientific reconstruction.** Undersampled MRI and CT | Sections 12 and 13 | Operator is known and linear, which is the easy case. Regulatory constraints are the real cost | Moderate |
+| 7 | **Generalized Tweedie for Poisson and Gamma.** Photon-limited, low-light, microscopy | Section 3 | Re-derive the correction and retrain per noise family. Additive curriculum does not transfer | New training |
+| 8 | **SURE and Noise2Score self-supervision.** Train or validate with no clean references | Stein's lemma [26], Tweedie | SURE variance is high for large nonlinear nets. Use for validation before trusting as sole loss | Moderate |
+| 9 | **DPS-style nonlinear posterior sampling.** Phase retrieval, nonlinear deblurring | The null/range split as a template | Highest. The clean split is linear-only. Needs JVP linearization and re-opens conservativeness | New implementation |
+| 10 | **Local manifold tangent extraction.** Top Jacobian singular vectors as local structure | Finite-difference local Jacobian | Local only, and checkpoint-specific, Section 10 | Cheap ablation |
+| 11 | **Per-pixel uncertainty from shrinkage magnitude** | Residual and divergence fields | **Unlicensed until #4 and #5 land, and even then only as an energy comparison, never a calibrated probability** | Do not ship |
 
-*Cross-cutting method (not a standalone row):* apply **control-theory stability analysis** (gain margins, saturation-aware Lyapunov bounds) to the sampler's numerical scaffolding — the `_adaptive_step_schedule` stack currently uses 7 hand-tuned clip/cap/floor interventions that would benefit from principled bounds instead of ad-hoc engineering.
+**Cross-cutting.** Replace hand-tuned clip, cap, and floor interventions in the sampler's step-size scaffolding with principled control-theoretic bounds, using gain margins and saturation-aware Lyapunov analysis. Ad-hoc numerical guards accumulate silently and make failures hard to attribute.
 
 ---
 
-## 10. What is true vs what is overstated
+# Part V. Reference
 
-Updated 2026-07-12. Rows marked **[REVISED]** were changed by direct measurement (`analyses/analysis_2026-07-12_103e465c/`).
+## 21. True, overstated, and false: the ledger
 
 | Claim | Verdict | Basis |
 |---|---|---|
-| Residual = scaled score (additive Gaussian, MMSE denoiser) | **TRUE** (exact-in-idealization) | Miyasawa theorem (§2) |
-| Bias-free ⇒ exact degree-1 homogeneity | **TRUE, and it is NORM-DEPENDENT, not luck** **[REVISED]** | `BiasFreeBatchNorm` + `use_bias=False` + a positively-homogeneous activation (`leaky_relu`) ⇒ exact to **float32** (2.5e-5, flat across an 80× α range; control fires at 0.83). A **LayerNorm** block breaks it (81–98% error). Factory-default `gelu` would make it mathematically impossible. |
-| **A blind denoiser can emulate a NOISE-CONDITIONAL one** | **TRUE — and it is the most valuable fact here** **[NEW]** | Exact homogeneity ⇒ `D_σ(y) := σ·D(y/σ)`. DDRM/DDNM/DPS/ΠGDM all require noise-conditioning and are otherwise unreachable from a blind net; **no published bridge exists in the literature**. Zero retraining. |
-| A single trained net = a coherent global prior / energy | **OVERSTATED** | non-conservative Jacobian (§6.2); replicated at 0.14 / ~800× baseline on a 3rd checkpoint |
-| Sampling / reconstruction still work despite the above | **TRUE** | prior-only inpainting reconstructs well; curl ⟂ trajectory (Chao 2023) |
-| RED/PnP convergence guarantees apply to a learned denoiser | **FALSE — do not transfer** (and this note was RIGHT) **[REVISED]** | Not only non-conservative — also **NOT PASSIVE**: measured ‖J‖₂ = **1.22–1.36** (clean inputs). MRED (arXiv:2202.04961) needs passivity, so it does *not* rescue the guarantees either. |
-| "The prior does 84% of the work" (as a universal) | **OVERSTATED — and the *law* is FALSIFIED** **[REVISED]** | Credit is **flat at 86–97% across a 15× null-space range, inverted at the top**. It is a rough CONSTANT, not a function of null-space size (§8). |
-| **`dim(null(M))/N` predicts prior contribution** | **FALSE** **[REVISED]** | Posterior 0.06. Replaced by: hard gates (linearity, knowability, corruption statistics) + `H(x_null\|x_range)` among survivors (§8). |
-| **Out-of-domain content fails** | **FALSE — refuted with the wrong sign** **[REVISED]** | An out-of-domain **medical X-ray beat in-domain natural photos 3.2×** (+12.39 vs +1.54 dB). **MRI/CT is a top target, not a hedge.** |
-| Efficacy is *primarily* manifold-projection geometry | **CHECKPOINT-SPECIFIC, does not generalize** **[REVISED]** | The "soft low-rank projector" (stable rank ~2%) does **not** replicate: a sibling checkpoint measures **38.6%** stable rank under the identical probe (§6.4). |
-| One denoiser solves *all* linear inverse problems | **TRUE with an asterisk** | true operationally; the asterisk is now the **gates**, not the null space |
+| Residual equals scaled score, for additive Gaussian noise and an MMSE denoiser | **True**, exact in the idealization | Miyasawa's theorem, Section 2 |
+| The ideal denoiser is conservative, with symmetric Jacobian | **True** | A gradient field's Jacobian is a Hessian. Section 14.1 |
+| Bias-free implies exact degree-1 homogeneity | **True, and norm-dependent** | Float32-exact at `2.5e-5`, flat across 80x in `alpha`, with a control at `0.83`. LayerNorm breaks it at 81 to 98 percent. GELU makes it impossible. |
+| A blind denoiser can serve as a noise-conditional one at zero retraining cost | **True, and the most valuable fact here** | Exact homogeneity gives `sigma D(y/sigma) = D(y)`. Unlocks DDRM, DDNM, DPS, PiGDM. Section 5 |
+| A single directly-parameterized net equals a coherent global prior or energy | **False** | Non-symmetric Jacobian: `0.58` against a `0.0001` control on the identical extraction, about 7,400x. Replicated across three checkpoints and two architecture families. |
+| Sampling and reconstruction work anyway | **True** | Prior-only inpainting reconstructs well. The curl is roughly orthogonal to the annealed trajectory [16] |
+| RED and PnP convergence guarantees apply to a learned denoiser as trained | **False, they do not transfer** | Non-conservative **and** not passive: measured `\|\|J\|\|_2 = 1.22 to 1.36`. RED-family analyses need passivity, so they do not rescue it either. |
+| Conservativeness can be made exact | **True, by reparameterization** | `E = 0.5\|\|g\|\|^2`, `D = y - grad E`. Symmetry exact to float precision, and degree-1 homogeneity preserved. Sections 14.2 and 14.3 |
+| Passivity is cheap once conservativeness is exact | **True** | Euler's theorem reduces it to the scalar condition `\|\|grad E\|\|^2 <= 4E`. Section 15 |
+| Post-hoc symmetrization of the Jacobian yields a conservative field | **False** | Integrability is a global property. Pointwise symmetry does not imply zero circulation. Section 14.6 |
+| `dim(null(M))/N` predicts the prior's contribution | **False** | Credit share flat at 86 to 97 percent across a 15x null-space range, and inverted at the top |
+| "The prior does about 84 percent of the work," as a universal | **Overstated, but roughly right as a constant** | It is a near-constant around 90 percent of *credit share*, not a function of null-space size. Absolute quality is the metric that varies. |
+| Out-of-domain content fails | **False, refuted with the wrong sign** | An out-of-domain X-ray reached `+12.39 dB` against `+1.54 dB` for in-domain natural photos, same operator and solver. MRI and CT are top targets. |
+| Efficacy is primarily manifold-projection geometry | **Checkpoint-specific, does not generalize** | Stable rank 2 percent on one checkpoint, 38.6 percent on a sibling under the identical probe |
+| One denoiser solves all linear inverse problems | **True with an asterisk** | Operationally true. The asterisk is the three gates of Section 13: linearity, knowability, corruption statistics. |
+| Calibrated per-pixel uncertainty is available | **False, and permanently so for a directly-parameterized net** | No global log-density exists. Under Method A an unnormalized energy exists, which permits *comparison*, never a probability. |
+| Multiplicative noise transfers | **False, verified negative** | No clean identity. Only Monte-Carlo relations: one exact of a different form, one small-`sigma` approximation. |
 
----
+## 22. Limitations and honest uncertainty
 
-## 11. Limitations and honest uncertainty
+1. **No calibrated uncertainty is licensed.** For a directly-parameterized net, the non-conservative field means every result is a point estimate or a sampling-quality claim, never a calibrated-posterior claim. Under Method A you gain an unnormalized energy `E(y)`, which lets you rank two candidate reconstructions, but the partition function remains inaccessible, so you still cannot report a probability or a confidence interval. Treat this as a permanent guardrail on product claims.
+2. **Homogeneity is checkpoint-specific and layer-fragile.** Re-verify before relying on cross-`sigma` generalization or on the Section 5 bridge, for every checkpoint and after every architectural change.
+3. **The credit-share constant rests on four operators.** The measurements span block inpainting, random-pixel inpainting, super-resolution, and demosaicing on a small validation set. The near-constancy is well-supported; the exact value is not.
+4. **Conditional unpredictability is validated on the operator axis only.** On the domain axis it is a plausible post-hoc account of the medical-imaging result, not a validated predictor. Measure per domain rather than predicting.
+5. **Local rank is local.** The soft-low-rank-projector reading holds at measured points on one checkpoint, does not transfer to a sibling, and says nothing about global manifold dimension. Do not build an explanation of *why the method works* on it.
+6. **The Method A quality cost is unmeasured here.** The literature reports a penalty for energy parameterization [19]. Whether it is acceptable for your task is an experiment, not a deduction.
+7. **Second-order autodiff is a real engineering blocker**, not a footnote. Method A training requires it, and the finite-difference workaround that rescues *measurement* does not rescue *training*.
+8. **Single-repository, largely single-domain empirical base.** Natural-image validation content dominates, with one out-of-domain probe. Cross-domain generality is asserted from the literature, not independently established.
 
-1. **No calibrated uncertainty is licensed.** The non-conservative field means every "solved" result is a point-estimate / sampling-quality claim, never a calibrated-posterior claim. Treat this as a permanent guardrail for any product claim.
-2. **Homogeneity is checkpoint-specific.** Re-verify `D(αy)=αD(y)` before relying on cross-`σ` generalization for a given checkpoint.
-3. **The 84% credit-split is one task point** (maximally prior-favorable); the small-null-space endpoint (deblur/SR) was not independently re-measured, and the interpolating law is a single-anchor extrapolation — trust the ranking, not the numbers.
-4. **The manifold question (geometry vs probability) is now resolved locally** (§6.4): an exact finite-difference local Jacobian shows the denoiser is a soft low-rank projector (stable rank ~2%), so the geometric account is *locally* correct and coexists with the non-conservative "no global prior" finding. The reverse-mode autodiff route is still blocked by a Keras/TF-2.18 jit-conv instability, but finite differences sidestep it. Residual caveat: this is a *local* rank at one point/checkpoint; the *global* manifold dimension is larger and not measured here.
-5. **Single-repo, largely single-domain (natural-image / DIV2K) empirical base.** Cross-domain generality is asserted from the literature, not independently verified here.
-6. **Multiplicative-noise boundary** is a verified negative result: no clean identity, only Monte-Carlo relations A/B.
+## 23. Glossary
 
----
+**Annealed Langevin.** Noisy gradient ascent on `log p` with a decreasing noise schedule. Equivalently, reverse-diffusion sampling.
 
-## 12. Start here: three concrete moves
+**Conservative field.** A vector field that is the gradient of a scalar potential, equivalently one whose Jacobian is symmetric everywhere, equivalently one with zero circulation around every closed loop. A directly-parameterized learned residual field generally is not.
 
-1. **Cheapest high-value win (extension #1):** wire an existing bias-free checkpoint into a published diffusion SDE/ODE solver as a drop-in score network and benchmark against the current K&S loop. No retraining; immediately unlocks the modern sampling toolbox.
-2. **Biggest genuinely-new capability (extension #3):** implement the generalized-Tweedie Poisson/Gamma correction for low-light / microscopy. This *extends the solvable boundary* rather than re-packaging it.
-3. **Close the last honest gap (cheap):** re-run the credit-split ablation on a *measurement-dominated* task (mild deblur) to complete the null-space law empirically. (The Jacobian geometry-vs-probability gap is now closed — §6.4 — via an exact finite-difference local Jacobian; no need to fight the autodiff blocker.)
+**Credit share.** In an ablation of the solver's two terms, the fraction of achievable null-space gain attributable to the prior term. Distinct from absolute reconstruction quality, and the conflation of the two is the source of the false null-space law.
 
-And one **guardrail:** the non-conservative Jacobian is not a bug to fix casually — it is a property of learned scores. Never ship a calibrated-uncertainty claim derived from this denoiser-prior. If calibrated UQ is a hard requirement, that is extension #8 (train a conservativeness-repaired net and re-verify with the Hutchinson probe), not a free read-off.
+**Degree-1 homogeneity.** `D(alpha y) = alpha D(y)` for `alpha > 0`. The scale-equivariance a genuinely bias-free network enjoys, and the enabling property for the noise-conditional bridge.
 
----
+**Empirical Bayes.** Estimating a needed functional of an unknown prior directly from data, here the marginal's score read off the optimal denoiser, without ever parameterizing `p(x)`.
 
-## 13. Glossary and references
+**MMSE denoiser.** The estimator minimizing mean squared error. Equals the posterior mean `E[x|y]`.
 
-**Glossary.**
-- **Score** — `∇_y log p(y)`, the gradient of the log-density; points toward higher-probability regions.
-- **MMSE denoiser** — minimizes mean-squared error; equals the posterior mean `E[x|y]`.
-- **Empirical Bayes** — estimate the needed functional of an *unknown* prior directly from data (here, the marginal's score off the optimal denoiser) without ever parameterizing `p(x)`.
-- **Degree-1 homogeneity** — `D(αy)=αD(y)`; the scale-equivariance that a bias-free net enjoys.
-- **Conservative field** — a vector field that is the gradient of a scalar potential ⇔ its Jacobian is symmetric. A learned residual field generally is **not**.
-- **Null space of `M`** — the set of signal components the measurement operator cannot see; where the prior does all the work.
-- **Annealed Langevin** — noisy gradient ascent on `log p` with a decreasing noise schedule; equivalently, reverse-diffusion sampling.
+**Nonexpansive.** `||J||_2 <= 1`. Stronger than passivity, and required by some PnP fixed-point analyses.
 
-**Primary references (all verified, HTTP-200 / peer-reviewed):**
-- Miyasawa, K. (1961). *An empirical Bayes estimator of the mean of a normal population.* Bull. ISI 38(4):181–188.
-- Robbins, H. (1956). *An empirical Bayes approach to statistics.* 3rd Berkeley Symp.
-- Efron, B. (2011). *Tweedie's formula and selection bias.* JASA 106(496):1602–1614.
-- Raphan, M. & Simoncelli, E. P. (2011). *Least squares estimation without priors or supervision.* Neural Computation 23(2):374–420.
-- Mohan, Kadkhodaie, Simoncelli & Fernandez-Granda (2020). *Robust and interpretable blind image denoising via bias-free CNNs.* ICLR. arXiv:1906.05478.
-- Kadkhodaie, Z. & Simoncelli, E. P. (2021). *Solving/Stochastic solutions for linear inverse problems using the prior implicit in a denoiser.* NeurIPS. arXiv:2007.13640.
-- Romano, Elad & Milanfar (2017). *Regularization by Denoising (RED).* SIAM J. Imaging Sci. 10(4):1804–1844.
-- Venkatakrishnan, Bouman & Wohlberg (2013). *Plug-and-Play priors for model-based reconstruction.* IEEE GlobalSIP.
-- Song, Y. & Ermon, S. (2019). *Generative modeling by estimating gradients of the data distribution (NCSN).* NeurIPS. arXiv:1907.05600.
-- Ho, Jain & Abbeel (2020). *Denoising diffusion probabilistic models (DDPM).* NeurIPS. arXiv:2006.11239.
-- Song et al. (2021). *Score-based generative modeling through SDEs.* ICLR. arXiv:2011.13456.
-- Kim, K. & Ye, J. C. (2021). *Noise2Score: Tweedie's approach to self-supervised denoising.* NeurIPS. arXiv:2106.07009.
-- Lehtinen et al. (2018). *Noise2Noise.* ICML. arXiv:1803.04189.
-- Soltanayev, S. & Chun, S. Y. (2018). *Training deep denoisers without ground truth (SURE).* NeurIPS.
-- Chung, H. & Ye, J. C. (2022). *Diffusion posterior sampling (DPS).* arXiv:2209.14687.
-- Chao et al. (2023). *On investigating the conservative property of score-based generative models.* ICML. arXiv:2209.12753.
+**Null space of `M`.** The signal components the measurement operator cannot see. The only place the prior can act in a linear solver.
 
-**Repo assets referenced:** `src/applications/bias_free_denoiser/samplers.py` · `src/dl_techniques/utils/multiplicative_miyasawa.py` · `src/dl_techniques/models/vision/bias_free_denoisers/{bfcnn,bfunet,bfconvunext,bfcliffordunet}.py` · `src/dl_techniques/layers/{bias_free_conv2d.py, norms/bias_free_batch_norm.py}` · `src/dl_techniques/callbacks/noise_sigma_curriculum.py` · `src/train/bfunet/eval_psnr_vs_noise.py`.
+**Participation ratio.** `(sum s_i)^2 / sum s_i^2` over singular values. A soft count of effective directions.
 
----
+**Passive.** `||D(f)|| <= ||f||` for all inputs. Required by RED-family convergence analyses, and independent of conservativeness.
 
-*Provenance: produced via a COMPREHENSIVE epistemic-deconstruction session (framing → domain grounding → scope audit → boundary map → abductive expansion → causal analysis with GPU probes → parametric quantification → synthesis → validation). Empirical claims in §6 were measured on this repo's checkpoints; full audit trail, 15-hypothesis Bayesian ledger, and probe scripts under `analyses/analysis_2026-07-04_cefd1d1d/`.*
+**Score.** `grad_y log p(y)`, the gradient of the log-density. Points toward higher-probability regions.
+
+**Stable rank.** `||J||_F^2 / ||J||_2^2`. A continuous, noise-robust surrogate for matrix rank.
+
+**Tweedie's formula.** The general empirical-Bayes identity relating a posterior mean to the score of the marginal. Miyasawa's theorem is its Gaussian case.
+
+## 24. Citation index
+
+| # | Work | Where used in this guide |
+|---|---|---|
+| 1 | Miyasawa, K. (1961). *An empirical Bayes estimator of the mean of a normal population.* Bull. Inst. Internat. Statist. 38(4):181-188. | §1, §2, the core theorem |
+| 2 | Robbins, H. (1956). *An empirical Bayes approach to statistics.* Proc. 3rd Berkeley Symp. | §2, Tweedie lineage |
+| 3 | Efron, B. (2011). *Tweedie's formula and selection bias.* JASA 106(496):1602-1614. | §2, modern statement |
+| 4 | Raphan, M. and Simoncelli, E. P. (2011). *Least squares estimation without priors or supervision.* Neural Computation 23(2):374-420. | §3, exponential-family generalization |
+| 5 | Mohan, S., Kadkhodaie, Z., Simoncelli, E. P. and Fernandez-Granda, C. (2020). *Robust and interpretable blind image denoising via bias-free CNNs.* ICLR. arXiv:1906.05478. | §4, bias-free construction and Jacobian-as-filter |
+| 6 | Kadkhodaie, Z. and Simoncelli, E. P. (2021). *Stochastic solutions for linear inverse problems using the prior implicit in a denoiser.* NeurIPS. arXiv:2007.13640. | §1, §6, sampler and linear solver |
+| 7 | Romano, Y., Elad, M. and Milanfar, P. (2017). *The little engine that could: regularization by denoising (RED).* SIAM J. Imaging Sci. 10(4):1804-1844. | §7, §9.2, guarantees that require conservativeness and passivity |
+| 8 | Venkatakrishnan, S. V., Bouman, C. A. and Wohlberg, B. (2013). *Plug-and-play priors for model-based reconstruction.* IEEE GlobalSIP. | §7, PnP framing |
+| 9 | Song, Y. and Ermon, S. (2019). *Generative modeling by estimating gradients of the data distribution (NCSN).* NeurIPS. arXiv:1907.05600. | §1, §7, score-based generation |
+| 10 | Ho, J., Jain, A. and Abbeel, P. (2020). *Denoising diffusion probabilistic models.* NeurIPS. arXiv:2006.11239. | §1, §7 |
+| 11 | Song, Y. et al. (2021). *Score-based generative modeling through stochastic differential equations.* ICLR. arXiv:2011.13456. | §1, §7, the SDE view |
+| 12 | Kim, K. and Ye, J. C. (2021). *Noise2Score: Tweedie's approach to self-supervised image denoising without clean images.* NeurIPS. arXiv:2106.07009. | §3, §7, §20, explicit Tweedie across noise families |
+| 13 | Lehtinen, J. et al. (2018). *Noise2Noise: learning image restoration without clean data.* ICML. arXiv:1803.04189. | §7, clean-data-free training |
+| 14 | Soltanayev, S. and Chun, S. Y. (2018). *Training deep learning based denoisers without ground truth data.* NeurIPS. | §7, §20, SURE training |
+| 15 | Chung, H., Kim, J., McCann, M. T., Klasky, M. L. and Ye, J. C. (2022). *Diffusion posterior sampling for general noisy inverse problems.* arXiv:2209.14687. | §7, §13, §17, nonlinear route |
+| 16 | Chao, C.-H. et al. (2023). *On investigating the conservative property of score-based generative models.* ICML. arXiv:2209.12753. | §1, §7, §9, why sampling survives non-conservativeness |
+| 17 | Hurault, S., Leclaire, A. and Papadakis, N. (2022). *Gradient step denoiser for convergent plug-and-play.* ICLR. arXiv:2110.03220. | §14.2, the exact-conservativeness construction |
+| 18 | Hurault, S., Leclaire, A. and Papadakis, N. (2022). *Proximal denoiser for convergent plug-and-play optimization with nonconvex regularization.* ICML. arXiv:2201.13256. | §14.2, stronger PnP guarantees |
+| 19 | Salimans, T. and Ho, J. (2021). *Should EBMs model the energy or the score?* Energy Based Models Workshop, ICLR. | §14.4, §20, §22, the measured cost of energy parameterization |
+| 20 | MRED analysis, arXiv:2202.04961. | §9.2, the passivity requirement that blocks the RED rescue |
+| 21 | Kawar, B., Elad, M., Ermon, S. and Song, J. (2022). *Denoising diffusion restoration models (DDRM).* NeurIPS. arXiv:2201.11793. | §5, §17, §20, noise-conditional linear solver |
+| 22 | Wang, Y., Yu, J. and Zhang, J. (2023). *Zero-shot image restoration using denoising diffusion null-space model (DDNM).* ICLR. arXiv:2212.00490. | §5, §17, §20, null-space solver |
+| 23 | Song, J., Vahdat, A., Mardani, M. and Kautz, J. (2023). *Pseudoinverse-guided diffusion models for inverse problems (PiGDM).* ICLR. | §5, §17, uncertain-operator route |
+| 24 | Karras, T., Aittala, M., Aila, T. and Laine, S. (2022). *Elucidating the design space of diffusion-based generative models (EDM).* NeurIPS. arXiv:2206.00364. | §5.3, §19, few-step schedules |
+| 25 | Hutchinson, M. F. (1989). *A stochastic estimator of the trace of the influence matrix for Laplacian smoothing splines.* Comm. Statist. Simulation Comput. 18(3):1059-1076. | §14.5, §16, divergence and asymmetry estimators |
+| 26 | Stein, C. M. (1981). *Estimation of the mean of a multivariate normal distribution.* Annals of Statistics 9(6):1135-1151. | §7, §20, the lemma behind SURE |
+| 27 | Ryu, E. K., Liu, J., Wang, S., Chen, X., Wang, Z. and Yin, W. (2019). *Plug-and-play methods provably converge with properly trained denoisers.* ICML. arXiv:1905.05406. | §7, §15, the spectral-normalization route |
+| 28 | Zhang, K., Li, Y., Zuo, W., Zhang, L., Van Gool, L. and Timofte, R. (2021). *Plug-and-play image restoration with deep denoiser prior.* IEEE TPAMI. arXiv:2008.13751. | §17, practical multi-task restoration baseline |
+| 29 | Anscombe, F. J. (1948). *The transformation of Poisson, binomial and negative-binomial data.* Biometrika 35:246-254. | §13, §17, variance stabilization |
+| 30 | Kadkhodaie, Z., Guth, F., Simoncelli, E. P. and Mallat, S. (2024). *Generalization in diffusion models arises from geometry-adaptive harmonic representations.* ICLR. arXiv:2310.02557. | §7, §10, the geometric reading of the same operator |
