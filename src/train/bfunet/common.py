@@ -2367,11 +2367,11 @@ def train(
         round_trip_sample = np.random.default_rng(0).uniform(
             DATA_MIN, DATA_MAX, size=(1,) + spatial
         ).astype("float32")
-        round_trip_pred = train_model.predict(round_trip_sample, verbose=0)
+        round_trip_pred = model.predict(round_trip_sample, verbose=0)
     except Exception as e:
         logger.debug(f"Round-trip pre-save capture skipped: {e}")
 
-    train_model.save(final_path)
+    model.save(final_path)
     logger.info(f"Saved final (last-epoch) model -> {final_path}")
 
     if round_trip_pred is not None:
