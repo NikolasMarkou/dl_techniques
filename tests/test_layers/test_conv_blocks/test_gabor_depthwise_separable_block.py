@@ -125,6 +125,40 @@ class TestConstructionAndValidation:
         with pytest.raises(ValueError, match=r"padding must be 'same' or 'valid', got 'reflect'"):
             GaborDepthwiseSeparableBlock(filters=F, padding="reflect")
 
+    @pytest.mark.parametrize("strides", [(1, 2), (2, 1), (3, 2)])
+    def test_non_square_strides_raises(self, strides):
+        """MEASURED before the fix: `strides=(1, 2)` CONSTRUCTED, answered
+        `compute_output_shape((1,16,16,3)) -> (1,14,6,8)`, and then died inside
+        `call()` with a raw TF `InvalidArgumentError: Current implementation
+        only supports equal length strides in the row and column dimensions.`
+        The constructor now refuses it (review W-3, decisions.md D-023).
+        """
+        with pytest.raises(
+            ValueError,
+            match=r"strides must be equal in the height and width dimensions",
+        ):
+            GaborDepthwiseSeparableBlock(filters=F, strides=strides)
+
+    @pytest.mark.parametrize("strides", [1, 2, (1, 1), (2, 2)])
+    def test_square_strides_are_the_non_vacuous_control(self, strides):
+        """The control for the arm above: every SQUARE form still constructs.
+
+        Without this, `test_non_square_strides_raises` could be satisfied by a
+        constructor that rejected `strides` outright.
+        """
+        layer = GaborDepthwiseSeparableBlock(filters=F, strides=strides)
+        assert layer.strides == strides
+
+    def test_non_square_kernel_size_is_still_accepted(self):
+        """Only `strides` is square-constrained; `kernel_size` is NOT.
+
+        The depthwise kernel may be rectangular -- TensorFlow's restriction is
+        on the stride pair alone. Pinning this stops the W-3 fix from being
+        widened into a rejection of rectangular Gabor windows.
+        """
+        layer = GaborDepthwiseSeparableBlock(filters=F, kernel_size=(3, 5))
+        assert layer.kernel_size == (3, 5)
+
     def test_rank3_input_raises(self, rng):
         layer = GaborDepthwiseSeparableBlock(filters=F, filters_per_channel=M, kernel_size=K)
         x = rng.standard_normal((B, H, 3)).astype("float32")
@@ -154,6 +188,20 @@ FORWARD_CASES = [
     (2, "valid", 7),
 ]
 
+# An ODD input extent, for the same grid. 15 is divisible by NEITHER stride, so
+# these four numbers are the ones a ceil/floor drift changes -- see
+# `TestComputeOutputShape::test_odd_input_extent_matches_call`. Hand-derived:
+#   same,  s=1 -> ceil(15/1) = 15       same,  s=2 -> ceil(15/2) = 8
+#   valid, s=1 -> ceil((15-3+1)/1) = 13
+#   valid, s=2 -> ceil(13/2) = 7
+ODD = 15
+ODD_INPUT_CASES = [
+    (1, "same", 15),
+    (2, "same", 8),
+    (1, "valid", 13),
+    (2, "valid", 7),
+]
+
 
 class TestForwardPass:
     """Shape and finiteness across strides x padding x input channels."""
@@ -173,6 +221,32 @@ class TestForwardPass:
 
         assert tuple(y.shape) == (B, out_hw, out_hw, F)
         assert bool(keras.ops.all(keras.ops.isfinite(y)))
+
+    def test_non_square_kernel_size_runs_and_has_the_predicted_shape(self, sample_input):
+        """No arm in this module passed a TUPLE `kernel_size` before.
+
+        That gap is why mutation ME (`_positive_pair` collapsing a non-square
+        pair to `(pair[0], pair[0])`) survived the whole suite. Hand-derived for
+        a 16x16 input, `kernel_size=(3, 5)`, stride 1, `'valid'`:
+            h = 16 - 3 + 1 = 14,  w = 16 - 5 + 1 = 12
+        i.e. the two axes MUST differ, so an implementation that reuses the
+        height kernel for the width cannot pass.
+        """
+        layer = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=(3, 5),
+            strides=1,
+            padding="valid",
+        )
+        assert layer.built is False
+        predicted = layer.compute_output_shape((B, H, W, 3))
+        assert tuple(predicted) == (B, 14, 12, F)
+
+        y = layer(sample_input, training=False)
+        assert tuple(y.shape) == (B, 14, 12, F)
+        assert bool(keras.ops.all(keras.ops.isfinite(y)))
+        assert tuple(layer.gabor_depthwise.kernel.shape) == (3, 5, 3, M)
 
     def test_depthwise_kernel_shape_is_channelwise(self, sample_input):
         """The frozen bank is (kh, kw, in_channels, filters_per_channel)."""
@@ -210,6 +284,40 @@ class TestComputeOutputShape:
         y = layer(sample_input, training=False)
         assert bool(keras.ops.all(keras.ops.isfinite(y)))
         assert tuple(y.shape) == tuple(predicted)
+
+    @pytest.mark.parametrize("strides,padding,out_hw", ODD_INPUT_CASES)
+    def test_odd_input_extent_matches_call(self, rng, strides, padding, out_hw):
+        """The drift-visibility arm for review C-2 / criterion SC-19.
+
+        Every other spatial arm in this module uses `H = W = 16`, which is
+        divisible by BOTH strides tested, so a ceil-vs-floor error in the
+        `'same'` branch is arithmetically invisible: `ceil(16/2) == 16 // 2`.
+        MEASURED against the pre-fix code, a ceil->floor mutation left the suite
+        at `63 passed`. `H = W = 15` is divisible by neither stride, so every
+        expected value below differs under floor division (`same,s=2`: 8 vs 7;
+        `valid,s=2`: 7 vs 6).
+
+        Hand-derived, NOT read off the layer, for `ODD = 15` and `K = 3`:
+            same,  s=1 -> ceil(15/1)      = 15    (floor: 15)
+            same,  s=2 -> ceil(15/2)      = 8     (floor: 7)
+            valid, s=1 -> ceil((15-3+1)/1) = 13   (floor: 13)
+            valid, s=2 -> ceil(13/2)      = 7     (floor: 6)
+        """
+        layer = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            strides=strides,
+            padding=padding,
+        )
+        assert layer.built is False
+        predicted = layer.compute_output_shape((B, ODD, ODD, 3))
+        assert tuple(predicted) == (B, out_hw, out_hw, F)
+
+        x = rng.standard_normal((B, ODD, ODD, 3)).astype("float32")
+        y = layer(x, training=False)
+        assert tuple(y.shape) == tuple(predicted)
+        assert bool(keras.ops.all(keras.ops.isfinite(y)))
 
     def test_compute_output_shape_rejects_wrong_rank(self):
         layer = GaborDepthwiseSeparableBlock(filters=F, kernel_size=K)
@@ -1301,16 +1409,25 @@ class TestDegenerateSpatialInputs:
         with pytest.raises(ValueError, match=r"[Cc]omputed output size would be negative"):
             block(np.zeros((1, 1, 1, 3), dtype="float32"), training=False)
 
-    def test_compute_output_shape_returns_a_negative_extent_where_call_raises(self):
-        """The unbuilt shape helper does NOT reproduce `call()`'s refusal.
+    def test_compute_output_shape_raises_where_call_raises(self):
+        """The unbuilt shape path REPRODUCES `call()`'s refusal (review W-2).
 
-        MEASURED: for K=3, 'valid', a 1x1 input, `compute_output_shape` returns
-        `(1, -1, -1, 8)` -- an arithmetically consistent but physically
-        impossible extent -- while `call()` on the same shape raises (arm
-        above). This is asserted as the REAL behaviour, not as the desired one:
-        the layer is not modified by this step, and a caller who trusts
-        `compute_output_shape` alone on an over-cropped configuration gets a
-        negative dimension rather than an error.
+        This arm previously pinned the opposite: `compute_output_shape` used to
+        answer `(1, -1, -1, 8)` -- an arithmetically consistent but physically
+        impossible extent -- where `call()` raised. That divergence came from the
+        block owning a second, private copy of the spatial arithmetic. Now that
+        both paths delegate to the sub-layers (decisions.md D-023), the
+        depthwise stage raises here exactly as it does in `call()`.
+
+        MEASURED on keras 3.8.0, this is also what BOTH stock layers the block
+        wraps already do on the same shape:
+            `keras.layers.Conv2D(8, 3, padding='valid')
+                 .compute_output_shape((1, 1, 1, 3))`            -> RAISES
+            `keras.layers.DepthwiseConv2D(3, depth_multiplier=2,
+                 padding='valid').compute_output_shape((1,1,1,3))` -> RAISES
+        both with `ValueError: Computed output size would be negative`. The
+        boundary one pixel over (`2x2 -> (1, 0, 0, 8)`), where the block, its
+        `call()` and both stock layers all agree, is pinned by the arm below.
         """
         block = GaborDepthwiseSeparableBlock(
             filters=F,
@@ -1320,7 +1437,24 @@ class TestDegenerateSpatialInputs:
             name="degenerate_cos",
         )
         assert block.built is False
-        assert tuple(block.compute_output_shape((1, 1, 1, 3))) == (1, -1, -1, F)
+        with pytest.raises(ValueError, match=r"[Cc]omputed output size would be negative"):
+            block.compute_output_shape((1, 1, 1, 3))
+        # The query must not have built the layer as a side effect.
+        assert block.built is False
+
+    def test_the_stock_keras_layers_agree_on_the_impossible_config(self):
+        """Anti-vacuity control for the arm above: the block matches Keras.
+
+        If a future Keras release starts CLAMPING instead of raising, this arm
+        goes red first and names the framework, so the block's behaviour is not
+        silently re-litigated as a defect of this layer.
+        """
+        for layer in (
+            keras.layers.Conv2D(F, K, padding="valid"),
+            keras.layers.DepthwiseConv2D(K, depth_multiplier=M, padding="valid"),
+        ):
+            with pytest.raises(ValueError, match=r"[Cc]omputed output size would be negative"):
+                layer.compute_output_shape((1, 1, 1, 3))
 
     def test_exactly_zero_spatial_extent_is_produced_not_rejected(self):
         """K=3 on a 2x2 input with 'valid' padding: extent 0, and it runs.

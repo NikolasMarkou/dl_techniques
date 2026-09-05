@@ -11,8 +11,14 @@ The composition is not new to this library. It is hand-written, twice and
 independently, inside two shipped model builders --
 ``models/vision/convunext/model.py`` and
 ``models/vision/bias_free_denoisers/bfunet.py`` -- as a frozen Gabor
-``DepthwiseConv2D`` followed by a mandatory bias-free 1x1 projection. This
-module packages that convention as one registered layer; it does not
+``DepthwiseConv2D`` followed by an optionally bias-free 1x1 projection. Only
+``bfunet.py`` hardcodes that projection bias-free (``bfunet.py:207``,
+``use_bias=False``); ``convunext`` threads it from ``create_convunext``'s own
+``use_bias`` (``model.py:1084``), which defaults to ``True`` (``model.py:620``),
+so convunext's projection carries a bias at its default. The projection is also
+not mandatory in either builder: both expose a ``gabor_stem_projection`` knob
+(``model.py:632``, ``bfunet.py:626``) that defaults to ``True`` but can drop it.
+This module packages that convention as one registered layer; it does not
 reimplement any Gabor math, which lives in
 :class:`~dl_techniques.initializers.gabor_filters_initializer.GaborFiltersInitializer`
 and is composed here through
@@ -25,8 +31,10 @@ frequency-selective front-end. Freezing it makes the block cheap (one
 learnable weight tensor, the 1x1 kernel), removes the gradient path through a
 synthesized kernel entirely, and -- with the shipped defaults, which are
 bias-free and carry no normalization -- preserves positive homogeneity,
-``D(a * x) == a * D(x)`` for ``a > 0``. That property is what the two existing
-consumers, both bias-free denoisers, depend on.
+``D(a * x) == a * D(x)`` for ``a > 0``. That property is what ``bfunet.py`` --
+unconditionally bias-free -- and ``convunext``'s ``use_bias=False`` arm depend
+on. ``convunext``'s DEFAULT arm (``use_bias=True``) does not, and is bias-carrying
+from its stem projection onward.
 
 References:
     - Ozbulak, G., & Ekenel, H. K. *Initialization of Convolutional Neural
@@ -74,45 +82,17 @@ _POSITIVELY_HOMOGENEOUS_ACTIVATIONS: FrozenSet[Optional[str]] = frozenset(
 
 
 # ---------------------------------------------------------------------
-# module-private helpers
-# ---------------------------------------------------------------------
-
-def _conv_output_length(
-        input_length: Optional[int],
-        kernel_size: int,
-        stride: int,
-        padding: str
-) -> Optional[int]:
-    """Compute one spatial output dimension of a convolution.
-
-    This is the single home of the block's spatial arithmetic; both
-    :meth:`GaborDepthwiseSeparableBlock.compute_output_shape` and the
-    ``build``-time shape threading go through it, so the two can never drift.
-
-    :param input_length: Input extent along one spatial axis, or ``None`` when
-        the dimension is dynamic.
-    :type input_length: Optional[int]
-    :param kernel_size: Kernel extent along the same axis. Must be positive.
-    :type kernel_size: int
-    :param stride: Stride along the same axis. Must be positive.
-    :type stride: int
-    :param padding: Padding mode, ``'same'`` or ``'valid'``.
-    :type padding: str
-    :return: Output extent along that axis, or ``None`` if ``input_length``
-        is ``None``.
-    :rtype: Optional[int]
-    """
-    if input_length is None:
-        return None
-
-    if padding == 'same':
-        # ceil(input_length / stride)
-        return (input_length + stride - 1) // stride
-
-    # 'valid': ceil((input_length - kernel_size + 1) / stride)
-    return (input_length - kernel_size + stride) // stride
-
-
+# DECISION plan-2026-09-05T115518-e69163e4/D-023: this block owns NO spatial
+# arithmetic of its own. A module-private `_conv_output_length` helper used to
+# live here; do NOT bring it back. Review finding C-2 MEASURED that it was a
+# SECOND implementation -- `build()` threaded shape through
+# `self.gabor_depthwise.compute_output_shape(...)` and never called the helper,
+# despite the helper's docstring claiming to be "the single home ... so the two
+# can never drift" -- and a ceil->floor mutation of its `'same'` branch left the
+# suite at 63 passed. Both `build()` and `compute_output_shape()` now delegate to
+# the sub-layers, so there is exactly one implementation (the framework's) and
+# the block inherits Keras' own refusal to report a negative extent (review
+# C-2 and W-2). See decisions.md D-023.
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.conv_blocks.gabor_depthwise_separable_block")
@@ -163,12 +143,19 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
     Relation to the existing consumers
     ----------------------------------
     The default configuration -- no normalization, no activation,
-    ``pointwise_use_bias=False`` -- is exactly the Gabor-stem convention already
-    used by ``models/vision/convunext/model.py`` and
-    ``models/vision/bias_free_denoisers/bfunet.py``. At those defaults the block
-    is bias-free end to end and contains no normalization, so positive
-    homogeneity ``D(a * x) == a * D(x)`` for ``a > 0`` is preserved. Neither
-    consumer is migrated onto this class; both keep their inline stems.
+    ``pointwise_use_bias=False`` -- reproduces the Gabor stem of
+    ``models/vision/bias_free_denoisers/bfunet.py``, which hardcodes
+    ``use_bias=False`` on its 1x1 projection (``bfunet.py:207``). It also
+    reproduces ``models/vision/convunext/model.py``'s stem in that model's
+    ``use_bias=False`` arm; under ``create_convunext``'s DEFAULT
+    ``use_bias=True`` (``model.py:620``) the projection is bias-carrying
+    (``model.py:1084``), which corresponds to ``pointwise_use_bias=True`` here.
+    Both builders also make the projection itself optional via
+    ``gabor_stem_projection`` (default ``True``); this block has no such mode
+    (see the D-009 note in ``__init__``). At the block's defaults it is bias-free
+    end to end and contains no normalization, so positive homogeneity
+    ``D(a * x) == a * D(x)`` for ``a > 0`` is preserved. Neither consumer is
+    migrated onto this class; both keep their inline stems.
 
     Positive homogeneity and ``activation``
     ---------------------------------------
@@ -217,7 +204,11 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
         size and the Gabor factory's own default.
     :type kernel_size: Union[int, Tuple[int, int]]
     :param strides: Stride of the depthwise stage, an int or an ``(sh, sw)``
-        tuple. The pointwise stage is always stride 1. Defaults to 1.
+        tuple. ``sh`` and ``sw`` must be EQUAL -- TensorFlow's depthwise
+        convolution supports no other case, so a non-square pair is rejected in
+        the constructor rather than at the first forward pass. Non-square
+        ``kernel_size`` is unaffected and fully supported. The pointwise stage
+        is always stride 1. Defaults to 1.
     :type strides: Union[int, Tuple[int, int]]
     :param padding: Padding mode of the depthwise stage, ``'same'`` or
         ``'valid'``. Defaults to ``'same'``.
@@ -268,7 +259,8 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
     :param kwargs: Additional arguments for the Layer base class.
     :raises ValueError: If ``filters`` is not positive, ``filters_per_channel``
         is below 1, ``kernel_size`` or ``strides`` is non-positive or not a
-        pair, or ``padding`` is neither ``'same'`` nor ``'valid'``.
+        pair, ``strides`` is a non-square pair, or ``padding`` is neither
+        ``'same'`` nor ``'valid'``.
     """
 
     def __init__(
@@ -329,8 +321,28 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
                 f"padding must be 'same' or 'valid', got {padding!r}"
             )
 
-        self._kernel_size_hw = _positive_pair(kernel_size, 'kernel_size')
-        self._strides_hw = _positive_pair(strides, 'strides')
+        # Validated, not stored: since `build`/`compute_output_shape` delegate to
+        # the sub-layers (D-023 above), the normalized pairs are needed only for
+        # the checks below -- keeping them as attributes would be write-only state.
+        _positive_pair(kernel_size, 'kernel_size')
+        stride_h, stride_w = _positive_pair(strides, 'strides')
+
+        # DECISION plan-2026-09-05T115518-e69163e4/D-023: reject non-square
+        # strides in the CONSTRUCTOR. Review finding W-3 MEASURED that
+        # `strides=(1, 2)` constructed fine and produced a shape, then died in
+        # `call()` with a raw TF `InvalidArgumentError: Current implementation
+        # only supports equal length strides in the row and column dimensions`
+        # from `depthwise_conv2d`. Do NOT relax this to a warning and do NOT
+        # move it into `build()`: the parameter is otherwise accepted,
+        # documented and `get_config()`-round-tripped for a configuration that
+        # can never run. Non-square `kernel_size` DOES work and stays allowed.
+        # See decisions.md D-023.
+        if stride_h != stride_w:
+            raise ValueError(
+                f"strides must be equal in the height and width dimensions "
+                f"(the depthwise convolution supports no other case), "
+                f"got {strides}"
+            )
 
         self.filters = filters
         self.filters_per_channel = filters_per_channel
@@ -447,15 +459,19 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
         self.gabor_depthwise.build(input_shape)
         depthwise_output_shape = self.gabor_depthwise.compute_output_shape(input_shape)
 
+        # Thread the shape through every stage in `call()` order, taking each
+        # stage's own `compute_output_shape` -- the same chain
+        # `compute_output_shape` walks, so the two agree by construction.
+        stage_shape = depthwise_output_shape
         if self.gabor_norm is not None:
-            self.gabor_norm.build(depthwise_output_shape)
+            self.gabor_norm.build(stage_shape)
+            stage_shape = self.gabor_norm.compute_output_shape(stage_shape)
         if self.gabor_activation is not None:
-            self.gabor_activation.build(depthwise_output_shape)
+            self.gabor_activation.build(stage_shape)
+            stage_shape = self.gabor_activation.compute_output_shape(stage_shape)
 
-        self.pointwise_conv.build(depthwise_output_shape)
-        pointwise_output_shape = self.pointwise_conv.compute_output_shape(
-            depthwise_output_shape
-        )
+        self.pointwise_conv.build(stage_shape)
+        pointwise_output_shape = self.pointwise_conv.compute_output_shape(stage_shape)
 
         logger.debug(
             f"Built GaborDepthwiseSeparableBlock: input_shape={input_shape} -> "
@@ -501,32 +517,40 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape from stored configuration alone.
+        """Compute the output shape by delegating to the sub-layers.
 
-        This works on an unbuilt layer: it reads only constructor arguments,
-        never a sub-layer's weights.
+        This works on an unbuilt layer: the sub-layers are all created in
+        ``__init__``, and ``compute_output_shape`` on a Keras convolution reads
+        only its own configuration, never its weights (MEASURED on keras 3.8.0:
+        an unbuilt ``gabor_depthwise``/``pointwise_conv`` both answer, and both
+        stay ``built is False`` afterwards).
+
+        The block performs NO spatial arithmetic of its own -- see the D-023
+        note at module scope. One consequence is inherited deliberately: on a
+        configuration whose output extent would be negative (a kernel larger
+        than a ``'valid'``-padded input), the depthwise stage RAISES here
+        exactly as it does in ``call()``, and exactly as stock
+        ``keras.layers.Conv2D``/``DepthwiseConv2D`` do.
 
         :param input_shape: Shape tuple including the batch dimension.
         :type input_shape: Tuple[Optional[int], ...]
         :return: ``(batch, new_height, new_width, filters)``.
         :rtype: Tuple[Optional[int], ...]
-        :raises ValueError: If the input shape is not rank 4.
+        :raises ValueError: If the input shape is not rank 4, or if the
+            configured kernel/padding leaves no pixels to convolve.
         """
         if len(input_shape) != 4:
             raise ValueError(
                 f"Expected 4D input shape, got {len(input_shape)}D: {input_shape}"
             )
 
-        batch_size, height, width, _ = input_shape
-        kernel_h, kernel_w = self._kernel_size_hw
-        stride_h, stride_w = self._strides_hw
+        stage_shape = self.gabor_depthwise.compute_output_shape(input_shape)
+        if self.gabor_norm is not None:
+            stage_shape = self.gabor_norm.compute_output_shape(stage_shape)
+        if self.gabor_activation is not None:
+            stage_shape = self.gabor_activation.compute_output_shape(stage_shape)
 
-        # The pointwise stage is 1x1 / stride 1 / 'same', so it leaves the
-        # spatial dimensions untouched and only the depthwise stage matters.
-        new_height = _conv_output_length(height, kernel_h, stride_h, self.padding)
-        new_width = _conv_output_length(width, kernel_w, stride_w, self.padding)
-
-        return (batch_size, new_height, new_width, self.filters)
+        return tuple(self.pointwise_conv.compute_output_shape(stage_shape))
 
     def get_config(self) -> Dict[str, Any]:
         """Return every constructor argument, for serialization.
