@@ -36,7 +36,7 @@ see § Naming traps.
 | `fusion/` | — | Multimodal fusion layer |
 | `tokenizers/` | — | BPE tokenizer |
 | `complex/` | — | Complex-valued (complex-number) layers: `ComplexConv2D`, `ComplexDense`, `ComplexReLU`, complex pooling/dropout, raw-TF backend only |
-| `conv_blocks/` | — | Convolutional building blocks: bias-free Conv1D/2D, ConvNeXt v1/v2, depthwise separable, dynamic Conv2D, inverted residual, MobileOne, RepMixer, ResPath, universal inverted bottleneck, plus the shared `SqueezeExcitation` gate and `MatchChannels` skip helper |
+| `conv_blocks/` | — | Convolutional building blocks: bias-free Conv1D/2D, ConvNeXt v1/v2, depthwise separable (learnable `DepthwiseSeparableBlock`, plus `GaborDepthwiseSeparableBlock` — a frozen Gabor depthwise bank followed by a learnable 1x1 projection, bias-free and positively homogeneous at defaults), dynamic Conv2D, inverted residual, MobileOne, RepMixer, ResPath, universal inverted bottleneck, plus the shared `SqueezeExcitation` gate and `MatchChannels` skip helper |
 | `signal_processing/` | — | Classical/fixed signal and image primitives: Canny, CLAHE, Gaussian filter/pyramid, Laplacian filter family, Haar wavelet decomposition, shearlet transform, FFT/IFFT, strong (color-jitter + CutMix) augmentation |
 | `pooling/` | — | Spatial/channel layout changes with ~0 learned params: blur pool, pixel shuffle/unshuffle, patch merging, global sum pool, U-Net downsample-and-skip junction |
 | `structured_linear/` | — | Alternative parameterizations to a dense weight matrix: BitLinear (1.58-bit), MPS/tensor-train, OrthoBlock, orthogonal butterfly, random Fourier features, rigid simplex, KANvolution |
