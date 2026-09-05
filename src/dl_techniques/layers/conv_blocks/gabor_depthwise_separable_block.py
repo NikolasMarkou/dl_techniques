@@ -31,7 +31,10 @@ frequency-selective front-end. Freezing it makes the block cheap (one
 learnable weight tensor, the 1x1 kernel), removes the gradient path through a
 synthesized kernel entirely, and -- with the shipped defaults, which are
 bias-free and carry no normalization -- preserves positive homogeneity,
-``D(a * x) == a * D(x)`` for ``a > 0``. That property is what ``bfunet.py`` --
+``D(a * x) == a * D(x)`` for ``a > 0``, to the precision of the compute dtype
+(MEASURED ~1e-7 relative at ``float32``/``float64`` and ~1e-3 at
+``mixed_float16``; see the class docstring's dtype table). That property is
+what ``bfunet.py`` --
 unconditionally bias-free -- and ``convunext``'s ``use_bias=False`` arm depend
 on. ``convunext``'s DEFAULT arm (``use_bias=True``) does not, and is bias-carrying
 from its stem projection onward.
@@ -154,8 +157,36 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
     ``gabor_stem_projection`` (default ``True``); this block has no such mode
     (see the D-009 note in ``__init__``). At the block's defaults it is bias-free
     end to end and contains no normalization, so positive homogeneity
-    ``D(a * x) == a * D(x)`` for ``a > 0`` is preserved. Neither consumer is
-    migrated onto this class; both keep their inline stems.
+    ``D(a * x) == a * D(x)`` for ``a > 0`` is preserved -- to the precision of
+    the COMPUTE DTYPE, see the next section. Neither consumer is migrated onto
+    this class; both keep their inline stems.
+
+    Positive homogeneity is a FLOAT32/FLOAT64 guarantee
+    ---------------------------------------------------
+    The identity is exact over the reals; in floating point it holds only to
+    the rounding of the dtype the block actually computes in, and that regime
+    is part of the guarantee. MEASURED at ``filters=8``, over
+    ``a in {0.013, 0.5, 2.0, 3.7, 100.0}``, reporting the worst
+    ``max|D(a*x) - a*D(x)|`` relative to ``max|a*D(x)|``:
+
+    ===================  =================  ==================  ===============
+    global policy        config             worst rel. defect   in units of eps
+    ===================  =================  ==================  ===============
+    ``float32``          M=2, K=3           ``1.90e-07``        1.6 eps_f32
+    ``float32``          M=4, K=11          ``5.39e-07``        4.5 eps_f32
+    ``float64``          M=2, K=3           ``5.13e-08``        0.4 eps_f32
+    ``mixed_float16``    M=2, K=3           ``1.27e-03``        1.3 eps_f16
+    ``mixed_float16``    M=4, K=11          ``4.47e-03``        4.6 eps_f16
+    ===================  =================  ==================  ===============
+
+    So under ``mixed_float16`` -- which this block fully supports otherwise --
+    the invariant degrades by ~4 decades, to ``~1e-3`` relative rather than
+    ``~1e-7``. That is ordinary half-precision rounding (a few units of
+    ``eps_f16 = 9.77e-04``), not a defect of the block, but a bias-free-denoiser
+    consumer that relies on the invariant NUMERICALLY must run the block in
+    ``float32`` or ``float64``. The float64 row is bounded by ``eps_f32`` and not
+    by ``eps_f64`` because the inputs are float32 there, so ``a * x`` is already
+    rounded before the block sees it.
 
     Positive homogeneity and ``activation``
     ---------------------------------------
@@ -504,12 +535,35 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
                 f"got shape {inputs.shape}"
             )
 
+        # DECISION plan-2026-09-05T115518-e69163e4/D-027 + D-028: EVERY stage
+        # below takes an EXPLICIT `training=training`. Do NOT drop any of them
+        # as "redundant because Keras propagates `training` ambiently".
+        # MEASURED (keras 3.8, `keras/src/layers/layer.py:851`,
+        # `call_context.training = training` on every nested `__call__`, and
+        # `_maybe_reset_call_context` at :1501 restores it only for the
+        # OUTERMOST entry layer): the ambient slot is a SINGLE MUTABLE SLOT, so
+        # any sub-layer that calls a child of its own with a different value
+        # poisons it for every LATER un-forwarded call in the same outer call.
+        # With the repo's `_ContextPoisoner` installed at `gabor_depthwise`
+        # and the block called `training=True`, dropping the forward on
+        # `gabor_norm` takes `gabor_norm.moving_mean` movement from 0.00008846
+        # to 0.00000000 (unpoisoned control 0.00008846 both ways), and before
+        # `gabor_activation` got its forward the activation observed
+        # `training=[False]`. Guarded by section V of
+        # `tests/test_layers/test_conv_blocks/test_gabor_depthwise_separable_block.py`.
+        # An earlier revision of this plan claimed the forward was
+        # unobservable; that claim was REFUTED -- see decisions.md D-027.
         x = self.gabor_depthwise(inputs, training=training)
 
         if self.gabor_norm is not None:
             x = self.gabor_norm(x, training=training)
         if self.gabor_activation is not None:
-            x = self.gabor_activation(x)
+            # MEASURED: all 22 constructible `ACTIVATION_REGISTRY` layers AND
+            # the `keras.layers.Activation` fallback accept `training=` -- Keras
+            # strips the kwarg for a `call()` that does not declare it
+            # (`layer.py:854`), so this forward is safe for every activation
+            # `resolve_activation_layer` can return.
+            x = self.gabor_activation(x, training=training)
 
         return self.pointwise_conv(x, training=training)
 

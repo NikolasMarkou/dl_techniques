@@ -30,6 +30,16 @@ from dl_techniques.layers.conv_blocks.gabor_depthwise_separable_block import (
 from tests.test_models.gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,
 )
+# Section V's instrument. IMPORTED, not re-implemented: `_ContextPoisoner` and
+# `StrictTrainingActivation` are this repo's established, PROVEN-RED probe for
+# `training=` forwarding (provenance header at
+# `tests/test_layers/test_attention/test_tripse_attention.py:627-645`). Read
+# section V's block comment before touching either name.
+from tests.test_layers.test_attention.test_tripse_attention import (
+    _ContextPoisoner,
+    StrictTrainingActivation,
+)
+import dl_techniques.layers.activations.factory as _act_factory
 
 # ---------------------------------------------------------------------
 # Shared constants. `K = 3` (not the layer default 11) keeps `padding='valid'`
@@ -1721,6 +1731,83 @@ class TestPositiveHomogeneity:
                     f"allowlist's warning would then be describing nothing"
                 )
 
+    def test_under_mixed_float16_it_holds_only_to_a_float16_bound(
+        self, sample_input, mixed_float16_policy
+    ):
+        """SC-24. The invariant is a claim about a DTYPE REGIME, not the reals.
+
+        Every arm above runs at `float32`, where the derived allowance is
+        `32 * eps_f32 * scale`. `TestDtypePolicies` advertises `mixed_float16`
+        as a supported policy, so a consumer may reasonably run the block
+        there -- and under half precision the SAME property holds ~4 decades
+        looser. That is ordinary fp16 rounding, not a broken layer, and the
+        honest response is to assert it against the fp16 bound rather than to
+        loosen the float32 one (which stays exactly where it was).
+
+        THE BOUND IS THE SAME DERIVATION, with the eps of the COMPUTE dtype
+        substituted. The derivation above bounds the defect by `n * eps` of the
+        output scale for an accumulation of `n <= kh*kw + C*M = 9 + 6 = 15`
+        terms, rounded up to 32. Nothing in that argument is float32-specific;
+        at `mixed_float16` the block computes in float16
+        (`_EXPECTED_POLICY_DTYPES`), so the same bound reads `32 * eps_f16`.
+        `eps_f16 = 9.766e-04`, i.e. 8192x `eps_f32`.
+
+        MEASURED at this configuration (M=2, K=3, F=8), worst over the five
+        scales: relative defect `1.267e-03` = 1.297 units of `eps_f16` --
+        24.7x inside the 32-eps bound, the same order of headroom the float32
+        arms carry (1.4-1.8 eps). Per scale: a=0.013 1.11 eps_f16, a=0.5 and
+        a=2.0 EXACTLY 0 (powers of two rescale without rounding in any radix-2
+        format), a=3.7 1.01 eps_f16, a=100.0 1.30 eps_f16. At the SHIPPED
+        defaults (M=4, K=11) the same measurement gives 4.58 eps_f16, still
+        inside 32 but with less headroom -- expected, since `n` is 133 there,
+        which is why this arm is pinned at the configuration the derivation
+        was written for.
+        """
+        assert mixed_float16_policy == "mixed_float16"
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            pointwise_use_bias=False,
+            name="homog_f16",
+        )
+        assert block.compute_dtype == "float16", (
+            "this arm is only meaningful in half precision; the block computes "
+            f"in {block.compute_dtype}"
+        )
+
+        eps16 = float(np.finfo(np.float16).eps)
+        worst_rel = 0.0
+        worst_over_f32_allowance = 0.0
+        for a in _HOMOGENEITY_SCALES:
+            defect, scale = _homogeneity_defect(block, sample_input, a)
+            assert scale / a > 0.1, f"output scale {scale / a} is too small"
+            assert defect <= 32.0 * eps16 * scale, (
+                f"positive homogeneity at a={a} broke even the FLOAT16 bound: "
+                f"defect {defect} exceeds {32.0 * eps16 * scale} "
+                f"(= 32 * {eps16} * {scale}); that is a layer defect, not "
+                f"half-precision rounding"
+            )
+            worst_rel = max(worst_rel, defect / scale)
+            worst_over_f32_allowance = max(
+                worst_over_f32_allowance, defect / _homogeneity_atol(scale)
+            )
+
+        # ANTI-VACUITY, and the reason the docstring now carries a dtype
+        # qualifier: this arm must NOT be satisfiable by the float32 allowance,
+        # otherwise it would be a second float32 run wearing an fp16 label and
+        # the "~4 decades looser" claim would be unevidenced.
+        assert worst_over_f32_allowance > 1.0, (
+            "the fp16 run met the FLOAT32 homogeneity allowance "
+            f"(worst defect/atol_f32 = {worst_over_f32_allowance}), so either "
+            "the policy did not take effect or this arm duplicates the float32 "
+            "ones; MEASURED it is ~332x outside that allowance"
+        )
+        assert worst_rel > 8.0 * _F32_EPS, (
+            f"the worst fp16 relative defect {worst_rel} is at float32 scale, "
+            "so half precision is not actually in force"
+        )
+
 
 # ---------------------------------------------------------------------
 # S. NO DEAD KNOBS (SC-20) -- every knob is read off the BUILT sub-layer
@@ -1992,20 +2079,17 @@ class TestTrainingDependentNormalization:
     `bias_free_batch_norm` are equally valid keys of the same factory and DO
     depend on it.
 
-    IMPORTANT SCOPE NOTE, MEASURED, so a later reader does not mistake this
-    section for something it is not: this does NOT prove that
-    `self.gabor_norm(x, training=training)` forwards `training` explicitly.
-    Keras 3.8 propagates `training` to sub-layers through an AMBIENT call
-    context, so DELETING `training=training` from that call changes NOTHING
-    observable. MEASURED twice. (i) On an isolated two-layer probe wrapping a
-    stock `keras.layers.BatchNormalization`, `max|train - infer|` = 10.4651
-    WITH the explicit forward and 10.4651 WITHOUT it -- bit-identical. (ii) On
-    the REAL layer, with `self.gabor_norm(x, training=training)` replaced by
-    `self.gabor_norm(x)`: the whole module stayed at `96 passed`, and this
-    class on its own stayed at `3 passed`. The explicit forward is therefore
-    redundant-but-correct under Keras 3.8 and is NOT observable from outside
-    the layer; the review's MB mutation is INERT, not merely unguarded, so no
-    test in any repo could redden on it.
+    SCOPE NOTE, MEASURED, so a later reader does not mistake this section for
+    something it is not: these arms do NOT guard the EXPLICIT
+    `training=training` argument on `self.gabor_norm(...)`. Keras 3.8 also
+    delivers `training` to sub-layers through an AMBIENT call context, so with
+    that argument deleted these three arms stay GREEN (MEASURED: the whole
+    module at `96 passed`). What separates the explicit channel from the
+    ambient one is a POISONER, and that guard lives in section V below.
+
+    An earlier revision of this docstring went further and claimed the
+    explicit forward was unobservable by any test at all. That claim was
+    REFUTED and is deleted -- see section V and decisions.md D-027.
 
     What these arms DO pin, and what was genuinely missing, is that the block
     runs a training-dependent normalization correctly in BOTH modes -- an
@@ -2014,14 +2098,13 @@ class TestTrainingDependentNormalization:
     training-mode behaviour at all.
     """
 
-    # DECISION plan-2026-09-05T115518-e69163e4/D-026: this section does NOT
-    # guard `training=` forwarding, and must not be relabelled as if it did.
-    # MEASURED on the real layer: deleting `training=training` from
-    # `self.gabor_norm(...)` leaves the module at `96 passed`, because Keras
-    # 3.8 delivers `training` to sub-layers through an ambient call context.
-    # Do NOT try to strengthen these arms until they redden on that mutation --
-    # no external test can, and chasing it would produce a guard written
-    # against a framework behaviour that does not exist. See decisions.md D-026.
+    # DECISION plan-2026-09-05T115518-e69163e4/D-027: this section does NOT
+    # guard `training=` forwarding, and must not be relabelled as if it did --
+    # MEASURED, deleting `training=training` from `self.gabor_norm(...)` leaves
+    # these arms green, because Keras 3.8 also delivers the flag ambiently. Do
+    # NOT, however, conclude from that (as D-026 did) that no test can see the
+    # explicit forward: section V reddens on exactly that mutation using the
+    # repo's `_ContextPoisoner`. See decisions.md D-027.
     @pytest.mark.parametrize(
         "normalization_type", ["batch_norm", "bias_free_batch_norm"]
     )
@@ -2075,7 +2158,8 @@ class TestTrainingDependentNormalization:
         the norm sub-layer; it does not attribute that to the explicit
         `training=` argument in `call()`, because (see the class docstring)
         Keras 3.8 would deliver the flag through the ambient call context even
-        if that argument were deleted.
+        if that argument were deleted. Section V does make that attribution,
+        by poisoning the ambient channel first.
         """
         block = GaborDepthwiseSeparableBlock(
             filters=F,
@@ -2098,3 +2182,295 @@ class TestTrainingDependentNormalization:
         assert not np.array_equal(after, before), (
             "a training call did NOT move the moving statistics"
         )
+
+
+# ---------------------------------------------------------------------
+# V. `training=` IS FORWARDED EXPLICITLY (SC-22, SC-23) -- read this first
+# ---------------------------------------------------------------------
+#
+# WHAT THIS SECTION EXISTS TO CORRECT. An earlier revision of this module
+# asserted, in section U's class docstring and in a `# DECISION .../D-026`
+# anchor, that dropping `training=training` from `self.gabor_norm(...)` was
+# behaviourally unobservable BY ANY TEST ANYWHERE, and instructed maintainers
+# not to try to write one. That was FALSE. It was refuted with a pattern that
+# already lives in this repo, and both the claim and the anchor are deleted
+# (decisions.md D-027 carries the retracted wording verbatim, so this file
+# does not).
+#
+# THE MECHANISM. Keras delivers `training` to a sub-layer through TWO channels:
+#   (1) the EXPLICIT `training=` kwarg at the call site, and
+#   (2) an AMBIENT `CallContext.training`.
+# `keras/src/layers/layer.py:851` writes `call_context.training = training` on
+# every nested `__call__`, and `_maybe_reset_call_context` (:1501) clears it
+# only for the OUTERMOST entry layer -- so the ambient value is a SINGLE
+# MUTABLE SLOT that any sibling sub-layer can overwrite for every LATER
+# un-forwarded call in the same outer call. Un-poisoned, channel (2) delivers
+# the right value on its own, which is exactly why an ordinary probe cannot
+# tell the two apart: MEASURED, `block.call(x, training=True)` vs
+# `training=False` on a `batch_norm` block gives `max|delta| = 1.287291` WITH
+# the explicit forward and `1.287291` WITHOUT it. A direct train-vs-inference
+# comparison therefore CANNOT redden on this mutation, and by the source lines
+# above it never will -- do not spend time on that shape.
+#
+# The `_ContextPoisoner` below is what separates the channels: it delegates to
+# a real sub-layer and then calls a dead child with `training=False`, poisoning
+# the ambient slot mid-call. It is IMPORTED, not re-implemented: it is this
+# repo's established, documented, PROVEN-RED instrument for this exact defect
+# class (see the block comment at
+# `tests/test_layers/test_attention/test_tripse_attention.py:627-645`, which
+# records it firing on `'gate_activation' received training=False` before that
+# plan's D-015 fix). This module already imports a shared test oracle across
+# packages the same way (`tests.test_models.gradient_flow_oracle`).
+#
+# MEASURED on THIS layer, poisoner installed at `gabor_depthwise`, block called
+# `training=True`:
+#   * `gabor_norm.moving_mean` movement: 0.00008846 at HEAD, 0.00000000 with
+#     `training=training` dropped from `self.gabor_norm(...)`; the UNPOISONED
+#     control moves 0.00008846 in both cases -- so it is the poisoner, not the
+#     probe, that makes the gap observable.
+#   * the activation observed `training=[False]` before it was given an
+#     explicit forward, and `[True]` after (review pass-2 R-2, decisions.md
+#     D-028).
+#
+# DECISION plan-2026-09-05T115518-e69163e4/D-027 + D-029: this section is the
+# guard the deleted anchor said could not exist. Do NOT weaken it by dropping the
+# poisoner -- without it every arm here passes on the ambient channel and the
+# section becomes vacuous, which is precisely how the false claim arose. Do
+# NOT replace the poisoner with a local copy either: one definition, in the
+# module whose header carries its proven-RED provenance. And do NOT add a
+# direct `training=True` vs `training=False` arm as a second mechanism: it
+# CANNOT redden on the mutation (MEASURED 1.287291 both ways, and see the
+# Keras source lines above). See decisions.md D-027, D-028 and D-029.
+
+# Registry key for the strict probe activation, namespaced to this module so it
+# cannot collide with the tripse module's own key if both are collected.
+_STRICT_ACT_KEY = "__gabor_block_strict_training_probe__"
+
+
+class _ShapedStrictTrainingActivation(StrictTrainingActivation):
+    """`StrictTrainingActivation` plus the one method THIS block requires.
+
+    MEASURED: `GaborDepthwiseSeparableBlock.build()` calls
+    `self.gabor_activation.compute_output_shape(...)` to thread the stage shape
+    (that delegation is what SC-19 rests on), and `keras.layers.Layer` has no
+    default implementation -- the bare probe raises
+    `NotImplementedError: Layer StrictTrainingActivation does not have a
+    compute_output_shape method implemented`. TripSE never hits this because it
+    does not size anything off its activation.
+
+    Subclassing rather than copying keeps ONE definition of the probe's actual
+    behaviour (the `training is not True` raise and its message) in the repo;
+    only the shape passthrough is added here. Do NOT reimplement the `call()`.
+    """
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+
+@pytest.fixture
+def strict_activation_registered():
+    """Register `_ShapedStrictTrainingActivation` under `_STRICT_ACT_KEY`.
+
+    Installing it in `ACTIVATION_REGISTRY` is what lets the probe enter through
+    the block's own `activation=` CONSTRUCTOR argument rather than by patching
+    a built attribute -- so the arm exercises the real construction path.
+
+    :yield: the registry key the block should be constructed with.
+    :rtype: str
+    """
+    _act_factory.ACTIVATION_REGISTRY[_STRICT_ACT_KEY] = {
+        "class": _ShapedStrictTrainingActivation,
+        "description": "test-only strict training probe",
+        "required_params": [],
+        "optional_params": {},
+        "use_case": "proven-RED injection for training= forwarding",
+    }
+    try:
+        yield _STRICT_ACT_KEY
+    finally:
+        _act_factory.ACTIVATION_REGISTRY.pop(_STRICT_ACT_KEY, None)
+
+
+class TestTrainingIsForwardedExplicitly:
+    """Read the block comment above before touching these arms."""
+
+    @staticmethod
+    def _batch_norm_block(name, poisoned):
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            normalization_type="batch_norm",
+            name=name,
+        )
+        if poisoned:
+            # The depthwise stage is the one sub-layer that runs BETWEEN the
+            # block's entry and the norm, so it is where the poison has to go.
+            block.gabor_depthwise = _ContextPoisoner(block.gabor_depthwise)
+        return block
+
+    @staticmethod
+    def _moving_mean_movement(block, sample_input, training):
+        block(sample_input, training=False)  # build, and settle the statistics
+        before = keras.ops.convert_to_numpy(block.gabor_norm.moving_mean).copy()
+        block(sample_input, training=training)
+        after = keras.ops.convert_to_numpy(block.gabor_norm.moving_mean)
+        return float(np.max(np.abs(after - before)))
+
+    def test_the_norm_gets_training_through_the_explicit_kwarg(self, sample_input):
+        """RED when `self.gabor_norm(x, training=training)` loses its kwarg.
+
+        MEASURED: poisoned movement 0.00008846 at HEAD and 0.00000000 with the
+        forward dropped, with the unpoisoned control at 0.00008846 both ways.
+        """
+        poisoned = self._moving_mean_movement(
+            self._batch_norm_block("poisoned_norm", poisoned=True),
+            sample_input,
+            training=True,
+        )
+        control = self._moving_mean_movement(
+            self._batch_norm_block("control_norm", poisoned=False),
+            sample_input,
+            training=True,
+        )
+
+        # The CONTROL is what proves the poisoner (not the probe) is what makes
+        # the gap visible: it passes on fixed AND unfixed code, by design.
+        assert control > 0.0, (
+            "the unpoisoned control did not move the moving statistics at all, "
+            "so this arm's instrument is broken, not the layer"
+        )
+        assert poisoned == pytest.approx(control, rel=1e-6), (
+            f"with the ambient CallContext poisoned the norm moved by "
+            f"{poisoned} instead of the control's {control}: "
+            f"`self.gabor_norm(x, training=training)` is not passing `training` "
+            f"EXPLICITLY, so the norm ran in inference mode inside a "
+            f"`training=True` call"
+        )
+
+    def test_the_poisoned_arm_still_sees_inference_mode_as_inference(
+        self, sample_input
+    ):
+        """ANTI-VACUITY twin: the arm above must not pass for a trivial reason.
+
+        If the poisoned block moved its statistics under `training=False` too,
+        the assertion above would be measuring an unconditional update rather
+        than a forwarded flag.
+        """
+        movement = self._moving_mean_movement(
+            self._batch_norm_block("poisoned_infer", poisoned=True),
+            sample_input,
+            training=False,
+        )
+        assert movement == 0.0, (
+            f"an inference call moved the moving statistics by {movement}"
+        )
+
+    @staticmethod
+    def _ambient_name_prefix(name, sample_input):
+        """Whatever Keras' global name-scope stack prepends to a fresh block.
+
+        `''` in a clean process. NOT asserted to be empty: another module may
+        legitimately have leaked a scope before this one ran (D-018), and a
+        test that reads the ABSOLUTE path would then be RED purely from
+        collection order -- the very defect C-3 closed in this module.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F, filters_per_channel=M, kernel_size=K, name=name
+        )
+        block(sample_input, training=False)
+        marker = name + "/"
+        paths = {w.path for w in block.weights}
+        assert paths, "the probe block created no weights"
+        prefixes = {p[: p.index(marker)] for p in paths if marker in p}
+        assert len(prefixes) == 1, f"inconsistent weight-path prefixes: {paths}"
+        return prefixes.pop()
+
+    def test_the_poisoner_does_not_leak_a_name_scope(self, sample_input):
+        """The poisoner must not become a second instance of D-018.
+
+        `test_tripse_attention.py`'s own poisoned nesting leaves `'outer'` on
+        Keras' process-global `name_scope_stack` FOREVER, which reddens weight
+        path assertions in six other packages (decisions.md D-018). MEASURED,
+        the shape used here does NOT leak -- this arm pins that, so a future
+        change to the poisoner cannot export the leak from this module.
+
+        It compares the ambient prefix BEFORE and AFTER, never against `''`:
+        this module already shipped five order-coupled tests once (C-3), and
+        an absolute-path version of this assertion would be RED whenever the
+        tripse arm above ran first -- MEASURED, `1 failed, 103 passed` for
+        exactly that pairing.
+        """
+        before = self._ambient_name_prefix("leak_probe_before", sample_input)
+        self._moving_mean_movement(
+            self._batch_norm_block("leak_check", poisoned=True),
+            sample_input,
+            training=True,
+        )
+        after = self._ambient_name_prefix("leak_probe_after", sample_input)
+        assert after == before, (
+            f"a name scope leaked out of the poisoned call: fresh blocks were "
+            f"prefixed {before!r} before it and {after!r} after it, so every "
+            f"variable created later in this process now carries a stray prefix"
+        )
+
+    def test_the_activation_gets_training_through_the_explicit_kwarg(
+        self, sample_input, strict_activation_registered
+    ):
+        """SC-23. RED when `self.gabor_activation(x)` loses its `training=`.
+
+        MEASURED before the fix: with the poisoner installed the activation
+        observed `training=[False]` while the block was called `training=True`.
+        `StrictTrainingActivation` is numerically the identity, so it cannot
+        change the output -- the only thing it can do is fire.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            activation=strict_activation_registered,
+            name="poisoned_act",
+        )
+        block.gabor_depthwise = _ContextPoisoner(block.gabor_depthwise)
+
+        out = block(sample_input, training=True)
+        assert tuple(out.shape) == (B, H, W, F)
+
+    def test_the_strict_activation_is_actually_on_the_forward_path(
+        self, sample_input, strict_activation_registered
+    ):
+        """ANTI-VACUITY twin: the probe must be reachable at all.
+
+        Called with `training=False` it MUST fire. Without this, an activation
+        that the block silently never invoked would satisfy the arm above.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            activation=strict_activation_registered,
+            name="reachable_act",
+        )
+        with pytest.raises(AssertionError, match=r"dead-component injection FIRED"):
+            block(sample_input, training=False)
+
+    def test_without_the_poisoner_the_ambient_channel_already_delivers(
+        self, sample_input, strict_activation_registered
+    ):
+        """The CONTROL that names what these arms could NOT have seen.
+
+        Un-poisoned, an un-forwarded sub-layer still receives the right value
+        through `CallContext`. This passes on fixed AND unfixed code, by
+        design: it is here so nobody mistakes the arms above for evidence that
+        Keras fails to propagate `training`, and so a future Keras that stops
+        propagating it ambiently is noticed here rather than as a mystery.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            activation=strict_activation_registered,
+            name="unpoisoned_act",
+        )
+        out = block(sample_input, training=True)
+        assert tuple(out.shape) == (B, H, W, F)
