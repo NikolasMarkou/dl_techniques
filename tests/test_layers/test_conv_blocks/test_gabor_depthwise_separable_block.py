@@ -3,7 +3,9 @@
 Sections A-F are the core arms (validation, forward, shapes, layout,
 serialization). Sections G-L are the identity / freeze / gradient guards --
 the ones that make this a *Gabor*, *frozen* layer -- plus the homogeneity-set
-drift guard and the ``call()`` rank re-check.
+drift guard and the ``call()`` rank re-check. Sections N-Q are the robustness
+arms: dtype policies, XLA-vs-eager, the optional stages switched ON (the twins
+of section D's OFF assertions), and degenerate spatial inputs.
 """
 
 import os
@@ -13,6 +15,10 @@ import logging
 import keras
 import numpy as np
 import pytest
+# `tensorflow` is imported for ONE thing only: `tf.function(jit_compile=True)`
+# in section O. Every other arm in this module is written against `keras.ops`
+# so it stays backend-agnostic; XLA compilation is not, and cannot be.
+import tensorflow as tf
 
 from dl_techniques.initializers.gabor_filters_initializer import (
     GaborFiltersInitializer,
@@ -871,3 +877,472 @@ class TestCallRankRecheck:
         shape_text = re.escape(f"got shape {bad_shape}")
         with pytest.raises(ValueError, match=shape_text):
             layer(np.zeros(bad_shape, dtype="float32"))
+
+
+# ---------------------------------------------------------------------
+# N. dtype policies (SC-11)
+# ---------------------------------------------------------------------
+
+# What each global policy is EXPECTED to produce, keyed by policy name:
+#   (layer.compute_dtype, layer.variable_dtype, numpy dtype of the output)
+#
+# MEASURED on keras 3.8 / TF 2.18, CPU-only, before this table was written --
+# not predicted from the policy name. Pasted from the probe:
+#
+#   policy=float32        compute=float32  variable=float32  out=float32
+#   policy=mixed_float16  compute=float16  variable=float32  out=float16
+#   policy=float64        compute=float64  variable=float64  out=float64
+#
+# The middle row is the whole point of the table: under `mixed_float16` a Keras
+# layer computes in half precision while its VARIABLES stay float32, so
+# `compute_dtype != variable_dtype` there and nowhere else. Without this table
+# the three parametrizations would run identical float32 arithmetic three times
+# and assert identical numbers -- an inert policy arm, which is a defect this
+# repo has already shipped once (`plans/LESSONS.md`).
+_EXPECTED_POLICY_DTYPES = {
+    "float32": ("float32", "float32", "float32"),
+    "mixed_float16": ("float16", "float32", "float16"),
+    "float64": ("float64", "float64", "float64"),
+}
+
+
+class TestDtypePolicies:
+    """Construct, build and forward under float32 / mixed_float16 / float64.
+
+    The global policy is set and restored by the `dtype_policy` fixture in
+    `tests/test_layers/conftest.py`, which is parametrized over exactly these
+    three policies and restores the previous one in a `finally`. That restore
+    is deliberately centralised there (see that module's docstring: the third
+    copy-pasted `try/finally` is the one that forgets), so nothing here
+    touches `keras.mixed_precision.set_global_policy` directly.
+    """
+
+    def test_compute_and_output_dtypes_follow_the_policy(self, dtype_policy, rng):
+        expected_compute, expected_variable, expected_out = _EXPECTED_POLICY_DTYPES[
+            dtype_policy
+        ]
+
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            name=f"dtype_{dtype_policy}",
+        )
+        x = rng.standard_normal((B, H, W, 3)).astype("float32")
+        y = block(x, training=False)
+
+        # Finiteness and shape -- true under every policy, and therefore NOT on
+        # its own evidence that the policy did anything.
+        assert tuple(y.shape) == (B, H, W, F)
+        assert bool(keras.ops.all(keras.ops.isfinite(y)))
+
+        # The part that actually DIFFERS between the three parametrizations.
+        assert block.compute_dtype == expected_compute
+        assert block.variable_dtype == expected_variable
+        assert keras.ops.convert_to_numpy(y).dtype.name == expected_out
+        # Half precision is the only policy where the two diverge; asserting
+        # the divergence itself keeps the mixed arm from silently degrading
+        # into a second float32 run.
+        assert (block.compute_dtype != block.variable_dtype) == (
+            dtype_policy == "mixed_float16"
+        )
+
+    def test_gabor_bank_stays_frozen_under_every_policy(self, dtype_policy, rng):
+        """A dtype change must not silently unfreeze the bank."""
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            name=f"frozen_{dtype_policy}",
+        )
+        block(rng.standard_normal((B, H, W, 3)).astype("float32"), training=False)
+
+        gabor_kernel = block.gabor_depthwise.kernel
+        trainable_paths = {w.path for w in block.trainable_weights}
+
+        assert block.gabor_depthwise.trainable is False
+        assert gabor_kernel.trainable is False
+        assert gabor_kernel.path not in trainable_paths
+        # Anti-vacuity floor: the set is non-empty, so "not in" is a real claim.
+        assert len(block.trainable_weights) == 1
+        assert block.pointwise_conv.kernel.path in trainable_paths
+        # Variables carry the policy's VARIABLE dtype, not its compute dtype.
+        _, expected_variable, _ = _EXPECTED_POLICY_DTYPES[dtype_policy]
+        assert gabor_kernel.dtype == expected_variable
+
+
+# ---------------------------------------------------------------------
+# O. XLA (`jit_compile=True`) versus eager (SC-12)
+# ---------------------------------------------------------------------
+
+class TestXlaVersusEager:
+    """The compiled and interpreted paths agree to the dtype's resolution.
+
+    TF32 is deliberately NOT touched here. `tests/test_layers/conftest.py`
+    hosts a module-scoped `tf32_disabled` fixture and an autouse
+    `_tf32_leak_canary`, and calling `enable_tensor_float_32_execution`
+    inline would trip the canary for the next test in the session. The opt-in
+    was checked rather than assumed: the max abs difference below was MEASURED
+    twice, once with the process-global TF32 flag at its session default
+    (`True`) and once with it off, and both runs gave exactly
+    4.76837158203125e-07. TF32 is a GPU tensor-core path and these runs are
+    CPU-only (`CUDA_VISIBLE_DEVICES=""`), so it has no numeric effect here and
+    the module does not need `pytestmark`.
+    """
+
+    def test_jit_compiled_output_matches_eager(self, sample_input):
+        block = GaborDepthwiseSeparableBlock(
+            filters=F, filters_per_channel=M, kernel_size=K, name="jit_block"
+        )
+        # Build eagerly first, so both paths run against the SAME weights.
+        y_eager = keras.ops.convert_to_numpy(block(sample_input, training=False))
+
+        @tf.function(jit_compile=True)
+        def compiled(t):
+            return block(t, training=False)
+
+        y_jit = np.asarray(compiled(tf.constant(sample_input)))
+
+        assert y_jit.shape == y_eager.shape
+        assert np.all(np.isfinite(y_jit))
+
+        # Anti-vacuity: two all-zero tensors would agree to any tolerance.
+        peak = float(np.max(np.abs(y_eager)))
+        assert peak > 0.1, f"output is degenerate (max |y| = {peak}), comparison is vacuous"
+
+        # TOLERANCE DERIVATION (not pasted -- derived here, from the dtype's
+        # resolution and this layer's accumulation length):
+        #   * float32 has eps = 2**-23 = 1.1920928955078125e-07 (relative).
+        #   * The block accumulates over K*K = 3*3 = 9 taps in the depthwise
+        #     stage and over in_channels * filters_per_channel = 3*2 = 6 taps
+        #     in the pointwise stage, i.e. n = 15 floating-point additions on
+        #     the longest path from an input element to an output element.
+        #   * Worst-case accumulated rounding for n sequential additions is
+        #     bounded by ~n * eps in relative terms, so in absolute terms by
+        #     n * eps * max|y|. XLA is free to reassociate and to fuse the
+        #     multiply-adds, which changes WHICH roundings happen but not this
+        #     bound.
+        #   => atol = 15 * 1.1920929e-07 * max|y|.
+        # With the measured max|y| = 4.1019325 that is 7.33e-06.
+        #
+        # MEASURED max abs difference on this exact configuration:
+        #   4.76837158203125e-07
+        # which is exactly ONE ulp at magnitude 4.1 (for x in [4, 8) the float32
+        # ulp is 2**(2-23) = 4.76837158203125e-07) -- i.e. the two paths differ
+        # by a single last-place bit. The derived tolerance therefore carries
+        # ~15x headroom over what was observed; both numbers are stated so a
+        # future reader can see the margin rather than trust it.
+        n_accumulations = K * K + 3 * M
+        atol = n_accumulations * float(np.finfo(np.float32).eps) * peak
+        max_abs_diff = float(np.max(np.abs(y_jit - y_eager)))
+        assert max_abs_diff <= atol, (
+            f"jit vs eager differ by {max_abs_diff}, above the derived "
+            f"tolerance {atol} (n={n_accumulations}, max|y|={peak})"
+        )
+
+
+# ---------------------------------------------------------------------
+# P. Optional stages ON -- the twins of section D's OFF assertions
+#    (guide 16.3: every "nothing changed" assertion needs its twin)
+# ---------------------------------------------------------------------
+
+# MEASURED weight layouts with a normalization stage switched on, keyed by
+# `normalization_type`. Both keys are real entries of the norms factory's
+# `_TYPE_TO_CLASS` (18 keys, enumerated in step 1(b) of this plan). The layouts
+# were read off built layers, not predicted from the class name.
+_NORM_ON_LAYOUTS = {
+    "layer_norm": {
+        "gabor_depthwise/kernel",
+        "gabor_norm/gamma",
+        "gabor_norm/beta",
+        "pointwise_conv/kernel",
+    },
+    "rms_norm": {
+        "gabor_depthwise/kernel",
+        "gabor_norm/scale",
+        "pointwise_conv/kernel",
+    },
+}
+
+
+class TestOptionalStagesOn:
+    """Each optional stage, when switched on, really exists and really runs."""
+
+    @pytest.mark.parametrize("normalization_type", sorted(_NORM_ON_LAYOUTS))
+    def test_normalization_on_adds_a_sublayer_and_its_weights(
+        self, sample_input, normalization_type
+    ):
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            normalization_type=normalization_type,
+            name=f"norm_on_{normalization_type}",
+        )
+        assert block.gabor_norm is not None
+
+        y = block(sample_input, training=False)
+        assert tuple(y.shape) == (B, H, W, F)
+        assert bool(keras.ops.all(keras.ops.isfinite(y)))
+
+        paths = _relative_weight_paths(block)
+        assert paths == _NORM_ON_LAYOUTS[normalization_type]
+        # Strictly MORE weights than the defaults arm pinned in section D.
+        assert paths > EXPECTED_WEIGHT_SUFFIXES
+        assert len(block.weights) > len(EXPECTED_WEIGHT_SUFFIXES)
+        # The norm carries its own `w.path` under the block, i.e. it is a
+        # tracked sub-layer rather than a functional call.
+        assert any(p.startswith("gabor_norm/") for p in paths)
+
+        # S-3: the norm came from `create_normalization_layer`, whose epsilon
+        # default is 1e-6. A bare `keras.layers.LayerNormalization()` would
+        # carry 1e-3 -- a 1000x gap, MEASURED in step 1(b) of this plan. This
+        # assertion is what would redden if someone "simplified" the factory
+        # call away.
+        assert block.gabor_norm.epsilon == pytest.approx(1e-6)
+
+    def test_activation_relu_takes_the_registry_path(self, sample_input):
+        """`'relu'` IS an `ACTIVATION_REGISTRY` key, so it reaches the factory."""
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            activation="relu",
+            name="act_relu",
+        )
+        assert block.gabor_activation is not None
+        assert isinstance(block.gabor_activation, keras.layers.ReLU)
+
+        y = block(sample_input, training=False)
+        assert tuple(y.shape) == (B, H, W, F)
+        assert bool(keras.ops.all(keras.ops.isfinite(y)))
+        # An activation stage is weightless, so the layout is unchanged -- the
+        # sub-layer OBJECT is the evidence here, not a new `w.path`.
+        assert _relative_weight_paths(block) == EXPECTED_WEIGHT_SUFFIXES
+
+    @pytest.mark.parametrize("activation", ["linear", "leaky_relu"])
+    def test_non_registry_activations_route_through_the_keras_fallback(
+        self, sample_input, activation
+    ):
+        """This arm is what proves decisions.md D-012's fix actually works.
+
+        Step 1(a) MEASURED that `'linear'` and `'leaky_relu'` are NOT keys of
+        `ACTIVATION_REGISTRY` (24 keys, `'relu'` among them, these two not) and
+        that `create_activation_layer` raises `ValueError` on both. They are
+        also two of the four names in the block's own positive-homogeneity
+        allowlist, so a regression from `resolve_activation_layer` back to
+        `create_activation_layer` would make the block raise on half the
+        activations it most wants to support. Without this arm that regression
+        is invisible: the `'relu'` arm above would stay green.
+
+        `keras.layers.Activation` (as opposed to `keras.layers.ReLU`) is the
+        observable signature of the fallback path.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            activation=activation,
+            name=f"act_{activation}",
+        )
+        assert block.gabor_activation is not None
+        assert type(block.gabor_activation) is keras.layers.Activation
+
+        y = block(sample_input, training=False)
+        assert tuple(y.shape) == (B, H, W, F)
+        assert bool(keras.ops.all(keras.ops.isfinite(y)))
+
+    def test_activation_kwargs_are_dropped_on_the_fallback_path_only(self):
+        """The D-012 kwargs-drop caveat is REAL, and observable numerically.
+
+        The class docstring claims `activation_kwargs` are silently dropped
+        when the activation is not a registry key. That claim is checked here
+        against its own contrast: the SAME kwarg reaches the layer on the
+        registry path and does not on the fallback path. A one-sided version
+        of this test could not tell "dropped" from "never supported".
+        """
+        slope = 0.25
+
+        # Registry path: 'relu' -> create_activation_layer -> keras.layers.ReLU,
+        # which accepts `negative_slope` and keeps it.
+        registry_block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            activation="relu",
+            activation_kwargs={"negative_slope": slope},
+            name="kwargs_registry",
+        )
+        assert registry_block.gabor_activation.negative_slope == pytest.approx(slope)
+
+        # Fallback path: 'leaky_relu' -> keras.layers.Activation, which takes
+        # no `negative_slope` at all -- the kwarg is dropped by the resolver.
+        fallback_block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            activation="leaky_relu",
+            activation_kwargs={"negative_slope": slope},
+            name="kwargs_fallback",
+        )
+        act = fallback_block.gabor_activation
+        assert type(act) is keras.layers.Activation
+        assert not hasattr(act, "negative_slope")
+        assert "negative_slope" not in act.get_config()
+
+        # And the drop is visible in the NUMBERS, not only in the attributes:
+        # Keras' own `leaky_relu` default slope is 0.2, so -2.0 maps to -0.4.
+        # Had the kwarg survived, slope 0.25 would give -0.5. MEASURED: -0.4.
+        probe = np.array([[-2.0, -1.0, 0.0, 1.0]], dtype="float32")
+        out = keras.ops.convert_to_numpy(act(probe))
+        np.testing.assert_allclose(out, [[-0.4, -0.2, 0.0, 1.0]], rtol=0, atol=1e-6)
+        assert out[0, 0] != pytest.approx(-2.0 * slope), (
+            "the fallback activation honoured `negative_slope`, so the "
+            "docstring's kwargs-drop caveat is wrong"
+        )
+
+    def test_both_stages_on_run_in_the_dw_norm_act_pw_order(self, sample_input):
+        """Stage order is depthwise -> norm -> activation -> pointwise (D-004).
+
+        Asserted STRUCTURALLY, by recomposing the block's own sub-layers in the
+        two rival orders and comparing against what `call()` actually produced
+        -- not by reading the source. `layer_norm` and `relu` do not commute
+        (relu clips before the norm sees the negative half), so the swapped
+        order is numerically distinguishable; the separation assertion below
+        proves the discriminator is live, which is what keeps the equality
+        assertion from being satisfiable by any order at all.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            normalization_type="layer_norm",
+            activation="relu",
+            name="both_on",
+        )
+        assert block.gabor_norm is not None
+        assert block.gabor_activation is not None
+
+        y = keras.ops.convert_to_numpy(block(sample_input, training=False))
+        assert np.all(np.isfinite(y))
+
+        depthwise = block.gabor_depthwise(sample_input, training=False)
+        as_specified = keras.ops.convert_to_numpy(
+            block.pointwise_conv(
+                block.gabor_activation(block.gabor_norm(depthwise, training=False)),
+                training=False,
+            )
+        )
+        swapped = keras.ops.convert_to_numpy(
+            block.pointwise_conv(
+                block.gabor_norm(block.gabor_activation(depthwise), training=False),
+                training=False,
+            )
+        )
+
+        # MEASURED: the specified order reproduces `call()` at max abs diff
+        # 0.0 (identical ops in identical order). The 1e-6 allowance is only
+        # headroom against kernel-selection non-determinism, not slack in the
+        # claim.
+        assert np.max(np.abs(y - as_specified)) <= 1e-6
+
+        # MEASURED separation between the two orders: 2.47 on a probe run (the
+        # exact value moves with the randomly initialised pointwise kernel, so
+        # the threshold is set ~20x below it rather than pinned to it).
+        separation = float(np.max(np.abs(as_specified - swapped)))
+        assert separation > 0.1, (
+            f"norm and activation commute on this input (separation "
+            f"{separation}), so the order assertion above cannot fail"
+        )
+
+        # Sub-layer declaration order is a second, independent witness.
+        assert [layer.name for layer in block._layers] == [
+            "gabor_depthwise",
+            "gabor_norm",
+            "gabor_activation",
+            "pointwise_conv",
+        ]
+
+
+# ---------------------------------------------------------------------
+# Q. Degenerate spatial inputs
+# ---------------------------------------------------------------------
+
+# The symbolic `keras.Input((None, None, C))` arm asked for by plan step 5 is
+# NOT repeated here: section C's `test_symbolic_none_spatial_dims` already
+# traces it, asserts the static channel count `(None, None, None, F)`, and runs
+# a concrete batch through the resulting `keras.Model`. Duplicating it would
+# add a test without adding a claim.
+
+class TestDegenerateSpatialInputs:
+    """What the block does when 'valid' padding runs out of pixels.
+
+    Both behaviours below are MEASURED, then asserted. Neither was predicted:
+    the block's `compute_output_shape` and its `call()` DISAGREE once the
+    kernel is larger than the input, and the pair of arms pins that divergence
+    where a later reader will find it rather than rediscover it.
+    """
+
+    def test_kernel_larger_than_input_raises_from_call(self):
+        """K=3 on a 1x1 input with 'valid' padding: the conv itself raises.
+
+        MEASURED message (from Keras' conv shape check, not from the block's
+        own validation, which only guards rank and channel count):
+            "Computed output size would be negative. Received `inputs
+             shape=(1, 1, 1, 3)`, `kernel shape=(3, 3, 3, 6)` ..."
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            padding="valid",
+            name="degenerate_1x1",
+        )
+        with pytest.raises(ValueError, match=r"[Cc]omputed output size would be negative"):
+            block(np.zeros((1, 1, 1, 3), dtype="float32"), training=False)
+
+    def test_compute_output_shape_returns_a_negative_extent_where_call_raises(self):
+        """The unbuilt shape helper does NOT reproduce `call()`'s refusal.
+
+        MEASURED: for K=3, 'valid', a 1x1 input, `compute_output_shape` returns
+        `(1, -1, -1, 8)` -- an arithmetically consistent but physically
+        impossible extent -- while `call()` on the same shape raises (arm
+        above). This is asserted as the REAL behaviour, not as the desired one:
+        the layer is not modified by this step, and a caller who trusts
+        `compute_output_shape` alone on an over-cropped configuration gets a
+        negative dimension rather than an error.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            padding="valid",
+            name="degenerate_cos",
+        )
+        assert block.built is False
+        assert tuple(block.compute_output_shape((1, 1, 1, 3))) == (1, -1, -1, F)
+
+    def test_exactly_zero_spatial_extent_is_produced_not_rejected(self):
+        """K=3 on a 2x2 input with 'valid' padding: extent 0, and it runs.
+
+        MEASURED: `compute_output_shape` gives `(1, 0, 0, 8)` and `call()`
+        returns a tensor of that shape without raising -- the boundary case one
+        pixel away from the raising arm above, where the two paths DO agree.
+
+        Note the deliberate absence of an `isfinite` assertion: MEASURED,
+        `keras.ops.all(keras.ops.isfinite(y))` is `True` on a zero-element
+        tensor for the same reason `all([])` is -- vacuously. Asserting it here
+        would be a guard that cannot fail, so the size is asserted instead.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            padding="valid",
+            name="degenerate_zero",
+        )
+        assert tuple(block.compute_output_shape((1, 2, 2, 3))) == (1, 0, 0, F)
+
+        y = block(np.zeros((1, 2, 2, 3), dtype="float32"), training=False)
+        assert tuple(y.shape) == (1, 0, 0, F)
+        assert int(np.prod(y.shape)) == 0
