@@ -2204,17 +2204,44 @@ class TestTrainingDependentNormalization:
 # every nested `__call__`, and `_maybe_reset_call_context` (:1501) clears it
 # only for the OUTERMOST entry layer -- so the ambient value is a SINGLE
 # MUTABLE SLOT that any sibling sub-layer can overwrite for every LATER
-# un-forwarded call in the same outer call. Un-poisoned, channel (2) delivers
-# the right value on its own, which is exactly why an ordinary probe cannot
-# tell the two apart: MEASURED, `block.call(x, training=True)` vs
-# `training=False` on a `batch_norm` block gives `max|delta| = 1.287291` WITH
-# the explicit forward and `1.287291` WITHOUT it. A direct train-vs-inference
-# comparison therefore CANNOT redden on this mutation, and by the source lines
-# above it never will -- do not spend time on that shape.
+# un-forwarded call in the same outer call.
 #
-# The `_ContextPoisoner` below is what separates the channels: it delegates to
-# a real sub-layer and then calls a dead child with `training=False`, poisoning
-# the ambient slot mid-call. It is IMPORTED, not re-implemented: it is this
+# WHETHER A PLAIN TRAIN-VS-INFERENCE PROBE CAN SEE THE EXPLICIT FORWARD DEPENDS
+# ENTIRELY ON THE ENTRY PROTOCOL, and the two protocols give OPPOSITE answers.
+# RE-DERIVED at this site (fresh `batch_norm` block, `filters=8`,
+# `filters_per_channel=2`, `kernel_size=3`, built by an inference call, then
+# `max|out(training=True) - out(training=False)|`), at HEAD and with
+# `training=training` dropped from `self.gabor_norm(...)`:
+#
+#   * P1 -- the PUBLIC path, `block(x, training=...)`, i.e. `Layer.__call__`:
+#     `1.269153` at HEAD, `1.269153` mutated. INSENSITIVE. The outer
+#     `__call__` has ALREADY written `call_context.training`
+#     (`keras/src/layers/layer.py:851`) before `call()` runs, so the norm's own
+#     `__call__` reads the right value off the ambient slot whether or not the
+#     explicit kwarg is present.
+#   * P2 -- the DIRECT path, `block.call(x, training=...)`, which BYPASSES
+#     `Layer.__call__`: `1.269153` at HEAD, `0.000000` mutated. SENSITIVE. No
+#     outer `__call__` runs, so nothing writes the ambient slot; the explicit
+#     kwarg is then the ONLY channel, and deleting it leaves the norm at its
+#     `training=None` inference default in both arms.
+#
+# So a direct-`.call()` arm DOES redden on this mutation. It is deliberately
+# NOT shipped here, and the reason is a judgement about instruments, not an
+# impossibility: `.call()` is not how any consumer reaches this block, so such
+# an arm would pin the framework's kwarg plumbing on a non-public entry path
+# (no build, no autocast, no name scope, no ambient slot) rather than the
+# block's behaviour on the path callers actually use. A later maintainer who
+# wants it anyway as a second mechanism is not doing something futile -- see
+# the DECISION anchor below. An earlier revision of this header asserted that
+# such a comparison "CANNOT redden ... it never will"; that assertion was
+# FALSE, and the numbers above are its retraction (decisions.md D-030,
+# corrected).
+#
+# The `_ContextPoisoner` below is the SHIPPED instrument precisely because it
+# reddens on the PUBLIC path P1 -- it recovers the observability that P1 loses
+# to the ambient slot, while still isolating the explicit kwarg. It separates
+# the channels by delegating to a real sub-layer and then calling a dead child
+# with `training=False`, poisoning the ambient slot mid-call. It is IMPORTED, not re-implemented: it is this
 # repo's established, documented, PROVEN-RED instrument for this exact defect
 # class (see the block comment at
 # `tests/test_layers/test_attention/test_tripse_attention.py:627-645`, which
@@ -2232,15 +2259,20 @@ class TestTrainingDependentNormalization:
 #     explicit forward, and `[True]` after (review pass-2 R-2, decisions.md
 #     D-028).
 #
-# DECISION plan-2026-09-05T115518-e69163e4/D-027 + D-029: this section is the
-# guard the deleted anchor said could not exist. Do NOT weaken it by dropping the
-# poisoner -- without it every arm here passes on the ambient channel and the
+# DECISION plan-2026-09-05T115518-e69163e4/D-027 + D-029 + D-032: this section
+# is the guard the deleted anchor said could not exist. Do NOT weaken it by
+# dropping the poisoner -- without it every arm here passes on the ambient channel and the
 # section becomes vacuous, which is precisely how the false claim arose. Do
 # NOT replace the poisoner with a local copy either: one definition, in the
-# module whose header carries its proven-RED provenance. And do NOT add a
-# direct `training=True` vs `training=False` arm as a second mechanism: it
-# CANNOT redden on the mutation (MEASURED 1.287291 both ways, and see the
-# Keras source lines above). See decisions.md D-027, D-028 and D-029.
+# module whose header carries its proven-RED provenance. A direct
+# `block.call(x, training=True/False)` arm is NOT shipped as a second
+# mechanism, but that is a CHOICE, not an impossibility: it does redden on the
+# mutation (MEASURED `1.269153` at HEAD -> `0.000000` mutated; see the P1/P2
+# table above). It is omitted because it enters through a non-public path that
+# no consumer uses. Adding it later is legitimate -- if you do, label it as
+# testing the explicit-kwarg channel in isolation and prove it RED first. Do
+# NOT re-introduce the retracted claim that such an arm cannot redden. See
+# decisions.md D-027, D-028, D-029, D-030 and D-032.
 
 # Registry key for the strict probe activation, namespaced to this module so it
 # cannot collide with the tripse module's own key if both are collected.
