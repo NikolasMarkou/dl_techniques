@@ -65,10 +65,45 @@ def sample_input(rng):
 
 
 def _relative_weight_paths(block):
-    """Return ``{w.path}`` with the block's own name prefix stripped off."""
+    """Return each ``w.path`` made genuinely RELATIVE to the block.
+
+    The earlier form of this helper stripped ``block.name + "/"`` only when the
+    path STARTED with it. That made every layout assertion in this module
+    coupled to pytest COLLECTION ORDER, because Keras' global
+    ``name_scope_stack`` is a process-global that nothing in the suite
+    restores: `tests/test_layers/test_attention/test_tripse_attention.py`'s
+    `TestTripSETrainingIsForwardedExplicitly::
+    test_the_ambient_training_context_is_a_single_poisonable_slot` leaves
+    ``'outer'`` on that stack permanently (root-caused in decisions.md D-018),
+    so every variable created afterwards in the same process reads
+    ``'outer/parity_block/gabor_depthwise/kernel'``. MEASURED at commit
+    d5bcd6450 with the prefix-only strip: running that one node id before this
+    module gave ``5 failed, 73 passed``, i.e. this module shipped five RED
+    tests into the `tests/test_layers/` gate purely as an artefact of order.
+
+    ``rpartition`` takes the suffix after the LAST occurrence of the block's
+    own name, which is what plan step 3 asked for in the first place ("`w.path`
+    suffixes relative to the block"). It hides nothing: an internal sub-layer
+    rename still moves the suffix and still reddens the layout assertions --
+    MEASURED, `gabor_depthwise` -> `gabor_dw` in the layer reddens
+    `TestBuildParity::test_default_weight_layout_is_pinned` and
+    `::test_optional_stages_off_create_no_sublayer` with this helper in place.
+
+    The leak itself is NOT this plan's to fix (D-018): it belongs to
+    `test_tripse_attention.py` and reddens six other packages too.
+    """
+    # DECISION plan-2026-09-05T115518-e69163e4/D-023: `rpartition`, NOT
+    # `startswith`. Do NOT "simplify" this back to
+    # `w.path[len(prefix):] if w.path.startswith(prefix) else w.path` -- that
+    # is the form that shipped and it made this module's five layout
+    # assertions fail whenever any earlier test in the process left a scope on
+    # Keras' global `name_scope_stack`. Do NOT go the other way either and
+    # strip everything before the last `/`: that would stop reddening on an
+    # internal sub-layer rename, which is the whole point of the assertion.
+    # See decisions.md D-023 (C-3) and D-018.
     prefix = block.name + "/"
     return {
-        w.path[len(prefix):] if w.path.startswith(prefix) else w.path
+        w.path.rpartition(prefix)[2] if prefix in w.path else w.path
         for w in block.weights
     }
 
@@ -1480,3 +1515,586 @@ class TestDegenerateSpatialInputs:
         y = block(np.zeros((1, 2, 2, 3), dtype="float32"), training=False)
         assert tuple(y.shape) == (1, 0, 0, F)
         assert int(np.prod(y.shape)) == 0
+
+
+# ---------------------------------------------------------------------
+# R. POSITIVE HOMOGENEITY (SC-18) -- the layer's headline invariant
+# ---------------------------------------------------------------------
+
+# Tolerance DERIVATION (do not replace with a pasted constant).
+#
+# float32 carries a 24-bit significand, so its unit roundoff is
+# `np.finfo(np.float32).eps` = 2**-23 = 1.1920929e-07 (MEASURED, printed by the
+# probe that produced the numbers below).
+#
+# At defaults the block is exactly linear: a frozen depthwise dot product of
+# kh*kw = K*K = 9 terms feeding a pointwise dot product of C*M = 3*2 = 6 terms,
+# with `use_bias=False` on both stages and no normalization and no activation.
+# Scaling the input by `a` scales every partial product by exactly `a` -- a
+# float32 multiply by a common factor is exact up to one rounding -- so
+# `D(a*x)` and `a*D(x)` differ ONLY in how those two accumulations round at a
+# different exponent. The standard bound for a length-n float32 accumulation is
+# n*eps relative to the sum of |terms|; with n <= 9 + 6 = 15 across both stages
+# that is 15*eps ~= 1.8e-06 of the OUTPUT SCALE. Rounding that up to a power of
+# two gives the allowance used here:
+#
+#     atol = 32 * eps * a * max|D(x)|      (~= 3.8e-06 of the output scale)
+#     rtol = 0
+#
+# The tolerance is scaled to the output MAGNITUDE, not applied per element,
+# and that choice is forced by measurement: individual output elements pass
+# through zero, where a per-element relative error is meaningless. MEASURED on
+# the exact blocks these arms construct (seed 0, `sample_input`): the
+# per-element relative error reaches 1.28e-03 at a=3.7 and 2.60e-04 at a=100
+# purely from near-zero elements, while the error relative to the output SCALE
+# is 2.03e-07 and 1.49e-07 respectively. Across all five scales the measured
+# defect is 0.00 - 1.77 units of eps of the output scale, so the 32-eps bound
+# carries 18x - 23x headroom at the inexact scales:
+#
+#     a=0.013  defect 9.31e-09  scale 5.65e-02  atol 2.16e-07  (1.38 eps, 23.1x)
+#     a=0.5    defect 0.00e+00  scale 2.17e+00  atol 8.29e-06  (0.00 eps)
+#     a=2.0    defect 0.00e+00  scale 8.69e+00  atol 3.32e-05  (0.00 eps)
+#     a=3.7    defect 2.86e-06  scale 1.61e+01  atol 6.13e-05  (1.49 eps, 21.4x)
+#     a=100.0  defect 9.16e-05  scale 4.35e+02  atol 1.66e-03  (1.77 eps, 18.1x)
+#
+# a=0.5 and a=2.0 measure EXACTLY 0.0: powers of two rescale float32 without
+# any rounding at all, which is why the three non-power-of-two scales are the
+# ones that actually exercise the tolerance.
+_F32_EPS = float(np.finfo(np.float32).eps)
+
+# Spanning ~4 decades, deliberately mixing exact (power-of-two) and inexact
+# scale factors.
+_HOMOGENEITY_SCALES = (0.013, 0.5, 2.0, 3.7, 100.0)
+
+
+def _homogeneity_defect(block, x, a):
+    """Return ``(max|D(a*x) - a*D(x)|, max|a*D(x)|)`` -- the defect and its scale."""
+    base = keras.ops.convert_to_numpy(block(x, training=False))
+    got = keras.ops.convert_to_numpy(block(a * x, training=False))
+    want = a * base
+    return float(np.max(np.abs(got - want))), float(np.max(np.abs(want)))
+
+
+def _homogeneity_atol(scale):
+    """The derived allowance: 32 units of float32 eps at the output's own scale."""
+    return 32.0 * _F32_EPS * scale
+
+
+class TestPositiveHomogeneity:
+    """`D(a*x) == a*D(x)` for `a > 0` -- plan Invariant #2, SC-18.
+
+    This is the property D-004's bias-free defaults exist to provide and the
+    one both intended consumers (`convunext`, `bfunet`, bias-free denoisers)
+    depend on. Until this section existed nothing in the module measured it:
+    the adversarial pass inserted `+ 0.1` after the depthwise stage inside
+    `call()` -- changing no shape, no dtype, no weight path and no `.keras`
+    round trip -- and the whole suite stayed green.
+    """
+
+    @pytest.mark.parametrize("a", _HOMOGENEITY_SCALES)
+    def test_homogeneity_holds_at_the_bias_free_defaults(self, sample_input, a):
+        """The positive arm, at the configuration D-004 ships: no norm, no
+        activation, `pointwise_use_bias=False`."""
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            pointwise_use_bias=False,
+            name=f"homog_{str(a).replace('.', '_')}",
+        )
+        defect, scale = _homogeneity_defect(block, sample_input, a)
+        # Anti-vacuity: a block whose output is identically zero would satisfy
+        # any homogeneity assertion trivially. The floor is applied to the
+        # UNSCALED output `max|D(x)| = scale / a`, so it means the same thing
+        # at a=0.013 as at a=100.
+        assert scale / a > 0.1, f"output scale {scale / a} is too small to test against"
+        assert defect <= _homogeneity_atol(scale), (
+            f"positive homogeneity broken at a={a}: max|D(a*x) - a*D(x)| = "
+            f"{defect} exceeds {_homogeneity_atol(scale)} "
+            f"(= 32 * {_F32_EPS} * {scale})"
+        )
+
+    def test_a_nonzero_pointwise_bias_breaks_homogeneity(self, sample_input):
+        """THE NEGATIVE TWIN -- and it has a trap in it, MEASURED.
+
+        `pointwise_use_bias=True` ALONE does not break homogeneity, because
+        Keras initialises a `Conv2D` bias with `Zeros` (MEASURED:
+        `block.pointwise_conv.bias_initializer` is a `Zeros` instance and
+        `max|bias| == 0.0` on a freshly built block). Writing the twin as
+        "construct with a bias, assert homogeneity fails" would therefore have
+        been a guard that CANNOT FAIL -- it would have been red on arrival and
+        the positive arm above would have been left unproven. MEASURED at the
+        zero-initialised bias on THIS block: defect 0.0 / 0.0 / 2.86e-06 /
+        6.10e-05 at a = 0.5 / 2.0 / 3.7 / 100.0, i.e. indistinguishable from
+        the bias-free arm. With the bias assigned below it becomes 0.375 /
+        2.025 / 74.25 at a = 0.5 / 3.7 / 100.0 -- six to nine decades larger.
+
+        So the bias is assigned a real value first. With bias `b`,
+        `D(a*x) = a*W*G(x) + b` while `a*D(x) = a*W*G(x) + a*b`, so the defect
+        is exactly `|1 - a| * max|b|` -- a closed form this test checks against
+        rather than merely asserting "not close".
+        """
+        # DECISION plan-2026-09-05T115518-e69163e4/D-026: the bias MUST be
+        # assigned. Do NOT reduce this twin to "construct with
+        # `pointwise_use_bias=True`, assert homogeneity fails" -- MEASURED,
+        # Keras initialises a `Conv2D` bias with `Zeros`, so that version is
+        # RED on arrival and leaves the positive arm above unproven. The
+        # `.assign` below is what makes the twin discriminating.
+        # See decisions.md D-026.
+        bias_value = 0.75
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            pointwise_use_bias=True,
+            name="homog_bias",
+        )
+        block(sample_input, training=False)  # build
+
+        # (i) with the shipped ZERO bias the property still holds -- this is
+        #     the measurement that makes the twin non-trivial.
+        assert float(np.max(np.abs(
+            keras.ops.convert_to_numpy(block.pointwise_conv.bias)))) == 0.0
+        defect, scale = _homogeneity_defect(block, sample_input, 3.7)
+        assert defect <= _homogeneity_atol(scale), (
+            "a zero-initialised bias already broke homogeneity, so the "
+            "assignment below is not what makes this twin fail"
+        )
+
+        # (ii) now make the bias real, and the property must break.
+        block.pointwise_conv.bias.assign(
+            np.full((F,), bias_value, dtype="float32")
+        )
+        for a in (0.5, 3.7, 100.0):
+            defect, scale = _homogeneity_defect(block, sample_input, a)
+            expected = abs(1.0 - a) * bias_value
+            assert defect > _homogeneity_atol(scale), (
+                f"a={a}: a nonzero pointwise bias did NOT break homogeneity "
+                f"(defect {defect}), so the positive arm above is vacuous"
+            )
+            np.testing.assert_allclose(
+                defect, expected, rtol=1e-5,
+                err_msg=f"the defect at a={a} is not the predicted |1-a|*|b|",
+            )
+
+    @pytest.mark.parametrize(
+        "activation,homogeneous",
+        [("relu", True), ("leaky_relu", True), ("gelu", False)],
+    )
+    def test_activation_homogeneity_matches_the_docstring_allowlist(
+        self, sample_input, activation, homogeneous
+    ):
+        """Pins the class docstring's activation claim NUMERICALLY.
+
+        `_POSITIVELY_HOMOGENEOUS_ACTIVATIONS` is a name allowlist and the layer
+        only `logger.warning`s off it; until now nothing checked that the names
+        on the list actually preserve `D(a*x) == a*D(x)` or that a name off it
+        actually destroys it. `relu` and `leaky_relu` are positively homogeneous
+        of degree 1 (both are `max`/scale of linear pieces through the origin);
+        `gelu` is not (it has a smooth, non-scale-invariant knee).
+
+        MEASURED on the exact blocks below, at a=3.7: `relu` defect 1.43e-06
+        against scale 11.73 (1.02 eps of scale, 31x inside the allowance);
+        `gelu` defect 2.27 against scale 15.05, which is 1.27e+06 eps of scale
+        and 3.96e+04x OUTSIDE it. `leaky_relu` sits with `relu` at 1.08 eps.
+        Neither arm is anywhere near its threshold, in either direction.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            activation=activation,
+            name=f"homog_act_{activation}",
+        )
+        for a in (0.5, 3.7, 100.0):
+            defect, scale = _homogeneity_defect(block, sample_input, a)
+            assert scale / a > 0.1
+            if homogeneous:
+                assert defect <= _homogeneity_atol(scale), (
+                    f"{activation!r} is in the positive-homogeneity allowlist "
+                    f"but broke D(a*x)==a*D(x) at a={a} (defect {defect})"
+                )
+            else:
+                assert defect > _homogeneity_atol(scale), (
+                    f"{activation!r} is NOT in the allowlist yet preserved "
+                    f"D(a*x)==a*D(x) at a={a} (defect {defect}); the "
+                    f"allowlist's warning would then be describing nothing"
+                )
+
+
+# ---------------------------------------------------------------------
+# S. NO DEAD KNOBS (SC-20) -- every knob is read off the BUILT sub-layer
+# ---------------------------------------------------------------------
+
+class TestKnobsReachTheBuiltSublayers:
+    """Four constructor parameters were MEASURED to be fully ignorable.
+
+    The adversarial pass made each of `kernel_initializer`,
+    `kernel_regularizer`, `pointwise_use_bias` and `normalization_kwargs`
+    completely inoperative inside the layer, one at a time, and the suite
+    stayed green every time. `kernel_initializer` is the pointed one: D-010's
+    entire trade-off is about how that initializer is resolved and what
+    `get_config()` therefore emits, yet nothing checked it ever reached the
+    block's ONLY learnable weight.
+
+    Every assertion below reads the built sub-layer or the built variable, not
+    the block's own stored attribute -- an attribute assertion would pass under
+    all four of those mutations.
+    """
+
+    def test_kernel_initializer_reaches_the_pointwise_kernel(self, sample_input):
+        """Identity of the object AND the value it actually wrote."""
+        init = keras.initializers.Constant(0.125)
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            kernel_initializer=init,
+            name="knob_init",
+        )
+        # `keras.initializers.get(<Initializer instance>)` is the identity, and
+        # `Conv2D` stores what it is handed, so the SAME object must arrive.
+        assert block.pointwise_conv.kernel_initializer is init
+
+        block(sample_input, training=False)
+        kernel = keras.ops.convert_to_numpy(block.pointwise_conv.kernel)
+        np.testing.assert_allclose(kernel, 0.125, rtol=0, atol=0)
+
+        # Negative control: the DEFAULT initializer does not produce that
+        # value, so the assertion above cannot be satisfied by ignoring the knob.
+        default_block = GaborDepthwiseSeparableBlock(
+            filters=F, filters_per_channel=M, kernel_size=K, name="knob_init_ctl"
+        )
+        default_block(sample_input, training=False)
+        default_kernel = keras.ops.convert_to_numpy(
+            default_block.pointwise_conv.kernel
+        )
+        assert isinstance(
+            default_block.pointwise_conv.kernel_initializer,
+            keras.initializers.HeNormal,
+        )
+        assert float(np.max(np.abs(default_kernel - 0.125))) > 1e-3
+
+    def test_kernel_regularizer_reaches_the_pointwise_conv(self, sample_input):
+        """The regularizer must produce a real, correctly-valued loss term."""
+        strength = 1e-3
+        reg = keras.regularizers.L2(strength)
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            kernel_regularizer=reg,
+            name="knob_reg",
+        )
+        assert block.pointwise_conv.kernel_regularizer is reg
+
+        block(sample_input, training=False)
+        losses = [float(keras.ops.convert_to_numpy(v)) for v in block.losses]
+        assert len(losses) == 1, f"expected exactly one regularization loss, got {losses}"
+
+        kernel = keras.ops.convert_to_numpy(block.pointwise_conv.kernel)
+        np.testing.assert_allclose(
+            losses[0], strength * float(np.sum(kernel ** 2)), rtol=1e-5,
+            err_msg="the loss term is not L2 of the pointwise kernel",
+        )
+
+        # Negative control at the shipped default (`kernel_regularizer=None`):
+        # no loss term at all, so the length assertion above is discriminating.
+        control = GaborDepthwiseSeparableBlock(
+            filters=F, filters_per_channel=M, kernel_size=K, name="knob_reg_ctl"
+        )
+        control(sample_input, training=False)
+        assert control.pointwise_conv.kernel_regularizer is None
+        assert control.losses == []
+
+    @pytest.mark.parametrize("pointwise_use_bias", [True, False])
+    def test_pointwise_use_bias_controls_the_built_bias_variable(
+        self, sample_input, pointwise_use_bias
+    ):
+        """The knob must move the sub-layer flag AND the weight layout."""
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            pointwise_use_bias=pointwise_use_bias,
+            name=f"knob_bias_{pointwise_use_bias}",
+        )
+        assert block.pointwise_conv.use_bias is pointwise_use_bias
+
+        block(sample_input, training=False)
+        paths = _relative_weight_paths(block)
+        if pointwise_use_bias:
+            assert block.pointwise_conv.bias is not None
+            assert paths == EXPECTED_WEIGHT_SUFFIXES | {"pointwise_conv/bias"}
+            assert len(block.weights) == 3
+        else:
+            assert block.pointwise_conv.bias is None
+            assert paths == EXPECTED_WEIGHT_SUFFIXES
+            assert len(block.weights) == 2
+
+    def test_normalization_kwargs_reach_the_norm_sublayer(self, sample_input):
+        """A non-default `epsilon` must survive the factory call.
+
+        Step 1(b) of this plan MEASURED that `create_normalization_layer`'s own
+        `epsilon` default is 1e-6 (a bare `keras.layers.LayerNormalization()`
+        would be 1e-3 -- the 1000x hazard S-3 names). 1e-2 is therefore
+        distinguishable from BOTH, so this arm cannot be satisfied by a dropped
+        `**normalization_kwargs` falling back to either default.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            normalization_type="layer_norm",
+            normalization_kwargs={"epsilon": 1e-2},
+            name="knob_norm_kwargs",
+        )
+        assert block.gabor_norm.epsilon == pytest.approx(1e-2)
+
+        block(sample_input, training=False)
+        assert block.gabor_norm.epsilon == pytest.approx(1e-2)
+
+        # Negative control: the factory default, MEASURED as 1e-6.
+        control = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            normalization_type="layer_norm",
+            name="knob_norm_kwargs_ctl",
+        )
+        assert control.gabor_norm.epsilon == pytest.approx(1e-6)
+
+
+# ---------------------------------------------------------------------
+# T. The SHIPPED DEFAULTS, and a fully-ON `.keras` round trip (review W-5)
+# ---------------------------------------------------------------------
+
+# Almost every built test in this module uses `filters_per_channel=2,
+# kernel_size=3` -- a configuration chosen so 'valid' padding stays
+# distinguishable on a 16x16 input, but NOT the configuration the layer
+# documents and ships. The two arms below cover the gap: the documented
+# defaults are actually run, and a save/load carries a config with every
+# optional stage switched on.
+
+_ON_ARM_KWARGS = dict(
+    filters=F,
+    filters_per_channel=M,
+    kernel_size=K,
+    normalization_type="layer_norm",
+    normalization_kwargs={"epsilon": 1e-4},
+    activation="relu",
+    activation_kwargs={"negative_slope": 0.1},
+    pointwise_use_bias=True,
+)
+
+
+class TestShippedDefaultsAndOnArmRoundTrip:
+    """The documented defaults run, and an ON config survives `.keras`."""
+
+    def test_the_shipped_defaults_build_and_forward(self, sample_input):
+        """`filters_per_channel=4, kernel_size=11` -- constructed elsewhere in
+        this module, never built or forward-passed until here.
+
+        `kernel_size=11` on a 16x16 input with the default `padding='same'`
+        keeps the spatial extent, and `depth_multiplier=4` on 3 channels gives
+        a 12-channel depthwise stage, so the layout is genuinely different from
+        the (2, 3) configuration the rest of the suite rides on.
+        """
+        block = GaborDepthwiseSeparableBlock(filters=F, name="shipped_defaults")
+        assert block.filters_per_channel == 4
+        assert block.kernel_size == 11
+        assert block.strides == 1
+        assert block.padding == "same"
+
+        y = block(sample_input, training=False)
+        assert tuple(y.shape) == (B, H, W, F)
+        assert bool(keras.ops.all(keras.ops.isfinite(y)))
+
+        # The intermediate width the defaults imply: 3 channels x 4 = 12.
+        assert tuple(block.gabor_depthwise.kernel.shape) == (11, 11, 3, 4)
+        assert _relative_weight_paths(block) == EXPECTED_WEIGHT_SUFFIXES
+        assert tuple(block.pointwise_conv.kernel.shape) == (1, 1, 12, F)
+
+    def test_every_optional_stage_on_survives_the_keras_round_trip(
+        self, sample_input, tmp_path
+    ):
+        """Norm AND activation AND regularizer AND bias, all through save/load.
+
+        Section F's round trip covers the defaults arm only, so no ON-arm
+        config -- and therefore none of `normalization_kwargs`,
+        `activation_kwargs`, `kernel_regularizer` or `pointwise_use_bias` --
+        was ever actually serialized and restored. Same strictness as section
+        F: `rtol=0`, `atol=0`, explicit `training=False` on both calls, and the
+        weight comparison taken BEFORE the loaded model's first call.
+        """
+        inputs = keras.Input(shape=(H, W, 3))
+        block = GaborDepthwiseSeparableBlock(
+            kernel_regularizer=keras.regularizers.L2(1e-4),
+            name="on_blk",
+            **_ON_ARM_KWARGS,
+        )
+        model = keras.Model(inputs, block(inputs))
+
+        y0 = model(sample_input, training=False)
+        assert bool(keras.ops.all(keras.ops.isfinite(y0)))
+
+        path = os.path.join(tmp_path, "gabor_dsb_on.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        original = {w.path: keras.ops.convert_to_numpy(w) for w in model.weights}
+        restored = {w.path: keras.ops.convert_to_numpy(w) for w in loaded.weights}
+        assert set(original) == set(restored)
+        # dw kernel + norm gamma/beta + pw kernel + pw bias.
+        assert len(original) == 5
+        for path_key in original:
+            np.testing.assert_allclose(
+                original[path_key], restored[path_key], rtol=0.0, atol=0.0,
+                err_msg=f"weight {path_key} changed across the .keras round trip",
+            )
+
+        y1 = loaded(sample_input, training=False)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y0),
+            keras.ops.convert_to_numpy(y1),
+            rtol=0.0,
+            atol=0.0,
+            err_msg="reloaded ON-arm model is not bit-identical to the original",
+        )
+
+        # Every ON knob must have come back as a live sub-layer property, not
+        # just as a key in the config dict.
+        rblock = loaded.get_layer("on_blk")
+        assert rblock.gabor_norm is not None
+        assert rblock.gabor_norm.epsilon == pytest.approx(1e-4)
+        assert rblock.gabor_activation is not None
+        assert rblock.pointwise_conv.use_bias is True
+        assert rblock.pointwise_conv.bias is not None
+        assert rblock.pointwise_conv.kernel_regularizer is not None
+        assert len(rblock.losses) == 1
+        # And the freeze still survives, on the ON arm too.
+        assert rblock.gabor_depthwise.trainable is False
+        assert rblock.gabor_depthwise.kernel.path not in {
+            w.path for w in rblock.trainable_weights
+        }
+
+
+# ---------------------------------------------------------------------
+# U. A TRAINING-DEPENDENT normalization stage (review W-6)
+# ---------------------------------------------------------------------
+
+class TestTrainingDependentNormalization:
+    """`batch_norm` is the only norm arm here whose output depends on `training`.
+
+    The two norms section P exercises (`layer_norm`, `rms_norm`) have no
+    training-mode behaviour at all, so the block's training-mode contract was
+    unmeasured for the norms that need it. `batch_norm` and
+    `bias_free_batch_norm` are equally valid keys of the same factory and DO
+    depend on it.
+
+    IMPORTANT SCOPE NOTE, MEASURED, so a later reader does not mistake this
+    section for something it is not: this does NOT prove that
+    `self.gabor_norm(x, training=training)` forwards `training` explicitly.
+    Keras 3.8 propagates `training` to sub-layers through an AMBIENT call
+    context, so DELETING `training=training` from that call changes NOTHING
+    observable. MEASURED twice. (i) On an isolated two-layer probe wrapping a
+    stock `keras.layers.BatchNormalization`, `max|train - infer|` = 10.4651
+    WITH the explicit forward and 10.4651 WITHOUT it -- bit-identical. (ii) On
+    the REAL layer, with `self.gabor_norm(x, training=training)` replaced by
+    `self.gabor_norm(x)`: the whole module stayed at `96 passed`, and this
+    class on its own stayed at `3 passed`. The explicit forward is therefore
+    redundant-but-correct under Keras 3.8 and is NOT observable from outside
+    the layer; the review's MB mutation is INERT, not merely unguarded, so no
+    test in any repo could redden on it.
+
+    What these arms DO pin, and what was genuinely missing, is that the block
+    runs a training-dependent normalization correctly in BOTH modes -- an
+    entire norm family (`batch_norm`, `bias_free_batch_norm`) that no arm in
+    this module previously touched, since `layer_norm` and `rms_norm` have no
+    training-mode behaviour at all.
+    """
+
+    # DECISION plan-2026-09-05T115518-e69163e4/D-026: this section does NOT
+    # guard `training=` forwarding, and must not be relabelled as if it did.
+    # MEASURED on the real layer: deleting `training=training` from
+    # `self.gabor_norm(...)` leaves the module at `96 passed`, because Keras
+    # 3.8 delivers `training` to sub-layers through an ambient call context.
+    # Do NOT try to strengthen these arms until they redden on that mutation --
+    # no external test can, and chasing it would produce a guard written
+    # against a framework behaviour that does not exist. See decisions.md D-026.
+    @pytest.mark.parametrize(
+        "normalization_type", ["batch_norm", "bias_free_batch_norm"]
+    )
+    def test_train_and_inference_outputs_differ(self, sample_input, normalization_type):
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            normalization_type=normalization_type,
+            name=f"train_dep_{normalization_type}",
+        )
+        y_train = keras.ops.convert_to_numpy(block(sample_input, training=True))
+        y_infer = keras.ops.convert_to_numpy(block(sample_input, training=False))
+        assert np.all(np.isfinite(y_train)) and np.all(np.isfinite(y_infer))
+        assert tuple(y_train.shape) == (B, H, W, F)
+
+        # MEASURED: no warm-up is needed. On the FIRST call the moving
+        # statistics are still at their initial (mean 0, var 1) values while
+        # `training=True` uses the batch's own statistics, and the gap is
+        # already large -- 1.11 for `batch_norm`, 1.68 for `bias_free_batch_norm`
+        # against outputs of order 1. The threshold is set two decades below
+        # the smaller of those, not pinned to either.
+        first_call_gap = float(np.max(np.abs(y_train - y_infer)))
+        assert first_call_gap > 1e-2, (
+            f"{normalization_type} produced the same output in both modes "
+            f"(gap {first_call_gap}), so this arm measures nothing"
+        )
+
+        # And it stays true after the moving statistics have actually moved,
+        # so the claim is not an artefact of the untouched initial state.
+        # MEASURED after 20 training calls: 0.968 / 1.46 respectively.
+        for _ in range(20):
+            block(sample_input, training=True)
+        warm_gap = float(np.max(np.abs(
+            keras.ops.convert_to_numpy(block(sample_input, training=True))
+            - keras.ops.convert_to_numpy(block(sample_input, training=False))
+        )))
+        assert warm_gap > 1e-2, (
+            f"{normalization_type} train/infer gap collapsed to {warm_gap} "
+            f"once the moving statistics warmed up"
+        )
+
+    def test_the_moving_statistics_actually_move_in_training_only(self, sample_input):
+        """Anti-vacuity control for the arm above: `training` reaches the norm.
+
+        If the gap above came from something other than the training flag, the
+        moving statistics would be indifferent to it. MEASURED: they advance
+        under `training=True` and are bit-identical under `training=False`.
+
+        Note what this does and does not establish. It proves the flag REACHES
+        the norm sub-layer; it does not attribute that to the explicit
+        `training=` argument in `call()`, because (see the class docstring)
+        Keras 3.8 would deliver the flag through the ambient call context even
+        if that argument were deleted.
+        """
+        block = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            normalization_type="batch_norm",
+            name="moving_stats",
+        )
+        block(sample_input, training=False)
+        before = keras.ops.convert_to_numpy(block.gabor_norm.moving_mean).copy()
+
+        for _ in range(5):
+            block(sample_input, training=False)
+        assert np.array_equal(
+            keras.ops.convert_to_numpy(block.gabor_norm.moving_mean), before
+        ), "inference calls moved the moving statistics"
+
+        block(sample_input, training=True)
+        after = keras.ops.convert_to_numpy(block.gabor_norm.moving_mean)
+        assert not np.array_equal(after, before), (
+            "a training call did NOT move the moving statistics"
+        )
