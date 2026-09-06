@@ -1560,7 +1560,7 @@ def _b_models_sam3_decoder():
 
 
 def _b_models_dit_blocks():
-    from dl_techniques.models.vision_language.dit.blocks import DiTBlock
+    from dl_techniques.models.vision.dit.blocks import DiTBlock
     # `mlp` is created in `__init__`, not `build`, so no build call is needed.
     return DiTBlock(hidden_size=16, num_heads=2).mlp
 
@@ -1625,7 +1625,7 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/vision/image_restoration/pw_fnet/model.py": _b_models_pw_fnet,
     "models/graph/relgt/model.py": _b_models_relgt,
     "models/vision_language/bit_diffusion/blocks.py": _b_models_bit_diffusion_blocks,
-    "models/vision_language/dit/blocks.py": _b_models_dit_blocks,
+    "models/vision/dit/blocks.py": _b_models_dit_blocks,
     "models/vision_language/sam/sam1/image_encoder.py": _b_models_sam_image_encoder,
     "models/vision_language/sam/sam1/transformer.py": _b_models_sam_transformer,
     "models/vision_language/sam/sam3/decoder.py": _b_models_sam3_decoder,

@@ -3,7 +3,7 @@
 Three separate claims live here, and the difference between them matters:
 
 1. **The export surface is real.** Every name in
-   ``dl_techniques.models.vision_language.dit.__all__`` is importable from the
+   ``dl_techniques.models.vision.dit.__all__`` is importable from the
    package, is the same object the defining module holds, and is either
    constructible or a documented module constant. No exported name shadows a
    submodule -- the failure mode there is invisible to a per-package pytest run
@@ -39,8 +39,8 @@ import keras
 import numpy as np
 import pytest
 
-import dl_techniques.models.vision_language.dit as dit_pkg
-from dl_techniques.models.vision_language.dit import (
+import dl_techniques.models.vision.dit as dit_pkg
+from dl_techniques.models.vision.dit import (
     DIT_VARIANTS,
     DiT,
     DiTBlock,
@@ -71,9 +71,9 @@ DOCUMENTED_CONSTANTS = {
 
 #: The classes SC-7 names, mapped to the module that defines them.
 SC7_DIAGRAM_CLASSES = {
-    "DiT": "dl_techniques.models.vision_language.dit.model",
-    "DiTBlock": "dl_techniques.models.vision_language.dit.blocks",
-    "DiTFinalLayer": "dl_techniques.models.vision_language.dit.blocks",
+    "DiT": "dl_techniques.models.vision.dit.model",
+    "DiTBlock": "dl_techniques.models.vision.dit.blocks",
+    "DiTFinalLayer": "dl_techniques.models.vision.dit.blocks",
     "TimestepEmbedding": "dl_techniques.layers.embedding.timestep_embedding",
 }
 
@@ -220,7 +220,7 @@ class TestTheExportSurface:
 
         for sub in SUBMODULE_NAMES:
             mod = importlib.import_module(
-                f"dl_techniques.models.vision_language.dit.{sub}"
+                f"dl_techniques.models.vision.dit.{sub}"
             )
             assert mod.__name__.endswith(sub)
 
@@ -256,7 +256,7 @@ class TestTheExportSurface:
         """Re-export, not re-definition."""
         for sub in SUBMODULE_NAMES:
             mod = importlib.import_module(
-                f"dl_techniques.models.vision_language.dit.{sub}"
+                f"dl_techniques.models.vision.dit.{sub}"
             )
             for name in dit_pkg.__all__:
                 if hasattr(mod, name):
