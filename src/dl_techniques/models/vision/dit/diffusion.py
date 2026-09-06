@@ -134,7 +134,7 @@ import numpy as np
 # Local Imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.models.vision_language.dit.config import DiffusionConfig
+from dl_techniques.models.vision.dit.config import DiffusionConfig
 from dl_techniques.utils.ddpm_schedule import DDPMSchedule, space_timesteps
 from dl_techniques.utils.logger import logger
 

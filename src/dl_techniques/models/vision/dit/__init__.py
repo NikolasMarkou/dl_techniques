@@ -16,8 +16,8 @@ factory ``create_dit``, the pure helpers ``flattened_linear_xavier`` and
 respacing). Block internals and leading-underscore helpers stay private to
 their submodule.
 
-    from dl_techniques.models.vision_language.dit import DiT, create_dit
-    from dl_techniques.models.vision_language.dit.blocks import NUM_DIT_ADALN_CHUNKS
+    from dl_techniques.models.vision.dit import DiT, create_dit
+    from dl_techniques.models.vision.dit.blocks import NUM_DIT_ADALN_CHUNKS
 
 References:
     - Peebles, W. and Xie, S. "Scalable Diffusion Models with Transformers."

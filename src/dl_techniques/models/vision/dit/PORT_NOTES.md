@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-This package (`src/dl_techniques/models/vision_language/dit/`) is a Keras 3, **channels-last** port
+This package (`src/dl_techniques/models/vision/dit/`) is a Keras 3, **channels-last** port
 of Peebles & Xie's **DiT** (arXiv:2212.09748) — a transformer that denoises VAE latents, conditioned
 on a class label and a diffusion timestep through adaLN-Zero — together with the Gaussian-diffusion
 machinery the model is useless without: both named beta schedules, `q_sample`, the true posterior,
@@ -39,7 +39,7 @@ interpolation held in lockstep by a test (§4.8); a `scale, shift` chunk order i
 Measured surface at the end of step 8 (commands beside the numbers):
 
 ```bash
-wc -l src/dl_techniques/models/vision_language/dit/*.py        # 3,303 over 5 modules
+wc -l src/dl_techniques/models/vision/dit/*.py        # 3,303 over 5 modules
 wc -l tests/test_models/test_dit/*.py                          # 3,344 over 6 files
 CUDA_VISIBLE_DEVICES="" .venv/bin/python -m pytest tests/test_models/test_dit/ -q
 ```
@@ -61,7 +61,7 @@ CUDA_VISIBLE_DEVICES="" .venv/bin/python -m pytest tests/test_models/test_dit/ -
 Existing, tested `dl_techniques` components used without modification. The bar for "reuse" is that
 the *numerics* match, not merely the name. **No attention, FFN, normalization, patch-embedding or
 label-embedding class is defined anywhere under `dit/`** — verify with
-`grep -n "^class " src/dl_techniques/models/vision_language/dit/*.py`, which returns exactly
+`grep -n "^class " src/dl_techniques/models/vision/dit/*.py`, which returns exactly
 `DiffusionConfig`, `DiTBlock`, `DiTFinalLayer`, `DiT` and `GaussianDiffusion`.
 
 | Upstream component | dl_techniques reuse | Import path | Note |

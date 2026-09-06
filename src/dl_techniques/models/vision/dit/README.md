@@ -98,7 +98,7 @@ Every block below was executed; the output shown is the real output.
 
 ```python
 import keras
-from dl_techniques.models.vision_language.dit import DiT
+from dl_techniques.models.vision.dit import DiT
 
 model = DiT.from_variant("DiT-S/2", input_size=8, in_channels=4, num_classes=10)
 
@@ -122,7 +122,7 @@ which exists only because `class_dropout_rate > 0`.
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.vision_language.dit import DiT, GaussianDiffusion
+from dl_techniques.models.vision.dit import DiT, GaussianDiffusion
 
 model = DiT.from_variant("DiT-S/2", input_size=8, in_channels=4, num_classes=10)
 
@@ -165,7 +165,7 @@ otherwise see (`x_start` and the per-sample `t`) is packed into `y_true`, which 
 import keras
 import numpy as np
 from dl_techniques.losses.ddpm_hybrid_loss import DDPMHybridLoss
-from dl_techniques.models.vision_language.dit import DiT
+from dl_techniques.models.vision.dit import DiT
 
 T, C = 1000, 4
 loss = DDPMHybridLoss(schedule_name="linear", num_timesteps=T, in_channels=C)

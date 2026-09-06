@@ -38,8 +38,8 @@ from dl_techniques.layers.embedding.class_label_embedding import ClassLabelEmbed
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.sincos_pos_embed_2d import get_2d_sincos_pos_embed
 from dl_techniques.layers.embedding.timestep_embedding import TimestepEmbedding
-from dl_techniques.models.vision_language.dit.blocks import DiTBlock, DiTFinalLayer
-from dl_techniques.models.vision_language.dit.config import (
+from dl_techniques.models.vision.dit.blocks import DiTBlock, DiTFinalLayer
+from dl_techniques.models.vision.dit.config import (
     DIT_VARIANTS,
     get_variant_config,
     normalize_variant_name,
@@ -259,7 +259,7 @@ class DiT(keras.Model):
         out [B, H, W, out_channels]
 
     The twelve named variants, transcribed in
-    :data:`~dl_techniques.models.vision_language.dit.config.DIT_VARIANTS` and
+    :data:`~dl_techniques.models.vision.dit.config.DIT_VARIANTS` and
     reachable through :meth:`from_variant`:
 
     .. code-block:: text
@@ -333,7 +333,7 @@ class DiT(keras.Model):
 
     #: House-contract alias for the variant registry (``models/CLAUDE.md``
     #: § House Model Module Shape). Bound to the same object as
-    #: :data:`~dl_techniques.models.vision_language.dit.config.DIT_VARIANTS`,
+    #: :data:`~dl_techniques.models.vision.dit.config.DIT_VARIANTS`,
     #: not a copy, so the two never drift out of sync.
     MODEL_VARIANTS: Dict[str, Dict[str, int]] = DIT_VARIANTS
 
@@ -779,7 +779,7 @@ class DiT(keras.Model):
         default unless overridden through ``kwargs``.
 
         :param variant: Any spelling accepted by
-            :func:`~dl_techniques.models.vision_language.dit.config.normalize_variant_name`,
+            :func:`~dl_techniques.models.vision.dit.config.normalize_variant_name`,
             e.g. ``"DiT-S/2"``, ``"S/2"`` or ``"dit_s_2"``.
         :type variant: str
         :param pretrained: ``False`` (default) for random init. A string is
@@ -831,7 +831,7 @@ def create_dit(
     the variant lookup would be a second thing to keep in lockstep.
 
     :param variant: One of the twelve keys of
-        :data:`~dl_techniques.models.vision_language.dit.config.DIT_VARIANTS`,
+        :data:`~dl_techniques.models.vision.dit.config.DIT_VARIANTS`,
         in any accepted spelling.
     :type variant: str
     :param pretrained: ``False`` for random init, a local weights path to load,
