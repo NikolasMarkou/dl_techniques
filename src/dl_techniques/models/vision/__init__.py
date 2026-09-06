@@ -1,6 +1,6 @@
 """Vision models — image backbones, detectors, segmenters, denoisers and generators.
 
-The largest family: 37 leaf packages, four of which sit one level deeper under a
+The largest family: 37 leaf packages, five of which sit one level deeper under a
 task subdirectory (`image_restoration/`, `keypoints/`, `super_resolution/`).
 
 - `accunet/` — AccuNet
