@@ -30,6 +30,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import keras
 import numpy as np
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.embedding.class_label_embedding import ClassLabelEmbedding
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.sincos_pos_embed_2d import get_2d_sincos_pos_embed
@@ -42,6 +46,8 @@ from dl_techniques.models.vision_language.dit.config import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 #: The three positional inputs :meth:`DiT.call` takes, in order. Named so the
 #: model, its error messages and the tests agree on the tuple layout instead of
