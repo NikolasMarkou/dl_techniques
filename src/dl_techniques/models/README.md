@@ -35,9 +35,9 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **36** | image backbones, detectors, segmenters, denoisers, generators |
+| [`vision/`](vision/) | **37** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
-| [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
+| [`vision_language/`](vision_language/) | **10** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 3 | architecture-level MLP replacements, modality-agnostic |
@@ -49,7 +49,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`tabular/`](tabular/) | 1 | tabular-data models |
 | **Sum** | **88** | |
 
-### `vision/` (36)
+### `vision/` (37)
 
 | Package | |
 |---|---|
@@ -65,6 +65,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `depth_anything/` | depth estimation |
 | `detr/` | DEtection TRansformer |
 | `dino/` | DINO self-supervised |
+| `dit/` | DiT, the class-conditional latent Diffusion Transformer of Peebles & Xie: adaLN-Zero blocks over VAE latents, the twelve published variants, and the DDPM sampler (ancestral + DDIM, respacing, classifier-free guidance) |
 | `energy_transformer/` | Energy Transformer — masked image completion, plus classifier |
 | `fastvit/` | FastViT MCi image backbone, the assembled tower over `layers/fastvit/` |
 | `fractalnet/` | FractalNet |
@@ -115,13 +116,12 @@ direct-child count, because those two nest one level further. Re-derive with the
 Packages here are filed by input modality — token sequences — which is not a claim that
 `mamba`, `fnet` or `fftnet` is only a language model.
 
-### `vision_language/` (11)
+### `vision_language/` (10)
 
 | Package | |
 |---|---|
 | `bit_diffusion/` | BiT/BiB bidirectional text<->image diffusion bridge: the DiTXA cross-attention transformer, a lossless token<->latent packing, four SDE bridge processes and a shared token decoder |
 | `clip/` | CLIP |
-| `dit/` | DiT, the class-conditional latent Diffusion Transformer of Peebles & Xie: adaLN-Zero blocks over VAE latents, the twelve published variants, and the DDPM sampler (ancestral + DDIM, respacing, classifier-free guidance) |
 | `fastvlm/` | vision-only hybrid backbone: MobileOne stem, RepMixer, attention stages. Name misattributes |
 | `ideogram4/` | Ideogram4 text-to-image flow-matching DiT |
 | `mobile_clip/` | MobileCLIP, both generations in one package: `mobile_clip_v1.py` is deliberately non-faithful on the image side, `mobile_clip_v2.py` is the faithful MobileCLIP2. Neither deprecates the other |

@@ -1,6 +1,6 @@
 """Vision models — image backbones, detectors, segmenters, denoisers and generators.
 
-The largest family: 35 leaf packages, four of which sit one level deeper under a
+The largest family: 37 leaf packages, four of which sit one level deeper under a
 task subdirectory (`image_restoration/`, `keypoints/`, `super_resolution/`).
 
 - `accunet/` — AccuNet
@@ -15,6 +15,8 @@ task subdirectory (`image_restoration/`, `keypoints/`, `super_resolution/`).
 - `depth_anything/` — depth estimation
 - `detr/` — DEtection TRansformer
 - `dino/` — DINO self-supervised
+- `dit/` — DiT, the class-conditional latent Diffusion Transformer (Peebles & Xie),
+  plus the DDPM sampler it needs
 - `energy_transformer/` — Energy Transformer (masked image completion + classifier)
 - `fastvit/` — FastViT MCi image backbone, the assembled tower over `layers/fastvit/`
 - `fractalnet/` — FractalNet
