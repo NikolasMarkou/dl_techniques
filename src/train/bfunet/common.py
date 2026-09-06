@@ -964,6 +964,56 @@ GABOR_ACTIVATIONS = frozenset(
 )
 
 
+def validate_gabor_stem_channels(
+        use_gabor_stem: bool,
+        gabor_stem_projection: bool,
+        gabor_filters: int,
+        initial_filters: int,
+) -> None:
+    """Fail early when ``--no-gabor-projection`` cannot reach ``initial_filters``.
+
+    The Gabor stem is a bias-free cross-channel ``Conv2D`` (the Ozbulak & Ekenel
+    warm start), so ``gabor_filters`` IS its output channel count. With the 1x1
+    projection dropped, the stem output feeds the encoder directly and must
+    therefore already be ``initial_filters`` wide. Both model builders
+    (``models/vision/convunext/model.py`` and
+    ``models/vision/bias_free_denoisers/bfunet.py``) raise the same way as a
+    backstop; this runs first so the CLI reports it before a model is built.
+
+    Interface contract: pure predicate, no I/O, no state. Returns ``None`` when the
+    configuration is admissible and raises otherwise. Both bfunet trainers call it
+    with the RESOLVED ``initial_filters`` (after any variant override), never the
+    variant default.
+
+    NOTE: the rule used to be ``channels * gabor_filters == initial_filters``, from
+    the era when the stem was a depthwise bank with ``gabor_filters`` as a
+    ``depth_multiplier``. ``channels`` is no longer part of it.
+
+    :param use_gabor_stem: Whether the Gabor stem is built at all.
+    :type use_gabor_stem: bool
+    :param gabor_stem_projection: Whether the 1x1 projection after the stem is kept.
+    :type gabor_stem_projection: bool
+    :param gabor_filters: The stem's output channel count.
+    :type gabor_filters: int
+    :param initial_filters: The resolved level-0 encoder width.
+    :type initial_filters: int
+    :return: None.
+    :rtype: None
+    :raises ValueError: If the stem is on, the projection is off, and
+        ``gabor_filters != initial_filters``.
+    """
+    if not (use_gabor_stem and not gabor_stem_projection):
+        return
+    if gabor_filters != initial_filters:
+        raise ValueError(
+            f"--no-gabor-projection requires gabor_filters({gabor_filters}) to equal "
+            f"initial_filters({initial_filters}). The Gabor stem is a cross-channel "
+            "Conv2D, so gabor_filters IS its output channel count -- the old "
+            "channels * gabor_filters rule no longer applies. Pass --initial-filters "
+            f"{gabor_filters} (or adjust --gabor-filters)."
+        )
+
+
 @dataclass
 class BFUnetTrainingConfig:
     """Shared configuration base for the bfunet bias-free denoiser trainers.
@@ -1052,21 +1102,25 @@ class BFUnetTrainingConfig:
     # Model (shared bias-free U-Net topology)
     variant: str = "base"           # tiny | small | base | large | xlarge
     use_gabor_stem: bool = True
+    # OUTPUT CHANNEL COUNT of the Gabor stem, which is a bias-free cross-channel
+    # Conv2D warm started from a Gabor bank (Ozbulak & Ekenel) and TRAINED. It was
+    # once a depthwise depth_multiplier, where the stem emitted channels *
+    # gabor_filters; it is not any more.
     gabor_filters: int = 32
     gabor_kernel_size: int = 11
-    # Activation on the frozen Gabor stem. None -> linear passthrough (the raw signed
+    # Activation on the Gabor stem. None -> linear passthrough (the raw signed
     # Gabor responses). Restricted to positively homogeneous activations: anything else
     # breaks the degree-1 homogeneity D(a*x) = a*D(x) the whole bias-free stack rests on.
     # Validated in __post_init__ against GABOR_ACTIVATIONS.
     gabor_activation: Optional[str] = None
     # Drop the mandatory bias-free 1x1 projection after the Gabor stem and feed the
-    # depthwise bank straight into the encoder. Requires channels * gabor_filters ==
-    # initial_filters EXACTLY (see initial_filters override below); the factory raises
-    # otherwise. Default True = unchanged (projection kept).
+    # stem straight into the encoder. Requires gabor_filters == initial_filters EXACTLY
+    # (see initial_filters override below); validate_gabor_stem_channels and both model
+    # factories raise otherwise. Default True = unchanged (projection kept).
     gabor_stem_projection: bool = True
     # Override the variant's initial_filters (level-0 width). None -> use the variant
     # default from the model CONFIGS. Primarily for the no-projection Gabor stem, where
-    # initial_filters must equal channels * gabor_filters (e.g. 3 * 32 = 96).
+    # initial_filters must equal gabor_filters exactly.
     initial_filters: Optional[int] = None
     # Per-encoder-level channel-growth multiplier (>= 1). Channels at level i are
     # int(round(initial_filters * filter_multiplier ** i)). Default 2.0 doubles per
@@ -2443,7 +2497,7 @@ def add_common_arguments(parser) -> None:
                         help="EarlyStopping patience; <= 0 disables early stopping "
                              "(default -1 = disabled).")
     parser.add_argument("--no-gabor-stem", action="store_true",
-                        help="Disable the frozen Gabor depthwise stem")
+                        help="Disable the trainable Gabor warm-start stem")
     parser.add_argument("--laplacian-pyramid", action="store_true",
                         help="Enable the Laplacian-pyramid downsample/skip path (default OFF)")
     parser.add_argument("--no-clip", action="store_true",
@@ -2506,26 +2560,33 @@ def add_common_arguments(parser) -> None:
     parser.add_argument("--analyzer-start-epoch", type=int, default=1,
                         help="First epoch to run the analyzer on (with --analyzer, "
                              "default 1).")
-    parser.add_argument("--gabor-filters", type=int, default=32)
+    parser.add_argument("--gabor-filters", type=int, default=32,
+                        help="OUTPUT CHANNEL COUNT of the Gabor stem (a Conv2D "
+                             "`filters`), default 32. NOTE: this was once a depthwise "
+                             "depth_multiplier and the stem emitted "
+                             "channels*gabor_filters; it now emits exactly this many "
+                             "channels.")
     parser.add_argument("--gabor-kernel-size", type=int, default=11,
-                        help="Spatial size of the frozen Gabor depthwise stem (default 11).")
+                        help="Spatial size of the trainable Gabor stem (default 11).")
     parser.add_argument("--gabor-activation", type=str, default=None,
                         choices=sorted(GABOR_ACTIVATIONS),
-                        help="Activation on the frozen Gabor stem. Default: none (linear "
+                        help="Activation on the Gabor stem. Default: none (linear "
                              "passthrough of the raw signed Gabor responses). Restricted to "
                              "positively homogeneous activations -- anything else breaks the "
-                             "degree-1 homogeneity the bias-free denoisers rely on. Note the "
-                             "bank has no phase-reversed filter pairs, so 'relu' discards each "
-                             "filter's negative lobe with no sibling filter to recover it.")
+                             "degree-1 homogeneity the bias-free denoisers rely on. With the "
+                             "default sweep='product' bank the filters come in phase-reversed "
+                             "(psi, psi+180) pairs -- MEASURED on a 32-filter bank: 16 pairs at "
+                             "cosine < -0.99 -- so 'relu' keeps each filter's negative lobe on "
+                             "its sibling channel.")
     parser.add_argument("--no-gabor-projection", action="store_true",
                         help="Drop the 1x1 projection after the Gabor stem and feed the "
-                             "depthwise bank straight into the encoder. Requires "
-                             "channels*gabor_filters == initial_filters exactly (e.g. "
-                             "--gabor-filters 32 --initial-filters 96 for 3-channel input).")
+                             "stem straight into the encoder. Requires "
+                             "gabor_filters == initial_filters exactly (e.g. "
+                             "--gabor-filters 96 --initial-filters 96).")
     parser.add_argument("--initial-filters", type=int, default=None,
                         help="Override the variant's level-0 width (initial_filters). "
                              "Default: variant value. Use with --no-gabor-projection so "
-                             "channels*gabor_filters == initial_filters.")
+                             "gabor_filters == initial_filters.")
     parser.add_argument("--filter-multiplier", type=float, default=2.0,
                         help="Per-encoder-level channel-growth multiplier (>=1). "
                              "channels[level]=round(initial_filters * multiplier**level). "

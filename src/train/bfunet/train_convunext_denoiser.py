@@ -1,8 +1,8 @@
-"""Bias-free ConvNeXt (ConvUNext) denoiser trainer with a frozen Gabor stem and
-a noise-sigma curriculum.
+"""Bias-free ConvNeXt (ConvUNext) denoiser trainer with a trainable Gabor
+warm-start stem and a noise-sigma curriculum.
 
 Trains ``create_convunext_denoiser`` (bias-free ConvNeXt U-Net) with an optional
-NON-LEARNABLE Gabor depthwise stem on DIV2K + COCO. Patches of 256x256 are sampled
+TRAINABLE cross-channel Gabor stem (Ozbulak & Ekenel warm start) on DIV2K + COCO. Patches of 256x256 are sampled
 with geometric augmentation (flips + rot90), normalized to ``[0, 1]`` (``image / 255``;
 the strictly-positive domain is what forces the bias-free net's filters to sum to one --
 see ``research/2026_bfunet_unit_domain_migration.md``), and corrupted with additive Gaussian
@@ -131,7 +131,7 @@ from train.bfunet.common import (
     multi_pass_psnr, build_fixed_val_batch, build_dashboard_from_dir,
     _read_current_lr, DenoisingVisualizationCallback, LRLoggerCallback,
     add_common_arguments, reject_self_iterate_with_nonadditive,
-    _homogeneity_probe,
+    _homogeneity_probe, validate_gabor_stem_channels,
 )
 from train.bfunet import common as common
 
@@ -233,15 +233,13 @@ def build_model(config: TrainingConfig) -> keras.Model:
         cfg["blocks_per_level"] = config.blocks_per_level  # override variant blocks/level
     # No-projection Gabor stem requires an exact channel match; fail early with a clear
     # message before the factory builds (the factory also validates as a backstop).
-    if config.use_gabor_stem and not config.gabor_stem_projection:
-        gabor_out = config.channels * config.gabor_filters
-        if gabor_out != cfg["initial_filters"]:
-            raise ValueError(
-                f"--no-gabor-projection requires channels({config.channels}) * "
-                f"gabor_filters({config.gabor_filters}) = {gabor_out} to equal "
-                f"initial_filters({cfg['initial_filters']}). Pass --initial-filters "
-                f"{gabor_out} (or adjust --gabor-filters)."
-            )
+    # One shared predicate, so the two trainers cannot drift apart on the rule.
+    validate_gabor_stem_channels(
+        use_gabor_stem=config.use_gabor_stem,
+        gabor_stem_projection=config.gabor_stem_projection,
+        gabor_filters=config.gabor_filters,
+        initial_filters=cfg["initial_filters"],
+    )
     # Resolve the final-projection group count: -1 means one group per output channel
     # (groups == channels), so each output channel reads a disjoint feature group.
     final_projection_groups = (

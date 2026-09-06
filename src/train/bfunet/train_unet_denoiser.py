@@ -20,7 +20,7 @@ Usage::
     MPLBACKEND=Agg python -m train.bfunet.train_unet_denoiser \
         --variant base --epochs 100 --batch-size 4 --gpu 1
 
-    # With the frozen Gabor stem + Laplacian pyramid (ConvUNeXt-parity features)
+    # With the trainable Gabor warm-start stem + Laplacian pyramid (ConvUNeXt-parity features)
     MPLBACKEND=Agg python -m train.bfunet.train_unet_denoiser \
         --variant base --laplacian-pyramid --block-normalization batchnorm --gpu 1
 
@@ -58,7 +58,7 @@ from train.bfunet.common import (
     multi_pass_psnr, build_fixed_val_batch, build_dashboard_from_dir,
     _read_current_lr, DenoisingVisualizationCallback, LRLoggerCallback,
     add_common_arguments, reject_self_iterate_with_nonadditive,
-    _homogeneity_probe,
+    _homogeneity_probe, validate_gabor_stem_channels,
 )
 from train.bfunet import common as common
 
@@ -118,15 +118,13 @@ def build_model(config: TrainingConfig) -> keras.Model:
         cfg["blocks_per_level"] = config.blocks_per_level  # override variant blocks/level
     # No-projection Gabor stem requires an exact channel match; fail early with a clear
     # message before the factory builds (the factory also validates as a backstop).
-    if config.use_gabor_stem and not config.gabor_stem_projection:
-        gabor_out = config.channels * config.gabor_filters
-        if gabor_out != cfg["initial_filters"]:
-            raise ValueError(
-                f"--no-gabor-projection requires channels({config.channels}) * "
-                f"gabor_filters({config.gabor_filters}) = {gabor_out} to equal "
-                f"initial_filters({cfg['initial_filters']}). Pass --initial-filters "
-                f"{gabor_out} (or adjust --gabor-filters)."
-            )
+    # One shared predicate, so the two trainers cannot drift apart on the rule.
+    validate_gabor_stem_channels(
+        use_gabor_stem=config.use_gabor_stem,
+        gabor_stem_projection=config.gabor_stem_projection,
+        gabor_filters=config.gabor_filters,
+        initial_filters=cfg["initial_filters"],
+    )
     # Resolve the final-projection group count: -1 means one group per output channel.
     final_projection_groups = (
         config.channels if config.final_projection_groups == -1

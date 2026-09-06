@@ -46,6 +46,10 @@ from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block  
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block  # noqa: F401
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization  # noqa: F401
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth  # noqa: F401
+from dl_techniques.initializers import create_gabor_conv2d  # noqa: F401
+# Kept for archives written before the Gabor stem became a trainable cross-channel
+# Conv2D: both builders live in the same module, so either import registers
+# `GaborFiltersInitializer`, and this one keeps the legacy name resolvable here.
 from dl_techniques.initializers import create_gabor_depthwise_conv2d  # noqa: F401
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels  # noqa: F401
 from dl_techniques.layers.pooling.downsample_and_skip import DownsampleAndSkip  # noqa: F401

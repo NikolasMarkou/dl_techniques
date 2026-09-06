@@ -113,17 +113,32 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 > **the literature has no published bridge**. This is what `applications/bias_free_denoiser/ddnm.py`
 > exploits, with zero retraining.
 
-#### Optional frozen Gabor stem (non-learnable)
-`create_convunext_denoiser` accepts three params that swap the learned stem for a **non-learnable (frozen)** Gabor depthwise convolution stem:
+#### Optional trainable Gabor warm-start stem
+`create_convunext_denoiser` (and `create_bfunet_denoiser`) accept four params that swap the learned stem for a **trainable cross-channel `Conv2D` warm started from a Gabor bank** — the construction of Ozbulak & Ekenel, *Initialization of Convolutional Neural Networks by Gabor Filters* (SIU 2018):
 
 | Param | Default | Meaning |
 |-------|---------|---------|
-| `use_gabor_stem` | `False` | When `True`, build a frozen Gabor depthwise bank + a **mandatory bias-free 1x1 projection** to `initial_filters` **INSTEAD OF** the learned `ConvUNextStem` — not before it. The Gabor front-end already performs initial feature extraction and sets the channel count, so the builder skips the stem entirely and falls through to the (no-op) channel-adjust branch. Default `False` is byte-identical to the original architecture. |
-| `gabor_filters` | `32` | Depth multiplier of the depthwise Gabor bank; the stem emits `input_channels * gabor_filters` channels which the 1x1 projection reduces back to `initial_filters`. |
-| `gabor_kernel_size` | `11` | Kernel size of the Gabor depthwise stem. |
-| `gabor_stem_projection` | `True` | Added after this table was first written. `False` DROPS the mandatory 1x1 projection and feeds the Gabor bank straight into the encoder — legal only when `input_channels * gabor_filters == initial_filters` exactly (`ValueError` otherwise), and it leaves all cross-channel mixing to the first ConvNeXt block. |
+| `use_gabor_stem` | `False` | When `True`, build a bias-free Gabor-initialized `Conv2D` + a **mandatory bias-free 1x1 projection** to `initial_filters` **INSTEAD OF** the learned `ConvUNextStem` — not before it. The Gabor front-end already performs initial feature extraction and sets the channel count, so the builder skips the stem entirely and falls through to the (no-op) channel-adjust branch. Default `False` is byte-identical to the original architecture. |
+| `gabor_filters` | `32` | **OUTPUT CHANNEL COUNT** of the stem (a `Conv2D` `filters`); the 1x1 projection then maps it to `initial_filters`. |
+| `gabor_kernel_size` | `11` | Kernel size of the Gabor stem convolution. |
+| `gabor_stem_projection` | `True` | `False` DROPS the mandatory 1x1 projection and feeds the stem straight into the encoder — legal only when `gabor_filters == initial_filters` exactly (`ValueError` otherwise). |
 
-The Gabor weights are deterministic (`GaborFiltersInitializer`) and the layer is `trainable=False`, so the stem contributes **zero trainable parameters** and is preserved (still frozen) across `.keras` round-trips. The mandatory 1x1 projection is bias-free, keeping the whole front-end strictly bias-free.
+> **Breaking change.** This stem used to be a **frozen `DepthwiseConv2D`** bank contributing zero
+> trainable parameters and emitting `input_channels * gabor_filters` channels, and `gabor_filters`
+> was a depthwise `depth_multiplier`. It is now a **trainable `Conv2D`** emitting exactly
+> `gabor_filters` channels. Two consequences: `.keras` archives written with the old stem cannot be
+> loaded into a model built by these factories, and any `gabor_filters` chosen to satisfy the old
+> `input_channels * gabor_filters == initial_filters` rule must be re-derived. The per-channel
+> (colour-blind-per-channel) front-end is deliberately given up: a `Conv2D` sums across input
+> channels, so the stem is colour-blind at initialization until training breaks that symmetry.
+> `create_gabor_depthwise_conv2d` still exists and is still the right primitive for a genuinely
+> frozen per-channel front-end.
+
+The Gabor initialization is deterministic (`GaborFiltersInitializer`); the layer is
+`trainable=True` and `use_bias=False` is **hardcoded**, not threaded from `use_bias`. Bias-freedom
+is what makes `D(a*x) == a*D(x)` hold — the depthwise-vs-cross-channel choice never was — so the
+denoiser's positive-homogeneity guarantee is unaffected. The mandatory 1x1 projection is bias-free
+too, keeping the whole front-end strictly bias-free.
 
 ```python
 from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import create_convunext_denoiser
@@ -131,7 +146,7 @@ from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import create_c
 model = create_convunext_denoiser(
     input_shape=(256, 256, 3),
     convnext_version='v1',        # strict bias-freedom
-    use_gabor_stem=True,          # frozen Gabor front-end
+    use_gabor_stem=True,          # trainable Gabor warm-start front-end
     gabor_filters=32,
     gabor_kernel_size=11,
 )

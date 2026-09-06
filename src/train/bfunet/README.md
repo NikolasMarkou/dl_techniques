@@ -119,9 +119,9 @@ in the per-trainer sections below.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--no-gabor-stem` | off (stem ON) | Disable the frozen Gabor depthwise stem |
-| `--gabor-filters` | 32 | Gabor filters per channel |
-| `--no-gabor-projection` | off | Drop the 1×1 projection after the Gabor stem (requires `channels*gabor_filters == initial_filters`) |
+| `--no-gabor-stem` | off (stem ON) | Disable the trainable Gabor warm-start stem |
+| `--gabor-filters` | 32 | Gabor stem OUTPUT channel count (a `Conv2D` `filters`, no longer a per-channel multiplier) |
+| `--no-gabor-projection` | off | Drop the 1×1 projection after the Gabor stem (requires `gabor_filters == initial_filters`) |
 | `--initial-filters` | variant | Override level-0 width |
 | `--filter-multiplier` | 2.0 | Per-level channel growth: `channels[l] = round(initial_filters * m**l)` |
 | `--depth` | variant | Number of U-Net levels (≥2) |

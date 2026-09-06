@@ -162,8 +162,10 @@ def test_default_built_model_has_zero_bias_tensors(entry_point):
 #: `BiasFreeConv2D`, whose bias-freeness lives inside the layer. But `_build_final_projection`
 #: has a SECOND branch, selected by ``final_projection_groups > 1``, which builds a raw
 #: `keras.layers.Conv2D(..., use_bias=False)` -- bias-freeness written out by hand at the call
-#: site. `_build_gabor_stem` has two more such hand-written sites (the frozen Gabor bank and its
-#: 1x1 projection), reachable only via ``use_gabor_stem=True``. Flipping any of them to
+#: site. `_build_gabor_stem` has two more such hand-written sites (the trainable Gabor warm-start
+#: stem and its 1x1 projection), reachable only via ``use_gabor_stem=True``. The stem's
+#: ``use_bias=False`` is HARDCODED, not threaded from any knob, because the bias-free denoiser's
+#: positive homogeneity depends on it. Flipping any of them to
 #: ``use_bias=True`` leaves a defaults-only zero-bias guard entirely GREEN.
 #:
 #: Each entry carries a `probe` layer that EXISTS ONLY on the branch it is meant to reach, so
@@ -205,7 +207,10 @@ BRANCH_REACHING_CONFIGS = {
             input_shape=INPUT_SHAPE, depth=2, initial_filters=4, blocks_per_level=1,
             use_gabor_stem=True, gabor_filters=4, gabor_stem_projection=False),
         probe='gabor_stem',
-        raw_conv=False,
+        # The stem is now a plain cross-channel `keras.layers.Conv2D` (the Ozbulak &
+        # Ekenel warm start), not the `DepthwiseConv2D` it used to be, so the raw-conv
+        # reachability control applies to it too.
+        raw_conv=True,
     ),
 }
 

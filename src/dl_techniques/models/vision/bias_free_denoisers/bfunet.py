@@ -9,8 +9,10 @@ Miyasawa's relation its residual is proportional to the score of the noisy
 image distribution. The property only holds if nothing in the graph adds a
 constant, so `block_normalization` chooses between the variance-only
 `BiasFreeBatchNorm`, which preserves it, and `layernorm`, which does not.
-Structurally this is a standard U-Net, with an optional frozen Gabor stem
-and an optional Laplacian-pyramid skip split, both off by default.
+Structurally this is a standard U-Net, with an optional TRAINABLE Gabor
+warm-start stem (a bias-free cross-channel `Conv2D` initialized from a Gabor
+bank, per Ozbulak & Ekenel) and an optional Laplacian-pyramid skip split, both
+off by default.
 
 The builders are functional, returning `keras.Model(inputs, outputs)` with
 no subclass, since converting them would invalidate existing checkpoints.
@@ -49,7 +51,7 @@ from dl_techniques.layers.conv_blocks.bias_free_conv2d import (
     BiasFreeResidualBlock,
     resolve_denoiser_normalization,
 )
-from dl_techniques.initializers import create_gabor_depthwise_conv2d
+from dl_techniques.initializers import create_gabor_conv2d
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 
 from dl_techniques.layers.pooling.downsample_and_skip import DownsampleAndSkip
@@ -177,7 +179,7 @@ def _build_gabor_stem(
         kernel_initializer: Union[str, keras.initializers.Initializer],
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
 ) -> keras.KerasTensor:
-    """Build the optional frozen Gabor stem in front of the encoder.
+    """Build the optional trainable Gabor warm-start stem in front of the encoder.
 
     Arguments mirror the identically-named parameters of `create_bfunet_denoiser`.
     `kernel_initializer` / `kernel_regularizer` are forwarded as objects, never
@@ -187,17 +189,45 @@ def _build_gabor_stem(
         `use_gabor_stem=False`, a true no-op that adds zero layers.
     :rtype: keras.KerasTensor
     :raises ValueError: If `gabor_stem_projection=False` and
-        `input_channels * gabor_filters != initial_filters`.
+        `gabor_filters != initial_filters`.
     """
+    # DECISION standalone-2026-09-06-gabor-warm-start/D-002: the Gabor stem is now the
+    # PAPER'S construction — a TRAINABLE CROSS-CHANNEL Conv2D warm start (Ozbulak &
+    # Ekenel, SIU 2018), built by `create_gabor_conv2d`. This is the SAME deliberate
+    # reversal recorded at `# DECISION standalone-2026-09-06-gabor-warm-start/D-001`
+    # in `models/vision/convunext/model.py`, applied here so the two independent stem
+    # implementations do not diverge. Recorded consequences:
+    #   * The per-channel Gabor front-end is GIVEN UP on purpose. The depthwise bank
+    #     gave `input_channels * gabor_filters` distinct, colour-blind-per-channel
+    #     responses; a Conv2D sums across input channels, so output channel j sees the
+    #     Gabor response of the UNWEIGHTED SUM of the input channels, and the stem is
+    #     colour-blind at initialization until training breaks that symmetry.
+    #   * This KNOWINGLY CONTRADICTS `# DECISION plan_2026-06-18_ba4e0079/D-001` in
+    #     `create_gabor_depthwise_conv2d`'s docstring ("Do not swap this for a
+    #     Conv2D"). That decision STILL STANDS for callers of THAT builder; what
+    #     changed is which builder this caller uses.
+    #   * NO archive under `results/` embeds a bfunet-family Gabor stem, so unlike
+    #     convunext (which breaks `results/bfconvunext_repro` and
+    #     `results/bfconvunext_d3`) this arm carries zero checkpoint exposure. Any
+    #     bfunet checkpoint written with the old frozen depthwise stem would still be
+    #     unloadable.
+    #   * The bias-free guarantee is UNAFFECTED. Positive homogeneity
+    #     D(a*x) == a*D(x) comes from the ABSENCE OF BIAS, not from
+    #     depthwise-vs-cross-channel: channel summing was never the mechanism.
     if use_gabor_stem:
-        gabor = create_gabor_depthwise_conv2d(
-            filters_per_channel=gabor_filters,
+        gabor = create_gabor_conv2d(
+            filters=gabor_filters,
             kernel_size=gabor_kernel_size,
             activation=gabor_activation,
             strides=1,
             padding='same',
+            # HARDCODED bias-free: the bias-free denoiser arm requires positive
+            # homogeneity D(a*x) == a*D(x), and a bias-free convolution is
+            # homogeneous whether it is depthwise or cross-channel.
             use_bias=False,
-            trainable=False,
+            # The paper's warm start: Gabor-INITIALIZED, then refined by gradient
+            # descent. This is the whole point of the construction.
+            trainable=True,
             name='gabor_stem',
         )(inputs)
         if gabor_stem_projection:
@@ -210,15 +240,24 @@ def _build_gabor_stem(
                 name='gabor_stem_projection',
             )(gabor)
         else:
-            gabor_out_ch = input_shape[-1] * gabor_filters
-            if gabor_out_ch != initial_filters:
+            # No-projection Gabor stem: the cross-channel Conv2D emits exactly
+            # `gabor_filters` channels and feeds the encoder directly. Only
+            # well-defined when that equals initial_filters; there is no bias-free
+            # parameter-free way to reach initial_filters here, so fail loudly rather
+            # than silently pad/slice.
+            if gabor_filters != initial_filters:
                 raise ValueError(
-                    "gabor_stem_projection=False requires input_channels * gabor_filters == "
-                    f"initial_filters, but {input_shape[-1]} * {gabor_filters} = {gabor_out_ch} "
-                    f"!= initial_filters({initial_filters}). Match them, or keep projection on."
+                    "gabor_stem_projection=False requires the Gabor stem to emit exactly "
+                    f"initial_filters channels, but gabor_filters({gabor_filters}) != "
+                    f"initial_filters({initial_filters}). NOTE: gabor_filters is the "
+                    "stem's OUTPUT CHANNEL COUNT (a Conv2D `filters`), NOT a per-channel "
+                    f"multiplier, so the old input_channels({input_shape[-1]}) * "
+                    "gabor_filters rule no longer applies. Set gabor_filters == "
+                    "initial_filters, or keep gabor_stem_projection=True."
                 )
             stem_input = gabor
-        logger.info(f"Frozen Gabor stem enabled: filters={gabor_filters}, "
+        logger.info(f"Trainable Gabor stem (paper warm start) enabled: filters="
+                    f"{gabor_filters} output channels, "
                     f"kernel_size={gabor_kernel_size}, projection={gabor_stem_projection}")
     else:
         stem_input = inputs
@@ -681,11 +720,37 @@ def create_bfunet_denoiser(
     :type use_residual_blocks: bool
     :param enable_deep_supervision: Whether to add deep-supervision outputs. Defaults to False.
     :type enable_deep_supervision: bool
-    :param use_gabor_stem: Replace the learned first convolution with a frozen Gabor filter bank. Defaults to False.
-    :param gabor_filters: Number of Gabor filters in the stem. Defaults to 32.
-    :param gabor_kernel_size: Kernel size of the Gabor filters. Defaults to 11.
-    :param gabor_activation: Activation after the Gabor stem, if any.
-    :param gabor_stem_projection: Whether the Gabor stem includes a 1x1 projection. Defaults to True.
+    :param use_gabor_stem: Replace the learned first convolution with a TRAINABLE
+        cross-channel `Conv2D` warm started from a Gabor filter bank (Ozbulak &
+        Ekenel, SIU 2018), always bias-free. Defaults to False.
+
+        .. warning::
+
+           **This stem changed shape and trainability.** It used to be a FROZEN
+           `DepthwiseConv2D` bank contributing zero trainable parameters and emitting
+           `input_channels * gabor_filters` channels. It is now a trainable `Conv2D`
+           emitting exactly `gabor_filters` channels. Checkpoints written before that
+           change cannot be loaded into a model built by this function.
+    :param gabor_filters: **OUTPUT CHANNEL COUNT of the Gabor stem** — a `Conv2D`
+        `filters`, so the stem emits exactly `gabor_filters` channels. Defaults to 32.
+
+        .. warning::
+
+           **Semantic change to a public knob.** This used to be a depthwise
+           `depth_multiplier`: the stem emitted `input_channels * gabor_filters`
+           channels. It no longer does. A caller who previously passed
+           `gabor_filters=32` with 3-channel input got a 96-channel stem output and
+           now gets a 32-channel one. Re-derive any value chosen to satisfy the old
+           `input_channels * gabor_filters == initial_filters` rule.
+    :param gabor_kernel_size: Kernel size of the Gabor stem convolution. Defaults to 11.
+    :param gabor_activation: Activation after the Gabor stem, if any. Must be
+        positively homogeneous (relu, leaky_relu, linear, or None).
+    :param gabor_stem_projection: Whether the Gabor stem includes a bias-free 1x1
+        projection to `initial_filters`. Defaults to True. If False the projection is
+        DROPPED and the stem feeds the encoder directly — valid ONLY when
+        `gabor_filters == initial_filters` exactly (raises `ValueError` otherwise).
+        The old rule was `input_channels * gabor_filters == initial_filters`; it no
+        longer applies.
     :param use_laplacian_pyramid: Split each skip into a low-pass and a high-frequency band. Defaults to False.
     :param high_freq_blocks: Bias-free residual blocks applied to the Laplacian
         high-frequency skip band at each encoder level, ignored when

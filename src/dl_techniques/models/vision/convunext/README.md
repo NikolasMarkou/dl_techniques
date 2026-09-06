@@ -71,7 +71,7 @@ denoiser/autoencoder contract. Override it with `output_channels`
 input
   |
   stem                    ConvUNextStem  (Conv2D k=7 -> <stem_normalization> -> activation)
-  |                       or a frozen Gabor depthwise bank + 1x1 projection (use_gabor_stem)
+  |                       or a trainable Gabor-initialized Conv2D + 1x1 projection (use_gabor_stem)
   |
   encoder level i         blocks_per_level x ConvNeXt block   -> skip_i
   |                       DownsampleAndSkip                   (max / average / strided_conv,
@@ -119,7 +119,7 @@ therefore does not mean "provably, strictly bias-free":
 |---|---|---|
 | `GlobalResponseNormalization`'s `beta` | stays trainable (`use_beta` is never passed) | Threading it would change the bias-free arm's parameter count and numerics. Nothing in the repo enforces its absence; the trainer's `verify_bias_free` logs it and does not raise. |
 | `SpatialLinearAttention`'s internal attention | hardcoded `use_bias=False` | No knob is exposed there by design. It is bias-free on BOTH arms. |
-| The frozen Gabor bank | hardcoded `use_bias=False`, `trainable=False` | A frozen biased filter bank is a meaningless construct. |
+| The Gabor warm-start stem | hardcoded `use_bias=False` (`trainable=True`) | The bias-free arm needs `D(a*x) == a*D(x)`, and that comes from the absence of bias, not from the stem's form. A bias there would break it for every caller, so no knob is offered. |
 
 A fourth asymmetry is about activations rather than bias: `block_activation`,
 `stem_activation` and `supervision_activation` all default to `'gelu'`, which is NOT

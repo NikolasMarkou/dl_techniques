@@ -167,16 +167,23 @@ def _run_one(args, condition: str, zero_pad: bool, extra_zero: bool, seed: int,
     config = _make_config(args, zero_pad, extra_zero, seed)
     model = build_model(config)
 
-    # "Free Gabor": the factory always builds the Gabor stem FROZEN (trainable=False).
-    # Flip it to trainable so the Gabor-initialized depthwise bank is learned. Done before
-    # the training loop so model.trainable_variables (read each step) picks up the kernel.
-    if args.trainable_gabor:
-        flipped = 0
-        for layer in model._flatten_layers():
-            if layer.name == "gabor_stem":
-                layer.trainable = True
-                flipped += 1
-        logger.info(f"[{condition} seed={seed}] free-Gabor: set {flipped} gabor_stem layer(s) trainable")
+    # "Free Gabor". The factory now builds the Gabor stem TRAINABLE (it is the paper's
+    # warm start, a cross-channel Conv2D initialized from a Gabor bank), so the flag no
+    # longer needs to unfreeze anything -- but its two conditions must stay what they
+    # always were, or every historical report from this probe silently changes meaning.
+    # So the probe applies the FREEZE itself when the flag is absent, and asserts the
+    # stem really is trainable when it is present. A flag that had quietly become a
+    # no-op would be this repo's recorded silently-inert-argument defect.
+    touched = 0
+    for layer in model._flatten_layers():
+        if layer.name == "gabor_stem":
+            layer.trainable = bool(args.trainable_gabor)
+            touched += 1
+    logger.info(
+        f"[{condition} seed={seed}] gabor_stem trainable="
+        f"{bool(args.trainable_gabor)} applied to {touched} layer(s) "
+        f"(free-Gabor={'ON' if args.trainable_gabor else 'OFF, stem frozen by the probe'})"
+    )
 
     optimizer = keras.optimizers.AdamW(
         learning_rate=args.learning_rate,
@@ -386,7 +393,10 @@ def parse_arguments() -> argparse.Namespace:
     p.add_argument("--laplacian-pyramid", action="store_true",
                    help="Use the Laplacian-pyramid downsample/skip path in BOTH conditions.")
     p.add_argument("--trainable-gabor", action="store_true",
-                   help="Train the (otherwise frozen) Gabor stem in BOTH conditions ('free Gabor').")
+                   help="Train the Gabor stem in BOTH conditions ('free Gabor'). NOTE: the "
+                        "model builder now ships the stem TRAINABLE (the paper's warm "
+                        "start), so WITHOUT this flag the probe freezes it explicitly to "
+                        "keep both conditions identical to every earlier run of this probe.")
     p.add_argument("--sigma", type=float, default=0.1,
                    help="Fixed noise sigma on the [0,1] domain (curriculum frozen). "
                         "Unchanged by the domain migration: peak-to-peak width is 1.0 "

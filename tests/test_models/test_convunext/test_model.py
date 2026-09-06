@@ -1759,7 +1759,11 @@ class TestSerialization:
             reloaded.get_layer(name='bottleneck_attention_block_0'),
             SpatialLinearAttention)
         assert reloaded.get_layer(name='skip_highfreq_block_0_0') is not None
-        assert reloaded.get_layer(name='gabor_stem').trainable is False
+        # The Gabor stem is the paper's TRAINABLE warm start and must reload as one.
+        gabor = reloaded.get_layer(name='gabor_stem')
+        assert type(gabor) is keras.layers.Conv2D
+        assert gabor.trainable is True
+        assert len(gabor.trainable_weights) == 1
 
 
 # ---------------------------------------------------------------------
@@ -2055,13 +2059,21 @@ class TestEdgeCases:
             GlobalResponseNormalization
 
     def test_gabor_stem_replaces_the_convunext_stem(self) -> None:
-        """The two stems are mutually exclusive branches -- with the Gabor bank
-        on, no ``ConvUNextStem`` is built at all, and the bank is FROZEN.
+        """The two stems are mutually exclusive branches -- with the Gabor stem
+        on, no ``ConvUNextStem`` is built at all.
+
+        The stem is a TRAINABLE cross-channel ``Conv2D`` warm started from a Gabor
+        bank (Ozbulak & Ekenel), so ``gabor_filters`` is its output channel count,
+        not a per-channel multiplier: 4 filters on 3-channel input give 4 channels,
+        not 12.
         """
         model = create_convunext(
             **_cfg(use_gabor_stem=True, gabor_filters=4, gabor_kernel_size=5))
         with pytest.raises(ValueError):
             model.get_layer(name='encoder_level_0_stem')
         gabor = model.get_layer(name='gabor_stem')
-        assert gabor.trainable is False
+        assert type(gabor) is keras.layers.Conv2D
+        assert gabor.trainable is True
+        assert gabor.use_bias is False
+        assert gabor.output.shape[-1] == 4
         assert model.get_layer(name='gabor_stem_projection') is not None
