@@ -2,7 +2,7 @@
 
 THE INPUT CONTRACT
 ==================
-:class:`~dl_techniques.models.vision_language.dit.DiT` never sees pixels. It is a
+:class:`~dl_techniques.models.vision.dit.DiT` never sees pixels. It is a
 **latent** diffusion transformer: an offline job runs a VAE encoder once over the
 corpus and writes its output to disk, and training reads only that output. This
 module is where that contract is written down, because **no VAE ships with this
@@ -79,7 +79,7 @@ THE PIPELINE
 :func:`build_dit_dataset` emits exactly what stock ``fit()`` needs -- 2-tuples
 ``((x_t, t, y), y_true)`` -- with no custom ``train_step`` anywhere. ``t`` and
 ``noise`` are drawn here, ``x_t`` is produced by
-:meth:`~dl_techniques.models.vision_language.dit.GaussianDiffusion.q_sample`, and
+:meth:`~dl_techniques.models.vision.dit.GaussianDiffusion.q_sample`, and
 ``y_true`` is the packed target :class:`~dl_techniques.losses.DDPMHybridLoss`
 reads (D-002):
 
@@ -101,7 +101,7 @@ The loss re-derives ``x_t`` from ``(x_start, noise, t)`` instead of receiving it
 so the two sides must agree numerically. That agreement is made STRUCTURAL rather
 than coincidental: both construct their tables from the same
 ``(schedule_name, num_timesteps)`` pair through
-:meth:`~dl_techniques.models.vision_language.dit.config.DiffusionConfig.build_schedule`,
+:meth:`~dl_techniques.models.vision.dit.config.DiffusionConfig.build_schedule`,
 and this module calls ``GaussianDiffusion.q_sample`` rather than retyping the
 two-term formula. ``tests/test_train/test_dit/test_the_input_contract.py`` pins
 the equality at ``atol=1e-6, rtol=0``.
@@ -117,8 +117,8 @@ import tensorflow as tf
 
 import keras
 
-from dl_techniques.models.vision_language.dit import GaussianDiffusion
-from dl_techniques.models.vision_language.dit.config import DiffusionConfig
+from dl_techniques.models.vision.dit import GaussianDiffusion
+from dl_techniques.models.vision.dit.config import DiffusionConfig
 from dl_techniques.utils.logger import logger
 
 __all__ = [
@@ -391,7 +391,7 @@ def load_records_npz(path: Union[str, Path]) -> Dict[str, np.ndarray]:
     """Read one record shard written by :func:`save_records_npz`.
 
     Deliberately NOT validated here: the caller owns the
-    :class:`~dl_techniques.models.vision_language.dit.config.DiffusionConfig` the
+    :class:`~dl_techniques.models.vision.dit.config.DiffusionConfig` the
     records must match, so :func:`validate_records` runs at the pipeline
     boundary where that config is in scope. Dtypes are NOT coerced either -- a
     ``float64`` or NCHW shard must be REJECTED by the validator rather than
@@ -422,7 +422,7 @@ def build_training_diffusion(config: DiffusionConfig) -> GaussianDiffusion:
     """Build the forward process this pipeline noises with.
 
     Interface contract: pure. Returns an UNRESPACED
-    :class:`~dl_techniques.models.vision_language.dit.GaussianDiffusion` over
+    :class:`~dl_techniques.models.vision.dit.GaussianDiffusion` over
     ``config``'s schedule.
 
     :param config: The diffusion configuration; the loss is constructed from the
@@ -574,7 +574,7 @@ def build_dit_dataset(
     Interface contract: returns a dataset of 2-tuples
     ``((x_t, t, y), y_true)`` -- exactly the ``(inputs, target)`` pair
     ``keras.Model.fit`` expects, with ``inputs`` in
-    :data:`~dl_techniques.models.vision_language.dit.MODEL_INPUT_NAMES` order and
+    :data:`~dl_techniques.models.vision.dit.MODEL_INPUT_NAMES` order and
     no ``sample_weight`` third element (``DDPMHybridLoss`` needs none; ``t``
     rides inside ``y_true``, see D-002). INFINITE unless ``steps`` is given,
     because every element is redrawn with a fresh ``t`` and fresh noise, so an

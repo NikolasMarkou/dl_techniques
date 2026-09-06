@@ -70,7 +70,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision_language.dit.blocks import (
+from dl_techniques.models.vision.dit.blocks import (
     DIT_ADALN_CHUNK_NAMES,
     DIT_FINAL_CHUNK_NAMES,
     NUM_DIT_ADALN_CHUNKS,

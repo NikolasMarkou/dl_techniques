@@ -39,8 +39,8 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.embedding.sincos_pos_embed_2d import get_2d_sincos_pos_embed
-from dl_techniques.models.vision_language.dit.config import DIT_VARIANTS
-from dl_techniques.models.vision_language.dit.model import (
+from dl_techniques.models.vision.dit.config import DIT_VARIANTS
+from dl_techniques.models.vision.dit.model import (
     CFG_GUIDED_CHANNELS,
     DiT,
     create_dit,

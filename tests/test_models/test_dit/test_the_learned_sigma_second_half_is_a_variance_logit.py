@@ -2,7 +2,7 @@
 LOGIT, not a second epsilon.
 
 **The lines this file pins.**
-``src/dl_techniques/models/vision_language/dit/diffusion.py``,
+``src/dl_techniques/models/vision/dit/diffusion.py``,
 ``GaussianDiffusion.p_mean_variance``::
 
     model_output, model_var_values = keras.ops.split(model_output, 2, axis=-1)
@@ -55,7 +55,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision_language.dit.diffusion import GaussianDiffusion
+from dl_techniques.models.vision.dit.diffusion import GaussianDiffusion
 from dl_techniques.utils.ddpm_schedule import DDPMSchedule
 
 from ._dit_helpers import TINY, np_, built_model

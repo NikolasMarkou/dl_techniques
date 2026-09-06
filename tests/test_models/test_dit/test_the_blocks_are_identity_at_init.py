@@ -2,7 +2,7 @@
 whole ``DiT`` emits EXACTLY ``0.0``.
 
 **The lines this file pins.**
-``src/dl_techniques/models/vision_language/dit/blocks.py`` -- ``DiTBlock``'s
+``src/dl_techniques/models/vision/dit/blocks.py`` -- ``DiTBlock``'s
 6-way modulation ``Dense`` (owned by ``sd3_adaln.AdaLayerNormZero``),
 ``DiTFinalLayer``'s 2-way modulation ``Dense``, and ``DiTFinalLayer.linear``::
 
@@ -60,7 +60,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision_language.dit.model import DiT
+from dl_techniques.models.vision.dit.model import DiT
 
 from ._dit_helpers import TINY, built_model, np_, tiny_inputs
 

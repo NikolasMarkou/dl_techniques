@@ -35,8 +35,8 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision_language.dit.blocks import DiTBlock, DiTFinalLayer
-from dl_techniques.models.vision_language.dit.model import DiT
+from dl_techniques.models.vision.dit.blocks import DiTBlock, DiTFinalLayer
+from dl_techniques.models.vision.dit.model import DiT
 
 from ._dit_helpers import BATCH, TINY, dit_config, relative_paths, tiny_inputs
 

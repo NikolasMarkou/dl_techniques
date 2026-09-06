@@ -1,7 +1,7 @@
 """Quirk guard: classifier-free guidance covers THREE channels, not ``in_channels``.
 
 **The line this file pins.**
-``src/dl_techniques/models/vision_language/dit/model.py``, ``DiT.forward_with_cfg``::
+``src/dl_techniques/models/vision/dit/model.py``, ``DiT.forward_with_cfg``::
 
     eps  = model_out[..., :CFG_GUIDED_CHANNELS]     # CFG_GUIDED_CHANNELS == 3
     rest = model_out[..., CFG_GUIDED_CHANNELS:]
@@ -62,7 +62,7 @@ from typing import Any, Tuple
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision_language.dit.model import CFG_GUIDED_CHANNELS, DiT
+from dl_techniques.models.vision.dit.model import CFG_GUIDED_CHANNELS, DiT
 
 from ._dit_helpers import BATCH, TINY, activate, built_model, np_, tiny_inputs
 

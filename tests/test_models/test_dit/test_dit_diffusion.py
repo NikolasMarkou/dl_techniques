@@ -47,14 +47,14 @@ from dl_techniques.losses.ddpm_hybrid_loss import (
     _mean_flat,
     _normal_kl,
 )
-from dl_techniques.models.vision_language.dit.config import DiffusionConfig
-from dl_techniques.models.vision_language.dit.diffusion import (
+from dl_techniques.models.vision.dit.config import DiffusionConfig
+from dl_techniques.models.vision.dit.diffusion import (
     DEFAULT_CLIP_DENOISED,
     GaussianDiffusion,
     MODEL_MEAN_TYPES,
     MODEL_VAR_TYPES,
 )
-from dl_techniques.models.vision_language.dit.model import DiT
+from dl_techniques.models.vision.dit.model import DiT
 from dl_techniques.utils.ddpm_schedule import DDPMSchedule
 
 # ---------------------------------------------------------------------

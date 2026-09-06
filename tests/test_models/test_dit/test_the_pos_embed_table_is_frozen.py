@@ -1,7 +1,7 @@
 """Quirk guard: the 2-D sin-cos positional table is a FROZEN weight.
 
 **The lines this file pins.**
-``src/dl_techniques/models/vision_language/dit/model.py``, ``DiT.build``::
+``src/dl_techniques/models/vision/dit/model.py``, ``DiT.build``::
 
     table = get_2d_sincos_pos_embed(self.hidden_size, self.grid_size)
     self.pos_embed = self.add_weight(
@@ -65,7 +65,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.losses.ddpm_hybrid_loss import DDPMHybridLoss
-from dl_techniques.models.vision_language.dit.model import DiT
+from dl_techniques.models.vision.dit.model import DiT
 
 from ._dit_helpers import (
     TINY,

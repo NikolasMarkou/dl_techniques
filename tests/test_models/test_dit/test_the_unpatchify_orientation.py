@@ -2,7 +2,7 @@
 model's ``unpatchify`` binds the geometry it claims to.
 
 **The lines this file pins.**
-``src/dl_techniques/models/vision_language/dit/model.py``::
+``src/dl_techniques/models/vision/dit/model.py``::
 
     x = keras.ops.reshape(tokens, (batch, h, w, p, p, c))
     x = keras.ops.transpose(x, (0, 1, 3, 2, 4, 5))
@@ -57,7 +57,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.vision_language.dit.model import DiT, unpatchify_tokens
+from dl_techniques.models.vision.dit.model import DiT, unpatchify_tokens
 
 from ._dit_helpers import TINY, built_model, np_
 

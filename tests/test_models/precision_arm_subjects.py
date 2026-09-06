@@ -1300,7 +1300,7 @@ _extra("colbert", _b_colbert,
 
 
 def _b_dit():
-    from dl_techniques.models.vision_language.dit.model import DiT
+    from dl_techniques.models.vision.dit.model import DiT
     return DiT(input_size=8, patch_size=2, in_channels=3, hidden_size=16,
                depth=1, num_heads=2, num_classes=4)
 

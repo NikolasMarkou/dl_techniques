@@ -51,7 +51,7 @@ import tensorflow as tf
 import keras
 
 from dl_techniques.losses.ddpm_hybrid_loss import DDPMHybridLoss
-from dl_techniques.models.vision_language.dit.config import DiffusionConfig
+from dl_techniques.models.vision.dit.config import DiffusionConfig
 from train.dit.synthetic_data import (
     CONTRACT_KEYS,
     LATENT_SCALE_FACTOR,

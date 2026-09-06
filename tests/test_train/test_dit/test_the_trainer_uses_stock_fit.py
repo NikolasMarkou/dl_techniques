@@ -52,7 +52,7 @@ import pytest
 import keras
 
 from dl_techniques.losses.ddpm_hybrid_loss import DDPMHybridLoss
-from dl_techniques.models.vision_language.dit.model import DiT, create_dit
+from dl_techniques.models.vision.dit.model import DiT, create_dit
 from train.dit import train_dit as trainer
 from train.dit.ema_callback import WeightEMACallback
 from train.dit.synthetic_data import build_dit_dataset, synthetic_records
@@ -211,7 +211,7 @@ class TestTheTrainerUsesStockFit:
         this catches an override added to a sibling module (a subclass used by a
         future ``--resume`` path, say) before anyone wires it in.
         """
-        import dl_techniques.models.vision_language.dit as dit_package
+        import dl_techniques.models.vision.dit as dit_package
 
         roots = (
             Path(trainer.__file__).parent,          # src/train/dit/

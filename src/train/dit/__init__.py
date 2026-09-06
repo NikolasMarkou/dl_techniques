@@ -1,6 +1,6 @@
 r"""Class-conditional latent DiT training package.
 
-Trains :class:`dl_techniques.models.vision_language.dit.DiT` on upstream's
+Trains :class:`dl_techniques.models.vision.dit.DiT` on upstream's
 ``LossType.MSE`` + ``ModelVarType.LEARNED_RANGE`` objective through **stock**
 ``compile()`` / ``fit()``, with no custom ``train_step``.
 

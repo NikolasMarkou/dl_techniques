@@ -52,8 +52,8 @@ import pytest
 import keras
 
 from dl_techniques.losses.ddpm_hybrid_loss import DDPMHybridLoss
-from dl_techniques.models.vision_language.dit.config import DiffusionConfig
-from dl_techniques.models.vision_language.dit.model import DiT
+from dl_techniques.models.vision.dit.config import DiffusionConfig
+from dl_techniques.models.vision.dit.model import DiT
 from train.dit.ema_callback import (
     DEFAULT_EMA_DECAY,
     SHADOWED_VARIABLE_SET,

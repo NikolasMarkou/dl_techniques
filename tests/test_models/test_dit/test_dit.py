@@ -66,7 +66,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.losses.ddpm_hybrid_loss import DDPMHybridLoss
-from dl_techniques.models.vision_language.dit.model import DiT
+from dl_techniques.models.vision.dit.model import DiT
 
 from ...numerics import reassociation_atol
 from ..knob_sensitivity_oracle import (

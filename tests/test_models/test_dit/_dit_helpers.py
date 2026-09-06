@@ -37,7 +37,7 @@ import keras
 import numpy as np
 
 from dl_techniques.losses.ddpm_hybrid_loss import DDPMHybridLoss
-from dl_techniques.models.vision_language.dit.model import DiT
+from dl_techniques.models.vision.dit.model import DiT
 
 # ---------------------------------------------------------------------
 # The geometry every arm in this directory shares

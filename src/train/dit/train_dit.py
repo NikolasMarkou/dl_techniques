@@ -71,7 +71,7 @@ Sampling is NOT wired into this trainer
 ---------------------------------------
 There is no ``--sample`` flag: no VAE exists anywhere in this repository, so a
 sample is a latent nothing can decode.
-:class:`~dl_techniques.models.vision_language.dit.GaussianDiffusion` already
+:class:`~dl_techniques.models.vision.dit.GaussianDiffusion` already
 provides ``p_sample_loop`` / ``ddim_sample_loop``, and ``WeightEMACallback``
 exposes ``applied_to(model)``, so sampling from the EMA weights of a finished
 run is a few lines in a notebook rather than an untested branch here.
@@ -98,7 +98,7 @@ from typing import Any, Dict, Optional, Sequence, Set, Tuple
 import numpy as np
 
 from dl_techniques.losses.ddpm_hybrid_loss import DDPMHybridLoss
-from dl_techniques.models.vision_language.dit import (
+from dl_techniques.models.vision.dit import (
     DIT_VARIANTS,
     DiT,
     DiffusionConfig,

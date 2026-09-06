@@ -10,7 +10,7 @@ the source.
 
 import pytest
 
-from dl_techniques.models.vision_language.dit.config import (
+from dl_techniques.models.vision.dit.config import (
     DIT_VARIANTS,
     VARIANT_FIELDS,
     DiffusionConfig,
