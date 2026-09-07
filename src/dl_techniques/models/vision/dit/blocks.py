@@ -74,7 +74,7 @@ time through the modulation ``Dense``'s bias and asks only which sub-op moved.
       │                                          │
       ├─ × gate_msa[:, None, :]  (chunk 2)       │
       ▼                                          ▼
-      └───────────────────────────────────────► ⊕   residual 1
+      └───────────────────────────────────────►  ⊕  residual 1
                                                  │ x [B, T, D]
       ┌──────────────────────────────────────────┤
       ▼                                          │
@@ -95,7 +95,7 @@ time through the modulation ``Dense``'s bias and asks only which sub-op moved.
       │                                          │
       ├─ × gate_mlp[:, None, :]  (chunk 5)       │
       ▼                                          ▼
-      └───────────────────────────────────────► ⊕   residual 2
+      └───────────────────────────────────────►  ⊕  residual 2
                                                  │
                                                  ▼
                                             out [B, T, D]

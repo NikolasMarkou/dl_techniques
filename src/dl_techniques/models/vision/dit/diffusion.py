@@ -21,7 +21,7 @@ The reverse chain, and where each piece sits:
                           │
                           ▼
         ┌─────────────────────────────────────────────────────────┐
-        │  for t = T-1, T-2, ... 1, 0   (a plain Python loop)      │
+        │  for t = T-1, T-2, ... 1, 0   (a plain Python loop)     │
         │                                                         │
         │   ┌─ respacing ─────────────────────────────────────┐   │
         │   │ t_model = timestep_map[t]   ◄── ORIGINAL index  │   │
