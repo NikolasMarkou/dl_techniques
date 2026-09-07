@@ -716,6 +716,51 @@ class TestTabMBackbone:
             keras.initializers.get("zeros")
         )
 
+    def test_a_seeded_kernel_initializer_re_aliases_every_block_by_design(self):
+        # The documented LIMIT of the clone, pinned so it cannot silently become a
+        # surprise again. `clone_initializer` deliberately does NOT break symmetry
+        # for a SEEDED initializer (`initializers/clone.py:71-73`): two clones of
+        # `GlorotUniform(seed=7)` replay the same seed, so every block starts
+        # bit-identical. MEASURED at c070126d0 through the public API, end to end:
+        # `create_tabm_model(n_num_features=4, cat_cardinalities=[3, 5],
+        # n_classes=16, hidden_dims=[16, 16], arch_type='tabm-packed', k=4,
+        # kernel_initializer=GlorotUniform(seed=7))` gives a block kernel and an
+        # output kernel that are both (4, 16, 16) and EQUAL. That is the clone's
+        # stated contract, not a defect in it -- overriding the caller's seed with a
+        # derived per-block one would be worse. The reproducibility idiom that does
+        # NOT re-alias is `keras.utils.set_random_seed()`; the test below pins it.
+        layer = TabMBackbone(
+            hidden_dims=[D, D], k=K,
+            kernel_initializer=keras.initializers.GlorotUniform(seed=7),
+        )
+        layer.build((None, K, D))
+        k0, k1 = (_block_kernel(b) for b in layer.blocks)
+        assert k0.shape == k1.shape, "arm is only meaningful at equal shapes"
+        assert np.array_equal(k0, k1), (
+            "a seeded initializer is documented to replay for every clone; if this "
+            "arm goes red, clone_initializer's seeded-clone contract changed and "
+            "tabm_backbone.py's :param kernel_initializer: text is now wrong"
+        )
+
+    def test_set_random_seed_reproduces_without_re_aliasing_the_blocks(self):
+        # The idiom `:param kernel_initializer:` points a reproducibility-seeking
+        # caller at, instead of a seeded initializer. BOTH halves are load-bearing:
+        # the blocks must still DIFFER from each other (what the clone buys) and the
+        # whole draw must REPRODUCE across runs (what the caller wanted a seed for).
+        def draw():
+            keras.utils.set_random_seed(1234)
+            backbone = TabMBackbone(hidden_dims=[D, D], k=K)
+            backbone.build((None, K, D))
+            return [_block_kernel(b) for b in backbone.blocks]
+
+        first, second = draw(), draw()
+        assert not np.array_equal(first[0], first[1]), (
+            "set_random_seed must not re-alias the blocks: max|diff| = "
+            f"{float(np.max(np.abs(first[0] - first[1])))}"
+        )
+        np.testing.assert_array_equal(first[0], second[0])
+        np.testing.assert_array_equal(first[1], second[1])
+
 
 class TestRegistrationKeys:
     """The five keys this package's classes are deserialized by, pinned literally.
@@ -822,6 +867,35 @@ class TestOutputShapeContract:
         assert symbolic[0] is None
         assert symbolic[1:] == actual[1:]
 
+    # ScaleEnsemble was EXEMPTED from the N-8 fix twice -- D-003 ("echo and
+    # config-derivation cannot disagree for an elementwise multiply") and D-006
+    # ("unreachable once build() requires rank 3"). Both reasons were refuted by
+    # measurement, and the three inputs below are the refutation. They are arms of
+    # this class rather than of the rank contract because `build()` is not what
+    # answers them: it runs ONCE, and none of these three reaches it a second time.
+
+    def test_scale_ensemble_functional_node_advertises_the_real_shape(self):
+        # (a) `keras.Input(shape=(None, D))` BUILDS -- the axis-1 guard skips a
+        # `None` axis by design (I-2) -- and the functional node then advertised
+        # (None, None, D) while every real output is (B, K, D). Nothing raises and
+        # no tensor exists yet, so a shape-sensitive consumer downstream
+        # (`Reshape`, `concatenate`) would read the wrong number at graph time.
+        out = ScaleEnsemble(k=K, input_dim=D)(keras.Input(shape=(None, D)))
+        assert tuple(out.shape) == (None, K, D)
+
+    @pytest.mark.parametrize("queried", [(B, 1, D), (B, K, 1)],
+                             ids=["axis-1", "last-axis"])
+    def test_scale_ensemble_output_shape_ignores_a_post_build_input(self, queried):
+        # (b)/(c) A built Keras layer never re-enters `build()`, so the two axis
+        # guards cannot inspect a shape queried afterwards. Echoing it returned
+        # (2, 1, D) / (2, K, 1) for forward passes that really produce (B, K, D) --
+        # the broadcast absorbs the 1 on either axis. The second assertion checks
+        # the prediction against the real tensor, not against another prediction.
+        layer = ScaleEnsemble(k=K, input_dim=D)
+        layer.build((None, K, D))
+        assert tuple(layer.compute_output_shape(queried)) == (B, K, D)
+        assert tuple(layer(_f32(*queried)).shape) == (B, K, D)
+
 
 class TestRankContract:
     """The rank-3 contract of the three leaf layers, and what it does upstream.
@@ -854,18 +928,6 @@ class TestRankContract:
         layer = ScaleEnsemble(k=K, input_dim=D)
         with pytest.raises(ValueError, match="rank-3"):
             layer(_f32(B, K, K, D))
-
-    def test_the_scale_ensemble_output_shape_disagreement_is_unreachable(self):
-        # W-C, verbatim: ScaleEnsemble(k=3, input_dim=3) built from (None, 3)
-        # made compute_output_shape echo (None, 3) while a real forward pass on
-        # (3, 3) returned (1, 3, 3) -- rank inflated by the expand_dims
-        # broadcast and the batch axis silently collapsed 3 -> 1. The echo is
-        # only correct at rank 3, and rank 3 is now the only buildable rank, so
-        # the disagreement has no reachable input. compute_output_shape itself
-        # is unchanged; this test pins the reason it can stay that way.
-        layer = ScaleEnsemble(k=K, input_dim=K)
-        with pytest.raises(ValueError, match="rank-3"):
-            layer.build((None, K))
 
     @pytest.mark.parametrize("shape", [(B, K), (B, K, K, D)])
     @pytest.mark.parametrize("make", [

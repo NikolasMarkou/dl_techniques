@@ -158,9 +158,29 @@ class ScaleEnsemble(keras.layers.Layer):
         # Efficient broadcasting: inputs (B, K, D) * weight (K, D) -> (B, K, D)
         return keras.ops.multiply(inputs, keras.ops.expand_dims(self.weight, axis=0))
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
-        return input_shape
+    def compute_output_shape(
+            self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], int, int]:
+        """Compute the output shape of the layer.
+
+        Axes 1 and -1 come from the stored ``k`` and ``input_dim``, never from
+        ``input_shape``: the member weight is shaped from them and :meth:`call`
+        broadcasts the input against it, so those are the axes ``call()``
+        actually produces. Only the batch axis is read from the argument, and
+        the answer is correct on an UNBUILT layer.
+        """
+        # DECISION plan-2026-09-07T130829-d709705c/D-008: DERIVE, do not echo
+        # `input_shape`. D-006 left the echo in place claiming the rank guard in
+        # `build()` made a disagreement UNREACHABLE. REFUTED by measurement:
+        # `build()` runs exactly ONCE and the axis guards skip a `None` axis, so
+        # (a) `keras.Input(shape=(None, D))` builds and the functional node then
+        # advertised `(None, None, D)` for a forward pass that is always
+        # `(B, k, D)`; (b)/(c) a layer built at `(None, k, D)` answered
+        # `(2, 1, D)` / `(2, k, 1)` for queried shapes whose real forward output
+        # is `(2, k, D)`, because a built layer never re-enters `build()`. Same
+        # guide-v2 3.4 rule -- and now the same one-line treatment -- as
+        # `linear_efficient_ensemble.py`. See decisions.md D-008.
+        return (input_shape[0], self.k, self.input_dim)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization."""

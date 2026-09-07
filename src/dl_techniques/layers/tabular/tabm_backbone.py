@@ -97,11 +97,19 @@ class TabMBackbone(keras.layers.Layer):
     :param use_bias: Whether to use bias.
     :type use_bias: bool
     :param kernel_initializer: Initializer for weights. Each block receives an
-        independent *clone*, never this instance, so two blocks of equal width do
-        not start bit-identical -- see the ``D-005`` anchor in ``__init__``.
+        independent *clone*, never this instance, so two blocks of equal width
+        draw independently -- **for a seedless initializer**. A *seeded* one
+        (``GlorotUniform(seed=7)``) clones to the SAME seed by design
+        (:func:`~dl_techniques.initializers.clone_initializer`, ``clone.py``
+        lines 71-73) and therefore gives every block bit-identical weights; that
+        is the caller's stated intent, not a defect in the clone. For
+        reproducibility use ``keras.utils.set_random_seed()`` instead, which
+        reproduces across runs AND keeps the blocks distinct. See the ``D-005``
+        anchor in ``__init__``.
     :type kernel_initializer: str or keras.initializers.Initializer
     :param bias_initializer: Initializer for bias. Cloned per block on the same
-        terms; the ``'zeros'`` default clones to zeros, so it is unaffected.
+        terms and with the same seeded-initializer qualification; the ``'zeros'``
+        default clones to zeros, so it is unaffected.
     :type bias_initializer: str or keras.initializers.Initializer
     :param kernel_regularizer: Optional regularizer for kernel weights.
     :type kernel_regularizer: str or keras.regularizers.Regularizer or None
@@ -192,6 +200,26 @@ class TabMBackbone(keras.layers.Layer):
         # correct there), but a random bias initializer aliases identically.
         # `get_config()` still emits the UNCLONED attributes, so nothing serialized
         # moves. See decisions.md D-005.
+        #
+        # SCOPE -- the clone breaks symmetry for a SEEDLESS initializer ONLY (D-007,
+        # MEASURED). `clone_initializer` deliberately reproduces a seed
+        # (`initializers/clone.py:71-73`), so `kernel_initializer=GlorotUniform(seed=7)`
+        # -- a documented public argument of this class AND of `create_tabm_model` --
+        # gives every block BIT-IDENTICAL kernels, and does so end to end
+        # (`hidden_dims=[16, 16], n_classes=16, k=4, arch_type='tabm-packed'`: the
+        # block kernel and the output kernel are both (4, 16, 16) and equal). That is
+        # the clone's stated contract, not a hole in it; the idiom that reproduces
+        # WITHOUT re-aliasing is `keras.utils.set_random_seed()`. Both behaviours are
+        # pinned in `tests/test_layers/test_tabular/test_tabm_blocks.py`. Do NOT
+        # "fix" this with per-block seed derivation -- it would silently override the
+        # caller's seed. See decisions.md D-007.
+        #
+        # DEPENDENCY -- do not remove the clone: `models/tabular/tabm/model.py:400,412,424`
+        # hands ONE `self.kernel_initializer` instance to BOTH this backbone and the
+        # output layer. That fan-out is safe ONLY BECAUSE the comprehension below
+        # clones per block, leaving the model's shared instance with exactly ONE
+        # `add_weight` consumer. Dropping the clone regrows aliasing at TWO levels at
+        # once (between blocks, and between the last block and the output layer).
         self.blocks = [
             TabMMLPBlock(
                 units=units,
