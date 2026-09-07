@@ -46,6 +46,7 @@ from typing import Optional, Tuple, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -154,6 +155,33 @@ class TripletAttentionBranch(layers.Layer):
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
+        # DECISION plan-2026-09-07T183458-be1c267e/D-010
+        # Every sub-layer constructed in this FILE takes
+        # `clone_initializer(self.kernel_initializer)`, never the bare
+        # attribute. Each class resolves ONE `Initializer` instance in
+        # `__init__` (`initializers.get(...)`), and a seedless instance replays
+        # the same underlying sample at every later site, so handing it to
+        # several sub-layers makes their kernels the same random numbers.
+        # MEASURED before the fix at input `(2, 8, 8, 4)`: 14 of 14 sites live,
+        # 37 aliased weight tensors -- `TripletAttentionBranch` 1, `TripSE1` 5,
+        # `TripSE2` 9, `TripSE3` 9, `TripSE4` 11, `_SEWeights` 2. The H-W, C-W
+        # and H-C branches, whose ONLY architectural difference is which axis
+        # pair they gate, all started as the identical kernel.
+        #
+        # Do NOT move the clone up to the `initializers.get(...)` line: cloning
+        # once there hands every sub-layer the SAME clone and restores the tie,
+        # while also breaking a seeded caller's reproducibility. The clone
+        # belongs at the SITE.
+        #
+        # Independence holds for a RANDOM SEEDLESS initializer; the exceptions
+        # are a SEEDED instance (replays by contract, across differing shapes
+        # too), a DETERMINISTIC one (`'zeros'`/`'ones'`/`Constant`, `Identity`
+        # at 2-D -- identical and correctly so), and a CUSTOM one failing the
+        # `get_config()` round trip (falls back to `copy.deepcopy`, keeping the
+        # resolved seed). No class here exposes a `bias_initializer`, so every
+        # bias is Keras' stock `'zeros'` -- the second exemption, and nothing
+        # to fan out. See `src/dl_techniques/initializers/clone.py` and
+        # decisions.md D-010.
         # Layers defined in init, built in build
         self.conv = layers.Conv2D(
             filters=1,
@@ -161,7 +189,7 @@ class TripletAttentionBranch(layers.Layer):
             strides=1,
             padding="same",
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="conv"
         )
@@ -393,6 +421,19 @@ class TripSE1(layers.Layer):
         }
 
         # Triplet Attention Branches, one per axis pair: H-W, C-W, H-C.
+        # DECISION plan-2026-09-07T183458-be1c267e/D-010
+        # The three branches below take `self.kernel_initializer` bare, NOT
+        # `clone_initializer(...)`, deliberately. `TripletAttentionBranch`
+        # clones at its OWN construction site, so each branch's `conv` already
+        # draws independently and a clone here would be redundant. MEASURED:
+        # with the branch's own clone in place, reverting all three of these
+        # sites reddens NOTHING; reverting the branch's clone as well reddens
+        # all four branch-conv guards. A redundant wrapper here would be a
+        # clone whose own revert can never be observed -- the guard-that-cannot-
+        # fail this chain has shipped four times. The dependency on the callee
+        # is MONITORED instead: `TestTheTripletBranchInitializerDoesNotFanOut`
+        # reddens the moment `TripletAttentionBranch` stops cloning. See
+        # decisions.md D-010 and the same reasoning at D-007.
         self.branch_hw = TripletAttentionBranch(
             kernel_size=kernel_size,
             permute_pattern=(0, 1, 2),
@@ -422,9 +463,20 @@ class TripSE1(layers.Layer):
         )
 
         # SE Block (created here, built in build)
+        # DECISION plan-2026-09-07T183458-be1c267e/D-010
+        # This site hands the clone to the SHARED `SqueezeExcitation`
+        # (`layers/conv_blocks/squeeze_excitation.py`), which has its own,
+        # separate internal fan-out between `conv_reduce` and `conv_restore`.
+        # That one is a different defect with a different owner and is fixed in
+        # its own commit (decisions.md D-002). The clone here is still needed:
+        # without it every SE block in this file, and every branch beside them,
+        # draws the same sample. The matching guard asserts the INSTANCE that
+        # crosses this boundary is not `self.kernel_initializer`, never a value
+        # inside the SE block -- a value guard there would move when the SE
+        # commit lands and make it look like a regression.
         self.se_block = SqueezeExcitation(
             reduction_ratio=reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="se"
         )
@@ -613,9 +665,20 @@ class TripSE2(layers.Layer):
         self.gate_activations: List[keras.layers.Layer] = []
 
         for suffix in self._suffixes:
+        # DECISION plan-2026-09-07T183458-be1c267e/D-010
+        # This site hands the clone to the SHARED `SqueezeExcitation`
+        # (`layers/conv_blocks/squeeze_excitation.py`), which has its own,
+        # separate internal fan-out between `conv_reduce` and `conv_restore`.
+        # That one is a different defect with a different owner and is fixed in
+        # its own commit (decisions.md D-002). The clone here is still needed:
+        # without it every SE block in this file, and every branch beside them,
+        # draws the same sample. The matching guard asserts the INSTANCE that
+        # crosses this boundary is not `self.kernel_initializer`, never a value
+        # inside the SE block -- a value guard there would move when the SE
+        # commit lands and make it look like a regression.
             self.se_layers.append(SqueezeExcitation(
                 reduction_ratio=reduction_ratio,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"se_{suffix}"
             ))
@@ -624,7 +687,7 @@ class TripSE2(layers.Layer):
                 kernel_size=kernel_size,
                 padding="same",
                 use_bias=use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"conv_{suffix}"
             ))
@@ -865,9 +928,20 @@ class TripSE3(layers.Layer):
         self.gate_activations: List[keras.layers.Layer] = []
 
         for suffix in self._suffixes:
+        # DECISION plan-2026-09-07T183458-be1c267e/D-010
+        # This site hands the clone to the SHARED `SqueezeExcitation`
+        # (`layers/conv_blocks/squeeze_excitation.py`), which has its own,
+        # separate internal fan-out between `conv_reduce` and `conv_restore`.
+        # That one is a different defect with a different owner and is fixed in
+        # its own commit (decisions.md D-002). The clone here is still needed:
+        # without it every SE block in this file, and every branch beside them,
+        # draws the same sample. The matching guard asserts the INSTANCE that
+        # crosses this boundary is not `self.kernel_initializer`, never a value
+        # inside the SE block -- a value guard there would move when the SE
+        # commit lands and make it look like a regression.
             self.se_layers.append(SqueezeExcitation(
                 reduction_ratio=reduction_ratio,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"se_{suffix}"
             ))
@@ -876,7 +950,7 @@ class TripSE3(layers.Layer):
                 kernel_size=kernel_size,
                 padding="same",
                 use_bias=use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"conv_{suffix}"
             ))
@@ -1093,21 +1167,40 @@ class _SEWeights(layers.Layer):
         input_channels = input_shape[-1]
         bottleneck_channels = max(1, int(input_channels * self.reduction_ratio))
 
+        # DECISION plan-2026-09-07T183458-be1c267e/D-011
+        # Both convolutions below carry an explicit `name=`. They must: they
+        # are created in `build()`, and a Keras sub-layer created without a
+        # name falls back to the PROCESS-GLOBAL auto-increment counter, so the
+        # same weight lands on a different path in every instance. These two
+        # were the only build()-created sub-layers in this file lacking one.
+        # MEASURED before the fix, two `TripSE4` instances in one process (one
+        # explicitly built, one lazy): equal weight COUNTS (23 vs 23) but six
+        # disagreeing paths -- `se_logits_hw/conv2d_8/kernel` against
+        # `se_logits_hw/conv2d_14/kernel`, and so on. The offset is not fixed;
+        # it depends on how many unnamed `Conv2D` layers the process created
+        # earlier, so any training script with other layers ahead of this one
+        # gets different paths again. `.keras` save/load never broke, because
+        # that path is graph-position-based, which is why counting weights --
+        # what the existing suites did -- could not see it. Do NOT drop these
+        # names. Pinned by `tests/test_layers/test_attention/
+        # test_the_se_weights_carry_explicit_names.py` and decisions.md D-011.
         if self.conv_reduce is None:
             self.conv_reduce = layers.Conv2D(
                 filters=bottleneck_channels,
                 kernel_size=1,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                kernel_regularizer=self.kernel_regularizer,
+                name="conv_reduce"
             )
         if self.conv_restore is None:
             self.conv_restore = layers.Conv2D(
                 filters=input_channels,
                 kernel_size=1,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                kernel_regularizer=self.kernel_regularizer,
+                name="conv_restore"
             )
 
         # Build explicitly
@@ -1315,6 +1408,17 @@ class TripSE4(layers.Layer):
 
         for suffix in self._suffixes:
             # Internal helper to get MLP logits
+            # DECISION plan-2026-09-07T183458-be1c267e/D-010
+            # `_SEWeights` takes `self.kernel_initializer` bare, NOT
+            # `clone_initializer(...)`, deliberately: it clones at BOTH of its
+            # own sites (`conv_reduce`, `conv_restore`), so a clone here would
+            # be redundant and its revert unobservable. MEASURED: reverting
+            # this site alone reddens nothing; reverting it together with
+            # `_SEWeights`' two clones reddens all eight `_SEWeights` guards.
+            # The dependency is monitored by
+            # `TestTheSEWeightsInitializerDoesNotFanOut`. Contrast `final_se`
+            # below, which DOES clone -- the shared `SqueezeExcitation` does
+            # not clone internally yet (that is decisions.md D-002).
             self.se_logit_layers.append(_SEWeights(
                 reduction_ratio=reduction_ratio,
                 activation=self.se_reduction_activation_type,
@@ -1328,7 +1432,7 @@ class TripSE4(layers.Layer):
                 kernel_size=kernel_size,
                 padding="same",
                 use_bias=use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"conv_{suffix}"
             ))
@@ -1339,9 +1443,20 @@ class TripSE4(layers.Layer):
                 **(self.gate_activation_args or {}),
             ))
 
+        # DECISION plan-2026-09-07T183458-be1c267e/D-010
+        # This site hands the clone to the SHARED `SqueezeExcitation`
+        # (`layers/conv_blocks/squeeze_excitation.py`), which has its own,
+        # separate internal fan-out between `conv_reduce` and `conv_restore`.
+        # That one is a different defect with a different owner and is fixed in
+        # its own commit (decisions.md D-002). The clone here is still needed:
+        # without it every SE block in this file, and every branch beside them,
+        # draws the same sample. The matching guard asserts the INSTANCE that
+        # crosses this boundary is not `self.kernel_initializer`, never a value
+        # inside the SE block -- a value guard there would move when the SE
+        # commit lands and make it look like a regression.
         self.final_se = SqueezeExcitation(
             reduction_ratio=reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="final_se"
         )
