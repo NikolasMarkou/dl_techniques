@@ -5,6 +5,7 @@ which implements the MLA mechanism from DeepSeek-V2 with low-rank KV compression
 and decoupled RoPE for efficient inference.
 """
 
+import re
 import pytest
 import numpy as np
 import tensorflow as tf
@@ -1481,4 +1482,219 @@ class TestRoPECarriesPosition:
         assert defect > 1e-4, (
             f"MLA is permutation-equivariant (defect {defect:.3e}); its "
             f"decoupled RoPE is carrying no positional signal."
+        )
+
+
+# ---------------------------------------------------------------------
+# Composite initializer fan-out — plan-2026-09-07T183458-be1c267e step 4.
+#
+# `MultiHeadLatentAttention.__init__` resolves ONE initializer instance
+# (`self.kernel_initializer = keras.initializers.get(kernel_initializer)`) and
+# hands that same instance to every child `keras.layers.Dense`. A seedless
+# `Initializer` INSTANCE replays the same underlying sample at every later
+# site, so the child kernels start life as the same random numbers. MEASURED
+# before the fix at `dim=32, num_heads=2, kv_latent_dim=8`: all 5 kernels of
+# the no-compression arm and all 6 of the `q_latent_dim=8` arm were bit-equal
+# to a replay from the shared instance -- `q_down_proj` vs `kv_down_proj`,
+# which differ by nothing but their architectural role, were bit-identical.
+#
+# Oracle (plan.md § S-1): build the layer, then draw from the layer's own
+# STILL-SHARED `self.kernel_initializer` at that weight's OWN shape and assert
+# the created weight is not bit-equal to that replay. One assertion per source
+# site, so a one-line revert reddens exactly one test. A pairwise comparison
+# between two sites is deliberately NOT the guard -- cloning either member of
+# a pair decorrelates it, so a single-line revert would stay green.
+#
+# BIAS: there is no bias arm here, and that is a MEASURED verdict, not an
+# omission. `MultiHeadLatentAttention.__init__` exposes no `bias_initializer`
+# parameter at all, and `use_bias` defaults to `False`. Forcing `use_bias=True`
+# was measured: every child Dense then creates a bias from Keras' stock
+# `'zeros'`, and all 6 bias tensors came back at `max|bias| == 0.0`. There is
+# no shared bias instance to fan out, so a bias arm could not fire and would be
+# a guard that cannot fail. `test_no_bias_initializer_fans_out_because_there_is
+# _no_bias_initializer` pins that reasoning instead.
+#
+# Scope of the claim, exactly (copied from the corrected canonical wording in
+# `src/dl_techniques/initializers/clone.py`'s module docstring): independence
+# holds for a RANDOM SEEDLESS initializer. Three exemptions, all correct
+# behaviour, none a defect --
+#   1. a caller-supplied SEEDED instance (e.g. `GlorotUniform(seed=7)`)
+#      replays deliberately and by contract, ACROSS DIFFERING SHAPES TOO;
+#   2. a DETERMINISTIC initializer (`'zeros'`/`'ones'`/`Constant`, and
+#      `Identity` only where the weight is 2-D -- it raises on rank 3+) holds
+#      no random state, so every site is bit-identical and that is what it is
+#      meant to do;
+#   3. a CUSTOM initializer whose `get_config()`/`from_config()` round trip
+#      raises falls back to `copy.deepcopy`, which copies the ALREADY-RESOLVED
+#      seed rather than drawing a new one, so such a site silently stays tied.
+# Exemptions 1 and 2 are asserted below as positive controls, so this module
+# never states an absolute it has not measured.
+# ---------------------------------------------------------------------
+
+_MLA_DIM = 32
+_MLA_KW = dict(
+    dim=_MLA_DIM,
+    num_heads=2,
+    kv_latent_dim=8,
+    qk_nope_head_dim=8,
+    qk_rope_head_dim=4,
+    v_head_dim=8,
+)
+
+
+def _mla_np(x):
+    return keras.ops.convert_to_numpy(x)
+
+
+def _mla_weight(layer, suffix):
+    hits = [w for w in layer.weights if w.path.endswith(suffix)]
+    assert len(hits) == 1, (
+        f"expected exactly one weight ending {suffix!r}, got {[w.path for w in hits]}"
+    )
+    return hits[0]
+
+
+_MLA_UNIQUIFIED = re.compile(r"_\d+$")
+
+
+def _mla_key(weight):
+    """Instance-stable weight key.
+
+    Keras appends a `_<n>` disambiguator to any sub-layer created WITHOUT an
+    explicit `name=`, so the same weight has a different path in the second
+    instance built in one process. `MultiHeadLatentAttention`'s RoPE sub-layer
+    (`create_embedding_layer("rope", ...)`, no `name=`) is the only one here
+    that hits it -- an observed build-parity wart, out of scope for this step,
+    NOT something this oracle should be sensitive to. Strip the disambiguator
+    per path component so these tests measure initializer independence and
+    nothing else.
+    """
+    parts = weight.path.split("/")[1:]
+    return "/".join(_MLA_UNIQUIFIED.sub("", part) for part in parts)
+
+
+def _mla_replay(initializer, shape):
+    """Draw from the still-shared initializer instance at ``shape``."""
+    return _mla_np(initializer(tuple(shape), dtype="float32"))
+
+
+def _mla_assert_not_the_shared_replay(layer, suffix):
+    w = _mla_weight(layer, suffix)
+    assert not np.array_equal(_mla_replay(layer.kernel_initializer, w.shape), _mla_np(w)), (
+        f"{w.path} {tuple(w.shape)} is bit-identical to a fresh draw from the "
+        f"layer's shared kernel_initializer instance -- the site was not cloned"
+    )
+
+
+def _built_mla(kernel_initializer, q_latent_dim=None, use_bias=False):
+    layer = MultiHeadLatentAttention(
+        **_MLA_KW,
+        q_latent_dim=q_latent_dim,
+        use_bias=use_bias,
+        kernel_initializer=kernel_initializer,
+    )
+    layer(np.zeros((2, 6, _MLA_DIM), dtype="float32"))
+    return layer
+
+
+class TestTheMlaInitializerDoesNotFanOut:
+    """One test per source site in ``__init__``; seven sites, seven tests.
+
+    ``q_down_proj``/``q_up_proj`` and ``query_proj`` are mutually exclusive
+    branches of the same `if self.q_latent_dim is not None`, so at most six
+    fire in one instance -- but all seven are separate source lines and each
+    gets its own guard.
+    """
+
+    def test_the_q_down_proj_kernel_is_not_the_shared_replay(self):
+        layer = _built_mla(keras.initializers.GlorotUniform(), q_latent_dim=8)
+        _mla_assert_not_the_shared_replay(layer, "q_down_proj/kernel")
+
+    def test_the_q_up_proj_kernel_is_not_the_shared_replay(self):
+        layer = _built_mla(keras.initializers.GlorotUniform(), q_latent_dim=8)
+        _mla_assert_not_the_shared_replay(layer, "q_up_proj/kernel")
+
+    def test_the_query_proj_kernel_is_not_the_shared_replay(self):
+        layer = _built_mla(keras.initializers.GlorotUniform(), q_latent_dim=None)
+        _mla_assert_not_the_shared_replay(layer, "query_proj/kernel")
+
+    @pytest.mark.parametrize("q_latent_dim", [None, 8])
+    def test_the_kv_down_proj_kernel_is_not_the_shared_replay(self, q_latent_dim):
+        layer = _built_mla(keras.initializers.GlorotUniform(), q_latent_dim=q_latent_dim)
+        _mla_assert_not_the_shared_replay(layer, "kv_down_proj/kernel")
+
+    @pytest.mark.parametrize("q_latent_dim", [None, 8])
+    def test_the_kv_up_proj_kernel_is_not_the_shared_replay(self, q_latent_dim):
+        layer = _built_mla(keras.initializers.GlorotUniform(), q_latent_dim=q_latent_dim)
+        _mla_assert_not_the_shared_replay(layer, "kv_up_proj/kernel")
+
+    @pytest.mark.parametrize("q_latent_dim", [None, 8])
+    def test_the_k_rope_proj_kernel_is_not_the_shared_replay(self, q_latent_dim):
+        layer = _built_mla(keras.initializers.GlorotUniform(), q_latent_dim=q_latent_dim)
+        _mla_assert_not_the_shared_replay(layer, "k_rope_proj/kernel")
+
+    @pytest.mark.parametrize("q_latent_dim", [None, 8])
+    def test_the_output_proj_kernel_is_not_the_shared_replay(self, q_latent_dim):
+        layer = _built_mla(keras.initializers.GlorotUniform(), q_latent_dim=q_latent_dim)
+        _mla_assert_not_the_shared_replay(layer, "output_proj/kernel")
+
+    def test_the_q_and_kv_compressions_do_not_start_identical(self):
+        """The sharpest pair: two compressions of the SAME input, same shape.
+
+        Measured `corr = 1.0` before the fix. This is an extra cross-check on
+        top of the per-site guards, not a substitute -- cloning either member
+        alone already decorrelates it, so this test is blind to a one-line
+        revert of exactly one of the two.
+        """
+        layer = _built_mla(keras.initializers.GlorotUniform(), q_latent_dim=8)
+        q = _mla_np(_mla_weight(layer, "q_down_proj/kernel"))
+        kv = _mla_np(_mla_weight(layer, "kv_down_proj/kernel"))
+        assert q.shape == kv.shape
+        assert not np.array_equal(q, kv)
+
+
+class TestTheMlaExemptionsThisModuleDoesNotClaimAway:
+    """Positive controls. Cloning must not break either exemption."""
+
+    def test_no_bias_initializer_fans_out_because_there_is_no_bias_initializer(self):
+        """MEASURED: `use_bias=True` biases are stock `'zeros'` at exactly 0.0.
+
+        `MultiHeadLatentAttention.__init__` has no `bias_initializer`
+        parameter, so there is no shared bias instance and no bias fan-out to
+        guard. This records the measurement instead of silently omitting a
+        bias arm. It is exemption 2 (`'zeros'` is DETERMINISTIC: identical at
+        every site, and that is what it is for).
+        """
+        import inspect
+        params = inspect.signature(MultiHeadLatentAttention.__init__).parameters
+        assert "bias_initializer" not in params
+        assert params["use_bias"].default is False
+
+        layer = _built_mla(keras.initializers.GlorotUniform(), q_latent_dim=8, use_bias=True)
+        biases = [w for w in layer.weights if w.path.endswith("/bias")]
+        assert len(biases) == 6
+        for b in biases:
+            assert float(np.max(np.abs(_mla_np(b)))) == 0.0
+
+    def test_a_seeded_initializer_stays_reproducible_across_two_instances(self):
+        """Exemption 1 + invariant I-2: an explicit seed still reproduces exactly."""
+        snapshots = []
+        for _ in range(2):
+            layer = _built_mla(keras.initializers.GlorotUniform(seed=7), q_latent_dim=8)
+            snapshots.append({_mla_key(w): _mla_np(w) for w in layer.weights})
+        a, b = snapshots
+        assert set(a) == set(b)
+        for key in a:
+            assert np.array_equal(a[key], b[key]), f"{key} not reproducible under an explicit seed"
+
+    def test_cloning_changed_neither_the_config_keys_nor_the_weight_shapes(self):
+        """Cloning happens AT THE SITE, never at the `get_config` boundary."""
+        layer = _built_mla("glorot_uniform", q_latent_dim=8)
+        config = layer.get_config()
+        assert "kernel_initializer" in config
+        restored = MultiHeadLatentAttention.from_config(config)
+        restored(np.zeros((2, 6, _MLA_DIM), dtype="float32"))
+        assert (
+            {(_mla_key(w), tuple(w.shape)) for w in layer.weights}
+            == {(_mla_key(w), tuple(w.shape)) for w in restored.weights}
         )

@@ -26,6 +26,7 @@ from typing import Optional, Dict, Any, Tuple, Union
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from .common import apply_attention_mask, compute_attention_scale
@@ -265,12 +266,40 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         self._scale = compute_attention_scale(qk_nope_head_dim + qk_rope_head_dim)
 
 
+        # DECISION plan-2026-09-07T183458-be1c267e/D-008
+        # Every child Dense below takes `clone_initializer(self.kernel_initializer)`,
+        # never the bare attribute. `self.kernel_initializer` is ONE resolved
+        # `Initializer` instance, and a seedless instance replays the same
+        # underlying sample at every later site, so handing it to all seven
+        # projections makes their kernels the same random numbers. MEASURED
+        # before the fix at `dim=32, num_heads=2, kv_latent_dim=8`: all 7 sites
+        # came back bit-identical to a replay from the shared instance, and
+        # `q_down_proj` vs `kv_down_proj` -- two compressions of the SAME input,
+        # differing only in architectural role -- were bit-equal (corr = 1.0).
+        # Do NOT "simplify" this back to `self.kernel_initializer`, and do NOT
+        # move the clone up to the `keras.initializers.get(...)` line in
+        # `__init__`: cloning once there would give every child the SAME clone
+        # and restore the tie. The clone belongs at the SITE.
+        #
+        # There is deliberately no bias arm. This class exposes no
+        # `bias_initializer` parameter and `use_bias` defaults to `False`;
+        # MEASURED with `use_bias=True`, all six biases are Keras' stock
+        # `'zeros'` at `max|bias| == 0.0`. There is no shared bias instance, so
+        # there is nothing to fan out and a bias guard could not fail.
+        #
+        # Independence holds for a RANDOM SEEDLESS initializer; the exceptions
+        # are a SEEDED instance (replays by contract, across differing shapes
+        # too), a DETERMINISTIC one (`'zeros'`/`'ones'`/`Constant`, `Identity`
+        # at 2-D -- identical and correctly so), and a CUSTOM one failing the
+        # `get_config()` round trip (falls back to `copy.deepcopy`, keeping the
+        # resolved seed). See `src/dl_techniques/initializers/clone.py` and
+        # decisions.md D-008.
         # 1. Query Path: Optional compression via down-project -> norm -> up-project
         if self.q_latent_dim is not None:
             self.q_down_proj = keras.layers.Dense(
                 q_latent_dim,
                 use_bias=use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="q_down_proj"
             )
@@ -282,7 +311,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             self.q_up_proj = keras.layers.Dense(
                 num_heads * (qk_nope_head_dim + qk_rope_head_dim),
                 use_bias=use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="q_up_proj"
             )
@@ -291,7 +320,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             self.query_proj = keras.layers.Dense(
                 num_heads * (qk_nope_head_dim + qk_rope_head_dim),
                 use_bias=use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="query_proj"
             )
@@ -300,7 +329,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         self.kv_down_proj = keras.layers.Dense(
             kv_latent_dim,
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="kv_down_proj"
         )
@@ -314,7 +343,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         self.kv_up_proj = keras.layers.Dense(
             num_heads * (qk_nope_head_dim + v_head_dim),
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="kv_up_proj"
         )
@@ -324,7 +353,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         self.k_rope_proj = keras.layers.Dense(
             qk_rope_head_dim,
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="k_rope_proj"
         )
@@ -343,7 +372,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         self.output_proj = keras.layers.Dense(
             dim,
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="output_proj"
         )
