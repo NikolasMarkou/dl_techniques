@@ -25,6 +25,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import RandomSigns
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -36,38 +37,6 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 EnsembleInitDistribution = Literal['ones', 'normal', 'random-signs']
 
 # ---------------------------------------------------------------------
-
-@register_dl_technique("dl_techniques.layers.tabular.tabm_blocks")
-class RandomSigns(keras.initializers.Initializer):
-    """
-    Draw each element uniformly from :math:`\\{-1, +1\\}`.
-
-    This is the initializer the TabM paper uses for the per-member scaling
-    vectors. It is the only one of the three options that guarantees every
-    ensemble member starts at a distinct, non-degenerate, unit-magnitude
-    perturbation of the shared kernel: a normal draw clusters members near the
-    mean, and a constant draw makes them identical.
-
-    :param seed: Optional seed for reproducible draws.
-    :type seed: int or None
-    """
-
-    def __init__(self, seed: Optional[int] = None) -> None:
-        self.seed = seed
-        # Draws through a stock initializer: inside `add_weight` there is no
-        # seed-generator variable for a direct `keras.random.*` call to update.
-        self._uniform = keras.initializers.RandomUniform(
-            minval=-1.0, maxval=1.0, seed=seed
-        )
-
-    def __call__(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
-        dtype = dtype or keras.config.floatx()
-        u = self._uniform(shape, dtype=dtype)
-        return ops.where(u >= 0.0, ops.ones_like(u), -ops.ones_like(u))
-
-    def get_config(self) -> Dict[str, Any]:
-        return {"seed": self.seed}
-
 
 def _ensemble_scaling_initializer(
         init_distribution: EnsembleInitDistribution

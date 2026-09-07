@@ -44,6 +44,12 @@ Available initializers:
     that should begin as close to a no-op; ``stddev=0`` gives the exact
     identity. Used by ``WaveFieldAttention``'s cross-head ``field_coupling``
     matrix.
+-   ``RandomSigns``: every element drawn uniformly from ``{-1, +1}``, at any
+    shape. A unit-magnitude symmetry-breaking draw rather than a small
+    perturbation: it is the only ensemble scaling init that leaves every member
+    distinct AND non-degenerate. Used by the TabM batched-ensemble layers
+    (``ScaleEnsemble``, ``LinearEfficientEnsemble``) under
+    ``init_distribution='random-signs'``.
 -   ``clone_initializer``: returns an independent copy of an initializer. A
     single seedless initializer instance reused across several weights emits the
     same tensor at every matching shape, which is Keras 3 behaviour: the
@@ -75,6 +81,7 @@ from .hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 from .polar_initializer import PolarInitializer
 from .linear_up_initializer import LinearUpInitializer
 from .identity_plus_noise import IdentityPlusNoise
+from .random_signs import RandomSigns
 from .clone import clone_initializer
 from .kan_initializer import (
     KANInitializer,
@@ -94,6 +101,7 @@ __all__ = [
     "PolarInitializer",
     "LinearUpInitializer",
     "IdentityPlusNoise",
+    "RandomSigns",
     "KANInitializer",
     "create_kan_initializers",
 ]

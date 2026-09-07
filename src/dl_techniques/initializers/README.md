@@ -4,7 +4,7 @@ The `dl_techniques.initializers` module provides a collection of advanced weight
 
 ## Overview
 
-This module offers nine specialized initializers that go beyond standard random distributions (the table below covers the six with a dedicated section here; `LinearUpInitializer`, `IdentityPlusNoise` and `KANInitializer` are described in `CLAUDE.md`, which lists the complete public surface). They leverage principles from linear algebra and signal processing—such as orthogonality, wavelet theory, and polar/hyperspherical geometry—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
+This module offers ten specialized initializers that go beyond standard random distributions (the table below covers the seven with a dedicated section here; `LinearUpInitializer`, `IdentityPlusNoise` and `KANInitializer` are described in `CLAUDE.md`, which lists the complete public surface). They leverage principles from linear algebra and signal processing—such as orthogonality, wavelet theory, and polar/hyperspherical geometry—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
 
 ## Available Initializers
 
@@ -15,6 +15,7 @@ This module offers nine specialized initializers that go beyond standard random 
 | `hypersphere_orthogonal` | `OrthogonalHypersphereInitializer` | Creates vectors on a hypersphere of a specified radius, mutually orthogonal where possible; beyond `latent_dim` vectors it stacks independent orthonormal bases (a tight frame) rather than degrading to uniform sampling. | Maximizing initial feature diversity for embeddings, attention heads, or mixture-of-experts models. |
 | `haar_wavelet` | `HaarWaveletInitializer` | Deterministically creates the fixed, orthonormal 2x2 filter bank of the 2D Haar wavelet decomposition (every tap +/- 0.5); output slot `j` is sub-band `j % 4` for every input channel. | Building non-trainable, engineered feature extractors for multi-resolution analysis in CNNs. |
 | `polar` | `PolarInitializer` | Sets each fan-in vector (every axis but the last by default, so He-correct for Dense AND Conv2D) to an exact L2 norm with a uniform-on-sphere direction. | Equinorm / magnitude-controlled, well-conditioned initialization where chi-distributed Gaussian norms are undesirable. |
+| `random_signs` | `RandomSigns` | Draws every element uniformly from `{-1, +1}` at any rank, via a stock `RandomUniform(-1, +1)` and a sign threshold. | Symmetry-breaking, unit-magnitude per-member scaling vectors for batched ensembles (the TabM `'random-signs'` option). |
 | `gabor_filters` | `GaborFiltersInitializer` | Deterministically fills a convolution kernel with a bank of Gabor filters over a factorized orientation x scale x phase sweep (Ozbulak-Ekenel), DC-removed and energy-normalized to a He-like scale. | Pre-training-free transfer learning by initializing the first convolutional layer with edge/texture-selective low-level features. |
 
 ## Orthonormal Initializer
@@ -443,6 +444,50 @@ gabor_layer = create_gabor_depthwise_conv2d(
 )
 # For a specific output count, follow with a 1x1 projection:
 proj = keras.layers.Conv2D(64, 1)   # 288 -> 64
+```
+
+## Random Signs Initializer
+
+Fills a weight of **any** shape with values drawn uniformly from `{-1, +1}` — a
+Rademacher draw. Every entry has magnitude exactly 1 and a random sign, so it is
+a *symmetry-breaking* initializer rather than a small-perturbation one.
+
+This is the initializer the TabM paper uses for the per-member scaling vectors of
+its batched ensembles (`ScaleEnsemble` and `LinearEfficientEnsemble` in
+`dl_techniques/layers/tabular/`, reached by `init_distribution='random-signs'`).
+Of the three options there it is the only one that is both symmetry-breaking and
+unit-magnitude: `'normal'` (mean 1.0, stddev 0.1) leaves every member clustered
+near the shared kernel, and `'ones'` makes every member's effective weight matrix
+*identical* at initialization, so the ensemble collapses to a single model.
+
+**Not a general kernel initializer.** The per-element variance is fixed at 1.0
+with no fan-in scaling, so on a `Dense` or `Conv2D` kernel it multiplies the
+forward signal energy by `fan_in`. It belongs on a multiplicative scaling vector
+that sits beside a properly-scaled kernel.
+
+**Implementation note.** The draw is delegated to a stock
+`keras.initializers.RandomUniform(-1, +1)` followed by a `u >= 0` sign threshold,
+rather than calling `keras.random.uniform` directly. An initializer runs inside
+`add_weight`, where there is no `SeedGenerator` variable for a direct
+`keras.random.*` call to update. Seeding therefore follows the ordinary Keras
+initializer contract: an *instance* replays the same tensor at every matching
+shape, and a seedless instance resolves its seed from the global RNG state, so
+`keras.utils.set_random_seed` controls it.
+
+### Usage
+
+```python
+from dl_techniques.initializers import RandomSigns
+
+# A per-member scaling vector for a k=8 batched ensemble over 128 features:
+# every entry is exactly -1.0 or +1.0.
+signs = RandomSigns(seed=42)((8, 128))
+
+# Any rank is accepted; the shape is passed straight through.
+r3 = RandomSigns(seed=0)((4, 8, 16))
+
+# In a layer, as the initializer of a multiplicative scaling weight:
+# self.r = self.add_weight(shape=(k, input_dim), initializer=RandomSigns())
 ```
 
 ## Integration with Keras Models
