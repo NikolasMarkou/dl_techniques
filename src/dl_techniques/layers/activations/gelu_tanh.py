@@ -39,6 +39,11 @@ are bit-exact.
 
 import keras
 from typing import Any, Callable, Dict, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

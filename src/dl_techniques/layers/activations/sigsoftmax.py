@@ -76,6 +76,7 @@ def _log_sigsoftmax_widened(
     log_probabilities = w - keras.ops.logsumexp(w, axis=axis, keepdims=True)
     return log_probabilities, input_dtype
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.activations.sigsoftmax")
 def log_sigsoftmax(
@@ -118,6 +119,7 @@ def log_sigsoftmax(
     log_probabilities, input_dtype = _log_sigsoftmax_widened(x, axis)
     return keras.ops.cast(log_probabilities, input_dtype)
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.activations.sigsoftmax")
 def sigsoftmax(
