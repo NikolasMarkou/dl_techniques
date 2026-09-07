@@ -896,6 +896,51 @@ class TestOutputShapeContract:
         assert tuple(layer.compute_output_shape(queried)) == (B, K, D)
         assert tuple(layer(_f32(*queried)).shape) == (B, K, D)
 
+    # The derive-from-config rule this plan applied five times has ONE hole, and
+    # these arms are it. When `k` or `input_dim` is 1 the size-1 axis belongs to
+    # the MEMBER weight, so the broadcast runs the other way and `call()` adopts
+    # the INPUT's size while `compute_output_shape` reports the config's. The
+    # arms below assert the WRONG-but-documented prediction on purpose: they
+    # exist so this stops being a surprise, and so that anyone who later makes
+    # the derivation exact here has a test telling them what they changed.
+    # Unreachable from the shipped model (`model.py` always builds
+    # `ScaleEnsemble(k=self.k, input_dim=self.d_flat)` with `k >= 1` feeding
+    # `(B, k, d_flat)`), and unreachable through `build()` at all, which runs
+    # once. See decisions.md D-009.
+
+    @pytest.mark.parametrize("make, built, queried, predicted, real", [
+        (lambda: ScaleEnsemble(k=1, input_dim=D), (None, 1, D),
+         (B, 7, D), (B, 1, D), (B, 7, D)),
+        (lambda: ScaleEnsemble(k=K, input_dim=1), (None, K, 1),
+         (B, K, 9), (B, K, 1), (B, K, 9)),
+        (lambda: LinearEfficientEnsemble(units=5, k=1), (None, 1, D),
+         (B, 7, D), (B, 1, 5), (B, 7, 5)),
+    ], ids=["ScaleEnsemble-k1", "ScaleEnsemble-input_dim1",
+            "LinearEfficientEnsemble-k1"])
+    def test_the_degenerate_size_1_axis_is_the_documented_exception(
+            self, make, built, queried, predicted, real):
+        layer = make()
+        layer.build(built)
+        assert tuple(layer.compute_output_shape(queried)) == predicted
+        assert tuple(layer(_f32(*queried)).shape) == real
+        assert predicted != real, "arm is vacuous unless the two really disagree"
+
+    def test_the_linear_ensemble_last_axis_is_not_a_second_degenerate_hole(self):
+        # `LinearEfficientEnsemble`'s last axis is produced by the einsum
+        # contraction `bki,iu->bku`, not by a broadcast, so `input_dim == 1`
+        # against a wider input RAISES instead of silently absorbing. That is why
+        # the docstring names `k == 1` as the ONLY exception rather than copying
+        # `ScaleEnsemble`'s two.
+        layer = LinearEfficientEnsemble(units=5, k=K)
+        layer.build((None, K, 1))
+        assert tuple(layer.kernel.shape) == (1, 5)
+        assert tuple(layer.compute_output_shape((B, K, 9))) == (B, K, 5)
+        with pytest.raises(Exception) as exc:
+            layer(_f32(B, K, 9))
+        # A BACKEND contraction failure, not one of this layer's own ValueError
+        # guards -- `build()` already ran, so nothing of ours inspects this shape.
+        assert not isinstance(exc.value, ValueError)
+
 
 class TestRankContract:
     """The rank-3 contract of the three leaf layers, and what it does upstream.

@@ -278,8 +278,24 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         """Compute the output shape of the layer.
 
         Axis 1 comes from the stored ``k``, never from ``input_shape[1]``: the
-        weights are shaped from ``k``, so ``k`` is what :meth:`call` actually
-        produces, and this must answer correctly on an UNBUILT layer.
+        per-member weights are shaped from ``k``, and this must answer correctly
+        on an UNBUILT layer. The last axis is ``units``, which the einsum
+        ``bki,iu->bku`` produces unconditionally.
+
+        The derivation is EXACT for every input when ``k > 1``. The exception is
+        the degenerate case ``k == 1``, where the size-1 axis belongs to the
+        ``(k, input_dim)`` / ``(k, units)`` member vectors, so the broadcast in
+        :meth:`call` adopts the *input's* axis 1 while this method still reports
+        ``1`` -- MEASURED: ``LinearEfficientEnsemble(units=5, k=1)`` built at
+        ``(None, 1, 6)`` answers ``(4, 1, 5)`` for a queried ``(4, 7, 6)`` whose
+        real output is ``(4, 7, 5)``. This is the same degenerate hole as
+        ``ScaleEnsemble`` (decisions.md D-009), inherited from D-003. The LAST
+        axis has no such hole: ``input_dim == 1`` against a wider input is an
+        einsum contraction mismatch, which raises rather than broadcasting.
+        Reaching either needs a BUILT layer re-queried at a different axis size,
+        which ``build()`` cannot see and no shipped caller does; both are pinned
+        by ``TestOutputShapeContract::
+        test_the_degenerate_size_1_axis_is_the_documented_exception``.
         """
         return (input_shape[0], self.k, self.units)
 

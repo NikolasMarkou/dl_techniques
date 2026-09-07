@@ -164,10 +164,26 @@ class ScaleEnsemble(keras.layers.Layer):
         """Compute the output shape of the layer.
 
         Axes 1 and -1 come from the stored ``k`` and ``input_dim``, never from
-        ``input_shape``: the member weight is shaped from them and :meth:`call`
-        broadcasts the input against it, so those are the axes ``call()``
-        actually produces. Only the batch axis is read from the argument, and
-        the answer is correct on an UNBUILT layer.
+        ``input_shape``; only the batch axis is read from the argument, and the
+        answer is correct on an UNBUILT layer.
+
+        The derivation is EXACT for every input when ``k > 1`` and
+        ``input_dim > 1``: the member weight is shaped ``(k, input_dim)`` and
+        :meth:`call` broadcasts the input against it, so a disagreeing axis is
+        either size 1 (absorbed, and this method reports the surviving member
+        size) or a broadcast error.
+
+        The exception is the degenerate case ``k == 1`` or ``input_dim == 1``.
+        There the size-1 axis belongs to the MEMBER weight, so ``call()`` adopts
+        the *input's* size while this method still reports ``1`` -- MEASURED:
+        ``ScaleEnsemble(k=1, input_dim=6)`` built at ``(None, 1, 6)`` answers
+        ``(4, 1, 6)`` for a queried ``(4, 7, 6)`` whose real output is
+        ``(4, 7, 6)``, and ``ScaleEnsemble(k=3, input_dim=1)`` answers
+        ``(4, 3, 1)`` against a real ``(4, 3, 9)``. Reaching it requires a BUILT
+        layer re-queried at a different axis size with a config value of ``1``,
+        which the ``build()`` guards cannot see and no shipped caller does. It is
+        pinned by ``TestOutputShapeContract::
+        test_the_degenerate_size_1_axis_is_the_documented_exception``.
         """
         # DECISION plan-2026-09-07T130829-d709705c/D-008: DERIVE, do not echo
         # `input_shape`. D-006 left the echo in place claiming the rank guard in
@@ -180,6 +196,19 @@ class ScaleEnsemble(keras.layers.Layer):
         # is `(2, k, D)`, because a built layer never re-enters `build()`. Same
         # guide-v2 3.4 rule -- and now the same one-line treatment -- as
         # `linear_efficient_ensemble.py`. See decisions.md D-008.
+        #
+        # DECISION plan-2026-09-07T130829-d709705c/D-009 -- QUALIFIED. The
+        # sentence above is scoped, deliberately: this
+        # plan wrote three anchors (D-003, D-006, D-008) whose ABSOLUTE wording a
+        # later measurement refuted, so the house form here is "exact for X; the
+        # exception is Y". X = `k > 1 and input_dim > 1`. Y = `k == 1` or
+        # `input_dim == 1`, where the size-1 axis is the MEMBER's, so `call()`
+        # broadcasts to the INPUT's size and this method under-reports it
+        # (`k=1, input_dim=6` built at (None,1,6): cos((4,7,6)) = (4,1,6) vs a
+        # real (4,7,6); `k=3, input_dim=1`: cos((4,3,9)) = (4,3,1) vs a real
+        # (4,3,9)). The pre-D-008 echo was accidentally right in exactly that
+        # case -- do NOT restore it, because it is wrong on every NON-degenerate
+        # disagreement, which is the reachable one. See decisions.md D-009.
         return (input_shape[0], self.k, self.input_dim)
 
     def get_config(self) -> Dict[str, Any]:

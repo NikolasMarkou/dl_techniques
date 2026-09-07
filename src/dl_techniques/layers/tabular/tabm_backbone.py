@@ -201,8 +201,9 @@ class TabMBackbone(keras.layers.Layer):
         # `get_config()` still emits the UNCLONED attributes, so nothing serialized
         # moves. See decisions.md D-005.
         #
-        # SCOPE -- the clone breaks symmetry for a SEEDLESS initializer ONLY (D-007,
-        # MEASURED). `clone_initializer` deliberately reproduces a seed
+        # DECISION plan-2026-09-07T130829-d709705c/D-007 -- SCOPE of D-005 above:
+        # the clone breaks symmetry for a SEEDLESS initializer ONLY (MEASURED).
+        # `clone_initializer` deliberately reproduces a seed
         # (`initializers/clone.py:71-73`), so `kernel_initializer=GlorotUniform(seed=7)`
         # -- a documented public argument of this class AND of `create_tabm_model` --
         # gives every block BIT-IDENTICAL kernels, and does so end to end
