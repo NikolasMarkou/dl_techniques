@@ -36,6 +36,11 @@ References:
 import keras
 from keras import ops, initializers, regularizers, constraints
 from typing import Optional, Union, Tuple, Dict, Any, Literal
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

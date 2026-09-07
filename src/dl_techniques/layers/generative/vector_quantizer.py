@@ -29,8 +29,13 @@ References:
 import keras
 from typing import Optional, Tuple, Dict, Any, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.generative.vector_quantizer")
 class VectorQuantizer(keras.layers.Layer):
@@ -459,3 +464,5 @@ class VectorQuantizer(keras.layers.Layer):
             "epsilon": self.epsilon,
         })
         return config
+
+# ---------------------------------------------------------------------

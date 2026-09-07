@@ -38,9 +38,14 @@ import keras
 import numpy as np
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.generative.vector_quantizer_rotation_trick")
 class VectorQuantizerRotationTrick(keras.layers.Layer):
@@ -802,4 +807,6 @@ class VectorQuantizerRotationTrick(keras.layers.Layer):
         d_tensor = keras.ops.convert_to_tensor([self.embedding_dim], dtype="int32")
         out_shape = keras.ops.concatenate([spatial_shape_i32, d_tensor], axis=0)
         return keras.ops.reshape(flat_q, out_shape)
+
+# ---------------------------------------------------------------------
 

@@ -17,10 +17,16 @@ References:
 
 import keras
 from typing import Optional, Union, Any, Dict, Tuple, Callable
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.lowrank_ffn")
 class LowRankFFN(keras.layers.Layer):
@@ -399,3 +405,5 @@ class LowRankFFN(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

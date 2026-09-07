@@ -23,14 +23,21 @@ References:
 import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 # DECISION plan-2026-08-29T043546-e97b34d8/D-010: these two frozensets are the
 # only source of valid reduction names; factory.py imports them, never a copy. See decisions.md.
 VALID_INTERSECTION_REDUCTIONS = frozenset({'product', 'min', 'mean'})
 VALID_DIFFERENCE_REDUCTIONS = frozenset({'ignorematch', 'subtractmatch'})
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.tversky_projection")
 class TverskyProjectionLayer(keras.layers.Layer):
@@ -468,3 +475,5 @@ class TverskyProjectionLayer(keras.layers.Layer):
             'contrast_initializer': keras.initializers.serialize(self.contrast_initializer),
         })
         return config
+
+# ---------------------------------------------------------------------

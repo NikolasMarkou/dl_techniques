@@ -13,13 +13,16 @@ References:
 import keras
 from typing import Optional, Union, Any, Dict, Tuple, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-01T110541-dcc1574a/D-001: keep the bare class name --
-# it is the FFN factory's 'mlp' key and a live legacy alias. See decisions.md.
 @register_dl_technique("dl_techniques.layers.ffn.mlp")
 class MLPBlock(keras.layers.Layer):
     """
@@ -408,3 +411,5 @@ class MLPBlock(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

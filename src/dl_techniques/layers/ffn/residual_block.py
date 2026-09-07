@@ -19,8 +19,14 @@ References:
 import keras
 from typing import Optional, Union, Any, Tuple, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.residual_block")
 class ResidualBlock(keras.layers.Layer):
@@ -364,3 +370,5 @@ class ResidualBlock(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -25,10 +25,15 @@ import keras
 from keras import ops, layers, initializers, regularizers, activations
 from typing import Optional, Union, Any, Dict, Callable, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.geglu_ffn")
 class GeGLUFFN(keras.layers.Layer):
@@ -380,3 +385,5 @@ class GeGLUFFN(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

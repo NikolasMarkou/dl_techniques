@@ -27,8 +27,14 @@ from keras import ops
 from keras import initializers
 from keras import regularizers
 from typing import Optional, Tuple, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.generative.restricted_boltzmann_machine")
 class RestrictedBoltzmannMachine(keras.layers.Layer):
@@ -463,3 +469,5 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             ),
         })
         return config
+
+# ---------------------------------------------------------------------

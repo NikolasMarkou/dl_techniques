@@ -25,9 +25,14 @@ import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.gelu_mlp_ffn")
 class GELUMLPFFN(keras.layers.Layer):
@@ -353,3 +358,5 @@ class GELUMLPFFN(keras.layers.Layer):
             "use_bias": self.use_bias,
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -20,12 +20,17 @@ References:
 import keras
 from typing import Optional, Union, Any, Dict, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 from ..activations.relu_k import ReLUK
 from ..activations.basis_function import BasisFunction
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.power_mlp_layer")
 class PowerMLPLayer(keras.layers.Layer):
@@ -361,3 +366,6 @@ class PowerMLPLayer(keras.layers.Layer):
         :rtype: str
         """
         return f"PowerMLPLayer(units={self.units}, k={self.k}, name='{self.name}')"
+
+
+# ---------------------------------------------------------------------

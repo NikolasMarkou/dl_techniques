@@ -27,6 +27,10 @@ import copy
 import keras
 from typing import Dict, Any, Literal, Mapping, Optional, Sequence, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
 from .mlp import MLPBlock
@@ -53,6 +57,8 @@ from .mlp_mixer_block import MixerBlock
 from .squared_relu_ffn import SquaredReLUFFN
 from .lowrank_ffn import LowRankFFN
 
+# ---------------------------------------------------------------------
+
 FFNType = Literal[
     'bilinear',
     'counting',
@@ -76,6 +82,8 @@ FFNType = Literal[
     'swin_mlp',
     'tversky'
 ]
+
+# ---------------------------------------------------------------------
 
 # Every entry has: class, description, required_params, output_dim_param,
 # optional_params, use_case. output_dim_param names the constructor argument

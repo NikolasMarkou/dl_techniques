@@ -21,9 +21,14 @@ References:
 import keras
 from typing import Callable, Optional, Union, Tuple, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.diff_ffn")
 class DifferentialFFN(keras.layers.Layer):
@@ -447,3 +452,5 @@ class DifferentialFFN(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

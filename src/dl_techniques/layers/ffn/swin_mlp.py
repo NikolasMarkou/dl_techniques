@@ -16,9 +16,14 @@ References:
 import keras
 from typing import Tuple, Optional, Dict, Any, Union, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.swin_mlp")
 class SwinMLP(keras.layers.Layer):
@@ -441,3 +446,5 @@ class SwinMLP(keras.layers.Layer):
             "activity_regularizer": keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

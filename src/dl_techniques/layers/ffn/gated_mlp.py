@@ -20,6 +20,10 @@ References:
 import keras
 from typing import Optional, Union, Tuple, Literal, Any, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -27,6 +31,7 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.gated_mlp")
 class GatedMLP(keras.layers.Layer):
@@ -447,3 +452,5 @@ class GatedMLP(keras.layers.Layer):
             "data_format": self.data_format,
         })
         return config
+
+# ---------------------------------------------------------------------
