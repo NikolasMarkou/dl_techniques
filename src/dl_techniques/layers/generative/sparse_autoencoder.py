@@ -134,23 +134,37 @@ class SparseAutoencoder(keras.layers.Layer):
     :type aux_k: int or None
     :param aux_coefficient: Coefficient for auxiliary loss. Defaults to 1/32.
     :type aux_coefficient: float
-    :param kernel_initializer: Initializer for encoder/decoder/gate weights.
-        Defaults to ``'glorot_uniform'``. ``build()`` draws each weight from its
-        own clone of this initializer, so a SEEDLESS instance yields independent
-        draws at every site. The exception is a SEEDED instance (e.g.
-        ``GlorotUniform(seed=7)``): cloning reproduces an explicit seed
-        deliberately and by contract
+    :param kernel_initializer: Initializer for encoder/decoder/gate
+        weights. Defaults to ``'glorot_uniform'``. ``build()`` draws each
+        weight from its own clone of this initializer, so a RANDOM SEEDLESS
+        instance yields independent draws at every site. Differing shapes are
+        NOT what makes two sites independent: one shared seedless instance
+        replays the same underlying sample everywhere, so a shorter draw comes
+        out as a longer draw's prefix up to the fan-based scale (measured on
+        this backend for every shape pair tried; the durable mechanism is the
+        replayed seed, and the prefix relation is how the stateless RNG
+        realises it). Three exemptions, all correct behaviour: a
+        caller-supplied SEEDED instance (e.g. ``GlorotUniform(seed=7)``) --
+        cloning reproduces an explicit seed deliberately and by contract
         (``dl_techniques.initializers.clone_initializer``), so weights of equal
         shape -- ``encoder_weight`` and ``gate_weight`` always, plus
-        ``decoder_weight`` when ``d_input == d_latent`` -- stay bit-identical.
-        For reproducibility WITHOUT that coincidence, call
-        ``keras.utils.set_random_seed()`` and leave this argument seedless.
+        ``decoder_weight`` when ``d_input == d_latent`` -- stay bit-identical;
+        a DETERMINISTIC initializer (``'zeros'``, ``'ones'``, ``Constant``, and
+        ``Identity`` where the weight is 2-D) -- it holds no random state, so
+        every site is bit-identical and that is what it is meant to do; and a
+        CUSTOM initializer whose ``get_config()``/``from_config()`` round trip
+        raises -- ``clone_initializer`` then falls back to ``copy.deepcopy``,
+        which copies the already-resolved seed rather than drawing a new one
+        (measured: a deepcopy of a seedless glorot_uniform draws
+        bit-identically), so such a site can silently stay tied. For
+        reproducibility WITHOUT the tie, call ``keras.utils.set_random_seed()``
+        and leave this argument seedless.
     :type kernel_initializer: str or keras.initializers.Initializer
     :param bias_initializer: Initializer for bias vectors. Defaults to
         ``'zeros'``, under which all biases are correctly identical (zeros are
-        deterministic; cloning them is a no-op). Cloned per site on the same
-        terms as ``kernel_initializer``: exact for a seedless instance, with a
-        caller-supplied seeded instance the documented exception.
+        deterministic; cloning them is a no-op -- the second of the three
+        exemptions above). Cloned per site on exactly the same terms as
+        ``kernel_initializer``.
     :type bias_initializer: str or keras.initializers.Initializer
     :param kernel_regularizer: Optional regularizer for encoder/decoder weights.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
@@ -256,35 +270,65 @@ class SparseAutoencoder(keras.layers.Layer):
                 f"got {input_shape[-1]}"
             )
 
-        # DECISION plan-2026-09-07T161712-985e4d31/D-002: every add_weight call
-        # below draws from its OWN clone of self.kernel_initializer /
-        # self.bias_initializer. Do NOT "simplify" these back to the bare
-        # attribute: one seedless Keras 3 initializer instance self-assigns a
-        # seed at construction and replays it at every site whose shape matches,
-        # so encoder_weight and gate_weight (both (d_input, d_latent), i.e.
-        # coinciding unconditionally) came out bit-identical, and in a square SAE
-        # (d_input == d_latent) all three of encoder/decoder/gate collapsed to a
-        # single draw. Measured max|diff| == 0.0 before this change.
-        # Scope of the claim, exactly: this is exact for a SEEDLESS initializer;
-        # the exception is a caller-supplied SEEDED one (e.g.
-        # GlorotUniform(seed=7)), for which clone_initializer reproduces the seed
-        # deliberately and by contract (initializers/clone.py:60-65) and the
-        # weights stay identical. Callers wanting reproducibility WITHOUT that
-        # coincidence should use keras.utils.set_random_seed() and leave the
-        # initializer seedless. Both directions are pinned by
-        # TestInitializerAliasing in tests/test_layers/test_generative/
-        # test_sparse_autoencoder.py.
-        # The bias sites are cloned too: at the shipped default 'zeros' that is a
-        # provable no-op (Zeros carries no per-instance random state, and the
+        # DECISION plan-2026-09-07T161712-985e4d31/D-002 (claim corrected by
+        # D-009): every add_weight call below draws from its OWN clone of
+        # self.kernel_initializer / self.bias_initializer. Do NOT "simplify"
+        # these back to the bare attribute: one seedless Keras 3 initializer
+        # instance self-assigns a seed at construction and replays THE SAME
+        # UNDERLYING SAMPLE at every later site, so encoder_weight and
+        # gate_weight (both (d_input, d_latent), i.e. coinciding
+        # unconditionally) came out bit-identical, and in a square SAE (d_input
+        # == d_latent) all three of encoder/decoder/gate collapsed to a single
+        # draw. Measured max|diff| == 0.0 before this change.
+        #
+        # What is NOT the criterion: matching SHAPES. An earlier revision of
+        # this comment said the instance "replays it at every site whose shape
+        # matches", which measurement refutes -- a shared seedless
+        # glorot_uniform drawing (8, 4, 3, 3, 7) then (8, 4, 3, 3) gives
+        # Pearson r = 0.999999999999998 between the second draw and the first's
+        # flattened prefix (they differ only by the fan-based scale sqrt(5)),
+        # and a non-scaling RandomUniform makes the smaller draw BIT-IDENTICAL
+        # to the larger one's prefix. Two weights can be the same random
+        # numbers without matching shapes, which is why EVERY add_weight fed by
+        # a shared instance is cloned here rather than only the
+        # shape-coinciding ones.
+        #
+        # Scope of the claim, exactly: independence holds for a RANDOM SEEDLESS
+        # initializer. Three exemptions, all correct behaviour, none a defect:
+        #   (1) a caller-supplied SEEDED instance (e.g. GlorotUniform(seed=7)):
+        #       clone_initializer reproduces an explicit seed deliberately and
+        #       by contract (initializers/clone.py), so the clones stay tied;
+        #   (2) a DETERMINISTIC initializer ('zeros', 'ones', Constant, and
+        #       Identity where the weight is 2-D): it holds no random state, so
+        #       every site is bit-identical and that is what it is meant to do;
+        #       cloning it is a no-op -- this is why the 'zeros' bias default
+        #       below is correctly identical everywhere;
+        #   (3) a CUSTOM initializer whose get_config()/from_config() round
+        #       trip raises: clone_initializer falls back to copy.deepcopy,
+        #       which copies the already-resolved seed rather than drawing a
+        #       new one (measured: a deepcopy of a seedless glorot_uniform
+        #       draws bit-identically), so such a site can silently stay tied
+        #       with no diagnostic.
+        #
+        # Callers wanting reproducibility WITHOUT the tie should use
+        # keras.utils.set_random_seed() and leave the initializer seedless. The
+        # default and exemptions (1) and (2) are pinned by
+        # TestInitializerAliasing in
+        # tests/test_layers/test_generative/test_sparse_autoencoder.py.
+        # Exemption (3) has NO test here: it is a property of clone_initializer,
+        # not of this layer.
+        #
+        # The bias sites are cloned too: at the shipped default 'zeros' that is
+        # a provable no-op (Zeros carries no per-instance random state, and the
         # biases correctly stay identical), but it stops the same defect
         # regrowing under a randomized bias_initializer. The literal 'zeros' at
         # pre_encoder_bias is not an instance and needs no clone. See
         # decisions.md D-002.
         #
-        # Behaviour change: initial weights move, so training runs seeded only by
-        # a fixed process seed will not reproduce pre-change results bit-for-bit.
-        # No .keras archive in this repo references SparseAutoencoder (verified).
-
+        # Behaviour change: initial weights move, so training runs seeded only
+        # by a fixed process seed will not reproduce pre-change results
+        # bit-for-bit. No .keras archive in this repo references
+        # SparseAutoencoder (verified).
         # Encoder weights: (d_input, d_latent)
         self.encoder_weight = self.add_weight(
             name='encoder_weight',

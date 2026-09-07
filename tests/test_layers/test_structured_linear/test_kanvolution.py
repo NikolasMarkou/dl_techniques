@@ -657,22 +657,64 @@ class TestKANvolution:
 # Per-site initializer cloning (plan-2026-09-07T161712-985e4d31/D-003)
 # ----------------------------------------------------------------------
 
+def _prefix_pearson_r(bigger, smaller) -> float:
+    """Correlate ``smaller`` against ``bigger``'s flattened PREFIX.
+
+    Two weights drawn from one shared seedless initializer instance are the
+    same underlying random sample even when their shapes differ: the shorter
+    draw is the longer draw's prefix, up to the initializer's own fan-based
+    scale factor. Bit-comparison cannot see that (the scales differ, and the
+    shapes do not even match), so the oracle is scale-invariant correlation on
+    the overlap.
+
+    :param bigger: The weight with the larger number of elements.
+    :param smaller: The weight with the smaller (or equal) number of elements.
+    :return: Pearson r over ``smaller.size`` elements. ~1.0 means one sample
+        was replayed at both sites; ~0 means the two draws are independent.
+    :rtype: float
+    """
+    a = np.asarray(ops.convert_to_numpy(bigger)).reshape(-1)
+    b = np.asarray(ops.convert_to_numpy(smaller)).reshape(-1)
+    assert b.size <= a.size, "pass the larger weight first"
+    return float(np.corrcoef(a[:b.size], b)[0, 1])
+
+
 class TestInitializerAliasing:
-    """``build()`` must draw ``w_spline`` and ``w_silu`` from their own instances.
+    """``build()`` must draw every kernel weight from its OWN initializer clone.
 
-    Scope of the claim, stated exactly: cloning per ``add_weight`` site removes
-    the *seedless-instance replay* only. A caller-supplied SEEDED initializer
-    (e.g. ``GlorotUniform(seed=7)``) still yields bit-identical weights after
-    cloning, deliberately and by contract
-    (``src/dl_techniques/initializers/clone.py:60-65``) --
-    ``test_a_seeded_initializer_still_aliases_by_contract`` pins that exemption.
-    Callers who want reproducibility *without* the aliasing should seed the
-    process with ``keras.utils.set_random_seed()`` and leave the initializer
-    seedless.
+    Scope of the claim, stated exactly: per-site cloning gives independent
+    draws for a RANDOM SEEDLESS initializer. There are three exemptions, all of
+    them correct behaviour rather than defects:
 
-    ``control_points`` is deliberately NOT cloned; see
-    ``test_control_points_can_never_coincide_with_the_rank_4_pair`` for the
-    executable reason.
+    1. a caller-supplied SEEDED instance (e.g. ``GlorotUniform(seed=7)``) --
+       ``clone_initializer`` reproduces an explicit seed deliberately and by
+       contract (``src/dl_techniques/initializers/clone.py``), so the clones
+       stay tied (``test_a_seeded_initializer_still_aliases_by_contract`` and
+       ``test_a_seeded_initializer_reproduces_the_shared_instance_draw``);
+    2. a DETERMINISTIC initializer (``'zeros'``, ``'ones'``, ``Constant``, and
+       ``Identity`` where the weight is 2-D) -- it holds no random state, so
+       every site is bit-identical and that is exactly what it is meant to do
+       (``test_a_deterministic_initializer_is_identical_at_every_site``);
+    3. a CUSTOM initializer whose ``get_config()``/``from_config()`` round trip
+       raises -- ``clone_initializer`` then falls back to ``copy.deepcopy``,
+       which copies the already-resolved seed rather than drawing a new one,
+       so such a site can silently stay tied. Untested here because it is a
+       property of ``clone_initializer`` itself, not of this layer; it is
+       named so a caller passing a custom initializer is not misled by the
+       sentence above.
+
+    Callers who want reproducibility WITHOUT the tie should seed the process
+    with ``keras.utils.set_random_seed()`` and leave the initializer seedless.
+
+    What is NOT the criterion: matching SHAPES. An earlier revision of this
+    suite asserted that ``control_points`` (rank 5) could never coincide with
+    the rank-4 ``w_spline``/``w_silu`` pair because their shapes differ. That is
+    refuted: one shared seedless ``glorot_uniform`` drawing ``(8, 4, 3, 3, 7)``
+    and then ``(8, 4, 3, 3)`` -- the exact pre-fix order -- gives Pearson
+    r = 0.999999999999998 between the second draw and the first's flattened
+    prefix, the two differing only by the fan-based scale ``sqrt(5)``; with a
+    non-scaling ``RandomUniform`` the smaller draw is BIT-IDENTICAL to the
+    larger one's prefix. So all three kernel weights are cloned.
     """
 
     @staticmethod
@@ -690,7 +732,10 @@ class TestInitializerAliasing:
 
         Both are ``(filters, in_channels, kh, kw)``, so their shapes coincide
         unconditionally -- by construction, not at a particular config -- and one
-        shared seedless instance replays the same draw at both sites. They are
+        shared seedless instance replays the same draw at both sites. Note the
+        direction: shape coincidence is what makes the replay BIT-identical and
+        therefore visible to ``array_equal``. It is NOT what causes the sites to
+        share a sample; they would share one at any shapes (class docstring). They are
         the coefficients of two DIFFERENT basis functions in
         ``K(x) = w_spline * B(x) + w_silu * SiLU(x)``, so an identical init is a
         real symmetry defect, not a harmless duplicate.
@@ -710,28 +755,118 @@ class TestInitializerAliasing:
             "exemption and would legitimately be identical."
         )
 
-    def test_control_points_can_never_coincide_with_the_rank_4_pair(self):
-        """Why ``control_points`` is deliberately left on the shared instance.
+    @pytest.mark.parametrize(
+        'weight_name', ['control_points', 'w_spline', 'w_silu']
+    )
+    def test_no_kernel_weight_is_the_shared_instance_replay(self, weight_name):
+        """Per-site guard: no kernel weight is what the SHARED attribute draws.
 
-        A seedless initializer instance only replays a draw at sites whose shape
-        MATCHES. ``control_points`` is rank 5 -- it carries a trailing
-        ``grid_size + 1`` knot axis -- against the rank-4 ``w_spline``/``w_silu``
-        pair, so it can never coincide with them at any config and is not part of
-        the aliasing defect. This arm pins the SHAPE non-coincidence; it
-        deliberately does NOT assert that the values differ, because the values
-        are not what makes the non-action correct. A RED here means the rank
-        relationship changed and the do-not-clone note in ``kanvolution.py``
-        needs re-deriving before anyone "finishes the job" by cloning it.
+        ``self.kernel_initializer`` stays the caller's object and is never used
+        directly at an ``add_weight`` site. A seedless Keras 3 instance replays
+        its self-assigned seed on every call, so drawing from it here at a
+        weight's own shape reproduces exactly what that site would have got had
+        ``build()`` passed the bare attribute. Bit-equality therefore means that
+        site is un-cloned -- and this arm sees it one site at a time, which the
+        pairwise correlation arm cannot: cloning EITHER member of a pair already
+        decorrelates it.
+
+        Exact for a random seedless initializer; see the class docstring for the
+        three exemptions (the seeded one is pinned by
+        ``test_a_seeded_initializer_reproduces_the_shared_instance_draw``, which
+        asserts the opposite result for the opposite reason).
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(filters=8, kernel_size=3, grid_size=6)
+        weight = self._np(getattr(layer, weight_name))
+        replay = np.asarray(layer.kernel_initializer(shape=weight.shape))
+        assert not np.array_equal(weight, replay), (
+            f"{weight_name} is bit-identical to what the shared "
+            "self.kernel_initializer instance draws at that shape, so it was "
+            "built from the bare attribute rather than its own clone. Wrap it "
+            "in clone_initializer (initializers/clone.py)."
+        )
+
+    def test_the_three_kernel_weights_are_independent_draws(self):
+        """No two kernel weights are the same random sample -- shapes or not.
+
+        The refuted rule this arm replaces said differing SHAPES made
+        ``control_points`` safe. They do not: a shared seedless instance replays
+        one underlying sample at every site, so the shorter draw is the longer
+        draw's prefix up to a fan-based scale, and bit-comparison is blind to
+        it. This arm therefore correlates each pair on its overlap. Measured
+        pre-fix for the ``control_points``/``w_spline`` order: r =
+        0.999999999999998, ratio ``sqrt(5)``.
         """
         keras.utils.set_random_seed(1234)
         layer = self._built(filters=8, kernel_size=3, grid_size=6)
         cp = self._np(layer.control_points)
         spline, silu = self._np(layer.w_spline), self._np(layer.w_silu)
-        assert cp.ndim == 5
-        assert spline.ndim == silu.ndim == 4
+        # Anti-vacuity: the oracle needs control_points to be the longer draw,
+        # and the pair to be equal-length.
         assert cp.shape == (8, 4, 3, 3, 7)
-        assert cp.shape != spline.shape
-        assert cp.shape != silu.shape
+        assert spline.shape == silu.shape == (8, 4, 3, 3)
+        for name, r in (
+            ('control_points/w_spline', _prefix_pearson_r(cp, spline)),
+            ('control_points/w_silu', _prefix_pearson_r(cp, silu)),
+            ('w_spline/w_silu', _prefix_pearson_r(spline, silu)),
+        ):
+            assert abs(r) < 0.5, (
+                f"{name} are the same random sample (r = {r}): one seedless "
+                "initializer instance was replayed at both add_weight sites. "
+                "Differing shapes do NOT protect a site -- the shorter draw is "
+                "the longer draw's prefix, up to a fan-based scale."
+            )
+
+    @pytest.mark.parametrize(
+        'init', ['zeros', 'ones', initializers.Constant(0.3)]
+    )
+    def test_a_deterministic_initializer_is_identical_at_every_site(self, init):
+        """Exemption 2, pinned: identical weights are CORRECT here, not a defect.
+
+        ``'zeros'``/``'ones'``/``Constant`` hold no per-instance random state,
+        so cloning them is a no-op and every site comes out bit-identical. This
+        is the positive control for the class docstring's central claim: it goes
+        RED if anyone "strengthens" that claim to "cloning always makes weights
+        differ", which is the direction this suite has already been wrong in
+        once.
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(
+            filters=8, kernel_size=3, grid_size=6, kernel_initializer=init,
+        )
+        cp = self._np(layer.control_points).reshape(-1)
+        spline = self._np(layer.w_spline).reshape(-1)
+        silu = self._np(layer.w_silu).reshape(-1)
+        assert np.array_equal(spline, silu)
+        assert np.array_equal(cp[:spline.size], spline), (
+            "a deterministic initializer must produce the same values at every "
+            "site; cloning it is a no-op by construction"
+        )
+
+    def test_a_seeded_initializer_reproduces_the_shared_instance_draw(self):
+        """Exemption 1, the same oracle, pointing the other way.
+
+        With a SEEDED initializer, ``clone_initializer`` reproduces the seed on
+        purpose, so every cloned site draws EXACTLY what the shared attribute
+        would have drawn. That is the contract, not a defect; this arm is the
+        inverse of ``test_no_kernel_weight_is_the_shared_instance_replay`` and
+        makes the exemption executable rather than merely written down.
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(
+            filters=8,
+            kernel_size=3,
+            grid_size=6,
+            kernel_initializer=initializers.GlorotUniform(seed=7),
+        )
+        for weight_name in ('control_points', 'w_spline', 'w_silu'):
+            weight = self._np(getattr(layer, weight_name))
+            replay = np.asarray(layer.kernel_initializer(shape=weight.shape))
+            assert np.array_equal(weight, replay), (
+                f"{weight_name} no longer reproduces the seeded shared "
+                "instance's draw: clone_initializer's seeded contract changed, "
+                "and every comment and docstring written around it is now wrong"
+            )
 
     def test_a_seeded_initializer_still_aliases_by_contract(self):
         """Documented limitation, pinned: a SEEDED initializer stays aliased.

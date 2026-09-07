@@ -24,6 +24,7 @@ from typing import Tuple, Optional, Union, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -82,13 +83,33 @@ class MPSLayer(keras.layers.Layer):
         Defaults to True.
     :type use_bias: bool
     :param kernel_initializer: Initializer for core tensors and projection.
-        Defaults to ``'glorot_uniform'``.
+        Defaults to ``'glorot_uniform'``. ``build()`` draws ``mps_cores`` and
+        ``projection`` from their own clones of this initializer, so a RANDOM
+        SEEDLESS instance yields independent draws at both sites. Differing
+        shapes are NOT what makes two sites independent: one shared seedless
+        instance replays the same underlying sample everywhere. Three
+        exemptions, all correct behaviour: a caller-supplied SEEDED instance
+        (e.g. ``GlorotUniform(seed=7)``) -- cloning reproduces an explicit seed
+        deliberately and by contract
+        (``dl_techniques.initializers.clone_initializer``), so the two weights
+        stay tied; a DETERMINISTIC initializer (``'zeros'``, ``'ones'``,
+        ``Constant``, and ``Identity`` where the weight is 2-D) -- it holds no
+        random state, so every site is bit-identical and that is what it is
+        meant to do; and a CUSTOM initializer whose
+        ``get_config()``/``from_config()`` round trip raises --
+        ``clone_initializer`` then falls back to ``copy.deepcopy``, which
+        copies the already-resolved seed rather than drawing a new one
+        (measured: a deepcopy of a seedless glorot_uniform draws
+        bit-identically), so such a site can silently stay tied. For
+        reproducibility WITHOUT the tie, call ``keras.utils.set_random_seed()``
+        and leave this argument seedless.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for core tensors and projection.
         Defaults to None.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param bias_initializer: Initializer for bias terms.
-        Defaults to ``'zeros'``.
+        Defaults to ``'zeros'``. There is a single bias site, so nothing can
+        alias against it and it is not cloned.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param bias_regularizer: Regularizer for bias terms. Defaults to None.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
@@ -155,11 +176,64 @@ class MPSLayer(keras.layers.Layer):
 
         input_dim = int(input_dim)
 
+        # DECISION plan-2026-09-07T161712-985e4d31/D-008: mps_cores and
+        # projection each draw from their OWN clone of self.kernel_initializer.
+        # Do NOT "simplify" them back to the bare attribute: one seedless Keras
+        # 3 initializer instance self-assigns a seed at construction and
+        # replays THE SAME UNDERLYING SAMPLE at every later site, so these two
+        # weights -- the chain's per-feature core tensors and the single
+        # bond-to-output map, architecturally unrelated -- were the same random
+        # numbers. Measured before this change at output_dim=8, bond_dim=8:
+        # projection was mps_cores' flattened prefix times 2.828427 (ratio std
+        # 9.5e-07), Pearson r = 0.9999999999999968.
+        #
+        # What is NOT the criterion: matching SHAPES. mps_cores is (input_dim,
+        # bond_dim, bond_dim) and projection is (bond_dim, output_dim) --
+        # different ranks and different sizes -- and they aliased anyway,
+        # because the shorter draw came out as the longer draw's prefix up to
+        # the fan-based scale -- measured on this backend for every shape pair
+        # tried, the durable mechanism being the replayed seed and the prefix
+        # relation how the stateless RNG realises it. An earlier revision of
+        # this plan CLEARED this layer on the rule that differing shapes cannot
+        # alias; measurement refuted that rule. Every add_weight fed by a
+        # shared initializer instance gets its own clone here.
+        #
+        # Scope of the claim, exactly: independence holds for a RANDOM SEEDLESS
+        # initializer. Three exemptions, all correct behaviour, none a defect:
+        #   (1) a caller-supplied SEEDED instance (e.g. GlorotUniform(seed=7)):
+        #       clone_initializer reproduces an explicit seed deliberately and
+        #       by contract (initializers/clone.py), so the clones stay tied --
+        #       measured r = 0.9999999999999957 across these very shapes;
+        #   (2) a DETERMINISTIC initializer ('zeros', 'ones', Constant, and
+        #       Identity where the weight is 2-D): it holds no random state, so
+        #       every site is bit-identical and that is what it is meant to do;
+        #       cloning it is a no-op;
+        #   (3) a CUSTOM initializer whose get_config()/from_config() round
+        #       trip raises: clone_initializer falls back to copy.deepcopy,
+        #       which copies the already-resolved seed rather than drawing a
+        #       new one (measured: a deepcopy of a seedless glorot_uniform
+        #       draws bit-identically), so such a site can silently stay tied
+        #       with no diagnostic.
+        #
+        # Callers wanting reproducibility WITHOUT the tie should use
+        # keras.utils.set_random_seed() and leave the initializer seedless. The
+        # default and exemptions (1) and (2) are pinned by
+        # TestInitializerAliasing in
+        # tests/test_layers/test_structured_linear/test_mps_layer.py. Exemption
+        # (3) has NO test here: it is a property of clone_initializer, not of
+        # this layer. See decisions.md D-008.
+        #
+        # Behaviour change: initial weights move, so a training run seeded only
+        # by a fixed process seed will not reproduce pre-change results
+        # bit-for-bit, and any checkpoint of this layer taken before the change
+        # holds weights drawn under the old, tied scheme.
+        #
+        # The single bias site has nothing to alias against and is not cloned.
         # One core tensor per input feature.
         self.cores = self.add_weight(
             name="mps_cores",
             shape=(input_dim, self.bond_dim, self.bond_dim),
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             regularizer=self.kernel_regularizer,
             trainable=True
         )
@@ -167,7 +241,7 @@ class MPSLayer(keras.layers.Layer):
         self.projection = self.add_weight(
             name="projection",
             shape=(self.bond_dim, self.output_dim),
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             regularizer=self.kernel_regularizer,
             trainable=True
         )

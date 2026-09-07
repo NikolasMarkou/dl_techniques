@@ -261,15 +261,37 @@ class TestSparseAutoencoder:
 class TestInitializerAliasing:
     """``build()`` must draw each weight from its own initializer instance.
 
-    Scope of the claim, stated exactly: cloning per ``add_weight`` site removes
-    the *seedless-instance replay* only. A caller-supplied SEEDED initializer
-    (e.g. ``GlorotUniform(seed=7)``) still yields bit-identical weights after
-    cloning, deliberately and by contract
-    (``src/dl_techniques/initializers/clone.py:60-65``) --
-    ``test_a_seeded_initializer_still_aliases_by_contract`` pins that exemption.
-    Callers who want reproducibility *without* the aliasing should seed the
-    process with ``keras.utils.set_random_seed()`` and leave the initializer
-    seedless.
+    Scope of the claim, stated exactly: per-site cloning gives independent
+    draws for a RANDOM SEEDLESS initializer. There are three exemptions, all of
+    them correct behaviour rather than defects:
+
+    1. a caller-supplied SEEDED instance (e.g. ``GlorotUniform(seed=7)``) --
+       ``clone_initializer`` reproduces an explicit seed deliberately and by
+       contract (``src/dl_techniques/initializers/clone.py``), so the clones
+       stay tied (``test_a_seeded_initializer_still_aliases_by_contract``);
+    2. a DETERMINISTIC initializer (``'zeros'``, ``'ones'``, ``Constant``, and
+       ``Identity`` where the weight is 2-D) -- it holds no random state, so
+       every site is bit-identical and that is exactly what it is meant to do
+       (``test_zeros_bias_stays_identical_positive_control`` on the bias side,
+       ``test_a_deterministic_kernel_is_identical_at_every_site`` on the kernel
+       side);
+    3. a CUSTOM initializer whose ``get_config()``/``from_config()`` round trip
+       raises -- ``clone_initializer`` then falls back to ``copy.deepcopy``,
+       which copies the already-resolved seed rather than drawing a new one,
+       so such a site can silently stay tied. Untested here because it is a
+       property of ``clone_initializer`` itself, not of this layer; it is
+       named so a caller passing a custom initializer is not misled by the
+       sentence above.
+
+    Callers who want reproducibility WITHOUT the tie should seed the process
+    with ``keras.utils.set_random_seed()`` and leave the initializer seedless.
+
+    What is NOT the criterion: matching SHAPES. A shared seedless instance
+    replays one underlying sample at every site, so a shorter draw is a longer
+    draw's prefix up to the fan-based scale -- measured elsewhere in this repo
+    at Pearson r = 0.999999999999998 across a rank-5/rank-4 mismatch. Every
+    ``add_weight`` fed by a shared instance is cloned here, not just the
+    shape-coinciding ones.
     """
 
     @staticmethod
@@ -286,9 +308,12 @@ class TestInitializerAliasing:
         """Non-square gated SAE: ``encoder_weight`` vs ``gate_weight``.
 
         Their shapes coincide unconditionally (both ``(d_input, d_latent)``), so
-        one shared seedless instance replays the same draw at both sites. Exact
-        for a seedless initializer; the exception is a seeded one (see the class
-        docstring).
+        one shared seedless instance replays the same draw at both sites. Note
+        the direction: shape coincidence is what makes the replay BIT-identical
+        and therefore visible to ``array_equal``. It is NOT what causes the two
+        sites to share a sample; they would share one at any shapes (class
+        docstring). Exact for a random seedless initializer; see the class
+        docstring for the three exemptions.
         """
         keras.utils.set_random_seed(1234)
         layer = self._built(d_input=64, d_latent=512, variant="gated")
@@ -358,6 +383,34 @@ class TestInitializerAliasing:
         assert not np.array_equal(enc_b, gate_b), (
             "encoder_bias and gate_bias are bit-identical under a randomized "
             "bias_initializer: the shared seedless instance was replayed."
+        )
+
+    @pytest.mark.parametrize(
+        "init", ["zeros", "ones", keras.initializers.Constant(0.3)]
+    )
+    def test_a_deterministic_kernel_is_identical_at_every_site(self, init):
+        """Exemption 2 on the KERNEL side: identical weights are CORRECT here.
+
+        ``'zeros'``/``'ones'``/``Constant`` hold no per-instance random state,
+        so cloning them is a no-op and every kernel site comes out
+        bit-identical. The bias side already had this positive control
+        (``test_zeros_bias_stays_identical_positive_control``); the kernel side
+        had none, so the class docstring's central claim could be
+        "strengthened" to the false form "cloning always makes weights differ"
+        without anything going RED.
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(
+            d_input=64, d_latent=64, variant="gated", kernel_initializer=init
+        )
+        enc = self._np(layer.encoder_weight)
+        gate = self._np(layer.gate_weight)
+        dec = self._np(layer.decoder_weight)
+        assert enc.shape == gate.shape == dec.shape == (64, 64)
+        assert np.array_equal(enc, gate)
+        assert np.array_equal(enc, dec), (
+            "a deterministic initializer must produce the same values at every "
+            "site; cloning it is a no-op by construction"
         )
 
     def test_a_seeded_initializer_still_aliases_by_contract(self):
