@@ -16,8 +16,13 @@ import keras
 from keras import ops
 from typing import Dict, List, Optional, Tuple, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.one_hot_encoding")
 class OneHotEncoding(keras.layers.Layer):
@@ -152,3 +157,5 @@ class OneHotEncoding(keras.layers.Layer):
             "cardinalities": self.cardinalities,
         })
         return config
+
+# ---------------------------------------------------------------------
