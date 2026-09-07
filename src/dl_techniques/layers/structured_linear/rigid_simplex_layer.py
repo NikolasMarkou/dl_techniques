@@ -1,19 +1,20 @@
 """RigidSimplexLayer, a projection onto a frozen Equiangular Tight Frame.
 
-Instead of a freely learned linear map, the layer projects onto a frozen
-regular simplex (a set of `N+1` unit vectors in `N` dimensions at the
-theoretical minimum pairwise coherence, `v_i . v_j = -1/N`). The learnable
-degrees of freedom collapse from a full `input_dim x units` matrix to a
-trainable rotation `R` and a scalar `s`: `output = s * (x @ R) @ Simplex`.
-`R` is kept close to orthogonal by an auxiliary penalty,
-`L_ortho = lambda * ||R^T R - I||^2`, rather than a hard reparameterization,
-since small departures from orthogonality only slightly perturb the
-composite map's isometry. The frozen frame is exactly isometric
-(`V^T V = ((N+1)/N) I`) and never degrades, since it never trains.
+RigidSimplexLayer is a Keras layer that maps `[..., input_dim]` to
+`[..., units]`. Its projection matrix is a fixed regular simplex frame:
+`input_dim + 1` unit vectors in `input_dim` dimensions, every pair at inner
+product `-1/input_dim`. That matrix never trains. The learnable parts are a
+square rotation `R` and a scalar `s`, giving
 
-When `units` exceeds the `input_dim + 1` simplex vertices, the frame is
-tiled and truncated to the requested width; the equiangular and isometry
-guarantees then hold only within each tile, not across the full output.
+    output = s * (x @ R) @ Simplex
+
+with `R` pulled toward orthogonality by a penalty on the mean squared
+entries of `R^T R - I`. The penalty is added through `add_loss` on every
+call, at inference as well as in training. The frame carries only
+`input_dim + 1` distinct vectors, so `units` past that count repeats
+columns and `units` below it drops them. The scale starts at 1.0 and is
+clipped into `[scale_min, scale_max]` after the first update. The last
+input dimension must be static.
 
 References:
     - Papyan et al., 2020. Prevalence of Neural Collapse during the Terminal
@@ -44,42 +45,89 @@ class RigidSimplexLayer(keras.layers.Layer):
     """
     Project inputs onto a rigid simplex with a learnable rotation and scale.
 
-    Maintains a frozen Equiangular Tight Frame weight matrix whose rows are
-    maximally separated unit vectors (``v_i . v_j = -1/N`` for ``i != j``).
-    The layer learns only a rotation matrix ``R`` (softly constrained toward
-    orthogonality via ``Loss = lambda * ||R^T R - I||^2``) and a bounded
-    global scale ``s in [scale_min, scale_max]``:
-    ``output = s * (x @ R) @ Simplex``.
+    Holds a non-trainable simplex frame of shape ``(input_dim, units)`` whose
+    columns are unit vectors at pairwise inner product ``-1/input_dim``. The
+    layer learns a rotation ``R`` and a bounded scalar ``s``, so the composite
+    map is ``output = s * (x @ R) @ Simplex``. ``R`` is not reparameterized;
+    it is pushed toward orthogonality by an auxiliary loss equal to
+    ``orthogonality_penalty * mean((R^T R - I)^2)``.
 
     Architecture:
 
     .. code-block:: text
 
         input [..., input_dim]
-              |
-        x @ rotation_kernel      [input_dim, input_dim]
-              |                  (trainable, soft ortho loss)
-              v
-        rotated @ static_simplex [input_dim, units]
-              |                  (non-trainable, frozen ETF)
-              v
-        * global_scale           (bounded [scale_min, scale_max])
-              |
-              v
+              │
+              ▼
+        ┌──────────────────────────┐
+        │ rotation_kernel matmul   ├──► ortho penalty ──► add_loss
+        │ [input_dim, input_dim]   │    (trainable R)
+        └──────────────────────────┘
+              │ [..., input_dim]
+              ▼
+        ┌──────────────────────────┐
+        │ static_simplex matmul    │    (frozen etf)
+        │ [input_dim, units]       │
+        └──────────────────────────┘
+              │ [..., units]
+              ▼
+        ┌──────────────────────────┐
+        │ global_scale multiply    │    (clipped scalar)
+        │ [1]                      │
+        └──────────────────────────┘
+              │
+              ▼
         output [..., units]
+
+    The penalty branch runs on every call, training or not.
+
+    Frame width:
+
+    .. code-block:: text
+
+        vertices = input_dim + 1 distinct unit vectors
+
+        units <  vertices        columns dropped
+                                 angles hold, frame no longer tight
+        units == k * vertices    exact frame, operator = k*(N+1)/N * I
+        otherwise                columns tiled then cut
+                                 repeated columns sit at coherence 1
+
+    Input shape:
+        N-D tensor ``(..., input_dim)``. The last dimension must be static.
+
+    Output shape:
+        Same rank as the input, with the last dimension set to ``units``.
+
+    Note:
+        ``global_scale`` is initialized at 1.0 and the range constraint is
+        applied after an optimizer update, so a range that excludes 1.0
+        leaves the first forward pass outside the bounds.
 
     :param units: Dimensionality of the output space (Simplex projections).
     :type units: int
     :param scale_min: Minimum allowed scaling factor.
     :type scale_min: float
-    :param scale_max: Maximum allowed scaling factor.
+    :param scale_max: Maximum allowed scaling factor. Must exceed ``scale_min``.
     :type scale_max: float
     :param orthogonality_penalty: Weight for the orthogonality regularisation loss on the rotation kernel.
     :type orthogonality_penalty: float
-    :param rotation_initializer: Initializer for the rotation matrix.
+    :param rotation_initializer: Initializer for the rotation matrix. Defaults
+        to ``'identity'``, which starts the layer as the bare frame projection.
     :type rotation_initializer: Union[str, initializers.Initializer]
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any
+
+    :ivar static_simplex: Frozen frame of shape ``(input_dim, units)``.
+    :vartype static_simplex: keras.Variable
+    :ivar rotation_kernel: Trainable rotation of shape ``(input_dim, input_dim)``.
+    :vartype rotation_kernel: keras.Variable
+    :ivar global_scale: Trainable scalar of shape ``(1,)``, range constrained.
+    :vartype global_scale: keras.Variable
+
+    :raises ValueError: If ``units`` is not positive.
+    :raises ValueError: If ``scale_min`` is not less than ``scale_max``.
+    :raises ValueError: If ``orthogonality_penalty`` is negative.
     """
 
     def __init__(
@@ -93,7 +141,6 @@ class RigidSimplexLayer(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if units <= 0:
             raise ValueError(f"units must be positive, got {units}")
         if scale_min >= scale_max:
@@ -105,14 +152,13 @@ class RigidSimplexLayer(keras.layers.Layer):
                 f"orthogonality_penalty must be non-negative, got {orthogonality_penalty}"
             )
 
-        # Store configuration
         self.units = units
         self.scale_min = scale_min
         self.scale_max = scale_max
         self.orthogonality_penalty = orthogonality_penalty
         self.rotation_initializer = keras.initializers.get(rotation_initializer)
 
-        # Weight attributes - created in build()
+        # Every shape below depends on the input width, so nothing exists yet.
         self.static_simplex = None
         self.rotation_kernel = None
         self.global_scale = None
@@ -130,33 +176,33 @@ class RigidSimplexLayer(keras.layers.Layer):
         :type input_dim: int
         :param output_dim: Number of Simplex projections.
         :type output_dim: int
-        :return: Weight matrix ``(input_dim, output_dim)`` as float32.
+        :return: Weight matrix ``(input_dim, output_dim)`` as float32, columns
+            drawn from the ``input_dim + 1`` simplex vertices.
         :rtype: np.ndarray
         """
 
         dimensions = input_dim
         matrix = np.identity(dimensions, dtype=np.float32)
 
-        # Calculate the last point to be equidistant from all others
-        # This creates a regular simplex in N dimensions
+        # This value places the extra vertex equidistant from the identity rows.
         last_point = np.ones((1, dimensions), dtype=np.float32) * \
                      ((1.0 + np.sqrt(dimensions + 1.0)) / dimensions)
 
         matrix = np.vstack([matrix, last_point])
 
-        # Center points at origin
+        # Centering makes the vertices sum to zero, which sets coherence to -1/N.
         mean_m = np.mean(matrix, axis=0)
         matrix = matrix - mean_m
 
-        # Normalize to unit vectors, clamped to avoid division by zero.
+        # Norms are clamped so a degenerate vertex cannot divide by zero.
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         norms = np.maximum(norms, 1e-8)
         matrix = matrix / norms
 
-        # Transpose to get (input_dim, N+1) shape
+        # Vertices become columns so that x @ W projects onto them.
         W = matrix.T
 
-        # Tile or slice to match requested output_dim
+        # A width other than a multiple of N+1 repeats or discards vertices.
         current_cols = W.shape[1]
 
         if output_dim > current_cols:
@@ -171,14 +217,15 @@ class RigidSimplexLayer(keras.layers.Layer):
         """Create Simplex, rotation kernel, and scale weights.
 
         :param input_shape: Shape tuple of the input tensor.
-        :type input_shape: Tuple[Optional[int], ...]"""
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the last dimension of ``input_shape`` is ``None``."""
         input_dim = input_shape[-1]
         if input_dim is None:
             raise ValueError("Last dimension of input must be defined")
 
         self._input_dim = input_dim
 
-        # 1. Static Simplex (frozen weights - geometry remains rigid)
+        # Registered as a weight, not a constant, so it saves and loads with the model.
         simplex_weights = self._create_simplex_matrix(input_dim, self.units)
         self.static_simplex = self.add_weight(
             name='static_simplex',
@@ -188,7 +235,6 @@ class RigidSimplexLayer(keras.layers.Layer):
             dtype=self.dtype,
         )
 
-        # 2. Trainable rotation matrix (learns optimal input alignment)
         self.rotation_kernel = self.add_weight(
             name='rotation_kernel',
             shape=(input_dim, input_dim),
@@ -197,7 +243,7 @@ class RigidSimplexLayer(keras.layers.Layer):
             dtype=self.dtype,
         )
 
-        # 3. Bounded scaling factor
+        # The constraint runs after updates, so 1.0 may start outside the range.
         self.global_scale = self.add_weight(
             name='global_scale',
             shape=(1,),
@@ -219,14 +265,14 @@ class RigidSimplexLayer(keras.layers.Layer):
 
         :param inputs: Input tensor ``(batch, ..., input_dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Training mode flag.
+        :param training: Training mode flag. Accepted for API symmetry; the
+            orthogonality loss is added regardless of its value.
         :type training: Optional[bool]
         :return: Output tensor ``(batch, ..., units)``.
         :rtype: keras.KerasTensor
         """
 
-        # 1. Add orthogonality regularization loss (soft constraint for rotation)
-        # R^T * R should approximate Identity for valid rotation
+        # The loss is a mean of squared entries, so it does not scale with input_dim.
         r_t_r = keras.ops.matmul(
             keras.ops.transpose(self.rotation_kernel),
             self.rotation_kernel
@@ -235,13 +281,10 @@ class RigidSimplexLayer(keras.layers.Layer):
         ortho_loss = keras.ops.mean(keras.ops.square(r_t_r - identity))
         self.add_loss(self.orthogonality_penalty * ortho_loss)
 
-        # 2. Rotate inputs to align with Simplex
         rotated_inputs = keras.ops.matmul(inputs, self.rotation_kernel)
 
-        # 3. Project onto static Simplex
         outputs = keras.ops.matmul(rotated_inputs, self.static_simplex)
 
-        # 4. Apply bounded scaling
         outputs = outputs * self.global_scale
 
         return outputs
