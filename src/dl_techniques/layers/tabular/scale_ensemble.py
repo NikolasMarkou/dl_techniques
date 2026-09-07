@@ -8,7 +8,7 @@ owning a private copy of the surrounding kernel.
 
 The layer holds no ``kernel_initializer`` knob. Which distribution the scaling
 vectors are drawn from is decided entirely by ``init_distribution``, resolved
-through :func:`dl_techniques.layers.tabular._ensemble_scaling._ensemble_scaling_initializer`
+through :func:`dl_techniques.layers.tabular._ensemble_scaling.ensemble_scaling_initializer`
 -- and that choice is what decides whether the members start as different
 functions at all: ``'random-signs'`` and ``'normal'`` break symmetry, ``'ones'``
 does not.
@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.layers.tabular._ensemble_scaling import (
     EnsembleInitDistribution,
-    _ensemble_scaling_initializer,
+    ensemble_scaling_initializer,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -95,7 +95,7 @@ class ScaleEnsemble(keras.layers.Layer):
         # The initializer is fully determined by `init_distribution`; there is
         # no separate `kernel_initializer` knob to contradict it. That is also
         # why `get_config()` below serializes only `init_distribution`.
-        self.kernel_initializer = _ensemble_scaling_initializer(init_distribution)
+        self.kernel_initializer = ensemble_scaling_initializer(init_distribution)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:

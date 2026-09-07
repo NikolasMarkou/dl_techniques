@@ -248,9 +248,9 @@ class TestTabmConsumer:
         from `layers/` at all.
         """
         from dl_techniques.layers.tabular._ensemble_scaling import (
-            _ensemble_scaling_initializer,
+            ensemble_scaling_initializer,
         )
 
         assert isinstance(
-            _ensemble_scaling_initializer("random-signs"), RandomSigns
+            ensemble_scaling_initializer("random-signs"), RandomSigns
         )
