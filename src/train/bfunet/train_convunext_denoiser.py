@@ -131,7 +131,7 @@ from train.bfunet.common import (
     multi_pass_psnr, build_fixed_val_batch, build_dashboard_from_dir,
     _read_current_lr, DenoisingVisualizationCallback, LRLoggerCallback,
     add_common_arguments, reject_self_iterate_with_nonadditive,
-    _homogeneity_probe, validate_gabor_stem_channels,
+    _homogeneity_probe, validate_gabor_stem_channels, freeze_gabor_stem_if_requested,
 )
 from train.bfunet import common as common
 
@@ -268,7 +268,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         )
     else:
         block_activation = config.block_activation
-    return create_convunext_denoiser(
+    model = create_convunext_denoiser(
         input_shape=input_shape,
         use_gabor_stem=config.use_gabor_stem,
         gabor_filters=config.gabor_filters,
@@ -304,6 +304,9 @@ def build_model(config: TrainingConfig) -> keras.Model:
         filter_multiplier=config.filter_multiplier,
         **cfg,
     )
+    # Built but NOT yet compiled -- common.train() compiles well after this returns, so
+    # this is the window in which the stem's `trainable` flip still reaches the optimizer.
+    return freeze_gabor_stem_if_requested(model, config)
 
 
 def verify_bias_free(model: keras.Model) -> None:
@@ -420,6 +423,7 @@ def main():
             variant="tiny",
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
+            trainable_gabor_stem=not args.freeze_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
             clip_noise=not args.no_clip,
             symmetry_weight=args.symmetry_weight,
@@ -508,6 +512,7 @@ def main():
             variant=args.variant,
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
+            trainable_gabor_stem=not args.freeze_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
             clip_noise=not args.no_clip,
             symmetry_weight=args.symmetry_weight,

@@ -132,6 +132,17 @@ class BFCNNTrainingConfig(BFUnetTrainingConfig):
                 f"Unknown variant {self.variant!r}; choices: "
                 f"{list(BFCNN_CONFIGS) + ['custom']}"
             )
+        # BFCNN is a flat CNN and pins use_gabor_stem=False, so there is no stem to
+        # freeze. The base's --freeze-gabor-stem flag reaches this parser via
+        # add_common_arguments; reject it here rather than let it be a no-op. The two
+        # U-Net trainers enforce the same rule at build time via
+        # freeze_gabor_stem_if_requested; this is the flat-CNN half of that guarantee.
+        if not self.trainable_gabor_stem:
+            raise ValueError(
+                "--freeze-gabor-stem is not applicable to the BFCNN trainer: BFCNN is a "
+                "flat CNN and never builds a 'gabor_stem' layer (use_gabor_stem is "
+                "pinned False). Drop the flag."
+            )
 
 
 # ---------------------------------------------------------------------
@@ -279,6 +290,7 @@ def main():
     if args.smoke:
         # Mechanism check: tiny, fast, constant-ish LR (avoid cosine collapse at 2 epochs).
         config = BFCNNTrainingConfig(
+            trainable_gabor_stem=not args.freeze_gabor_stem,
             variant=args.variant,
             num_blocks=args.num_blocks,
             filters=args.filters,
@@ -324,6 +336,7 @@ def main():
         )
     else:
         config = BFCNNTrainingConfig(
+            trainable_gabor_stem=not args.freeze_gabor_stem,
             variant=args.variant,
             num_blocks=args.num_blocks,
             filters=args.filters,

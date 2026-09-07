@@ -58,7 +58,7 @@ from train.bfunet.common import (
     multi_pass_psnr, build_fixed_val_batch, build_dashboard_from_dir,
     _read_current_lr, DenoisingVisualizationCallback, LRLoggerCallback,
     add_common_arguments, reject_self_iterate_with_nonadditive,
-    _homogeneity_probe, validate_gabor_stem_channels,
+    _homogeneity_probe, validate_gabor_stem_channels, freeze_gabor_stem_if_requested,
 )
 from train.bfunet import common as common
 
@@ -163,7 +163,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
     # blocks never get stock BatchNormalization -- still holds, and now holds for a caller
     # who reaches the model factory without going through this trainer. Do NOT re-add a
     # remap here; two copies of one decision is what made the model API wrong.
-    return create_bfunet_denoiser(
+    model = create_bfunet_denoiser(
         input_shape=input_shape,
         filter_multiplier=filter_multiplier,
         kernel_size=config.conv_kernel_size,
@@ -189,6 +189,9 @@ def build_model(config: TrainingConfig) -> keras.Model:
         model_name=f"unet_denoiser_{config.variant}",
         **cfg,
     )
+    # Built but NOT yet compiled -- common.train() compiles well after this returns, so
+    # this is the window in which the stem's `trainable` flip still reaches the optimizer.
+    return freeze_gabor_stem_if_requested(model, config)
 
 
 def verify_bias_free(model: keras.Model) -> None:
@@ -277,6 +280,7 @@ def main():
         config = TrainingConfig(
             variant="tiny",
             use_gabor_stem=not args.no_gabor_stem,
+            trainable_gabor_stem=not args.freeze_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
             high_freq_blocks=args.high_freq_blocks,
             zero_pad_channels=args.zero_pad_channels,
@@ -337,6 +341,7 @@ def main():
         config = TrainingConfig(
             variant=args.variant,
             use_gabor_stem=not args.no_gabor_stem,
+            trainable_gabor_stem=not args.freeze_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
             high_freq_blocks=args.high_freq_blocks,
             zero_pad_channels=args.zero_pad_channels,

@@ -1014,6 +1014,71 @@ def validate_gabor_stem_channels(
         )
 
 
+# The stem's `trainable` flag is HARDCODED True inside the model factories
+# (models/vision/convunext/model.py and .../bias_free_denoisers/bfunet.py) because a
+# Gabor-initialized-then-refined stem is what the current architecture wants by default.
+# There is therefore no factory kwarg to thread; the only place a caller can freeze it is
+# after the graph is built and before it is compiled. Both U-Net trainers call this from
+# their `build_model`, and `common.train()` does not compile until well after
+# `build_model_fn(config)` returns, so the flip lands before the optimizer ever sees the
+# variable list. This is the same build-then-flip mechanism `variance_probe.py` uses for
+# its free-Gabor conditions -- kept as ONE implementation so the probe and the production
+# trainers cannot drift on what "frozen stem" means.
+def freeze_gabor_stem_if_requested(
+        model: keras.Model,
+        config: "BFUnetTrainingConfig",
+) -> keras.Model:
+    """Freeze the Gabor stem in place when ``config.trainable_gabor_stem`` is False.
+
+    Must be called on a BUILT but NOT YET COMPILED model. Returns the same model object
+    (mutated in place) so it can wrap a ``return`` in ``build_model``.
+
+    Raises rather than no-ops when a freeze is requested and no ``gabor_stem`` layer
+    exists -- e.g. ``--freeze-gabor-stem`` together with ``--no-gabor-stem``, or on the
+    BFCNN trainer, whose config pins ``use_gabor_stem=False``. A flag that silently did
+    nothing would be this repo's recorded silently-inert-argument defect.
+
+    :param model: The freshly built, uncompiled denoiser.
+    :type model: keras.Model
+    :param config: The trainer config carrying ``trainable_gabor_stem``.
+    :type config: BFUnetTrainingConfig
+    :returns: ``model``, unchanged when the stem is meant to stay trainable.
+    :rtype: keras.Model
+    :raises ValueError: If a freeze is requested but the model has no ``gabor_stem``.
+    """
+    if config.trainable_gabor_stem:
+        return model
+
+    # Dedupe by identity: `_flatten_layers()` walks nested containers and can yield the
+    # same layer object more than once, which would make a count-based assertion lie.
+    stems = {id(l): l for l in model._flatten_layers() if l.name == "gabor_stem"}
+    if not stems:
+        raise ValueError(
+            "A frozen Gabor stem was requested (--freeze-gabor-stem / "
+            "trainable_gabor_stem=False) but this model has no 'gabor_stem' layer. "
+            "--freeze-gabor-stem is incompatible with --no-gabor-stem, and the BFCNN "
+            "trainer never builds a stem at all (use_gabor_stem is pinned False there). "
+            "Drop the flag, or drop --no-gabor-stem."
+        )
+    if len(stems) != 1:
+        raise ValueError(
+            f"Expected exactly one 'gabor_stem' layer, found {len(stems)}. The freeze "
+            "would be ambiguous; the model topology has changed in a way this helper "
+            "does not understand."
+        )
+
+    stem = next(iter(stems.values()))
+    stem.trainable = False
+    frozen = int(sum(np.prod(w.shape) for w in stem.weights))
+    logger.info(
+        f"gabor_stem FROZEN at its Gabor initialization: {frozen:,} parameters moved "
+        f"from trainable to non-trainable. NOTE this freezes the cross-channel Conv2D; "
+        f"it does NOT restore the paper's depthwise bank. Degree-1 homogeneity is "
+        f"unaffected (it comes from the stem's use_bias=False, not from freezing)."
+    )
+    return model
+
+
 @dataclass
 class BFUnetTrainingConfig:
     """Shared configuration base for the bfunet bias-free denoiser trainers.
@@ -1118,6 +1183,15 @@ class BFUnetTrainingConfig:
     # (see initial_filters override below); validate_gabor_stem_channels and both model
     # factories raise otherwise. Default True = unchanged (projection kept).
     gabor_stem_projection: bool = True
+    # Whether the Gabor stem's kernel is updated by gradient descent. The model factories
+    # build it TRAINABLE (the paper's warm start: Gabor-INITIALIZED, then refined), so
+    # False re-freezes it at its Gabor initialization AFTER the build, via
+    # freeze_gabor_stem_if_requested(), which both U-Net trainers call from build_model.
+    # False does NOT restore the paper's stem: the paper's was a DEPTHWISE bank (22
+    # filters per input channel, no cross-channel mixing); this freezes the current
+    # cross-channel Conv2D. Homogeneity is unaffected either way -- it comes from the
+    # stem's hardcoded use_bias=False, never from frozen-ness. Default True = unchanged.
+    trainable_gabor_stem: bool = True
     # Override the variant's initial_filters (level-0 width). None -> use the variant
     # default from the model CONFIGS. Primarily for the no-projection Gabor stem, where
     # initial_filters must equal gabor_filters exactly.
@@ -2578,6 +2652,16 @@ def add_common_arguments(parser) -> None:
                              "(psi, psi+180) pairs -- MEASURED on a 32-filter bank: 16 pairs at "
                              "cosine < -0.99 -- so 'relu' keeps each filter's negative lobe on "
                              "its sibling channel.")
+    parser.add_argument("--freeze-gabor-stem", action="store_true",
+                        help="Freeze the Gabor stem at its Gabor initialization instead "
+                             "of refining it by gradient descent (default: trainable, the "
+                             "paper's warm start). Applied after the graph is built and "
+                             "before compile. This freezes the CROSS-CHANNEL Conv2D the "
+                             "factories build now; it does NOT restore the paper's "
+                             "depthwise 22-per-channel bank. Degree-1 homogeneity is "
+                             "unaffected either way (that comes from the stem's "
+                             "use_bias=False). Incompatible with --no-gabor-stem, and "
+                             "rejected by the BFCNN trainer, which builds no stem.")
     parser.add_argument("--no-gabor-projection", action="store_true",
                         help="Drop the 1x1 projection after the Gabor stem and feed the "
                              "stem straight into the encoder. Requires "
