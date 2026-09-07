@@ -82,6 +82,11 @@ import keras
 import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Literal
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.dtype_policy import stability_floor
 from dl_techniques.utils.keras_registration import register_dl_technique
 

@@ -33,6 +33,10 @@ References:
 import keras
 from typing import Optional, Union, Any, Tuple, Dict, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.regularization.layer_scale import LayerScale
 from dl_techniques.layers.norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
@@ -42,10 +46,13 @@ from dl_techniques.initializers.hypersphere_orthogonal_initializer import Orthog
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 # Activations whose derivative at zero is zero, which makes a gate that reaches
 # the lower bound of ValueRangeConstraint absorbing rather than reflecting.
 _ZERO_DERIVATIVE_AT_ORIGIN = frozenset({"relu", "relu6"})
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.structured_linear.orthoblock")
 class OrthoBlock(keras.layers.Layer):
@@ -361,3 +368,5 @@ class OrthoBlock(keras.layers.Layer):
             "binary_preference_factor": self.binary_preference_factor,
         })
         return config
+
+# ---------------------------------------------------------------------

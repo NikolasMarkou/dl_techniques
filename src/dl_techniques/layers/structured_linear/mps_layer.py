@@ -20,8 +20,13 @@ References:
 import keras
 from typing import Tuple, Optional, Union, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.structured_linear.mps_layer")
 class MPSLayer(keras.layers.Layer):
@@ -245,3 +250,5 @@ class MPSLayer(keras.layers.Layer):
             'activity_regularizer': keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

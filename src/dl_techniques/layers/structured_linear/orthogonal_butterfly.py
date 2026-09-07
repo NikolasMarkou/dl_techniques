@@ -27,10 +27,15 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.tensors import is_power_of_two
 
+# ---------------------------------------------------------------------
 
 def _butterfly_apply(
     x: keras.KerasTensor,
@@ -77,6 +82,7 @@ def _butterfly_apply(
             x = ops.reshape(xr, (-1, d))
     return x
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.structured_linear.orthogonal_butterfly")
 class OrthogonalButterfly(keras.layers.Layer):
@@ -93,14 +99,14 @@ class OrthogonalButterfly(keras.layers.Layer):
             │
             ▼
         ┌──────────────────────────────────────┐
-        │ for block in 0..num_blocks:           │
-        │   for stage s in 0..L: stride = 2^s   │
-        │     pair partners `stride` apart      │
-        │     [a;b] -> [a cos0 - b sin0 ;        │
-        │               a sin0 + b cos0]        │
-        │     (d/2 disjoint 2x2 rotations)      │
-        └──────────────────┬─────────────────────┘
-                            ▼
+        │ for block in 0..num_blocks:          │
+        │   for stage s in 0..L: stride = 2^s  │
+        │     pair partners `stride` apart     │
+        │     [a;b] -> [a cos0 - b sin0 ;      │
+        │               a sin0 + b cos0]       │
+        │     (d/2 disjoint 2x2 rotations)     │
+        └──────────────────┬───────────────────┘
+                           ▼
                     (+ bias, optional)
                             │
                             ▼
@@ -255,3 +261,5 @@ class OrthogonalButterfly(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

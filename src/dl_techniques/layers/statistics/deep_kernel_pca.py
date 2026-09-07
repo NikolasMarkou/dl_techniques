@@ -53,6 +53,11 @@ import keras
 import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.dtype_policy import (
     accumulation_dtype,
     stability_floor,

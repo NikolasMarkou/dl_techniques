@@ -62,6 +62,11 @@ Where:
 import keras
 from keras import ops
 from typing import Optional, Union, Tuple, Any, Dict
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 

@@ -26,6 +26,10 @@ import numpy as np
 from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -33,6 +37,7 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.structured_linear.kanvolution")
 class KANvolution(keras.layers.Layer):

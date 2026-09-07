@@ -18,8 +18,13 @@ import keras
 import numpy as np
 from typing import Optional, Union, Tuple, Any, Dict, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.structured_linear.random_fourier_features")
 class RFFKernelLayer(keras.layers.Layer):
@@ -257,3 +262,5 @@ class RFFKernelLayer(keras.layers.Layer):
             'bias_constraint': keras.constraints.serialize(self.bias_constraint),
         })
         return config
+
+# ---------------------------------------------------------------------
