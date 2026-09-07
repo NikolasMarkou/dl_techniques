@@ -304,9 +304,40 @@ class TabMMLPBlock(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+            :param input_shape: Shape of the input, batch axis included.
+            :type input_shape: tuple of (int or None)
+
+            :return: Plain mode (``k is None``) maps only the LAST axis, so every
+                leading axis is preserved; ensemble mode is always
+                ``(batch, k, units)``.
+            :rtype: tuple of (int or None)
+        """
+        # DECISION plan-2026-09-07T161712-985e4d31/D-005: the plain branch keeps every
+        # leading axis because its ``self.linear`` is a ``keras.layers.Dense``, which
+        # transforms only the last axis. It previously hardcoded
+        # ``(input_shape[0], self.units)``, which is right at rank 2 -- the only rank the
+        # shipped model ever reaches here -- and wrong at every other rank: measured,
+        # ``TabMMLPBlock(units=8)`` on ``(2, 3, 6)`` RAN to ``(2, 3, 8)`` and PREDICTED
+        # ``(2, 8)``.
+        #
+        # DO NOT add a matching formula to ``tabm_backbone.py``. ``TabMBackbone`` owns no
+        # shape arithmetic: both its ``build()`` and its ``compute_output_shape()`` thread
+        # ``current_shape = block.compute_output_shape(current_shape)`` through the block
+        # list, so this ONE expression is the whole chain's arithmetic (guide v2 s3.4 --
+        # shape arithmetic lives in exactly one pure helper). A second site in the
+        # backbone would be the duplication s3.4 forbids, and would have to be kept in
+        # lockstep with this one by hand. The delegation is not merely asserted here:
+        # ``TestPlainModeShapeIsRankCorrect::test_the_backbone_inherits_the_block_formula_at_rank_3``
+        # in ``tests/test_layers/test_tabular/test_tabm_blocks.py`` fails if it stops
+        # holding.
+        #
+        # No rank GUARD was added either: a rank-3+ plain-mode call currently succeeds and
+        # computes a numerically correct answer, so rejecting it would be a behaviour
+        # regression for zero benefit. See decisions.md D-005.
         if self.k is None:
-            return (input_shape[0], self.units)
+            return tuple(input_shape[:-1]) + (self.units,)
         else:
             return (input_shape[0], self.k, self.units)
 

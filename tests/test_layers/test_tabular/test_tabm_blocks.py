@@ -996,3 +996,81 @@ class TestRankContract:
         layer = make()
         y = layer(_f32(B, D))
         assert len(tuple(y.shape)) == 2 and tuple(y.shape)[0] == B
+
+
+class TestPlainModeShapeIsRankCorrect:
+    """Plain mode (``k is None``) predicts a shape a ``Dense`` never produces.
+
+    ``TabMMLPBlock.compute_output_shape`` hardcoded ``(input_shape[0], units)``
+    on the ``k is None`` branch, but that branch's ``self.linear`` is a
+    ``keras.layers.Dense``, which maps ONLY the last axis and leaves every
+    leading axis alone. The two formulas agree at rank 2 and nowhere else, so
+    ``TabMMLPBlock(units=8)`` on ``(2, 3, 6)`` RAN to ``(2, 3, 8)`` while
+    PREDICTING ``(2, 8)`` -- a contract violation that also fed
+    ``TabMBackbone.build()`` a lied-about shape when it threaded
+    ``current_shape = block.compute_output_shape(current_shape)`` block to block.
+
+    Three arms, and the rank-2 one is load-bearing:
+
+    * rank 2 -- the anti-vacuity CONTROL. ``input_shape[:-1] + (units,)`` and
+      ``(input_shape[0], units)`` are the same tuple here, and rank 2 is the
+      only thing the shipped model ever feeds plain mode (``model.py`` expands
+      to rank 3 strictly inside ``if self.k is not None``). It must be green
+      before AND after the fix; that is what proves the fix is a no-op on the
+      shipped path rather than a behaviour change nobody measured.
+    * ``TabMMLPBlock`` at rank 3 -- the defect itself.
+    * ``TabMBackbone`` at rank 3 -- the DELEGATION claim, made executable. The
+      backbone deliberately owns no shape arithmetic (``tabm_backbone.py``
+      delegates in a loop in both ``build()`` and ``compute_output_shape()``),
+      so this arm goes green from the ``TabMMLPBlock`` fix alone. If it ever
+      stays red while the block arm passes, the chain is no longer pure
+      delegation and guide v2 s3.4's one-arithmetic-site claim needs
+      re-deriving before anyone adds a formula here.
+
+    See decisions.md D-005.
+    """
+
+    @pytest.mark.parametrize("make", [
+        lambda: TabMMLPBlock(units=8),
+        lambda: TabMBackbone(hidden_dims=[8, 6]),
+    ], ids=["TabMMLPBlock-plain", "TabMBackbone-plain"])
+    def test_rank_2_agrees_and_must_keep_agreeing(self, make):
+        # CONTROL. Green before and after the fix by construction: at rank 2 the
+        # old and new formulas are the same tuple. RED-proven by mutation (see
+        # the Mutation Register in the plan), not by the fix.
+        layer = make()
+        actual = tuple(layer(_f32(B, D)).shape)
+        assert tuple(layer.compute_output_shape((B, D))) == actual
+
+    def test_the_block_predicts_the_rank_3_shape_it_really_produces(self):
+        layer = TabMMLPBlock(units=8)
+        actual = tuple(layer(_f32(B, K, D)).shape)
+        # Anti-vacuity: the arm means nothing unless the input really is rank 3
+        # and the leading axis really does survive.
+        assert actual == (B, K, 8), f"setup broken: Dense produced {actual}"
+        assert tuple(layer.compute_output_shape((B, K, D))) == actual, (
+            "plain mode predicted a rank-2 shape for a rank-3 input: the "
+            "`k is None` branch is a Dense, which maps only the LAST axis, so "
+            "the prediction must be input_shape[:-1] + (units,)."
+        )
+
+    def test_the_backbone_inherits_the_block_formula_at_rank_3(self):
+        layer = TabMBackbone(hidden_dims=[8, 6])
+        actual = tuple(layer(_f32(B, K, D)).shape)
+        assert actual == (B, K, 6), f"setup broken: backbone produced {actual}"
+        assert tuple(layer.compute_output_shape((B, K, D))) == actual, (
+            "TabMBackbone delegates its shape arithmetic to TabMMLPBlock and "
+            "owns none of its own (INV-4 / guide v2 s3.4). A failure here after "
+            "the block arm passes means that delegation no longer holds -- "
+            "re-derive it before adding a formula to tabm_backbone.py."
+        )
+
+    def test_the_symbolic_batch_axis_survives_the_rank_3_prediction(self):
+        # A `None` batch axis must stay None and must not leak into or be
+        # invented for any feature axis -- the same two-part shape contract
+        # TestOutputShapeContract applies at rank 2.
+        layer = TabMMLPBlock(units=8)
+        actual = tuple(layer(_f32(B, K, D)).shape)
+        symbolic = tuple(layer.compute_output_shape((None, K, D)))
+        assert symbolic[0] is None
+        assert symbolic[1:] == actual[1:]
