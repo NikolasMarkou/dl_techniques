@@ -161,6 +161,7 @@ def _silu_moments(grid_range: Tuple[float, float]) -> Tuple[float, float]:
         float(np.sum(derivative ** 2 * w) / span),
     )
 
+# ---------------------------------------------------------------------
 
 def _knot_vector(
     grid_size: int, spline_order: int, grid_range: Tuple[float, float]
@@ -184,6 +185,7 @@ def _knot_vector(
     h = (hi - lo) / grid_size
     return np.arange(-spline_order, grid_size + spline_order + 1, dtype=np.float64) * h + lo
 
+# ---------------------------------------------------------------------
 
 def _bspline_basis(x: np.ndarray, knots: np.ndarray, order: int) -> np.ndarray:
     """Evaluate the Cox-de Boor B-spline basis.
@@ -206,6 +208,7 @@ def _bspline_basis(x: np.ndarray, knots: np.ndarray, order: int) -> np.ndarray:
         )
     return basis
 
+# ---------------------------------------------------------------------
 
 def _bspline_basis_derivative(
     x: np.ndarray, knots: np.ndarray, order: int
@@ -234,6 +237,7 @@ def _bspline_basis_derivative(
         - lower[:, 1:] / (knots[order + 1:] - knots[1:-order])
     )
 
+# ---------------------------------------------------------------------
 
 def _basis_moments(
     grid_size: int, spline_order: int, grid_range: Tuple[float, float]

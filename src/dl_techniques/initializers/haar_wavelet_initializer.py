@@ -92,6 +92,7 @@ HAAR_PATTERNS: np.ndarray = 0.5 * np.array([
      [-1.0, 1.0]],
 ], dtype=np.float64)
 
+# ---------------------------------------------------------------------
 
 def _numpy_dtype(dtype: Any) -> str:
     """Convert a Keras dtype spec to a numpy-acceptable dtype name.

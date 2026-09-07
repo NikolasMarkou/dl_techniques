@@ -129,6 +129,7 @@ LAMBDA_FRACTIONS = (0.30, 1.00)
 #: Filters below this L2 norm are left untouched by the normalization step.
 _NORM_EPS = 1e-12
 
+# ---------------------------------------------------------------------
 
 def _numpy_dtype(dtype: Any) -> str:
     """Convert a Keras dtype spec to a numpy-acceptable dtype name.
@@ -142,6 +143,7 @@ def _numpy_dtype(dtype: Any) -> str:
     :rtype: str
     """
     return getattr(dtype, "name", None) or str(dtype)
+
 # ---------------------------------------------------------------------
 
 
@@ -178,6 +180,7 @@ def _validate_range(name: str, rng: RangeLike) -> Optional[Tuple[float, float]]:
 
     return (lo, hi)
 
+# ---------------------------------------------------------------------
 
 def _axis(
     lo: float,
@@ -210,6 +213,7 @@ def _axis(
         return np.geomspace(lo, hi, n, dtype=np.float64)
     return np.linspace(lo, hi, n, dtype=np.float64)
 
+# ---------------------------------------------------------------------
 
 def _factorize_bank(n: int) -> Tuple[int, int, int]:
     """Split ``n`` filters into ``(n_theta, n_scale, n_psi)`` product axes.
@@ -230,6 +234,7 @@ def _factorize_bank(n: int) -> Tuple[int, int, int]:
     n_theta = int(np.ceil(m / n_scale))
     return n_theta, n_scale, n_psi
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.initializers.gabor_filters_initializer")
 class GaborFiltersInitializer(keras.initializers.Initializer):
