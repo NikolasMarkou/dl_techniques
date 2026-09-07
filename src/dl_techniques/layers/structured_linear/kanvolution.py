@@ -30,6 +30,7 @@ from typing import Tuple, Optional, Union, Any, Dict, Callable
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -103,9 +104,21 @@ class KANvolution(keras.layers.Layer):
     :param use_bias: Whether to add learnable bias vector to outputs. Defaults to True.
     :type use_bias: bool
     :param kernel_initializer: Initializer for kernel weight matrices. Defaults to
-        'glorot_uniform'.
+        'glorot_uniform'. ``build()`` draws ``w_spline`` and ``w_silu`` from their
+        own clones of this initializer, so a SEEDLESS instance yields independent
+        draws at those two sites. The exception is a SEEDED instance (e.g.
+        ``GlorotUniform(seed=7)``): cloning reproduces an explicit seed
+        deliberately and by contract
+        (``dl_techniques.initializers.clone_initializer``), so ``w_spline`` and
+        ``w_silu``, whose shapes coincide unconditionally, stay bit-identical.
+        For reproducibility WITHOUT that coincidence, call
+        ``keras.utils.set_random_seed()`` and leave this argument seedless.
+        ``control_points`` keeps the shared instance on purpose -- its rank-5
+        shape can never coincide with the rank-4 pair.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for bias vector. Defaults to 'zeros'.
+        There is a single bias site, so nothing can alias against it and it is
+        not cloned.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer applied to all kernel weights.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
@@ -232,6 +245,39 @@ class KANvolution(keras.layers.Layer):
             raise ValueError("Input channels dimension must be defined")
         self._input_channels = input_channels
 
+        # DECISION plan-2026-09-07T161712-985e4d31/D-003: w_spline and w_silu
+        # below each draw from their OWN clone of self.kernel_initializer. Do NOT
+        # "simplify" them back to the bare attribute: one seedless Keras 3
+        # initializer instance self-assigns a seed at construction and replays it
+        # at every site whose shape matches, and w_spline/w_silu are BOTH
+        # (filters, input_channels, *kernel_size) -- they coincide
+        # unconditionally, by construction, not at some particular config. They
+        # came out bit-identical (measured max|diff| == 0.0 at the library
+        # default) even though they weight two different basis functions of
+        # K(x) = w_spline * B(x) + w_silu * SiLU(x).
+        # Scope of the claim, exactly: this is exact for a SEEDLESS initializer;
+        # the exception is a caller-supplied SEEDED one (e.g.
+        # GlorotUniform(seed=7)), for which clone_initializer reproduces the seed
+        # deliberately and by contract (initializers/clone.py:60-65) and the two
+        # weights stay identical. Callers wanting reproducibility WITHOUT that
+        # coincidence should use keras.utils.set_random_seed() and leave the
+        # initializer seedless. Both directions are pinned by
+        # TestInitializerAliasing in
+        # tests/test_layers/test_structured_linear/test_kanvolution.py.
+        #
+        # control_points is DELIBERATELY left on the shared instance and must NOT
+        # be "finished off" by a later reader: it is rank 5 (it carries the
+        # trailing grid_size + 1 knot axis) against the rank-4 pair, so its shape
+        # can never coincide with theirs at any config, and a seedless instance
+        # only replays a draw where the shape MATCHES. Cloning it would change
+        # initial weights for nothing and would turn this note into a lie. The
+        # rank non-coincidence is pinned by
+        # test_control_points_can_never_coincide_with_the_rank_4_pair.
+        # See decisions.md D-003.
+        #
+        # Behaviour change: initial weights move, so training runs seeded only by
+        # a fixed process seed will not reproduce pre-change results bit-for-bit.
+        # No .keras archive in this repo references KANvolution (verified).
         self.control_points = self.add_weight(
             name='control_points',
             shape=(self.filters, input_channels, *self.kernel_size, self.grid_size + 1),
@@ -243,7 +289,7 @@ class KANvolution(keras.layers.Layer):
         self.w_spline = self.add_weight(
             name='w_spline',
             shape=(self.filters, input_channels, *self.kernel_size),
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             regularizer=self.kernel_regularizer,
             trainable=True,
         )
@@ -251,7 +297,7 @@ class KANvolution(keras.layers.Layer):
         self.w_silu = self.add_weight(
             name='w_silu',
             shape=(self.filters, input_channels, *self.kernel_size),
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             regularizer=self.kernel_regularizer,
             trainable=True,
         )

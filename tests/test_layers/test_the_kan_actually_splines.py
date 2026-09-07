@@ -167,6 +167,13 @@ def test_w_spline_and_w_silu_are_not_the_same_weight_twice():
 
     Identical movement is the signature of `w_spline + w_silu` collapsing into
     one kernel, where both factors necessarily receive the same gradient.
+
+    NOT a guard on init identity: this measures POST-optimizer-step deltas, and
+    it passed while the two weights were bit-identical AT INIT (one shared
+    seedless initializer instance replayed at both add_weight sites). That claim
+    is owned by
+    `tests/test_layers/test_structured_linear/test_kanvolution.py::TestInitializerAliasing`
+    (plan-2026-09-07T161712-985e4d31/D-003).
     """
     keras.utils.set_random_seed(5)
     model = keras.Sequential([

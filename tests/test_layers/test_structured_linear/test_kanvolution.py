@@ -651,3 +651,128 @@ class TestKANvolution:
         assert output.shape[0] == sample_input_small.shape[0]
         assert output.shape[-1] == 8
         assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+
+
+# ----------------------------------------------------------------------
+# Per-site initializer cloning (plan-2026-09-07T161712-985e4d31/D-003)
+# ----------------------------------------------------------------------
+
+class TestInitializerAliasing:
+    """``build()`` must draw ``w_spline`` and ``w_silu`` from their own instances.
+
+    Scope of the claim, stated exactly: cloning per ``add_weight`` site removes
+    the *seedless-instance replay* only. A caller-supplied SEEDED initializer
+    (e.g. ``GlorotUniform(seed=7)``) still yields bit-identical weights after
+    cloning, deliberately and by contract
+    (``src/dl_techniques/initializers/clone.py:60-65``) --
+    ``test_a_seeded_initializer_still_aliases_by_contract`` pins that exemption.
+    Callers who want reproducibility *without* the aliasing should seed the
+    process with ``keras.utils.set_random_seed()`` and leave the initializer
+    seedless.
+
+    ``control_points`` is deliberately NOT cloned; see
+    ``test_control_points_can_never_coincide_with_the_rank_4_pair`` for the
+    executable reason.
+    """
+
+    @staticmethod
+    def _built(input_shape=(None, 16, 16, 4), **kwargs):
+        layer = KANvolution(**kwargs)
+        layer.build(input_shape)
+        return layer
+
+    @staticmethod
+    def _np(w):
+        return ops.convert_to_numpy(w)
+
+    def test_w_spline_and_w_silu_are_independent_draws(self):
+        """The library default: ``w_spline`` vs ``w_silu`` at init.
+
+        Both are ``(filters, in_channels, kh, kw)``, so their shapes coincide
+        unconditionally -- by construction, not at a particular config -- and one
+        shared seedless instance replays the same draw at both sites. They are
+        the coefficients of two DIFFERENT basis functions in
+        ``K(x) = w_spline * B(x) + w_silu * SiLU(x)``, so an identical init is a
+        real symmetry defect, not a harmless duplicate.
+
+        Exact for a seedless initializer; the exception is a seeded one (see the
+        class docstring).
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(filters=8, kernel_size=3)
+        spline, silu = self._np(layer.w_spline), self._np(layer.w_silu)
+        # Anti-vacuity: the arm is only meaningful while the shapes coincide.
+        assert spline.shape == silu.shape == (8, 4, 3, 3)
+        assert not np.array_equal(spline, silu), (
+            "w_spline and w_silu are bit-identical: one seedless initializer "
+            "instance was replayed at both add_weight sites. Clone per site "
+            "(initializers/clone.py). Note a SEEDED initializer is a documented "
+            "exemption and would legitimately be identical."
+        )
+
+    def test_control_points_can_never_coincide_with_the_rank_4_pair(self):
+        """Why ``control_points`` is deliberately left on the shared instance.
+
+        A seedless initializer instance only replays a draw at sites whose shape
+        MATCHES. ``control_points`` is rank 5 -- it carries a trailing
+        ``grid_size + 1`` knot axis -- against the rank-4 ``w_spline``/``w_silu``
+        pair, so it can never coincide with them at any config and is not part of
+        the aliasing defect. This arm pins the SHAPE non-coincidence; it
+        deliberately does NOT assert that the values differ, because the values
+        are not what makes the non-action correct. A RED here means the rank
+        relationship changed and the do-not-clone note in ``kanvolution.py``
+        needs re-deriving before anyone "finishes the job" by cloning it.
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(filters=8, kernel_size=3, grid_size=6)
+        cp = self._np(layer.control_points)
+        spline, silu = self._np(layer.w_spline), self._np(layer.w_silu)
+        assert cp.ndim == 5
+        assert spline.ndim == silu.ndim == 4
+        assert cp.shape == (8, 4, 3, 3, 7)
+        assert cp.shape != spline.shape
+        assert cp.shape != silu.shape
+
+    def test_a_seeded_initializer_still_aliases_by_contract(self):
+        """Documented limitation, pinned: a SEEDED initializer stays aliased.
+
+        ``clone_initializer`` reproduces an explicit seed on purpose
+        (``initializers/clone.py:60-65``), so per-site cloning does NOT break
+        symmetry here. A RED on this arm means that contract changed and every
+        comment, docstring and sibling assertion written around it is now wrong.
+        The reproducibility idiom that does NOT alias is
+        ``keras.utils.set_random_seed()`` with a seedless initializer.
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(
+            filters=8,
+            kernel_size=3,
+            kernel_initializer=initializers.GlorotUniform(seed=7),
+        )
+        spline, silu = self._np(layer.w_spline), self._np(layer.w_silu)
+        assert spline.shape == silu.shape == (8, 4, 3, 3)
+        assert np.array_equal(spline, silu), (
+            "a seeded initializer no longer replays across add_weight sites: "
+            "clone_initializer's seeded contract changed"
+        )
+
+    def test_cloning_leaves_the_serialized_initializers_untouched(self):
+        """The clone belongs at the ``add_weight`` site, never on the attribute.
+
+        ``self.kernel_initializer``/``self.bias_initializer`` must remain the
+        caller's own objects so ``get_config()`` still serializes what was
+        passed in.
+        """
+        kern = initializers.GlorotUniform(seed=7)
+        bias = initializers.RandomNormal(stddev=0.5)
+        layer = self._built(
+            filters=8,
+            kernel_size=3,
+            kernel_initializer=kern,
+            bias_initializer=bias,
+        )
+        assert layer.kernel_initializer is kern
+        assert layer.bias_initializer is bias
+        cfg = layer.get_config()
+        assert cfg['kernel_initializer'] == initializers.serialize(kern)
+        assert cfg['bias_initializer'] == initializers.serialize(bias)
