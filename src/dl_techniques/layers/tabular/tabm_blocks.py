@@ -25,43 +25,15 @@ from typing import Dict, List, Literal, Optional, Tuple, Union, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.initializers import RandomSigns
+from dl_techniques.layers.tabular._ensemble_scaling import (
+    EnsembleInitDistribution,
+    _ensemble_scaling_initializer,
+)
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
-
-EnsembleInitDistribution = Literal['ones', 'normal', 'random-signs']
-
-# ---------------------------------------------------------------------
-
-def _ensemble_scaling_initializer(
-        init_distribution: EnsembleInitDistribution
-) -> keras.initializers.Initializer:
-    """
-    Resolve an ensemble scaling-vector initializer by name.
-
-    :param init_distribution: One of ``'ones'``, ``'normal'``, ``'random-signs'``.
-    :type init_distribution: str
-
-    :return: The matching initializer instance.
-    :rtype: keras.initializers.Initializer
-
-    :raises ValueError: If ``init_distribution`` is not one of the three names.
-    """
-    if init_distribution == 'ones':
-        return keras.initializers.Ones()
-    if init_distribution == 'normal':
-        return keras.initializers.RandomNormal(mean=1.0, stddev=0.1)
-    if init_distribution == 'random-signs':
-        return RandomSigns()
-    raise ValueError(
-        f"init_distribution must be one of 'ones', 'normal', 'random-signs'; "
-        f"got {init_distribution!r}"
-    )
 
 # ---------------------------------------------------------------------
 
