@@ -1698,3 +1698,124 @@ class TestTheMlaExemptionsThisModuleDoesNotClaimAway:
             {(_mla_key(w), tuple(w.shape)) for w in layer.weights}
             == {(_mla_key(w), tuple(w.shape)) for w in restored.weights}
         )
+
+
+# ---------------------------------------------------------------------
+# plan-2026-09-07T183458-be1c267e step 9c: the dropout sub-layer is
+# created unconditionally and GATED, per guide v2 §1.3
+# ---------------------------------------------------------------------
+
+
+class TestTheDropoutLayerIsCreatedUnconditionally:
+    """`dropout_layer` exists at every `dropout_rate`, including 0.0.
+
+    It used to be created only when `dropout_rate > 0.0` and left as `None`
+    otherwise, so the layer's sub-layer set was a function of a numeric
+    argument -- guide v2 §1.3 asks for the opposite shape, which the sibling
+    `graphs/graph_neural_network.py` already uses: create unconditionally,
+    gate at use.
+
+    `Dropout(rate=0.0)` is a behavioural no-op, but "no-op" is a PREDICTION,
+    and this exact prediction has been refuted twice in this chain. So the
+    change ships with the three measurements that would falsify it: the weight
+    COUNT, the weight PATH SET and a `.keras` round trip at `dropout_rate=0.0`.
+    """
+
+    _SHAPE = (2, 6, _MLA_DIM)
+
+    def _layer(self, dropout_rate):
+        layer = MultiHeadLatentAttention(**_MLA_KW, dropout_rate=dropout_rate)
+        layer(np.zeros(self._SHAPE, dtype="float32"))
+        return layer
+
+    @pytest.mark.parametrize("dropout_rate", [0.0, 0.1, 0.5])
+    def test_the_dropout_layer_exists_at_every_rate(self, dropout_rate):
+        layer = self._layer(dropout_rate)
+        assert layer.dropout_layer is not None
+        assert layer.dropout_layer.rate == dropout_rate
+        assert layer.dropout_layer.name == "attn_dropout"
+
+    @pytest.mark.parametrize("dropout_rate", [0.0, 0.1])
+    def test_the_dropout_layer_is_built(self, dropout_rate):
+        """Gating `build()` on the RATE, not on `is None`, must still build it."""
+        layer = self._layer(dropout_rate)
+        assert layer.dropout_layer.built
+
+    def test_creating_it_at_rate_zero_added_no_weight(self):
+        """The falsification arm for "a Dropout(0.0) is inert"."""
+        layer = self._layer(0.0)
+        assert len(layer.weights) == 8
+        paths = {_mla_key(w) for w in layer.weights}
+        assert not any("dropout" in path for path in paths), paths
+
+    def test_the_weight_path_set_is_the_same_at_rate_zero_and_at_a_live_rate(self):
+        """A dropout layer carries no weights, so the two sets must agree.
+
+        Compared through `_mla_key`, which strips Keras' `_<n>` disambiguator.
+        Without it this guard reddens for the WRONG reason and stays red after
+        the fix: `MultiHeadLatentAttention`'s RoPE sub-layer is built by
+        `create_embedding_layer("rope", ...)` with no `name=`, so ANY two
+        instances in one process disagree on
+        `rotary_position_embedding[_1]/cos_cached` -- the separate build-parity
+        wart logged in D-008, which this step does not fix and must not depend
+        on. MEASURED: without the strip, the pre-fix diff was exactly those two
+        RoPE paths and said nothing whatever about dropout.
+        """
+        zero = {_mla_key(w) for w in self._layer(0.0).weights}
+        live = {_mla_key(w) for w in self._layer(0.1).weights}
+        assert zero == live
+
+    def test_a_keras_round_trip_at_rate_zero_is_exact(self):
+        """SC-9: `max|delta| == 0.0` for the class whose sub-layer set changed."""
+        inputs = keras.Input(shape=self._SHAPE[1:])
+        outputs = MultiHeadLatentAttention(**_MLA_KW, dropout_rate=0.0)(inputs)
+        model = keras.Model(inputs, outputs)
+
+        rng = np.random.default_rng(17)
+        sample = rng.standard_normal(self._SHAPE).astype("float32")
+        before = keras.ops.convert_to_numpy(model(sample, training=False))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "mla_dropout_zero.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(restored(sample, training=False))
+
+        assert float(np.max(np.abs(before - after))) == 0.0
+
+    def test_the_config_is_unchanged_by_the_unconditional_creation(self):
+        layer = self._layer(0.0)
+        config = layer.get_config()
+        assert config["dropout_rate"] == 0.0
+        assert "dropout_layer" not in config
+
+    def test_a_live_rate_still_actually_drops(self):
+        """The other half: removing the rate branch must not disable dropout.
+
+        `call()` now invokes the sub-layer unconditionally, so this is what
+        keeps that from silently becoming "dropout never runs". At a high rate
+        the training-mode output must differ from the inference-mode one.
+        """
+        keras.utils.set_random_seed(5)
+        layer = self._layer(0.9)
+        rng = np.random.default_rng(29)
+        sample = rng.standard_normal(self._SHAPE).astype("float32")
+        eval_out = keras.ops.convert_to_numpy(layer(sample, training=False))
+        train_out = keras.ops.convert_to_numpy(layer(sample, training=True))
+        assert float(np.max(np.abs(eval_out - train_out))) > 0.0
+
+    def test_rate_zero_dropout_does_not_perturb_the_training_mode_output(self):
+        """The behavioural half: gating on the rate must not change numerics.
+
+        A `Dropout(0.0)` applied in training mode must be the identity, so a
+        seeded layer gives the same output with `training=True` as with
+        `training=False` -- which is the property that makes creating it
+        unconditionally safe rather than merely tidy.
+        """
+        keras.utils.set_random_seed(3)
+        layer = self._layer(0.0)
+        rng = np.random.default_rng(23)
+        sample = rng.standard_normal(self._SHAPE).astype("float32")
+        eval_out = keras.ops.convert_to_numpy(layer(sample, training=False))
+        train_out = keras.ops.convert_to_numpy(layer(sample, training=True))
+        assert float(np.max(np.abs(eval_out - train_out))) == 0.0

@@ -20,11 +20,21 @@ TripSE4 is the only variant whose gate sees a genuine 3-D tensor: it adds a
 channel-logit path (:class:`_SEWeights`, pre-sigmoid) to the spatial logits
 before one sigmoid, rather than multiplying two already-gated maps.
 
-None of the five classes here validate constructor arguments: a bad
-``reduction_ratio`` or ``kernel_size`` surfaces later as a Keras or Conv2D
-error, not at construction time. This behavior is unchanged — see
-``plans/plan-2026-07-27T130643-38c5646a/decisions.md``
-D-012.
+Constructor-argument validation here is mostly DELEGATED rather than absent,
+and the difference is measurable. A bad ``kernel_size`` raises immediately from
+``keras.layers.Conv2D``'s own ``__init__``, and a bad ``reduction_ratio`` raises
+immediately from :class:`~dl_techniques.layers.conv_blocks.squeeze_excitation.SqueezeExcitation`'s
+— both at construction time, in all five classes (measured;
+``TestTheModuleDocstringMatchesTheMeasuredValidation`` in
+``tests/test_layers/test_attention/test_tripse_attention.py`` keeps this
+sentence honest). What was genuinely unvalidated was
+``TripletAttentionBranch(permute_pattern=...)``, which accepted a
+non-permutation such as ``(0, 0, 0)`` and died later inside ``call()`` with a
+raw ``InvalidArgumentError: 2 is missing from {0,1,1,1}`` naming neither the
+argument nor the layer; it now raises in ``__init__``. This is not a blanket
+claim that every argument is checked — anything not named above is still
+whatever its consuming sub-layer does with it. Historical context:
+``plans/plan-2026-07-27T130643-38c5646a/decisions.md`` D-012.
 
 References:
     - Alhazmi, A., & Altahhan, A. (2025). Achieving 3D Attention via Triplet
@@ -119,11 +129,14 @@ class TripletAttentionBranch(layers.Layer):
     :type gate_activation_args: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    :raises ValueError: From ``build()``, if the input shape is not 4D.
+    :raises ValueError: From ``__init__``, if ``permute_pattern`` is not a
+        permutation of ``(0, 1, 2)``, or (by delegation to
+        ``keras.layers.Conv2D``) if ``kernel_size`` is invalid. From
+        ``build()``, if the input shape is not 4D.
 
     .. note::
-       This ``__init__`` does not validate its arguments. See the module
-       docstring for why that is unchanged rather than fixed.
+       ``permute_pattern`` and ``kernel_size`` are validated at construction;
+       nothing else here is. See the module docstring.
     """
 
     def __init__(
@@ -141,14 +154,49 @@ class TripletAttentionBranch(layers.Layer):
 
         The convolution, the batch norm and the gate activation are all created
         here; they are given shapes in :meth:`build`, once the permuted spatial
-        dims are known. No argument is validated: see the module docstring's
-        "Rubric R6" section.
+        dims are known. ``permute_pattern`` is validated here and
+        ``kernel_size`` by ``Conv2D`` below; see the module docstring for what
+        is and is not checked.
 
         See the class docstring for the parameter reference.
         """
         super().__init__(**kwargs)
+
+        # DECISION plan-2026-09-07T183458-be1c267e/D-016
+        # `permute_pattern` is validated HERE, at construction, not left to fail
+        # inside `call()`. MEASURED on the shipped layer:
+        # `TripletAttentionBranch(permute_pattern=(0, 0, 0))` constructed without
+        # complaint and then died in `call()` with `InvalidArgumentError: 2 is
+        # missing from {0,1,1,1}. [Op:Transpose]` -- a raw backend message naming
+        # neither the argument nor this layer. `TripSE1`-`TripSE4` only ever pass
+        # the three valid patterns, so this is reachable only by constructing the
+        # class directly, which a caller can do: it is registered and importable.
+        #
+        # Accept ANY sequence, not just `tuple`: `get_config()` serializes the
+        # pattern to a JSON array, so `from_config` hands it back as a LIST, and a
+        # `tuple`-only check here would break deserialization of every existing
+        # branch. Accept all SIX permutations, not only the three the `TripSEn`
+        # classes use -- the argument's contract is "a permutation of the (H, W, C)
+        # axes", and narrowing it to a whitelist would be a new restriction with no
+        # measured reason behind it.
+        try:
+            pattern = tuple(permute_pattern)
+        except TypeError:
+            raise ValueError(
+                f"permute_pattern must be a sequence of 3 axis indices, a "
+                f"permutation of (0, 1, 2); got {permute_pattern!r}"
+            ) from None
+        if sorted(pattern) != [0, 1, 2]:
+            raise ValueError(
+                f"permute_pattern must be a permutation of (0, 1, 2) -- the "
+                f"(H, W, C) axes, each used exactly once; got {permute_pattern!r}. "
+                f"A repeated or out-of-range axis is accepted by this constructor's "
+                f"caller but fails later inside call() as an opaque backend "
+                f"transpose error."
+            )
+
         self.kernel_size = kernel_size
-        self.permute_pattern = permute_pattern
+        self.permute_pattern = pattern
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)

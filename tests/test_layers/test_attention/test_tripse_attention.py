@@ -875,3 +875,98 @@ class TestTripSETrainingIsForwardedExplicitly:
         out = keras.ops.convert_to_numpy(branch(x, training=training))
         assert np.isfinite(out).all()
         assert out.shape == self.SHAPE
+
+
+# ---------------------------------------------------------------------
+# plan-2026-09-07T183458-be1c267e step 9: constructor-argument contracts
+# ---------------------------------------------------------------------
+
+
+class TestThePermutePatternIsValidatedAtConstruction:
+    """`TripletAttentionBranch(permute_pattern=...)` refuses a non-permutation.
+
+    MEASURED before the fix: `TripletAttentionBranch(permute_pattern=(0, 0, 0))`
+    CONSTRUCTED without complaint and then died inside `call()` with a raw
+    backend error that named neither the argument nor the layer --
+    `InvalidArgumentError: ... 2 is missing from {0,1,1,1}. [Op:Transpose]`.
+    `permute_pattern` is a public constructor argument on a registered,
+    importable class, so a caller can reach it directly even though
+    `TripSE1`-`TripSE4` only ever pass the three valid patterns themselves.
+    """
+
+    _VALID = [(0, 1, 2), (0, 2, 1), (2, 1, 0), (1, 0, 2), (1, 2, 0), (2, 0, 1)]
+
+    @pytest.mark.parametrize("bad", [
+        (0, 0, 0),
+        (1, 1, 1),
+        (0, 1, 1),
+        (0, 1, 3),
+        (0, 1, -1),
+        (0, 1),
+        (0, 1, 2, 3),
+    ])
+    def test_a_non_permutation_raises_at_construction(self, bad):
+        with pytest.raises(ValueError) as excinfo:
+            TripletAttentionBranch(permute_pattern=bad)
+        message = str(excinfo.value)
+        assert "permute_pattern" in message
+        assert str(bad) in message or repr(bad) in message
+
+    @pytest.mark.parametrize("pattern", _VALID)
+    def test_every_real_permutation_is_still_accepted(self, pattern):
+        """Positive control: the guard must not reject a valid pattern.
+
+        All six permutations of `(0, 1, 2)` are accepted, not only the three
+        the `TripSEn` classes happen to use -- the argument's contract is "a
+        permutation", and narrowing it to a whitelist of three would be a new
+        restriction this fix did not measure a reason for.
+        """
+        branch = TripletAttentionBranch(permute_pattern=pattern)
+        assert tuple(branch.permute_pattern) == pattern
+
+    @pytest.mark.parametrize("pattern", [(0, 1, 2), (0, 2, 1), (2, 1, 0)])
+    def test_the_three_patterns_the_tripse_classes_use_still_run(self, pattern):
+        branch = TripletAttentionBranch(permute_pattern=pattern)
+        out = branch(np.zeros((2, 8, 8, 4), dtype="float32"))
+        assert tuple(out.shape) == (2, 8, 8, 4)
+
+    def test_a_list_pattern_is_accepted_and_normalized_to_a_tuple(self):
+        """`get_config()` round trips a permutation back as a LIST.
+
+        `keras.saving` serializes a tuple to a JSON array, so `from_config`
+        hands `permute_pattern` back as a list. The validation must therefore
+        accept any sequence, not just `tuple` -- otherwise this fix would break
+        deserialization of every existing branch.
+        """
+        branch = TripletAttentionBranch(permute_pattern=[0, 2, 1])
+        assert tuple(branch.permute_pattern) == (0, 2, 1)
+        restored = TripletAttentionBranch.from_config(branch.get_config())
+        assert tuple(restored.permute_pattern) == (0, 2, 1)
+
+
+class TestTheModuleDocstringMatchesTheMeasuredValidation:
+    """The module docstring's validation claim, pinned by measurement.
+
+    `tripse_attention.py`'s module docstring used to state that a bad
+    `reduction_ratio` or `kernel_size` "surfaces later as a Keras or Conv2D
+    error, not at construction time". MEASURED FALSE for BOTH: each raises
+    immediately in `__init__`, by delegation to the sub-layer that owns the
+    argument. This class is what keeps the corrected sentence true -- a prose
+    claim with no guard is exactly how the stale one survived.
+    """
+
+    _CLASSES = [TripletAttentionBranch, TripSE1, TripSE2, TripSE3, TripSE4]
+
+    @pytest.mark.parametrize("cls", _CLASSES, ids=lambda c: c.__name__)
+    def test_a_bad_kernel_size_raises_at_construction_not_at_call(self, cls):
+        """Delegated to `keras.layers.Conv2D`, which validates in its own init."""
+        with pytest.raises(ValueError, match="kernel_size"):
+            cls(kernel_size=0)
+
+    @pytest.mark.parametrize("cls", [TripSE1, TripSE2, TripSE3, TripSE4],
+                             ids=lambda c: c.__name__)
+    @pytest.mark.parametrize("bad", [0.0, -0.5, 2.0])
+    def test_a_bad_reduction_ratio_raises_at_construction(self, cls, bad):
+        """Delegated to `SqueezeExcitation`, which validates in its own init."""
+        with pytest.raises(ValueError, match="reduction_ratio"):
+            cls(reduction_ratio=bad)

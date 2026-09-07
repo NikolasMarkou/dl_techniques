@@ -121,7 +121,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
                               ▼
                   _apply_attention_mask   (only if a mask is passed)
                               ▼
-                     attn_prob  ►  dropout (only if dropout_rate > 0)
+                     attn_prob  ►  dropout (identity at dropout_rate=0)
                               ▼
                      weights @ V   [B, H, S_q, v]
                               ▼
@@ -384,11 +384,22 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             name="attn_prob",
         )
 
-        # 8. Optional Dropout on attention weights
-        if dropout_rate > 0.0:
-            self.dropout_layer = keras.layers.Dropout(dropout_rate, name="attn_dropout")
-        else:
-            self.dropout_layer = None
+        # 8. Dropout on attention weights
+        # DECISION plan-2026-09-07T183458-be1c267e/D-017
+        # Created UNCONDITIONALLY and gated at use (guide v2 §1.3), matching the
+        # sibling `graphs/graph_neural_network.py`. It used to be created only when
+        # `dropout_rate > 0.0` and left as `None` otherwise, making the sub-layer set
+        # a function of a numeric argument. `Dropout(rate=0.0)` is a behavioural
+        # no-op, but that is a PREDICTION and this chain has had it refuted twice, so
+        # it ships MEASURED: at `dropout_rate=0.0` the weight count (8), the weight
+        # path set and the `.keras` round trip (`max|delta| == 0.0`) are all unchanged,
+        # and the training-mode output equals the inference-mode output exactly.
+        # `build()` and `call()` invoke it UNCONDITIONALLY, with no rate branch at
+        # all: `keras.layers.Dropout` already short-circuits at rate 0.0 inside its
+        # own `call()`, so a `self.dropout_rate > 0.0` gate here was MEASURED
+        # unfalsifiable -- reverting it changed no test anywhere (211 passed). The
+        # sibling GNN file has no branch either. Do not re-add one.
+        self.dropout_layer = keras.layers.Dropout(dropout_rate, name="attn_dropout")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -458,9 +469,9 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         attn_shape = (q_shape[0], self.num_heads, q_shape[1], kv_shape[1])
         self.attn_prob.build(attn_shape)
 
-        # Build dropout if present
-        if self.dropout_layer is not None:
-            self.dropout_layer.build(attn_shape)
+        # Built unconditionally: the layer always exists now (D-017); `call()`
+        # is what skips it at rate 0.0.
+        self.dropout_layer.build(attn_shape)
 
         super().build(input_shape)
 
@@ -567,8 +578,13 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # `training` is forwarded so the probability layer can honour it.
         attn_weights = self.attn_prob(scores, training=training)
 
-        if self.dropout_layer is not None:
-            attn_weights = self.dropout_layer(attn_weights, training=training)
+        # Unconditional, exactly like the sibling `graphs/graph_neural_network.py`
+        # (D-017). A `self.dropout_rate > 0.0` gate here was MEASURED
+        # unfalsifiable -- reverting it to `is not None` reddened nothing across
+        # both MLA and tripse suites (211 passed), because `keras.layers.Dropout`
+        # already short-circuits at rate 0.0 inside its own `call()`. A branch
+        # whose removal cannot be observed is not a guard, so there is no branch.
+        attn_weights = self.dropout_layer(attn_weights, training=training)
 
         # V shape: (B, S_kv, H, v_dim) -> (B, H, S_kv, v_dim)
         v = keras.ops.transpose(v, (0, 2, 1, 3))
