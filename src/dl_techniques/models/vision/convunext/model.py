@@ -772,6 +772,18 @@ def create_convunext(
            emitting ``input_channels * gabor_filters`` channels. It is now a trainable
            ``Conv2D`` emitting exactly ``gabor_filters`` channels. Checkpoints written
            before that change cannot be loaded into a model built by this function.
+
+        .. note::
+
+           There is deliberately **no kwarg to freeze this stem**: ``trainable=True`` is
+           hardcoded because a Gabor-initialized-then-refined stem is what this
+           architecture wants by default. A caller who wants it frozen at its Gabor
+           initialization flips ``trainable`` on the built, not-yet-compiled model --
+           ``train.bfunet.common.freeze_gabor_stem_if_requested`` does exactly that, and
+           both bfunet U-Net trainers expose it as ``--freeze-gabor-stem``. Note that
+           freezing this layer does NOT reproduce the older depthwise bank; for a
+           genuinely per-channel frozen front end use
+           :func:`~dl_techniques.initializers.gabor_filters_initializer.create_gabor_depthwise_conv2d`.
     :type use_gabor_stem: bool
     :param gabor_filters: **OUTPUT CHANNEL COUNT of the Gabor stem** — a ``Conv2D``
         ``filters``, so the stem emits exactly ``gabor_filters`` channels, which the

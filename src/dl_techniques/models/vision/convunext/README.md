@@ -119,7 +119,7 @@ therefore does not mean "provably, strictly bias-free":
 |---|---|---|
 | `GlobalResponseNormalization`'s `beta` | stays trainable (`use_beta` is never passed) | Threading it would change the bias-free arm's parameter count and numerics. Nothing in the repo enforces its absence; the trainer's `verify_bias_free` logs it and does not raise. |
 | `SpatialLinearAttention`'s internal attention | hardcoded `use_bias=False` | No knob is exposed there by design. It is bias-free on BOTH arms. |
-| The Gabor warm-start stem | hardcoded `use_bias=False` (`trainable=True`) | The bias-free arm needs `D(a*x) == a*D(x)`, and that comes from the absence of bias, not from the stem's form. A bias there would break it for every caller, so no knob is offered. |
+| The Gabor warm-start stem | hardcoded `use_bias=False` (`trainable=True`) | The bias-free arm needs `D(a*x) == a*D(x)`, and that comes from the absence of bias, not from the stem's form. A bias there would break it for every caller, so no knob is offered. `trainable=True` is likewise not threaded: a Gabor-initialized-then-refined stem is the intended default. Callers who want it frozen flip `trainable` on the built, not-yet-compiled model — `train.bfunet.common.freeze_gabor_stem_if_requested`, exposed by the bfunet U-Net trainers as `--freeze-gabor-stem`. That freezes this cross-channel `Conv2D`; it does not restore the older depthwise per-channel bank. |
 
 A fourth asymmetry is about activations rather than bias: `block_activation`,
 `stem_activation` and `supervision_activation` all default to `'gelu'`, which is NOT

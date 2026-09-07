@@ -174,6 +174,16 @@ def _run_one(args, condition: str, zero_pad: bool, extra_zero: bool, seed: int,
     # So the probe applies the FREEZE itself when the flag is absent, and asserts the
     # stem really is trainable when it is present. A flag that had quietly become a
     # no-op would be this repo's recorded silently-inert-argument defect.
+    #
+    # POLARITY WARNING: this probe's `--trainable-gabor` is the INVERSE of the production
+    # trainers' `--freeze-gabor-stem` (common.freeze_gabor_stem_if_requested). Same
+    # property, same build-then-flip mechanism, opposite defaults: the probe defaults
+    # FROZEN and opts in to free, the trainers default TRAINABLE (the factory default)
+    # and opt in to frozen. The probe keeps its polarity deliberately, for the reason
+    # above. The freeze is kept inline here rather than routed through the shared helper
+    # because the helper is keyed on a BFUnetTrainingConfig field this probe does not
+    # build, and because the probe must also ASSERT the trainable case, which the helper
+    # (correctly) does not do.
     touched = 0
     for layer in model._flatten_layers():
         if layer.name == "gabor_stem":

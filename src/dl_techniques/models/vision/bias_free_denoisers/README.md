@@ -140,6 +140,17 @@ is what makes `D(a*x) == a*D(x)` hold — the depthwise-vs-cross-channel choice 
 denoiser's positive-homogeneity guarantee is unaffected. The mandatory 1x1 projection is bias-free
 too, keeping the whole front-end strictly bias-free.
 
+**Freezing the stem.** These factories expose **no kwarg** for it: `trainable=True` is hardcoded
+because a Gabor-initialized-then-refined stem is the intended default. The only window in which a
+caller can freeze it is after the graph is built and before it is compiled, which is what
+`train.bfunet.common.freeze_gabor_stem_if_requested` does; both bfunet U-Net trainers expose it as
+`--freeze-gabor-stem` (rejected with `--no-gabor-stem`, and on the BFCNN trainer, which builds no
+stem). Freezing moves the stem's parameters from trainable to non-trainable, leaves the 1x1
+projection trainable as the one learned degree of freedom on top of the bank, and does **not**
+affect homogeneity — that comes from `use_bias=False`. It also does **not** restore the older
+depthwise per-channel bank: the layer stays a cross-channel `Conv2D`. For a genuinely per-channel
+frozen front end, `create_gabor_depthwise_conv2d` remains the right primitive.
+
 ```python
 from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import create_convunext_denoiser
 

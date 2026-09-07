@@ -185,6 +185,12 @@ def _build_gabor_stem(
     `kernel_initializer` / `kernel_regularizer` are forwarded as objects, never
     re-resolved.
 
+    The stem is built `trainable=True` unconditionally; there is no kwarg to freeze it.
+    Callers that want it frozen at its Gabor initialization do so after the graph is
+    built and before it is compiled — see
+    `train.bfunet.common.freeze_gabor_stem_if_requested` and the trainers'
+    `--freeze-gabor-stem`.
+
     :return: The tensor the encoder path starts from — `inputs` unchanged when
         `use_gabor_stem=False`, a true no-op that adds zero layers.
     :rtype: keras.KerasTensor
@@ -731,6 +737,17 @@ def create_bfunet_denoiser(
            `input_channels * gabor_filters` channels. It is now a trainable `Conv2D`
            emitting exactly `gabor_filters` channels. Checkpoints written before that
            change cannot be loaded into a model built by this function.
+
+        .. note::
+
+           There is deliberately **no kwarg to freeze this stem**: `trainable=True` is
+           hardcoded because a Gabor-initialized-then-refined stem is what this
+           architecture wants by default. A caller who wants it frozen at its Gabor
+           initialization flips `trainable` on the built, not-yet-compiled model —
+           `train.bfunet.common.freeze_gabor_stem_if_requested` does exactly that, and
+           both bfunet U-Net trainers expose it as `--freeze-gabor-stem`. Freezing this
+           layer does NOT reproduce the older depthwise bank; for a genuinely
+           per-channel frozen front end use `create_gabor_depthwise_conv2d`.
     :param gabor_filters: **OUTPUT CHANNEL COUNT of the Gabor stem** — a `Conv2D`
         `filters`, so the stem emits exactly `gabor_filters` channels. Defaults to 32.
 

@@ -120,6 +120,7 @@ in the per-trainer sections below.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--no-gabor-stem` | off (stem ON) | Disable the trainable Gabor warm-start stem |
+| `--freeze-gabor-stem` | off (stem TRAINABLE) | Freeze the Gabor stem at its Gabor initialization instead of refining it. Freezes the **cross-channel** `Conv2D` the factories build now; does **not** restore the paper's depthwise 22-per-channel bank. Homogeneity is unaffected either way (it comes from `use_bias=False`). Rejected with `--no-gabor-stem` and on the BFCNN trainer |
 | `--gabor-filters` | 32 | Gabor stem OUTPUT channel count (a `Conv2D` `filters`, no longer a per-channel multiplier) |
 | `--no-gabor-projection` | off | Drop the 1×1 projection after the Gabor stem (requires `gabor_filters == initial_filters`) |
 | `--initial-filters` | variant | Override level-0 width |

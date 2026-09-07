@@ -225,6 +225,15 @@ toggle for the variant), `--laplacian-pyramid` and `--trainable-gabor` (applied 
 conditions so only the compared flag differs), `--epochs` / `--steps-per-epoch` (or
 `--steps` directly), `--sigma` (fixed noise level).
 
+> **`--trainable-gabor` here has the OPPOSITE polarity to the production trainers'
+> `--freeze-gabor-stem`.** They control the same property and both resolve to the same
+> build-then-flip mechanism, but this probe defaults the stem FROZEN and opts in to a free
+> one, while `train_convunext_denoiser.py` / `train_unet_denoiser.py` default it TRAINABLE
+> (the factories' own default) and opt in to freezing. The probe keeps its polarity so its
+> two historical conditions do not silently change meaning; see the `"Free Gabor"` comment
+> in `variance_probe.py::_run_one`. `probe --trainable-gabor` == trainer default;
+> `probe` (no flag) == `trainer --freeze-gabor-stem`.
+
 **Reading the report:** ratios are `variant / baseline`; **< 1 means the weightless
 variant is more stable / steadier** on that axis. The variance-reduction goal is supported
 when `final_mse_std_ratio < 1` and `final_mse_cv_ratio < 1` — which is what the converged
