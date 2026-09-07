@@ -123,6 +123,39 @@ class TestLinearEfficientEnsemble:
         layer = LinearEfficientEnsemble(units=5, k=K, **{gate: False})
         assert tuple(layer(_f32(B, K, D)).shape) == (B, K, 5)
 
+    @pytest.mark.parametrize("dist", ["random-signs", "normal"])
+    def test_r_and_s_differ_at_equal_widths(self, dist):
+        # `r` (pre-matmul, shape (k, input_dim)) and `s` (post-matmul, shape
+        # (k, units)) are architecturally distinct roles, so a stochastic
+        # `init_distribution` must draw them INDEPENDENTLY. A single seedless
+        # Keras initializer instance self-assigns a seed and replays it, so
+        # sharing one instance across both `add_weight` calls produced
+        # bit-identical vectors at every shape where `input_dim == units`.
+        # The widths here are deliberately EQUAL: at unequal widths the shapes
+        # differ and the vectors trivially differ, which is the bug's hiding
+        # place, so such a test would be green against the defect.
+        layer = LinearEfficientEnsemble(units=8, k=K, init_distribution=dist)
+        layer.build((None, K, 8))
+        r = keras.ops.convert_to_numpy(layer.r)
+        s = keras.ops.convert_to_numpy(layer.s)
+        # Anti-vacuity: assert the shapes MATCH first. Equality must be
+        # possible for the inequality below to carry any information.
+        assert r.shape == s.shape == (K, 8)
+        assert not np.array_equal(r, s)
+
+    def test_ones_distribution_keeps_r_and_s_identical(self):
+        # Positive control, not a diversity arm: with `init_distribution='ones'`
+        # both vectors are all-ones BY DESIGN, so equality is the correct
+        # assertion here. Cloning a deterministic `Ones()` still yields ones,
+        # so the fix must not perturb this branch.
+        layer = LinearEfficientEnsemble(units=8, k=K, init_distribution="ones")
+        layer.build((None, K, 8))
+        r = keras.ops.convert_to_numpy(layer.r)
+        s = keras.ops.convert_to_numpy(layer.s)
+        assert r.shape == s.shape == (K, 8)
+        assert np.array_equal(r, s)
+        assert np.array_equal(r, np.ones_like(r))
+
 
 class TestNLinear:
     def test_forward_and_shape(self):

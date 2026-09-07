@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.tabular._ensemble_scaling import (
     EnsembleInitDistribution,
     ensemble_scaling_initializer,
@@ -181,11 +182,18 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         # multiplying by a weight the config says does not exist.
         # See decisions.md D-011 and plan.md § Edge cases.
 
+        # DECISION plan-2026-09-07T130829-d709705c/D-002: clone_initializer per
+        # add_weight site, never the shared `self.scaling_initializer` instance --
+        # a shared seedless instance replays its own seed and drew bit-identical
+        # `r` and `s` whenever `input_dim == units` (the default TabM config),
+        # collapsing each member's 2-sided perturbation to a 1-sided one. Do NOT
+        # reinstate the shared instance. See decisions.md D-002.
+
         # Input scaling weights
         if self.ensemble_scaling_in:
             self.r = self.add_weight(
                 shape=(self.k, input_dim),
-                initializer=self.scaling_initializer,
+                initializer=clone_initializer(self.scaling_initializer),
                 trainable=True,
                 name='input_scaling'
             )
@@ -194,7 +202,7 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         if self.ensemble_scaling_out:
             self.s = self.add_weight(
                 shape=(self.k, self.units),
-                initializer=self.scaling_initializer,
+                initializer=clone_initializer(self.scaling_initializer),
                 trainable=True,
                 name='output_scaling'
             )
