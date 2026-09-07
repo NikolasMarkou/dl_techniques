@@ -181,3 +181,254 @@ class TestTheGnnStackRunsAtAHiddenWidth:
         assert tuple(out.shape) == tuple(
             layer.compute_output_shape([nodes.shape, adj.shape])
         )
+
+
+# ---------------------------------------------------------------------
+# Composite initializer fan-out — plan-2026-09-07T183458-be1c267e step 3.
+#
+# One seedless `Initializer` INSTANCE handed to several child-layer
+# constructors replays the same underlying sample at every later site, so two
+# weights start life as the same random numbers. The per-site oracle below is
+# the one `plan.md` § S-1 mandates: build the layer, then draw from the
+# layer's own STILL-SHARED `self.kernel_initializer` at that weight's OWN
+# shape, and assert the created weight is not bit-equal to that replay. A
+# pairwise comparison between two sites is deliberately NOT used: cloning
+# either member of a pair decorrelates it, so a one-line revert would stay
+# green.
+#
+# Scope of the claim, exactly (copied from the corrected canonical wording in
+# `src/dl_techniques/initializers/clone.py`'s module docstring): independence
+# holds for a RANDOM SEEDLESS initializer. Three exemptions, all correct
+# behaviour, none a defect --
+#   1. a caller-supplied SEEDED instance (e.g. `GlorotUniform(seed=7)`)
+#      replays deliberately and by contract, ACROSS DIFFERING SHAPES TOO;
+#   2. a DETERMINISTIC initializer (`'zeros'`/`'ones'`/`Constant`, and
+#      `Identity` only where the weight is 2-D -- it raises on rank 3+) holds
+#      no random state, so every site is bit-identical and that is what it is
+#      meant to do;
+#   3. a CUSTOM initializer whose `get_config()`/`from_config()` round trip
+#      raises falls back to `copy.deepcopy`, which copies the ALREADY-RESOLVED
+#      seed rather than drawing a new one, so such a site silently stays tied.
+# Exemptions 1 and 2 are asserted below as positive controls, so this module
+# never states an absolute it has not measured.
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.ffn.mlp import MLPBlock
+
+
+def _np(x):
+    return keras.ops.convert_to_numpy(x)
+
+
+def _weight(layer, suffix):
+    """Return the single weight whose path ends with ``suffix``."""
+    hits = [w for w in layer.weights if w.path.endswith(suffix)]
+    assert len(hits) == 1, f"expected exactly one weight ending {suffix!r}, got {[w.path for w in hits]}"
+    return hits[0]
+
+
+def _replay(initializer, shape):
+    """Draw from the still-shared initializer instance at ``shape``."""
+    return _np(initializer(tuple(shape), dtype="float32"))
+
+
+def _assert_not_the_shared_replay(layer, suffix, initializer):
+    w = _weight(layer, suffix)
+    replay = _replay(initializer, w.shape)
+    actual = _np(w)
+    assert not np.array_equal(replay, actual), (
+        f"{w.path} {tuple(w.shape)} is bit-identical to a fresh draw from the "
+        f"layer's shared initializer instance -- the site was not cloned"
+    )
+
+
+def _built_gnn(message_passing, kernel_initializer, bias_initializer, graph_inputs,
+               num_layers=2, aggregation="none"):
+    nodes, adj = graph_inputs
+    layer = GraphNeuralNetworkLayer(
+        concept_dim=D,
+        num_layers=num_layers,
+        message_passing=message_passing,
+        aggregation=aggregation,
+        num_attention_heads=4,
+        kernel_initializer=kernel_initializer,
+        bias_initializer=bias_initializer,
+    )
+    layer((nodes, adj))
+    return layer
+
+
+class TestTheGnnInitializerDoesNotFanOut:
+    """One test per MEASURED-LIVE source site, so a one-line revert reddens one test.
+
+    Six sites, three `keras.layers.Dense` constructions: ``gcn_dense_{i}``,
+    ``sage_self_{i}`` and ``sage_neighbor_{i}``, kernel and bias each. The
+    other three constructions in `__init__` (``gat_attention_{i}``,
+    ``gin_mlp_{i}``, ``aggregation_attention``) are deliberately NOT cloned --
+    see `TestTheCalleeReClonesTheSharedInitializer` below and the source
+    anchors at those three sites.
+    """
+
+    @pytest.mark.parametrize("num_layers", [1, 2])
+    def test_the_gcn_dense_kernel_is_not_the_shared_replay(self, graph_inputs, num_layers):
+        ki = keras.initializers.GlorotUniform()
+        layer = _built_gnn("gcn", ki, "zeros", graph_inputs, num_layers=num_layers)
+        for i in range(num_layers):
+            _assert_not_the_shared_replay(layer, f"gcn_dense_{i}/kernel", layer.kernel_initializer)
+
+    @pytest.mark.parametrize("num_layers", [1, 2])
+    def test_the_gcn_dense_bias_is_not_the_shared_replay(self, graph_inputs, num_layers):
+        bi = keras.initializers.RandomNormal(stddev=0.05)
+        layer = _built_gnn("gcn", "glorot_uniform", bi, graph_inputs, num_layers=num_layers)
+        for i in range(num_layers):
+            _assert_not_the_shared_replay(layer, f"gcn_dense_{i}/bias", layer.bias_initializer)
+
+    @pytest.mark.parametrize("num_layers", [1, 2])
+    def test_the_sage_self_kernel_is_not_the_shared_replay(self, graph_inputs, num_layers):
+        ki = keras.initializers.GlorotUniform()
+        layer = _built_gnn("graphsage", ki, "zeros", graph_inputs, num_layers=num_layers)
+        for i in range(num_layers):
+            _assert_not_the_shared_replay(layer, f"sage_self_{i}/kernel", layer.kernel_initializer)
+
+    @pytest.mark.parametrize("num_layers", [1, 2])
+    def test_the_sage_self_bias_is_not_the_shared_replay(self, graph_inputs, num_layers):
+        bi = keras.initializers.RandomNormal(stddev=0.05)
+        layer = _built_gnn("graphsage", "glorot_uniform", bi, graph_inputs, num_layers=num_layers)
+        for i in range(num_layers):
+            _assert_not_the_shared_replay(layer, f"sage_self_{i}/bias", layer.bias_initializer)
+
+    @pytest.mark.parametrize("num_layers", [1, 2])
+    def test_the_sage_neighbor_kernel_is_not_the_shared_replay(self, graph_inputs, num_layers):
+        ki = keras.initializers.GlorotUniform()
+        layer = _built_gnn("graphsage", ki, "zeros", graph_inputs, num_layers=num_layers)
+        for i in range(num_layers):
+            _assert_not_the_shared_replay(layer, f"sage_neighbor_{i}/kernel", layer.kernel_initializer)
+
+    @pytest.mark.parametrize("num_layers", [1, 2])
+    def test_the_sage_neighbor_bias_is_not_the_shared_replay(self, graph_inputs, num_layers):
+        bi = keras.initializers.RandomNormal(stddev=0.05)
+        layer = _built_gnn("graphsage", "glorot_uniform", bi, graph_inputs, num_layers=num_layers)
+        for i in range(num_layers):
+            _assert_not_the_shared_replay(layer, f"sage_neighbor_{i}/bias", layer.bias_initializer)
+
+    def test_the_sage_self_and_neighbor_kernels_differ_from_each_other(self, graph_inputs):
+        """The architecturally sharpest pair: self-transform vs neighbour-transform."""
+        ki = keras.initializers.GlorotUniform()
+        layer = _built_gnn("graphsage", ki, "zeros", graph_inputs)
+        for i in range(2):
+            a = _np(_weight(layer, f"sage_self_{i}/kernel"))
+            b = _np(_weight(layer, f"sage_neighbor_{i}/kernel"))
+            assert not np.array_equal(a, b)
+
+
+class TestTheExemptionsThisModuleDoesNotClaimAway:
+    """Positive controls for exemptions 1 and 2 of `clone.py` § "Scope of the claim, exactly".
+
+    Cloning must NOT break either. These assert that identical weights are the
+    CORRECT outcome in both cases, so no reader mistakes the guards above for
+    an absolute "initializers can never coincide" claim.
+    """
+
+    def test_a_deterministic_zeros_bias_is_identical_at_every_site_and_that_is_correct(
+            self, graph_inputs
+    ):
+        # Exemption 2. `'zeros'` is the class default and holds no random
+        # state: every bias is the same because that is what `'zeros'` means.
+        layer = _built_gnn("graphsage", "glorot_uniform", "zeros", graph_inputs)
+        biases = [w for w in layer.weights if w.path.endswith("/bias")]
+        assert len(biases) == 4
+        for b in biases:
+            assert float(np.max(np.abs(_np(b)))) == 0.0
+
+    def test_a_seeded_initializer_stays_reproducible_across_two_instances(self, graph_inputs):
+        # Exemption 1 + invariant I-2: cloning reproduces an explicit seed by
+        # contract, so two separately-constructed layers still agree exactly.
+        paths_and_values = []
+        for _ in range(2):
+            layer = _built_gnn(
+                "graphsage",
+                keras.initializers.GlorotUniform(seed=7),
+                keras.initializers.RandomNormal(stddev=0.05, seed=11),
+                graph_inputs,
+            )
+            paths_and_values.append(
+                {w.path.split("/", 1)[1]: _np(w) for w in layer.weights}
+            )
+        a, b = paths_and_values
+        assert set(a) == set(b)
+        for key in a:
+            assert np.array_equal(a[key], b[key]), f"{key} not reproducible under an explicit seed"
+
+
+class TestTheCalleeReClonesTheSharedInitializer:
+    """MONITOR the stock-callee behaviour that steps 3's narrow scope depends on.
+
+    These tests are GREEN today AND were green before the fix. That is
+    deliberate and is the whole point: they are not guards for a change we
+    made, they are a tripwire on somebody else's code.
+
+    `graph_neural_network.py` deliberately does NOT wrap `clone_initializer`
+    around the initializers it hands to ``gat_attention_{i}``,
+    ``aggregation_attention`` (both stock `keras.layers.MultiHeadAttention`)
+    or ``gin_mlp_{i}`` (`MLPBlock`), because those callees ALREADY re-clone
+    per sub-layer -- measured, not assumed. If a future Keras or a future
+    `MLPBlock` drops that re-clone, those three sites silently start aliasing
+    again and no other test in this repo would notice. These two tests go RED
+    and name the reason.
+
+    DO NOT DELETE THESE AS VACUOUS. A test that cannot fail today is exactly
+    what an upstream-behaviour tripwire looks like. See decisions.md D-007.
+    """
+
+    def test_stock_multi_head_attention_re_clones_per_sublayer(self):
+        # `MultiHeadAttention._get_common_kwargs_for_sublayer` runs
+        # `initializer.__class__.from_config(initializer.get_config())` for
+        # every sub-layer. `GlorotUniform().get_config()` reports
+        # `{'seed': None}` even when the live instance has a RESOLVED `.seed`,
+        # so `from_config` self-assigns a fresh seed and the tie breaks. Note
+        # this is the OPPOSITE of `clone.py` exemption 3, where the
+        # `copy.deepcopy` FALLBACK preserves the resolved seed and the site
+        # stays tied -- a round trip that SUCCEEDS unties, a round trip that
+        # RAISES stays tied. Do not "correct" one into the other.
+        ki = keras.initializers.GlorotUniform()
+        mha = keras.layers.MultiHeadAttention(num_heads=2, key_dim=4, kernel_initializer=ki)
+        x = np.zeros((1, 3, 8), dtype="float32")
+        mha(x, x)
+
+        q = _weight(mha, "query/kernel")
+        k = _weight(mha, "key/kernel")
+        assert tuple(q.shape) == tuple(k.shape)
+        assert not np.array_equal(_np(q), _np(k)), (
+            "stock MultiHeadAttention no longer re-clones its kernel_initializer "
+            "per sub-layer -- graph_neural_network.py's gat_attention_{i} and "
+            "aggregation_attention sites must now clone at the site (see D-007)"
+        )
+        assert not np.array_equal(_replay(ki, q.shape), _np(q))
+
+    def test_the_shared_seedless_instance_really_does_replay(self):
+        # The control the test above rests on: without a re-cloning callee,
+        # one shared seedless instance DOES hand two Dense layers the same
+        # numbers. If this ever goes green-by-vacuity the oracle is broken.
+        ki = keras.initializers.GlorotUniform()
+        a = keras.layers.Dense(4, kernel_initializer=ki, name="a")
+        b = keras.layers.Dense(4, kernel_initializer=ki, name="b")
+        x = np.zeros((1, 6), dtype="float32")
+        a(x)
+        b(x)
+        assert np.array_equal(_np(a.kernel), _np(b.kernel))
+
+    def test_mlp_block_clones_its_own_kernel_initializer(self):
+        # `layers/ffn/mlp.py` calls `clone_initializer` for fc1 and fc2, which
+        # is why `gin_mlp_{i}` is not cloned at the GNN site.
+        ki = keras.initializers.GlorotUniform()
+        bi = keras.initializers.RandomNormal(stddev=0.05)
+        block = MLPBlock(hidden_dim=8, output_dim=4, kernel_initializer=ki, bias_initializer=bi)
+        block(np.zeros((1, 3, 4), dtype="float32"))
+
+        for suffix, init in (("fc1/kernel", ki), ("fc2/kernel", ki),
+                             ("fc1/bias", bi), ("fc2/bias", bi)):
+            w = _weight(block, suffix)
+            assert not np.array_equal(_replay(init, w.shape), _np(w)), (
+                f"MLPBlock no longer clones its initializer for {suffix} -- "
+                "graph_neural_network.py's gin_mlp_{i} site must now clone (see D-007)"
+            )

@@ -90,6 +90,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 
 from ..ffn.mlp import MLPBlock
 from ..norms.rms_norm import RMSNorm
+from ...initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -270,8 +271,8 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                     keras.layers.Dense(
                         self.concept_dim,
                         activation=None,  # Apply activation separately for flexibility
-                        kernel_initializer=self.kernel_initializer,
-                        bias_initializer=self.bias_initializer,
+                        kernel_initializer=clone_initializer(self.kernel_initializer),
+                        bias_initializer=clone_initializer(self.bias_initializer),
                         kernel_regularizer=self.kernel_regularizer,
                         bias_regularizer=self.bias_regularizer,
                         name=f'gcn_dense_{i}'
@@ -284,8 +285,8 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                     keras.layers.Dense(
                         self.concept_dim,
                         activation=None,
-                        kernel_initializer=self.kernel_initializer,
-                        bias_initializer=self.bias_initializer,
+                        kernel_initializer=clone_initializer(self.kernel_initializer),
+                        bias_initializer=clone_initializer(self.bias_initializer),
                         kernel_regularizer=self.kernel_regularizer,
                         bias_regularizer=self.bias_regularizer,
                         name=f'sage_self_{i}'
@@ -295,8 +296,8 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                     keras.layers.Dense(
                         self.concept_dim,
                         activation=None,
-                        kernel_initializer=self.kernel_initializer,
-                        bias_initializer=self.bias_initializer,
+                        kernel_initializer=clone_initializer(self.kernel_initializer),
+                        bias_initializer=clone_initializer(self.bias_initializer),
                         kernel_regularizer=self.kernel_regularizer,
                         bias_regularizer=self.bias_regularizer,
                         name=f'sage_neighbor_{i}'
@@ -321,6 +322,45 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                 # the output projection. At `concept_dim == D` it is a
                 # measured no-op (identical weight shapes, identical weight
                 # bytes, identical output). See decisions.md D-005.
+                # DECISION plan-2026-09-07T183458-be1c267e/D-007
+                # `self.kernel_initializer` / `self.bias_initializer` are passed
+                # here WITHOUT `clone_initializer(...)`, deliberately, unlike the
+                # `gcn_dense_{i}` / `sage_self_{i}` / `sage_neighbor_{i}` Dense
+                # layers above. Do NOT "fix" this by adding the wrapper: it would
+                # add a guard that is green before AND after its own revert, i.e.
+                # a test that can never fail, which is this repo's most-repeated
+                # test defect.
+                #
+                # Why the site is already independent: stock
+                # `keras.layers.MultiHeadAttention._get_common_kwargs_for_sublayer`
+                # runs `initializer.__class__.from_config(initializer.get_config())`
+                # for EVERY sub-layer (query / key / value / attention_output), so
+                # the callee re-clones for us. MEASURED on this class: all 24
+                # `gat_attention_{i}` + `aggregation_attention` weights come out
+                # independent of a replay from the shared instance, while the four
+                # `sage_*` Dense weights come out bit-identical to it.
+                #
+                # The mechanism, stated exactly: `GlorotUniform().get_config()`
+                # reports `{'seed': None}` even when the LIVE instance already has
+                # a resolved `.seed`, so `from_config` self-assigns a fresh seed and
+                # the tie breaks. This is the OPPOSITE of `clone.py` exemption 3,
+                # where a `get_config()` round trip that RAISES falls back to
+                # `copy.deepcopy`, which COPIES the resolved seed and leaves the site
+                # tied. A round trip that succeeds unties; a round trip that raises
+                # stays tied. Do not "correct" one into the other.
+                #
+                # The dependency is MONITORED, not assumed:
+                # `TestTheCalleeReClonesTheSharedInitializer` in
+                # `tests/test_layers/test_graphs/test_graph_neural_network.py` pins
+                # the stock-`MultiHeadAttention` and `MLPBlock` behaviour and goes
+                # RED, naming this site, if a future version drops the re-clone.
+                # Independence here holds for a RANDOM SEEDLESS initializer; the
+                # exceptions are a SEEDED instance (replays by contract, across
+                # differing shapes too), a DETERMINISTIC one (`'zeros'`/`'ones'`/
+                # `Constant`, `Identity` at 2-D -- identical and correctly so), and
+                # a CUSTOM one failing the `get_config()` round trip (falls back to
+                # `copy.deepcopy`, keeping the resolved seed). See decisions.md
+                # D-007 and `src/dl_techniques/initializers/clone.py`.
                 self.gnn_layers.append(
                     keras.layers.MultiHeadAttention(
                         num_heads=self.num_attention_heads,
@@ -336,6 +376,15 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                 )
             elif self.message_passing == 'gin':
                 # GIN uses an MLP for expressive power
+                # DECISION plan-2026-09-07T183458-be1c267e/D-007
+                # Not wrapped in `clone_initializer(...)`, deliberately: `MLPBlock`
+                # already clones per sub-layer for both `fc1` and `fc2`
+                # (`layers/ffn/mlp.py:261,271`), so wrapping here would buy nothing
+                # and would ship a guard that cannot be reddened by reverting it.
+                # MEASURED: all 8 `gin_mlp_{i}` weights are independent of a replay
+                # from the shared instance. Same reasoning, same exemptions and the
+                # same monitoring test as the `gat_attention_{i}` anchor above --
+                # see decisions.md D-007.
                 self.gnn_layers.append(
                     MLPBlock(
                         hidden_dim=self.concept_dim * 2,
@@ -375,6 +424,11 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
 
         # Final aggregation layer
         if self.aggregation == 'attention':
+            # DECISION plan-2026-09-07T183458-be1c267e/D-007
+            # Not wrapped in `clone_initializer(...)`, deliberately: this is a stock
+            # `keras.layers.MultiHeadAttention`, which re-clones its initializer for
+            # every sub-layer. MEASURED independent. See the full anchor at the
+            # `gat_attention_{i}` construction above and decisions.md D-007.
             self.aggregation_attention = keras.layers.MultiHeadAttention(
                 num_heads=4,
                 key_dim=self.concept_dim // 4,
