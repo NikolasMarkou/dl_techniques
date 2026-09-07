@@ -9,7 +9,13 @@ import keras
 from keras import ops
 from typing import Optional, Tuple, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class ClipLayer(keras.layers.Layer):
@@ -383,6 +389,7 @@ class DenormalizationLayer(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class TensorPreprocessingLayer(keras.layers.Layer):
@@ -545,4 +552,4 @@ class TensorPreprocessingLayer(keras.layers.Layer):
         })
         return config
 
-
+# ---------------------------------------------------------------------

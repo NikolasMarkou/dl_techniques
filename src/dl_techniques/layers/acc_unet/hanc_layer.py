@@ -23,6 +23,7 @@ from keras import ops
 from typing import Optional, Union, Tuple, Any, List, Dict
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.acc_unet.hanc_layer")
 class HANCLayer(keras.layers.Layer):
@@ -259,3 +260,5 @@ class HANCLayer(keras.layers.Layer):
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

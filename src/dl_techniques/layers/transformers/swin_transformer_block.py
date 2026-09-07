@@ -24,6 +24,10 @@ import keras
 from keras import ops, initializers, regularizers
 from typing import Tuple, Optional, Dict, Any, Union, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import window_reverse, window_partition
 

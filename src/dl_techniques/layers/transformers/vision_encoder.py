@@ -43,7 +43,10 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 
 # DECISION plan-2026-07-31T132403-b3f540cb/D-003: no mask-incompatible-mode
-# allowlist here (supersedes plan-2026-07-31T042809-ddc92265/D-013) -- masked-patch isolation for weighted/top_k pooling is now fixed inside layers/sequence_pooling/, not guarded per-caller. See decisions.md.
+# allowlist here (supersedes plan-2026-07-31T042809-ddc92265/D-013)
+# -- masked-patch isolation
+# for weighted/top_k pooling is now fixed inside layers/sequence_pooling/,
+# not guarded per-caller. See decisions.md.
 
 # ---------------------------------------------------------------------
 

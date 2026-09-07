@@ -21,11 +21,16 @@ References:
 import keras
 from typing import Optional, Tuple, Union, Any, Dict
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from .pooling.pixel_shuffle import PixelShuffle
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.modality_projection")
 class ModalityProjection(keras.layers.Layer):
@@ -283,3 +288,4 @@ class ModalityProjection(keras.layers.Layer):
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
+# ---------------------------------------------------------------------

@@ -23,6 +23,10 @@ import keras
 from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict, Callable, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -30,6 +34,7 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.hierarchical_mlp_stem")
 class HierarchicalMLPStem(keras.layers.Layer):
@@ -287,3 +292,5 @@ class HierarchicalMLPStem(keras.layers.Layer):
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
+
+    # ---------------------------------------------------------------------

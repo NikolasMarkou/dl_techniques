@@ -15,10 +15,15 @@ import keras
 from keras import ops
 from typing import Tuple, Optional, Dict, Any, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from .swin_transformer_block import SwinTransformerBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.transformers.swin_conv_block")
 class SwinConvBlock(keras.layers.Layer):

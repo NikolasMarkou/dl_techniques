@@ -1,13 +1,18 @@
 """HANCBlock, a hierarchical-context building block from ACC-UNet.
 
-Standard self-attention scores every pixel pair, costing O(N^2) in the pixel
-count N. HANCBlock approximates that global comparison at O(k) instead: at
-k scales, the feature map is average- and max-pooled down, concatenated back
-onto the full-resolution map along the channel axis, and a learned 1x1
-convolution aggregates the result. Around that hierarchical-context step sit
-an inverted-bottleneck expansion, a depthwise 3x3 convolution, a projection
-back to the output channel count, a residual connection when input and
-output channels match, and Squeeze-and-Excitation recalibration.
+HANCBlock is a Keras layer that maps a feature map to ``filters`` channels.
+It wraps hierarchical neighborhood aggregation in an inverted bottleneck: a
+1x1 expansion, a depthwise 3x3 convolution, a HANCLayer, a 1x1 projection,
+and Squeeze-and-Excitation recalibration. HANCLayer stands in for
+self-attention, which scores every pixel pair and costs O(N^2) in the pixel
+count N. Instead it average- and max-pools the feature map at k scales,
+concatenates the results onto the full-resolution map along the channel
+axis, and mixes them with a learned 1x1 convolution, so cost grows with k
+rather than with N squared. The input channel count is a constructor
+argument and is checked against the input shape at build time. The residual
+connection is present only when ``input_channels`` equals ``filters``. Every
+convolution here runs without a bias term, so ``bias_initializer`` and
+``bias_regularizer`` are stored for serialization and have no effect.
 
 References:
     - Yan et al., 2023. ACC-UNet: An adaptive context and contrast-aware UNet
@@ -20,45 +25,85 @@ References:
 import keras
 from typing import Optional, Union, Tuple, Any, Dict
 
-from .hanc_layer import HANCLayer
-from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
-from dl_techniques.utils.keras_registration import register_dl_technique
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
+
+from .hanc_layer import HANCLayer
+
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.acc_unet.hanc_block")
 class HANCBlock(keras.layers.Layer):
-    """Hierarchical Aggregation of Neighborhood Context (HANC) block.
+    """Aggregate neighborhood context at k scales inside an inverted bottleneck.
 
-    Combines an inverted-bottleneck expansion, depthwise spatial processing,
-    hierarchical context aggregation at ``k`` scales, an optional residual
-    connection, and Squeeze-and-Excitation recalibration.
-
-    ``X_exp = sigma(BN(W_exp * X))``, ``X_dw = sigma(BN(W_dw * X_exp))``,
-    ``X_ctx = Agg({P_s(X_dw)} for s=1..k)``, ``Y = SE(sigma(BN(W_proj * X_ctx)))``.
+    HANC stands for hierarchical aggregation of neighborhood context. The
+    block expands the input channels, processes them depthwise, aggregates
+    context at ``k`` pooling scales, projects to ``filters`` channels, and
+    rescales channels with Squeeze-and-Excitation. One LeakyReLU instance is
+    reused after each of the three normalized convolutions.
 
     Architecture:
 
     .. code-block:: text
 
-        input [H, W, C_in]
-              |
-        Conv1x1 -> BN -> LeakyReLU   (expand: C_in -> C_in*inv)
-              |
-        DepthwiseConv3x3 -> BN -> ReLU
-              |
-        HANCLayer (k hierarchical pooling levels)
-              |
-        + input -> BN   (only if C_in == filters)
-              |
-        Conv1x1 -> BN -> LeakyReLU   (project: C_in -> filters)
-              |
-        Squeeze-and-Excitation
-              |
-        output [H, W, filters]
+        input [B, H, W, C_in]
+              │
+              ├─────────────────────────┐
+              ▼                         │
+        ┌───────────────────────┐       │
+        │ expand conv 1x1       │       │
+        │ bn, leaky relu        │       │
+        └───────────────────────┘       │
+              │ [B, H, W, C_in*inv]     │
+              ▼                         │
+        ┌───────────────────────┐       │
+        │ depthwise conv 3x3    │       │
+        │ bn, leaky relu        │       │
+        └───────────────────────┘       │
+              │ [B, H, W, C_in*inv]     │
+              ▼                         │
+        ┌───────────────────────┐       │
+        │ hanc, k scales        │       │
+        └───────────────────────┘       │
+              │ [B, H, W, C_in]         │
+              ▼                         │
+             (+)◄───────────────────────┘  (optional)
+              │
+              ▼
+        ┌───────────────────────┐  (optional)
+        │ batch norm            │
+        └───────────────────────┘
+              │ [B, H, W, C_in]
+              ▼
+        ┌───────────────────────┐
+        │ project conv 1x1      │
+        │ bn, leaky relu        │
+        └───────────────────────┘
+              │ [B, H, W, filters]
+              ▼
+        ┌───────────────────────┐
+        │ squeeze-excitation    │
+        └───────────────────────┘
+              │
+              ▼
+        output [B, H, W, filters]
+
+    The skip and its batch norm run only when ``input_channels == filters``.
+
+    Input shape:
+        4D tensor ``(batch, height, width, input_channels)``.
+
+    Output shape:
+        4D tensor ``(batch, height, width, filters)``.
 
     :param filters: Number of output filters. Must be positive.
     :type filters: int
-    :param input_channels: Number of input channels. Must be positive.
+    :param input_channels: Number of input channels. Must be positive and must
+        match the last dimension of the input shape.
     :type input_channels: int
     :param k: Hierarchical levels for HANC operation (1-5 supported).
         Determines the granularity of context aggregation.
@@ -69,14 +114,23 @@ class HANCBlock(keras.layers.Layer):
     :param kernel_initializer: Initializer for convolution kernels.
         Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for bias vectors.
+    :param bias_initializer: Initializer for bias vectors. Kept in the config
+        for serialization; the convolutions here use no bias.
         Defaults to ``'zeros'``.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer for convolution kernels.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param bias_regularizer: Optional regularizer for bias vectors.
+    :param bias_regularizer: Optional regularizer for bias vectors. Kept in the
+        config for serialization; the convolutions here use no bias.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional arguments for the Layer base class.
+
+    :ivar expanded_channels: Channel width inside the bottleneck,
+        ``input_channels * inv_factor``.
+    :vartype expanded_channels: int
+    :ivar use_residual: Whether the skip connection and its batch norm are
+        active, true when ``input_channels == filters``.
+    :vartype use_residual: bool
 
     :raises ValueError: If filters, input_channels, or inv_factor are not positive.
     :raises ValueError: If k is not between 1 and 5.
@@ -96,7 +150,6 @@ class HANCBlock(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
         if input_channels <= 0:
@@ -115,7 +168,6 @@ class HANCBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Compute derived parameters
         self.expanded_channels = self.input_channels * self.inv_factor
         self.use_residual = (self.input_channels == self.filters)
 
@@ -130,7 +182,6 @@ class HANCBlock(keras.layers.Layer):
         )
         self.expand_bn = keras.layers.BatchNormalization(name='expand_bn')
 
-        # 2. Depthwise layers
         self.depthwise_conv = keras.layers.DepthwiseConv2D(
             kernel_size=3,
             padding='same',
@@ -141,7 +192,7 @@ class HANCBlock(keras.layers.Layer):
         )
         self.depthwise_bn = keras.layers.BatchNormalization(name='depthwise_bn')
 
-        # 3. HANC layer
+        # HANC returns to input_channels so the skip tensor lines up unchanged.
         self.hanc_layer = HANCLayer(
             in_channels=self.expanded_channels,
             out_channels=self.input_channels,
@@ -151,13 +202,11 @@ class HANCBlock(keras.layers.Layer):
             name='hanc'
         )
 
-        # 4. Residual connection batch norm
         if self.use_residual:
             self.residual_bn = keras.layers.BatchNormalization(name='residual_bn')
         else:
             self.residual_bn = None
 
-        # 5. Output layers
         self.output_conv = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=1,
@@ -169,7 +218,6 @@ class HANCBlock(keras.layers.Layer):
         )
         self.output_bn = keras.layers.BatchNormalization(name='output_bn')
 
-        # 6. Squeeze-Excitation
         self.squeeze_excitation = SqueezeExcitation(
             reduction_ratio=0.25,
             kernel_initializer=self.kernel_initializer,
@@ -177,7 +225,7 @@ class HANCBlock(keras.layers.Layer):
             name='se'
         )
 
-        # 7. Activation
+        # Stateless, so one instance serves all three activation sites.
         self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -185,8 +233,9 @@ class HANCBlock(keras.layers.Layer):
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the input shape is not 4D, or if its last
+            dimension differs from ``input_channels``.
         """
-        # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D: {input_shape}")
 
@@ -196,32 +245,26 @@ class HANCBlock(keras.layers.Layer):
                 f"got {input_shape[-1]}"
             )
 
-        # 1. Expansion
         self.expand_conv.build(input_shape)
         expand_output_shape = self.expand_conv.compute_output_shape(input_shape)
         self.expand_bn.build(expand_output_shape)
 
-        # 2. Depthwise
         self.depthwise_conv.build(expand_output_shape)
         depthwise_output_shape = self.depthwise_conv.compute_output_shape(expand_output_shape)
         self.depthwise_bn.build(depthwise_output_shape)
 
-        # 3. HANC
         self.hanc_layer.build(depthwise_output_shape)
         hanc_output_shape = self.hanc_layer.compute_output_shape(depthwise_output_shape)
 
-        # 4. Residual
         if self.residual_bn is not None:
             self.residual_bn.build(hanc_output_shape)
 
-        # 5. Output Projection
         # HANCLayer restores input_channels, so its output shape feeds output_conv directly.
         output_input_shape = hanc_output_shape
         self.output_conv.build(output_input_shape)
         output_conv_shape = self.output_conv.compute_output_shape(output_input_shape)
         self.output_bn.build(output_conv_shape)
 
-        # 6. SE Block
         self.squeeze_excitation.build(output_conv_shape)
 
         super().build(input_shape)
@@ -231,7 +274,7 @@ class HANCBlock(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass computation.
+        """Run the forward pass.
 
         :param inputs: Input tensor of shape ``(batch, height, width, input_channels)``.
         :type inputs: keras.KerasTensor
@@ -240,41 +283,37 @@ class HANCBlock(keras.layers.Layer):
         :return: Output tensor of shape ``(batch, height, width, filters)``.
         :rtype: keras.KerasTensor
         """
-        # 1. Expansion phase
         x = self.expand_conv(inputs)
         x = self.expand_bn(x, training=training)
         x = self.activation(x)
 
-        # 2. Depthwise convolution
         x = self.depthwise_conv(x)
         x = self.depthwise_bn(x, training=training)
         x = self.activation(x)
 
-        # 3. Hierarchical context aggregation
         x = self.hanc_layer(x, training=training)
 
-        # 4. Residual connection (if applicable)
+        # The skip carries the block input, so the add sits before projection.
         if self.use_residual and self.residual_bn is not None:
             x = x + inputs
             x = self.residual_bn(x, training=training)
 
-        # 5. Output projection
         x = self.output_conv(x)
         x = self.output_bn(x, training=training)
         x = self.activation(x)
 
-        # 6. Squeeze-Excitation
         x = self.squeeze_excitation(x, training=training)
 
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape of the layer.
+        """Compute the output shape of the layer.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple.
+        :return: Input shape with the channel dimension replaced by ``filters``.
         :rtype: Tuple[Optional[int], ...]
+        :raises ValueError: If the input shape is not 4D.
         """
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
@@ -299,3 +338,5 @@ class HANCBlock(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

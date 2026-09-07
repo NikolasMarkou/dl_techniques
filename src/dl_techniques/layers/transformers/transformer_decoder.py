@@ -22,6 +22,10 @@ import keras
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 
+# ---------------------------------------------------------------------
+# local import
+# ---------------------------------------------------------------------
+
 from ..ffn import create_ffn_from_config, FFNType
 from .transformer import (
     TransformerLayer,
@@ -33,8 +37,11 @@ from ..norms import create_normalization_layer, NormalizationType
 from ...utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 NormalizationPositionType = Literal['post', 'pre']
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.transformers.transformer_decoder")
 class TransformerDecoderLayer(keras.layers.Layer):
@@ -505,3 +512,5 @@ class TransformerDecoderLayer(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -14,6 +14,10 @@ their dense-layer analogue.
 import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .norms import create_normalization_layer
 from .activations import create_activation_layer, resolve_activation_layer
 from .activations.factory import ACTIVATION_REGISTRY

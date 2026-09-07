@@ -30,8 +30,13 @@ import keras
 import numpy as np
 from typing import Tuple, Optional, Any, Literal, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 AlignmentType = Literal["centers", "endpoints"]
 ChannelOrderType = Literal["ij", "xy"]
@@ -45,7 +50,7 @@ _VALID_RESIZE_METHODS = ("nearest", "bilinear")
 #: Guards the zero-variance axis (``n == 1``) in the ``'zscore'`` path.
 ZSCORE_EPSILON = 1e-7
 
-
+# ---------------------------------------------------------------------
 
 def _axis_positions(n: int, alignment: str) -> np.ndarray:
     """Sample positions along one axis of length ``n``, spanning ``[-0.5, 0.5]``.
@@ -62,6 +67,7 @@ def _axis_positions(n: int, alignment: str) -> np.ndarray:
         return np.linspace(-0.5 + offset, 0.5 - offset, n)
     return np.linspace(-0.5, 0.5, n)
 
+# ---------------------------------------------------------------------
 
 def coordinate_grid(
     size: Union[int, Tuple[int, int]],
@@ -132,8 +138,7 @@ def coordinate_grid(
     channels = [grid_h, grid_w] if channel_order == "ij" else [grid_w, grid_h]
     return np.stack(channels, axis=-1).astype(dtype)
 
-
-
+# ---------------------------------------------------------------------
 
 def _gather_hw(
     grid: "keras.KerasTensor", idx_h: "keras.KerasTensor", idx_w: "keras.KerasTensor"
@@ -169,6 +174,7 @@ def _gather_hw(
     gathered = keras.ops.take(flat_grid, keras.ops.reshape(flat_idx, (-1,)), axis=0)
     return keras.ops.reshape(gathered, (lead[0], lead[1], lead[2], channels))
 
+# ---------------------------------------------------------------------
 
 def interpolate_grid(
     coords: Union["keras.KerasTensor", np.ndarray],
@@ -259,6 +265,7 @@ def interpolate_grid(
     bot = v10 * (1.0 - fw) + v11 * fw
     return top * (1.0 - fh) + bot * fh
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.spatial_layer")
 class SpatialLayer(keras.layers.Layer):
@@ -486,3 +493,4 @@ class SpatialLayer(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------

@@ -16,10 +16,16 @@ import keras
 from keras import ops
 from typing import Optional, Tuple, Union, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from dl_techniques.layers import standard_blocks
 from dl_techniques.layers.transformers.area_attention_block import AreaAttentionBlock
+
+# ---------------------------------------------------------------------
 
 # DECISION plan-2026-09-01T055648-e6d380a5/D-005: keep epsilon/momentum in one
 # dict, not per-site literals -- 26 construction sites across 4 modules depend
@@ -30,6 +36,7 @@ from dl_techniques.layers.transformers.area_attention_block import AreaAttention
 # unreviewed Keras defaults. See decisions.md.
 YOLO12_NORM_KWARGS: Dict[str, Any] = {"epsilon": 1e-3, "momentum": 0.97}
 
+# ---------------------------------------------------------------------
 
 def _fresh_initializer(
         initializer: keras.initializers.Initializer,
@@ -48,6 +55,7 @@ def _fresh_initializer(
     """
     return keras.initializers.get(keras.initializers.serialize(initializer))
 
+# ---------------------------------------------------------------------
 
 def yolo12_conv_block(
     filters: int,
@@ -112,7 +120,7 @@ def yolo12_conv_block(
         **kwargs
     )
 
-
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.yolo12.yolo12_blocks")
 class Bottleneck(keras.layers.Layer):
@@ -260,7 +268,7 @@ class Bottleneck(keras.layers.Layer):
         })
         return config
 
-
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.yolo12.yolo12_blocks")
 class C3k2Block(keras.layers.Layer):
@@ -452,7 +460,7 @@ class C3k2Block(keras.layers.Layer):
         })
         return config
 
-
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.yolo12.yolo12_blocks")
 class A2C2fBlock(keras.layers.Layer):
@@ -660,3 +668,4 @@ class A2C2fBlock(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
