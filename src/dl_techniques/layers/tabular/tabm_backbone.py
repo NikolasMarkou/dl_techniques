@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.tabular._ensemble_scaling import EnsembleInitDistribution
 from dl_techniques.layers.tabular.tabm_mlp_block import TabMMLPBlock
 from dl_techniques.utils.activation_serialization import (
@@ -95,9 +96,12 @@ class TabMBackbone(keras.layers.Layer):
     :type dropout_rate: float
     :param use_bias: Whether to use bias.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for weights.
+    :param kernel_initializer: Initializer for weights. Each block receives an
+        independent *clone*, never this instance, so two blocks of equal width do
+        not start bit-identical -- see the ``D-005`` anchor in ``__init__``.
     :type kernel_initializer: str or keras.initializers.Initializer
-    :param bias_initializer: Initializer for bias.
+    :param bias_initializer: Initializer for bias. Cloned per block on the same
+        terms; the ``'zeros'`` default clones to zeros, so it is unaffected.
     :type bias_initializer: str or keras.initializers.Initializer
     :param kernel_regularizer: Optional regularizer for kernel weights.
     :type kernel_regularizer: str or keras.regularizers.Regularizer or None
@@ -174,6 +178,20 @@ class TabMBackbone(keras.layers.Layer):
 
         # Create all MLP blocks in __init__ (hidden_dims are config-known) so
         # weights are reliably created/restored across serialization.
+        #
+        # DECISION plan-2026-09-07T130829-d709705c/D-005: every block gets its OWN
+        # clone of both initializers. Do NOT hand `self.kernel_initializer` straight
+        # down: a seedless Keras 3 initializer instance self-assigns a seed at
+        # construction and replays it at every `add_weight` whose shape matches, so
+        # ONE shared instance gives two equal-width blocks BIT-IDENTICAL kernels --
+        # measured at `hidden_dims=[256, 256, 256], k=8`, blocks 1 and 2 came out at
+        # `max|k1 - k2| = 0.0` for both ensemble types, end to end through
+        # `create_tabm_model`. Two blocks then start as the same function. Same
+        # mechanism as D-002, one composition level up. `bias_initializer` is cloned
+        # for the same reason: the 'zeros' default clones to zeros (identical is
+        # correct there), but a random bias initializer aliases identically.
+        # `get_config()` still emits the UNCLONED attributes, so nothing serialized
+        # moves. See decisions.md D-005.
         self.blocks = [
             TabMMLPBlock(
                 units=units,
@@ -185,8 +203,8 @@ class TabMBackbone(keras.layers.Layer):
                 activation=self.activation,
                 dropout_rate=self.dropout_rate,
                 use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f'block_{i}'

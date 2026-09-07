@@ -47,6 +47,30 @@ def _roundtrip(layer, input_shape, data, name, tmp_path, cls):
     )
 
 
+def _block_kernel(block):
+    """The one kernel a ``TabMMLPBlock``'s ``linear`` sub-layer creates.
+
+    Named ``kernel`` on ``Dense`` and ``LinearEfficientEnsemble``, ``kernels`` on
+    ``NLinear`` (packed). Each of the three creates it from exactly ONE
+    ``add_weight`` call fed by ``kernel_initializer``, so this is the whole
+    surface that initializer reaches inside a block.
+    """
+    linear = block.linear
+    w = getattr(linear, "kernel", None)
+    if w is None:
+        w = getattr(linear, "kernels", None)
+    return keras.ops.convert_to_numpy(w)
+
+
+def _block_bias(block):
+    """The one bias of a ``TabMMLPBlock``'s ``linear`` sub-layer (``biases`` on ``NLinear``)."""
+    linear = block.linear
+    w = getattr(linear, "bias", None)
+    if w is None:
+        w = getattr(linear, "biases", None)
+    return keras.ops.convert_to_numpy(w)
+
+
 class TestScaleEnsemble:
     def test_forward_and_shape(self):
         layer = ScaleEnsemble(k=K, input_dim=D)
@@ -588,6 +612,71 @@ class TestTabMBackbone:
             TabMBackbone(hidden_dims=[8, 6], ensemble_type='packed')
         assert "k is None" in str(exc.value)
         assert os.path.basename(str(exc.traceback[-1].path)) == "tabm_mlp_block.py"
+
+    @pytest.mark.parametrize("ensemble_type, k", [
+        ("efficient", K),
+        ("packed", K),
+        # k=None builds plain `keras.layers.Dense` blocks -- same mechanism, third
+        # sub-layer class, so the guard is not specific to this package's layers.
+        ("efficient", None),
+    ])
+    def test_equal_width_blocks_get_independent_kernels(self, ensemble_type, k):
+        # MEASURED at 72911a325: the backbone stored ONE
+        # `keras.initializers.get(kernel_initializer)` instance and handed that same
+        # object to every block, so at `hidden_dims=[256, 256, 256], k=8` blocks 1
+        # and 2 came out at `max|k1 - k2| = 0.0` -- bit-identical -- for BOTH
+        # ensemble types and end to end through `create_tabm_model`. A seedless
+        # Keras 3 initializer replays its self-assigned seed at every `add_weight`
+        # whose shape matches, so two equal-width blocks started as the same
+        # function. Equal widths are what makes this arm capable of failing: at
+        # unequal widths the shapes differ and the draws differ anyway.
+        layer = TabMBackbone(hidden_dims=[D, D, D], k=k, ensemble_type=ensemble_type)
+        layer.build((None, K, D) if k is not None else (None, D))
+        k0, k1, k2 = (_block_kernel(b) for b in layer.blocks)
+        assert k0.shape == k1.shape == k2.shape, "arm is only meaningful at equal shapes"
+        for a, b, pair in ((k0, k1, "0/1"), (k1, k2, "1/2"), (k0, k2, "0/2")):
+            assert not np.array_equal(a, b), (
+                f"blocks {pair} start as the SAME function: max|diff| = "
+                f"{float(np.max(np.abs(a - b)))}"
+            )
+
+    @pytest.mark.parametrize("ensemble_type", ["efficient", "packed"])
+    def test_zeros_bias_blocks_stay_identical(self, ensemble_type):
+        # Positive control, so the test above is not read as "cloning makes
+        # everything differ". `bias_initializer` defaults to 'zeros', which is
+        # deterministic: cloning it yields zeros again, and identical zeros carry no
+        # symmetry-breaking loss. An arm here going red means a clone changed a
+        # DETERMINISTIC draw, which would be a real regression.
+        layer = TabMBackbone(hidden_dims=[D, D], k=K, ensemble_type=ensemble_type)
+        layer.build((None, K, D))
+        b0, b1 = (_block_bias(b) for b in layer.blocks)
+        np.testing.assert_array_equal(b0, np.zeros_like(b0))
+        np.testing.assert_array_equal(b0, b1)
+
+    def test_random_bias_initializer_also_draws_per_block(self):
+        # `bias_initializer` is cloned for the same reason as `kernel_initializer`:
+        # the 'zeros' default hides the aliasing, a random one does not.
+        layer = TabMBackbone(
+            hidden_dims=[D, D], k=K,
+            bias_initializer=keras.initializers.RandomNormal(stddev=0.5),
+        )
+        layer.build((None, K, D))
+        b0, b1 = (_block_bias(b) for b in layer.blocks)
+        assert not np.array_equal(b0, b1)
+
+    def test_cloning_leaves_the_serialized_initializers_untouched(self):
+        # The clones go to the BLOCKS; the backbone's own attributes -- and therefore
+        # `get_config()` -- must still be the caller's objects. A fix that reassigned
+        # `self.kernel_initializer = clone_initializer(...)` would pass the diversity
+        # test above and silently change what the archive records.
+        init = keras.initializers.GlorotUniform()
+        layer = TabMBackbone(hidden_dims=[D, D], kernel_initializer=init)
+        assert layer.kernel_initializer is init
+        config = layer.get_config()
+        assert config["kernel_initializer"] == keras.initializers.serialize(init)
+        assert config["bias_initializer"] == keras.initializers.serialize(
+            keras.initializers.get("zeros")
+        )
 
 
 class TestRegistrationKeys:
