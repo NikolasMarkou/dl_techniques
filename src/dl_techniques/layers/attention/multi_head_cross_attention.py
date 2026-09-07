@@ -30,6 +30,10 @@ References:
 import keras
 from typing import Optional, Any, Dict, Tuple, Union, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
 from .common import (
@@ -39,6 +43,7 @@ from .common import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.multi_head_cross_attention")
 class MultiHeadCrossAttention(keras.layers.Layer):
@@ -682,3 +687,5 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -46,6 +46,10 @@ References:
 import keras
 from typing import Optional, Union, Any, Dict, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.layers.norms.factory import create_normalization_layer
@@ -57,6 +61,8 @@ from .common import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 #: Raised from two places -- the pre-loop rank check and the in-loop
 #: dispatch's else -- so mask_slice can never be read unbound.
 _UNSUPPORTED_MASK_RANK = (
@@ -65,6 +71,7 @@ _UNSUPPORTED_MASK_RANK = (
     "(batch, num_heads, seq_len, seq_len); got rank {rank}."
 )
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.ring_attention")
 class RingAttention(keras.layers.Layer):
@@ -733,3 +740,5 @@ class RingAttention(keras.layers.Layer):
             'qk_norm_kwargs': self.qk_norm_kwargs,
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -28,9 +28,15 @@ References:
 import keras
 from typing import Optional, Tuple, Union, Any, Dict
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .common import validate_head_divisibility
 from .multi_head_cross_attention import MultiHeadCrossAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.multi_head_attention")
 class MultiHeadAttention(keras.layers.Layer):
@@ -65,7 +71,7 @@ class MultiHeadAttention(keras.layers.Layer):
         inputs [B, seq, dim]
                 │
                 ▼
-        ┌────────────────────────────┐
+        ┌─────────────────────────────┐
         │ cross_attention             │
         │  (MultiHeadCrossAttention,  │
         │   shared_qk_projections,    │
@@ -79,7 +85,7 @@ class MultiHeadAttention(keras.layers.Layer):
         │  weighted sum of V, merge   │
         │  output projection -> dim   │
         └──────────────┬──────────────┘
-                        ▼
+                       ▼
                 output [B, seq, dim]
 
     Every stage in that box belongs to :class:`MultiHeadCrossAttention`;
@@ -350,3 +356,5 @@ class MultiHeadAttention(keras.layers.Layer):
             "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
+
+# ---------------------------------------------------------------------

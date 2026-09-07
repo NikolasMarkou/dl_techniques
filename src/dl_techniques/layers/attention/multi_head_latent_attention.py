@@ -19,6 +19,10 @@ References:
 import keras
 from typing import Optional, Dict, Any, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.activations import ProbabilityOutput
@@ -26,6 +30,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 from .common import apply_attention_mask, compute_attention_scale
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.multi_head_latent_attention")
 class MultiHeadLatentAttention(keras.layers.Layer):
@@ -651,3 +656,5 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

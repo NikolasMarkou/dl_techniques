@@ -29,12 +29,19 @@ import keras
 import numpy as np
 from typing import Optional, Tuple, Union, Dict, Any, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 SparsityMode = Literal['none', 'top_k', 'threshold']
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.progressive_focused_attention")
 class ProgressiveFocusedAttention(keras.layers.Layer):
@@ -941,3 +948,5 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         )
 
         return output_shape, attn_map_shape
+
+# ---------------------------------------------------------------------

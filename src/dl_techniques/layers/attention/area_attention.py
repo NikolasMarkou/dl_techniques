@@ -23,6 +23,10 @@ convention.
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.standard_blocks import ConvBlock
@@ -35,6 +39,7 @@ from .common import (
     validate_head_divisibility,
 )
 
+# ---------------------------------------------------------------------
 
 def _fresh_initializer(
         initializer: keras.initializers.Initializer,
@@ -50,6 +55,7 @@ def _fresh_initializer(
     """
     return keras.initializers.get(keras.initializers.serialize(initializer))
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.area_attention")
 class AreaAttention(keras.layers.Layer):
@@ -524,3 +530,5 @@ class AreaAttention(keras.layers.Layer):
             ),
         })
         return config
+
+# ---------------------------------------------------------------------

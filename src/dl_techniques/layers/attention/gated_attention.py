@@ -26,14 +26,19 @@ References:
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.activations import ProbabilityOutput, resolve_activation_layer
-
-from .common import apply_attention_mask, compute_attention_scale
 from dl_techniques.utils.keras_registration import register_dl_technique
+from .common import apply_attention_mask, compute_attention_scale
+
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.gated_attention")
 class GatedAttention(keras.layers.Layer):
@@ -738,3 +743,5 @@ class GatedAttention(keras.layers.Layer):
             'gate_activation_args': self.gate_activation_args,
         })
         return config
+
+# ---------------------------------------------------------------------

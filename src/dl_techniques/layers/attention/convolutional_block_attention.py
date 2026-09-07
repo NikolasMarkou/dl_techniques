@@ -42,10 +42,15 @@ References:
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .channel_attention import ChannelAttention
 from .spatial_attention import SpatialAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.convolutional_block_attention")
 class CBAM(keras.layers.Layer):
@@ -80,24 +85,24 @@ class CBAM(keras.layers.Layer):
 
         inputs F [B, H, W, C]
                 │
-        ┌───────┴──────────┐
+        ┌───────┴────────────┐
         ▼                    │
         channel_attention(F) │
         -> M_c [B, 1, 1, C]  │
         │                    │
         ▼                    │
-        (x) <────────────────┘  broadcast over H, W
+       (x) <─────────────────┘  broadcast over H, W
         │
         ▼
         F' [B, H, W, C]  channel-refined
                 │
-        ┌───────┴──────────┐
+        ┌───────┴────────────┐
         ▼                    │
         spatial_attention(F')│
         -> M_s [B, H, W, 1]  │
         │                    │
         ▼                    │
-        (x) <────────────────┘  broadcast over C
+       (x) <─────────────────┘  broadcast over C
         │
         ▼
         output F'' [B, H, W, C]
@@ -363,3 +368,5 @@ class CBAM(keras.layers.Layer):
             "spatial_use_bias": self.spatial_use_bias,
         })
         return config
+
+# ---------------------------------------------------------------------

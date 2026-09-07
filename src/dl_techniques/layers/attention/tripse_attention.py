@@ -71,12 +71,12 @@ class TripletAttentionBranch(layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────┐
+        ┌──────────────────────────────────────────────────────────┐
         │  TripletAttentionBranch — one rotated-plane spatial gate │
-        │                                                         │
+        │                                                          │
         │  The one reusable branch. Rotate a plane forward, build  │
         │  a spatial gate from it, apply it, rotate back.          │
-        └─────────────────────────────────────────────────────────┘
+        └──────────────────────────────────────────────────────────┘
 
         Input  [B, H, W, C]
                   ▼

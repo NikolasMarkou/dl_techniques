@@ -24,9 +24,14 @@ import keras
 import numpy as np
 from typing import Optional, Tuple, Dict, Any, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.fnet_fourier_transform")
 class FNetFourierTransform(keras.layers.Layer):
@@ -468,3 +473,5 @@ class FNetFourierTransform(keras.layers.Layer):
             'epsilon': self.epsilon,
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -28,6 +28,10 @@ import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import ops, layers, initializers, regularizers
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations.probability_output import ProbabilityOutput
@@ -37,6 +41,8 @@ from .common import (
     compute_attention_scale
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 # Probability types that cannot be used as drop-in replacements for the
 # attention/coupling softmaxes in this layer (they consume features, not
@@ -56,6 +62,7 @@ _AXIS_AGNOSTIC_PROB_TYPES: Tuple[str, ...] = (
     "adaptive_softmax",
 )
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.capsule_routing_attention")
 class CapsuleRoutingSelfAttention(keras.layers.Layer):

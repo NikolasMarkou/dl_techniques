@@ -26,6 +26,10 @@ import keras
 import numpy as np
 from typing import Any, Dict, Tuple, Optional, Literal, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations import ProbabilityOutput, resolve_activation_layer
 from dl_techniques.utils.activation_serialization import (
@@ -36,6 +40,7 @@ from dl_techniques.utils.activation_serialization import (
 from .common import compute_attention_scale, mask_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.non_local_attention")
 class NonLocalAttention(keras.layers.Layer):
@@ -630,3 +635,5 @@ class NonLocalAttention(keras.layers.Layer):
             'activity_regularizer': keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

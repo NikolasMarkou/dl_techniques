@@ -29,6 +29,10 @@ import keras
 import numpy as np
 from typing import Optional, Dict, Any, Tuple, Union, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
@@ -185,17 +189,6 @@ def _compute_mandatory_indices(
 
 
 # ---------------------------------------------------------------------
-
-# DECISION plan_2026-07-26_c41d09b2/D-004: (a) scorer reads raw QK
-# projections, not post-qk-norm; (b) coarsest level is additive to top_k, not
-# consuming it; (c) causal sort key is an entry's last-pooled position, not its
-# window start. These three letters are cited by (a)/(b)/(c) elsewhere in this
-# file. See decisions.md.
-
-# DECISION plan-2026-07-27T130643-38c5646a/D-009: superseded by D-023
-# (per-causal-block top_k) -- kept as the record that this was once broken.
-# See decisions.md.
-
 
 @register_dl_technique("dl_techniques.layers.attention.lighthouse_attention")
 class LighthouseAttention(keras.layers.Layer):

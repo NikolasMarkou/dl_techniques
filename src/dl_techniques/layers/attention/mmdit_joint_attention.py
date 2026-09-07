@@ -19,10 +19,15 @@ list.
 import keras
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.mmdit_joint_attention")
 class MMDiTJointAttention(keras.layers.Layer):
@@ -441,3 +446,5 @@ class MMDiTJointAttention(keras.layers.Layer):
             }
         )
         return config
+
+# ---------------------------------------------------------------------

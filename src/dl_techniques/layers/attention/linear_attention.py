@@ -28,8 +28,14 @@ import keras
 from typing import Optional, Union, Tuple, Any, Dict
 from keras import ops, layers, initializers, regularizers
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 # Feature maps allowed here are exactly the positively-homogeneous,
 # non-negative ones; 'elu_plus_one'/'exp'/'softmax' break degree-1
@@ -37,6 +43,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 _SUPPORTED_FEATURE_MAPS = ('relu', 'relu_squared', 'abs')
 _FORBIDDEN_FEATURE_MAPS = ('elu_plus_one', 'exp', 'softmax')
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.linear_attention")
 class LinearAttention(keras.layers.Layer):
@@ -483,3 +490,5 @@ class LinearAttention(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

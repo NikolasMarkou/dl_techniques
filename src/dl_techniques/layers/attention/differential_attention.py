@@ -44,6 +44,10 @@ References:
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
@@ -51,6 +55,7 @@ from dl_techniques.layers.norms import create_normalization_layer
 from .common import apply_attention_mask, compute_attention_scale
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.differential_attention")
 class DifferentialMultiHeadAttention(keras.layers.Layer):

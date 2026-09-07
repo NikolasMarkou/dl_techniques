@@ -32,12 +32,17 @@ import math
 import keras
 from typing import Optional, Union, Tuple, Any, Dict
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .common import (
     compute_attention_scale,
     validate_head_divisibility
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.performer_attention")
 class PerformerAttention(keras.layers.Layer):
@@ -610,3 +615,5 @@ class PerformerAttention(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

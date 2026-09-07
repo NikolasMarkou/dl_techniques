@@ -23,6 +23,10 @@ References:
 import keras
 from typing import Any, Dict, Optional, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.embedding.multi_axis_rope import apply_rotary_pos_emb
@@ -33,11 +37,14 @@ from .common import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 # Not the same object as common.MASK_BIAS_VALUE: this layer casts straight
 # to scores.dtype instead of going through common.mask_dtype(...). Stays
 # finite under softmax because the diagonal is always same-segment.
 _MASK_NEG = -1e9
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.ideogram4_attention")
 class Ideogram4Attention(keras.layers.Layer):
@@ -376,3 +383,5 @@ class Ideogram4Attention(keras.layers.Layer):
             }
         )
         return config
+
+# ---------------------------------------------------------------------

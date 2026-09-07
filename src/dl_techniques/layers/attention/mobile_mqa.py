@@ -28,8 +28,14 @@ References:
 import keras
 from typing import Tuple, Optional, Any, Dict, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .group_query_attention import GroupedQueryAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.mobile_mqa")
 class MobileMQA(GroupedQueryAttention):
@@ -386,3 +392,5 @@ class MobileMQA(GroupedQueryAttention):
             "use_downsampling": self.use_downsampling,
         })
         return config
+
+# ---------------------------------------------------------------------

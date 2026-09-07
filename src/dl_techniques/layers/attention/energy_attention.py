@@ -29,6 +29,10 @@ import keras
 from keras import ops, initializers
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
 
@@ -44,6 +48,7 @@ from dl_techniques.layers.attention.common import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 def _token_keep(
     mask: keras.KerasTensor,
@@ -108,6 +113,7 @@ def _symmetric_token_keep(token_keep: keras.KerasTensor) -> keras.KerasTensor:
     query_keep = ops.expand_dims(ops.expand_dims(token_keep, axis=1), axis=2)
     return key_keep * query_keep
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.energy_attention")
 class EnergyAttention(keras.layers.Layer):

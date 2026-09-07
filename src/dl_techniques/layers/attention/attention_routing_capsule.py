@@ -46,9 +46,14 @@ References:
 import keras
 from typing import Optional, Tuple, Union, Dict, Any, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.attention_routing_capsule")
 class AttentionRoutingCapsule(keras.layers.Layer):
@@ -852,4 +857,4 @@ class CapsuleBlockV2(keras.layers.Layer):
         )
         return config
 
-
+# ---------------------------------------------------------------------

@@ -42,10 +42,15 @@ References:
 import keras
 from typing import Optional, Any, Dict, Tuple, Union, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .common import validate_head_divisibility
 from .multi_head_cross_attention import MultiHeadCrossAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 def _is_list_of_shapes(s: Any) -> bool:
     """Return whether ``s`` is a container of shapes rather than a single shape.
@@ -72,6 +77,7 @@ def _is_list_of_shapes(s: Any) -> bool:
         and isinstance(s[0], (list, tuple))
     )
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.perceiver_attention")
 class PerceiverAttention(keras.layers.Layer):
@@ -402,3 +408,5 @@ class PerceiverAttention(keras.layers.Layer):
             "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
+
+# ---------------------------------------------------------------------

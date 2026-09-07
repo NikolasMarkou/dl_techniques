@@ -19,6 +19,10 @@ import keras
 import numpy as np
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .common import apply_attention_mask
 from ..ffn.kan_linear import KANLinear
 from ..activations import ProbabilityOutput
@@ -29,6 +33,7 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.single_window_attention")
 class SingleWindowAttention(keras.layers.Layer):
@@ -63,27 +68,32 @@ class SingleWindowAttention(keras.layers.Layer):
               ▼
         ┌────────────────────────────────────────────────────┐
         │ size the window (3 regimes), build the internal    │
-        │ padding mask                                        │
+        │ padding mask                                       │
         │   default          pad to N_target = ws^2          │
         │   window_slots     N_target = len(slots), no pad   │
         │   pad_to_window=F  N_target = N_actual,   no pad   │
         └────────────────────────────────────────────────────┘
+              │
               ▼
         ┌────────────────────────────────────────────────────┐
-        │ QKV projection                                      │
-        │   'linear'  : fused Dense(3*dim)                    │
-        │   'kan_key' : Dense(Q) + KANLinear(K) + Dense(V)    │
-        │   reshape -> (B, heads, N_target, head_dim) each    │
+        │ QKV projection                                     │
+        │   'linear'  : fused Dense(3*dim)                   │
+        │   'kan_key' : Dense(Q) + KANLinear(K) + Dense(V)   │
+        │   reshape -> (B, heads, N_target, head_dim) each   │
         └────────────────────────────────────────────────────┘
+              │
               ▼
         [q_norm / k_norm]  (optional, qk_norm_type)
+              │
               ▼
         scores = (Q * scale) @ K^T        (B, heads, N, N)
+              │
               ▼
         [+ relative position bias]  (optional, gathered at the
-                                     full index or at the slots)
+              │                       full index or at the slots)
               ▼
         clip(scores, -30, 30)       on the raw scores, see D-010
+              │
               ▼
         ┌────────────────────────────────────────────────────┐
         │ mask: internal padding mask, times the caller's    │
@@ -91,12 +101,16 @@ class SingleWindowAttention(keras.layers.Layer):
         │                rank-3 (B, N, N) -> (B, 1, N, N)    │
         │ fully-masked slices are rescued, not left as -inf. │
         └────────────────────────────────────────────────────┘
+              │
               ▼
         ProbabilityOutput -> [dropout] -> weights @ V
+              │
               ▼
         transpose -> reshape -> output Dense projection
+              │
               ▼
         slice [:, :N_actual, :]      (a no-op when nothing was padded)
+              │
               ▼
         Output (B, N_actual, dim)
 

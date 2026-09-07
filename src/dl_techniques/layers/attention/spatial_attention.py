@@ -23,9 +23,14 @@ References:
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.spatial_attention")
 class SpatialAttention(keras.layers.Layer):
@@ -309,3 +314,5 @@ class SpatialAttention(keras.layers.Layer):
             "gate_activation_args": self.gate_activation_args,
         })
         return config
+
+# ---------------------------------------------------------------------

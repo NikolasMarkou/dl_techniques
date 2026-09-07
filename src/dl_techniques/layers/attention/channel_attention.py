@@ -23,9 +23,15 @@ References:
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.channel_attention")
 class ChannelAttention(keras.layers.Layer):
@@ -53,7 +59,7 @@ class ChannelAttention(keras.layers.Layer):
         reshape [B,C]   reshape [B,C]
         └───────┬────────┘
                 ▼
-        ┌────────────────────────┐
+        ┌─────────────────────────┐
         │ shared weights:         │
         │  dense1: Dense(C//ratio)│
         │  intermediate_activation│
@@ -65,9 +71,9 @@ class ChannelAttention(keras.layers.Layer):
             elementwise sum
                     │  [B, C]
                     ▼
-        ┌────────────────────────┐
+        ┌─────────────────────────┐
         │ gate_activation         │
-        │ ('sigmoid' by default) │
+        │ ('sigmoid' by default)  │
         └───────────┬─────────────┘
                     ▼
             reshape [B, 1, 1, C]
@@ -402,3 +408,5 @@ class ChannelAttention(keras.layers.Layer):
             "gate_activation_args": self.gate_activation_args,
         })
         return config
+
+# ---------------------------------------------------------------------

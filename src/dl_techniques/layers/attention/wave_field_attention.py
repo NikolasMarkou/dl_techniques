@@ -137,7 +137,7 @@ class WaveFieldAttention(keras.layers.Layer):
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
         │  gate 2, content gate:      × act(gate_proj(x))              │
-        │    how much survives; computed from the raw input             │
+        │    how much survives; computed from the raw input            │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
