@@ -14,12 +14,16 @@ The ``activation`` argument is stored through
 emitted through :func:`~dl_techniques.utils.activation_serialization.serialize_activation`,
 the same pair
 :class:`dl_techniques.layers.tabular.tabm_backbone.TabMBackbone` uses -- so a
-string key survives ``get_config()`` verbatim and a callable or activation
-``Layer`` round-trips as a config dict. Because that pair deliberately returns a
-string unchanged, the *live* callable ``call()`` runs is resolved separately into
+string key survives ``get_config()`` verbatim and a stateless callable
+round-trips as a config dict. Because that pair deliberately returns a string
+unchanged, the *live* callable ``call()`` runs is resolved separately into
 ``self.activation_fn``; ``self.activation`` is the serializable value and
 ``self.activation_fn`` is what the forward path invokes (the split
 ``layers/ffn/gated_mlp.py`` uses for the same reason).
+
+An activation **``Layer`` instance is rejected** by ``__init__``. Two supported
+forms remain: a name string and a stateless callable. See the class ``:raises``
+list and decisions.md D-009 for the measurements behind that rejection.
 """
 
 import keras
@@ -85,6 +89,9 @@ class TabMMLPBlock(keras.layers.Layer):
         shared kernel plus rank-1 per-member scaling); ``'packed'`` uses an
         :class:`NLinear`, i.e. ``k`` fully independent kernels, which costs ``k``
         times the backbone parameters and is the honest deep-ensemble baseline.
+        There is no ensemble at all when ``k is None``, so any value other than
+        the ``'efficient'`` default is **rejected** in that case rather than
+        silently discarded -- ``k is None`` always builds a plain ``Dense``.
     :type ensemble_type: str
     :param ensemble_scaling_in: Whether the efficient ensemble applies per-member
         input scaling. Ignored when ``ensemble_type='packed'`` or ``k is None``.
@@ -95,9 +102,11 @@ class TabMMLPBlock(keras.layers.Layer):
     :param init_distribution: Initialization of the per-member scaling vectors
         (see :class:`LinearEfficientEnsemble`).
     :type init_distribution: str
-    :param activation: Activation, as a name string, a callable, or an
-        activation ``Layer``. Stored verbatim for ``get_config()``; the live
-        callable used by ``call()`` is resolved into ``activation_fn``.
+    :param activation: Activation, as a name string (``'relu'``, ``'mish'``,
+        ...) or as a **stateless** callable (``keras.activations.gelu``, ...).
+        Stored verbatim for ``get_config()``; the live callable used by
+        ``call()`` is resolved into ``activation_fn``. An activation ``Layer``
+        instance is **not** accepted -- see ``:raises``.
     :type activation: str or Callable
     :param dropout_rate: Dropout rate, in ``[0, 1]``.
     :type dropout_rate: float
@@ -126,9 +135,13 @@ class TabMMLPBlock(keras.layers.Layer):
         ``build()`` and ``call()`` that gate on the rate, not the construction.
     :vartype dropout: keras.layers.Dropout
 
-    :raises ValueError: If ``ensemble_type`` is not ``'efficient'`` or ``'packed'``,
-        if ``units`` is not positive, if ``k`` is given and not positive, or if
-        ``dropout_rate`` is outside ``[0, 1]``.
+    :raises ValueError: If ``ensemble_type`` is not ``'efficient'`` or
+        ``'packed'``; if ``ensemble_type`` is non-default while ``k is None``
+        (there is no ensemble to configure, and the setting would otherwise be
+        discarded while ``get_config()`` still reported it); if ``units`` is not
+        positive; if ``k`` is given and not positive; if ``dropout_rate`` is
+        outside ``[0, 1]``; or if ``activation`` resolves to a
+        ``keras.layers.Layer`` instance.
     """
 
     def __init__(
@@ -149,9 +162,21 @@ class TabMMLPBlock(keras.layers.Layer):
             **kwargs
     ) -> None:
         super().__init__(**kwargs)
+        # Resolved before validation, not after: `from_config` hands back a config
+        # dict, and only the deserialized value can be checked for what it is.
+        activation = deserialize_activation(activation)
+
         if ensemble_type not in ('efficient', 'packed'):
             raise ValueError(
                 f"ensemble_type must be 'efficient' or 'packed'; got {ensemble_type!r}"
+            )
+        if k is None and ensemble_type != 'efficient':
+            raise ValueError(
+                f"ensemble_type={ensemble_type!r} is meaningless when k is None: with no "
+                f"ensemble members this block is a plain Dense, so the setting would be "
+                f"silently discarded while get_config() still reported {ensemble_type!r}. "
+                f"Pass k to build an ensemble, or leave ensemble_type at its 'efficient' "
+                f"default."
             )
         if units <= 0:
             raise ValueError(f"units must be positive; got {units!r}")
@@ -159,6 +184,17 @@ class TabMMLPBlock(keras.layers.Layer):
             raise ValueError(f"k must be positive when given; got {k!r}")
         if not 0.0 <= dropout_rate <= 1.0:
             raise ValueError(f"dropout_rate must be in [0, 1]; got {dropout_rate!r}")
+        if isinstance(activation, keras.layers.Layer):
+            raise ValueError(
+                f"activation must be a name string (e.g. 'relu', 'mish') or a stateless "
+                f"callable (e.g. keras.activations.gelu); got a "
+                f"{type(activation).__name__} Layer instance. An activation Layer is not "
+                f"supported here: build() does not build it, so a parameterised one such "
+                f"as PReLU creates its variables lazily inside call() and they are absent "
+                f"from the archive at save() time; and TabMBackbone would hand the one "
+                f"instance to every block, which raises on the forward pass as soon as two "
+                f"blocks differ in width. See decisions.md D-009."
+            )
 
         self.units = units
         self.k = k
@@ -166,10 +202,20 @@ class TabMMLPBlock(keras.layers.Layer):
         self.ensemble_scaling_in = ensemble_scaling_in
         self.ensemble_scaling_out = ensemble_scaling_out
         self.init_distribution = init_distribution
-        # `deserialize_activation` returns a string unchanged, so `self.activation`
-        # is the SERIALIZABLE value (what `get_config` emits) and may be a str;
-        # `self.activation_fn` is the live callable `call()` runs.
-        self.activation = deserialize_activation(activation)
+        # DECISION plan-2026-09-07T095804-b821967f/D-009: `activation` and `activation_fn`
+        # are two attributes on purpose. `self.activation` is the SERIALIZABLE value (what
+        # `get_config` emits) and is usually a `str`; `self.activation_fn` is the live
+        # callable `call()` runs. Do NOT collapse `activation_fn` back into `activation`:
+        # `deserialize_activation` returns a non-dict UNCHANGED (by design -- see
+        # `utils/activation_serialization.py`, because a dl_techniques factory key such as
+        # 'mish' must survive `get_config()` verbatim), so a single
+        # `self.activation = deserialize_activation(activation)` leaves a plain string in
+        # the attribute and `call()` raises `TypeError: 'str' object is not callable` on
+        # the DEFAULT 'relu' path every shipped caller uses. Do NOT "fix" that by eagerly
+        # storing `keras.activations.get(activation)` either: that is the pre-split shape,
+        # and it destroys the factory key on the way into `get_config()`. Same split as
+        # `layers/ffn/gated_mlp.py`. See decisions.md D-009.
+        self.activation = activation
         self.activation_fn = (
             self.activation if callable(self.activation)
             else keras.activations.get(self.activation)

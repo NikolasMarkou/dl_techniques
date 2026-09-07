@@ -16,6 +16,12 @@ That pair returns a non-``dict`` unchanged, so ``self.activation`` is the
 blocks in that form. The backbone never invokes it: resolving the live callable
 is ``TabMMLPBlock``'s job (``activation_fn`` there), which is why this module
 needs no callable of its own.
+
+The supported forms are therefore exactly ``TabMMLPBlock``'s: a name string or a
+**stateless** callable. An activation ``Layer`` instance is rejected as the first
+block is constructed -- the backbone would otherwise hand *one* instance to every
+block, so a parameterised one would share its variables across widths and raise
+on the forward pass. See decisions.md D-009.
 """
 
 import keras
@@ -80,8 +86,10 @@ class TabMBackbone(keras.layers.Layer):
     :type ensemble_scaling_out: bool
     :param init_distribution: Initialization of the per-member scaling vectors.
     :type init_distribution: str
-    :param activation: Activation, as a name string, a callable, or an activation
-        ``Layer``. Stored verbatim and handed to every block in that form.
+    :param activation: Activation, as a name string (``'relu'``, ``'mish'``,
+        ...) or as a **stateless** callable. Stored verbatim and handed to every
+        block in that form. An activation ``Layer`` instance is **not** accepted
+        -- see ``:raises``.
     :type activation: str or Callable
     :param dropout_rate: Dropout rate, in ``[0, 1]``.
     :type dropout_rate: float
@@ -109,9 +117,12 @@ class TabMBackbone(keras.layers.Layer):
     :vartype blocks: list[TabMMLPBlock]
 
     :raises ValueError: If ``hidden_dims`` is empty or holds a non-positive
-        entry, or if ``dropout_rate`` is outside ``[0, 1]``. ``k`` and
-        ``ensemble_type`` are validated by :class:`TabMMLPBlock` as the blocks
-        are constructed.
+        entry, or if ``dropout_rate`` is outside ``[0, 1]``. ``k``,
+        ``ensemble_type`` (including a non-default value combined with
+        ``k is None``) and ``activation`` (an activation ``Layer`` instance) are
+        validated by :class:`TabMMLPBlock` as the blocks are constructed, so
+        those raises come from ``tabm_mlp_block.py``'s frame -- one guard, not
+        two copies that can drift.
     """
 
     def __init__(

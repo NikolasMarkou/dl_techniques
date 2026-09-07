@@ -203,6 +203,10 @@ class TestTabMMLPBlock:
         (dict(units=8, k=-2), "-2"),
         (dict(units=8, dropout_rate=1.5), "1.5"),
         (dict(units=8, dropout_rate=-0.1), "-0.1"),
+        # k=None means there is no ensemble, so the `if self.k is None` branch wins
+        # and a plain Dense is built. Before this arm existed, `ensemble_type` was
+        # then SILENTLY discarded while `get_config()` still reported 'packed'.
+        (dict(units=8, ensemble_type='packed'), "packed"),
     ])
     def test_constructor_rejects_out_of_range(self, kwargs, bad):
         with pytest.raises(ValueError) as exc:
@@ -210,15 +214,43 @@ class TestTabMMLPBlock:
         # The message must name the offending value, not just the argument.
         assert bad in str(exc.value)
 
+    def test_packed_with_k_none_is_rejected_not_silently_discarded(self):
+        # The discriminating observable is the DISAGREEMENT the raise now prevents:
+        # against the pre-fix code `type(block.linear).__name__ == 'Dense'` while
+        # `get_config()['ensemble_type'] == 'packed'`. Asserting only that a
+        # ValueError is raised would not say what it protects, so name both halves.
+        with pytest.raises(ValueError) as exc:
+            TabMMLPBlock(units=8, ensemble_type='packed')
+        msg = str(exc.value)
+        assert "k is None" in msg
+        assert "packed" in msg
+        # And the raise belongs to this layer, not to a sub-layer constructor.
+        assert os.path.basename(str(exc.traceback[-1].path)) == "tabm_mlp_block.py"
+
     @pytest.mark.parametrize("kwargs", [
         dict(units=8),
         dict(units=8, k=K),
         dict(units=8, dropout_rate=0.0),
         dict(units=8, dropout_rate=1.0),
+        # The shipped 'plain' TabM path: ARCH_SPECS['plain'] passes the DEFAULT
+        # ensemble_type together with k=None, so the guard above must not fire on it.
+        dict(units=8, ensemble_type='efficient'),
+        # 'packed' is legal the moment there is actually an ensemble to pack.
+        dict(units=8, k=K, ensemble_type='packed'),
     ])
     def test_constructor_accepts_valid(self, kwargs):
         # Positive controls: the guards above must not fire on shipped configs.
         assert TabMMLPBlock(**kwargs) is not None
+
+    def test_ensemble_type_reaches_the_built_sublayer(self):
+        # `get_config()` echoing a knob proves nothing about what was built; assert
+        # the sub-layer TYPE, which is the only thing that distinguishes the two
+        # ensemble realizations.
+        assert type(TabMMLPBlock(units=8, k=K, ensemble_type='packed').linear) is NLinear
+        assert type(
+            TabMMLPBlock(units=8, k=K, ensemble_type='efficient').linear
+        ) is LinearEfficientEnsemble
+        assert type(TabMMLPBlock(units=8).linear) is keras.layers.Dense
 
     def test_activation_is_stored_verbatim_not_eagerly_resolved(self):
         # RED against the pre-split implementation, which did
@@ -243,13 +275,50 @@ class TestTabMMLPBlock:
         ("relu", "act_str"),
         ("mish", "act_mish"),
         (keras.activations.gelu, "act_callable"),
-        (GoLU(), "act_layer"),
     ])
     def test_activation_roundtrip(self, activation, tag, tmp_path):
-        # `mish` and the GoLU layer are dl_techniques activations; the live
-        # callable is the form TabMBackbone hands down when a caller passes one.
+        # `mish` is a dl_techniques activation key; the live callable is the form
+        # TabMBackbone hands down when a caller passes one. These two forms plus a
+        # plain name string are the ONLY supported ones -- a Layer is rejected, see
+        # `test_activation_layer_is_rejected`.
         _roundtrip(TabMMLPBlock(units=8, activation=activation, name=tag), (10,),
                    _f32(B, 10), tag, tmp_path, TabMMLPBlock)
+
+    @pytest.mark.parametrize("act_layer, tag", [
+        (keras.layers.PReLU(), "prelu"),   # parameterised: owns a variable
+        (GoLU(), "golu"),                  # stateless: owns none
+    ])
+    def test_activation_layer_is_rejected(self, act_layer, tag):
+        # Replaces the previous `GoLU()` ROUND-TRIP arm, which could not fail:
+        # MEASURED, GoLU has zero weights and is shape-agnostic, so it was blind to
+        # both real defects of the Layer path. Those defects, MEASURED at 255400a0f:
+        #   (a) `build()` builds only `self.linear` and `self.dropout`, never the
+        #       activation, so a functional model wrapping
+        #       `TabMMLPBlock(units=4, k=3, activation=keras.layers.PReLU())` had
+        #       4 weights at `model.save()` time and 5 after the first forward pass
+        #       -- the archive silently omitted `alpha`;
+        #   (b) `TabMBackbone` hands ONE instance to every block, so
+        #       `TabMBackbone(hidden_dims=[8, 6], k=3, activation=keras.layers.PReLU())`
+        #       raised `InvalidArgumentError: Incompatible shapes: [3,8] vs [2,3,6]`.
+        # The stateless arm is included deliberately: the guard is on the TYPE, not
+        # on whether the instance happens to own variables today, so a future
+        # stateful rewrite of a currently-stateless activation Layer cannot slip in.
+        with pytest.raises(ValueError) as exc:
+            TabMMLPBlock(units=8, activation=act_layer)
+        msg = str(exc.value)
+        assert type(act_layer).__name__ in msg   # names what was passed
+        assert "'relu'" in msg                   # names the remedy: a name string
+        assert "keras.activations.gelu" in msg   # ... or a stateless callable
+
+    def test_activation_layer_config_dict_is_rejected_too(self):
+        # The `from_config` route: a config written before the guard existed carries
+        # the Layer as a dict, and `deserialize_activation` turns it back into a live
+        # Layer. Validating the RAW argument instead of the deserialized value would
+        # leave that route open, so the guard must sit after the deserialize call.
+        cfg = keras.saving.serialize_keras_object(GoLU())
+        assert isinstance(cfg, dict)
+        with pytest.raises(ValueError, match="Layer instance"):
+            TabMMLPBlock(units=8, activation=cfg)
 
     @pytest.mark.parametrize("rate, tag", [(0.0, "drop0"), (0.5, "drop5")])
     def test_dropout_object_exists_at_every_rate(self, rate, tag, tmp_path):
@@ -339,3 +408,25 @@ class TestTabMBackbone:
         # backbone that eagerly resolved it would round-trip a different function.
         _roundtrip(TabMBackbone(hidden_dims=[8, 8], activation="mish", name="bb_mish"),
                    (10,), _f32(B, 10), "bb_mish", tmp_path, TabMBackbone)
+
+    def test_activation_layer_is_rejected_before_any_block_is_usable(self):
+        # The backbone hands ONE `activation` object to every block, so a stateful
+        # activation Layer would be SHARED across blocks of different widths.
+        # MEASURED at 255400a0f: `TabMBackbone(hidden_dims=[8, 6], k=3,
+        # activation=keras.layers.PReLU())` raised `InvalidArgumentError:
+        # Incompatible shapes: [3,8] vs [2,3,6]` on the forward pass -- a shape error
+        # from deep inside PReLU, arbitrarily far from the constructor that caused it.
+        # The guard lives in TabMMLPBlock (one copy, not two that can drift), so the
+        # raise is a ValueError from that frame, at CONSTRUCTION time.
+        with pytest.raises(ValueError) as exc:
+            TabMBackbone(hidden_dims=[8, 6], k=K, activation=keras.layers.PReLU())
+        assert "Layer instance" in str(exc.value)
+        assert os.path.basename(str(exc.traceback[-1].path)) == "tabm_mlp_block.py"
+
+    def test_packed_with_k_none_is_rejected_through_the_blocks(self):
+        # Same delegation, second knob: the backbone does not re-implement the
+        # ensemble_type/k interaction, it inherits the block's guard.
+        with pytest.raises(ValueError) as exc:
+            TabMBackbone(hidden_dims=[8, 6], ensemble_type='packed')
+        assert "k is None" in str(exc.value)
+        assert os.path.basename(str(exc.traceback[-1].path)) == "tabm_mlp_block.py"
