@@ -32,10 +32,15 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .baseline_ntm import NeuralTuringMachine, create_ntm
 from .ntm_interface import NTMConfig
 from .som_2d_layer import SOM2dLayer
 
+# ---------------------------------------------------------------------
 
 def create_mann(
     memory_locations: int,
@@ -155,6 +160,7 @@ def create_mann(
         **kwargs,
     )
 
+# ---------------------------------------------------------------------
 
 def create_som_2d(
     map_size: tuple[int, int],
@@ -217,6 +223,7 @@ def create_som_2d(
     """
     return SOM2dLayer(map_size=map_size, input_dim=input_dim, **kwargs)
 
+# ---------------------------------------------------------------------
 
 __all__ = [
     "create_mann",
