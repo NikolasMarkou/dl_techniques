@@ -99,7 +99,29 @@ class ScaleEnsemble(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the scaling weights with proper initialization."""
+        """Build the scaling weights with proper initialization.
+
+        :param input_shape: Shape of the input, ``(batch, k, input_dim)``.
+        :type input_shape: tuple
+
+        :raises ValueError: If ``input_shape[1]`` disagrees with ``k``, or if
+            ``input_shape[-1]`` disagrees with ``input_dim``. Both axes are
+            REQUIRED constructor arguments, and :meth:`call` is a broadcasting
+            elementwise multiply, so an unchecked mismatch is absorbed silently
+            and returns a plausible-looking result computed from the wrong
+            weight. A ``None`` (symbolic) axis is not checked.
+        """
+        if input_shape[1] is not None and input_shape[1] != self.k:
+            raise ValueError(
+                f"k was given as {self.k!r} but the input's axis 1 is "
+                f"{input_shape[1]!r}; input_shape={tuple(input_shape)!r}"
+            )
+        if input_shape[-1] is not None and input_shape[-1] != self.input_dim:
+            raise ValueError(
+                f"input_dim was given as {self.input_dim!r} but the input's last "
+                f"axis is {input_shape[-1]!r}; input_shape={tuple(input_shape)!r}"
+            )
+
         self.weight = self.add_weight(
             shape=(self.k, self.input_dim),
             initializer=self.kernel_initializer,

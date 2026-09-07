@@ -153,7 +153,21 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         Each of the three optional weights is created only when its flag is set,
         and :meth:`call` reads it behind the identical flag. See the D-011
         anchor below the kernel for why that conditionality is load-bearing.
+
+        :param input_shape: Shape of the input, ``(batch, k, input_dim)``.
+        :type input_shape: tuple
+
+        :raises ValueError: If ``input_shape[1]`` disagrees with ``k``. Without
+            this check ``build()`` accepts the mismatch and the failure surfaces
+            later as an opaque backend error from inside :meth:`call`. A ``None``
+            (symbolic) axis is not checked.
         """
+        if input_shape[1] is not None and input_shape[1] != self.k:
+            raise ValueError(
+                f"k was given as {self.k!r} but the input's axis 1 is "
+                f"{input_shape[1]!r}; input_shape={tuple(input_shape)!r}"
+            )
+
         input_dim = input_shape[-1]
 
         # Main weight matrix shared across ensemble members

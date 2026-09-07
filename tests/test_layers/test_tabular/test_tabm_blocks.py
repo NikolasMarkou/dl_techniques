@@ -75,6 +75,43 @@ class TestScaleEnsemble:
         layer = ScaleEnsemble(k=K, input_dim=D)
         assert (layer.k, layer.input_dim) == (K, D)
 
+    def test_build_rejects_k_mismatch(self):
+        # `k` is a REQUIRED constructor argument that names axis 1, but build()
+        # used to read nothing at all from `input_shape`.
+        layer = ScaleEnsemble(k=K, input_dim=D)
+        with pytest.raises(ValueError) as exc:
+            layer.build((None, K + 4, D))
+        msg = str(exc.value)
+        assert str(K) in msg and str(K + 4) in msg
+        assert str(tuple((None, K + 4, D))) in msg
+
+    def test_build_rejects_input_dim_mismatch(self):
+        # The measured reproduction: `input_dim=1` against a (B, K, D) input was
+        # accepted and then absorbed by the broadcast in call(), which returned a
+        # (B, K, D) tensor scaled by the WRONG (K, 1) weight and no error at all.
+        layer = ScaleEnsemble(k=K, input_dim=1)
+        with pytest.raises(ValueError) as exc:
+            layer.build((B, K, D))
+        msg = str(exc.value)
+        assert "1" in msg and str(D) in msg
+        assert str(tuple((B, K, D))) in msg
+
+    def test_build_accepts_matching_shape(self):
+        # Positive control: the guards must not reject the contract shape.
+        layer = ScaleEnsemble(k=K, input_dim=D)
+        layer.build((B, K, D))
+        assert tuple(layer.weight.shape) == (K, D)
+
+    @pytest.mark.parametrize("shape", [(None, None, D), (None, K, None)])
+    def test_build_accepts_unknown_axes(self, shape):
+        # The `is not None` sub-condition on both guards exists for this: a
+        # symbolic/unknown axis carries no information and must not raise.
+        # Sub-layers here are built via a direct `.build(input_shape)` call, not
+        # always through a fully concrete functional trace.
+        layer = ScaleEnsemble(k=K, input_dim=D)
+        layer.build(shape)
+        assert tuple(layer.weight.shape) == (K, D)
+
 
 class TestLinearEfficientEnsemble:
     def test_forward_and_shape(self):
@@ -155,6 +192,31 @@ class TestLinearEfficientEnsemble:
         assert r.shape == s.shape == (K, 8)
         assert np.array_equal(r, s)
         assert np.array_equal(r, np.ones_like(r))
+
+    def test_build_rejects_k_mismatch(self):
+        # build() only ever read `input_shape[-1]` (the kernel fan-in); an axis-1
+        # mismatch was accepted here and surfaced later as an opaque backend
+        # InvalidArgumentError from the `x * expand_dims(r, 0)` multiply in call().
+        layer = LinearEfficientEnsemble(units=5, k=K)
+        with pytest.raises(ValueError) as exc:
+            layer.build((B, K + 4, D))
+        msg = str(exc.value)
+        assert str(K) in msg and str(K + 4) in msg
+        assert str(tuple((B, K + 4, D))) in msg
+
+    def test_build_accepts_matching_k(self):
+        # Positive control: the contract shape still builds, weights unchanged.
+        layer = LinearEfficientEnsemble(units=5, k=K)
+        layer.build((B, K, D))
+        assert tuple(layer.kernel.shape) == (D, 5)
+        assert tuple(layer.r.shape) == (K, D)
+
+    def test_build_accepts_unknown_k_axis(self):
+        # `is not None` sub-condition (H-2): an unknown axis 1 must build, and
+        # the weights are still sized from the STORED `k`, not from the input.
+        layer = LinearEfficientEnsemble(units=5, k=K)
+        layer.build((None, None, D))
+        assert tuple(layer.r.shape) == (K, D)
 
 
 class TestNLinear:
