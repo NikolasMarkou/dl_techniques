@@ -155,6 +155,19 @@ class TrainingConfig(BFUnetTrainingConfig):
 
     # ConvNeXt-specific model fields.
     convnext_version: str = "v1"    # v1 = strict bias-free; v2 opt-in (GRN beta trains)
+    # DEPTHWISE Gabor stem (opt-in, ConvUNeXt only). None (default) = the shared
+    # cross-channel Conv2D warm start from BFUnetTrainingConfig, byte-identical to every
+    # existing run. When set (>= 1) the stem becomes a bias-free DepthwiseConv2D bank
+    # applied per input channel with NO mixing, so it emits `channels *
+    # gabor_filters_per_channel` responses and the inherited `gabor_filters` is not read
+    # at all -- the two are alternatives, never composed (build_model + the factory both
+    # branch on this being None). Kept a ConvUNeXt-only field, NOT promoted to
+    # BFUnetTrainingConfig: `create_bfunet_denoiser` and `create_bfcnn_denoiser` have no
+    # such kwarg, so a shared field would be a silently-inert knob on two of the three
+    # trainers. The bank is built TRAINABLE (the factory overrides
+    # create_gabor_depthwise_conv2d's own frozen default) so --freeze-gabor-stem stays
+    # the single freeze knob for either stem kind.
+    gabor_filters_per_channel: Optional[int] = None
     # Grow output channels at decoder level 0: append `output_channels` zero-initialized channels before the level-0 ConvNeXt blocks (widened to absorb them), then keep ONLY those as the output, dropping the learned 1x1 final projection. Bias-free, default OFF. See bfconvunext create_convunext_denoiser.
     extra_zero_output_channels: bool = False
     # Opt-in depthwise-kernel init/regularization pass-through (plan_2026-06-20_353a3a76).
@@ -188,6 +201,21 @@ class TrainingConfig(BFUnetTrainingConfig):
             )
         if self.convnext_version not in ("v1", "v2"):
             raise ValueError("convnext_version must be 'v1' or 'v2'")
+        if self.gabor_filters_per_channel is not None:
+            if self.gabor_filters_per_channel < 1:
+                raise ValueError(
+                    "gabor_filters_per_channel is a depthwise depth_multiplier and must "
+                    f"be >= 1 when set, got {self.gabor_filters_per_channel}. Leave it "
+                    "None for the cross-channel Conv2D Gabor stem."
+                )
+            if not self.use_gabor_stem:
+                # Belt-and-suspenders with the parse-time guard and the factory's own
+                # check: a flag that reaches no layer must never be a silent no-op.
+                raise ValueError(
+                    "gabor_filters_per_channel selects the DEPTHWISE Gabor stem, but "
+                    "use_gabor_stem=False builds no stem at all (--no-gabor-stem). "
+                    "Drop one of them."
+                )
         if self.bottleneck_attention_blocks < 0:
             raise ValueError(
                 f"bottleneck_attention_blocks must be >= 0, got "
@@ -239,6 +267,10 @@ def build_model(config: TrainingConfig) -> keras.Model:
         gabor_stem_projection=config.gabor_stem_projection,
         gabor_filters=config.gabor_filters,
         initial_filters=cfg["initial_filters"],
+        # Selects the depthwise arm of the width rule (channels * per-channel count),
+        # which is a DIFFERENT rule from the cross-channel one -- see the predicate.
+        gabor_filters_per_channel=config.gabor_filters_per_channel,
+        channels=config.channels,
     )
     # Resolve the final-projection group count: -1 means one group per output channel
     # (groups == channels), so each output channel reads a disjoint feature group.
@@ -272,6 +304,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         input_shape=input_shape,
         use_gabor_stem=config.use_gabor_stem,
         gabor_filters=config.gabor_filters,
+        gabor_filters_per_channel=config.gabor_filters_per_channel,
         gabor_kernel_size=config.gabor_kernel_size,
         gabor_activation=config.gabor_activation,
         gabor_stem_projection=config.gabor_stem_projection,
@@ -370,6 +403,20 @@ def parse_arguments() -> argparse.Namespace:
     add_common_arguments(parser)
     parser.add_argument("--variant", choices=list(CONVUNEXT_CONFIGS), default="base")
     parser.add_argument("--convnext-version", choices=["v1", "v2"], default="v1")
+    parser.add_argument(
+        "--gabor-filters-per-channel", type=int, default=None,
+        help="Opt-in DEPTHWISE Gabor stem: build the stem as a bias-free "
+             "DepthwiseConv2D bank with depth_multiplier=N applied to each input "
+             "channel INDEPENDENTLY (no cross-channel mixing), emitting "
+             "channels*N responses, instead of the default cross-channel Conv2D warm "
+             "start. Restores the per-channel, colour-SELECTIVE front end the Conv2D "
+             "stem gave up. MUTUALLY EXCLUSIVE with --gabor-filters, which is a Conv2D "
+             "output-channel count and is not read on this arm (passing both is a parse "
+             "error). Still trainable and still bias-free, so --freeze-gabor-stem and "
+             "degree-1 homogeneity work unchanged. With --no-gabor-projection the width "
+             "rule becomes channels*N == initial_filters. Default None = OFF, "
+             "byte-identical to existing checkpoints.",
+    )
     parser.add_argument("--extra-zero-output-channels", action="store_true", help="Grow output channels at decoder level 0: append output_channels zero-initialized channels before the level-0 ConvNeXt blocks (widened), then keep ONLY those as the output instead of the learned 1x1 projection. Bias-free; default OFF.")
     parser.add_argument(
         "--depthwise-initializer", type=str, default=None,
@@ -403,7 +450,49 @@ def parse_arguments() -> argparse.Namespace:
     )
     args = parser.parse_args()
     reject_self_iterate_with_nonadditive(parser, args)
+    reject_conflicting_gabor_stem_counts(parser, args)
     return args
+
+
+def reject_conflicting_gabor_stem_counts(parser, args) -> None:
+    """Parse-time guard: the two Gabor filter-count flags are mutually exclusive.
+
+    ``--gabor-filters`` is the cross-channel stem's OUTPUT channel count (a ``Conv2D``
+    ``filters``); ``--gabor-filters-per-channel`` is the depthwise stem's
+    ``depth_multiplier``. Exactly one stem is built, so exactly one of them is read.
+    Accepting both would leave whichever lost silently inert -- and this pair is the
+    high-risk case for that, because ``gabor_filters`` USED to mean a depth_multiplier
+    (pre-2026-09-06) and a reader carrying that memory will reach for it first.
+
+    ``argparse``'s ``add_mutually_exclusive_group`` cannot express this: ``--gabor-filters``
+    is registered by the SHARED ``add_common_arguments`` (all three trainers) while the
+    depthwise flag is ConvUNeXt-only, and it carries a non-None default of 32, so "was it
+    passed?" is a question about the default, not about None. Comparing against
+    ``parser.get_default`` answers exactly that. An explicit ``--gabor-filters 32``
+    alongside the depthwise flag is therefore accepted, which is correct: it requests the
+    value that is already there and changes nothing.
+
+    :param parser: The trainer's ``ArgumentParser``, for ``parser.error``.
+    :param args: The parsed namespace.
+    :return: None.
+    :raises SystemExit: Via ``parser.error`` when both counts were given.
+    """
+    if args.gabor_filters_per_channel is None:
+        return
+    if args.gabor_filters != parser.get_default("gabor_filters"):
+        parser.error(
+            "--gabor-filters and --gabor-filters-per-channel are mutually exclusive: "
+            "the first is the cross-channel Conv2D stem's OUTPUT channel count, the "
+            "second the depthwise stem's per-channel multiplier (output = channels * N). "
+            "Only one stem is built, so only one of them would be read. NOTE "
+            "--gabor-filters is no longer a depth_multiplier -- if that is what you "
+            "wanted, pass --gabor-filters-per-channel alone."
+        )
+    if args.no_gabor_stem:
+        parser.error(
+            "--gabor-filters-per-channel selects the depthwise Gabor stem, but "
+            "--no-gabor-stem builds no stem at all. Drop one of them."
+        )
 
 
 def main():
@@ -441,6 +530,7 @@ def main():
             depth=args.depth,
             blocks_per_level=args.blocks_per_level,
             gabor_filters=8,
+            gabor_filters_per_channel=args.gabor_filters_per_channel,
             gabor_kernel_size=args.gabor_kernel_size,
             gabor_activation=args.gabor_activation,
             epochs=2,
@@ -527,6 +617,7 @@ def main():
             enable_analyzer=args.analyzer,
             analyzer_freq=args.analyzer_freq,
             gabor_filters=args.gabor_filters,
+            gabor_filters_per_channel=args.gabor_filters_per_channel,
             gabor_kernel_size=args.gabor_kernel_size,
             gabor_activation=args.gabor_activation,
             gabor_stem_projection=not args.no_gabor_projection,
@@ -600,9 +691,23 @@ def main():
     if config.ww_pgd_log_alpha:
         config.ww_pgd = True
 
+    if config.gabor_filters_per_channel is None:
+        gabor_desc = f"{config.use_gabor_stem}"
+    else:
+        # Bind the multiplier to a local and multiply through it. Spelling the
+        # config attribute inline here would textually reproduce the retired
+        # channels-times-gabor-filters rule as a PREFIX, and
+        # `test_the_gabor_stem_channel_rule.py` scans this module's source -- comments
+        # included -- for it. That scan is right to exist: the retired rule must not
+        # come back for `gabor_filters`, only the depthwise count multiplies.
+        per_channel = config.gabor_filters_per_channel
+        gabor_desc = (
+            f"{config.use_gabor_stem} (DEPTHWISE x{per_channel}/channel -> "
+            f"{config.channels * per_channel} ch)"
+        )
     logger.info(
         f"Config: variant={config.variant} ({config.convnext_version}), "
-        f"gabor_stem={config.use_gabor_stem}, epochs={config.epochs}, "
+        f"gabor_stem={gabor_desc}, epochs={config.epochs}, "
         f"patch={config.patch_size}x{config.channels}, "
         f"sigma_max {config.sigma_max_start}->{config.sigma_max_end} "
         f"({config.curriculum_schedule})"

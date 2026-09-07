@@ -47,9 +47,12 @@ from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block  
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization  # noqa: F401
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth  # noqa: F401
 from dl_techniques.initializers import create_gabor_conv2d  # noqa: F401
-# Kept for archives written before the Gabor stem became a trainable cross-channel
-# Conv2D: both builders live in the same module, so either import registers
-# `GaborFiltersInitializer`, and this one keeps the legacy name resolvable here.
+# LIVE again as of `# DECISION standalone-2026-09-07-depthwise-gabor-stem/D-001`: this
+# is the builder `create_convunext` uses for the opt-in `gabor_filters_per_channel`
+# depthwise stem arm, so an archive whose `gabor_stem` is a `DepthwiseConv2D` is
+# produced by current code, not only by pre-2026-09-06 code. It also stays the registrar
+# for those older archives; both builders live in one module, so either import registers
+# `GaborFiltersInitializer`.
 from dl_techniques.initializers import create_gabor_depthwise_conv2d  # noqa: F401
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels  # noqa: F401
 from dl_techniques.layers.pooling.downsample_and_skip import DownsampleAndSkip  # noqa: F401

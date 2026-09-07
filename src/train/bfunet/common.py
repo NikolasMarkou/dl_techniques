@@ -969,48 +969,89 @@ def validate_gabor_stem_channels(
         gabor_stem_projection: bool,
         gabor_filters: int,
         initial_filters: int,
+        gabor_filters_per_channel: Optional[int] = None,
+        channels: Optional[int] = None,
 ) -> None:
     """Fail early when ``--no-gabor-projection`` cannot reach ``initial_filters``.
 
-    The Gabor stem is a bias-free cross-channel ``Conv2D`` (the Ozbulak & Ekenel
-    warm start), so ``gabor_filters`` IS its output channel count. With the 1x1
-    projection dropped, the stem output feeds the encoder directly and must
-    therefore already be ``initial_filters`` wide. Both model builders
+    With the 1x1 projection dropped, the stem output feeds the encoder directly and
+    must therefore already be ``initial_filters`` wide. Both model builders
     (``models/vision/convunext/model.py`` and
     ``models/vision/bias_free_denoisers/bfunet.py``) raise the same way as a
     backstop; this runs first so the CLI reports it before a model is built.
+
+    **The stem's output width depends on which stem was selected**, so this predicate
+    has two arms and the caller picks by passing ``gabor_filters_per_channel``:
+
+    - ``None`` (default, the cross-channel ``Conv2D`` warm start): ``gabor_filters``
+      IS the stem's output channel count, so the rule is
+      ``gabor_filters == initial_filters``.
+    - set (the opt-in ``DepthwiseConv2D`` bank, ConvUNeXt only): ``gabor_filters`` is
+      not read at all and ``gabor_filters_per_channel`` is a ``depth_multiplier``, so
+      the rule is ``channels * gabor_filters_per_channel == initial_filters``.
+
+    NOTE the trap in that second arm: the rule ``channels * <something> ==
+    initial_filters`` is the OLD pre-2026-09-06 rule, retired when the stem became a
+    ``Conv2D``. It is back only for the depthwise arm, and only against
+    ``gabor_filters_per_channel``. It is still WRONG for ``gabor_filters``, which is
+    why the two counts are separate parameters rather than one reinterpreted knob.
 
     Interface contract: pure predicate, no I/O, no state. Returns ``None`` when the
     configuration is admissible and raises otherwise. Both bfunet trainers call it
     with the RESOLVED ``initial_filters`` (after any variant override), never the
     variant default.
 
-    NOTE: the rule used to be ``channels * gabor_filters == initial_filters``, from
-    the era when the stem was a depthwise bank with ``gabor_filters`` as a
-    ``depth_multiplier``. ``channels`` is no longer part of it.
-
     :param use_gabor_stem: Whether the Gabor stem is built at all.
     :type use_gabor_stem: bool
     :param gabor_stem_projection: Whether the 1x1 projection after the stem is kept.
     :type gabor_stem_projection: bool
-    :param gabor_filters: The stem's output channel count.
+    :param gabor_filters: The cross-channel stem's output channel count. Ignored on
+        the depthwise arm.
     :type gabor_filters: int
     :param initial_filters: The resolved level-0 encoder width.
     :type initial_filters: int
+    :param gabor_filters_per_channel: Depthwise ``depth_multiplier``, or ``None``
+        (default) for the cross-channel stem. Selects which arm of the rule applies.
+    :type gabor_filters_per_channel: int or None
+    :param channels: Input channel count. REQUIRED on the depthwise arm (it is a
+        factor of that arm's output width) and unused on the other.
+    :type channels: int or None
     :return: None.
     :rtype: None
-    :raises ValueError: If the stem is on, the projection is off, and
-        ``gabor_filters != initial_filters``.
+    :raises ValueError: If the stem is on, the projection is off, and the selected
+        arm's width rule is violated; or if ``gabor_filters_per_channel`` is set
+        without ``channels``.
     """
     if not (use_gabor_stem and not gabor_stem_projection):
         return
-    if gabor_filters != initial_filters:
+    if gabor_filters_per_channel is None:
+        if gabor_filters != initial_filters:
+            raise ValueError(
+                f"--no-gabor-projection requires gabor_filters({gabor_filters}) to equal "
+                f"initial_filters({initial_filters}). The Gabor stem is a cross-channel "
+                "Conv2D, so gabor_filters IS its output channel count -- the old "
+                "channels * gabor_filters rule no longer applies. Pass --initial-filters "
+                f"{gabor_filters} (or adjust --gabor-filters)."
+            )
+        return
+    if channels is None:
+        # Not a defaultable argument: guessing a channel count here would compute a
+        # width the model never builds, and the check would pass or fail for reasons
+        # unrelated to the caller's configuration.
         raise ValueError(
-            f"--no-gabor-projection requires gabor_filters({gabor_filters}) to equal "
-            f"initial_filters({initial_filters}). The Gabor stem is a cross-channel "
-            "Conv2D, so gabor_filters IS its output channel count -- the old "
-            "channels * gabor_filters rule no longer applies. Pass --initial-filters "
-            f"{gabor_filters} (or adjust --gabor-filters)."
+            "channels is required when gabor_filters_per_channel is set: the depthwise "
+            "stem's output width is channels * gabor_filters_per_channel."
+        )
+    stem_output = channels * gabor_filters_per_channel
+    if stem_output != initial_filters:
+        raise ValueError(
+            "--no-gabor-projection with --gabor-filters-per-channel requires "
+            f"channels({channels}) * gabor_filters_per_channel"
+            f"({gabor_filters_per_channel}) = {stem_output} to equal "
+            f"initial_filters({initial_filters}). The depthwise stem applies the bank "
+            "per input channel with no mixing, so its output width MULTIPLIES. Pass "
+            f"--initial-filters {stem_output} (or adjust "
+            "--gabor-filters-per-channel)."
         )
 
 
@@ -1070,11 +1111,21 @@ def freeze_gabor_stem_if_requested(
     stem = next(iter(stems.values()))
     stem.trainable = False
     frozen = int(sum(np.prod(w.shape) for w in stem.weights))
+    # Report the layer kind rather than asserting one. Freezing and stem KIND are two
+    # independent axes: --gabor-filters-per-channel selects a DepthwiseConv2D bank
+    # (ConvUNeXt only) and this flag freezes whatever stem was built. A message that
+    # hardcoded "cross-channel Conv2D" would be a false statement on that arm.
+    kind = (
+        "per-channel DepthwiseConv2D bank"
+        if isinstance(stem, keras.layers.DepthwiseConv2D)
+        else "cross-channel Conv2D (this does NOT restore the paper's depthwise bank; "
+             "--gabor-filters-per-channel selects that)"
+    )
     logger.info(
         f"gabor_stem FROZEN at its Gabor initialization: {frozen:,} parameters moved "
-        f"from trainable to non-trainable. NOTE this freezes the cross-channel Conv2D; "
-        f"it does NOT restore the paper's depthwise bank. Degree-1 homogeneity is "
-        f"unaffected (it comes from the stem's use_bias=False, not from freezing)."
+        f"from trainable to non-trainable. The frozen layer is a {kind}. Degree-1 "
+        f"homogeneity is unaffected (it comes from the stem's use_bias=False, not "
+        f"from freezing)."
     )
     return model
 

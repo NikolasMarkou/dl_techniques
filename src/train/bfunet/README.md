@@ -120,8 +120,8 @@ in the per-trainer sections below.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--no-gabor-stem` | off (stem ON) | Disable the trainable Gabor warm-start stem |
-| `--freeze-gabor-stem` | off (stem TRAINABLE) | Freeze the Gabor stem at its Gabor initialization instead of refining it. Freezes the **cross-channel** `Conv2D` the factories build now; does **not** restore the paper's depthwise 22-per-channel bank. Homogeneity is unaffected either way (it comes from `use_bias=False`). Rejected with `--no-gabor-stem` and on the BFCNN trainer |
-| `--gabor-filters` | 32 | Gabor stem OUTPUT channel count (a `Conv2D` `filters`, no longer a per-channel multiplier) |
+| `--freeze-gabor-stem` | off (stem TRAINABLE) | Freeze the Gabor stem at its Gabor initialization instead of refining it. Freezing and stem **kind** are independent axes: this freezes whichever stem was built, and the depthwise bank is selected separately by ConvUNeXt's `--gabor-filters-per-channel`. Homogeneity is unaffected either way (it comes from `use_bias=False`). Rejected with `--no-gabor-stem` and on the BFCNN trainer |
+| `--gabor-filters` | 32 | Gabor stem OUTPUT channel count (a `Conv2D` `filters`, **not** a per-channel multiplier — that is ConvUNeXt's separate `--gabor-filters-per-channel`, which is mutually exclusive with this flag) |
 | `--no-gabor-projection` | off | Drop the 1×1 projection after the Gabor stem (requires `gabor_filters == initial_filters`) |
 | `--initial-filters` | variant | Override level-0 width |
 | `--filter-multiplier` | 2.0 | Per-level channel growth: `channels[l] = round(initial_filters * m**l)` |
@@ -204,6 +204,7 @@ Trains `create_convunext_denoiser` — a bias-free ConvNeXt U-Net. Variants: `ti
 |------|---------|---------|
 | `--variant` | base | ConvUNeXt size preset |
 | `--convnext-version` | v1 | `v1` = strict bias-free; `v2` adds a trainable GRN β (mildly breaks strict homogeneity) |
+| `--gabor-filters-per-channel` | None (off) | Build the Gabor stem as a **depthwise** bank (`depth_multiplier = N`) applied to each input channel independently instead of the default cross-channel `Conv2D`. Emits `channels·N` responses, so it is **mutually exclusive with `--gabor-filters`** (a `Conv2D` output-channel count — passing both is a parse error). Still trainable and bias-free, so `--freeze-gabor-stem` and degree-1 homogeneity are unaffected. Under `--no-gabor-projection` the width rule becomes `channels·N == initial_filters`. ConvUNeXt only |
 | `--dropout` | 0.0 | MLP dropout inside the inverted-bottleneck blocks |
 | `--depthwise-initializer` | None | Opt-in depthwise-kernel init (`orthonormal` → Orthogonal(gain=1)) |
 | `--depthwise-l2` | None | Opt-in L2 on depthwise kernels |

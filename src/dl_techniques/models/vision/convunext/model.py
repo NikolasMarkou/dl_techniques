@@ -53,7 +53,10 @@ from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.conv_blocks.match_channels import MatchChannels
 from dl_techniques.layers.pooling.downsample_and_skip import DownsampleAndSkip
 from dl_techniques.layers.attention.factory import create_attention_layer
-from dl_techniques.initializers import create_gabor_conv2d
+from dl_techniques.initializers import (
+    create_gabor_conv2d,
+    create_gabor_depthwise_conv2d,
+)
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -627,6 +630,7 @@ def create_convunext(
         stem_normalization: str = 'global_response_norm',
         use_gabor_stem: bool = False,
         gabor_filters: int = 32,
+        gabor_filters_per_channel: Optional[int] = None,
         gabor_kernel_size: Union[int, Tuple[int, int]] = 11,
         gabor_activation: Optional[str] = None,
         gabor_stem_projection: bool = True,
@@ -771,7 +775,9 @@ def create_convunext(
            ``DepthwiseConv2D`` bank contributing zero trainable parameters and
            emitting ``input_channels * gabor_filters`` channels. It is now a trainable
            ``Conv2D`` emitting exactly ``gabor_filters`` channels. Checkpoints written
-           before that change cannot be loaded into a model built by this function.
+           before that change cannot be loaded into a model built by this function --
+           and ``gabor_filters_per_channel`` does not change that: it restores the
+           depthwise LAYER KIND, not the pre-change graph.
 
         .. note::
 
@@ -781,9 +787,10 @@ def create_convunext(
            initialization flips ``trainable`` on the built, not-yet-compiled model --
            ``train.bfunet.common.freeze_gabor_stem_if_requested`` does exactly that, and
            both bfunet U-Net trainers expose it as ``--freeze-gabor-stem``. Note that
-           freezing this layer does NOT reproduce the older depthwise bank; for a
-           genuinely per-channel frozen front end use
-           :func:`~dl_techniques.initializers.gabor_filters_initializer.create_gabor_depthwise_conv2d`.
+           freezing this layer does NOT reproduce the older depthwise bank; that is a
+           separate axis, selected by ``gabor_filters_per_channel`` below. The two
+           compose: ``gabor_filters_per_channel=N`` plus a post-build freeze gives the
+           frozen per-channel front end.
     :type use_gabor_stem: bool
     :param gabor_filters: **OUTPUT CHANNEL COUNT of the Gabor stem** — a ``Conv2D``
         ``filters``, so the stem emits exactly ``gabor_filters`` channels, which the
@@ -798,7 +805,35 @@ def create_convunext(
            ``gabor_filters=32`` with 3-channel input got a 96-channel stem output and
            now gets a 32-channel one. Re-derive any value that was chosen to satisfy
            ``input_channels * gabor_filters == initial_filters``.
+
+        Not read at all when ``gabor_filters_per_channel`` is set — that argument
+        selects a different stem layer, which has no ``filters``.
     :type gabor_filters: int
+    :param gabor_filters_per_channel: Opt-in switch to the DEPTHWISE Gabor stem: a
+        ``DepthwiseConv2D`` with ``depth_multiplier = gabor_filters_per_channel``,
+        built by
+        :func:`~dl_techniques.initializers.gabor_filters_initializer.create_gabor_depthwise_conv2d`.
+        ``None`` (default) keeps the cross-channel ``Conv2D`` stem described above and
+        is byte-identical to every graph built before this argument existed. When set
+        (must be >= 1) the bank is applied to each input channel INDEPENDENTLY with no
+        cross-channel summing, so the stem emits ``input_channels *
+        gabor_filters_per_channel`` channels and ``gabor_filters`` is not read.
+
+        This is the per-channel front-end the cross-channel warm start gave up (see the
+        stem's ``standalone-2026-09-06-gabor-warm-start/D-001`` anchor): output channel
+        ``(c, j)`` is Gabor filter ``j``'s response to input channel ``c`` alone, so the
+        stem is colour-SELECTIVE at initialization rather than colour-blind. The bank is
+        built ``trainable=True`` — the OPPOSITE of ``create_gabor_depthwise_conv2d``'s
+        own default — so that ``--freeze-gabor-stem`` /
+        ``train.bfunet.common.freeze_gabor_stem_if_requested`` stays the single knob
+        that freezes a stem, whichever kind it is.
+
+        Bias-free and therefore degree-1 homogeneous exactly as the ``Conv2D`` stem is:
+        homogeneity comes from ``use_bias=False``, never from depthwise-vs-cross-channel.
+
+        Raises ``ValueError`` when set together with ``use_gabor_stem=False`` (a stated
+        intent that would reach no layer) or when ``< 1``.
+    :type gabor_filters_per_channel: int or None
     :param gabor_kernel_size: Kernel size of the Gabor stem convolution. Defaults to 11.
     :type gabor_kernel_size: int or tuple of 2 ints
     :param gabor_activation: Optional activation on the Gabor stem. ``None``
@@ -807,14 +842,24 @@ def create_convunext(
         mish break degree-1 homogeneity. Only used when ``use_gabor_stem=True``.
     :type gabor_activation: str or None
     :param gabor_stem_projection: If True (default) the Gabor stem is followed by the
-        mandatory bias-free 1x1 projection that maps the stem's ``gabor_filters``
-        channels to ``initial_filters``. If False the projection is DROPPED and the
-        Gabor stem feeds the encoder directly — valid ONLY when
-        ``gabor_filters == initial_filters`` exactly (raises ``ValueError``
-        otherwise). The old rule was ``input_channels * gabor_filters ==
-        initial_filters``; it no longer applies. Unlike the previous depthwise stem,
-        the ``Conv2D`` stem already mixes across input channels, so dropping the
-        projection no longer leaves the first ConvNeXt block as the only mixer.
+        mandatory bias-free 1x1 projection that maps the stem's output channels to
+        ``initial_filters``. If False the projection is DROPPED and the Gabor stem
+        feeds the encoder directly — valid ONLY when the stem already emits exactly
+        ``initial_filters`` channels (raises ``ValueError`` otherwise). Which count
+        that is depends on the stem kind, so the rule has two forms:
+
+        - cross-channel ``Conv2D`` stem (``gabor_filters_per_channel=None``):
+          ``gabor_filters == initial_filters``. The older ``input_channels *
+          gabor_filters == initial_filters`` rule does NOT apply to this arm.
+        - depthwise stem (``gabor_filters_per_channel`` set): ``input_channels *
+          gabor_filters_per_channel == initial_filters``.
+
+        Dropping the projection means something different on each arm, and the
+        difference is load-bearing rather than cosmetic. The ``Conv2D`` stem already
+        mixes across input channels, so the encoder still receives mixed features. The
+        DEPTHWISE stem does not mix at all, so with the projection dropped the first
+        ConvNeXt block's pointwise convolution becomes the model's first and only
+        cross-channel mixer.
     :type gabor_stem_projection: bool
     :param use_laplacian_pyramid: If True replace each encoder downsample/skip
         junction with a bias-free ``LaplacianPyramidLevel`` split: the
@@ -1055,6 +1100,26 @@ def create_convunext(
     if convnext_version not in ['v1', 'v2']:
         raise ValueError(f"convnext_version must be 'v1' or 'v2', got {convnext_version}")
 
+    if gabor_filters_per_channel is not None:
+        if gabor_filters_per_channel < 1:
+            raise ValueError(
+                "gabor_filters_per_channel is a depthwise depth_multiplier and must be "
+                f">= 1 when set, got {gabor_filters_per_channel}. Pass None (the "
+                "default) for the cross-channel Conv2D Gabor stem."
+            )
+        if not use_gabor_stem:
+            # Raise rather than ignore. The argument would reach no layer at all, and a
+            # silently inert argument is this repo's recorded defect class -- the same
+            # rule `_validate_bias_free_arguments` applies to `supervision_norm_center`:
+            # the guard is a pure function of its arguments, so a contradictory intent
+            # is reported even though nothing is built from it.
+            raise ValueError(
+                "gabor_filters_per_channel selects the DEPTHWISE Gabor stem, but "
+                "use_gabor_stem=False builds no Gabor stem at all, so the argument "
+                "would reach no layer. Pass use_gabor_stem=True, or drop "
+                "gabor_filters_per_channel."
+            )
+
     if downsample_pool_type not in ['max', 'average', 'strided_conv']:
         raise ValueError(
             "downsample_pool_type must be 'max', 'average' or 'strided_conv', got "
@@ -1122,24 +1187,80 @@ def create_convunext(
     #     over a in {0.25, 0.5, 2.0, 7.0}): 2.54e-07 .. 5.08e-07 with the stem
     #     bias-free, 1.75e-01 .. 1.02e+00 with a 0.3 bias on it. See
     #     `tests/test_models/test_bias_free_denoisers/test_bfconvunext_gabor.py`.
+    #
+    # DECISION standalone-2026-09-07-depthwise-gabor-stem/D-001: the depthwise bank is
+    # REACHABLE AGAIN, as an OPT-IN second arm keyed on `gabor_filters_per_channel`.
+    # This does NOT reverse D-001 above: `gabor_filters_per_channel=None` is the default
+    # and every graph built without it is byte-identical to before, so the paper's
+    # trainable cross-channel warm start remains THE stem. What changes is that "the
+    # per-channel Gabor front-end is GIVEN UP" is now scoped to the default arm rather
+    # than to the builder. Recorded consequences:
+    #   * `gabor_filters` and `gabor_filters_per_channel` are MUTUALLY EXCLUSIVE in
+    #     meaning, not composable: the first is a Conv2D `filters` (output channels),
+    #     the second a DepthwiseConv2D `depth_multiplier` (output channels are
+    #     `input_channels * it`). Exactly one is read per build. `gabor_filters` is not
+    #     silently reinterpreted -- the semantic-change warning on it stands untouched.
+    #   * The bank is built `trainable=True`, the OPPOSITE of
+    #     `create_gabor_depthwise_conv2d`'s own `trainable=False` default. That default
+    #     encodes `plan_2026-06-18_ba4e0079/D-001`'s FIXED front-end intent and STILL
+    #     STANDS for direct callers of that builder; this caller overrides it so that
+    #     `freeze_gabor_stem_if_requested` / `--freeze-gabor-stem` remains the ONE knob
+    #     that freezes a stem, whichever kind it is. Two different meanings of "frozen
+    #     stem" depending on an unrelated flag is the defect this avoids.
+    #   * It does NOT resurrect `results/bfconvunext_repro/best_model.keras` or
+    #     `results/bfconvunext_d3/best_model.keras`. Those archives predate other
+    #     changes to this graph; a depthwise `gabor_stem` layer is necessary for them to
+    #     load, not sufficient. They stay knowingly broken and untouched on disk.
+    #   * Homogeneity is UNAFFECTED for the same reason D-001 records: it comes from
+    #     `use_bias=False`, which both arms hardcode, never from depthwise-vs-cross-
+    #     channel.
     if use_gabor_stem:
-        gabor = create_gabor_conv2d(
-            filters=gabor_filters,
-            kernel_size=gabor_kernel_size,
-            activation=gabor_activation,
-            strides=1,
-            padding='same',
-            # HARDCODED bias-free, NOT threaded from `use_bias`: the bias-free denoiser
-            # arm requires positive homogeneity D(a*x) == a*D(x), and a bias-free
-            # convolution is homogeneous whether it is depthwise or cross-channel
-            # (MEASURED over 6 inits: bias-free rel error 2.54e-07..5.08e-07,
-            # bias-carrying 1.75e-01..1.02e+00).
-            use_bias=False,
-            # The paper's warm start: Gabor-INITIALIZED, then refined by gradient
-            # descent. This is the whole point of the construction.
-            trainable=True,
-            name='gabor_stem',
-        )(inputs)
+        if gabor_filters_per_channel is None:
+            gabor = create_gabor_conv2d(
+                filters=gabor_filters,
+                kernel_size=gabor_kernel_size,
+                activation=gabor_activation,
+                strides=1,
+                padding='same',
+                # HARDCODED bias-free, NOT threaded from `use_bias`: the bias-free denoiser
+                # arm requires positive homogeneity D(a*x) == a*D(x), and a bias-free
+                # convolution is homogeneous whether it is depthwise or cross-channel
+                # (MEASURED over 6 inits: bias-free rel error 2.54e-07..5.08e-07,
+                # bias-carrying 1.75e-01..1.02e+00).
+                use_bias=False,
+                # The paper's warm start: Gabor-INITIALIZED, then refined by gradient
+                # descent. This is the whole point of the construction.
+                trainable=True,
+                name='gabor_stem',
+            )(inputs)
+            stem_output_channels = gabor_filters
+            stem_description = (
+                f"cross-channel Conv2D, filters={gabor_filters}"
+            )
+        else:
+            gabor = create_gabor_depthwise_conv2d(
+                filters_per_channel=gabor_filters_per_channel,
+                kernel_size=gabor_kernel_size,
+                activation=gabor_activation,
+                strides=1,
+                padding='same',
+                # Same hardcoded bias-freedom as the Conv2D arm, for the same reason.
+                use_bias=False,
+                # Overrides this builder's own `trainable=False` default on purpose --
+                # see D-001 above: one meaning of "frozen stem", set by
+                # `--freeze-gabor-stem` alone.
+                trainable=True,
+                name='gabor_stem',
+            )(inputs)
+            # A depthwise convolution does not sum across input channels, so the bank is
+            # applied to each one independently and the widths MULTIPLY. This is the one
+            # place the two arms' output arithmetic differs; every downstream width check
+            # reads `stem_output_channels`, never `gabor_filters`.
+            stem_output_channels = input_shape[-1] * gabor_filters_per_channel
+            stem_description = (
+                f"per-channel DepthwiseConv2D, depth_multiplier="
+                f"{gabor_filters_per_channel} x input_channels({input_shape[-1]})"
+            )
         if gabor_stem_projection:
             stem_input = keras.layers.Conv2D(
                 filters=initial_filters,
@@ -1150,33 +1271,46 @@ def create_convunext(
                 name='gabor_stem_projection',
             )(gabor)
             logger.info(
-                f"Trainable Gabor stem (paper warm start) enabled: filters="
-                f"{gabor_filters} output channels, kernel_size={gabor_kernel_size} "
+                f"Trainable Gabor stem enabled ({stem_description}), "
+                f"kernel_size={gabor_kernel_size} -> {stem_output_channels} channels "
                 f"-> 1x1 projection to {initial_filters}"
             )
         else:
-            # No-projection Gabor stem: the cross-channel Conv2D emits exactly
-            # `gabor_filters` channels and feeds the encoder directly. This is only
-            # well-defined when that count equals initial_filters (the level-0
-            # channel-adjust is then a no-op); otherwise there is no bias-free
-            # parameter-free way to reach initial_filters here, so fail loudly rather
-            # than silently pad/slice.
-            if gabor_filters != initial_filters:
+            # No-projection Gabor stem: the stem's own output feeds the encoder
+            # directly. This is only well-defined when that count equals
+            # initial_filters (the level-0 channel-adjust is then a no-op); otherwise
+            # there is no bias-free parameter-free way to reach initial_filters here,
+            # so fail loudly rather than silently pad/slice.
+            if stem_output_channels != initial_filters:
+                if gabor_filters_per_channel is None:
+                    detail = (
+                        f"gabor_filters({gabor_filters}) != "
+                        f"initial_filters({initial_filters}). NOTE: gabor_filters is the "
+                        "stem's OUTPUT CHANNEL COUNT (a Conv2D `filters`), NOT a "
+                        f"per-channel multiplier, so the old input_channels"
+                        f"({input_shape[-1]}) * gabor_filters rule no longer applies to "
+                        "this arm. Set gabor_filters == initial_filters, keep "
+                        "gabor_stem_projection=True, or select the depthwise stem with "
+                        "gabor_filters_per_channel."
+                    )
+                else:
+                    detail = (
+                        f"the depthwise stem emits input_channels({input_shape[-1]}) * "
+                        f"gabor_filters_per_channel({gabor_filters_per_channel}) = "
+                        f"{stem_output_channels} channels, != "
+                        f"initial_filters({initial_filters}). Set "
+                        "input_channels * gabor_filters_per_channel == initial_filters, "
+                        "or keep gabor_stem_projection=True."
+                    )
                 raise ValueError(
                     "gabor_stem_projection=False requires the Gabor stem to emit exactly "
-                    f"initial_filters channels, but gabor_filters({gabor_filters}) != "
-                    f"initial_filters({initial_filters}). NOTE: gabor_filters is the "
-                    "stem's OUTPUT CHANNEL COUNT (a Conv2D `filters`), NOT a per-channel "
-                    f"multiplier, so the old input_channels({input_shape[-1]}) * "
-                    "gabor_filters rule no longer applies. Set gabor_filters == "
-                    "initial_filters, or keep gabor_stem_projection=True."
+                    f"initial_filters channels, but {detail}"
                 )
             stem_input = gabor
             logger.info(
-                f"Trainable Gabor stem (paper warm start) enabled (NO projection): "
-                f"filters={gabor_filters}, kernel_size={gabor_kernel_size} -> "
-                f"{gabor_filters} channels feed the encoder directly "
-                f"(== initial_filters)"
+                f"Trainable Gabor stem enabled (NO projection): {stem_description}, "
+                f"kernel_size={gabor_kernel_size} -> {stem_output_channels} channels "
+                f"feed the encoder directly (== initial_filters)"
             )
     else:
         stem_input = inputs

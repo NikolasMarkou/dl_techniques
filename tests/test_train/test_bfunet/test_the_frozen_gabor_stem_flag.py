@@ -17,6 +17,13 @@ It also pins the two properties a reader is most likely to assume wrongly: freez
 NOT restore the paper's depthwise bank (the layer stays a cross-channel `Conv2D`), and it
 does NOT touch degree-1 homogeneity, which comes from the stem's `use_bias=False`.
 
+Freezing and stem KIND are independent axes. A depthwise bank IS reachable, but through
+ConvUNeXt's separate `--gabor-filters-per-channel`
+(`standalone-2026-09-07-depthwise-gabor-stem/D-001`), never through this flag. Every
+build below leaves that argument at its `None` default, so the assertions here describe
+the default stem; their composition is pinned in
+`tests/test_train/test_bfunet/test_the_depthwise_gabor_stem_flag.py`.
+
 Run:
     CUDA_VISIBLE_DEVICES="" MPLBACKEND=Agg .venv/bin/python -m pytest \\
         tests/test_train/test_bfunet/test_the_frozen_gabor_stem_flag.py -q

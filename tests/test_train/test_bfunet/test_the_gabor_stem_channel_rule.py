@@ -18,9 +18,17 @@ Run:
         tests/test_train/test_bfunet/test_the_gabor_stem_channel_rule.py -q
 """
 
+import re
+
 import pytest
 
 from train.bfunet.common import validate_gabor_stem_channels
+
+# The retired `channels * gabor_filters` rule, as it would be spelled inside a trainer.
+# `\b` after `gabor_filters` is load-bearing: it excludes `gabor_filters_per_channel`,
+# the depthwise stem's count, whose width legitimately IS channels-multiplied. See
+# `test_trainer_has_no_private_copy_of_the_rule`.
+_RETIRED_RULE_RE = re.compile(r"config\.channels\s*\*\s*config\.gabor_filters\b")
 import train.bfunet.train_unet_denoiser as unet_trainer
 import train.bfunet.train_convunext_denoiser as convunext_trainer
 
@@ -84,11 +92,41 @@ class TestBothTrainersRouteThroughIt:
         Both copies computed `channels * gabor_filters` inline. That expression
         reappearing in either trainer means the duplicate is back and the two can
         drift again.
+
+        The match is anchored on a WORD BOUNDARY after `gabor_filters`, not a bare
+        substring. `standalone-2026-09-07-depthwise-gabor-stem/D-002` added a second,
+        legitimately-multiplied count named `gabor_filters_per_channel` -- the depthwise
+        stem really does emit `channels * gabor_filters_per_channel`, and that
+        identifier merely STARTS with `gabor_filters`. A substring test reports it as
+        the retired rule, which is a false positive against a different quantity. The
+        boundary keeps the guard on `gabor_filters` ITSELF, where the retired rule is
+        still wrong; `\\s*\\*\\s*` additionally catches spacing variants the old literal
+        would have missed, so this is strictly stronger on the pattern it targets.
+        `test_the_no_private_copy_guard_can_fail` is its RED proof.
         """
         import inspect
-        src = inspect.getsource(mod)
-        assert "config.channels * config.gabor_filters" not in src, (
+        assert _RETIRED_RULE_RE.search(inspect.getsource(mod)) is None, (
             f"{mod.__name__} re-inlined the old channels*gabor_filters rule"
+        )
+
+    def test_the_no_private_copy_guard_can_fail(self):
+        """RED proof: the tightened pattern must still catch the real re-inlining.
+
+        Guards that only ever run green prove nothing, and this one was just narrowed.
+        Both the original spelling and a spacing variant must be caught, while the
+        depthwise identifier must not be.
+        """
+        for offender in ("x = config.channels * config.gabor_filters\n",
+                         "x = config.channels*config.gabor_filters\n",
+                         "if config.channels * config.gabor_filters != n:\n"):
+            assert _RETIRED_RULE_RE.search(offender) is not None, (
+                f"the guard no longer catches the retired rule: {offender!r}"
+            )
+        assert _RETIRED_RULE_RE.search(
+            "w = config.channels * config.gabor_filters_per_channel\n"
+        ) is None, (
+            "the guard fires on gabor_filters_per_channel, a DIFFERENT count whose "
+            "width genuinely does multiply by channels"
         )
 
 
