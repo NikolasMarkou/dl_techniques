@@ -23,6 +23,8 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: keep the bare class name --
+# it is the FFN factory's 'mlp' key and a live legacy alias. See decisions.md.
 @register_dl_technique("dl_techniques.layers.ffn.mlp")
 class MLPBlock(keras.layers.Layer):
     """
