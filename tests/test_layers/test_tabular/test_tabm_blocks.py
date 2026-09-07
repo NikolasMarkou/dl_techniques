@@ -267,3 +267,66 @@ class TestTabMBackbone:
     def test_serialization(self, tmp_path):
         _roundtrip(TabMBackbone(hidden_dims=[8, 6], name="backbone"), (10,), _f32(B, 10),
                    "backbone", tmp_path, TabMBackbone)
+
+    @pytest.mark.parametrize("kwargs, expected", [
+        # An EMPTY hidden_dims is the arm that is RED against the pre-split code:
+        # zero blocks were constructed, so nothing downstream ever complained and
+        # the backbone silently became an identity map.
+        (dict(hidden_dims=[]), ("hidden_dims", "[]")),
+        # A bad ENTRY must be attributed to its index. TabMMLPBlock's own `units`
+        # guard would also fire here, but its message cannot name the position --
+        # asserting on "index N" is what makes this arm the backbone's guard.
+        (dict(hidden_dims=[8, 0]), ("index 1", "0")),
+        (dict(hidden_dims=[0, 8]), ("index 0", "0")),
+        (dict(hidden_dims=[8, -4]), ("index 1", "-4")),
+        (dict(hidden_dims=[8], dropout_rate=1.5), ("dropout_rate", "1.5")),
+        (dict(hidden_dims=[8], dropout_rate=-0.1), ("dropout_rate", "-0.1")),
+    ])
+    def test_constructor_rejects_out_of_range(self, kwargs, expected):
+        with pytest.raises(ValueError) as exc:
+            TabMBackbone(**kwargs)
+        # The message must name the offending value -- and, for a bad entry, its index.
+        for token in expected:
+            assert token in str(exc.value)
+
+    @pytest.mark.parametrize("rate", [1.5, -0.1])
+    def test_dropout_rate_is_rejected_by_the_backbone_itself(self, rate):
+        # TabMMLPBlock raises a message-identical ValueError for the same value, so
+        # the message alone cannot tell the two guards apart. What discriminates is
+        # WHERE the raise happens: the backbone must reject before it constructs any
+        # block, i.e. the innermost frame is this module, not tabm_mlp_block.py.
+        with pytest.raises(ValueError) as exc:
+            TabMBackbone(hidden_dims=[8, 6], dropout_rate=rate)
+        assert os.path.basename(str(exc.traceback[-1].path)) == "tabm_backbone.py"
+
+    @pytest.mark.parametrize("kwargs", [
+        dict(hidden_dims=[8]),
+        dict(hidden_dims=[8, 6]),
+        dict(hidden_dims=[8, 6], k=K),
+        dict(hidden_dims=[8], dropout_rate=0.0),
+        dict(hidden_dims=[8], dropout_rate=1.0),
+    ])
+    def test_constructor_accepts_valid(self, kwargs):
+        # Positive controls: the guards above must not fire on shipped configs.
+        assert TabMBackbone(**kwargs) is not None
+
+    def test_activation_is_handed_down_verbatim(self):
+        # The backbone stores the SERIALIZABLE value and never calls it; each block
+        # resolves its own live callable. Pins step 6's activation/activation_fn
+        # split at the hand-down boundary: a string must arrive at the block as a
+        # string, or `serialize_activation` in the block's `get_config` would be
+        # handed a resolved function instead of the factory key.
+        layer = TabMBackbone(hidden_dims=[8, 8], activation="mish")
+        assert layer.activation == "mish"
+        assert not callable(layer.activation)
+        assert layer.get_config()["activation"] == "mish"
+        for block in layer.blocks:
+            assert block.activation == "mish"
+            assert callable(block.activation_fn)
+            assert block.get_config()["activation"] == "mish"
+
+    def test_activation_roundtrip(self, tmp_path):
+        # `mish` is a dl_techniques-reachable key, not a Keras builtin object, so a
+        # backbone that eagerly resolved it would round-trip a different function.
+        _roundtrip(TabMBackbone(hidden_dims=[8, 8], activation="mish", name="bb_mish"),
+                   (10,), _f32(B, 10), "bb_mish", tmp_path, TabMBackbone)
