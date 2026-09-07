@@ -21,14 +21,21 @@ import keras
 from keras import ops
 from typing import Dict, List, Literal, Optional, Tuple, Union, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 EnsembleInitDistribution = Literal['ones', 'normal', 'random-signs']
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabular.tabm_blocks")
 class RandomSigns(keras.initializers.Initializer):
@@ -87,6 +94,7 @@ def _ensemble_scaling_initializer(
         f"got {init_distribution!r}"
     )
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabular.tabm_blocks")
 class ScaleEnsemble(keras.layers.Layer):
@@ -184,6 +192,7 @@ class ScaleEnsemble(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabular.tabm_blocks")
 class LinearEfficientEnsemble(keras.layers.Layer):
@@ -366,6 +375,7 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabular.tabm_blocks")
 class NLinear(keras.layers.Layer):
@@ -501,6 +511,7 @@ class NLinear(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 # DECISION plan-2026-09-01T110541-dcc1574a/D-001: keep the ``TabM`` prefix; do not rename to
 # ``MLPBlock``, which is ``layers/ffn/mlp.py``'s bare class name and FFN factory key. See decisions.md.
@@ -714,6 +725,7 @@ class TabMMLPBlock(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabular.tabm_blocks")
 class TabMBackbone(keras.layers.Layer):
@@ -882,4 +894,5 @@ class TabMBackbone(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
