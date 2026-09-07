@@ -104,13 +104,28 @@ class ScaleEnsemble(keras.layers.Layer):
         :param input_shape: Shape of the input, ``(batch, k, input_dim)``.
         :type input_shape: tuple
 
-        :raises ValueError: If ``input_shape[1]`` disagrees with ``k``, or if
-            ``input_shape[-1]`` disagrees with ``input_dim``. Both axes are
-            REQUIRED constructor arguments, and :meth:`call` is a broadcasting
-            elementwise multiply, so an unchecked mismatch is absorbed silently
-            and returns a plausible-looking result computed from the wrong
-            weight. A ``None`` (symbolic) axis is not checked.
+        :raises ValueError: If ``input_shape`` is not rank 3, or if
+            ``input_shape[1]`` disagrees with ``k``, or if ``input_shape[-1]``
+            disagrees with ``input_dim``. All three are fixed by construction,
+            and :meth:`call` is a broadcasting elementwise multiply, so an
+            unchecked mismatch is absorbed silently and returns a
+            plausible-looking result computed from the wrong weight. A ``None``
+            (symbolic) axis is not checked; the RANK always is.
         """
+        # DECISION plan-2026-09-07T130829-d709705c/D-006: the rank check comes
+        # FIRST and is unconditional. The two axis checks below encode a rank-3
+        # assumption they cannot state: on a rank-4 `(2, k, k, D)` input both
+        # passed and `call()` then broadcast the `(k, D)` member weight along
+        # axis 2 instead of axis 1 -- the wrong computation with no error at all.
+        # On a rank-2 input axis 1 is the FEATURE axis, so the k-guard's message
+        # blamed `k` for what is really a rank fault. Do NOT move this below the
+        # axis checks and do NOT make it `is not None`-conditional: rank is never
+        # unknown in a Keras shape tuple. See decisions.md D-006.
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"ScaleEnsemble requires a rank-3 input (batch, k, input_dim); "
+                f"got rank {len(input_shape)}; input_shape={tuple(input_shape)!r}"
+            )
         if input_shape[1] is not None and input_shape[1] != self.k:
             raise ValueError(
                 f"k was given as {self.k!r} but the input's axis 1 is "

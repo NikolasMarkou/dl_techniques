@@ -136,6 +136,19 @@ class TestScaleEnsemble:
         layer.build(shape)
         assert tuple(layer.weight.shape) == (K, D)
 
+    @pytest.mark.parametrize("shape", [(K,), (None, D), (None, K, K, D)])
+    def test_build_rejects_wrong_rank(self, shape):
+        # The two axis guards encode a rank-3 contract they cannot state. Before
+        # the rank guard, (None, K, K, D) BUILT and then RAN, broadcasting the
+        # (K, D) member weight along axis 2 -- the wrong computation, no error.
+        # A rank-1 shape raised a bare IndexError from `input_shape[1]`.
+        layer = ScaleEnsemble(k=K, input_dim=D)
+        with pytest.raises(ValueError) as exc:
+            layer.build(shape)
+        msg = str(exc.value)
+        assert "rank-3" in msg and f"rank {len(shape)}" in msg
+        assert str(tuple(shape)) in msg
+
 
 class TestLinearEfficientEnsemble:
     def test_forward_and_shape(self):
@@ -241,6 +254,19 @@ class TestLinearEfficientEnsemble:
         layer = LinearEfficientEnsemble(units=5, k=K)
         layer.build((None, None, D))
         assert tuple(layer.r.shape) == (K, D)
+
+    @pytest.mark.parametrize("shape", [(K,), (None, K), (None, K, K, D)])
+    def test_build_rejects_wrong_rank(self, shape):
+        # (None, K) is the measured hole the axis-1 guard could never see: at
+        # rank 2 axis 1 IS the feature axis, it happened to equal `k`, so the
+        # guard passed and `input_dim` was read as `k` -- a nonsense (K, 5)
+        # kernel, with the failure deferred to an opaque backend error in call().
+        layer = LinearEfficientEnsemble(units=5, k=K)
+        with pytest.raises(ValueError) as exc:
+            layer.build(shape)
+        msg = str(exc.value)
+        assert "rank-3" in msg and f"rank {len(shape)}" in msg
+        assert str(tuple(shape)) in msg
 
     def test_compute_output_shape_derives_from_k(self):
         # The input here is DELIBERATELY inconsistent -- axis 1 is K+4, not k --
@@ -348,6 +374,18 @@ class TestNLinear:
         layer = NLinear(n=K, input_dim=D, output_dim=5)
         layer.build((None, None, D))
         assert tuple(layer.kernels.shape) == (K, D, 5)
+
+    @pytest.mark.parametrize("shape", [(K,), (None, K), (None, K, K, D)])
+    def test_build_rejects_wrong_rank(self, shape):
+        # call() is a `bni,nio->bno` einsum, i.e. rank-3-only. Before the rank
+        # guard `NLinear(n=K, input_dim=K, output_dim=5).build((None, K))` was
+        # accepted and the einsum failed opaquely later.
+        layer = NLinear(n=K, input_dim=K, output_dim=5)
+        with pytest.raises(ValueError) as exc:
+            layer.build(shape)
+        msg = str(exc.value)
+        assert "rank-3" in msg and f"rank {len(shape)}" in msg
+        assert str(tuple(shape)) in msg
 
     def test_deferred_input_dim_builds_and_roundtrips(self, tmp_path):
         # G-3: `input_dim=None` is the correct deferred fan-in idiom, not a
@@ -783,3 +821,71 @@ class TestOutputShapeContract:
         symbolic = tuple(layer.compute_output_shape((None,) + shape))
         assert symbolic[0] is None
         assert symbolic[1:] == actual[1:]
+
+
+class TestRankContract:
+    """The rank-3 contract of the three leaf layers, and what it does upstream.
+
+    ``TabMMLPBlock`` and ``TabMBackbone`` deliberately have NO rank guard of
+    their own: in ``k is None`` (plain) mode their ``linear`` is a ``Dense``,
+    which legitimately accepts rank 2, and a rank-3 guard on them would break
+    that shipped path. In ensemble mode they build the guarded leaf directly
+    (``TabMMLPBlock.build`` -> ``self.linear.build(input_shape)``,
+    ``TabMBackbone.build`` -> ``block.build(current_shape)``), so the leaf's
+    guard is what fires. Both halves are pinned below.
+    """
+
+    @pytest.mark.parametrize("make, shape", [
+        (lambda: ScaleEnsemble(k=K, input_dim=D), (B, K, D)),
+        (lambda: LinearEfficientEnsemble(units=5, k=K), (B, K, D)),
+        (lambda: NLinear(n=K, input_dim=D, output_dim=5), (B, K, D)),
+    ], ids=["ScaleEnsemble", "LinearEfficientEnsemble", "NLinear"])
+    def test_rank_3_still_builds_and_runs(self, make, shape):
+        # Positive control: the rank guard must not touch the contract rank.
+        layer = make()
+        layer.build((None,) + shape[1:])
+        assert tuple(layer(_f32(*shape)).shape)[:2] == (B, K)
+
+    def test_the_silent_rank_4_broadcast_is_rejected(self):
+        # The measured N-7-class hole: ScaleEnsemble(k=3, input_dim=6) on a
+        # (2, 3, 3, 6) input used to BUILD *and RUN*, returning (2, 3, 3, 6)
+        # with the (k, D) member weight broadcast along axis 2 instead of
+        # axis 1 -- silently the wrong computation, no error at any stage.
+        layer = ScaleEnsemble(k=K, input_dim=D)
+        with pytest.raises(ValueError, match="rank-3"):
+            layer(_f32(B, K, K, D))
+
+    def test_the_scale_ensemble_output_shape_disagreement_is_unreachable(self):
+        # W-C, verbatim: ScaleEnsemble(k=3, input_dim=3) built from (None, 3)
+        # made compute_output_shape echo (None, 3) while a real forward pass on
+        # (3, 3) returned (1, 3, 3) -- rank inflated by the expand_dims
+        # broadcast and the batch axis silently collapsed 3 -> 1. The echo is
+        # only correct at rank 3, and rank 3 is now the only buildable rank, so
+        # the disagreement has no reachable input. compute_output_shape itself
+        # is unchanged; this test pins the reason it can stay that way.
+        layer = ScaleEnsemble(k=K, input_dim=K)
+        with pytest.raises(ValueError, match="rank-3"):
+            layer.build((None, K))
+
+    @pytest.mark.parametrize("shape", [(B, K), (B, K, K, D)])
+    @pytest.mark.parametrize("make", [
+        lambda: TabMMLPBlock(units=5, k=K),
+        lambda: TabMBackbone(hidden_dims=[5], k=K),
+    ], ids=["TabMMLPBlock", "TabMBackbone"])
+    def test_ensemble_mode_composites_inherit_the_leaf_guard(self, make, shape):
+        # No guard is written in either composite; they build the leaf directly,
+        # so the leaf's ValueError is what the caller sees.
+        with pytest.raises(ValueError, match="rank-3"):
+            make()(_f32(*shape))
+
+    @pytest.mark.parametrize("make", [
+        lambda: TabMMLPBlock(units=8),
+        lambda: TabMBackbone(hidden_dims=[8, 6]),
+    ], ids=["TabMMLPBlock-plain", "TabMBackbone-plain"])
+    def test_plain_mode_rank_2_still_builds_and_runs(self, make):
+        # THE regression this fix must not cause. `k is None` means `Dense`,
+        # and (batch, features) is that path's normal input -- it is what
+        # `create_tabm_model` feeds a non-ensemble backbone.
+        layer = make()
+        y = layer(_f32(B, D))
+        assert len(tuple(y.shape)) == 2 and tuple(y.shape)[0] == B

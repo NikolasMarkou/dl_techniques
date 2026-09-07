@@ -116,14 +116,27 @@ class NLinear(keras.layers.Layer):
         :param input_shape: Shape of the input, ``(batch, n, input_dim)``.
         :type input_shape: tuple
 
-        :raises ValueError: If ``input_shape[1]`` disagrees with ``n``, or if
-            ``input_dim`` was passed explicitly and disagrees with
-            ``input_shape[-1]``. Without the axis-1 check ``build()`` accepts the
-            mismatch, ``compute_output_shape`` reports ``(batch, n, output_dim)``
-            anyway, and the failure surfaces later as an opaque backend error
-            from the ``einsum`` in :meth:`call`. A ``None`` (symbolic) axis is
-            not checked.
+        :raises ValueError: If ``input_shape`` is not rank 3, if
+            ``input_shape[1]`` disagrees with ``n``, or if ``input_dim`` was
+            passed explicitly and disagrees with ``input_shape[-1]``. Without
+            these checks ``build()`` accepts the mismatch,
+            ``compute_output_shape`` reports ``(batch, n, output_dim)`` anyway,
+            and the failure surfaces later as an opaque backend error from the
+            ``einsum`` in :meth:`call`. A ``None`` (symbolic) axis is not
+            checked; the RANK always is.
         """
+        # DECISION plan-2026-09-07T130829-d709705c/D-006: rank check FIRST. The
+        # `bni,nio->bno` einsum in call() is rank-3-only, and at rank 2 axis 1 is
+        # the feature axis -- `NLinear(n=3, input_dim=3, output_dim=5)` built on
+        # `(None, 3)` and only then failed opaquely inside the einsum, with the
+        # axis-1 message blaming `n` for a rank fault. `input_dim=None` (the
+        # packed-block deferral) reads `input_shape[-1]` right below, so the rank
+        # must be settled before that read. See decisions.md D-006.
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"NLinear requires a rank-3 input (batch, n, input_dim); "
+                f"got rank {len(input_shape)}; input_shape={tuple(input_shape)!r}"
+            )
         if input_shape[1] is not None and input_shape[1] != self.n:
             raise ValueError(
                 f"n was given as {self.n!r} but the input's axis 1 is "

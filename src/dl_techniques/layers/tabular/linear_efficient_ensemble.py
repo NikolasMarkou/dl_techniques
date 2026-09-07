@@ -157,11 +157,26 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         :param input_shape: Shape of the input, ``(batch, k, input_dim)``.
         :type input_shape: tuple
 
-        :raises ValueError: If ``input_shape[1]`` disagrees with ``k``. Without
-            this check ``build()`` accepts the mismatch and the failure surfaces
-            later as an opaque backend error from inside :meth:`call`. A ``None``
-            (symbolic) axis is not checked.
+        :raises ValueError: If ``input_shape`` is not rank 3, or if
+            ``input_shape[1]`` disagrees with ``k``. Without these checks
+            ``build()`` accepts the mismatch and the failure surfaces later as an
+            opaque backend error from inside :meth:`call` -- or, at rank 4, as no
+            error at all. A ``None`` (symbolic) axis is not checked; the RANK
+            always is.
         """
+        # DECISION plan-2026-09-07T130829-d709705c/D-006: rank check FIRST, above
+        # the axis-1 check. `LinearEfficientEnsemble(units=5, k=3).build((None, 3))`
+        # used to BUILD -- at rank 2 axis 1 is the feature axis, it happened to
+        # equal `k`, so the guard passed and `input_dim` was then read as `k`,
+        # producing a nonsense `(3, 5)` kernel. At rank 4 build succeeded and
+        # `call()` ran, returning `(B, k, k, units)` while `compute_output_shape`
+        # promised `(B, k, units)`. Do NOT move this below the axis-1 check.
+        # See decisions.md D-006.
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"LinearEfficientEnsemble requires a rank-3 input (batch, k, input_dim); "
+                f"got rank {len(input_shape)}; input_shape={tuple(input_shape)!r}"
+            )
         if input_shape[1] is not None and input_shape[1] != self.k:
             raise ValueError(
                 f"k was given as {self.k!r} but the input's axis 1 is "
