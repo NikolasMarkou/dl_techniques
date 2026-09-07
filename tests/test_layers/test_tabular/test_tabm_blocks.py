@@ -69,6 +69,51 @@ class TestNLinear:
         _roundtrip(NLinear(n=K, input_dim=D, output_dim=5, name="nl"), (K, D), _f32(B, K, D),
                    "nl", tmp_path, NLinear)
 
+    @pytest.mark.parametrize("kwargs, bad", [
+        (dict(n=0, input_dim=D, output_dim=5), "0"),
+        (dict(n=-1, input_dim=D, output_dim=5), "-1"),
+        (dict(n=K, input_dim=D, output_dim=0), "0"),
+        (dict(n=K, input_dim=D, output_dim=-3), "-3"),
+        (dict(n=K, input_dim=0, output_dim=5), "0"),
+        (dict(n=K, input_dim=-2, output_dim=5), "-2"),
+    ])
+    def test_constructor_rejects_non_positive(self, kwargs, bad):
+        with pytest.raises(ValueError) as exc:
+            NLinear(**kwargs)
+        # The message must name the offending value, not just the argument.
+        assert bad in str(exc.value)
+
+    def test_constructor_accepts_valid_values(self):
+        # Positive control: the guards must not fire on the shipped configuration.
+        assert NLinear(n=K, input_dim=D, output_dim=5).n == K
+        assert NLinear(n=1, input_dim=None, output_dim=1).input_dim is None
+
+    def test_build_rejects_input_dim_mismatch(self):
+        layer = NLinear(n=K, input_dim=D, output_dim=5)
+        with pytest.raises(ValueError) as exc:
+            layer.build((None, K, D + 4))
+        msg = str(exc.value)
+        assert str(D) in msg and str(D + 4) in msg
+
+    def test_build_accepts_matching_input_dim(self):
+        # Positive control for the shape contract.
+        layer = NLinear(n=K, input_dim=D, output_dim=5)
+        layer.build((None, K, D))
+        assert tuple(layer.kernels.shape) == (K, D, 5)
+
+    def test_deferred_input_dim_builds_and_roundtrips(self, tmp_path):
+        # G-3: `input_dim=None` is the correct deferred fan-in idiom, not a
+        # round-trip defect -- build() fills in the concrete value and that is
+        # what get_config() serializes. This is the path TabMMLPBlock(packed) uses.
+        layer = NLinear(n=K, input_dim=None, output_dim=5, name="nl_deferred")
+        layer.build((None, K, D))
+        assert layer.input_dim == D
+        assert tuple(layer.kernels.shape) == (K, D, 5)
+        assert layer.get_config()["input_dim"] == D
+
+        _roundtrip(NLinear(n=K, input_dim=None, output_dim=5, name="nld"), (K, D),
+                   _f32(B, K, D), "nld", tmp_path, NLinear)
+
 
 class TestTabMMLPBlock:
     def test_forward_no_ensemble(self):
