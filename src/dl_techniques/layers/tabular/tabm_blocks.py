@@ -18,17 +18,14 @@ weight matrix identical at initialization.
 """
 
 import keras
-from keras import ops
 from typing import Dict, List, Literal, Optional, Tuple, Union, Any
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.tabular._ensemble_scaling import (
-    EnsembleInitDistribution,
-    _ensemble_scaling_initializer,
-)
+from dl_techniques.layers.tabular._ensemble_scaling import EnsembleInitDistribution
+from dl_techniques.layers.tabular.linear_efficient_ensemble import LinearEfficientEnsemble
 from dl_techniques.layers.tabular.nlinear import NLinear
 from dl_techniques.layers.tabular.scale_ensemble import ScaleEnsemble
 from dl_techniques.utils.activation_serialization import (
@@ -39,188 +36,6 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.tabular.tabm_blocks")
-class LinearEfficientEnsemble(keras.layers.Layer):
-    """
-    Efficient ensemble linear layer with rank-1 perturbations.
-
-    This layer performs a shared linear transformation across ``k`` ensemble
-    members, with optional learnable input scaling (``r``) and output scaling
-    (``s``) vectors per member. The result is equivalent to applying unique
-    diagonal transformations to the shared kernel for each member, providing
-    ensemble diversity without the cost of ``k`` independent weight matrices.
-
-    Architecture:
-
-    .. code-block:: text
-
-        ┌──────────────────────────────────┐
-        │  Input [B, K, D_in]              │
-        └──────────────┬───────────────────┘
-                       ▼
-        ┌──────────────────────────────────┐
-        │  Opt. input scaling: x * r[K,D]  │
-        └──────────────┬───────────────────┘
-                       ▼
-        ┌──────────────────────────────────┐
-        │  Shared matmul: x @ W            │
-        │  W [D_in, units] (shared)        │
-        └──────────────┬───────────────────┘
-                       ▼
-        ┌──────────────────────────────────┐
-        │  Opt. output scaling: x * s[K,U] │
-        │  + opt. bias [K, units]          │
-        └──────────────┬───────────────────┘
-                       ▼
-        ┌──────────────────────────────────┐
-        │  Output [B, K, units]            │
-        └──────────────────────────────────┘
-
-    :param units: Output dimension.
-    :type units: int
-    :param k: Number of ensemble members.
-    :type k: int
-    :param use_bias: Whether to use bias.
-    :type use_bias: bool
-    :param ensemble_scaling_in: Whether to use input scaling.
-    :type ensemble_scaling_in: bool
-    :param ensemble_scaling_out: Whether to use output scaling.
-    :type ensemble_scaling_out: bool
-    :param init_distribution: How the per-member scaling vectors ``r`` and ``s``
-        are initialized. ``'random-signs'`` draws from :math:`\\{-1, +1\\}` (the
-        paper's default: members start as distinct, unit-magnitude sign patterns),
-        ``'normal'`` draws from :math:`\\mathcal{N}(1, 0.1)`, and ``'ones'``
-        starts every member at the identity perturbation — under which all ``k``
-        members share one effective weight matrix at initialization.
-    :type init_distribution: str
-    :param kernel_initializer: Initializer for the main weights.
-    :type kernel_initializer: str or keras.initializers.Initializer
-    :param bias_initializer: Initializer for bias.
-    :type bias_initializer: str or keras.initializers.Initializer
-    :param kernel_regularizer: Optional regularizer for kernel weights.
-    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
-    :param bias_regularizer: Optional regularizer for bias weights.
-    :type bias_regularizer: str or keras.regularizers.Regularizer or None
-    :param kwargs: Additional layer arguments.
-    :type kwargs: Any
-    """
-
-    def __init__(
-            self,
-            units: int,
-            k: int,
-            use_bias: bool = True,
-            ensemble_scaling_in: bool = True,
-            ensemble_scaling_out: bool = True,
-            init_distribution: EnsembleInitDistribution = 'random-signs',
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            **kwargs
-    ) -> None:
-        super().__init__(**kwargs)
-        self.units = units
-        self.k = k
-        self.use_bias = use_bias
-        self.ensemble_scaling_in = ensemble_scaling_in
-        self.ensemble_scaling_out = ensemble_scaling_out
-        self.init_distribution = init_distribution
-        self.scaling_initializer = _ensemble_scaling_initializer(init_distribution)
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the ensemble linear layer weights."""
-        input_dim = input_shape[-1]
-
-        # Main weight matrix shared across ensemble members
-        self.kernel = self.add_weight(
-            shape=(input_dim, self.units),
-            initializer=self.kernel_initializer,
-            regularizer=self.kernel_regularizer,
-            trainable=True,
-            name='kernel'
-        )
-
-        # Input scaling weights
-        if self.ensemble_scaling_in:
-            self.r = self.add_weight(
-                shape=(self.k, input_dim),
-                initializer=self.scaling_initializer,
-                trainable=True,
-                name='input_scaling'
-            )
-
-        # Output scaling weights
-        if self.ensemble_scaling_out:
-            self.s = self.add_weight(
-                shape=(self.k, self.units),
-                initializer=self.scaling_initializer,
-                trainable=True,
-                name='output_scaling'
-            )
-
-        # Bias weights
-        if self.use_bias:
-            self.bias = self.add_weight(
-                shape=(self.k, self.units),
-                initializer=self.bias_initializer,
-                regularizer=self.bias_regularizer,
-                trainable=True,
-                name='bias'
-            )
-
-        super().build(input_shape)
-
-    def call(self, inputs: Any) -> Any:
-        """Forward pass through efficient ensemble layer.
-
-            :param inputs: Input tensor of shape (batch_size, k, input_dim).
-            :type inputs: keras.KerasTensor
-
-            :return: Output tensor of shape (batch_size, k, units).
-            :rtype: keras.KerasTensor
-        """
-        x = inputs
-
-        if self.ensemble_scaling_in:
-            x = ops.multiply(x, ops.expand_dims(self.r, axis=0))
-
-        x = ops.einsum('bki,iu->bku', x, self.kernel)
-
-        if self.ensemble_scaling_out:
-            x = ops.multiply(x, ops.expand_dims(self.s, axis=0))
-
-        if self.use_bias:
-            x = ops.add(x, ops.expand_dims(self.bias, axis=0))
-
-        return x
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], int, int]:
-        """Compute the output shape of the layer."""
-        return (input_shape[0], input_shape[1], self.units)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "units": self.units,
-            "k": self.k,
-            "use_bias": self.use_bias,
-            "ensemble_scaling_in": self.ensemble_scaling_in,
-            "ensemble_scaling_out": self.ensemble_scaling_out,
-            "init_distribution": self.init_distribution,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-        })
-        return config
-
-# ---------------------------------------------------------------------
 
 # DECISION plan-2026-09-01T110541-dcc1574a/D-001: keep the ``TabM`` prefix; do not rename to
 # ``MLPBlock``, which is ``layers/ffn/mlp.py``'s bare class name and FFN factory key. See decisions.md.

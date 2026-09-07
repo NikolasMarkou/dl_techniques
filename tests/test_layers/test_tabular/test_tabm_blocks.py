@@ -74,6 +74,43 @@ class TestLinearEfficientEnsemble:
         _roundtrip(LinearEfficientEnsemble(units=5, k=K, name="lee"), (K, D), _f32(B, K, D),
                    "lee", tmp_path, LinearEfficientEnsemble)
 
+    @pytest.mark.parametrize("kwargs, bad", [
+        (dict(units=0, k=K), "0"),
+        (dict(units=-4, k=K), "-4"),
+        (dict(units=5, k=0), "0"),
+        (dict(units=5, k=-1), "-1"),
+    ])
+    def test_constructor_rejects_non_positive(self, kwargs, bad):
+        with pytest.raises(ValueError) as exc:
+            LinearEfficientEnsemble(**kwargs)
+        # The message must name the offending value, not just the argument.
+        assert bad in str(exc.value)
+
+    def test_constructor_accepts_valid_values(self):
+        # Positive control: the guards must not fire on the shipped configuration.
+        layer = LinearEfficientEnsemble(units=5, k=K)
+        assert (layer.units, layer.k) == (5, K)
+
+    def test_all_gates_off_forward_pass(self):
+        # `r` / `s` / `bias` are created in build() only when their flag is set,
+        # and read in call() behind the identical flag. With all three off the
+        # layer must still run: an asymmetry between the two sides would surface
+        # here as an AttributeError, and this arm is otherwise unexercised.
+        layer = LinearEfficientEnsemble(
+            units=5, k=K, use_bias=False,
+            ensemble_scaling_in=False, ensemble_scaling_out=False,
+        )
+        out = layer(_f32(B, K, D))
+        assert tuple(out.shape) == (B, K, 5)
+        assert not hasattr(layer, "r") and not hasattr(layer, "s")
+        assert not hasattr(layer, "bias")
+
+    @pytest.mark.parametrize("gate", ["ensemble_scaling_in", "ensemble_scaling_out", "use_bias"])
+    def test_each_gate_off_forward_pass(self, gate):
+        # Same lockstep contract, one flag at a time.
+        layer = LinearEfficientEnsemble(units=5, k=K, **{gate: False})
+        assert tuple(layer(_f32(B, K, D)).shape) == (B, K, 5)
+
 
 class TestNLinear:
     def test_forward_and_shape(self):
