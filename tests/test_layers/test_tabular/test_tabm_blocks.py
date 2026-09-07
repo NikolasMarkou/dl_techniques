@@ -1,9 +1,12 @@
 """Tests for the TabM building blocks (efficient tabular ensembles)."""
 
+import json
 import os
 import keras
 import numpy as np
 import pytest
+
+from dl_techniques.layers.activations.golu import GoLU
 
 from dl_techniques.layers.tabular.tabm_blocks import (
     ScaleEnsemble,
@@ -183,6 +186,76 @@ class TestTabMMLPBlock:
 
     def test_serialization(self, tmp_path):
         _roundtrip(TabMMLPBlock(units=8, name="mlp"), (10,), _f32(B, 10), "mlp", tmp_path, TabMMLPBlock)
+
+    @pytest.mark.parametrize("kwargs, bad", [
+        (dict(units=0), "0"),
+        (dict(units=-3), "-3"),
+        (dict(units=8, k=0), "0"),
+        (dict(units=8, k=-2), "-2"),
+        (dict(units=8, dropout_rate=1.5), "1.5"),
+        (dict(units=8, dropout_rate=-0.1), "-0.1"),
+    ])
+    def test_constructor_rejects_out_of_range(self, kwargs, bad):
+        with pytest.raises(ValueError) as exc:
+            TabMMLPBlock(**kwargs)
+        # The message must name the offending value, not just the argument.
+        assert bad in str(exc.value)
+
+    @pytest.mark.parametrize("kwargs", [
+        dict(units=8),
+        dict(units=8, k=K),
+        dict(units=8, dropout_rate=0.0),
+        dict(units=8, dropout_rate=1.0),
+    ])
+    def test_constructor_accepts_valid(self, kwargs):
+        # Positive controls: the guards above must not fire on shipped configs.
+        assert TabMMLPBlock(**kwargs) is not None
+
+    def test_activation_is_stored_verbatim_not_eagerly_resolved(self):
+        # RED against the pre-split implementation, which did
+        # `self.activation = keras.activations.get(activation)` and therefore
+        # stored a FUNCTION. `deserialize_activation` returns a string unchanged,
+        # so the key survives into `get_config()` verbatim -- which is the whole
+        # point of the pair (a Keras-unknown factory key would otherwise be
+        # destroyed on the way in). `activation_fn` carries the live callable.
+        layer = TabMMLPBlock(units=8, activation="relu")
+        assert layer.activation == "relu"
+        assert not callable(layer.activation)
+        assert callable(layer.activation_fn)
+        assert layer.get_config()["activation"] == "relu"
+
+    @pytest.mark.parametrize("activation", ["relu", "mish", keras.activations.gelu])
+    def test_activation_config_is_json_serializable(self, activation):
+        # The observable the activation_serialization module docstring names as
+        # discriminating: `get_config()` must be JSON-safe for every accepted form.
+        json.dumps(TabMMLPBlock(units=8, activation=activation).get_config())
+
+    @pytest.mark.parametrize("activation, tag", [
+        ("relu", "act_str"),
+        ("mish", "act_mish"),
+        (keras.activations.gelu, "act_callable"),
+        (GoLU(), "act_layer"),
+    ])
+    def test_activation_roundtrip(self, activation, tag, tmp_path):
+        # `mish` and the GoLU layer are dl_techniques activations; the live
+        # callable is the form TabMBackbone hands down when a caller passes one.
+        _roundtrip(TabMMLPBlock(units=8, activation=activation, name=tag), (10,),
+                   _f32(B, 10), tag, tmp_path, TabMMLPBlock)
+
+    @pytest.mark.parametrize("rate, tag", [(0.0, "drop0"), (0.5, "drop5")])
+    def test_dropout_object_exists_at_every_rate(self, rate, tag, tmp_path):
+        # v2 s1.3 / fix (b): the Dropout object is created unconditionally, so the
+        # object graph and sibling auto-names do not shift with the rate. RED
+        # against the pre-split implementation, which set `self.dropout = None`
+        # at rate 0. Only `build()` and `call()` gate on the rate.
+        layer = TabMMLPBlock(units=8, dropout_rate=rate, name=tag)
+        out = layer(_f32(B, 10), training=False)
+        assert tuple(out.shape) == (B, 8)
+        assert layer.dropout is not None
+        assert isinstance(layer.dropout, keras.layers.Dropout)
+        assert layer.dropout.rate == rate
+        _roundtrip(TabMMLPBlock(units=8, dropout_rate=rate, name=f"{tag}_rt"), (10,),
+                   _f32(B, 10), f"{tag}_rt", tmp_path, TabMMLPBlock)
 
 
 class TestTabMBackbone:
