@@ -90,6 +90,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 
 from ..ffn.mlp import MLPBlock
 from ..norms.rms_norm import RMSNorm
+from ..norms.factory import create_normalization_layer
 from ...initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -174,7 +175,10 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
     :param use_residual: Whether to add residual connections. Defaults to ``True``.
     :type use_residual: bool
     :param num_attention_heads: Attention heads for GAT / attention aggregation.
-        Must divide ``concept_dim``. Defaults to 4.
+        Must divide ``concept_dim`` -- ``__init__`` raises otherwise. It sizes
+        BOTH the per-block GAT attention and the final aggregation attention,
+        each of which uses ``key_dim = concept_dim // num_attention_heads``.
+        Defaults to 4.
     :type num_attention_heads: int
     :param epsilon: Learnable self-loop weight for GIN. Defaults to 0.0.
     :type epsilon: float
@@ -188,6 +192,14 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
     :param bias_regularizer: Optional regularizer for bias vectors.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional arguments for the ``Layer`` base class.
+
+    :raises ValueError: from ``__init__`` if ``concept_dim``, ``num_layers`` or
+        ``num_attention_heads`` is non-positive, if ``dropout_rate`` is outside
+        ``[0, 1]``, if ``message_passing`` or ``aggregation`` is unknown, or if
+        ``num_attention_heads`` does not divide ``concept_dim``; and from
+        ``build()`` if the adjacency is not rank-3, not square, or disagrees
+        with the node features on the batch or node axis. A ``None`` (symbolic)
+        axis is never checked; the RANK always is.
     """
 
     def __init__(
@@ -219,6 +231,23 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
         if num_attention_heads <= 0:
             raise ValueError(f"num_attention_heads must be positive, got {num_attention_heads}")
+        # DECISION plan-2026-09-07T183458-be1c267e/D-013
+        # The docstring has always said `num_attention_heads` "Must divide
+        # `concept_dim`", and nothing enforced it. MEASURED on the shipped layer:
+        # `concept_dim=16, num_attention_heads=3` constructed and ran with a silently
+        # floor-divided `key_dim=5`, so the GAT branch used 3*5 = 15 of the 16
+        # advertised channels. Raise where the contract is documented. Note this is
+        # also a DESERIALIZATION break, because `from_config` calls `__init__` -- it is
+        # safe here only because no `.keras` archive in this repo references this class
+        # (re-derived in step 1), which is a fact about this layer, not a precedent.
+        if concept_dim % num_attention_heads != 0:
+            raise ValueError(
+                f"num_attention_heads must divide concept_dim; got "
+                f"num_attention_heads={num_attention_heads} and concept_dim={concept_dim} "
+                f"(remainder {concept_dim % num_attention_heads}). It sizes the per-head "
+                f"projection of the GAT branch AND of the aggregation attention, both of "
+                f"which use key_dim = concept_dim // num_attention_heads."
+            )
         if message_passing not in ['gcn', 'graphsage', 'gat', 'gin']:
             raise ValueError(f"Invalid message_passing: {message_passing}")
         if aggregation not in ['mean', 'max', 'attention', 'sum', 'none']:
@@ -406,18 +435,38 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             )
 
             # Normalization layers
+            # DECISION plan-2026-09-07T183458-be1c267e/D-004
+            # All three branches go through `create_normalization_layer`, whose
+            # `epsilon` defaults to the house 1e-6. They used to construct
+            # `keras.layers.LayerNormalization` / `BatchNormalization` directly, which
+            # take Keras' stock `epsilon=1e-3` -- 1000x the sibling `'rms'` branch three
+            # lines below, in the class DEFAULT configuration
+            # (`normalization='layer'`), with no shape symptom and no warning. There is
+            # no cited reference for 1e-3 here; it was the stock default taken by
+            # accident, and this file's own `'rms'` branch already contradicted it
+            # (`layers/CLAUDE.md` § Layer Reuse Policy rule 5). This CHANGES default-
+            # config numerics, deliberately and once: on a seeded 2-block stack at
+            # `(2, 5, 16)` the forward output moved by max|delta| 1.25e-03 ('layer',
+            # 5.05e-04 relative) and 3.44e-03 ('batch', 9.99e-04 relative), inference
+            # mode. Do NOT "restore" the
+            # direct constructions -- see decisions.md D-004. `name=` is passed
+            # explicitly so weight paths stay independent of Keras' process-global
+            # auto-increment counter.
             if self.normalization == 'layer':
                 self.norm_layers.append(
-                    keras.layers.LayerNormalization(name=f'gnn_layer_norm_{i}')
+                    create_normalization_layer('layer_norm', name=f'gnn_layer_norm_{i}')
                 )
             elif self.normalization == 'rms':
-                # Re-use RMSNorm from dl_techniques
+                # Re-use RMSNorm from dl_techniques. Deliberately left as a DIRECT
+                # construction: it already defaults to 1e-6, so routing it through the
+                # factory would be a behaviour-neutral churn in a commit whose whole
+                # point is one measured numeric change in the other two branches.
                 self.norm_layers.append(
                     RMSNorm(name=f'gnn_rms_norm_{i}')
                 )
             elif self.normalization == 'batch':
                 self.norm_layers.append(
-                    keras.layers.BatchNormalization(name=f'gnn_batch_norm_{i}')
+                    create_normalization_layer('batch_norm', name=f'gnn_batch_norm_{i}')
                 )
             else:  # 'none'
                 self.norm_layers.append(None)
@@ -429,9 +478,18 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             # `keras.layers.MultiHeadAttention`, which re-clones its initializer for
             # every sub-layer. MEASURED independent. See the full anchor at the
             # `gat_attention_{i}` construction above and decisions.md D-007.
+            # DECISION plan-2026-09-07T183458-be1c267e/D-014
+            # `num_heads` / `key_dim` come from `self.num_attention_heads`, NOT from a
+            # hardcoded 4. MEASURED on the shipped layer: at
+            # `num_attention_heads=8` this attention still reported
+            # `num_heads == 4`, so the constructor argument controlled the GAT branch
+            # and silently nothing here. At the default 4 the swap is bit-identical --
+            # `test_the_default_head_count_is_unchanged` pins that -- and the
+            # divisibility raise in `__init__` is what keeps `concept_dim //
+            # num_attention_heads` exact rather than floor-divided.
             self.aggregation_attention = keras.layers.MultiHeadAttention(
-                num_heads=4,
-                key_dim=self.concept_dim // 4,
+                num_heads=self.num_attention_heads,
+                key_dim=self.concept_dim // self.num_attention_heads,
                 dropout=self.dropout_rate,
                 kernel_initializer=self.kernel_initializer,
                 bias_initializer=self.bias_initializer,
@@ -480,6 +538,57 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         :type input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
         """
         node_shape, adjacency_shape = input_shape
+
+        # DECISION plan-2026-09-07T183458-be1c267e/D-015
+        # Validate the adjacency against the nodes HERE, before anything is built.
+        # MEASURED on the shipped layer: a `(1, 5, 5)` adjacency against `(2, 5, 16)`
+        # nodes was silently BROADCAST by `keras.ops.matmul` and returned a plausible
+        # `(2, 5, 16)` -- one graph's edges applied to every sample in the batch, with
+        # no error anywhere. A non-square `(2, 5, 7)` did fail, but only later and
+        # opaquely, inside `call()`: `InvalidArgumentError: Incompatible shapes:
+        # [2,5,7] vs. [2,1,5]`, which names neither the argument nor the layer.
+        #
+        # None-safe on purpose, in the shape of `layers/tabular/nlinear.py`'s guards: a
+        # symbolic axis carries no disagreement to detect, so only the RANK is always
+        # checked and every concrete-vs-concrete pair is checked individually. Without
+        # that, this raise would break every functional-API caller building on
+        # `keras.Input(shape=(None, None))` -- which is exactly how a graph model with a
+        # variable node count is written.
+        if len(adjacency_shape) != 3:
+            raise ValueError(
+                f"adjacency must be rank 3 (batch, num_nodes, num_nodes); got rank "
+                f"{len(adjacency_shape)}; adjacency_shape={tuple(adjacency_shape)!r}"
+            )
+        if len(node_shape) != 3:
+            raise ValueError(
+                f"node_features must be rank 3 (batch, num_nodes, features); got rank "
+                f"{len(node_shape)}; node_shape={tuple(node_shape)!r}"
+            )
+        if (adjacency_shape[1] is not None and adjacency_shape[2] is not None
+                and adjacency_shape[1] != adjacency_shape[2]):
+            raise ValueError(
+                f"adjacency must be square in its last two axes; got "
+                f"({adjacency_shape[1]!r}, {adjacency_shape[2]!r}); "
+                f"adjacency_shape={tuple(adjacency_shape)!r}"
+            )
+        if (adjacency_shape[0] is not None and node_shape[0] is not None
+                and adjacency_shape[0] != node_shape[0]):
+            raise ValueError(
+                f"adjacency batch size {adjacency_shape[0]!r} disagrees with the node "
+                f"features' batch size {node_shape[0]!r}; a mismatched batch is "
+                f"silently BROADCAST by the message passing, applying one graph's "
+                f"edges to every sample; adjacency_shape={tuple(adjacency_shape)!r}, "
+                f"node_shape={tuple(node_shape)!r}"
+            )
+        for axis in (1, 2):
+            if (adjacency_shape[axis] is not None and node_shape[1] is not None
+                    and adjacency_shape[axis] != node_shape[1]):
+                raise ValueError(
+                    f"adjacency axis {axis} is {adjacency_shape[axis]!r} but the node "
+                    f"features carry {node_shape[1]!r} nodes; "
+                    f"adjacency_shape={tuple(adjacency_shape)!r}, "
+                    f"node_shape={tuple(node_shape)!r}"
+                )
 
         # Create GIN epsilon if needed
         if self.message_passing == 'gin':

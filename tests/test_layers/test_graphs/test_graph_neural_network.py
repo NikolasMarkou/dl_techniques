@@ -432,3 +432,199 @@ class TestTheCalleeReClonesTheSharedInitializer:
                 f"MLPBlock no longer clones its initializer for {suffix} -- "
                 "graph_neural_network.py's gin_mlp_{i} site must now clone (see D-007)"
             )
+
+
+class TestTheSecondaryContractsThisLayerAdvertises:
+    """The four measured secondary defects fixed in plan step 8.
+
+    Each was MEASURED on the shipped layer before the fix, at `(2, 5, 16)`
+    nodes and an all-ones `(2, 5, 5)` adjacency:
+
+    1. `num_attention_heads` is DOCUMENTED as "Must divide ``concept_dim``"
+       (`graph_neural_network.py` `:param num_attention_heads:`) and was never
+       validated -- `concept_dim=16, num_attention_heads=3` constructed and ran
+       with a silently floor-divided `key_dim=5`, so the GAT branch used
+       `3 * 5 = 15` of the 16 advertised channels.
+    2. The final aggregation attention hardcoded `num_heads=4` /
+       `key_dim=concept_dim // 4`, ignoring `num_attention_heads` entirely --
+       measured `aggregation_attention.num_heads == 4` at
+       `num_attention_heads=8`.
+    3. Adjacency shape was unvalidated: a `(1, 5, 5)` adjacency against
+       `(2, 5, 16)` nodes was silently BROADCAST and returned a plausible
+       `(2, 5, 16)`, and a non-square `(2, 5, 7)` died inside `call()` with a
+       raw `InvalidArgumentError: Incompatible shapes: [2,5,7] vs. [2,1,5]`
+       that never named the adjacency argument.
+    4. The `'layer'` and `'batch'` normalization branches took Keras' stock
+       `epsilon=1e-3` while the sibling `'rms'` branch three lines below ran at
+       `1e-6` -- a 1000x difference in every denominator, in the class DEFAULT
+       configuration, with no shape symptom (D-004).
+    """
+
+    # -- 1. num_attention_heads divisibility ---------------------------------
+
+    @pytest.mark.parametrize("heads", [3, 5, 7])
+    def test_num_attention_heads_must_divide_concept_dim(self, heads):
+        with pytest.raises(ValueError) as excinfo:
+            GraphNeuralNetworkLayer(concept_dim=D, num_attention_heads=heads)
+        message = str(excinfo.value)
+        assert "num_attention_heads" in message
+        assert "concept_dim" in message
+        assert str(heads) in message
+        assert str(D) in message
+
+    @pytest.mark.parametrize("heads", [1, 2, 4, 8, 16])
+    def test_a_divisor_head_count_still_constructs(self, heads):
+        layer = GraphNeuralNetworkLayer(concept_dim=D, num_attention_heads=heads)
+        assert layer.num_attention_heads == heads
+
+    def test_the_divisibility_raise_fires_for_every_message_passing_mode(self):
+        """The contract is on the pair, not on whether GAT happens to be on.
+
+        `num_attention_heads` also sizes the aggregation attention, which is
+        the DEFAULT aggregation, so a non-divisor is wrong at `'gcn'` too.
+        """
+        for mode in ("gcn", "graphsage", "gat", "gin"):
+            with pytest.raises(ValueError, match="num_attention_heads"):
+                GraphNeuralNetworkLayer(
+                    concept_dim=D, message_passing=mode, num_attention_heads=3
+                )
+
+    # -- 2. the aggregation attention honours num_attention_heads ------------
+
+    @pytest.mark.parametrize("heads", [1, 2, 8, 16])
+    def test_the_aggregation_attention_uses_the_configured_head_count(self, heads):
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D, num_attention_heads=heads, aggregation="attention"
+        )
+        assert layer.aggregation_attention.num_heads == heads
+        assert layer.aggregation_attention.key_dim == D // heads
+
+    def test_the_default_head_count_is_unchanged(self):
+        """At the default `num_attention_heads=4` the swap is bit-identical.
+
+        Pinned so a future edit cannot quietly move the default config's
+        weight shapes while claiming to be wiring a knob through.
+        """
+        layer = GraphNeuralNetworkLayer(concept_dim=D, aggregation="attention")
+        assert layer.aggregation_attention.num_heads == 4
+        assert layer.aggregation_attention.key_dim == D // 4
+
+    def test_the_aggregation_attention_actually_runs_at_a_non_default_head_count(
+        self, graph_inputs
+    ):
+        """A shape assertion alone would pass on a layer that cannot run."""
+        nodes, adj = graph_inputs
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D, num_layers=1, num_attention_heads=8, aggregation="attention"
+        )
+        out = layer((nodes, adj))
+        assert tuple(out.shape) == (B, N, D)
+
+    # -- 3. adjacency shape validation ---------------------------------------
+
+    def test_a_broadcastable_adjacency_batch_is_refused(self, graph_inputs):
+        """The measured silent case: `(1, N, N)` against `(2, N, D)` nodes."""
+        nodes, _ = graph_inputs
+        layer = GraphNeuralNetworkLayer(concept_dim=D, num_layers=1, aggregation="none")
+        with pytest.raises(ValueError) as excinfo:
+            layer((nodes, np.ones((1, N, N), dtype="float32")))
+        message = str(excinfo.value)
+        assert "adjacency" in message
+        assert "(1, 5, 5)" in message or "(1, 5, 5)".replace(" ", "") in message
+
+    def test_a_non_square_adjacency_is_refused_by_name(self, graph_inputs):
+        nodes, _ = graph_inputs
+        layer = GraphNeuralNetworkLayer(concept_dim=D, num_layers=1, aggregation="none")
+        with pytest.raises(ValueError) as excinfo:
+            layer((nodes, np.ones((B, N, N + 2), dtype="float32")))
+        assert "adjacency" in str(excinfo.value)
+
+    def test_an_adjacency_of_the_wrong_rank_is_refused(self, graph_inputs):
+        nodes, _ = graph_inputs
+        layer = GraphNeuralNetworkLayer(concept_dim=D, num_layers=1, aggregation="none")
+        with pytest.raises(ValueError, match="adjacency"):
+            layer((nodes, np.ones((N, N), dtype="float32")))
+
+    def test_an_adjacency_whose_node_count_disagrees_with_the_nodes_is_refused(
+        self, graph_inputs
+    ):
+        nodes, _ = graph_inputs
+        layer = GraphNeuralNetworkLayer(concept_dim=D, num_layers=1, aggregation="none")
+        with pytest.raises(ValueError, match="adjacency"):
+            layer((nodes, np.ones((B, N + 1, N + 1), dtype="float32")))
+
+    @pytest.mark.parametrize("adjacency_shape", [
+        (None, N, N),
+        (B, None, None),
+        (None, None, None),
+    ])
+    def test_a_symbolic_adjacency_axis_does_NOT_raise(self, adjacency_shape):
+        """None-safety, the way `layers/tabular/nlinear.py` does it.
+
+        An unknown (symbolic) axis carries no disagreement to detect, so the
+        guard must skip it and check only the RANK. Without this arm the raise
+        would break every functional-API caller that builds on
+        `keras.Input(shape=(None, None))`.
+        """
+        layer = GraphNeuralNetworkLayer(concept_dim=D, num_layers=1, aggregation="none")
+        layer.build(((None, N, D), adjacency_shape))
+        assert layer.built
+
+    def test_the_matching_adjacency_still_builds_and_runs(self, graph_inputs):
+        """Positive control: the guard must not reject the valid case."""
+        nodes, adj = graph_inputs
+        layer = GraphNeuralNetworkLayer(concept_dim=D, num_layers=2, aggregation="none")
+        out = layer((nodes, adj))
+        assert tuple(out.shape) == (B, N, D)
+
+    def test_a_functional_model_with_symbolic_node_and_edge_counts_still_builds(self):
+        node_input = keras.Input(shape=(None, D))
+        adjacency_input = keras.Input(shape=(None, None))
+        out = GraphNeuralNetworkLayer(
+            concept_dim=D, num_layers=1, aggregation="none"
+        )((node_input, adjacency_input))
+        model = keras.Model([node_input, adjacency_input], out)
+        rng = np.random.default_rng(3)
+        nodes = rng.standard_normal((B, N, D)).astype("float32")
+        adj = np.ones((B, N, N), dtype="float32")
+        assert tuple(model([nodes, adj]).shape) == (B, N, D)
+
+    # -- 4. normalization epsilon --------------------------------------------
+
+    @pytest.mark.parametrize("normalization", ["layer", "batch", "rms"])
+    def test_every_normalization_branch_runs_at_the_house_epsilon(self, normalization):
+        """D-004: all three branches at 1e-6, matching `norms/factory.py`.
+
+        `layers/CLAUDE.md` § Layer Reuse Policy rule 5: Keras' stock `1e-3` is
+        1000x the factory's `1e-6` with no shape symptom and no warning. There
+        is no cited reference for `1e-3` here -- it was the stock default taken
+        by accident, and this file's own `'rms'` branch already disagreed with
+        it.
+        """
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D, num_layers=1, normalization=normalization
+        )
+        assert layer.norm_layers[0].epsilon == pytest.approx(1e-6, rel=0, abs=0)
+
+    def test_the_none_branch_still_creates_no_normalization_layer(self):
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D, num_layers=2, normalization="none"
+        )
+        assert layer.norm_layers == [None, None]
+
+    @pytest.mark.parametrize("normalization", ["layer", "batch", "rms"])
+    def test_the_normalization_layer_keeps_its_explicit_name(self, normalization):
+        """Routing through the factory must not drop `name=`.
+
+        A dropped `name=` would fall back to Keras' process-global
+        auto-increment counter and make weight paths depend on import order --
+        the `_SEWeights` defect (D-011) in a different file.
+        """
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D, num_layers=2, normalization=normalization
+        )
+        expected = {"layer": "layer_norm", "batch": "batch_norm", "rms": "rms_norm"}[
+            normalization
+        ]
+        for index in range(2):
+            assert layer.norm_layers[index].name == f"gnn_{expected}_{index}"
