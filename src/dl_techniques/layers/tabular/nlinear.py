@@ -116,9 +116,20 @@ class NLinear(keras.layers.Layer):
         :param input_shape: Shape of the input, ``(batch, n, input_dim)``.
         :type input_shape: tuple
 
-        :raises ValueError: If ``input_dim`` was passed explicitly and disagrees
-            with ``input_shape[-1]``.
+        :raises ValueError: If ``input_shape[1]`` disagrees with ``n``, or if
+            ``input_dim`` was passed explicitly and disagrees with
+            ``input_shape[-1]``. Without the axis-1 check ``build()`` accepts the
+            mismatch, ``compute_output_shape`` reports ``(batch, n, output_dim)``
+            anyway, and the failure surfaces later as an opaque backend error
+            from the ``einsum`` in :meth:`call`. A ``None`` (symbolic) axis is
+            not checked.
         """
+        if input_shape[1] is not None and input_shape[1] != self.n:
+            raise ValueError(
+                f"n was given as {self.n!r} but the input's axis 1 is "
+                f"{input_shape[1]!r}; input_shape={tuple(input_shape)!r}"
+            )
+
         # `input_dim=None` defers the fan-in to build time, so a packed
         # TabMMLPBlock can construct its NLinear in __init__, before the input width is known.
         if self.input_dim is None:

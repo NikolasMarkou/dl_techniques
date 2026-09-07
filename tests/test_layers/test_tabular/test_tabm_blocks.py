@@ -218,6 +218,26 @@ class TestLinearEfficientEnsemble:
         layer.build((None, None, D))
         assert tuple(layer.r.shape) == (K, D)
 
+    def test_compute_output_shape_derives_from_k(self):
+        # The input here is DELIBERATELY inconsistent -- axis 1 is K+4, not k --
+        # because that is the only way to see which SOURCE the answer came from.
+        # `r`/`s`/`bias` are all shaped from the stored `k`, so `k` is what
+        # call() actually produces; reading `input_shape[1]` made this method
+        # disagree with call() and with TabMMLPBlock on the same nominal input
+        # ((None, 7, 5) vs (None, 3, 5)). Guide v2 3.4 requires the answer to
+        # come from stored config on an UNBUILT layer, which is why nothing is
+        # built here. build() would now REJECT this shape outright
+        # (test_build_rejects_k_mismatch), so no layer that could be built can
+        # ever produce a (_, K+4, 5) tensor.
+        layer = LinearEfficientEnsemble(units=5, k=K)
+        assert not layer.built
+        assert layer.compute_output_shape((None, K + 4, D)) == (None, K, 5)
+        # ... and it now agrees with the block that wraps it, on that same input.
+        assert (
+            layer.compute_output_shape((None, K + 4, D))
+            == TabMMLPBlock(units=5, k=K).compute_output_shape((None, K + 4, D))
+        )
+
 
 class TestNLinear:
     def test_forward_and_shape(self):
@@ -256,10 +276,30 @@ class TestNLinear:
         msg = str(exc.value)
         assert str(D) in msg and str(D + 4) in msg
 
+    def test_build_rejects_n_mismatch(self):
+        # `n` names axis 1 and sizes `kernels`, but build() only ever validated
+        # the LAST axis: an axis-1 mismatch was accepted here,
+        # compute_output_shape still answered (None, n, output_dim), and the
+        # failure surfaced only as an opaque backend error from the einsum in
+        # call(). The guard sits ABOVE the input_dim block, in axis order.
+        layer = NLinear(n=K, input_dim=D, output_dim=5)
+        with pytest.raises(ValueError) as exc:
+            layer.build((None, K + 4, D))
+        msg = str(exc.value)
+        assert str(K) in msg and str(K + 4) in msg
+        assert str(tuple((None, K + 4, D))) in msg
+
     def test_build_accepts_matching_input_dim(self):
         # Positive control for the shape contract.
         layer = NLinear(n=K, input_dim=D, output_dim=5)
         layer.build((None, K, D))
+        assert tuple(layer.kernels.shape) == (K, D, 5)
+
+    def test_build_accepts_unknown_n_axis(self):
+        # `is not None` sub-condition (H-2): an unknown axis 1 carries no
+        # information and must build, with `kernels` still sized from `n`.
+        layer = NLinear(n=K, input_dim=D, output_dim=5)
+        layer.build((None, None, D))
         assert tuple(layer.kernels.shape) == (K, D, 5)
 
     def test_deferred_input_dim_builds_and_roundtrips(self, tmp_path):
@@ -569,3 +609,65 @@ class TestRegistrationKeys:
                                       registration_contract):
         key = registration_contract(cls)
         assert key == expected_key
+
+
+class TestOutputShapeContract:
+    """`compute_output_shape` must equal what `call()` actually produces.
+
+    N-8 was a DISAGREEMENT, not a crash: `LinearEfficientEnsemble` derived axis 1
+    from `input_shape[1]` while `TabMMLPBlock` derived it from `self.k`, so the
+    same nominal input got two different answers and neither site was obviously
+    wrong on its own. A per-class unit assertion cannot see that -- only a
+    contract applied to every class at once can, which is why these nine arms
+    cover all five classes in plain mode and in BOTH ensemble types.
+
+    `TabMBackbone.build()` threads `current_shape = block.compute_output_shape(
+    current_shape)` from block to block, so a wrong source does not stay local:
+    it propagates through the whole stack while every reported shape stays
+    self-consistent. The backbone arms are the ones that measure that.
+
+    Each arm asserts two things:
+
+    * concrete -- `compute_output_shape((B,) + shape)` equals the shape of a REAL
+      forward pass, so the prediction is checked against the tensor, not against
+      another prediction;
+    * symbolic -- `compute_output_shape((None,) + shape)` keeps the batch axis
+      `None` and agrees with the concrete output on every other axis, so an
+      unknown batch size neither leaks into nor is invented for the feature axes.
+    """
+
+    SUBJECTS = [
+        (lambda: ScaleEnsemble(k=K, input_dim=D), (K, D)),
+        (lambda: LinearEfficientEnsemble(units=5, k=K), (K, D)),
+        (lambda: NLinear(n=K, input_dim=D, output_dim=5), (K, D)),
+        (lambda: TabMMLPBlock(units=8), (D,)),
+        (lambda: TabMMLPBlock(units=8, k=K, ensemble_type='efficient'), (K, D)),
+        (lambda: TabMMLPBlock(units=8, k=K, ensemble_type='packed'), (K, D)),
+        (lambda: TabMBackbone(hidden_dims=[8, 6]), (D,)),
+        (lambda: TabMBackbone(hidden_dims=[8, 6], k=K, ensemble_type='efficient'), (K, D)),
+        (lambda: TabMBackbone(hidden_dims=[8, 6], k=K, ensemble_type='packed'), (K, D)),
+    ]
+
+    @pytest.mark.parametrize("make, shape", SUBJECTS, ids=[
+        "ScaleEnsemble",
+        "LinearEfficientEnsemble",
+        "NLinear",
+        "TabMMLPBlock-plain",
+        "TabMMLPBlock-efficient",
+        "TabMMLPBlock-packed",
+        "TabMBackbone-plain",
+        "TabMBackbone-efficient",
+        "TabMBackbone-packed",
+    ])
+    def test_compute_output_shape_matches_call(self, make, shape):
+        layer = make()
+
+        # Concrete arm: the prediction is checked against a real tensor.
+        actual = tuple(layer(_f32(B, *shape)).shape)
+        assert tuple(layer.compute_output_shape((B,) + shape)) == actual
+
+        # Symbolic arm: an unknown batch axis stays unknown and must not change
+        # any feature axis.
+        symbolic = tuple(layer.compute_output_shape((None,) + shape))
+        assert symbolic[0] is None
+        assert symbolic[1:] == actual[1:]

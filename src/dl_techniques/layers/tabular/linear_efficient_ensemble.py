@@ -260,8 +260,13 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], int, int]:
-        """Compute the output shape of the layer."""
-        return (input_shape[0], input_shape[1], self.units)
+        """Compute the output shape of the layer.
+
+        Axis 1 comes from the stored ``k``, never from ``input_shape[1]``: the
+        weights are shaped from ``k``, so ``k`` is what :meth:`call` actually
+        produces, and this must answer correctly on an UNBUILT layer.
+        """
+        return (input_shape[0], self.k, self.units)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization."""
