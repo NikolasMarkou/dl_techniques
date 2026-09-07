@@ -59,6 +59,7 @@ from typing import Optional, Union, List, Dict, Any, Tuple, Literal, Callable
 from dl_techniques.layers.ffn import create_ffn_layer, FFNType
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -491,6 +492,58 @@ class MultiModalFusion(keras.layers.Layer):
             shapes whose last axis is ``dim``, or if the strategy key is
             unknown.
         """
+        # DECISION plan-2026-09-07T183458-be1c267e/D-003
+        # Every sub-layer of this class is created HERE, in `build()`, never in
+        # `__init__` -- a literal deviation from the v2 custom-layer guide's
+        # §16.1 ("all sub-layers created in `__init__`, unconditionally"). The
+        # deviation is ACCEPTED, not an oversight: the sub-layer COUNT depends
+        # on `len(input_shape)`, the runtime number of modalities, and no
+        # amount of restructuring makes that knowable before `build()`. Do NOT
+        # "fix" this by moving construction into `__init__` -- doing so means
+        # re-architecting all eight `_build_*` builders around a modality count
+        # the constructor cannot see, which is a large behaviour-risking change
+        # bought with no measured benefit.
+        #
+        # The acceptance rests on exactly ONE property, so that property is
+        # guarded rather than asserted: every sub-layer created below carries
+        # an explicit `name=`, so an explicitly-built instance and a lazily-
+        # built instance produce the same weight PATHS. Keras appends a `_<n>`
+        # disambiguator to any sub-layer created without one, which would make
+        # the second instance in a process silently disagree. Adding a new
+        # sub-layer here WITHOUT `name=` breaks the basis of this acceptance.
+        # Pinned by `tests/test_layers/test_fusion/
+        # test_the_fusion_build_matches_the_lazy_build.py` (15 arms, MEASURED
+        # parity) and recorded in decisions.md D-003.
+        #
+        # DECISION plan-2026-09-07T183458-be1c267e/D-009
+        # Every `keras.layers.Dense` created by the builders below takes
+        # `clone_initializer(self.kernel_initializer)` and
+        # `clone_initializer(self.bias_initializer)`, never the bare
+        # attributes. `__init__` resolves ONE instance of each
+        # (`keras.initializers.get(...)`), and a seedless `Initializer`
+        # INSTANCE replays the same underlying sample at every later site, so
+        # handing it to several children makes their weights the same random
+        # numbers. MEASURED before the fix at `dim=8`, over all eight
+        # strategies at 2 and 3 modalities: all 8 sites and both of their
+        # weights aliased -- 48 aliased weight tensors across the 15 reachable
+        # arms. The sharpest case is `_build_tensor_fusion`'s parallel
+        # `tensor_proj_{i}`, which share the kernel AND the input.
+        #
+        # Do NOT move the clone up to the `keras.initializers.get(...)` lines
+        # in `__init__`: cloning once there hands every child the SAME clone
+        # and restores the tie, while also breaking a seeded caller's
+        # reproducibility. The clone belongs at the SITE.
+        #
+        # Independence holds for a RANDOM SEEDLESS initializer; the exceptions
+        # are a SEEDED instance (replays by contract, across differing shapes
+        # too), a DETERMINISTIC one (`'zeros'`/`'ones'`/`Constant`, `Identity`
+        # at 2-D -- identical and correctly so), and a CUSTOM one failing the
+        # `get_config()` round trip (falls back to `copy.deepcopy`, keeping the
+        # resolved seed). `bias_initializer` DEFAULTS to `'zeros'`, which is
+        # the second exemption: identical biases at every site under the
+        # default are correct, and the bias fan-out is only observable under a
+        # caller-supplied random instance. See
+        # `src/dl_techniques/initializers/clone.py` and decisions.md D-009.
         if self.built:
             return
 
@@ -635,8 +688,8 @@ class MultiModalFusion(keras.layers.Layer):
             units=self.dim,
             activation=self.activation,
             name='concat_projection',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )
@@ -680,8 +733,8 @@ class MultiModalFusion(keras.layers.Layer):
                 proj = keras.layers.Dense(
                     self.dim,
                     name=f'align_projection_{i}',
-                    kernel_initializer=self.kernel_initializer,
-                    bias_initializer=self.bias_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
+                    bias_initializer=clone_initializer(self.bias_initializer),
                     kernel_regularizer=self.kernel_regularizer,
                     bias_regularizer=self.bias_regularizer
                 )
@@ -726,8 +779,8 @@ class MultiModalFusion(keras.layers.Layer):
                 # Sigmoid keeps the gate in [0, 1]
                 activation='sigmoid',
                 name=f'gate_{i}',
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer
             )
@@ -739,8 +792,8 @@ class MultiModalFusion(keras.layers.Layer):
             units=self.dim,
             activation=self.activation,
             name='gated_projection',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )
@@ -787,8 +840,8 @@ class MultiModalFusion(keras.layers.Layer):
             units=self.dim,
             activation=self.activation,
             name='pool_projection',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )
@@ -820,8 +873,8 @@ class MultiModalFusion(keras.layers.Layer):
             units=self.dim,
             activation=self.activation,
             name='bilinear_projection',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )
@@ -862,13 +915,22 @@ class MultiModalFusion(keras.layers.Layer):
         # Parallel hidden units. Each sees the SAME concatenated input, so
         # this is one wide Dense(dim * num_tensor_projections) written as a
         # list. It is not a decomposition of anything.
+        #
+        # DECISION plan-2026-09-07T183458-be1c267e/D-009
+        # This is the sharpest site of the fan-out documented at `build()`.
+        # Because these projections share their input, handing them the same
+        # initializer instance made them the same function of the same tensor,
+        # so their gradients matched too and gradient descent could never
+        # separate them -- `num_tensor_projections` bought no capacity at all.
+        # The `clone_initializer(...)` calls below are what make them distinct;
+        # do not simplify them back to the bare attributes.
         for i in range(self.num_tensor_projections):
             proj = keras.layers.Dense(
                 units=self.dim,
                 activation=self.activation,
                 name=f'tensor_proj_{i}',
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer
             )
@@ -879,8 +941,8 @@ class MultiModalFusion(keras.layers.Layer):
         final_proj = keras.layers.Dense(
             units=self.dim,
             name='tensor_final_proj',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )
