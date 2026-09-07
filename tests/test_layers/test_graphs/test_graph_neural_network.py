@@ -4,6 +4,7 @@ import os
 import keras
 import numpy as np
 import pytest
+import tensorflow as tf
 
 from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetworkLayer
 
@@ -96,3 +97,87 @@ class TestGraphNeuralNetworkLayer:
         rebuilt = GraphNeuralNetworkLayer.from_config(config)
         assert rebuilt.concept_dim == D
         assert rebuilt.message_passing == "gin"
+
+
+# ---------------------------------------------------------------------
+# The stack must run at a hidden width that differs from the input width.
+#
+# Every test above pins concept_dim == D == 16, so `node_shape` and the
+# running block width coincide and the build-time shape contract is
+# structurally invisible. These cases separate the two.
+# ---------------------------------------------------------------------
+
+MESSAGE_PASSING = ["gcn", "graphsage", "gat", "gin"]
+NORMALIZATION = ["none", "layer", "rms", "batch"]
+# 8 < D, 16 == D (the currently-passing arm), 32 > D.
+HIDDEN_WIDTHS = [8, 16, 32]
+
+
+class TestTheGnnStackRunsAtAHiddenWidth:
+    """The layer must run for any ``concept_dim``, not only ``concept_dim == D``."""
+
+    @pytest.mark.parametrize("norm", NORMALIZATION)
+    @pytest.mark.parametrize("mp", MESSAGE_PASSING)
+    @pytest.mark.parametrize("num_layers", [1, 2])
+    @pytest.mark.parametrize("concept_dim", HIDDEN_WIDTHS)
+    def test_forward_pass_at_any_hidden_width(
+            self, graph_inputs, concept_dim, num_layers, mp, norm
+    ):
+        nodes, adj = graph_inputs
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=concept_dim,
+            num_layers=num_layers,
+            message_passing=mp,
+            normalization=norm,
+            aggregation="none",
+            num_attention_heads=4,
+        )
+        out = layer((nodes, adj))
+        assert tuple(out.shape) == (B, N, concept_dim)
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+
+    @pytest.mark.parametrize("norm", NORMALIZATION)
+    @pytest.mark.parametrize("mp", MESSAGE_PASSING)
+    @pytest.mark.parametrize("concept_dim", HIDDEN_WIDTHS)
+    def test_gradient_step_at_any_hidden_width(self, graph_inputs, concept_dim, mp, norm):
+        nodes, adj = graph_inputs
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=concept_dim,
+            num_layers=2,
+            message_passing=mp,
+            normalization=norm,
+            aggregation="none",
+            num_attention_heads=4,
+        )
+        with tf.GradientTape() as tape:
+            out = layer((nodes, adj), training=True)
+            loss = keras.ops.mean(keras.ops.square(out))
+        grads = tape.gradient(loss, layer.trainable_variables)
+        assert len(layer.trainable_variables) > 0
+        assert any(g is not None for g in grads)
+
+    @pytest.mark.parametrize("agg,expected_nodes", [
+        ("none", N), ("mean", 1), ("max", 1), ("sum", 1), ("attention", N),
+    ])
+    @pytest.mark.parametrize("mp", MESSAGE_PASSING)
+    @pytest.mark.parametrize("concept_dim", HIDDEN_WIDTHS)
+    def test_compute_output_shape_agrees_with_call_at_any_hidden_width(
+            self, graph_inputs, concept_dim, mp, agg, expected_nodes
+    ):
+        nodes, adj = graph_inputs
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=concept_dim,
+            num_layers=2,
+            message_passing=mp,
+            aggregation=agg,
+            num_attention_heads=4,
+        )
+        # UNBUILT: compute_output_shape must answer before any call.
+        computed_unbuilt = layer.compute_output_shape([(B, N, D), (B, N, N)])
+        assert tuple(computed_unbuilt) == (B, expected_nodes, concept_dim)
+
+        out = layer((nodes, adj))
+        assert tuple(out.shape) == tuple(computed_unbuilt)
+        assert tuple(out.shape) == tuple(
+            layer.compute_output_shape([nodes.shape, adj.shape])
+        )

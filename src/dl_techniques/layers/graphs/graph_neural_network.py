@@ -307,10 +307,25 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                 self.gnn_layers.append(None)
             elif self.message_passing == 'gat':
                 # GAT uses multi-head attention
+                # DECISION plan-2026-09-07T183458-be1c267e/D-005
+                # `output_shape=self.concept_dim` is LOAD-BEARING, not
+                # decorative. `keras.layers.MultiHeadAttention` defaults its
+                # output width to the QUERY tensor's last axis -- NOT to
+                # `num_heads * key_dim` -- so without it the GAT branch emits
+                # the raw input width `D` at every block and the stack never
+                # reaches `concept_dim`. MEASURED at `concept_dim=32`, D=16:
+                # the forward pass returned `(2, 5, 16)` while
+                # `compute_output_shape` promised `(2, 5, 32)`. Do NOT remove
+                # it on the grounds that `key_dim` already mentions
+                # `concept_dim`: `key_dim` sizes the per-head projection, not
+                # the output projection. At `concept_dim == D` it is a
+                # measured no-op (identical weight shapes, identical weight
+                # bytes, identical output). See decisions.md D-005.
                 self.gnn_layers.append(
                     keras.layers.MultiHeadAttention(
                         num_heads=self.num_attention_heads,
                         key_dim=self.concept_dim // self.num_attention_heads,
+                        output_shape=self.concept_dim,
                         dropout=self.dropout_rate,
                         kernel_initializer=self.kernel_initializer,
                         bias_initializer=self.bias_initializer,
@@ -376,6 +391,34 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         # Learnable epsilon for GIN (created in build)
         self.gin_epsilon = None
 
+    def _block_input_shape(
+            self,
+            node_shape: Tuple[Optional[int], ...],
+            block_index: int
+    ) -> Tuple[Optional[int], ...]:
+        """Return the node-feature shape entering GNN block ``block_index``.
+
+        Every block widens (or narrows) the running node features to
+        ``concept_dim``, so only block 0 sees the layer's raw input width.
+        ``block_index == self.num_layers`` therefore names the shape leaving
+        the whole stack, which is what :meth:`compute_output_shape` needs.
+
+        This is the single home for the stack's shape arithmetic: both
+        :meth:`build` and :meth:`compute_output_shape` derive from it, so they
+        cannot drift apart. It is pure -- it reads only ``self.concept_dim``
+        and its arguments -- and is therefore valid on an UNBUILT layer.
+
+        :param node_shape: Shape of the node-feature tensor handed to the layer.
+        :type node_shape: Tuple[Optional[int], ...]
+        :param block_index: Index of the block, in ``[0, self.num_layers]``.
+        :type block_index: int
+        :return: Node-feature shape entering that block.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        if block_index == 0:
+            return tuple(node_shape)
+        return tuple(node_shape[:-1]) + (self.concept_dim,)
+
     def build(self, input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]) -> None:
         """Build the layer and all its sub-layers.
 
@@ -393,35 +436,53 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                 trainable=True
             )
 
-        # Build all sub-layers explicitly
+        # Build all sub-layers explicitly, each at the shape it actually sees.
+        # DECISION plan-2026-09-07T183458-be1c267e/D-006
+        # Two distinct shapes per block, and they are NOT interchangeable:
+        # the message-passing sub-layer consumes the block's INPUT width
+        # (`node_shape` at block 0, `concept_dim` after that), while dropout
+        # and normalization run on the block's OUTPUT, which is `concept_dim`
+        # wide at EVERY block including block 0. Do NOT collapse them back to
+        # one `node_shape` for the whole loop -- that was the shipped defect:
+        # MEASURED crashes at `concept_dim=8, num_layers=2` (`ValueError` in
+        # `gcn_dense_1`, expected axis -1 == 16, got (2, 5, 8)) and at
+        # `concept_dim=32, num_layers=1` (`InvalidArgumentError` inside
+        # `LayerNormalization.call()`, reshape of 16 values into 32). It
+        # survived because every test pinned `concept_dim == D`, which makes
+        # the two shapes coincide. See decisions.md D-006.
         for i in range(self.num_layers):
+            block_input_shape = self._block_input_shape(node_shape, i)
+            block_output_shape = self._block_input_shape(node_shape, i + 1)
+
             if self.message_passing == 'gcn':
                 # GCN layer expects node features
-                self.gnn_layers[i].build(node_shape)
+                self.gnn_layers[i].build(block_input_shape)
 
             elif self.message_passing == 'graphsage':
                 # Build both self and neighbor transformations
-                self.sage_self_layers[i].build(node_shape)
-                self.sage_neighbor_layers[i].build(node_shape)
+                self.sage_self_layers[i].build(block_input_shape)
+                self.sage_neighbor_layers[i].build(block_input_shape)
 
             elif self.message_passing == 'gat':
                 # GAT attention expects query and key inputs
-                self.gnn_layers[i].build(node_shape, node_shape)
+                self.gnn_layers[i].build(block_input_shape, block_input_shape)
 
             elif self.message_passing == 'gin':
                 # GIN MLP expects aggregated features
-                self.gnn_layers[i].build(node_shape)
+                self.gnn_layers[i].build(block_input_shape)
 
-            # Build dropout
-            self.dropout_layers[i].build(node_shape)
+            # Build dropout on the block's OUTPUT
+            self.dropout_layers[i].build(block_output_shape)
 
-            # Build normalization if present
+            # Build normalization if present, also on the block's OUTPUT
             if self.norm_layers[i] is not None:
-                self.norm_layers[i].build(node_shape)
+                self.norm_layers[i].build(block_output_shape)
 
-        # Build final aggregation attention if needed
+        # Build final aggregation attention if needed -- it runs on the
+        # tensor leaving the last block, not on the layer's raw input.
         if self.aggregation_attention is not None:
-            self.aggregation_attention.build(node_shape, node_shape)
+            stack_output_shape = self._block_input_shape(node_shape, self.num_layers)
+            self.aggregation_attention.build(stack_output_shape, stack_output_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -535,15 +596,18 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         :rtype: Tuple[Optional[int], ...]
         """
         node_shape, _ = input_shape
-        batch_size = node_shape[0]
-        num_nodes = node_shape[1]
+        # Same pure helper `build()` uses, so the two cannot disagree.
+        stack_output_shape = self._block_input_shape(node_shape, self.num_layers)
+        batch_size = stack_output_shape[0]
+        num_nodes = stack_output_shape[1]
+        feature_dim = stack_output_shape[-1]
 
         if self.aggregation in ['mean', 'max', 'sum']:
             # Global pooling reduces to single node
-            return (batch_size, 1, self.concept_dim)
+            return (batch_size, 1, feature_dim)
         else:
             # Keep all nodes
-            return (batch_size, num_nodes, self.concept_dim)
+            return (batch_size, num_nodes, feature_dim)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization.
