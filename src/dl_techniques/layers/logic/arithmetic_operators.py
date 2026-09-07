@@ -469,9 +469,12 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             weight_shape = (self.num_operations,)
 
         # DECISION plan-2026-08-29T112804-aff039c4/D-001 -- clone at the
-        # add_weight site: one resolved Initializer INSTANCE redraws
-        # identical values at every weight whose shape matches. A string
-        # is safe; a seeded instance defeats the clone.
+        # add_weight site: one resolved Initializer INSTANCE replays the
+        # same underlying sample at every later weight -- matching shapes
+        # or NOT, since a shorter draw comes out as the longer one's
+        # prefix (initializers/clone.py). A string is safe; a seeded
+        # instance defeats the clone, and so does a deterministic one
+        # ('zeros'/'ones'/Constant), correctly.
         # See decisions.md D-001.
         self.operation_weights = self.add_weight(
             name="operation_weights",

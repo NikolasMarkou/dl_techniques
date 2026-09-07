@@ -190,7 +190,9 @@ class TabMBackbone(keras.layers.Layer):
         # DECISION plan-2026-09-07T130829-d709705c/D-005: every block gets its OWN
         # clone of both initializers. Do NOT hand `self.kernel_initializer` straight
         # down: a seedless Keras 3 initializer instance self-assigns a seed at
-        # construction and replays it at every `add_weight` whose shape matches, so
+        # construction and replays THE SAME UNDERLYING SAMPLE at every later
+        # `add_weight` -- matching shapes or NOT, since a shorter draw comes out as
+        # the longer one's prefix (see initializers/clone.py) -- so
         # ONE shared instance gives two equal-width blocks BIT-IDENTICAL kernels --
         # measured at `hidden_dims=[256, 256, 256], k=8`, blocks 1 and 2 came out at
         # `max|k1 - k2| = 0.0` for both ensemble types, end to end through
