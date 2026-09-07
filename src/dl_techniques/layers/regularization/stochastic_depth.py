@@ -24,9 +24,14 @@ References:
 import keras
 from typing import Optional, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.regularization.stochastic_depth")
 class StochasticDepth(keras.layers.Layer):
@@ -155,3 +160,5 @@ class StochasticDepth(keras.layers.Layer):
             "drop_path_rate": self.drop_path_rate,
         })
         return config
+
+# ---------------------------------------------------------------------

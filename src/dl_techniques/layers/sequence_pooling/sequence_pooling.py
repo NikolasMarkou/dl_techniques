@@ -78,7 +78,7 @@ import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal, List
 
 # ---------------------------------------------------------------------
-# Local imports
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.dtype_policy import mask_sentinel

@@ -15,6 +15,11 @@ pooling and full attention pooling.
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

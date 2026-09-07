@@ -26,9 +26,14 @@ References:
 import keras
 from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.regularization.scheduled_dropout")
 class ScheduledDropout(keras.layers.Layer):
@@ -313,3 +318,5 @@ class ScheduledDropout(keras.layers.Layer):
         if isinstance(config.get("rate"), dict):
             config["rate"] = keras.optimizers.schedules.deserialize(config["rate"])
         return cls(**config)
+
+# ---------------------------------------------------------------------

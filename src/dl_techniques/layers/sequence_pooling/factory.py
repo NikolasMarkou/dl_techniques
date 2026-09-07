@@ -25,7 +25,7 @@ import keras
 from typing import Any, Dict, List, Literal, Optional
 
 # ---------------------------------------------------------------------
-# Local Imports
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger

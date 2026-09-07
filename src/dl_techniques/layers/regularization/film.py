@@ -1,11 +1,21 @@
 """FiLMLayer, a Feature-wise Linear Modulation layer.
 
-A style vector is projected to a per-channel scale (gamma) and shift (beta),
-and the content tensor is transformed as output = content * (scale_factor +
-gamma) + beta. Instead of a fixed conditioning path, gamma and beta each get
-their own configurable projection, so multiplicative-only, additive-only, or
-combined modulation can be selected per instance, with optional layer
-normalization and dropout on the style vector before projection.
+FiLMLayer is a Keras layer that takes a list of two tensors, a content
+tensor and a style vector, and returns the content tensor with a
+per-channel scale and shift applied:
+
+    output = content * (scale_factor + gamma) + beta
+
+Gamma and beta come from separate Dense projections of the style vector,
+each with its own width, activation, initializer and constraint. Layer
+normalization and dropout can run on the style vector first.
+`modulation_mode` decides which projections are built at all, so
+'multiplicative' drops beta and 'additive' drops both gamma and
+`scale_factor`. Inputs are passed as `[content, style]`. The content
+channel count must be static. `epsilon` reaches only the optional layer
+normalization. A `gamma_units` or `beta_units` that differs from the
+channel count adds a second linear Dense to return the projection to the
+channel width; that extra Dense takes no bias, regularizer or constraint.
 
 References:
     - Perez et al., 2018. FiLM: Visual reasoning with a general conditioning
@@ -31,29 +41,74 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.regularization.film")
 class FiLMLayer(keras.layers.Layer):
     """
-    Configurable Feature-wise Linear Modulation (FiLM) layer.
+    Modulate a content tensor with per-channel scale and shift from a style vector.
 
-    Projects a style vector to per-channel gamma and beta, then applies
-    ``output = content * (scale_factor + gamma) + beta``. Multiplicative-only,
-    additive-only, or combined modulation is selected via ``modulation_mode``.
+    Projects the style vector to gamma and beta, then applies
+    ``output = content * (scale_factor + gamma) + beta``. ``modulation_mode``
+    selects which half runs: 'multiplicative' applies only the scale,
+    'additive' applies only the shift, and 'both' applies the scale first.
+    The projection for a disabled half is never created.
 
     Architecture:
 
     .. code-block:: text
 
-        content [B,H,W,C]        style [B,S]
-              |                     |
-              |              LayerNorm (optional)
-              |              Dropout (optional)
-              |               /            \\
-              |         Dense_gamma    Dense_beta
-              |         gamma[B,1,1,C] beta[B,1,1,C]
-              |               \\            /
-              v                v          v
-        output = content * (scale_factor + gamma) + beta
-              |
-              v
-          output [B,H,W,C]
+        content [B, ..., C]                     style [B, S]
+              │                                       │
+              │                                       ▼
+              │                             ┌───────────────────┐
+              │                             │ layer norm        │ (optional)
+              │                             └───────────────────┘
+              │                                       │
+              │                                       ▼
+              │                             ┌───────────────────┐
+              │                             │ dropout           │ (optional)
+              │                             └───────────────────┘
+              │                                       │ [B, S]
+              │                             ┌─────────┴─────────┐
+              │                             ▼                   ▼
+              │                       ┌──────────┐        ┌──────────┐
+              │                       │ gamma    │        │ beta     │
+              │                       │ dense    │        │ dense    │
+              │                       └──────────┘        └──────────┘
+              │                             │ [B, gu]           │ [B, bu]
+              │                             ▼                   ▼
+              │                       ┌──────────┐        ┌──────────┐
+              │                       │ channel  │        │ channel  │ (opt)
+              │                       │ dense    │        │ dense    │
+              │                       └──────────┘        └──────────┘
+              │                             │ [B, C]            │ [B, C]
+              ▼                             │                   │
+        ┌─────────────────────┐             │                   │
+        │ * (scale + gamma)   │◄────────────┘                   │
+        └─────────────────────┘  ('multiplicative', 'both')     │
+              │ [B, ..., C]                                     │
+              ▼                                                 │
+        ┌─────────────────────┐                                 │
+        │ + beta              │◄────────────────────────────────┘
+        └─────────────────────┘  ('additive', 'both')
+              │
+              ▼
+        output [B, ..., C]
+
+    In 'additive' mode neither gamma nor ``scale_factor`` is applied.
+
+    Broadcast shape:
+
+    .. code-block:: text
+
+        content rank 4  ->  gamma, beta reshaped to [B, 1, 1, C]
+        content rank 3  ->  gamma, beta reshaped to [B, 1, C]
+        content rank 2  ->  gamma, beta reshaped to [B, C]
+
+    The batch entry is read from the projected tensor's static shape.
+
+    Input shape:
+        List of two tensors. Content ``(batch, ..., channels)`` with a static
+        channel count, and style ``(batch, style_dim)``.
+
+    Output shape:
+        Same as the content tensor.
 
     :param gamma_units: Output units for gamma projection. If None, uses content
         channels.
@@ -67,13 +122,14 @@ class FiLMLayer(keras.layers.Layer):
     :param beta_activation: Activation function for beta projection. Defaults to
         'linear'.
     :type beta_activation: Union[str, Callable]
-    :param use_bias: Whether to use bias in projection layers.
+    :param use_bias: Whether to use bias in the gamma and beta projections. The
+        channel projections never use bias.
     :type use_bias: bool
     :param scale_factor: Base scaling factor applied before gamma modulation.
-        Defaults to 1.0.
+        Ignored when ``modulation_mode`` is 'additive'. Defaults to 1.0.
     :type scale_factor: float
     :param projection_dropout_rate: Dropout rate applied to style vector before
-        projection. Defaults to 0.0.
+        projection. A value of 0.0 creates no dropout layer. Defaults to 0.0.
     :type projection_dropout_rate: float
     :param use_layer_norm: Whether to apply LayerNormalization to style vector.
         Defaults to False.
@@ -86,11 +142,12 @@ class FiLMLayer(keras.layers.Layer):
     :type gamma_bias_initializer: Union[str, keras.initializers.Initializer]
     :param beta_bias_initializer: Initializer for beta projection bias.
     :type beta_bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Regularizer for projection layer weights.
+    :param kernel_regularizer: Regularizer for the gamma and beta projection weights.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param bias_regularizer: Regularizer for projection layer biases.
+    :param bias_regularizer: Regularizer for the gamma and beta projection biases.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param activity_regularizer: Regularizer for projection layer outputs.
+    :param activity_regularizer: Regularizer for the gamma and beta projection
+        outputs. It is also assigned to the base Layer slot of the same name.
     :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param gamma_constraint: Constraint for gamma projection weights.
     :type gamma_constraint: Optional[Union[str, keras.constraints.Constraint]]
@@ -99,9 +156,18 @@ class FiLMLayer(keras.layers.Layer):
     :param modulation_mode: Strategy for applying modulation ('multiplicative',
         'additive', 'both'). Defaults to 'both'.
     :type modulation_mode: Literal['multiplicative', 'additive', 'both']
-    :param epsilon: Small constant for numerical stability. Defaults to 1e-8.
+    :param epsilon: Epsilon for the optional style LayerNormalization. Has no
+        effect when ``use_layer_norm`` is False. Defaults to 1e-8.
     :type epsilon: float
     :param kwargs: Additional arguments for Layer base class.
+
+    :ivar num_channels: Content channel count, read from the content shape in
+        ``build()``.
+    :vartype num_channels: Optional[int]
+
+    :raises ValueError: If ``projection_dropout_rate`` is outside ``[0, 1)``.
+    :raises ValueError: If ``modulation_mode`` is not one of the three names.
+    :raises ValueError: If ``epsilon`` is not positive.
     """
 
     def __init__(
@@ -127,10 +193,9 @@ class FiLMLayer(keras.layers.Layer):
             epsilon: float = 1e-8,
             **kwargs: Any
     ) -> None:
-        """Initialize highly configurable FiLM layer."""
+        """Store the configuration and create the style-preprocessing sub-layers."""
         super().__init__(**kwargs)
 
-        # Store all configuration parameters
         self.gamma_units = gamma_units
         self.beta_units = beta_units
         self.gamma_activation = gamma_activation
@@ -151,7 +216,6 @@ class FiLMLayer(keras.layers.Layer):
         self.modulation_mode = modulation_mode
         self.epsilon = epsilon
 
-        # Validate inputs
         if projection_dropout_rate < 0.0 or projection_dropout_rate >= 1.0:
             raise ValueError(f"projection_dropout_rate must be in [0, 1), got {projection_dropout_rate}")
 
@@ -162,7 +226,7 @@ class FiLMLayer(keras.layers.Layer):
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
-        # Sub-layers to be created in build()
+        # The projections need the content channel count, so build() creates them.
         self.gamma_projection: Optional[keras.layers.Dense] = None
         self.beta_projection: Optional[keras.layers.Dense] = None
         self.gamma_channel_projection: Optional[keras.layers.Dense] = None
@@ -171,12 +235,11 @@ class FiLMLayer(keras.layers.Layer):
         self.dropout: Optional[keras.layers.Dropout] = None
         self.num_channels: Optional[int] = None
 
-        # Create sub-layers during initialization (Modern Keras 3 pattern)
+        # Norm and dropout keep the style shape, so they need nothing from build().
         self._create_sublayers()
 
     def _create_sublayers(self) -> None:
-        """Create all sub-layers during initialization."""
-        # Optional preprocessing layers
+        """Create the optional style normalization and dropout layers."""
         if self.use_layer_norm:
             self.layer_norm = keras.layers.LayerNormalization(
                 epsilon=self.epsilon,
@@ -194,6 +257,8 @@ class FiLMLayer(keras.layers.Layer):
 
         :param input_shape: List of two shapes: [content_shape, style_shape].
         :type input_shape: List[Tuple[Optional[int], ...]]
+        :raises ValueError: If ``input_shape`` is not a list of two shapes.
+        :raises ValueError: If the content channel count is ``None``.
         """
         if not isinstance(input_shape, list) or len(input_shape) != 2:
             raise ValueError(
@@ -207,11 +272,9 @@ class FiLMLayer(keras.layers.Layer):
         if self.num_channels is None:
             raise ValueError("Content tensor must have a known number of channels")
 
-        # Determine projection dimensions
         gamma_proj_units = self.gamma_units or self.num_channels
         beta_proj_units = self.beta_units or self.num_channels
 
-        # Create main projection layers
         if self.modulation_mode in ['multiplicative', 'both']:
             self.gamma_projection = keras.layers.Dense(
                 gamma_proj_units,
@@ -226,7 +289,7 @@ class FiLMLayer(keras.layers.Layer):
                 name=f"{self.name}_gamma_projection"
             )
 
-            # Additional projection if units don't match channels
+            # Gamma has to reach the channel width before it can broadcast.
             if gamma_proj_units != self.num_channels:
                 self.gamma_channel_projection = keras.layers.Dense(
                     self.num_channels,
@@ -250,7 +313,7 @@ class FiLMLayer(keras.layers.Layer):
                 name=f"{self.name}_beta_projection"
             )
 
-            # Additional projection if units don't match channels
+            # Beta has to reach the channel width before it can broadcast.
             if beta_proj_units != self.num_channels:
                 self.beta_channel_projection = keras.layers.Dense(
                     self.num_channels,
@@ -260,14 +323,14 @@ class FiLMLayer(keras.layers.Layer):
                     name=f"{self.name}_beta_channel_proj"
                 )
 
-        # Build all sub-layers explicitly for robust serialization
+        # Explicit builds so every weight exists before a load_weights call.
         if self.layer_norm is not None:
             self.layer_norm.build(style_shape)
 
         if self.dropout is not None:
             self.dropout.build(style_shape)
 
-        # Build projection layers
+        # Norm and dropout preserve the shape, so both projections take it as is.
         processed_style_shape = style_shape
 
         if self.gamma_projection is not None:
@@ -293,17 +356,18 @@ class FiLMLayer(keras.layers.Layer):
 
         :param inputs: List containing [content_tensor, style_vector].
         :type inputs: List[keras.KerasTensor]
-        :param training: Whether the layer is in training mode.
+        :param training: Whether the layer is in training mode. Reaches the
+            optional style normalization and dropout.
         :type training: Optional[bool]
         :return: The modulated content tensor.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``inputs`` does not hold exactly two tensors.
         """
         if len(inputs) != 2:
             raise ValueError(f"FiLMLayer expects 2 inputs, got {len(inputs)}")
 
         content_tensor, style_vector = inputs
 
-        # Preprocess style vector
         processed_style = style_vector
 
         if self.layer_norm is not None:
@@ -312,37 +376,31 @@ class FiLMLayer(keras.layers.Layer):
         if self.dropout is not None:
             processed_style = self.dropout(processed_style, training=training)
 
-        # Initialize modulated content
+        # In 'additive' mode the content passes through to the shift untouched.
         modulated_content = content_tensor
 
-        # Apply multiplicative modulation
         if self.modulation_mode in ['multiplicative', 'both'] and self.gamma_projection is not None:
             gamma = self.gamma_projection(processed_style)
 
-            # Optional channel projection
             if self.gamma_channel_projection is not None:
                 gamma = self.gamma_channel_projection(gamma)
 
-            # Reshape for broadcasting: (batch, 1, 1, ..., channels)
+            # One singleton axis per non-batch, non-channel content axis.
             gamma_shape = [gamma.shape[0]] + [1] * (len(content_tensor.shape) - 2) + [gamma.shape[-1]]
             gamma = ops.reshape(gamma, gamma_shape)
 
-            # Apply multiplicative modulation
             modulated_content = modulated_content * (self.scale_factor + gamma)
 
-        # Apply additive modulation
         if self.modulation_mode in ['additive', 'both'] and self.beta_projection is not None:
             beta = self.beta_projection(processed_style)
 
-            # Optional channel projection
             if self.beta_channel_projection is not None:
                 beta = self.beta_channel_projection(beta)
 
-            # Reshape for broadcasting: (batch, 1, 1, ..., channels)
+            # One singleton axis per non-batch, non-channel content axis.
             beta_shape = [beta.shape[0]] + [1] * (len(content_tensor.shape) - 2) + [beta.shape[-1]]
             beta = ops.reshape(beta, beta_shape)
 
-            # Apply additive modulation
             modulated_content = modulated_content + beta
 
         return modulated_content
@@ -364,7 +422,8 @@ class FiLMLayer(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get the configuration dictionary for layer serialization.
 
-        :return: Configuration dictionary.
+        :return: Configuration dictionary. Regularizers and constraints that
+            were left unset serialize as ``None``.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
