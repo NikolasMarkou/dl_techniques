@@ -45,7 +45,7 @@ see § Naming traps.
 | `blt/` | — | Byte Latent Transformer stack: tokenizer, entropy model, dynamic patcher, patch pooling, local encoder/decoder, global transformer, plus the HRM-fused reasoning core |
 | `acc_unet/` | — | ACC-UNet cluster: HANC block + layer (hierarchical-context aggregation), multi-level feature compilation (cross-scale fusion) |
 | `yolo12/` | — | YOLOv12 backbone blocks (`Bottleneck`, `C3k2Block`, `A2C2fBlock`) and task heads (detection/segmentation/classification) |
-| `tabular/` | — | TabM batched-ensemble MLP building blocks (D-007: named for the domain, not the paper acronym) |
+| `tabular/` | — | TabM batched-ensemble MLP building blocks (D-007: named for the domain, not the paper acronym), one class per module: `scale_ensemble.py`, `linear_efficient_ensemble.py`, `nlinear.py`, `tabm_mlp_block.py`, `tabm_backbone.py`, plus the private `_ensemble_scaling.py` (the shared `EnsembleInitDistribution` alias + the `'ones'`/`'normal'`/`'random-signs'` resolver). The `'random-signs'` initializer itself is `initializers/random_signs.py::RandomSigns`, not a `tabular/` symbol |
 
 ### Semantics worth knowing before you reuse
 
@@ -103,7 +103,7 @@ for a subpackage (see D-005: a 1-file subpackage adds a directory for zero organ
 | Trap | Detail |
 |---|---|
 | **`RepMixerBlock` is two different architectures** | `fastvit/FastVitRepMixerBlock` (timm FastViT MCi, consumed by `models/vision/fastvit/`) is **NOT** the top-level `repmixer_block.py::RepMixerBlock` (consumed by `models/vision_language/fastvlm/`). The FastViT names carry a `FastVit` prefix precisely because the serialization registry is keyed by bare class name |
-| **`MLPBlock` is `ffn/mlp.py`'s, and only its** | `tabm_blocks.py`'s two-Dense ensemble block is **`TabMMLPBlock`**. `ffn/mlp.py::MLPBlock` keeps the bare name because it is the FFN factory's `'mlp'` key, so moving it would move a public factory key. Same rule as `FastVitRepMixerBlock`: the narrower consumer takes the package prefix |
+| **`MLPBlock` is `ffn/mlp.py`'s, and only its** | `tabular/tabm_mlp_block.py`'s two-Dense ensemble block is **`TabMMLPBlock`**. `ffn/mlp.py::MLPBlock` keeps the bare name because it is the FFN factory's `'mlp'` key, so moving it would move a public factory key. Same rule as `FastVitRepMixerBlock`: the narrower consumer takes the package prefix |
 | **`Downsample` / `Upsample` are `ideogram4/vae.py`'s** | `models/vision/image_restoration/pw_fnet/model.py` spells its pair **`PWFNetDownsample`** / **`PWFNetUpsample`**. pw_fnet's is a strided `Conv2D` / `Conv2DTranspose`; ideogram4's is a kernel-4 conv with manual asymmetric padding / `UpSampling2D`+`Conv2D`. NOT interchangeable; do not merge them |
 
 ## Conventions
