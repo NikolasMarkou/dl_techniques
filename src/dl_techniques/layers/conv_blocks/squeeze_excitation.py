@@ -18,6 +18,7 @@ import keras
 from typing import Dict, Optional, Tuple, Union, Callable, Any
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -147,13 +148,42 @@ class SqueezeExcitation(keras.layers.Layer):
             name='global_pool'
         )
 
+        # DECISION plan-2026-09-07T183458-be1c267e/D-012
+        # Both convolutions below take `clone_initializer(...)`, never the bare
+        # `self.kernel_initializer` / `self.bias_initializer`. `__init__` resolves ONE
+        # instance of each and a seedless `Initializer` INSTANCE replays the same
+        # underlying sample at every later site, so the bottleneck DOWN-projection and
+        # its matching UP-projection -- whose whole reason to exist is that they do
+        # opposite things -- started life as the same random numbers. MEASURED at
+        # `(2, 8, 8, 8)`: all four sites (2 kernel + 2 bias) bit-identical to a replay
+        # from the shared instance at the weight's own shape; the differing shapes
+        # ((1, 1, C, B) vs (1, 1, B, C)) did NOT prevent it, since shape-matching is not
+        # the criterion. The bias pair is invisible at the defaults (`use_bias=False`)
+        # and live under a caller-supplied random `bias_initializer`.
+        #
+        # This holds for a RANDOM SEEDLESS initializer. Three exemptions, all correct
+        # behaviour: a caller-supplied SEEDED instance replays deliberately and by
+        # contract, ACROSS DIFFERING SHAPES TOO; a DETERMINISTIC one ('zeros'/'ones'/
+        # Constant, and Identity only at 2-D -- it raises on rank 3+) is identical at
+        # every site and correctly so, which is exactly the `bias_initializer='zeros'`
+        # default here; and a CUSTOM one whose get_config()/from_config() round trip
+        # raises falls back to copy.deepcopy, which copies the already-resolved seed and
+        # therefore stays tied. See `initializers/clone.py` § "Scope of the claim,
+        # exactly".
+        #
+        # Clone AT THE SITE, never at the `keras.initializers.get(...)` lines in
+        # `__init__`: cloning once there would hand both convolutions the same clone and
+        # restore the tie, would break seeded reproducibility for the caller, and would
+        # replace the object the caller handed us -- which seven consumers, and
+        # `tripse_attention.py`'s SE-boundary guards in particular (D-010), read back.
+        # Guards: tests/test_layers/test_conv_blocks/test_the_se_gate_initializer_does_not_fan_out.py
         self.conv_reduce = keras.layers.Conv2D(
             filters=self.bottleneck_channels,
             kernel_size=1,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             bias_regularizer=self.bias_regularizer,
             name='conv_reduce'
         )
@@ -162,9 +192,9 @@ class SqueezeExcitation(keras.layers.Layer):
             filters=self.input_channels,
             kernel_size=1,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             bias_regularizer=self.bias_regularizer,
             name='conv_restore'
         )
