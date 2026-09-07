@@ -41,6 +41,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -133,10 +134,23 @@ class SparseAutoencoder(keras.layers.Layer):
     :type aux_k: int or None
     :param aux_coefficient: Coefficient for auxiliary loss. Defaults to 1/32.
     :type aux_coefficient: float
-    :param kernel_initializer: Initializer for encoder/decoder weights.
-        Defaults to ``'glorot_uniform'``.
+    :param kernel_initializer: Initializer for encoder/decoder/gate weights.
+        Defaults to ``'glorot_uniform'``. ``build()`` draws each weight from its
+        own clone of this initializer, so a SEEDLESS instance yields independent
+        draws at every site. The exception is a SEEDED instance (e.g.
+        ``GlorotUniform(seed=7)``): cloning reproduces an explicit seed
+        deliberately and by contract
+        (``dl_techniques.initializers.clone_initializer``), so weights of equal
+        shape -- ``encoder_weight`` and ``gate_weight`` always, plus
+        ``decoder_weight`` when ``d_input == d_latent`` -- stay bit-identical.
+        For reproducibility WITHOUT that coincidence, call
+        ``keras.utils.set_random_seed()`` and leave this argument seedless.
     :type kernel_initializer: str or keras.initializers.Initializer
-    :param bias_initializer: Initializer for bias vectors. Defaults to ``'zeros'``.
+    :param bias_initializer: Initializer for bias vectors. Defaults to
+        ``'zeros'``, under which all biases are correctly identical (zeros are
+        deterministic; cloning them is a no-op). Cloned per site on the same
+        terms as ``kernel_initializer``: exact for a seedless instance, with a
+        caller-supplied seeded instance the documented exception.
     :type bias_initializer: str or keras.initializers.Initializer
     :param kernel_regularizer: Optional regularizer for encoder/decoder weights.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
@@ -242,11 +256,40 @@ class SparseAutoencoder(keras.layers.Layer):
                 f"got {input_shape[-1]}"
             )
 
+        # DECISION plan-2026-09-07T161712-985e4d31/D-002: every add_weight call
+        # below draws from its OWN clone of self.kernel_initializer /
+        # self.bias_initializer. Do NOT "simplify" these back to the bare
+        # attribute: one seedless Keras 3 initializer instance self-assigns a
+        # seed at construction and replays it at every site whose shape matches,
+        # so encoder_weight and gate_weight (both (d_input, d_latent), i.e.
+        # coinciding unconditionally) came out bit-identical, and in a square SAE
+        # (d_input == d_latent) all three of encoder/decoder/gate collapsed to a
+        # single draw. Measured max|diff| == 0.0 before this change.
+        # Scope of the claim, exactly: this is exact for a SEEDLESS initializer;
+        # the exception is a caller-supplied SEEDED one (e.g.
+        # GlorotUniform(seed=7)), for which clone_initializer reproduces the seed
+        # deliberately and by contract (initializers/clone.py:60-65) and the
+        # weights stay identical. Callers wanting reproducibility WITHOUT that
+        # coincidence should use keras.utils.set_random_seed() and leave the
+        # initializer seedless. Both directions are pinned by
+        # TestInitializerAliasing in tests/test_layers/test_generative/
+        # test_sparse_autoencoder.py.
+        # The bias sites are cloned too: at the shipped default 'zeros' that is a
+        # provable no-op (Zeros carries no per-instance random state, and the
+        # biases correctly stay identical), but it stops the same defect
+        # regrowing under a randomized bias_initializer. The literal 'zeros' at
+        # pre_encoder_bias is not an instance and needs no clone. See
+        # decisions.md D-002.
+        #
+        # Behaviour change: initial weights move, so training runs seeded only by
+        # a fixed process seed will not reproduce pre-change results bit-for-bit.
+        # No .keras archive in this repo references SparseAutoencoder (verified).
+
         # Encoder weights: (d_input, d_latent)
         self.encoder_weight = self.add_weight(
             name='encoder_weight',
             shape=(self.d_input, self.d_latent),
-            initializer=self.kernel_initializer,
+            initializer=clone_initializer(self.kernel_initializer),
             regularizer=self.kernel_regularizer,
             trainable=True
         )
@@ -256,7 +299,7 @@ class SparseAutoencoder(keras.layers.Layer):
             self.decoder_weight = self.add_weight(
                 name='decoder_weight',
                 shape=(self.d_latent, self.d_input),
-                initializer=self.kernel_initializer,
+                initializer=clone_initializer(self.kernel_initializer),
                 regularizer=self.kernel_regularizer,
                 trainable=True
             )
@@ -265,7 +308,7 @@ class SparseAutoencoder(keras.layers.Layer):
         self.encoder_bias = self.add_weight(
             name='encoder_bias',
             shape=(self.d_latent,),
-            initializer=self.bias_initializer,
+            initializer=clone_initializer(self.bias_initializer),
             trainable=True
         )
 
@@ -282,7 +325,7 @@ class SparseAutoencoder(keras.layers.Layer):
         self.decoder_bias = self.add_weight(
             name='decoder_bias',
             shape=(self.d_input,),
-            initializer=self.bias_initializer,
+            initializer=clone_initializer(self.bias_initializer),
             trainable=True
         )
 
@@ -311,14 +354,14 @@ class SparseAutoencoder(keras.layers.Layer):
             self.gate_weight = self.add_weight(
                 name='gate_weight',
                 shape=(self.d_input, self.d_latent),
-                initializer=self.kernel_initializer,
+                initializer=clone_initializer(self.kernel_initializer),
                 regularizer=self.kernel_regularizer,
                 trainable=True
             )
             self.gate_bias = self.add_weight(
                 name='gate_bias',
                 shape=(self.d_latent,),
-                initializer=self.bias_initializer,
+                initializer=clone_initializer(self.bias_initializer),
                 trainable=True
             )
 

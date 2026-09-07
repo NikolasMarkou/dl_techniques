@@ -252,3 +252,156 @@ class TestSparseAutoencoder:
         out = layer(x)
         assert tuple(out.shape) == (3, 10)
         assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+
+
+# ----------------------------------------------------------------------
+# Per-site initializer cloning (plan-2026-09-07T161712-985e4d31/D-002)
+# ----------------------------------------------------------------------
+
+class TestInitializerAliasing:
+    """``build()`` must draw each weight from its own initializer instance.
+
+    Scope of the claim, stated exactly: cloning per ``add_weight`` site removes
+    the *seedless-instance replay* only. A caller-supplied SEEDED initializer
+    (e.g. ``GlorotUniform(seed=7)``) still yields bit-identical weights after
+    cloning, deliberately and by contract
+    (``src/dl_techniques/initializers/clone.py:60-65``) --
+    ``test_a_seeded_initializer_still_aliases_by_contract`` pins that exemption.
+    Callers who want reproducibility *without* the aliasing should seed the
+    process with ``keras.utils.set_random_seed()`` and leave the initializer
+    seedless.
+    """
+
+    @staticmethod
+    def _built(**kwargs):
+        layer = SparseAutoencoder(**kwargs)
+        layer.build((None, kwargs["d_input"]))
+        return layer
+
+    @staticmethod
+    def _np(w):
+        return keras.ops.convert_to_numpy(w)
+
+    def test_encoder_and_gate_kernels_are_independent_draws(self):
+        """Non-square gated SAE: ``encoder_weight`` vs ``gate_weight``.
+
+        Their shapes coincide unconditionally (both ``(d_input, d_latent)``), so
+        one shared seedless instance replays the same draw at both sites. Exact
+        for a seedless initializer; the exception is a seeded one (see the class
+        docstring).
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(d_input=64, d_latent=512, variant="gated")
+        enc, gate = self._np(layer.encoder_weight), self._np(layer.gate_weight)
+        # Anti-vacuity: the arm is only meaningful while the shapes coincide.
+        assert enc.shape == gate.shape == (64, 512)
+        assert not np.array_equal(enc, gate), (
+            "encoder_weight and gate_weight are bit-identical: one seedless "
+            "initializer instance was replayed at both add_weight sites. "
+            "Clone per site (initializers/clone.py). Note a SEEDED initializer "
+            "is a documented exemption and would legitimately be identical."
+        )
+
+    def test_square_sae_draws_all_three_kernels_independently(self):
+        """Square SAE (``d_input == d_latent``): all three kernels are ``(d, d)``.
+
+        The only configuration in which ``decoder_weight`` joins the
+        coincidence. Exact for a seedless initializer; a seeded one is exempt.
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(
+            d_input=64, d_latent=64, variant="gated", tied_weights=False
+        )
+        enc = self._np(layer.encoder_weight)
+        dec = self._np(layer.decoder_weight)
+        gate = self._np(layer.gate_weight)
+        # Anti-vacuity: all three must actually share a shape here.
+        assert enc.shape == dec.shape == gate.shape == (64, 64)
+        assert not np.array_equal(enc, dec), "encoder_weight == decoder_weight"
+        assert not np.array_equal(enc, gate), "encoder_weight == gate_weight"
+        assert not np.array_equal(dec, gate), "decoder_weight == gate_weight"
+
+    def test_zeros_bias_stays_identical_positive_control(self):
+        """Positive control: cloning a DETERMINISTIC initializer is a no-op.
+
+        At the shipped default ``bias_initializer='zeros'`` every bias is all
+        zeros and therefore identical to every other. That is CORRECT, not a
+        symmetry defect -- this arm exists so the diversity arms above cannot be
+        read as "every weight always differs".
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(d_input=64, d_latent=64, variant="gated")
+        enc_b = self._np(layer.encoder_bias)
+        dec_b = self._np(layer.decoder_bias)
+        gate_b = self._np(layer.gate_bias)
+        assert enc_b.shape == dec_b.shape == gate_b.shape == (64,)
+        assert np.all(enc_b == 0.0)
+        assert np.array_equal(enc_b, gate_b)
+        assert np.array_equal(enc_b, dec_b)
+
+    def test_random_bias_initializer_draws_per_site(self):
+        """The bias fan-out becomes live under a randomized ``bias_initializer``.
+
+        Inert at the ``'zeros'`` default, so this is the arm that can see the
+        bias-site clones at all. Exact for a seedless initializer; a seeded one
+        is exempt by contract.
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(
+            d_input=64,
+            d_latent=512,
+            variant="gated",
+            bias_initializer=keras.initializers.RandomNormal(stddev=0.5),
+        )
+        enc_b, gate_b = self._np(layer.encoder_bias), self._np(layer.gate_bias)
+        assert enc_b.shape == gate_b.shape == (512,)
+        assert not np.array_equal(enc_b, gate_b), (
+            "encoder_bias and gate_bias are bit-identical under a randomized "
+            "bias_initializer: the shared seedless instance was replayed."
+        )
+
+    def test_a_seeded_initializer_still_aliases_by_contract(self):
+        """Documented limitation, pinned: a SEEDED initializer stays aliased.
+
+        ``clone_initializer`` reproduces an explicit seed on purpose
+        (``initializers/clone.py:60-65``), so per-site cloning does NOT break
+        symmetry here. A RED on this arm means that contract changed and every
+        comment, docstring and sibling assertion written around it is now wrong.
+        The reproducibility idiom that does NOT alias is
+        ``keras.utils.set_random_seed()`` with a seedless initializer.
+        """
+        keras.utils.set_random_seed(1234)
+        layer = self._built(
+            d_input=64,
+            d_latent=512,
+            variant="gated",
+            kernel_initializer=keras.initializers.GlorotUniform(seed=7),
+        )
+        enc, gate = self._np(layer.encoder_weight), self._np(layer.gate_weight)
+        assert enc.shape == gate.shape == (64, 512)
+        assert np.array_equal(enc, gate), (
+            "a seeded initializer no longer replays across add_weight sites: "
+            "clone_initializer's seeded contract changed"
+        )
+
+    def test_cloning_leaves_the_serialized_initializers_untouched(self):
+        """The clone belongs at the ``add_weight`` site, never on the attribute.
+
+        ``self.kernel_initializer``/``self.bias_initializer`` must remain the
+        caller's own objects so ``get_config()`` still serializes what was
+        passed in.
+        """
+        kern = keras.initializers.GlorotUniform(seed=7)
+        bias = keras.initializers.RandomNormal(stddev=0.5)
+        layer = self._built(
+            d_input=64,
+            d_latent=512,
+            variant="gated",
+            kernel_initializer=kern,
+            bias_initializer=bias,
+        )
+        assert layer.kernel_initializer is kern
+        assert layer.bias_initializer is bias
+        cfg = layer.get_config()
+        assert cfg["kernel_initializer"] == keras.initializers.serialize(kern)
+        assert cfg["bias_initializer"] == keras.initializers.serialize(bias)
