@@ -46,6 +46,23 @@ class TestScaleEnsemble:
         _roundtrip(ScaleEnsemble(k=K, input_dim=D, name="se"), (K, D), _f32(B, K, D),
                    "se", tmp_path, ScaleEnsemble)
 
+    @pytest.mark.parametrize("kwargs, bad", [
+        (dict(k=0, input_dim=D), "0"),
+        (dict(k=-1, input_dim=D), "-1"),
+        (dict(k=K, input_dim=0), "0"),
+        (dict(k=K, input_dim=-2), "-2"),
+    ])
+    def test_constructor_rejects_non_positive(self, kwargs, bad):
+        with pytest.raises(ValueError) as exc:
+            ScaleEnsemble(**kwargs)
+        # The message must name the offending value, not just the argument.
+        assert bad in str(exc.value)
+
+    def test_constructor_accepts_valid_values(self):
+        # Positive control: the guards must not fire on the shipped configuration.
+        layer = ScaleEnsemble(k=K, input_dim=D)
+        assert (layer.k, layer.input_dim) == (K, D)
+
 
 class TestLinearEfficientEnsemble:
     def test_forward_and_shape(self):
