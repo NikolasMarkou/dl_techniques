@@ -171,7 +171,7 @@ class TestSerialization:
         key is package-qualified and owned by `dl_techniques`, and the legacy
         `Custom>RandomSigns` alias still resolves to the SAME object. The alias
         half is load-bearing here because this class MOVED packages -- it was
-        registered under `dl_techniques.layers.tabular.tabm_blocks` before.
+        registered under the `dl_techniques.layers.tabular` package before.
         """
         key = registration_contract(RandomSigns)
         assert key == "dl_techniques.initializers.random_signs>RandomSigns"
@@ -240,10 +240,14 @@ class TestUseInLayer:
 
 class TestTabmConsumer:
     def test_the_ensemble_scaling_resolver_still_returns_it(self):
-        """`layers/tabular/tabm_blocks.py` imports this class back after the
+        """`layers/tabular/_ensemble_scaling.py` imports this class after the
         move; `init_distribution='random-signs'` must still resolve to it.
+
+        That private module is the single resolver the four TabM ensemble layers
+        share, so this is the runtime edge that keeps `RandomSigns` reachable
+        from `layers/` at all.
         """
-        from dl_techniques.layers.tabular.tabm_blocks import (
+        from dl_techniques.layers.tabular._ensemble_scaling import (
             _ensemble_scaling_initializer,
         )
 

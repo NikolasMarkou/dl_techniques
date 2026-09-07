@@ -1,4 +1,13 @@
-"""Tests for the TabM building blocks (efficient tabular ensembles)."""
+"""Tests for the TabM building blocks (efficient tabular ensembles).
+
+These five layers each live in their own module under
+``src/dl_techniques/layers/tabular/``: ``scale_ensemble.py``,
+``linear_efficient_ensemble.py``, ``nlinear.py``, ``tabm_mlp_block.py`` and
+``tabm_backbone.py``. They shared a single module until
+``plan-2026-09-07-b821967f`` split it one class per file; this file keeps its
+historical name (D-006) and covers all five modules together, because the
+layers compose into one stack and the round-trip guards exercise them jointly.
+"""
 
 import json
 import os
@@ -8,13 +17,13 @@ import pytest
 
 from dl_techniques.layers.activations.golu import GoLU
 
-from dl_techniques.layers.tabular.tabm_blocks import (
-    ScaleEnsemble,
+from dl_techniques.layers.tabular.scale_ensemble import ScaleEnsemble
+from dl_techniques.layers.tabular.linear_efficient_ensemble import (
     LinearEfficientEnsemble,
-    NLinear,
-    TabMMLPBlock,
-    TabMBackbone,
 )
+from dl_techniques.layers.tabular.nlinear import NLinear
+from dl_techniques.layers.tabular.tabm_mlp_block import TabMMLPBlock
+from dl_techniques.layers.tabular.tabm_backbone import TabMBackbone
 
 B, K, D = 2, 3, 6
 

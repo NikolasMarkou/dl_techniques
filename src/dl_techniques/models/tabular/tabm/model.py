@@ -43,7 +43,9 @@ from typing import Dict, List, Literal, Optional, Tuple, Union, Any, Sequence
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.one_hot_encoding import OneHotEncoding
-from dl_techniques.layers.tabular.tabm_blocks import ScaleEnsemble, NLinear, TabMBackbone
+from dl_techniques.layers.tabular.nlinear import NLinear
+from dl_techniques.layers.tabular.scale_ensemble import ScaleEnsemble
+from dl_techniques.layers.tabular.tabm_backbone import TabMBackbone
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
