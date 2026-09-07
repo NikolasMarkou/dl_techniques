@@ -209,11 +209,16 @@ class TestTheGnnStackRunsAtAHiddenWidth:
 #   3. a CUSTOM initializer whose `get_config()`/`from_config()` round trip
 #      raises falls back to `copy.deepcopy`, which copies the ALREADY-RESOLVED
 #      seed rather than drawing a new one, so such a site silently stays tied.
-# Exemptions 1 and 2 are asserted below as positive controls, so this module
-# never states an absolute it has not measured.
+# All three exemptions are asserted below as positive controls, so this module
+# never states an absolute it has not measured. Exemption 3 applies to the
+# CLONED sites -- `gcn_dense_{i}`, `sage_*`, and `gin_mlp_{i}` through
+# `MLPBlock` -- and NOT to `gat_attention_{i}` / `aggregation_attention`,
+# which never reach `clone_initializer`: see
+# `TestACustomInitializerThatCannotSerialize`.
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.ffn.mlp import MLPBlock
+from dl_techniques.initializers.clone import clone_initializer
 
 
 def _np(x):
@@ -385,11 +390,13 @@ class TestTheCalleeReClonesTheSharedInitializer:
         # `initializer.__class__.from_config(initializer.get_config())` for
         # every sub-layer. `GlorotUniform().get_config()` reports
         # `{'seed': None}` even when the live instance has a RESOLVED `.seed`,
-        # so `from_config` self-assigns a fresh seed and the tie breaks. Note
-        # this is the OPPOSITE of `clone.py` exemption 3, where the
-        # `copy.deepcopy` FALLBACK preserves the resolved seed and the site
-        # stays tied -- a round trip that SUCCEEDS unties, a round trip that
-        # RAISES stays tied. Do not "correct" one into the other.
+        # so `from_config` self-assigns a fresh seed and the tie breaks. The
+        # untying depends on the round trip SUCCEEDING. `clone.py` exemption 3
+        # -- a raising `get_config()` falls back to `copy.deepcopy` and the
+        # site stays tied -- describes `clone_initializer`, which is NOT on
+        # this code path, so do not paste it in here: at THIS site a raising
+        # `get_config()` propagates and the layer fails to build.
+        # `TestACustomInitializerThatCannotSerialize` below measures that.
         ki = keras.initializers.GlorotUniform()
         mha = keras.layers.MultiHeadAttention(num_heads=2, key_dim=4, kernel_initializer=ki)
         x = np.zeros((1, 3, 8), dtype="float32")
@@ -432,6 +439,146 @@ class TestTheCalleeReClonesTheSharedInitializer:
                 f"MLPBlock no longer clones its initializer for {suffix} -- "
                 "graph_neural_network.py's gin_mlp_{i} site must now clone (see D-007)"
             )
+
+
+@keras.saving.register_keras_serializable(package="test_gnn_anchor_probe")
+class _RefusesToSerialize(keras.initializers.GlorotUniform):
+    """A CUSTOM initializer whose ``get_config()`` round trip RAISES.
+
+    The exact shape `clone.py` § "Scope of the claim, exactly" exemption 3
+    is about. Defined at module scope and registered so it is picklable and
+    serializable-by-name everywhere except the one method that raises.
+    """
+
+    def get_config(self):
+        raise RuntimeError("this initializer refuses to serialize")
+
+
+class TestACustomInitializerThatCannotSerialize:
+    """Pin what ACTUALLY happens at the three deliberately non-cloned sites.
+
+    plan-2026-09-07T183458-be1c267e step 8.1 / D-019. The D-007 anchor used to
+    carry a copy-paste of `clone.py`'s three-exemption paragraph, whose third
+    clause says a custom initializer failing the `get_config()` round trip
+    "falls back to `copy.deepcopy`, keeping the resolved seed". That is true of
+    `clone_initializer`. It is FALSE at `gat_attention_{i}` and
+    `aggregation_attention`, which do not call `clone_initializer` at all --
+    stock `MultiHeadAttention._get_common_kwargs_for_sublayer` lets the
+    exception out and the layer never finishes building.
+
+    SC-10 checked that the three exemptions were NAMED, not that the named
+    mechanism EXISTS at the site, so correct prose pasted into an inapplicable
+    context passed the gate. These tests are what makes the corrected sentence
+    MONITORED instead of merely asserted.
+
+    HOW THEY GO RED, measured, because half of this class is a TRIPWIRE on
+    somebody else's code and no revert inside this repo can redden that half --
+    exactly like `TestTheCalleeReClonesTheSharedInitializer` above, and for the
+    same reason. Do not delete either half as vacuous:
+
+    * the three `clone_initializer` arms (`..._builds_fine_and_stays_tied`,
+      `..._deepcopy_fallback_really_does_keep_the_tie`,
+      `..._two_gcn_kernels_..._bit_identical`) redden on a REPO-SOURCE
+      mutation: delete the `except Exception: return copy.deepcopy(resolved)`
+      fallback in `initializers/clone.py`. MEASURED: 5 failed / 330 passed.
+    * the five stock-`MultiHeadAttention` arms redden only on a CALLEE
+      mutation: give `MultiHeadAttention._get_common_kwargs_for_sublayer` the
+      deepcopy fallback that `clone_initializer` has -- i.e. construct the
+      exact world the deleted sentence described. MEASURED in-process:
+      5 failed / 5 passed, all five failures in this class.
+
+    Wrapping `clone_initializer(...)` around the two `MultiHeadAttention`
+    sites does NOT redden anything here, and that is itself the point: the
+    deepcopy of a `get_config()`-raising initializer still raises, so the
+    "fix" the D-007 anchor forbids would not even change this behaviour.
+    """
+
+    _NODES = np.zeros((B, N, D), dtype="float32")
+    _ADJ = np.ones((B, N, N), dtype="float32")
+
+    def _run(self, **kwargs):
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D,
+            num_layers=1,
+            kernel_initializer=_RefusesToSerialize(),
+            bias_initializer="zeros",
+            **kwargs,
+        )
+        return layer, layer((self._NODES, self._ADJ))
+
+    @pytest.mark.parametrize("kwargs", [
+        {"message_passing": "gat", "aggregation": "none"},
+        {"message_passing": "gat", "aggregation": "attention"},
+        {"message_passing": "gcn", "aggregation": "attention"},
+        {"message_passing": "gin", "aggregation": "attention"},
+    ])
+    def test_a_stock_multi_head_attention_site_fails_loudly_rather_than_staying_tied(
+            self, kwargs
+    ):
+        """Whenever a stock `MultiHeadAttention` is in the sub-layer set."""
+        with pytest.raises(RuntimeError, match="refuses to serialize"):
+            self._run(**kwargs)
+
+    def test_construction_itself_still_succeeds_the_raise_comes_from_build(self):
+        """Name the boundary precisely: `__init__` is fine, `build()` is not.
+
+        The anchor says "`__init__` succeeds, then `build()` raises". If a
+        future Keras moved the round trip into `MultiHeadAttention.__init__`
+        the anchor would be wrong in a way the parametrized test above cannot
+        see, because it wraps both calls.
+        """
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D, num_layers=1, message_passing="gat", aggregation="none",
+            kernel_initializer=_RefusesToSerialize(), bias_initializer="zeros",
+        )
+        assert not layer.built
+        with pytest.raises(RuntimeError, match="refuses to serialize"):
+            layer.build(((B, N, D), (B, N, N)))
+
+    @pytest.mark.parametrize("message_passing", ["gcn", "graphsage", "gin"])
+    def test_a_cloned_or_mlp_block_site_builds_fine_and_stays_tied(self, message_passing):
+        """The other half, and the reason the two must not share one sentence.
+
+        `gcn_dense_{i}` / `sage_*` go through `clone_initializer` and
+        `gin_mlp_{i}` goes through `MLPBlock`, which also calls it -- so those
+        sites really DO take the `copy.deepcopy` branch, really DO build, and
+        really DO stay tied. Exemption 3 applies here and only here.
+        """
+        layer, out = self._run(message_passing=message_passing, aggregation="none")
+        assert layer.built
+        assert tuple(out.shape) == (B, N, D)
+
+    def test_the_deepcopy_fallback_really_does_keep_the_tie(self):
+        """The control the previous test rests on.
+
+        `clone_initializer` on this initializer returns a distinct object that
+        replays the SAME numbers, which is what "keeps the resolved seed"
+        means. Without this the test above would be green by vacuity.
+        """
+        shared = _RefusesToSerialize()
+        first = clone_initializer(shared)
+        second = clone_initializer(shared)
+        assert first is not shared and second is not shared
+        assert np.array_equal(
+            _np(first((4, 4), dtype="float32")), _np(second((4, 4), dtype="float32"))
+        )
+
+    def test_two_gcn_kernels_under_that_initializer_are_bit_identical(self):
+        """Exemption 3, end to end, on the real layer.
+
+        Two `gcn_dense_{i}` kernels come out identical even though the site IS
+        cloned -- because the clone is a deepcopy of a resolved seed. This is
+        the correct outcome, and it is why the fan-out guards elsewhere in this
+        module use a seedless `GlorotUniform` and not this class.
+        """
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D, num_layers=2, message_passing="gcn", aggregation="none",
+            kernel_initializer=_RefusesToSerialize(), bias_initializer="zeros",
+        )
+        layer((self._NODES, self._ADJ))
+        a = _np(_weight(layer, "gcn_dense_0/kernel"))
+        b = _np(_weight(layer, "gcn_dense_1/kernel"))
+        assert np.array_equal(a, b)
 
 
 class TestTheSecondaryContractsThisLayerAdvertises:

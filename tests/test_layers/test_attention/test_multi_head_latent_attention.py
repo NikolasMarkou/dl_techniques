@@ -1554,23 +1554,31 @@ def _mla_weight(layer, suffix):
     return hits[0]
 
 
+# A path component ending in `_<n>` is Keras' process-global auto-increment
+# disambiguator, handed out to any sub-layer created without an explicit
+# `name=`. Used here to DETECT that shape, never to normalize it away.
 _MLA_UNIQUIFIED = re.compile(r"_\d+$")
 
 
 def _mla_key(weight):
-    """Instance-stable weight key.
+    """Instance-relative weight path, RAW -- nothing normalized away.
 
-    Keras appends a `_<n>` disambiguator to any sub-layer created WITHOUT an
-    explicit `name=`, so the same weight has a different path in the second
-    instance built in one process. `MultiHeadLatentAttention`'s RoPE sub-layer
-    (`create_embedding_layer("rope", ...)`, no `name=`) is the only one here
-    that hits it -- an observed build-parity wart, out of scope for this step,
-    NOT something this oracle should be sensitive to. Strip the disambiguator
-    per path component so these tests measure initializer independence and
-    nothing else.
+    This used to strip Keras' `_<n>` disambiguator per path component, because
+    `MultiHeadLatentAttention`'s RoPE sub-layer was built by
+    `create_embedding_layer("rope", ...)` with no `name=` and so gave
+    `rotary_position_embedding/cos_cached` in one instance and
+    `rotary_position_embedding_1/cos_cached` in the next. The strip made every
+    weight-path comparison in this module blind to exactly the build-parity
+    defect class that `_SEWeights` was FIXED for in `tripse_attention.py`
+    (D-011), and an adversarial review found the wart still shipped behind a
+    green `test_the_weight_path_set_is_the_same_at_rate_zero_and_at_a_live_rate`.
+
+    The source site now passes `name="rope"` (D-019), so there is nothing left
+    to strip. Do NOT reintroduce the normalization to make a future unnamed
+    sub-layer's test pass: `TestTheWeightPathsAgreeBetweenAnExplicitAndALazyBuild`
+    is the guard that would go red, and going red is the point.
     """
-    parts = weight.path.split("/")[1:]
-    return "/".join(_MLA_UNIQUIFIED.sub("", part) for part in parts)
+    return weight.path.split("/", 1)[1]
 
 
 def _mla_replay(initializer, shape):
@@ -1751,15 +1759,14 @@ class TestTheDropoutLayerIsCreatedUnconditionally:
     def test_the_weight_path_set_is_the_same_at_rate_zero_and_at_a_live_rate(self):
         """A dropout layer carries no weights, so the two sets must agree.
 
-        Compared through `_mla_key`, which strips Keras' `_<n>` disambiguator.
-        Without it this guard reddens for the WRONG reason and stays red after
-        the fix: `MultiHeadLatentAttention`'s RoPE sub-layer is built by
-        `create_embedding_layer("rope", ...)` with no `name=`, so ANY two
-        instances in one process disagree on
-        `rotary_position_embedding[_1]/cos_cached` -- the separate build-parity
-        wart logged in D-008, which this step does not fix and must not depend
-        on. MEASURED: without the strip, the pre-fix diff was exactly those two
-        RoPE paths and said nothing whatever about dropout.
+        Compared through `_mla_key`, which is now the RAW relative path. When
+        this guard was written it compared through a normalized key that
+        stripped Keras' `_<n>` disambiguator, because the RoPE sub-layer was
+        unnamed and ANY two instances in one process disagreed on
+        `rotary_position_embedding[_1]/cos_cached` -- so the guard would have
+        reddened for a reason that had nothing to do with dropout. That wart is
+        FIXED at the source (D-019, `name="rope"`), so the normalization is
+        gone and this comparison is exact again.
         """
         zero = {_mla_key(w) for w in self._layer(0.0).weights}
         live = {_mla_key(w) for w in self._layer(0.1).weights}
@@ -1819,3 +1826,115 @@ class TestTheDropoutLayerIsCreatedUnconditionally:
         eval_out = keras.ops.convert_to_numpy(layer(sample, training=False))
         train_out = keras.ops.convert_to_numpy(layer(sample, training=True))
         assert float(np.max(np.abs(eval_out - train_out))) == 0.0
+
+
+# ---------------------------------------------------------------------
+# plan-2026-09-07T183458-be1c267e step 8.1 (D-019): the RoPE sub-layer is
+# named, so weight paths are instance-stable and process-order-independent.
+#
+# This is the same defect class `_SEWeights` was fixed for in
+# `tripse_attention.py` (D-011) and the same guard shape. It was deferred
+# once as D-008 and again as D-017, and it survived both times because this
+# module's own weight-path oracle normalized Keras' `_<n>` disambiguator
+# away. The oracle no longer does; these are the guards that keep it honest.
+# ---------------------------------------------------------------------
+
+
+class TestTheWeightPathsAgreeBetweenAnExplicitAndALazyBuild:
+    """Two instances in one process must agree on every relative weight path.
+
+    MEASURED before the fix, at `dim=32, num_heads=2, kv_latent_dim=8`: six of
+    eight relative paths agreed and two did not --
+    `rotary_position_embedding/{cos,sin}_cached` in the first instance versus
+    `rotary_position_embedding_1/{cos,sin}_cached` in the second. The offset is
+    not a fixed 1: it counts every `RotaryPositionEmbedding` the PROCESS built
+    earlier, so it is a function of test ordering, not of this class.
+
+    `.keras` full-model save/load never broke, which is why the defect survived
+    -- that path is graph-position-based. Anything name-keyed (`load_weights`
+    on an `.h5`/`.weights.h5`, a name-indexed checkpoint, a partial restore)
+    does break. So these guards compare path SETS, and keep the count assertion
+    only as a did-it-build check.
+    """
+
+    _KW = dict(dim=32, num_heads=2, kv_latent_dim=8)
+    _SHAPE = (2, 6, 32)
+
+    def _explicit(self):
+        layer = MultiHeadLatentAttention(**self._KW)
+        layer.build(self._SHAPE)
+        return layer
+
+    def _lazy(self):
+        layer = MultiHeadLatentAttention(**self._KW)
+        layer(np.zeros(self._SHAPE, dtype="float32"))
+        return layer
+
+    def test_the_rope_sublayer_has_an_explicit_name(self):
+        """The one-line source fix, asserted directly."""
+        assert self._explicit().rope.name == "rope"
+
+    def test_an_explicit_build_and_a_lazy_build_agree_on_every_path(self):
+        explicit = {_mla_key(w) for w in self._explicit().weights}
+        lazy = {_mla_key(w) for w in self._lazy().weights}
+        assert explicit == lazy, (
+            f"weight paths differ between an explicitly built and a lazily "
+            f"built instance in the same process: {sorted(explicit ^ lazy)}"
+        )
+
+    def test_a_third_instance_built_after_the_first_two_still_agrees(self):
+        """Ordering arm: the disambiguator counts PROCESS-wide constructions.
+
+        A guard comparing only two instances can pass by luck if both happen to
+        land on the same counter value. A third, built after both, cannot.
+        """
+        first = {_mla_key(w) for w in self._explicit().weights}
+        _ = self._lazy()
+        third = {_mla_key(w) for w in self._lazy().weights}
+        assert first == third, sorted(first ^ third)
+
+    def test_no_weight_path_carries_an_auto_incremented_component(self):
+        """The direct reading of the defect, independent of any comparison.
+
+        `_MLA_UNIQUIFIED` matches a trailing `_<n>`. `rope`, `query_proj`,
+        `kv_down_proj`, `kv_up_proj`, `k_rope_proj`, `output_proj`, `kv_norm`
+        are all explicitly named, so no component may match. The layer's OWN
+        outermost name is excluded -- `_mla_key` already drops it, and Keras
+        legitimately uniquifies that one across instances.
+        """
+        for weight in self._lazy().weights:
+            for part in _mla_key(weight).split("/"):
+                assert not _MLA_UNIQUIFIED.search(part), (
+                    f"{weight.path} carries the auto-increment component "
+                    f"{part!r}; a sub-layer is missing an explicit name="
+                )
+
+    def test_the_rope_name_did_not_leak_into_get_config(self):
+        """Naming a sub-layer must not change the serialized contract."""
+        config = self._explicit().get_config()
+        assert "rope" not in config
+        assert "rope_theta" in config and "rope_percentage" in config
+        restored = MultiHeadLatentAttention.from_config(config)
+        restored(np.zeros(self._SHAPE, dtype="float32"))
+        assert (
+            {_mla_key(w) for w in restored.weights}
+            == {_mla_key(w) for w in self._lazy().weights}
+        )
+
+    def test_a_keras_round_trip_is_still_exact(self):
+        """I-3: renaming a sub-layer must leave `max|delta| == 0.0`."""
+        inputs = keras.Input(shape=self._SHAPE[1:])
+        outputs = MultiHeadLatentAttention(**self._KW)(inputs)
+        model = keras.Model(inputs, outputs)
+
+        rng = np.random.default_rng(29)
+        sample = rng.standard_normal(self._SHAPE).astype("float32")
+        before = keras.ops.convert_to_numpy(model(sample, training=False))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "mla_rope_named.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(restored(sample, training=False))
+
+        assert float(np.max(np.abs(before - after))) == 0.0

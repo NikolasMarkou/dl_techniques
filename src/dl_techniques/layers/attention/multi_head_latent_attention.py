@@ -360,8 +360,30 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         # 5. RoPE Embeddings for Q_pe and K_pe
         #    Uses framework factory for consistent RoPE implementation
+        # DECISION plan-2026-09-07T183458-be1c267e/D-019
+        # `name="rope"` is LOAD-BEARING; do NOT drop it to "let the factory pick
+        # one". `create_embedding_layer` passes `name` through only when it is
+        # given, and without it Keras falls back to the PROCESS-GLOBAL
+        # auto-increment counter, so this sub-layer's weight paths depend on how
+        # many `RotaryPositionEmbedding` objects the process happened to build
+        # first. MEASURED before this line existed: two
+        # `MultiHeadLatentAttention(dim=32, num_heads=2, kv_latent_dim=8)` in one
+        # process -- one explicitly built, one lazily -- agreed on six of eight
+        # relative weight paths and disagreed on
+        # `rotary_position_embedding/cos_cached` vs
+        # `rotary_position_embedding_1/cos_cached` (same for `sin_cached`). Same
+        # defect class as `_SEWeights` in `tripse_attention.py` (D-011), and the
+        # matching in-repo precedent is `gated_attention.py`, which already names
+        # its own factory-built RoPE `'rope'`. This changes weight-path STRINGS,
+        # not `get_config()` -- the rope sub-layer's name is not a config key, and
+        # no `.keras` archive in the tree references this class (checked). Guarded
+        # by `TestTheWeightPathsAgreeBetweenAnExplicitAndALazyBuild`, which
+        # compares RAW relative paths: the step-4/step-9 oracle used to strip
+        # Keras' `_<n>` disambiguator and was therefore blind to exactly this.
+        # See decisions.md D-019 (and D-008, which deferred it).
         self.rope = create_embedding_layer(
             "rope",
+            name="rope",
             head_dim=qk_rope_head_dim,
             max_seq_len=max_seq_len,
             rope_theta=rope_theta,

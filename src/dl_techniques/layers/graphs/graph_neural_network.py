@@ -372,24 +372,50 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                 # The mechanism, stated exactly: `GlorotUniform().get_config()`
                 # reports `{'seed': None}` even when the LIVE instance already has
                 # a resolved `.seed`, so `from_config` self-assigns a fresh seed and
-                # the tie breaks. This is the OPPOSITE of `clone.py` exemption 3,
-                # where a `get_config()` round trip that RAISES falls back to
-                # `copy.deepcopy`, which COPIES the resolved seed and leaves the site
-                # tied. A round trip that succeeds unties; a round trip that raises
-                # stays tied. Do not "correct" one into the other.
+                # the tie breaks. That untying depends on the round trip SUCCEEDING,
+                # and the callee has no fallback for the case where it does not --
+                # see the exemption note below, which is where this site and
+                # `clone.py` part company.
                 #
                 # The dependency is MONITORED, not assumed:
                 # `TestTheCalleeReClonesTheSharedInitializer` in
                 # `tests/test_layers/test_graphs/test_graph_neural_network.py` pins
                 # the stock-`MultiHeadAttention` and `MLPBlock` behaviour and goes
                 # RED, naming this site, if a future version drops the re-clone.
-                # Independence here holds for a RANDOM SEEDLESS initializer; the
-                # exceptions are a SEEDED instance (replays by contract, across
-                # differing shapes too), a DETERMINISTIC one (`'zeros'`/`'ones'`/
-                # `Constant`, `Identity` at 2-D -- identical and correctly so), and
-                # a CUSTOM one failing the `get_config()` round trip (falls back to
-                # `copy.deepcopy`, keeping the resolved seed). See decisions.md
-                # D-007 and `src/dl_techniques/initializers/clone.py`.
+                #
+                # Independence here holds for a RANDOM SEEDLESS initializer. Do NOT
+                # paste `clone.py` § "Scope of the claim, exactly" verbatim into this
+                # anchor: that section describes `clone_initializer`, which is
+                # deliberately NOT called here, and its third exemption is FALSE at
+                # this site. What governs here is the CALLEE's round trip. MEASURED
+                # on `GraphNeuralNetworkLayer(concept_dim=16, num_layers=2,
+                # message_passing='gat', aggregation='none')`:
+                #   * a SEEDED instance (`GlorotUniform(seed=7)`) replays by
+                #     contract -- `gat_attention_0/query/kernel` came out
+                #     bit-identical to `.../key/kernel` AND to
+                #     `gat_attention_1/query/kernel`. Matches `clone.py` exemption 1.
+                #   * a DETERMINISTIC one (`'ones'`, and by the same argument
+                #     `'zeros'`/`Constant`, `Identity` at 2-D) is identical at every
+                #     site and correctly so. Matches `clone.py` exemption 2.
+                #   * a CUSTOM one whose `get_config()` RAISES does NOT stay tied
+                #     here, and there is no `copy.deepcopy` fallback -- `clone.py`
+                #     owns that fallback and is not on this code path.
+                #     `_get_common_kwargs_for_sublayer` lets the exception out, so
+                #     `GraphNeuralNetworkLayer.build()` propagates it and the layer
+                #     never finishes building. MEASURED: `__init__` succeeds, then
+                #     `build()` raises the initializer's own `RuntimeError` -- for
+                #     `message_passing='gat'`, and for ANY `message_passing` once
+                #     `aggregation='attention'` builds `aggregation_attention`.
+                #     Loud, not silent. This is the OPPOSITE of `clone.py`
+                #     exemption 3, which is exactly why that sentence used to be
+                #     here and was wrong; the cloned `gcn_dense_{i}` /
+                #     `sage_*` sites above DO take the deepcopy branch and DO stay
+                #     tied under the same initializer (measured in the same run).
+                # `TestACustomInitializerThatCannotSerialize` in
+                # `tests/test_layers/test_graphs/test_graph_neural_network.py` pins
+                # that third bullet, so the sentence is monitored rather than
+                # asserted. See decisions.md D-007 and D-019, and
+                # `src/dl_techniques/initializers/clone.py`.
                 self.gnn_layers.append(
                     keras.layers.MultiHeadAttention(
                         num_heads=self.num_attention_heads,
@@ -411,9 +437,15 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                 # (`layers/ffn/mlp.py:261,271`), so wrapping here would buy nothing
                 # and would ship a guard that cannot be reddened by reverting it.
                 # MEASURED: all 8 `gin_mlp_{i}` weights are independent of a replay
-                # from the shared instance. Same reasoning, same exemptions and the
-                # same monitoring test as the `gat_attention_{i}` anchor above --
-                # see decisions.md D-007.
+                # from the shared instance. Same reasoning and the same monitoring
+                # test as the `gat_attention_{i}` anchor above -- but NOT the same
+                # exemption 3: the callee here is `clone_initializer`, so this site
+                # really does take the `copy.deepcopy` branch and really does stay
+                # tied when a custom `get_config()` raises, where the two
+                # `MultiHeadAttention` sites raise instead. MEASURED: at
+                # `message_passing='gin', aggregation='none'` a raising initializer
+                # builds and runs fine. Read the exemption note above as belonging
+                # to those two sites, not to this one. See decisions.md D-007, D-019.
                 self.gnn_layers.append(
                     MLPBlock(
                         hidden_dim=self.concept_dim * 2,
