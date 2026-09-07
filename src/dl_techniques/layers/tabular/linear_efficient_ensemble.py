@@ -150,9 +150,8 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         """Build the ensemble linear layer weights.
 
         Each of the three optional weights is created only when its flag is set,
-        and :meth:`call` reads it behind the identical flag. Keep the two sides
-        in lockstep — making a weight unconditional here would also change the
-        saved ``.keras`` weight layout.
+        and :meth:`call` reads it behind the identical flag. See the D-011
+        anchor below the kernel for why that conditionality is load-bearing.
         """
         input_dim = input_shape[-1]
 
@@ -164,6 +163,23 @@ class LinearEfficientEnsemble(keras.layers.Layer):
             trainable=True,
             name='kernel'
         )
+
+        # DECISION plan-2026-09-07T095804-b821967f/D-011
+        # The next three weights are created CONDITIONALLY, each behind the same
+        # flag `call()` reads it behind. Do NOT "clean this up" into three
+        # unconditional `add_weight` calls with the flags applied only in
+        # `call()` (e.g. `r` always created and multiplied in as 1.0 when
+        # `ensemble_scaling_in` is False). It reads simpler and it is wrong:
+        # the set of weights `build()` creates IS the `.keras` weight layout, so
+        # an unconditional weight changes the layout for every flag combination
+        # and every archive written under the current one is refused on load.
+        # All three flags are in `get_config()`, so all eight combinations are
+        # reachable and archivable -- this is not a dead branch.
+        # The lockstep is also the error-reporting mechanism: a False flag
+        # leaves the attribute UNSET, so a `call()` that drifts out of step
+        # raises `AttributeError` at the drift site instead of silently
+        # multiplying by a weight the config says does not exist.
+        # See decisions.md D-011 and plan.md § Edge cases.
 
         # Input scaling weights
         if self.ensemble_scaling_in:

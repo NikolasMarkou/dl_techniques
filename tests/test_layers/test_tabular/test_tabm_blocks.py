@@ -430,3 +430,47 @@ class TestTabMBackbone:
             TabMBackbone(hidden_dims=[8, 6], ensemble_type='packed')
         assert "k is None" in str(exc.value)
         assert os.path.basename(str(exc.traceback[-1].path)) == "tabm_mlp_block.py"
+
+
+class TestRegistrationKeys:
+    """The five keys this package's classes are deserialized by, pinned literally.
+
+    A ``.keras`` round trip can NEVER catch a wrong ``package=`` string: the archive
+    is written and read through the SAME in-process registry, so a typo is
+    self-consistent and loads fine. The string is hand-authored and consumed
+    literally, with no derivation step, so nothing mechanical catches a stale one
+    either -- an assertion on the exact key text is the only instrument that works.
+    That is why these five arms spell the key out instead of asserting merely that
+    some key exists, and why they are collected tests rather than a one-shot grep.
+
+    ``registration_contract`` (tests/conftest.py) asserts the shared half: the key is
+    package-qualified, owned by ``dl_techniques``, resolves back to this exact class,
+    and its legacy ``Custom>{__name__}`` alias still resolves to the same object. It
+    returns the key; the ``==`` below is the module-path half it deliberately does
+    not hard-code. Same shape as
+    ``tests/test_initializers/test_random_signs.py::test_registered_name_resolves``.
+
+    All five keys were REWRITTEN by ``plan-2026-09-07-b821967f`` when the classes
+    moved out of ``layers/tabular/tabm_blocks.py`` (D-003: clean break, no
+    ``legacy_packages=`` alias), so a regression here is not hypothetical -- it is
+    the edit that plan already made once.
+    """
+
+    @pytest.mark.parametrize("cls, expected_key", [
+        (ScaleEnsemble,
+         "dl_techniques.layers.tabular.scale_ensemble>ScaleEnsemble"),
+        (LinearEfficientEnsemble,
+         "dl_techniques.layers.tabular.linear_efficient_ensemble"
+         ">LinearEfficientEnsemble"),
+        (NLinear,
+         "dl_techniques.layers.tabular.nlinear>NLinear"),
+        (TabMMLPBlock,
+         "dl_techniques.layers.tabular.tabm_mlp_block>TabMMLPBlock"),
+        (TabMBackbone,
+         "dl_techniques.layers.tabular.tabm_backbone>TabMBackbone"),
+    ], ids=["ScaleEnsemble", "LinearEfficientEnsemble", "NLinear",
+            "TabMMLPBlock", "TabMBackbone"])
+    def test_registered_name_resolves(self, cls, expected_key,
+                                      registration_contract):
+        key = registration_contract(cls)
+        assert key == expected_key
