@@ -139,8 +139,23 @@ class TabMModel(keras.Model):
         ``B * k`` rows is reshaped into disjoint per-member slices; the
         caller must supply a batch of that size.
     :type share_training_batches: bool
-    :param kernel_initializer: Initializer for linear-layer weights.
-    :param bias_initializer: Initializer for bias terms.
+    :param kernel_initializer: Initializer for linear-layer weights. ONE instance
+        is handed to both the backbone and the output layer. That is exact for a
+        SEEDLESS initializer -- the backbone clones per block, and the output
+        layer is then the shared instance's only other consumer, so the kernels
+        come out different (measured ``max|diff| = 0.42`` at
+        ``arch_type='tabm-packed', hidden_dims=[16, 16], n_classes=16, k=4``).
+        The exception is a caller-supplied SEEDED initializer such as
+        ``GlorotUniform(seed=7)``: :func:`~dl_techniques.initializers.clone_initializer`
+        reproduces the seed on purpose and deliberately does NOT break symmetry
+        (``initializers/clone.py:60-65``), so at that same config the output
+        layer's kernel is bit-identical to the last backbone block's whenever
+        their shapes coincide (measured ``max|diff| = 0.0``). For reproducible
+        runs prefer ``keras.utils.set_random_seed()``, which seeds the process
+        rather than one shared initializer object.
+    :param bias_initializer: Initializer for bias terms. Same fan-out and the
+        same seeded exception as ``kernel_initializer``; inert at the shipped
+        ``'zeros'`` default, which carries no per-instance random state.
     :param kernel_regularizer: Optional regularizer for linear-layer kernels.
     :param bias_regularizer: Optional regularizer for bias terms.
     :param name: Optional model name.
@@ -387,6 +402,34 @@ class TabMModel(keras.Model):
             self.minimal_ensemble_adapter = None
 
         backbone_k = None if self.arch_type == 'plain' else self.k
+        # DECISION plan-2026-09-07T161712-985e4d31/D-004: the SAME
+        # ``self.kernel_initializer`` / ``self.bias_initializer`` instance is handed to
+        # the backbone below AND to the output layer further down. Do NOT "fix" that by
+        # wrapping either site in ``clone_initializer``: it was MEASURED to be a no-op
+        # against the only failure mode that is live here.
+        #
+        # Exact for a SEEDLESS initializer: ``TabMBackbone`` clones per block
+        # (``tabm_backbone.py``, its own D-005/D-007 anchor), which leaves this shared
+        # instance with exactly one other ``add_weight`` consumer, and the output layer's
+        # kernel then differs from the last block's -- measured ``max|diff| = 0.42`` at
+        # ``arch_type='tabm-packed', hidden_dims=[16, 16], n_classes=16, k=4``.
+        #
+        # The exception is a caller-supplied SEEDED initializer. ``clone_initializer``
+        # round-trips through ``get_config()``/``from_config()`` and therefore reproduces
+        # the seed ON PURPOSE -- it deliberately does not break symmetry
+        # (``initializers/clone.py:60-65``). So with ``GlorotUniform(seed=7)`` the output
+        # layer's kernel is bit-identical to the last backbone block's TODAY, at that same
+        # config, WITH the backbone clone already in place (measured ``max|diff| = 0.0``).
+        # A clone added at these sites would hand the output layer an initializer with the
+        # identical seed and change nothing -- it would only look like a fix, and would
+        # license a false "aliasing is fixed" claim at the one place it is provably not.
+        #
+        # The action taken instead is documentation plus a guard: the ``kernel_initializer``
+        # / ``bias_initializer`` docstrings on this class and on ``create_tabm_model`` state
+        # the exception and point callers at ``keras.utils.set_random_seed()``, and
+        # ``tests/test_models/test_tabm/test_arch_types.py::TestSharedInitializerCoincidence``
+        # pins the coincidence so a change to ``clone_initializer``'s seeded contract turns
+        # both docstrings red instead of silently making them wrong. See decisions.md D-004.
         self.backbone = TabMBackbone(
             hidden_dims=self.hidden_dims,
             k=backbone_k,
@@ -743,8 +786,15 @@ def create_tabm_model(
     :type use_bias: bool
     :param share_training_batches: See :class:`TabMModel`.
     :type share_training_batches: bool
-    :param kernel_initializer: Initializer for linear-layer weights.
-    :param bias_initializer: Initializer for bias terms.
+    :param kernel_initializer: Initializer for linear-layer weights. Forwarded as
+        ONE instance to both the backbone and the output layer -- exact for a
+        SEEDLESS initializer; the exception is a caller-supplied SEEDED one,
+        which aliases the output layer's kernel with the last backbone block's
+        wherever their shapes coincide. See :class:`TabMModel`'s
+        ``kernel_initializer`` entry for the measurement, and prefer
+        ``keras.utils.set_random_seed()`` for reproducibility.
+    :param bias_initializer: Initializer for bias terms. Same fan-out and the
+        same seeded exception; inert at the shipped ``'zeros'`` default.
     :param kwargs: Additional arguments forwarded to :class:`TabMModel`.
     :return: A configured, uncompiled ``TabMModel``.
     :rtype: TabMModel
