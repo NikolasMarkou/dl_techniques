@@ -238,6 +238,29 @@ class TestLinearEfficientEnsemble:
             == TabMMLPBlock(units=5, k=K).compute_output_shape((None, K + 4, D))
         )
 
+    def test_the_weight_layout_is_unchanged(self):
+        # I-3 / SC-11. This plan changed VALUES (`s` now draws independently of
+        # `r`) and added build-time raises; it must not have moved the weight
+        # LAYOUT, because the set of weights build() creates IS the `.keras`
+        # weight layout -- see the D-011 anchor in the source.
+        # Keyed on (name, shape): on Keras 3.8 `w.name` is the bare `add_weight`
+        # name (`w.path` is the qualified `<layer>/<name>` form), so the bare
+        # names below are exact and no fallback to shapes-only is needed.
+        # `units == input_dim == 8` is deliberate: it is the one configuration
+        # where `input_scaling` and `output_scaling` share a shape, i.e. exactly
+        # the case W-1's fix perturbs, so this pins that the fix moved values
+        # only.
+        layer = LinearEfficientEnsemble(units=8, k=K)
+        layer.build((None, K, 8))
+        assert {(w.name, tuple(w.shape)) for w in layer.weights} == {
+            ("kernel", (8, 8)),
+            ("input_scaling", (K, 8)),
+            ("output_scaling", (K, 8)),
+            ("bias", (K, 8)),
+        }
+        # A set alone would hide a duplicated weight, so pin the count too.
+        assert len(layer.weights) == 4
+
 
 class TestNLinear:
     def test_forward_and_shape(self):
