@@ -250,10 +250,14 @@ class CoShNet(keras.Model):
     :type include_top: bool
     :param epsilon: Has no effect. Validated, stored, serialized and forwarded
         to every complex layer, but never used in a computation: ``grep -n
-        "epsilon" layers/complex/complex_layers.py`` returns 6 hits, all of them
-        docstring, signature, validation or ``get_config``; no complex layer
-        performs a division at all, so there is no numerical-stability term for
-        it to be. Measured on one built ``nano`` (rebuilding under
+        "epsilon" layers/complex/base.py`` returns 8 hits, all of them
+        docstring, signature, validation, the ``D-053`` decision anchor, the
+        ``self.epsilon`` assignment or ``get_config`` — none is a read in any
+        computation. The same grep over the six leaf modules of
+        ``layers/complex/`` returns 0 hits, so ``ComplexLayer`` in ``base.py``
+        owns the parameter outright. No complex layer performs a division at
+        all, so there is no numerical-stability term for it to be. Measured on
+        one built ``nano`` (rebuilding under
         ``set_random_seed`` does not reproduce the same weights, so this must
         be checked on a fixed build): forward is deterministic self-vs-self at
         exactly 0.0, and mutating all 4 live ``epsilon`` attributes from 1e-7

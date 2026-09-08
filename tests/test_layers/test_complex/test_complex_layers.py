@@ -1378,8 +1378,8 @@ def test_registration_key_is_the_modules_own_dotted_path(cls, expected_key):
     and the read share one in-process registry, so a mistyped key is
     self-consistent and loads green. Only a literal comparison against the
     module's own dotted path can see it. These keys were rewritten by the
-    one-class-per-module split with no legacy alias for the old shared
-    ``...complex.complex_layers`` string.
+    one-class-per-module split with no legacy alias for the single shared
+    key that the now-deleted multi-class module claimed for all seven.
     """
     assert keras.saving.get_registered_name(cls) == expected_key
 
