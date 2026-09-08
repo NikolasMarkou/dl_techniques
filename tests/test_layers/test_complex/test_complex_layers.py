@@ -23,6 +23,7 @@ from dl_techniques.layers.complex.complex_layers import (
     ComplexReLU,
     ComplexAveragePooling2D,
     ComplexDropout,
+    ComplexGlobalAveragePooling2D,
 )
 
 
@@ -838,6 +839,369 @@ def test_complex_dropout_round_trips_through_a_keras_model(tmp_path):
     ]
     assert len(reloaded_dropout) == 1
     assert reloaded_dropout[0].dropout_layer.name == "dropout"
+
+
+
+# ---------------------------------------------------------------------
+# ComplexAveragePooling2D -- first direct coverage (plan Step 6)
+# ---------------------------------------------------------------------
+
+def _complex_from_parts(real: np.ndarray, imag: np.ndarray) -> tf.Tensor:
+    """Build a complex64 tensor from two float arrays of the same shape."""
+    return tf.complex(
+        tf.constant(real, dtype=tf.float32),
+        tf.constant(imag, dtype=tf.float32),
+    )
+
+
+def test_complex_average_pooling_forward_values_match_a_hand_computed_reference():
+    """Pool a known 4x4 map and compare against arithmetic written out by hand.
+
+    Guide 16.3 forbids a shape-only oracle. The real part is ``arange(16)`` and
+    the imaginary part is ``100 - arange(16)``, so the two components carry
+    DIFFERENT numbers -- a forward that swapped them, or that pooled one part
+    twice, cannot pass.
+
+    2x2 / stride-2 / VALID windows over ``arange(16).reshape(4, 4)``::
+
+        [ 0  1 | 2  3]      (0+1+4+5)/4  = 2.5    (2+3+6+7)/4   = 4.5
+        [ 4  5 | 6  7]
+        ---------------
+        [ 8  9 |10 11]      (8+9+12+13)/4= 10.5   (10+11+14+15)/4 = 12.5
+        [12 13 |14 15]
+    """
+    real = np.arange(16, dtype="float32").reshape(1, 4, 4, 1)
+    imag = (100.0 - np.arange(16, dtype="float32")).reshape(1, 4, 4, 1)
+    x = _complex_from_parts(real, imag)
+
+    layer = ComplexAveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding='VALID')
+    y = layer(x).numpy()
+
+    expected_real = np.array([[2.5, 4.5], [10.5, 12.5]], dtype="float32").reshape(1, 2, 2, 1)
+    # imag = 100 - real elementwise, and the mean is affine, so each window mean
+    # is 100 minus the corresponding real window mean.
+    expected_imag = np.array([[97.5, 95.5], [89.5, 87.5]], dtype="float32").reshape(1, 2, 2, 1)
+
+    assert y.shape == (1, 2, 2, 1)
+    np.testing.assert_allclose(y.real, expected_real, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(y.imag, expected_imag, rtol=0, atol=1e-6)
+
+
+def test_complex_average_pooling_pools_the_two_components_independently():
+    """The imaginary part must be pooled on its own, not derived from the real one.
+
+    The real part is constant (every window mean is 5.0) while the imaginary
+    part varies, so a forward that pooled the real part and reused the result
+    for both components -- or that pooled ``|z|`` -- produces a constant
+    imaginary output and fails here, while the previous test could not tell.
+    """
+    real = np.full((1, 4, 4, 1), 5.0, dtype="float32")
+    imag = np.arange(16, dtype="float32").reshape(1, 4, 4, 1)
+    x = _complex_from_parts(real, imag)
+
+    y = ComplexAveragePooling2D(pool_size=(2, 2), strides=(2, 2))(x).numpy()
+
+    np.testing.assert_allclose(
+        y.real, np.full((1, 2, 2, 1), 5.0, dtype="float32"), rtol=0, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        y.imag,
+        np.array([[2.5, 4.5], [10.5, 12.5]], dtype="float32").reshape(1, 2, 2, 1),
+        rtol=0,
+        atol=1e-6,
+    )
+
+
+def test_complex_average_pooling_valid_and_same_branches_have_different_values():
+    """Both padding branches, with the SAME edge arithmetic written out.
+
+    MEASURED at keras 3.8 / TF 2.18: ``average_pool(padding='same')`` excludes the
+    implicit padding from the denominator (``count_include_pad=False``), so an
+    edge window divides by however many REAL elements it saw, not by 4. Over
+    ``arange(9).reshape(3, 3)`` with a 2x2 / stride-2 window::
+
+        VALID -> one full window: (0+1+3+4)/4 = 2.0
+        SAME  -> [[ (0+1+3+4)/4 , (2+5)/2 ],
+                  [ (6+7)/2     , (8)/1   ]]  =  [[2.0, 3.5], [6.5, 8.0]]
+
+    A branch that padded with zeros AND counted them would read
+    [[2.0, 1.75], [3.25, 2.0]] instead, so this test also pins the denominator.
+    """
+    real = np.arange(9, dtype="float32").reshape(1, 3, 3, 1)
+    imag = np.zeros((1, 3, 3, 1), dtype="float32")
+    x = _complex_from_parts(real, imag)
+
+    y_valid = ComplexAveragePooling2D(pool_size=2, strides=2, padding='VALID')(x).numpy()
+    assert y_valid.shape == (1, 1, 1, 1)
+    np.testing.assert_allclose(y_valid.real.squeeze(), 2.0, rtol=0, atol=1e-6)
+
+    y_same = ComplexAveragePooling2D(pool_size=2, strides=2, padding='SAME')(x).numpy()
+    assert y_same.shape == (1, 2, 2, 1)
+    np.testing.assert_allclose(
+        y_same.real.squeeze(),
+        np.array([[2.0, 3.5], [6.5, 8.0]], dtype="float32"),
+        rtol=0,
+        atol=1e-6,
+    )
+
+
+def test_complex_average_pooling_rejects_a_padding_that_is_not_same_or_valid():
+    """The constructor's own validation branch."""
+    with pytest.raises(ValueError, match="padding must be 'SAME' or 'VALID'"):
+        ComplexAveragePooling2D(padding='causal')
+
+
+def test_complex_average_pooling_compute_output_shape_rejects_non_4d():
+    """``compute_output_shape`` must refuse a rank it cannot pool."""
+    layer = ComplexAveragePooling2D()
+    for bad_shape in [(8, 32), (8, 32, 3), (8, 4, 4, 4, 3)]:
+        with pytest.raises(ValueError, match="requires 4D input"):
+            layer.compute_output_shape(bad_shape)
+
+
+def test_complex_average_pooling_round_trips_through_a_saved_model(tmp_path):
+    """A real ``.keras`` save/load must preserve config and values.
+
+    The complex64 ``InputLayer`` idiom is used deliberately: a
+    ``keras.layers.Lambda`` wrapper does not survive safe-mode deserialization.
+    """
+    model = keras.Sequential([
+        keras.layers.InputLayer(shape=(4, 4, 2), dtype="complex64"),
+        ComplexAveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding='SAME'),
+    ])
+    x = tf.complex(tf.random.normal((3, 4, 4, 2)), tf.random.normal((3, 4, 4, 2)))
+    before = model(x, training=False).numpy()
+
+    path = tmp_path / "complex_avgpool_roundtrip.keras"
+    model.save(path)
+    loaded = keras.models.load_model(path)
+
+    after = loaded(x, training=False).numpy()
+    np.testing.assert_allclose(before.real, after.real, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(before.imag, after.imag, rtol=0, atol=1e-6)
+
+    reloaded_layer = [
+        layer for layer in loaded.layers if isinstance(layer, ComplexAveragePooling2D)
+    ]
+    assert len(reloaded_layer) == 1
+    assert reloaded_layer[0].pool_size == (2, 2)
+    assert reloaded_layer[0].strides == (2, 2)
+    assert reloaded_layer[0].padding == 'SAME'
+
+
+# ---------------------------------------------------------------------
+# ComplexDropout -- first direct coverage (plan Step 6)
+# ---------------------------------------------------------------------
+
+def test_complex_dropout_is_exactly_the_identity_at_inference():
+    """``training=False`` must return the input BIT-for-bit, not merely close.
+
+    Dropout's inference path applies no mask and no rescale, so anything other
+    than exact equality means a scale factor leaked into the inference branch.
+    """
+    real = np.random.RandomState(0).randn(4, 32).astype("float32")
+    imag = np.random.RandomState(1).randn(4, 32).astype("float32")
+    x = _complex_from_parts(real, imag)
+
+    y = ComplexDropout(0.5)(x, training=False).numpy()
+
+    assert np.array_equal(y.real, real), "the inference path altered the real part"
+    assert np.array_equal(y.imag, imag), "the inference path altered the imaginary part"
+
+
+def test_complex_dropout_drops_and_rescales_the_survivors_at_training():
+    """Every training-mode output is either exactly 0 or exactly ``z / (1 - rate)``.
+
+    With ``rate=0.5`` the inverted-dropout scale is exactly 2.0. Asserting the
+    two-valued ratio pins BOTH halves of the operation: a forward that dropped
+    without rescaling fails, and one that rescaled without dropping fails too
+    (the drop fraction is checked against the rate).
+    """
+    keras.utils.set_random_seed(1234)
+    real = np.random.RandomState(2).randn(64, 64).astype("float32") + 3.0
+    imag = np.random.RandomState(3).randn(64, 64).astype("float32") + 5.0
+    x = _complex_from_parts(real, imag)
+
+    y = ComplexDropout(0.5)(x, training=True).numpy()
+
+    dropped = y.real == 0.0
+    kept = ~dropped
+
+    np.testing.assert_allclose(y.real[dropped], 0.0, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(y.imag[dropped], 0.0, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(y.real[kept], real[kept] * 2.0, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(y.imag[kept], imag[kept] * 2.0, rtol=0, atol=1e-5)
+
+    drop_fraction = dropped.mean()
+    assert 0.4 < drop_fraction < 0.6, (
+        f"{drop_fraction:.3f} of the units were dropped at rate=0.5 -- the mask is "
+        "not being drawn at the configured rate"
+    )
+
+
+def test_complex_dropout_kills_real_and_imaginary_parts_together():
+    """The reason this class exists: ONE real mask governs both components.
+
+    Two independent per-component masks would leave, at rate=0.5 over 4096 units,
+    roughly a quarter of them with a live real part and a dead imaginary part --
+    a complex number whose phase was destroyed by the regulariser. The oracle is
+    the elementwise ratio: for a shared mask ``out.real / in.real`` and
+    ``out.imag / in.imag`` are the SAME real number at every position.
+    """
+    keras.utils.set_random_seed(4321)
+    rng = np.random.RandomState(7)
+    # Every component is bounded away from zero, so a zero in the output can only
+    # come from the mask and the ratio below is always well defined.
+    real = rng.uniform(1.0, 2.0, size=(64, 64)).astype("float32")
+    imag = rng.uniform(3.0, 4.0, size=(64, 64)).astype("float32")
+    x = _complex_from_parts(real, imag)
+
+    y = ComplexDropout(0.5)(x, training=True).numpy()
+
+    real_ratio = y.real / real
+    imag_ratio = y.imag / imag
+
+    np.testing.assert_allclose(real_ratio, imag_ratio, rtol=0, atol=1e-5)
+
+    real_dead = y.real == 0.0
+    imag_dead = y.imag == 0.0
+    mismatched = int(np.count_nonzero(real_dead != imag_dead))
+    assert mismatched == 0, (
+        f"{mismatched} of {real.size} units had exactly one component zeroed -- "
+        "the real and imaginary parts are being masked INDEPENDENTLY, which "
+        "destroys the phase and is precisely what ComplexDropout exists to avoid"
+    )
+    # Guard the guard: the mask must actually have killed something, or the two
+    # ratios above would agree trivially at 2.0 everywhere.
+    assert real_dead.any(), "nothing was dropped, so the drop-together oracle saw no mask"
+
+
+@pytest.mark.parametrize("bad_rate", [-0.1, 1.0, 1.5])
+def test_complex_dropout_rejects_a_rate_outside_the_unit_interval(bad_rate):
+    """``rate`` must be in ``[0, 1)`` -- 1.0 would divide by zero when rescaling."""
+    with pytest.raises(ValueError, match=r"rate must be in the interval \[0, 1\)"):
+        ComplexDropout(bad_rate)
+
+
+def test_complex_dropout_round_trips_with_its_rate_preserved(tmp_path):
+    """A saved ``ComplexDropout`` must come back with the same ``rate``."""
+    model = keras.Sequential([
+        keras.layers.InputLayer(shape=(8,), dtype="complex64"),
+        ComplexDropout(0.35),
+    ])
+    x = tf.complex(tf.random.normal((2, 8)), tf.random.normal((2, 8)))
+    before = model(x, training=False).numpy()
+
+    path = tmp_path / "complex_dropout_rate_roundtrip.keras"
+    model.save(path)
+    loaded = keras.models.load_model(path)
+
+    after = loaded(x, training=False).numpy()
+    assert np.array_equal(before, after)
+
+    reloaded = [layer for layer in loaded.layers if isinstance(layer, ComplexDropout)]
+    assert len(reloaded) == 1
+    assert reloaded[0].rate == 0.35
+
+
+# ---------------------------------------------------------------------
+# ComplexGlobalAveragePooling2D -- first direct coverage (plan Step 6)
+# ---------------------------------------------------------------------
+
+def _gap_reference_input() -> Tuple[tf.Tensor, np.ndarray, np.ndarray]:
+    """A (2, 2, 2, 3) input whose per-channel spatial means are written out below.
+
+    ``real = arange(24).reshape(2, 2, 2, 3)``. For sample 0 channel c the four
+    spatial entries are ``c, c+3, c+6, c+9``, so the mean is ``c + 4.5``; sample 1
+    is the same block shifted by 12, so its mean is ``c + 16.5``.
+    """
+    real = np.arange(24, dtype="float32").reshape(2, 2, 2, 3)
+    imag = (100.0 - np.arange(24, dtype="float32")).reshape(2, 2, 2, 3)
+    return _complex_from_parts(real, imag), real, imag
+
+
+def test_complex_global_average_pooling_forward_values_match_a_hand_computed_mean():
+    """The mean is over axes [1, 2] -- not [1], not [2], not [1, 2, 3]."""
+    x, _, _ = _gap_reference_input()
+
+    y = ComplexGlobalAveragePooling2D(keepdims=False)(x).numpy()
+
+    expected_real = np.array([[4.5, 5.5, 6.5], [16.5, 17.5, 18.5]], dtype="float32")
+    # imag = 100 - real elementwise and the mean is affine.
+    expected_imag = 100.0 - expected_real
+
+    assert y.shape == (2, 3)
+    np.testing.assert_allclose(y.real, expected_real, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(y.imag, expected_imag, rtol=0, atol=1e-6)
+
+
+def test_complex_global_average_pooling_keepdims_true_keeps_the_spatial_axes():
+    """``keepdims=True`` must give (B, 1, 1, C) carrying the identical numbers."""
+    x, _, _ = _gap_reference_input()
+
+    y = ComplexGlobalAveragePooling2D(keepdims=True)(x).numpy()
+
+    expected_real = np.array(
+        [[4.5, 5.5, 6.5], [16.5, 17.5, 18.5]], dtype="float32"
+    ).reshape(2, 1, 1, 3)
+
+    assert y.shape == (2, 1, 1, 3)
+    np.testing.assert_allclose(y.real, expected_real, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(y.imag, 100.0 - expected_real, rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize("keepdims", [False, True])
+def test_complex_global_average_pooling_compute_output_shape_matches_the_forward(keepdims):
+    """Both ``keepdims`` branches pinned against the real forward output.
+
+    Asserted on an UNBUILT layer as well, because guide 3.4 requires
+    ``compute_output_shape`` to work from stored config alone.
+    """
+    x, _, _ = _gap_reference_input()
+
+    unbuilt = ComplexGlobalAveragePooling2D(keepdims=keepdims)
+    predicted_unbuilt = unbuilt.compute_output_shape((2, 2, 2, 3))
+
+    layer = ComplexGlobalAveragePooling2D(keepdims=keepdims)
+    y = layer(x)
+
+    assert tuple(predicted_unbuilt) == tuple(y.shape)
+    assert tuple(layer.compute_output_shape((2, 2, 2, 3))) == tuple(y.shape)
+    assert tuple(layer.compute_output_shape((None, 2, 2, 3)))[0] is None
+
+
+def test_complex_global_average_pooling_compute_output_shape_rejects_non_4d():
+    """``compute_output_shape`` must refuse a rank that has no [1, 2] to reduce."""
+    layer = ComplexGlobalAveragePooling2D()
+    for bad_shape in [(8, 32), (8, 32, 3), (8, 4, 4, 4, 3)]:
+        with pytest.raises(ValueError, match="requires 4D input"):
+            layer.compute_output_shape(bad_shape)
+
+
+@pytest.mark.parametrize("keepdims", [False, True])
+def test_complex_global_average_pooling_round_trips_through_a_saved_model(tmp_path, keepdims):
+    """A real ``.keras`` save/load must preserve ``keepdims`` and the values."""
+    model = keras.Sequential([
+        keras.layers.InputLayer(shape=(4, 4, 3), dtype="complex64"),
+        ComplexGlobalAveragePooling2D(keepdims=keepdims),
+    ])
+    x = tf.complex(tf.random.normal((2, 4, 4, 3)), tf.random.normal((2, 4, 4, 3)))
+    before = model(x, training=False).numpy()
+
+    path = tmp_path / f"complex_gap_roundtrip_{keepdims}.keras"
+    model.save(path)
+    loaded = keras.models.load_model(path)
+
+    after = loaded(x, training=False).numpy()
+    np.testing.assert_allclose(before.real, after.real, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(before.imag, after.imag, rtol=0, atol=1e-6)
+
+    reloaded = [
+        layer for layer in loaded.layers
+        if isinstance(layer, ComplexGlobalAveragePooling2D)
+    ]
+    assert len(reloaded) == 1
+    assert reloaded[0].keepdims is keepdims
 
 
 if __name__ == '__main__':
