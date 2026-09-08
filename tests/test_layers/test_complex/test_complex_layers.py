@@ -629,5 +629,113 @@ def test_compute_output_shape_propagates_none_dimensions(cls_name, padding, stri
     )
 
 
+# ---------------------------------------------------------------------
+# The `get_config` / `from_config` pair on `ComplexLayer` --- plan Step 4
+# ---------------------------------------------------------------------
+
+
+def _build_complex_dense_model(regularizer) -> keras.Model:
+    """A minimal saveable model whose single complex layer is a `ComplexDense`."""
+    model = keras.Sequential([
+        keras.layers.InputLayer(shape=(6,), dtype="complex64"),
+        ComplexDense(units=4, kernel_regularizer=regularizer),
+    ])
+    return model
+
+
+def _first_complex_dense(model: keras.Model) -> ComplexDense:
+    for layer in model.layers:
+        if isinstance(layer, ComplexDense):
+            return layer
+    raise AssertionError("no ComplexDense found in the model")
+
+
+def test_from_config_restores_regularizer_and_initializer_objects(tmp_path):
+    """A `.keras` round trip must give back OBJECTS, not their serialized dicts.
+
+    `get_config` writes `kernel_regularizer` / `kernel_initializer` through
+    `keras.regularizers.serialize` / `keras.initializers.serialize`, so without a
+    matching `from_config` the reloaded layer stores the raw config dict (Keras
+    wraps it as a `TrackedDict`). Nothing crashes --- the attribute is simply the
+    wrong TYPE, and anything that later calls the regularizer or asks it for a
+    config fails far from here. Hence the oracle is `isinstance`, not a crash.
+
+    The `name` / `trainable` assertions are the guide 6.2 base-key guard: a
+    `from_config` that pops a base key silently renames the layer and drops its
+    trainability on every reload.
+    """
+    model = _build_complex_dense_model(keras.regularizers.L2(0.01))
+    model(tf.complex(tf.random.normal((2, 6)), tf.random.normal((2, 6))))
+    original = _first_complex_dense(model)
+
+    path = tmp_path / "complex_dense_roundtrip.keras"
+    model.save(path)
+    loaded_layer = _first_complex_dense(keras.models.load_model(path))
+
+    assert isinstance(loaded_layer.kernel_regularizer, keras.regularizers.Regularizer), (
+        "after a .keras round trip `kernel_regularizer` is "
+        f"{type(loaded_layer.kernel_regularizer).__name__} "
+        f"({loaded_layer.kernel_regularizer!r}), not a keras Regularizer -- "
+        "ComplexLayer.from_config did not deserialize it"
+    )
+    assert isinstance(loaded_layer.kernel_initializer, keras.initializers.Initializer), (
+        "after a .keras round trip `kernel_initializer` is "
+        f"{type(loaded_layer.kernel_initializer).__name__} "
+        f"({loaded_layer.kernel_initializer!r}), not a keras Initializer -- "
+        "ComplexLayer.from_config did not deserialize it"
+    )
+
+    assert loaded_layer.name == original.name, (
+        f"the reloaded layer is named {loaded_layer.name!r} but the original was "
+        f"{original.name!r} -- from_config popped the base `name` key "
+        "(the guide 6.2 defect)"
+    )
+    assert loaded_layer.trainable == original.trainable, (
+        f"the reloaded layer has trainable={loaded_layer.trainable} but the "
+        f"original had {original.trainable} -- from_config popped the base "
+        "`trainable` key (the guide 6.2 defect)"
+    )
+
+
+def test_from_config_accepts_already_deserialized_objects():
+    """`from_config` is also reached with live objects, not only with dicts.
+
+    `keras.models.clone_model` and any hand-written `Cls.from_config(layer.get_config())`
+    after an in-memory `deserialize_keras_object` pass hand back real objects, so
+    this pins `from_config`'s accepted input domain.
+
+    Honest scope: this is a CONTRACT test, not a defect guard. Removing the
+    `isinstance(..., dict)` branches in `from_config` leaves it GREEN, because
+    MEASURED at keras 3.8 both `deserialize` helpers are idempotent on a live
+    object. It goes RED only if a future change makes `from_config` assume a
+    dict (e.g. indexing `config["kernel_regularizer"]["class_name"]`).
+    """
+    config = ComplexDense(units=4, kernel_regularizer=keras.regularizers.L2(0.01)).get_config()
+    config["kernel_regularizer"] = keras.regularizers.L2(0.02)
+    config["kernel_initializer"] = keras.initializers.HeNormal()
+
+    rebuilt = ComplexDense.from_config(config)
+
+    assert isinstance(rebuilt.kernel_regularizer, keras.regularizers.L2)
+    assert isinstance(rebuilt.kernel_initializer, keras.initializers.HeNormal)
+
+
+def test_from_config_does_not_consume_the_caller_config():
+    """`from_config` must not mutate the dict it is handed.
+
+    Keras reuses a config dict across `clone_model` passes; deserializing in place
+    turns the second call's input into objects the first call already consumed.
+    """
+    config = ComplexDense(units=4, kernel_regularizer=keras.regularizers.L2(0.01)).get_config()
+    before = dict(config)
+
+    ComplexDense.from_config(config)
+
+    assert config == before, (
+        "from_config mutated the caller's config dict; it must work on a copy"
+    )
+    assert isinstance(config["kernel_regularizer"], dict)
+
+
 if __name__ == '__main__':
     pytest.main([__file__])

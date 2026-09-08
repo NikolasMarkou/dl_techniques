@@ -126,6 +126,47 @@ class ComplexLayer(keras.layers.Layer):
         })
         return config
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ComplexLayer":
+        """Rebuild a layer from a config produced by :meth:`get_config`.
+
+        ``get_config`` writes ``kernel_regularizer`` and ``kernel_initializer``
+        through the Keras ``serialize`` helpers, so both arrive here as plain
+        dicts and must be turned back into objects; without this, the reloaded
+        layer keeps the raw dict as its attribute and every later use of it
+        fails far from the load site. ``kernel_initializer`` is inert in the
+        forward path (see D-002 above) but is deserialized all the same,
+        because surviving this round trip is precisely why the parameter was
+        kept rather than deleted.
+
+        Only those two keys are touched. Nothing is popped -- the base keys
+        (``name``, ``trainable``, ``dtype``) are passed straight through to the
+        constructor, and a copy is taken so the caller's dict is not consumed.
+
+        :param config: Configuration dictionary, as returned by ``get_config``.
+        :type config: Dict[str, Any]
+        :return: A new layer instance built from ``config``.
+        :rtype: ComplexLayer
+        """
+        config = dict(config)
+
+        # The `isinstance(..., dict)` guards follow the v2 guide's own 6.1
+        # template. MEASURED at keras 3.8: both `deserialize` helpers are
+        # idempotent on a live object and pass `None` through, so removing the
+        # guards changes nothing observable today -- they are kept for the
+        # guide's shape and against a future non-idempotent helper, not as a
+        # live defense.
+        if isinstance(config.get('kernel_regularizer'), dict):
+            config['kernel_regularizer'] = keras.regularizers.deserialize(
+                config['kernel_regularizer']
+            )
+        if isinstance(config.get('kernel_initializer'), dict):
+            config['kernel_initializer'] = keras.initializers.deserialize(
+                config['kernel_initializer']
+            )
+
+        return cls(**config)
+
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex.complex_layers")
