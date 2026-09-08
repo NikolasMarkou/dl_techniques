@@ -72,11 +72,11 @@ from typing import Optional, Tuple, List, Dict, Any, Sequence, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.signal_processing.shearlet_transform import ShearletTransform
-from dl_techniques.layers.complex.complex_layers import (
-    ComplexDense,
-    ComplexConv2D,
-    ComplexReLU,
-    ComplexDropout,
+from dl_techniques.layers.complex.complex_dense import ComplexDense
+from dl_techniques.layers.complex.complex_conv2d import ComplexConv2D
+from dl_techniques.layers.complex.complex_relu import ComplexReLU
+from dl_techniques.layers.complex.complex_dropout import ComplexDropout
+from dl_techniques.layers.complex.complex_global_average_pooling2d import (
     ComplexGlobalAveragePooling2D,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique

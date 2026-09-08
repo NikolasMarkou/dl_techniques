@@ -16,13 +16,15 @@ import tensorflow as tf
 from dataclasses import dataclass
 from typing import Any, Tuple, List, Optional
 
-from dl_techniques.layers.complex.complex_layers import (
-    ComplexLayer,
-    ComplexConv2D,
-    ComplexDense,
-    ComplexReLU,
+from dl_techniques.layers.complex.base import ComplexLayer
+from dl_techniques.layers.complex.complex_conv2d import ComplexConv2D
+from dl_techniques.layers.complex.complex_dense import ComplexDense
+from dl_techniques.layers.complex.complex_relu import ComplexReLU
+from dl_techniques.layers.complex.complex_average_pooling2d import (
     ComplexAveragePooling2D,
-    ComplexDropout,
+)
+from dl_techniques.layers.complex.complex_dropout import ComplexDropout
+from dl_techniques.layers.complex.complex_global_average_pooling2d import (
     ComplexGlobalAveragePooling2D,
 )
 
@@ -1339,6 +1341,47 @@ def test_sequence_config_normalization_is_closed_over_lists(cls, kwargs, attrs):
             f"{actual!r}; a list from a JSON config must coerce to {expected!r}"
         )
         assert isinstance(actual, tuple)
+
+
+# ---------------------------------------------------------------------
+# Registration keys (the one-class-per-module split)
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "cls,expected_key",
+    [
+        (ComplexLayer,
+         "dl_techniques.layers.complex.base>ComplexLayer"),
+        (ComplexConv2D,
+         "dl_techniques.layers.complex.complex_conv2d>ComplexConv2D"),
+        (ComplexDense,
+         "dl_techniques.layers.complex.complex_dense>ComplexDense"),
+        (ComplexReLU,
+         "dl_techniques.layers.complex.complex_relu>ComplexReLU"),
+        (ComplexAveragePooling2D,
+         "dl_techniques.layers.complex.complex_average_pooling2d>ComplexAveragePooling2D"),
+        (ComplexDropout,
+         "dl_techniques.layers.complex.complex_dropout>ComplexDropout"),
+        (ComplexGlobalAveragePooling2D,
+         "dl_techniques.layers.complex.complex_global_average_pooling2d>"
+         "ComplexGlobalAveragePooling2D"),
+    ],
+    ids=[
+        "base", "conv2d", "dense", "relu",
+        "average_pooling2d", "dropout", "global_average_pooling2d",
+    ],
+)
+def test_registration_key_is_the_modules_own_dotted_path(cls, expected_key):
+    """Pin all seven keys by literal ``==`` on the full registered name.
+
+    A save/load round trip can never validate a ``package=`` string: the write
+    and the read share one in-process registry, so a mistyped key is
+    self-consistent and loads green. Only a literal comparison against the
+    module's own dotted path can see it. These keys were rewritten by the
+    one-class-per-module split with no legacy alias for the old shared
+    ``...complex.complex_layers`` string.
+    """
+    assert keras.saving.get_registered_name(cls) == expected_key
 
 
 if __name__ == '__main__':
