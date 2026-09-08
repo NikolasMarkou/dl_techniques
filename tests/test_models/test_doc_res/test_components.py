@@ -33,11 +33,16 @@ committed (the injections are recorded in the plan's ``decisions.md``):
      output. The control in the same test shows the un-permuted follower does
      NOT restore it, so the comparison is not passing for a trivial reason.
 
-   What these guards do NOT cover, stated plainly: the *structural* "and is
-   followed by" half of the adjacency lives across a component boundary --
-   ``RestormerDownsample``'s consumer is wired in ``doc_res/model.py``, which
-   step 6 writes. :func:`assert_pixel_reshuffle_sites_are_bracketed` is
-   exported for that suite to re-run over the assembled model.
+   The *structural* "and is followed by" half of the adjacency lives across a
+   component boundary -- ``RestormerDownsample``'s consumer is wired in
+   ``doc_res/model.py`` -- so it is UNANSWERABLE here, and
+   :func:`test_a_resampler_alone_cannot_answer_the_successor_half` asserts
+   exactly that rather than leaving it as prose. Both
+   :func:`assert_pixel_reshuffle_sites_are_bracketed` and
+   :func:`assert_pixel_reshuffle_sites_have_a_per_channel_successor` are
+   exported for ``test_model.py`` to re-run over the ASSEMBLED model's
+   recorded forward order, which is where the successor half was closed
+   (iter-1/step-8).
 3. Both residual adds are live. Zeroing the two output projections must make
    the whole block the IDENTITY at ``rtol=0``; if either ``+`` were dropped
    the output would be zero instead.
@@ -223,6 +228,48 @@ def assert_pixel_reshuffle_sites_are_bracketed(layer) -> int:
     return sites
 
 
+def assert_pixel_reshuffle_sites_have_a_per_channel_successor(layer) -> int:
+    """The OTHER half of the bracketing claim: what runs *after* each site.
+
+    Split from :func:`assert_pixel_reshuffle_sites_are_bracketed` rather than
+    folded into it, because within a single component the two halves are not
+    both answerable: both resamplers end at their pixel op
+    (``op_sequence == [conv, shuffle]``), so the successor lives in
+    ``doc_res/model.py``. Applying this function to a resampler alone would
+    always fail; applying it to the ASSEMBLED model's recorded forward order
+    (``tests/test_models/test_doc_res/test_model.py``) is what closes the half
+    that step 5 could only argue functionally.
+
+    Both halves share :func:`_is_per_channel_parameterised`, deliberately -- a
+    second copy of that predicate is a second chance to weaken one of them.
+
+    :param layer: Anything exposing ``op_sequence``.
+    :return: Number of pixel-reshuffle sites found (0 means no subject; the
+        caller must check that).
+    :rtype: int
+    :raises AssertionError: If a site is LAST in the sequence or its successor
+        is per-channel blind.
+    """
+    ops_ = list(layer.op_sequence)
+    sites = 0
+    for index, op in enumerate(ops_):
+        if not _is_pixel_reshuffle(op):
+            continue
+        sites += 1
+        assert index < len(ops_) - 1, (
+            f"{type(layer).__name__}: {type(op).__name__} is the LAST op in "
+            "op_sequence, so nothing follows it to absorb the D-007 channel "
+            "permutation"
+        )
+        following = ops_[index + 1]
+        assert _is_per_channel_parameterised(following), (
+            f"{type(layer).__name__}: {type(op).__name__} is followed by "
+            f"{type(following).__name__}, which owns no per-channel learnable "
+            "parameter; the D-007 absorption argument does not hold here"
+        )
+    return sites
+
+
 class _DecoyResampler(keras.layers.Layer):
     """A component with the ops in the WRONG order: the negative control.
 
@@ -278,6 +325,35 @@ def test_the_bracketing_checker_rejects_both_ways_of_breaking_the_claim():
         assert_pixel_reshuffle_sites_are_bracketed(_DecoyResampler())
     with pytest.raises(AssertionError, match="no per-channel learnable"):
         assert_pixel_reshuffle_sites_are_bracketed(_BlindBracketResampler())
+
+
+def test_the_successor_checker_rejects_both_ways_of_breaking_the_claim():
+    """The same two decoys, judged by the successor half.
+
+    They swap roles, which is the point of running both: ``_DecoyResampler``
+    (``[shuffle, relu]``) has a successor but a per-channel BLIND one, and
+    ``_BlindBracketResampler`` (``[relu, shuffle]``) has no successor at all.
+    A checker that only asserted ``index < len - 1`` would pass the first, and
+    one that only inspected the successor would crash on the second.
+    """
+    with pytest.raises(AssertionError, match="no per-channel learnable"):
+        assert_pixel_reshuffle_sites_have_a_per_channel_successor(_DecoyResampler())
+    with pytest.raises(AssertionError, match="LAST op"):
+        assert_pixel_reshuffle_sites_have_a_per_channel_successor(
+            _BlindBracketResampler())
+
+
+def test_a_resampler_alone_cannot_answer_the_successor_half():
+    """Why the assembled-model re-run in ``test_model.py`` exists at all.
+
+    Both real resamplers END at their pixel op, so this assertion FAILS on
+    each of them in isolation. Recording that as a passing test rather than a
+    prose note keeps the claim honest: the successor half is not "also true
+    here", it is unanswerable here.
+    """
+    for layer in (RestormerDownsample(n_feat=48), RestormerUpsample(n_feat=96)):
+        with pytest.raises(AssertionError, match="LAST op"):
+            assert_pixel_reshuffle_sites_have_a_per_channel_successor(layer)
 
 
 def _torch_pixel_unshuffle_nhwc(x: np.ndarray, r: int) -> np.ndarray:
