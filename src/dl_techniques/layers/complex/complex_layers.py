@@ -240,8 +240,15 @@ class ComplexConv2D(ComplexLayer):
 
         # Store configuration
         self.filters = filters
-        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
-        self.strides = strides if isinstance(strides, tuple) else (strides, strides)
+        # DECISION plan-2026-09-08T070501-528ded1a/D-005: coerce ANY sequence,
+        # not just a tuple. Do NOT write `x if isinstance(x, tuple) else (x, x)`
+        # here: get_config emits a tuple, the .keras archive stores it as a JSON
+        # LIST, and __init__ gets that list back -- so the tuple-only test is
+        # False on reload and re-wraps [3, 3] into ([3, 3], [3, 3]), which made
+        # this layer impossible to load from disk at all (ValueError: Invalid
+        # dtype: TrackedList). See decisions.md D-005.
+        self.kernel_size = tuple(kernel_size) if isinstance(kernel_size, (list, tuple)) else (kernel_size, kernel_size)
+        self.strides = tuple(strides) if isinstance(strides, (list, tuple)) else (strides, strides)
         self.padding = padding.upper()
 
         if self.padding not in ['SAME', 'VALID']:
@@ -645,9 +652,14 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Store and validate configuration
-        self.pool_size = pool_size if isinstance(pool_size, tuple) else (pool_size, pool_size)
+        # DECISION plan-2026-09-08T070501-528ded1a/D-005: same round-trip closure
+        # as ComplexConv2D -- a JSON config hands these back as LISTS, so a
+        # tuple-only isinstance test re-wraps [2, 2] into ([2, 2], [2, 2]) and
+        # the forward pass then raises "Expected int for argument 'ksize'".
+        # See decisions.md D-005.
+        self.pool_size = tuple(pool_size) if isinstance(pool_size, (list, tuple)) else (pool_size, pool_size)
         self.strides = strides if strides is not None else self.pool_size
-        self.strides = self.strides if isinstance(self.strides, tuple) else (self.strides, self.strides)
+        self.strides = tuple(self.strides) if isinstance(self.strides, (list, tuple)) else (self.strides, self.strides)
         self.padding = padding.upper()
 
         if self.padding not in ['SAME', 'VALID']:

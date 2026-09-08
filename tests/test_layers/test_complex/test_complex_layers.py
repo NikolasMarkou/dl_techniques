@@ -1204,5 +1204,142 @@ def test_complex_global_average_pooling_round_trips_through_a_saved_model(tmp_pa
     assert reloaded[0].keepdims is keepdims
 
 
+# ---------------------------------------------------------------------
+# Sequence-typed config keys must be round-trip-closed (plan Step 6.1)
+# ---------------------------------------------------------------------
+#
+# `get_config()` emits a tuple; the `.keras` archive stores it as a JSON LIST;
+# `__init__` receives that list back. A normalization written as
+# `x if isinstance(x, tuple) else (x, x)` is therefore NOT closed under a round
+# trip -- it re-wraps `[3, 3]` into `([3, 3], [3, 3])`. These guards assert the
+# reloaded layer's sequence attributes are tuples of ints, not merely that the
+# model loads.
+
+@pytest.mark.parametrize(
+    "kernel_size,strides,expected_kernel,expected_strides",
+    [
+        (3, None, (3, 3), (1, 1)),          # int form
+        ((3, 3), None, (3, 3), (1, 1)),     # tuple form
+        (3, (2, 2), (3, 3), (2, 2)),        # explicit strides
+    ],
+    ids=["kernel_int", "kernel_tuple", "explicit_strides"],
+)
+def test_complex_conv2d_round_trips_its_sequence_config_keys(
+    tmp_path, kernel_size, strides, expected_kernel, expected_strides
+):
+    """A saved ``ComplexConv2D`` must reload with tuple-of-int shape config."""
+    kwargs = {"filters": 4, "kernel_size": kernel_size, "padding": "SAME"}
+    if strides is not None:
+        kwargs["strides"] = strides
+
+    model = keras.Sequential([
+        keras.layers.InputLayer(shape=(8, 8, 2), dtype="complex64"),
+        ComplexConv2D(**kwargs),
+    ])
+    x = tf.complex(tf.random.normal((2, 8, 8, 2)), tf.random.normal((2, 8, 8, 2)))
+    before = model(x, training=False).numpy()
+
+    path = tmp_path / f"complex_conv_roundtrip_{kernel_size}_{strides}.keras"
+    model.save(path)
+    loaded = keras.models.load_model(path)
+
+    after = loaded(x, training=False).numpy()
+    np.testing.assert_allclose(before.real, after.real, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(before.imag, after.imag, rtol=0, atol=1e-6)
+
+    reloaded = [
+        layer for layer in loaded.layers if isinstance(layer, ComplexConv2D)
+    ]
+    assert len(reloaded) == 1
+    layer = reloaded[0]
+    assert layer.kernel_size == expected_kernel, (
+        f"after a .keras round trip kernel_size is {layer.kernel_size!r} "
+        f"(type {type(layer.kernel_size).__name__}), expected {expected_kernel!r}"
+    )
+    assert layer.strides == expected_strides, (
+        f"after a .keras round trip strides is {layer.strides!r} "
+        f"(type {type(layer.strides).__name__}), expected {expected_strides!r}"
+    )
+    assert all(isinstance(v, int) for v in layer.kernel_size)
+    assert all(isinstance(v, int) for v in layer.strides)
+
+
+@pytest.mark.parametrize(
+    "pool_size,strides,expected_pool,expected_strides",
+    [
+        (2, None, (2, 2), (2, 2)),          # int form, strides default to pool_size
+        ((2, 2), None, (2, 2), (2, 2)),     # tuple form
+        (2, (1, 1), (2, 2), (1, 1)),        # explicit strides
+    ],
+    ids=["pool_int", "pool_tuple", "explicit_strides"],
+)
+def test_complex_average_pooling_round_trips_its_sequence_config_keys(
+    tmp_path, pool_size, strides, expected_pool, expected_strides
+):
+    """The same closure property for ``ComplexAveragePooling2D``."""
+    kwargs = {"pool_size": pool_size, "padding": "SAME"}
+    if strides is not None:
+        kwargs["strides"] = strides
+
+    model = keras.Sequential([
+        keras.layers.InputLayer(shape=(4, 4, 2), dtype="complex64"),
+        ComplexAveragePooling2D(**kwargs),
+    ])
+    x = tf.complex(tf.random.normal((2, 4, 4, 2)), tf.random.normal((2, 4, 4, 2)))
+    before = model(x, training=False).numpy()
+
+    path = tmp_path / f"complex_avgpool_seqcfg_{pool_size}_{strides}.keras"
+    model.save(path)
+    loaded = keras.models.load_model(path)
+
+    after = loaded(x, training=False).numpy()
+    np.testing.assert_allclose(before.real, after.real, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(before.imag, after.imag, rtol=0, atol=1e-6)
+
+    reloaded = [
+        layer for layer in loaded.layers
+        if isinstance(layer, ComplexAveragePooling2D)
+    ]
+    assert len(reloaded) == 1
+    layer = reloaded[0]
+    assert layer.pool_size == expected_pool, (
+        f"after a .keras round trip pool_size is {layer.pool_size!r} "
+        f"(type {type(layer.pool_size).__name__}), expected {expected_pool!r}"
+    )
+    assert layer.strides == expected_strides, (
+        f"after a .keras round trip strides is {layer.strides!r} "
+        f"(type {type(layer.strides).__name__}), expected {expected_strides!r}"
+    )
+    assert all(isinstance(v, int) for v in layer.pool_size)
+    assert all(isinstance(v, int) for v in layer.strides)
+
+
+@pytest.mark.parametrize(
+    "cls,kwargs,attrs",
+    [
+        (ComplexConv2D, {"filters": 4, "kernel_size": [3, 3], "strides": [2, 2]},
+         {"kernel_size": (3, 3), "strides": (2, 2)}),
+        (ComplexAveragePooling2D, {"pool_size": [2, 2], "strides": [2, 2]},
+         {"pool_size": (2, 2), "strides": (2, 2)}),
+    ],
+    ids=["conv2d", "average_pooling2d"],
+)
+def test_sequence_config_normalization_is_closed_over_lists(cls, kwargs, attrs):
+    """``from_config`` receives LISTS from JSON; normalization must accept them.
+
+    This is the unit-level statement of the same defect the two save/load
+    guards above exercise end to end: it needs no filesystem and pins the
+    normalization itself rather than its downstream symptom.
+    """
+    layer = cls(**kwargs)
+    for name, expected in attrs.items():
+        actual = getattr(layer, name)
+        assert actual == expected, (
+            f"{cls.__name__}.{name} normalized the list {kwargs[name]!r} to "
+            f"{actual!r}; a list from a JSON config must coerce to {expected!r}"
+        )
+        assert isinstance(actual, tuple)
+
+
 if __name__ == '__main__':
     pytest.main([__file__])
