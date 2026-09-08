@@ -49,9 +49,14 @@ class ComplexLayer(keras.layers.Layer):
         ``1e-7``.
     :param kernel_regularizer: Regularizer applied to both real and imaginary
         parts of complex weights. Defaults to ``None``.
-    :param kernel_initializer: Initializer affecting the base scaling before
-        the complex-specific initialization is applied. Defaults to
-        ``GlorotUniform``.
+    :param kernel_initializer: Accepted and serialized for config compatibility
+        but read by no computation in this module. Measured: a spy
+        ``Initializer`` records 0 ``__call__`` invocations during ``build()``
+        for both ``ComplexDense`` and ``ComplexConv2D``, and the kernel is not
+        the spy's value -- ``_init_complex_weights`` draws its own Rayleigh
+        magnitude and uniform phase. Kept because existing ``.keras`` files
+        pass it through ``from_config``; removing it would raise a
+        ``TypeError`` loading those checkpoints. Defaults to ``GlorotUniform``.
     """
 
     def __init__(
@@ -70,6 +75,11 @@ class ComplexLayer(keras.layers.Layer):
         # division in this module reads it. Removing it breaks from_config on every saved .keras checkpoint. See decisions.md.
         self.epsilon = epsilon
         self.kernel_regularizer = kernel_regularizer
+        # DECISION plan-2026-09-08T070501-528ded1a/D-002: kernel_initializer is inert -- a spy
+        # Initializer records 0 __call__ invocations during build() on both weight-owning subclasses.
+        # Do NOT "wire it up": an Initializer returns a REAL tensor and raises ValueError on
+        # dtype="complex64", and the closest candidate is off by exactly sqrt(3) at the default
+        # (0.14509525 vs 0.25131234), so any wire-up moves every CoShNet kernel's scale. See decisions.md.
         self.kernel_initializer = kernel_initializer or keras.initializers.GlorotUniform()
 
     def _init_complex_weights(
@@ -360,7 +370,6 @@ class ComplexDense(ComplexLayer):
 
         dense = ComplexDense(
             units=64, kernel_regularizer=keras.regularizers.L2(0.01),
-            kernel_initializer=keras.initializers.HeNormal(),
         )
         inputs = keras.Input(shape=(784,), dtype=tf.complex64)
         x = ComplexDense(256)(inputs)

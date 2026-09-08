@@ -6,13 +6,15 @@ This module provides comprehensive tests for complex-valued neural network layer
 including initialization tests, shape verification, and numerical correctness checks.
 """
 
+import ast
 import keras
 import pytest
+import inspect
 import tempfile
 import numpy as np
 import tensorflow as tf
 from dataclasses import dataclass
-from typing import Tuple, List, Optional
+from typing import Any, Tuple, List, Optional
 
 from dl_techniques.layers.complex.complex_layers import (
     ComplexLayer,
@@ -388,6 +390,131 @@ def create_complex_model(config: ComplexModelConfig) -> keras.Model:
 
     return model
 
+
+
+# ---------------------------------------------------------------------
+# The `kernel_initializer` dead knob — pinned, per
+# plans/plan-2026-09-08T070501-528ded1a/decisions.md D-002
+# ---------------------------------------------------------------------
+
+# The module physically holding `ComplexLayer`. The AST guard below parses THIS
+# object's source, so when `ComplexLayer` is relocated, repointing this single
+# import is the whole change.
+from dl_techniques.layers.complex import complex_layers as _complex_layer_module
+
+_COMPLEX_LAYER_MODULE_NAME = "complex_layers.py"
+
+
+def test_kernel_initializer_is_read_by_exactly_two_ast_nodes_and_neither_computes():
+    """The mechanism, asserted rather than described.
+
+    `self.kernel_initializer` appears at exactly two places in the AST of the
+    module holding `ComplexLayer`: the assignment in `__init__` and the entry in
+    `get_config`. A third site means the knob has acquired a consumer and D-002's
+    pin-as-documented-dead ruling must be revisited.
+
+    The predicate is AST, deliberately: the DECISION comment placed at the site
+    names the attribute, so a `source.count("self.kernel_initializer")` cannot
+    tell a consumer from a comment about the absence of consumers. This mirrors
+    the `epsilon` guard in
+    `tests/test_models/test_the_two_documented_dead_knobs.py`.
+    """
+    tree = ast.parse(inspect.getsource(_complex_layer_module))
+    nodes = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "kernel_initializer"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ]
+    assert len(nodes) == 2, (
+        f"`self.kernel_initializer` now appears at {len(nodes)} AST sites in "
+        f"{_COMPLEX_LAYER_MODULE_NAME} (expected exactly 2: the __init__ "
+        "assignment and the get_config entry). A new site means the knob is no "
+        "longer inert and D-002 must be re-decided, not patched."
+    )
+    # One is a Store (the assignment), one is a Load (the get_config read).
+    contexts = sorted(type(node.ctx).__name__ for node in nodes)
+    assert contexts == ["Load", "Store"], (
+        f"expected one Store and one Load, got {contexts} — a second Load is a "
+        "computation reading the knob"
+    )
+
+
+def test_epsilon_is_still_exactly_two_ast_nodes_in_the_same_module():
+    """Invariant 2 re-checked here, where `kernel_initializer` is edited.
+
+    The two knobs share one assignment block; an edit to one is exactly the kind
+    of change that could add a site to the other.
+    """
+    tree = ast.parse(inspect.getsource(_complex_layer_module))
+    nodes = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "epsilon"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ]
+    assert len(nodes) == 2, (
+        f"`self.epsilon` now appears at {len(nodes)} AST sites in "
+        f"{_COMPLEX_LAYER_MODULE_NAME} (expected exactly 2)."
+    )
+
+
+class _SpyInitializer(keras.initializers.Initializer):
+    """An initializer that records its own invocations and returns a sentinel.
+
+    RNG-independent by construction. A same-process `max|delta kernel|` probe
+    across two initializers CANNOT serve as this oracle: constructing an
+    `Initializer` object itself consumes global RNG state, so the glorot-vs-glorot
+    control reads ~1.66 too and the assertion would be RED at HEAD for a reason
+    unrelated to the knob (MEASURED, decisions.md D-002 § carried correction).
+    """
+
+    SENTINEL = 7.0
+
+    def __init__(self) -> None:
+        self.calls: List[Tuple[Any, ...]] = []
+
+    def __call__(self, shape, dtype=None):
+        self.calls.append(tuple(shape))
+        return keras.ops.full(shape, self.SENTINEL, dtype=dtype or "float32")
+
+
+@pytest.mark.parametrize(
+    "factory,build_shape",
+    [
+        (lambda init: ComplexDense(units=4, kernel_initializer=init), (2, 8)),
+        (lambda init: ComplexConv2D(filters=4, kernel_size=3,
+                                    kernel_initializer=init), (2, 8, 8, 3)),
+    ],
+    ids=["ComplexDense", "ComplexConv2D"],
+)
+def test_kernel_initializer_is_never_invoked_during_build(factory, build_shape):
+    """The spy oracle: the knob's own `__call__` never runs, and its value never lands.
+
+    `_init_complex_weights` hardcodes a Rayleigh-magnitude / uniform-phase draw,
+    so the passed initializer is dead. This guard goes RED the instant anyone
+    makes `_init_complex_weights` call `self.kernel_initializer`.
+    """
+    spy = _SpyInitializer()
+    layer = factory(spy)
+    layer.build(build_shape)
+
+    assert spy.calls == [], (
+        f"the kernel_initializer was invoked {len(spy.calls)} time(s) during "
+        f"build() with shapes {spy.calls} — the knob is no longer dead, so the "
+        "D-002 pin-as-documented-dead ruling is stale and must be re-decided"
+    )
+    # Subordinate belt, not an independent oracle: any wire-up that lands the
+    # spy's value in the kernel must first CALL the spy, so this assertion
+    # cannot be shown RED while the invocation-count assertion above is green.
+    # It is kept because it states the consequence the count is a proxy for.
+    kernel = keras.ops.convert_to_numpy(layer.kernel)
+    assert not np.allclose(np.real(kernel), _SpyInitializer.SENTINEL), (
+        "the kernel carries the spy's sentinel value — the initializer's output "
+        "reached the weights"
+    )
 
 
 if __name__ == '__main__':
