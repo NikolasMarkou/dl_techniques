@@ -35,8 +35,8 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.layers.complex import complex_layers
-from dl_techniques.layers.complex.complex_layers import ComplexLayer
+from dl_techniques.layers.complex import base as complex_layer_module
+from dl_techniques.layers.complex.base import ComplexLayer
 from dl_techniques.models.vision.coshnet.model import CoShNet
 from dl_techniques.models.general_purpose.kan import KAN
 from dl_techniques.models.general_purpose.kan.model import create_kan_model
@@ -59,7 +59,7 @@ def test_epsilon_is_read_by_exactly_two_ast_nodes_and_neither_computes():
     comment placed at the site names the attribute twice. A text count cannot
     tell a consumer from a comment about the absence of consumers.
     """
-    tree = ast.parse(inspect.getsource(complex_layers))
+    tree = ast.parse(inspect.getsource(complex_layer_module))
     nodes = [
         node for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
@@ -69,8 +69,9 @@ def test_epsilon_is_read_by_exactly_two_ast_nodes_and_neither_computes():
     ]
     assert len(nodes) == 2, (
         f"`self.epsilon` now appears at {len(nodes)} AST sites in "
-        "complex_layers.py (expected exactly 2: the __init__ assignment and "
-        "the get_config entry). A new site means the knob is no longer inert."
+        "layers/complex/base.py (expected exactly 2: the __init__ assignment "
+        "and the get_config entry). A new site means the knob is no longer "
+        "inert."
     )
     # One is a Store (the assignment), one is a Load (the get_config read).
     contexts = sorted(type(node.ctx).__name__ for node in nodes)

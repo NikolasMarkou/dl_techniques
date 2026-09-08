@@ -403,9 +403,9 @@ def create_complex_model(config: ComplexModelConfig) -> keras.Model:
 # The module physically holding `ComplexLayer`. The AST guard below parses THIS
 # object's source, so when `ComplexLayer` is relocated, repointing this single
 # import is the whole change.
-from dl_techniques.layers.complex import complex_layers as _complex_layer_module
+from dl_techniques.layers.complex import base as _complex_layer_module
 
-_COMPLEX_LAYER_MODULE_NAME = "complex_layers.py"
+_COMPLEX_LAYER_MODULE_NAME = "base.py"
 
 
 def test_kernel_initializer_is_read_by_exactly_two_ast_nodes_and_neither_computes():
