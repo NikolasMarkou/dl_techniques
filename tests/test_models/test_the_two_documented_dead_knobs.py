@@ -28,15 +28,21 @@ that a later sweep cannot quietly change the ruling in either direction.
 See ``decisions.md`` D-052, D-053.
 """
 
-import ast
-import inspect
-
 import numpy as np
 import pytest
 import keras
 
 from dl_techniques.layers.complex import base as complex_layer_module
 from dl_techniques.layers.complex.base import ComplexLayer
+from tests.complex_dead_knob_ast import (
+    BASE_MODULE_NAME,
+    EXPECTED_BASE_SITES,
+    assert_scan_reaches_the_leaves,
+    describe_site_counts,
+    expected_dead_knob_sites,
+    self_attribute_site_counts,
+    self_attribute_sites,
+)
 from dl_techniques.models.vision.coshnet.model import CoShNet
 from dl_techniques.models.general_purpose.kan import KAN
 from dl_techniques.models.general_purpose.kan.model import create_kan_model
@@ -49,36 +55,54 @@ from dl_techniques.models.general_purpose.kan.model import create_kan_model
 def test_epsilon_is_read_by_exactly_two_ast_nodes_and_neither_computes():
     """The mechanism, asserted rather than described.
 
-    `self.epsilon` appears at exactly two places in the module's AST: the
-    assignment in `__init__` and the entry in `get_config`. If a third ever
-    appears, the knob has acquired a consumer and this ruling must be revisited
-    — which is the point of pinning the count.
+    `self.epsilon` appears at exactly two places in `base.py`'s AST — the
+    assignment in `__init__` and the entry in `get_config` — and at ZERO places
+    in each of the six leaf modules that inherit it. If a site ever appears
+    anywhere else, the knob has acquired a consumer and this ruling must be
+    revisited — which is the point of pinning the counts.
 
     The predicate is AST, deliberately, and the first draft of this test was a
     `source.count("self.epsilon")` that read **4** — because the DECISION
     comment placed at the site names the attribute twice. A text count cannot
     tell a consumer from a comment about the absence of consumers.
+
+    The SCOPE is the whole `layers/complex/` package, not `base.py` alone. Before
+    the one-class-per-module split all seven classes shared one file, so a
+    single-module parse saw everything; afterwards it saw only the base and went
+    blind — MEASURED at `d148888a7`, a live read added to a leaf's `call()` left
+    this suite at 10 passed. The module set is enumerated from the package's own
+    `__path__`, so an eighth module is covered the day it lands.
     """
-    tree = ast.parse(inspect.getsource(complex_layer_module))
-    nodes = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and node.attr == "epsilon"
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
-    ]
-    assert len(nodes) == 2, (
-        f"`self.epsilon` now appears at {len(nodes)} AST sites in "
-        "layers/complex/base.py (expected exactly 2: the __init__ assignment "
-        "and the get_config entry). A new site means the knob is no longer "
+    counts = self_attribute_site_counts("epsilon")
+    expected = expected_dead_knob_sites()
+    assert counts == expected, (
+        f"`self.epsilon` site counts across layers/complex/ are "
+        f"[{describe_site_counts(counts)}], expected "
+        f"[{describe_site_counts(expected)}]: {EXPECTED_BASE_SITES} in "
+        f"{BASE_MODULE_NAME}.py (the __init__ assignment and the get_config "
+        "entry) and 0 in every leaf. A new site means the knob is no longer "
         "inert."
     )
-    # One is a Store (the assignment), one is a Load (the get_config read).
-    contexts = sorted(type(node.ctx).__name__ for node in nodes)
+    # In base.py one is a Store (the assignment), one is a Load (the get_config
+    # read). A second Load there is a computation reading the knob.
+    contexts = sorted(
+        type(node.ctx).__name__
+        for node in self_attribute_sites(complex_layer_module, "epsilon")
+    )
     assert contexts == ["Load", "Store"], (
         f"expected one Store and one Load, got {contexts} — a second Load is a "
         "computation reading the knob"
     )
+
+
+def test_the_ast_scan_reaches_the_leaf_modules_and_can_see_a_live_attribute():
+    """LIVENESS for the guard above — without it, "0 in every leaf" is unfalsifiable.
+
+    Shared with `tests/test_layers/test_complex/test_complex_layers.py`; the
+    assertion lives in `tests/complex_dead_knob_ast.py` so the two callers cannot
+    drift apart.
+    """
+    assert_scan_reaches_the_leaves()
 
 
 def test_epsilon_is_still_validated_and_serialized():

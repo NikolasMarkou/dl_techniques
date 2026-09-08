@@ -6,10 +6,8 @@ This module provides comprehensive tests for complex-valued neural network layer
 including initialization tests, shape verification, and numerical correctness checks.
 """
 
-import ast
 import keras
 import pytest
-import inspect
 import tempfile
 import numpy as np
 import tensorflow as tf
@@ -402,10 +400,23 @@ def create_complex_model(config: ComplexModelConfig) -> keras.Model:
 # plans/plan-2026-09-08T070501-528ded1a/decisions.md D-002
 # ---------------------------------------------------------------------
 
-# The module physically holding `ComplexLayer`. The AST guard below parses THIS
-# object's source, so when `ComplexLayer` is relocated, repointing this single
-# import is the whole change.
+# The AST guards below parse EVERY module of `layers/complex/`, not just the one
+# holding `ComplexLayer`. Both knobs are inherited by all six leaf classes, so a
+# guard scoped to `base.py` alone is blind to a read added in a leaf -- MEASURED
+# at `d148888a7`: `self.kernel_initializer((2, 2))` inside `ComplexDense.call`
+# left this suite at 159 passed and the dead-knob suite at 10 passed. The module
+# set is enumerated from the package's own `__path__`, never hardcoded, so an
+# eighth module is covered the day it lands.
 from dl_techniques.layers.complex import base as _complex_layer_module
+from tests.complex_dead_knob_ast import (
+    BASE_MODULE_NAME,
+    EXPECTED_BASE_SITES,
+    assert_scan_reaches_the_leaves,
+    describe_site_counts,
+    expected_dead_knob_sites,
+    self_attribute_site_counts,
+    self_attribute_sites,
+)
 
 _COMPLEX_LAYER_MODULE_NAME = "base.py"
 
@@ -414,9 +425,10 @@ def test_kernel_initializer_is_read_by_exactly_two_ast_nodes_and_neither_compute
     """The mechanism, asserted rather than described.
 
     `self.kernel_initializer` appears at exactly two places in the AST of the
-    module holding `ComplexLayer`: the assignment in `__init__` and the entry in
-    `get_config`. A third site means the knob has acquired a consumer and D-002's
-    pin-as-documented-dead ruling must be revisited.
+    module holding `ComplexLayer` — the assignment in `__init__` and the entry in
+    `get_config` — and at ZERO places in each of the six leaf modules that
+    inherit it. A site anywhere else means the knob has acquired a consumer and
+    D-002's pin-as-documented-dead ruling must be revisited.
 
     The predicate is AST, deliberately: the DECISION comment placed at the site
     names the attribute, so a `source.count("self.kernel_initializer")` cannot
@@ -424,46 +436,52 @@ def test_kernel_initializer_is_read_by_exactly_two_ast_nodes_and_neither_compute
     the `epsilon` guard in
     `tests/test_models/test_the_two_documented_dead_knobs.py`.
     """
-    tree = ast.parse(inspect.getsource(_complex_layer_module))
-    nodes = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and node.attr == "kernel_initializer"
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
-    ]
-    assert len(nodes) == 2, (
-        f"`self.kernel_initializer` now appears at {len(nodes)} AST sites in "
-        f"{_COMPLEX_LAYER_MODULE_NAME} (expected exactly 2: the __init__ "
-        "assignment and the get_config entry). A new site means the knob is no "
-        "longer inert and D-002 must be re-decided, not patched."
+    counts = self_attribute_site_counts("kernel_initializer")
+    expected = expected_dead_knob_sites()
+    assert counts == expected, (
+        f"`self.kernel_initializer` site counts across layers/complex/ are "
+        f"[{describe_site_counts(counts)}], expected "
+        f"[{describe_site_counts(expected)}] — {EXPECTED_BASE_SITES} in "
+        f"{BASE_MODULE_NAME}.py (the __init__ assignment and the get_config "
+        "entry) and 0 in every leaf. A new site means the knob is no longer "
+        "inert and D-002 must be re-decided, not patched."
     )
-    # One is a Store (the assignment), one is a Load (the get_config read).
-    contexts = sorted(type(node.ctx).__name__ for node in nodes)
+    # In base.py one is a Store (the assignment), one is a Load (the get_config
+    # read). A second Load there is a computation reading the knob.
+    contexts = sorted(
+        type(node.ctx).__name__
+        for node in self_attribute_sites(_complex_layer_module, "kernel_initializer")
+    )
     assert contexts == ["Load", "Store"], (
-        f"expected one Store and one Load, got {contexts} — a second Load is a "
-        "computation reading the knob"
+        f"expected one Store and one Load in {_COMPLEX_LAYER_MODULE_NAME}, got "
+        f"{contexts} — a second Load is a computation reading the knob"
     )
 
 
-def test_epsilon_is_still_exactly_two_ast_nodes_in_the_same_module():
+def test_epsilon_is_still_exactly_two_ast_nodes_across_the_whole_package():
     """Invariant 2 re-checked here, where `kernel_initializer` is edited.
 
     The two knobs share one assignment block; an edit to one is exactly the kind
-    of change that could add a site to the other.
+    of change that could add a site to the other. Scoped to the whole package for
+    the same reason as the guard above.
     """
-    tree = ast.parse(inspect.getsource(_complex_layer_module))
-    nodes = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and node.attr == "epsilon"
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
-    ]
-    assert len(nodes) == 2, (
-        f"`self.epsilon` now appears at {len(nodes)} AST sites in "
-        f"{_COMPLEX_LAYER_MODULE_NAME} (expected exactly 2)."
+    counts = self_attribute_site_counts("epsilon")
+    expected = expected_dead_knob_sites()
+    assert counts == expected, (
+        f"`self.epsilon` site counts across layers/complex/ are "
+        f"[{describe_site_counts(counts)}], expected "
+        f"[{describe_site_counts(expected)}]."
     )
+
+
+def test_the_ast_scan_reaches_the_leaf_modules_and_can_see_a_live_attribute():
+    """LIVENESS for the two guards above — shared with the dead-knob suite.
+
+    The assertion itself lives in `tests/complex_dead_knob_ast.py` because both
+    guards depend on it and a copy in each file would be a hand-maintained
+    lockstep invariant.
+    """
+    assert_scan_reaches_the_leaves()
 
 
 class _SpyInitializer(keras.initializers.Initializer):
@@ -1383,6 +1401,361 @@ def test_registration_key_is_the_modules_own_dotted_path(cls, expected_key):
     """
     assert keras.saving.get_registered_name(cls) == expected_key
 
+
+# ---------------------------------------------------------------------
+# The complex product itself, pinned to hand-computed values (plan Step 6.2)
+# ---------------------------------------------------------------------
+#
+# The four-real-product expansion is the entire reason `ComplexConv2D` and
+# `ComplexDense` exist, and it had NO value oracle: MEASURED at `d148888a7`,
+# inverting the sign in the real branch (`I_r*K_r - I_i*K_i` -> `+`) of EITHER
+# class left this suite at 159 passed. `test_forward_pass` checks shape, dtype
+# and NaN/Inf and nothing else, and shape is blind to the algebra.
+#
+# The oracle is arithmetic written out by hand below, never a re-derivation of
+# the same four-product form in numpy -- a formula-vs-formula test agrees with
+# the sign it is here to catch. `rtol=0` throughout: `assert_allclose`'s default
+# `rtol=1e-7` would otherwise contribute a silent second tolerance.
+
+_PRODUCT_ATOL = 1e-6
+
+
+def _assert_complex_allclose(actual, expected_real, expected_imag, message: str) -> None:
+    """Both components of a complex tensor against hand-computed reals."""
+    actual = np.asarray(keras.ops.convert_to_numpy(actual))
+    np.testing.assert_allclose(
+        actual.real, expected_real, rtol=0, atol=_PRODUCT_ATOL,
+        err_msg=f"{message} — REAL part",
+    )
+    np.testing.assert_allclose(
+        actual.imag, expected_imag, rtol=0, atol=_PRODUCT_ATOL,
+        err_msg=f"{message} — IMAGINARY part",
+    )
+
+
+def _assign_complex(variable, value) -> None:
+    """Overwrite a complex64 weight with an explicit literal."""
+    variable.assign(tf.constant(np.asarray(value, dtype=np.complex64)))
+
+
+@pytest.mark.parametrize(
+    "bias,expected_real,expected_imag",
+    [
+        (0 + 0j, 2.0, 14.0),
+        (1 - 1j, 3.0, 13.0),
+    ],
+    ids=["zero_bias", "nonzero_bias"],
+)
+def test_complex_dense_computes_the_hand_computed_complex_product(
+    bias, expected_real, expected_imag
+):
+    """`z @ w` for a 2-in / 1-out kernel, every number written out.
+
+        z = [1+2i, 2-1i]        w = [3+4i, 2+3i]^T
+
+        (1+2i)(3+4i) = (1*3 - 2*4) + i(1*4 + 2*3) = -5 + 10i
+        (2-1i)(2+3i) = (2*2 - -1*3) + i(2*3 + -1*2) =  7 +  4i
+                                                sum =  2 + 14i
+
+    The real part is the discriminating one: with the subtraction inverted to
+    `I_r*W_r + I_i*W_i` the two terms read `3+8 = 11` and `4-3 = 1`, i.e. `12`
+    rather than `2`. The imaginary part is asserted for the mirror-image flip of
+    the `+` in the imaginary branch (`10` and `4` become `-2` and `-8`).
+    """
+    layer = ComplexDense(units=1)
+    layer.build((1, 2))
+    _assign_complex(layer.kernel, [[3 + 4j], [2 + 3j]])
+    _assign_complex(layer.bias, [bias])
+
+    inputs = tf.constant(np.array([[1 + 2j, 2 - 1j]], dtype=np.complex64))
+    outputs = layer(inputs)
+
+    assert outputs.dtype == tf.complex64
+    assert tuple(outputs.shape) == (1, 1)
+    _assert_complex_allclose(
+        outputs, [[expected_real]], [[expected_imag]],
+        f"ComplexDense with bias {bias} did not compute z @ w",
+    )
+
+
+def test_complex_dense_matches_an_independent_numpy_complex_matmul():
+    """Breadth arm: many entries, oracle = numpy's own complex `@`.
+
+    Numpy implements the product in ITS OWN complex dtype, not as four real
+    matmuls, so this is an independent implementation rather than a restatement
+    of `call`. It exists to catch component transpositions the 2x1 cell above is
+    too small to separate; the hand-computed test is still the primary oracle.
+    """
+    rng = np.random.RandomState(0)
+    kernel = (rng.randn(4, 3) + 1j * rng.randn(4, 3)).astype(np.complex64)
+    bias = (rng.randn(3) + 1j * rng.randn(3)).astype(np.complex64)
+    x = (rng.randn(5, 4) + 1j * rng.randn(5, 4)).astype(np.complex64)
+
+    layer = ComplexDense(units=3)
+    layer.build((5, 4))
+    _assign_complex(layer.kernel, kernel)
+    _assign_complex(layer.bias, bias)
+
+    expected = x @ kernel + bias
+    _assert_complex_allclose(
+        layer(tf.constant(x)), expected.real, expected.imag,
+        "ComplexDense disagrees with numpy's complex matmul",
+    )
+
+
+def test_complex_conv2d_computes_the_hand_computed_complex_product():
+    """A 1x1 kernel over 2 input channels — the same arithmetic as the dense cell.
+
+        z = [1+2i, 2-1i] (two channels of one pixel)
+        k = [3+4i, 2+3i]
+
+        (1+2i)(3+4i) = -5 + 10i
+        (2-1i)(2+3i) =  7 +  4i
+                 sum =  2 + 14i
+
+    With the real branch's subtraction inverted the sum reads `12`, not `2`.
+    The bias is assigned to exactly zero so the expected value is the product
+    alone.
+    """
+    layer = ComplexConv2D(filters=1, kernel_size=1, strides=1, padding="VALID")
+    layer.build((1, 1, 1, 2))
+    _assign_complex(layer.kernel, [[[[3 + 4j], [2 + 3j]]]])   # (1, 1, 2, 1)
+    _assign_complex(layer.bias, [0 + 0j])
+
+    inputs = tf.constant(np.array([[[[1 + 2j, 2 - 1j]]]], dtype=np.complex64))
+    outputs = layer(inputs)
+
+    assert outputs.dtype == tf.complex64
+    assert tuple(outputs.shape) == (1, 1, 1, 1)
+    _assert_complex_allclose(
+        outputs, [[[[2.0]]]], [[[[14.0]]]],
+        "ComplexConv2D did not compute the 1x1 complex product",
+    )
+
+
+def test_complex_conv2d_slides_a_two_tap_kernel_over_hand_computed_values():
+    """A 1x2 kernel over a 1x3 map: the sliding sum, written out per position.
+
+        z = [1+0i, 0+1i, 2+2i]      k = [1+1i, 2-1i]
+
+    `keras.ops.conv` is a CROSS-correlation (no kernel flip), so
+
+        out[0] = z0*k0 + z1*k1 = (1+1i) + (1+2i) = 2+3i
+        out[1] = z1*k0 + z2*k1 = (-1+1i) + (6+2i) = 5+3i
+
+    With the real branch's subtraction inverted, `out[0]`'s real part reads
+    `1 + (-1) = 0` rather than `2`. This cell also pins the kernel ORIENTATION:
+    a flipped kernel would swap `k0` and `k1` and give `out[0] = 0+2i`.
+    """
+    layer = ComplexConv2D(filters=1, kernel_size=(1, 2), strides=1, padding="VALID")
+    layer.build((1, 1, 3, 1))
+    _assign_complex(layer.kernel, [[[[1 + 1j]], [[2 - 1j]]]])   # (1, 2, 1, 1)
+    _assign_complex(layer.bias, [0 + 0j])
+
+    inputs = tf.constant(
+        np.array([[[[1 + 0j], [0 + 1j], [2 + 2j]]]], dtype=np.complex64)
+    )
+    outputs = layer(inputs)
+
+    assert tuple(outputs.shape) == (1, 1, 2, 1)
+    _assert_complex_allclose(
+        outputs, [[[[2.0], [5.0]]]], [[[[3.0], [3.0]]]],
+        "ComplexConv2D's two-tap sliding product is wrong",
+    )
+
+
+def test_complex_conv2d_bias_is_added_to_both_components():
+    """The bias is complex and must reach BOTH components, not just the real one."""
+    layer = ComplexConv2D(filters=1, kernel_size=1, strides=1, padding="VALID")
+    layer.build((1, 1, 1, 1))
+    _assign_complex(layer.kernel, [[[[1 + 0j]]]])
+    _assign_complex(layer.bias, [10 - 20j])
+
+    inputs = tf.constant(np.array([[[[1 + 2j]]]], dtype=np.complex64))
+    _assert_complex_allclose(
+        layer(inputs), [[[[11.0]]]], [[[[-18.0]]]],
+        "ComplexConv2D did not add the complex bias to both components",
+    )
+
+
+# ---------------------------------------------------------------------
+# ASYMMETRIC shape cells — the 72-cell grid above is square-only (Step 6.2)
+# ---------------------------------------------------------------------
+#
+# Every cell of `_SHAPE_GRID` uses input `(1, S, S, 3)` with a SCALAR kernel and
+# a SCALAR stride, so H == W, kernel[0] == kernel[1] and strides[0] == strides[1]
+# in 72/72 cells and a height/width transposition is invisible. MEASURED at
+# `d148888a7`: swapping `strides[0]`/`strides[1]` and `kernel_size[0]`/
+# `kernel_size[1]` between the two branches of `ComplexConv2D.compute_output_shape`
+# left this suite at 159 passed; the same swap in `ComplexAveragePooling2D._compute_dim`
+# also left it at 159 passed. `kernel_size`/`pool_size`/`strides` are documented as
+# `Union[int, Tuple[int, int]]`, so the asymmetric form is a supported API surface
+# that had zero coverage. This is the repo's own "a layout decision needs a layout
+# guard" lesson.
+
+_ASYM_SHAPE_GRID = [
+    (cls_name, padding, kernel, strides, size)
+    for cls_name in ("ComplexConv2D", "ComplexAveragePooling2D")
+    for padding in ("SAME", "VALID")
+    for kernel in ((2, 3), (3, 2))
+    for strides in ((1, 2), (2, 1), (2, 3))
+    for size in ((7, 9), (9, 7))
+]
+
+
+def _make_asym_shape_layer(cls_name: str, padding: str, kernel, strides):
+    """Build one asymmetric grid cell (unbuilt)."""
+    if cls_name == "ComplexConv2D":
+        return ComplexConv2D(
+            filters=4, kernel_size=kernel, strides=strides, padding=padding
+        )
+    return ComplexAveragePooling2D(
+        pool_size=kernel, strides=strides, padding=padding
+    )
+
+
+def _asym_shape_id(cell) -> str:
+    cls_name, padding, kernel, strides, size = cell
+    return (
+        f"{cls_name}-{padding}-k{kernel[0]}x{kernel[1]}"
+        f"-s{strides[0]}x{strides[1]}-in{size[0]}x{size[1]}"
+    )
+
+
+@pytest.mark.parametrize(
+    "cls_name,padding,kernel,strides,size",
+    _ASYM_SHAPE_GRID,
+    ids=[_asym_shape_id(cell) for cell in _ASYM_SHAPE_GRID],
+)
+def test_compute_output_shape_agrees_with_forward_pass_on_asymmetric_cells(
+    cls_name, padding, kernel, strides, size
+):
+    """Non-square input, non-square kernel, non-equal strides — built AND unbuilt.
+
+    Every cell has `kernel[0] != kernel[1]`, `strides[0] != strides[1]` and
+    `H != W`, so a height/width transposition anywhere in either shape method
+    changes the answer. The oracle is the shape of a REAL forward pass, never a
+    re-derived formula.
+    """
+    height, width = size
+    inputs = tf.complex(
+        tf.random.normal((1, height, width, 3)),
+        tf.random.normal((1, height, width, 3)),
+    )
+    input_shape = tuple(inputs.shape)
+
+    unbuilt = _make_asym_shape_layer(cls_name, padding, kernel, strides)
+    unbuilt_shape = tuple(unbuilt.compute_output_shape(input_shape))
+
+    built = _make_asym_shape_layer(cls_name, padding, kernel, strides)
+    forward_shape = tuple(built(inputs).shape)
+    built_shape = tuple(built.compute_output_shape(input_shape))
+
+    assert built_shape == forward_shape, (
+        f"{cls_name} padding={padding} kernel={kernel} strides={strides} "
+        f"input={input_shape}: compute_output_shape returned {built_shape} but "
+        f"the real forward pass produced {forward_shape}"
+    )
+    assert unbuilt_shape == forward_shape, (
+        f"{cls_name} padding={padding} kernel={kernel} strides={strides} "
+        f"input={input_shape}: an UNBUILT layer's compute_output_shape returned "
+        f"{unbuilt_shape} but the real forward pass produced {forward_shape}"
+    )
+
+
+# ---------------------------------------------------------------------
+# `compute_output_shape` for the three remaining classes (Step 6.2)
+# ---------------------------------------------------------------------
+#
+# The grid above covers `ComplexConv2D` and `ComplexAveragePooling2D` only, and
+# `ComplexGlobalAveragePooling2D` has its own pin. The other three were
+# unguarded: MEASURED at `d148888a7`, replacing `ComplexDropout.compute_output_shape`
+# with `lambda self, s: (s[0],)` left this suite at 159 passed, as did the same
+# mutation on `ComplexReLU`, as did `ComplexDense.compute_output_shape` ignoring
+# `units` entirely. Every case below therefore uses `units != input_shape[-1]`,
+# so a method that echoes its argument is separable from a correct one.
+
+_FORWARD_SHAPE_CASES = [
+    ("ComplexDense-2D", lambda: ComplexDense(units=5), (2, 3)),
+    ("ComplexDense-3D", lambda: ComplexDense(units=5), (2, 4, 3)),
+    ("ComplexDense-narrowing", lambda: ComplexDense(units=1), (3, 7)),
+    ("ComplexReLU-2D", lambda: ComplexReLU(), (2, 3)),
+    ("ComplexReLU-4D", lambda: ComplexReLU(), (2, 5, 5, 3)),
+    ("ComplexDropout-2D", lambda: ComplexDropout(rate=0.3), (2, 3)),
+    ("ComplexDropout-4D", lambda: ComplexDropout(rate=0.0), (2, 5, 5, 3)),
+]
+
+
+@pytest.mark.parametrize(
+    "factory,input_shape",
+    [(factory, shape) for _, factory, shape in _FORWARD_SHAPE_CASES],
+    ids=[case_id for case_id, _, _ in _FORWARD_SHAPE_CASES],
+)
+def test_compute_output_shape_agrees_with_the_forward_pass(factory, input_shape):
+    """`compute_output_shape` must equal `tuple(forward_output.shape)`, built AND unbuilt.
+
+    Guide 3.4 requires the answer to come from stored config alone, so the
+    unbuilt instance is a separate object that is never built or called.
+    """
+    inputs = tf.complex(
+        tf.random.normal(input_shape), tf.random.normal(input_shape)
+    )
+
+    unbuilt = factory()
+    unbuilt_shape = tuple(unbuilt.compute_output_shape(input_shape))
+
+    built = factory()
+    forward_shape = tuple(built(inputs, training=False).shape)
+    built_shape = tuple(built.compute_output_shape(input_shape))
+
+    assert built_shape == forward_shape, (
+        f"{type(built).__name__} on input {input_shape}: compute_output_shape "
+        f"returned {built_shape} but the real forward pass produced {forward_shape}"
+    )
+    assert unbuilt_shape == forward_shape, (
+        f"{type(unbuilt).__name__} on input {input_shape}: an UNBUILT layer's "
+        f"compute_output_shape returned {unbuilt_shape} but the real forward pass "
+        f"produced {forward_shape} (guide 3.4: the answer must come from stored "
+        "config alone)"
+    )
+
+
+# ---------------------------------------------------------------------
+# Constructor / build validation on ComplexConv2D (Step 6.2)
+# ---------------------------------------------------------------------
+#
+# Both raises below survived deletion at 159 passed, MEASURED at `d148888a7`.
+#
+# CARRIED, deliberately not fixed here: `ComplexConv2D.compute_output_shape` is
+# alone among the shape methods in doing no rank check, so a rank-2 shape raises
+# `IndexError` from `input_shape[2]` rather than the class's own `ValueError`.
+# Repairing that needs a `src/` edit, which this step is scoped out of.
+
+@pytest.mark.parametrize("filters", [0, -1, -32], ids=["zero", "minus_one", "minus_32"])
+def test_complex_conv2d_rejects_a_non_positive_filter_count(filters):
+    """A `filters <= 0` kernel shape fails late and obscurely inside `add_weight`."""
+    with pytest.raises(ValueError, match="filters must be positive"):
+        ComplexConv2D(filters=filters, kernel_size=3)
+
+
+@pytest.mark.parametrize(
+    "input_shape",
+    [(8,), (4, 8), (2, 8, 3), (2, 8, 8, 8, 3)],
+    ids=["rank1", "rank2", "rank3", "rank5"],
+)
+def test_complex_conv2d_build_rejects_a_non_4d_input_shape(input_shape):
+    """`build` must name the rank error itself, not let `keras.ops.conv` raise later."""
+    layer = ComplexConv2D(filters=4, kernel_size=3)
+    with pytest.raises(ValueError, match="requires 4D input"):
+        layer.build(input_shape)
+
+
+def test_complex_conv2d_accepts_a_4d_input_shape():
+    """ANTI-VACUITY for the guard above: the rank it does accept must still build."""
+    layer = ComplexConv2D(filters=4, kernel_size=3)
+    layer.build((2, 8, 8, 3))
+    assert layer.built is True
+    assert tuple(layer.kernel.shape) == (3, 3, 3, 4)
 
 if __name__ == '__main__':
     pytest.main([__file__])
