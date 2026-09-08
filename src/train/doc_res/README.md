@@ -164,3 +164,62 @@ with `pip install libarchive-c` if the RAR years matter to you.
 Completeness is proven by **decoding every member** of the archive and then atomically
 renaming a `.part` file into place, with the `.ok` marker written last. A `Content-Length`
 check would not do: UCI serves `noisyoffice.zip` with no length and no range support.
+
+## A measured end-to-end run (2026-09-08, plan step 14)
+
+A 100%-passing unit suite is not evidence an entry point works. These are the exact commands
+that were run on an RTX 4070 (12 GB) against the staged binarization corpus, and the numbers
+they actually produced. Everything they wrote is under repo-root
+`results/doc_res_binarization_docres_20260908_224114/`.
+
+```bash
+cd /media/arxwn/data_fast/repositories/dl_techniques
+export CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg
+
+# 400 optimizer steps on 352 staged pages (317 train / 35 val, seed 42)
+.venv/bin/python -m train.doc_res.train_doc_res \
+    --task binarization --patch-size 128 --batch-size 4 \
+    --epochs 4 --steps-per-epoch 100 --validation-steps 10 --seed 42
+
+# a HELD-OUT page (in the seed-42 validation split, never trained on)
+.venv/bin/python -m train.doc_res.infer_doc_res --task binarization \
+    --checkpoint results/doc_res_binarization_docres_20260908_224114/best_model.keras \
+    --input /media/arxwn/data0_4tb/datasets/doc_res/binarization/dibco2009/DIBC02009_Test_images-handwritten/H01.bmp \
+    --output-dir results/doc_res_binarization_docres_20260908_224114/inference_step14
+```
+
+**Loss.** First step `0.4400`; per-epoch means `0.1160 -> 0.0790 -> 0.0618 -> 0.0649`, and
+`val_loss` `0.0967 -> 0.0613 -> 0.0754 -> 0.0650`. It decreases and then plateaus with epoch-scale
+noise — 400 steps is a smoke run, not training. Best checkpoint is epoch 2 (`val_loss 0.0613`).
+Wall time 420 s (the first step costs 127 s of XLA compilation; the steady state is 130 ms/step).
+
+**Batch size on 12 GB.** `--batch-size 8 --patch-size 128` **OOMs**, and the XLA allocator names
+why: `decoder_level1` and `refinement` run at 96 channels (there is deliberately no
+`reduce_chan_level1`), so each GDFN there materialises an `f32[8, 510, 128, 128]` = 255 MiB
+buffer. `--batch-size 4 --patch-size 128` peaks at **9962 MiB** and is the largest configuration
+measured to fit.
+
+**Checkpoint round-trip.** `keras.models.load_model` on the trained `best_model.keras` restores
+`DocRes` with all 15,203,680 parameters and the compiled `WarmupSchedule`; re-saving and
+re-loading it reproduces the outputs **bit-identically** (`rtol=0, atol=0`, explicit
+`training=False`), with all 275 weight arrays equal at `atol=0` before the reloaded model's first
+call. No custom object had to be passed by hand — the `@register_dl_technique` registrations
+cover the whole tree.
+
+**Quality after 400 steps** (ink is black, `BACKGROUND_LEVEL_U8 = 255`; the untrained rows use
+the same commands with `--checkpoint` omitted):
+
+| Page | State | Ink fraction | GT ink | Pixel acc. | F-measure |
+|---|---|---|---|---|---|
+| `dibco2009/H01.bmp` (**held out**) | trained 400 steps | 0.046 | 0.067 | 0.977 | **79.7** |
+| `dibco2009/H01.bmp` (**held out**) | untrained | 0.030 | 0.067 | 0.909 | 6.4 |
+| `dibco2011/HW1.png` (in the train split) | trained 400 steps | 0.158 | 0.127 | 0.958 | **85.2** |
+| `dibco2011/HW1.png` (in the train split) | untrained | 0.916 | 0.127 | 0.085 | 12.3 |
+
+The untrained ink fraction is a **random draw, not a constant**: the same page measured 0.766 on
+an earlier untrained run and 0.916 here, because an uninitialised argmax has no reason to be
+stable. Only the trained rows are comparable to each other.
+
+79.7 F on a held-out DIBCO 2009 page after 400 steps is a working pipeline, not a competitive
+binarizer — published DIBCO systems sit in the low 90s, and the recall (0.67) shows this
+checkpoint still drops thin strokes. Treat it as proof the entry points run end to end.
