@@ -13,8 +13,8 @@ this port.** No consumer may *branch* on a task string -- no ``== "name"``
 comparison and no dict keyed by task names: the staging script, the training
 pipeline and the inference shim all resolve a name through :func:`get_task` and
 read fields off the returned :class:`TaskSpec`. That is the invariant, and it is
-exactly what ``test_pipeline.py::test_no_task_string_is_compared_against_in_
-the_shipped_train_doc_res_modules`` checks, over every module in
+exactly what ``test_pipeline.py::test_no_task_string_is_compared_against_in_any
+_shipped_train_doc_res_module`` checks, over every module in
 ``src/train/doc_res/``.
 
 It is deliberately narrower than "no task name appears outside this table". One
