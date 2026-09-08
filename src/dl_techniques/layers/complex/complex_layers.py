@@ -777,7 +777,20 @@ class ComplexDropout(keras.layers.Layer):
             raise ValueError(f"rate must be in the interval [0, 1), got {rate}")
 
         self.rate = rate
-        self.dropout_layer = keras.layers.Dropout(self.rate)
+        self.dropout_layer = keras.layers.Dropout(self.rate, name="dropout")
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the inner dropout sub-layer.
+
+        The mask is drawn over ``tf.ones_like(tf.math.real(inputs))``, which has
+        the input's own shape, so the sub-layer is built against ``input_shape``
+        unchanged.
+
+        :param input_shape: Shape of the complex-valued input tensor.
+        """
+        self.dropout_layer.build(input_shape)
+        super().build(input_shape)
 
     def call(
         self,

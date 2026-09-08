@@ -22,6 +22,7 @@ from dl_techniques.layers.complex.complex_layers import (
     ComplexDense,
     ComplexReLU,
     ComplexAveragePooling2D,
+    ComplexDropout,
 )
 
 
@@ -735,6 +736,108 @@ def test_from_config_does_not_consume_the_caller_config():
         "from_config mutated the caller's config dict; it must work on a copy"
     )
     assert isinstance(config["kernel_regularizer"], dict)
+
+
+# ---------------------------------------------------------------------
+# ComplexDropout sub-layer compliance (guide 3.2)
+# ---------------------------------------------------------------------
+
+def test_complex_dropout_names_its_sublayer_explicitly_in_every_instance():
+    """Both instances in one process must name their inner Dropout ``"dropout"``.
+
+    Guide 3.2: "Always give sub-layers explicit names, including inside loops.
+    Auto-generated names shift when depth changes, and checkpoints stop matching."
+
+    The TWO-instance shape is the whole guard. Keras auto-names per process, so
+    without ``name="dropout"`` the first instance's inner layer is still called
+    ``dropout`` and a single-instance assertion passes at HEAD -- a guard that
+    cannot fail. The SECOND instance is what goes ``dropout_1`` when the explicit
+    name is removed, and that is the assertion with power.
+    """
+    first = ComplexDropout(0.3)
+    second = ComplexDropout(0.5)
+
+    assert first.dropout_layer.name == "dropout", (
+        f"the first ComplexDropout named its inner Dropout "
+        f"{first.dropout_layer.name!r}, not 'dropout'"
+    )
+    assert second.dropout_layer.name == "dropout", (
+        f"the SECOND ComplexDropout in this process named its inner Dropout "
+        f"{second.dropout_layer.name!r}, not 'dropout' -- the explicit name= was "
+        f"dropped and Keras auto-numbering took over, which is exactly what "
+        f"breaks checkpoint name matching (guide 3.2)"
+    )
+
+
+def test_complex_dropout_builds_its_sublayer_in_build():
+    """An explicit ``build()`` must materialize the sub-layer tree.
+
+    Guide 1.2's table: ``build`` = "CREATE this layer's weights; MATERIALIZE the
+    sub-layer tree", and "ALWAYS in build: build each sub-layer that call() will
+    run -- and only those". At HEAD ``ComplexDropout`` defines no ``build()``, so
+    nothing builds the inner Dropout before the first ``call()``.
+
+    The oracle is a SPY on ``dropout_layer.build``, not ``dropout_layer.built``.
+    MEASURED at keras 3.8: ``keras.layers.Dropout`` defines no ``build`` of its
+    own, so ``Layer.__init__`` marks it ``built=True`` at construction --
+    ``assert layer.dropout_layer.built is True`` passes at HEAD and is exactly the
+    guard-that-cannot-fail this suite refuses to ship. Whether ``build()`` reaches
+    the sub-layer is observable only by watching the call.
+    """
+    layer = ComplexDropout(0.25)
+    calls: List[Any] = []
+    inner_build = layer.dropout_layer.build
+
+    def spy_build(input_shape):
+        calls.append(input_shape)
+        return inner_build(input_shape)
+
+    object.__setattr__(layer.dropout_layer, "build", spy_build)
+
+    layer.build((None, 16))
+
+    assert layer.built is True
+    assert calls == [(None, 16)], (
+        f"ComplexDropout.build() invoked its inner Dropout's build() with {calls} "
+        "-- expected exactly one call carrying the input shape. The sub-layer tree "
+        "is being materialized lazily inside call() instead (guide 1.2/3.2)."
+    )
+
+
+def test_complex_dropout_round_trips_through_a_keras_model(tmp_path):
+    """Adding ``build()`` must not shift a saved model's weight layout or ordering.
+
+    ``build()`` changes WHEN the inner Dropout is materialized, so the falsification
+    signal for plan Step 5 is a reload that fails or a weight list whose names or
+    order moved. The inner Dropout owns no weights, so the pinned list is
+    ``ComplexDense``'s and it must be identical before and after the reload.
+    """
+    model = keras.Sequential([
+        keras.layers.InputLayer(shape=(6,), dtype="complex64"),
+        ComplexDense(units=4),
+        ComplexDropout(0.3),
+    ])
+    x = tf.complex(tf.random.normal((2, 6)), tf.random.normal((2, 6)))
+    before = model(x, training=False).numpy()
+    before_weights = [(w.name, tuple(w.shape)) for w in model.weights]
+
+    path = tmp_path / "complex_dropout_roundtrip.keras"
+    model.save(path)
+    loaded = keras.models.load_model(path)
+
+    after = loaded(x, training=False).numpy()
+    np.testing.assert_allclose(before, after, rtol=1e-6, atol=1e-6)
+
+    assert [(w.name, tuple(w.shape)) for w in loaded.weights] == before_weights, (
+        "the reloaded model's weight layout/order differs from the original -- "
+        "materializing the ComplexDropout sub-layer in build() shifted it"
+    )
+
+    reloaded_dropout = [
+        layer for layer in loaded.layers if isinstance(layer, ComplexDropout)
+    ]
+    assert len(reloaded_dropout) == 1
+    assert reloaded_dropout[0].dropout_layer.name == "dropout"
 
 
 if __name__ == '__main__':
