@@ -28,6 +28,17 @@ Data loading, generation, and preprocessing utilities for various domains.
     (2 global + N local views) `element_map_fn`; local views are rendered at the
     global pixel resolution, so `local_crop_size != global_crop_size` raises
     `NotImplementedError` (positional-embedding interpolation is not implemented)
+- `document_restoration/` — DocRes document-restoration data utilities:
+  - `dtsprompt.py` — the five DTSPrompt generators (`deshadow_prompt`,
+    `appearance_prompt`, `deblur_prompt`, `binarization_prompt`,
+    `dewarp_prompt`) built on ONE shared `estimate_background` primitive.
+    **numpy + scipy only — this module must not import `cv2` or `skimage`**
+    (neither is declared in `pyproject.toml`; both merely happen to be
+    installed). A suite guard enforces it; the tests may and do import them as
+    the OpenCV parity oracle.
+  - `tasks.py` — the single `TASKS` table binding each task name to its prompt
+    generator, supervised output-channel count, loss name and post-processing
+    mode. Nothing else in the tree branches on a DocRes task string.
 - `time_series/` — Time series dataset framework:
   - `base.py` — Base dataset class, `config.py` — dataset configuration
   - `generator.py` — Data generators, `pipeline.py` — preprocessing pipelines
