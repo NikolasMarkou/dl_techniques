@@ -43,15 +43,16 @@ Architecture:
                       │
                       ▼
     ┌───────────────────────────────────────────────┐
-    │ 1. ATTENTION_REGISTRY.get(attention_type)      │
-    │    a miss skips step 2 and falls into step 3   │
+    │ 1. ATTENTION_REGISTRY.get(attention_type)     │
+    │    a miss skips step 2 and falls into step 3  │
     └───────────────────────────────────────────────┘
+                      │
                       ▼
     ┌───────────────────────────────────────────────┐
-    │ 2. strict kwarg check, outside the try         │
+    │ 2. strict kwarg check, outside the try        │
     │    declared = required_params                 │
-    │             | optional_params keys             │
-    │    leftover = set(kwargs) - declared           │
+    │             | optional_params keys            │
+    │    leftover = set(kwargs) - declared          │
     └───────────────────────────────────────────────┘
                 │                    │
         empty   │                    │  non-empty
@@ -60,7 +61,7 @@ Architecture:
                                STRICT_DROPPED_KEY_MARKER
                 │
                 ▼
-    ┌───────────────────────────────────────────────┐
+    ┌────────────────────────────────────────────────┐
     │ 3. try:                                        │
     │      validate_attention_config(type, **kw)     │
     │        unknown type      -> ValueError         │
@@ -73,7 +74,8 @@ Architecture:
     │    except (TypeError, ValueError) as e:        │
     │      -> ValueError, "verify parameter          │
     │         compatibility", chained from e         │
-    └───────────────────────────────────────────────┘
+    └────────────────────────────────────────────────┘
+                      │
                       ▼
                keras.layers.Layer
 
@@ -205,12 +207,6 @@ AttentionType = Literal[
     'window_zigzag',
     'window_band'
 ]
-"""
-Type alias for supported attention mechanisms.
-
-This literal type provides IDE autocompletion and type checking for valid
-attention layer types supported by the factory.
-"""
 
 # ---------------------------------------------------------------------
 # Attention Layer Registry
@@ -657,7 +653,8 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'dropout_rate': 0.0,
             'kernel_initializer': 'he_normal',
             # DECISION plan-2026-08-22T035419-a11304c8/D-160: declared only on
-            # 'multi_head' and 'multi_head_cross' -- their output projection is the residual-path projection. Adding it elsewhere raises. See decisions.md.
+            # 'multi_head' and 'multi_head_cross' -- their output projection is the residual-path projection.
+            # Adding it elsewhere raises. See decisions.md.
             'output_kernel_initializer': None,
             'kernel_regularizer': None,
             'use_bias': False,
@@ -1287,7 +1284,8 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'gate_activation_type': 'sigmoid',
             'gate_activation_args': None,
             # DECISION plan-2026-08-17T183311-79c63e38/D-011: num_kv_heads is
-            # declared here, the sole exception to the frozen public surface. Removing it makes an undeclared num_kv_heads a hard ValueError. See decisions.md.
+            # declared here, the sole exception to the frozen public surface.
+            # Removing it makes an undeclared num_kv_heads a hard ValueError. See decisions.md.
             'num_kv_heads': None
         },
         'use_case': (
@@ -1533,7 +1531,8 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         'num_kv_heads', 'window_size', 'head_dim', 'kv_latent_dim'
     ]
     # DECISION plan-2026-08-11T012340-f63796dc/D-006: compare components, not
-    # the value -- window_size is scalar for 3 types but (Wh, Ww) for 'beit'; a bare <= 0 would TypeError instead of raising a clean ValueError. See decisions.md.
+    # the value -- window_size is scalar for 3 types but (Wh, Ww) for 'beit';
+    # a bare <= 0 would TypeError instead of raising a clean ValueError. See decisions.md.
     for param in positive_int_params:
         if param not in kwargs:
             continue
@@ -1601,6 +1600,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         f"Validation successful for '{attention_type}' with parameters: {kwargs}"
     )
 
+# ---------------------------------------------------------------------
 
 #: Stable substring every strict dropped-key ``ValueError`` carries; guards
 #: match on this constant, not the phrase. The ``(s)`` makes it a regex group,
@@ -1612,6 +1612,7 @@ STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
 #: :func:`assemble_attention_config`'s wrapper pre-filtering.
 _ATTENTION_CONFIG_PASSTHROUGH_KEYS: Sequence[str] = ('name',)
 
+# ---------------------------------------------------------------------
 
 def assemble_attention_config(
         attention_type: str,
@@ -1646,8 +1647,10 @@ def assemble_attention_config(
               └─────────────┬──────────────┘
                             ▼
                     dict.update: the caller wins
+                            │
                             ▼
                    config for create_attention_layer
+                            │
                             ▼
               a caller key the type does not accept
               still reaches the factory, which
@@ -1672,9 +1675,6 @@ def assemble_attention_config(
     (``assemble_ffn_config``) and ``layers/embedding/factory.py`` rather than a
     shared generic helper: each binds its own registry and its own frozen
     public surface, so unifying them is a refactor of three public APIs.
-
-    # DECISION plan-2026-08-17T183311-79c63e38/D-011: this function owns the
-    # merge, not just the filter, because a pre-filter applied after call sites merge their args would eat the caller's typos silently. See decisions.md.
 
     :param attention_type: An ``ATTENTION_REGISTRY`` key.
     :type attention_type: str
@@ -1820,6 +1820,7 @@ def create_attention_layer(
         logger.error(error_msg)
         raise ValueError(error_msg) from e
 
+# ---------------------------------------------------------------------
 
 def create_attention_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """Build an attention layer from a single ``{'type': ..., ...}`` dict.
@@ -1862,6 +1863,7 @@ def create_attention_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     logger.debug(f"Creating attention layer from config: {config}")
     return create_attention_layer(attention_type, **config_copy)
 
+# ---------------------------------------------------------------------
 
 def list_attention_types() -> List[str]:
     """List every registered attention type key.
@@ -1874,6 +1876,7 @@ def list_attention_types() -> List[str]:
     """
     return sorted(list(ATTENTION_REGISTRY.keys()))
 
+# ---------------------------------------------------------------------
 
 def get_attention_requirements(attention_type: str) -> Dict[str, Any]:
     """Return one attention type's registry entry.
@@ -1899,3 +1902,5 @@ def get_attention_requirements(attention_type: str) -> Dict[str, Any]:
         )
 
     return ATTENTION_REGISTRY[attention_type].copy()
+
+# ---------------------------------------------------------------------
