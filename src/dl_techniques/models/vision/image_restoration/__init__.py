@@ -1,16 +1,19 @@
-"""Image restoration — three model packages plus a literature survey.
+"""Image restoration — four model packages plus a literature survey.
 
 This subfamily groups the vision models whose task is recovering a clean image from a
 degraded one: denoising, deblurring, dehazing, low-light enhancement, and the all-in-one
 variants that handle several degradations with one network.
 
 * ``darkir/`` — DarkIR, low-light image restoration.
+* ``doc_res/`` — DocRes, one Restormer backbone serving five document-restoration
+  tasks. Its input is 6 channels (RGB plus a 3-channel classical-CV prompt), not 3;
+  read its ``README.md`` before wiring it to an image pipeline.
 * ``pw_fnet/`` — a 2-level U-Net with FFT token mixing and multi-scale supervision. Its
   name misattributes on two of three words; see ``models/CLAUDE.md`` § Names that
   misattribute before trusting it.
 * ``scunet/`` — SCUNet, a swin-conv U-Net denoiser.
 
-It also carries two documents that predate the three packages above and are not
+It also carries two documents that predate the packages above and are not
 superseded by them:
 
 * ``BENCHMARKS.md`` — consolidated PSNR/SSIM tables for all-in-one image restoration

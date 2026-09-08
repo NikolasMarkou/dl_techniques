@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **87 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **89 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (87 of 87 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (89 of 89 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -35,7 +35,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **37** | image backbones, detectors, segmenters, denoisers, generators |
+| [`vision/`](vision/) | **38** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **10** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
@@ -47,9 +47,9 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **88** | |
+| **Sum** | **89** | |
 
-### `vision/` (37)
+### `vision/` (38)
 
 | Package | |
 |---|---|
@@ -70,6 +70,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `fastvit/` | FastViT MCi image backbone, the assembled tower over `layers/fastvit/` |
 | `fractalnet/` | FractalNet |
 | `image_restoration/darkir/` | DarkIR low-light restoration |
+| `image_restoration/doc_res/` | DocRes — one Restormer backbone for five document tasks; the task is carried by 3 classical-CV prompt channels stacked onto RGB, so the input is 6 channels and nothing in the network is task-conditioned |
 | `image_restoration/pw_fnet/` | 2-level U-Net, FFT token mixing, multi-scale supervision. No wavelet op despite the paper's pyramid-wavelet design |
 | `image_restoration/scunet/` | SCUNet denoiser |
 | `keypoints/superpoint/` | SuperPoint keypoint detector + descriptor |
@@ -172,7 +173,7 @@ docstring `__init__.py` and, like the families, exports nothing:
 
 | Subfamily | Members |
 |---|---|
-| `vision/image_restoration/` | `darkir`, `pw_fnet`, `scunet` — plus `README.md` and `BENCHMARKS.md`, a transcribed literature survey whose PSNR/SSIM numbers all come from papers and none from this repository |
+| `vision/image_restoration/` | `darkir`, `doc_res`, `pw_fnet`, `scunet` — plus `README.md` and `BENCHMARKS.md`, a transcribed literature survey whose PSNR/SSIM numbers all come from papers and none from this repository |
 | `vision/keypoints/` | `superpoint` (one member today) |
 | `vision/super_resolution/` | `pft_sr` (one member today) |
 | `vision_language/sam/` | `sam1`, `sam2`, `sam3` |
