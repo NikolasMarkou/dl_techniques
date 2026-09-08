@@ -10,7 +10,7 @@ extends ``keras.layers.Layer`` directly rather than
 
 ``pool_size``/``strides`` must accept any sequence, not only a ``tuple``,
 because a ``.keras`` archive hands them back as JSON lists; see the DECISION
-anchor in ``__init__`` and ``decisions.md`` D-005. ``compute_output_shape``
+anchor in ``__init__`` and ``decisions.md`` D-006. ``compute_output_shape``
 mirrors what ``keras.ops.average_pool`` computes on each branch -- ``'SAME'`` is
 ``ceil(dim / stride)``, ``'VALID'`` is ``(dim - pool + stride) // stride`` --
 and both branches are pinned against the real forward pass by test.
@@ -74,11 +74,11 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Store and validate configuration
-        # DECISION plan-2026-09-08T070501-528ded1a/D-005: same round-trip closure
+        # DECISION plan-2026-09-08T070501-528ded1a/D-006: same round-trip closure
         # as ComplexConv2D -- a JSON config hands these back as LISTS, so a
         # tuple-only isinstance test re-wraps [2, 2] into ([2, 2], [2, 2]) and
         # the forward pass then raises "Expected int for argument 'ksize'".
-        # See decisions.md D-005.
+        # See decisions.md D-006.
         self.pool_size = tuple(pool_size) if isinstance(pool_size, (list, tuple)) else (pool_size, pool_size)
         self.strides = strides if strides is not None else self.pool_size
         self.strides = tuple(self.strides) if isinstance(self.strides, (list, tuple)) else (self.strides, self.strides)

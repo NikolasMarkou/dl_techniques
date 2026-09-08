@@ -1726,10 +1726,10 @@ def test_compute_output_shape_agrees_with_the_forward_pass(factory, input_shape)
 #
 # Both raises below survived deletion at 159 passed, MEASURED at `d148888a7`.
 #
-# CARRIED, deliberately not fixed here: `ComplexConv2D.compute_output_shape` is
-# alone among the shape methods in doing no rank check, so a rank-2 shape raises
-# `IndexError` from `input_shape[2]` rather than the class's own `ValueError`.
-# Repairing that needs a `src/` edit, which this step is scoped out of.
+# The carried gap noted here at step 6.2 -- `ComplexConv2D.compute_output_shape`
+# alone among the shape methods did no rank check, so a rank-2 shape raised
+# `IndexError` from `input_shape[2]` instead of the class's own `ValueError` --
+# is CLOSED at step 2.2 by the guard below plus the matching `src/` check.
 
 @pytest.mark.parametrize("filters", [0, -1, -32], ids=["zero", "minus_one", "minus_32"])
 def test_complex_conv2d_rejects_a_non_positive_filter_count(filters):
@@ -1756,6 +1756,30 @@ def test_complex_conv2d_accepts_a_4d_input_shape():
     layer.build((2, 8, 8, 3))
     assert layer.built is True
     assert tuple(layer.kernel.shape) == (3, 3, 3, 4)
+
+
+@pytest.mark.parametrize(
+    "input_shape",
+    [(8,), (4, 8), (2, 8, 3), (2, 8, 8, 8, 3)],
+    ids=["rank1", "rank2", "rank3", "rank5"],
+)
+def test_complex_conv2d_compute_output_shape_rejects_non_4d(input_shape):
+    """`compute_output_shape` must raise the class's OWN error, not `IndexError`.
+
+    `pytest.raises(ValueError)` is load-bearing: at HEAD before this guard the
+    rank-2 and rank-1 cells raised `IndexError` out of `input_shape[2]`, which is
+    the shape method crashing rather than judging. The two pooling classes both
+    already raise `ValueError` here, so this closes the one inconsistent method.
+    """
+    layer = ComplexConv2D(filters=4, kernel_size=3)
+    with pytest.raises(ValueError, match="requires 4D input"):
+        layer.compute_output_shape(input_shape)
+
+
+def test_complex_conv2d_compute_output_shape_still_accepts_rank_4():
+    """ANTI-VACUITY for the guard above: rank 4 must still return a shape."""
+    layer = ComplexConv2D(filters=4, kernel_size=3, strides=2, padding="SAME")
+    assert layer.compute_output_shape((2, 8, 8, 3)) == (2, 4, 4, 4)
 
 if __name__ == '__main__':
     pytest.main([__file__])

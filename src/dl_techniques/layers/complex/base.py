@@ -59,9 +59,14 @@ class ComplexLayer(keras.layers.Layer):
         ``Initializer`` records 0 ``__call__`` invocations during ``build()``
         for both ``ComplexDense`` and ``ComplexConv2D``, and the kernel is not
         the spy's value -- ``_init_complex_weights`` draws its own Rayleigh
-        magnitude and uniform phase. Kept because existing ``.keras`` files
-        pass it through ``from_config``; removing it would raise a
-        ``TypeError`` loading those checkpoints. Defaults to ``GlorotUniform``.
+        magnitude and uniform phase. It is pinned to preserve behaviour, not
+        because a wire-up is impossible: drawing the real and imaginary parts
+        separately from the passed real initializer works for all four stock
+        initializers, but none of them reproduces the shipped default draw, so
+        honouring this parameter would move every CoShNet kernel's scale. Kept
+        because existing ``.keras`` files pass it through ``from_config``;
+        removing it would raise a ``TypeError`` loading those checkpoints.
+        Defaults to ``GlorotUniform``.
     """
 
     def __init__(
@@ -82,9 +87,17 @@ class ComplexLayer(keras.layers.Layer):
         self.kernel_regularizer = kernel_regularizer
         # DECISION plan-2026-09-08T070501-528ded1a/D-002: kernel_initializer is inert -- a spy
         # Initializer records 0 __call__ invocations during build() on both weight-owning subclasses.
-        # Do NOT "wire it up": an Initializer returns a REAL tensor and raises ValueError on
-        # dtype="complex64", and the closest candidate is off by exactly sqrt(3) at the default
-        # (0.14509525 vs 0.25131234), so any wire-up moves every CoShNet kernel's scale. See decisions.md.
+        # It is pinned to PRESERVE BEHAVIOUR, not because wiring it up is impossible. A coherent
+        # wire-up DOES exist: drawing the real and imaginary parts SEPARATELY from the passed real
+        # initializer yields a genuine complex64 weight for all four stock initializers. MEASURED at
+        # CoShNet's real (5, 5, 3, 20) kernel, mean|z|: GlorotUniform 0.0715, HeNormal 0.1923,
+        # Orthogonal 0.1313, Constant(0.1) 0.1414 -- against the shipped Rayleigh-magnitude /
+        # uniform-phase draw's 0.1846. None of them reproduces the shipped default, so any wire-up
+        # replaces Trabelsi's scheme and moves every CoShNet kernel's scale. Do NOT wire it up under
+        # this parameter name; propose it as a new opt-in mode with its own decision. (The narrower
+        # claim that an Initializer refuses dtype="complex64" is true of GlorotUniform, HeNormal and
+        # Orthogonal but NOT of Constant, which accepts it -- so it is not the reason either.)
+        # See decisions.md D-002.
         self.kernel_initializer = kernel_initializer or keras.initializers.GlorotUniform()
 
     def _init_complex_weights(

@@ -16,7 +16,7 @@ padding must report ``ceil(dim / stride)``, because that is what
 forward pass in every cell where the stride does not divide the input evenly.
 And ``kernel_size``/``strides`` must accept any sequence, not only a ``tuple``,
 because a ``.keras`` archive hands them back as JSON lists; see the DECISION
-anchor in ``__init__`` and ``decisions.md`` D-005.
+anchor in ``__init__`` and ``decisions.md`` D-006.
 
 The forward path uses raw ``tf.complex`` / ``tf.math.real`` / ``tf.math.imag``
 because ``keras.ops`` exposes no complex-tensor constructor, so this layer is
@@ -107,13 +107,13 @@ class ComplexConv2D(ComplexLayer):
 
         # Store configuration
         self.filters = filters
-        # DECISION plan-2026-09-08T070501-528ded1a/D-005: coerce ANY sequence,
+        # DECISION plan-2026-09-08T070501-528ded1a/D-006: coerce ANY sequence,
         # not just a tuple. Do NOT write `x if isinstance(x, tuple) else (x, x)`
         # here: get_config emits a tuple, the .keras archive stores it as a JSON
         # LIST, and __init__ gets that list back -- so the tuple-only test is
         # False on reload and re-wraps [3, 3] into ([3, 3], [3, 3]), which made
         # this layer impossible to load from disk at all (ValueError: Invalid
-        # dtype: TrackedList). See decisions.md D-005.
+        # dtype: TrackedList). See decisions.md D-006.
         self.kernel_size = tuple(kernel_size) if isinstance(kernel_size, (list, tuple)) else (kernel_size, kernel_size)
         self.strides = tuple(strides) if isinstance(strides, (list, tuple)) else (strides, strides)
         self.padding = padding.upper()
@@ -209,7 +209,12 @@ class ComplexConv2D(ComplexLayer):
         :param input_shape: Input tensor shape.
 
         :return: Output tensor shape.
+
+        :raises ValueError: If ``input_shape`` is not rank 4.
         """
+        if len(input_shape) != 4:
+            raise ValueError(f"ComplexConv2D requires 4D input, got {len(input_shape)}D")
+
         batch_size = input_shape[0]
 
         if self.padding == 'SAME':
