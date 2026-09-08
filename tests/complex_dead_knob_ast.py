@@ -28,7 +28,10 @@ Interface contract
     ``__path__`` via :func:`pkgutil.iter_modules` -- never from a hardcoded list,
     so an eighth module added tomorrow is covered the day it lands. The empty
     ``__init__.py`` is not yielded by ``iter_modules`` and so is absent. Raises
-    ``ImportError`` if a module of the package cannot be imported.
+    ``ImportError`` if a module of the package cannot be imported, and
+    ``BlindPackageScanError`` if the enumeration falls below
+    ``KNOWN_MODULE_FLOOR`` -- the instrument FAILS CLOSED rather than handing
+    its callers an empty map they would compare equal to an empty expectation.
 
 ``self_attribute_sites(module, attr)``
     Returns the list of ``ast.Attribute`` nodes in ``module``'s source that read
@@ -47,7 +50,11 @@ Interface contract
 ``EXPECTED_DEAD_KNOB_SITES``
     The invariant both callers assert: 2 sites in ``base.py`` (the ``__init__``
     assignment and the ``get_config`` entry) and 0 in every leaf. Built at call
-    time from the enumerated module set, so it grows with the package.
+    time from the enumerated module set, so it grows with the package -- and,
+    because that set comes from ``complex_package_modules()``, it cannot be empty
+    without raising, so ``counts == expected`` can never be a vacuous ``{} == {}``.
+
+RED proof for every claim above: ``tests/test_complex_dead_knob_ast.py``.
 """
 
 import ast
@@ -70,16 +77,53 @@ DEAD_KNOBS = ("epsilon", "kernel_initializer")
 EXPECTED_BASE_SITES = 2
 
 
+class BlindPackageScanError(RuntimeError):
+    """The package enumeration missed a module the package is known to hold.
+
+    Raised rather than returned so that EVERY consumer fails CLOSED. MEASURED at
+    ``0dc3bc1ed``, before this class existed: with the package ``__path__``
+    pointed at an empty directory, ``self_attribute_site_counts("epsilon")``
+    returned ``{}`` and ``expected_dead_knob_sites()`` returned ``{}``, so both
+    callers' predicate ``counts == expected`` was ``{} == {}`` -- **True**. A
+    guard whose enumeration collapsed to nothing must go RED, not green.
+    """
+
+
+# Every module the package is known to contain today. A FLOOR, never the
+# enumeration itself -- the counts always come from `pkgutil`, so an eighth
+# module is scanned the day it lands. `complex_package_modules()` raises when the
+# enumeration falls below it.
+KNOWN_MODULE_FLOOR = frozenset({
+    "base",
+    "complex_conv2d",
+    "complex_dense",
+    "complex_relu",
+    "complex_average_pooling2d",
+    "complex_dropout",
+    "complex_global_average_pooling2d",
+})
+
+
 def complex_package_modules() -> Dict[str, ModuleType]:
     """Import and return every module of ``dl_techniques.layers.complex``.
 
     :return: ``{module_basename: module_object}``, enumerated from the filesystem.
+    :raises BlindPackageScanError: if the enumeration does not cover
+        :data:`KNOWN_MODULE_FLOOR` -- an empty or truncated scan is an error here,
+        never a vacuous pass.
     """
     modules: Dict[str, ModuleType] = {}
     for module_info in pkgutil.iter_modules(_complex_package.__path__):
         name = module_info.name
         modules[name] = __import__(
             f"{_complex_package.__name__}.{name}", fromlist=[name]
+        )
+    missing = KNOWN_MODULE_FLOOR - set(modules)
+    if missing:
+        raise BlindPackageScanError(
+            f"the package scan enumerated only {sorted(modules)}, which is "
+            f"missing {sorted(missing)} -- every dead-knob count derived from "
+            "this enumeration would be vacuous, so the scan fails closed"
         )
     return modules
 
@@ -124,19 +168,6 @@ def describe_site_counts(counts: Dict[str, int]) -> str:
 LIVENESS_PROBE_ATTRIBUTE = "strides"
 LIVENESS_PROBE_MODULES = ("complex_conv2d", "complex_average_pooling2d")
 
-# Every module the package is known to contain today. Used ONLY as a floor for
-# the liveness assertion (`>=`), never as the enumeration itself -- the counts
-# always come from `pkgutil`, so an eighth module is scanned the day it lands.
-KNOWN_MODULE_FLOOR = frozenset({
-    "base",
-    "complex_conv2d",
-    "complex_dense",
-    "complex_relu",
-    "complex_average_pooling2d",
-    "complex_dropout",
-    "complex_global_average_pooling2d",
-})
-
 
 def assert_scan_reaches_the_leaves() -> None:
     """LIVENESS for the two dead-knob guards — without it, "0 in every leaf" is unfalsifiable.
@@ -150,13 +181,11 @@ def assert_scan_reaches_the_leaves() -> None:
 
     :raises AssertionError: if the package scan is blind to the leaf modules.
     """
-    modules = complex_package_modules()
-    assert KNOWN_MODULE_FLOOR <= set(modules), (
-        f"the package scan enumerated only {sorted(modules)}, which is missing "
-        f"{sorted(KNOWN_MODULE_FLOOR - set(modules))} — the dead-knob guards are "
-        "blind to whatever it cannot see"
-    )
-
+    # No floor assertion here: `complex_package_modules()` itself raises
+    # `BlindPackageScanError` below the floor, so a duplicate assert would be a
+    # line whose revert nothing can observe. What remains is the part the
+    # enumeration check CANNOT cover -- that the modules it found are really
+    # being parsed.
     live = self_attribute_site_counts(LIVENESS_PROBE_ATTRIBUTE)
     blind = [name for name in LIVENESS_PROBE_MODULES if live.get(name, 0) <= 0]
     assert not blind, (

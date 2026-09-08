@@ -1781,5 +1781,158 @@ def test_complex_conv2d_compute_output_shape_still_accepts_rank_4():
     layer = ComplexConv2D(filters=4, kernel_size=3, strides=2, padding="SAME")
     assert layer.compute_output_shape((2, 8, 8, 3)) == (2, 4, 4, 4)
 
+
+# ---------------------------------------------------------------------
+# ABSOLUTE strides oracles (Step 2.3)
+# ---------------------------------------------------------------------
+#
+# The 48-cell asymmetric grid above is a RELATIVE oracle: it asserts
+# `compute_output_shape == forward.shape`, which a CONSISTENTLY wrong pair
+# satisfies. MEASURED at `0dc3bc1ed`: transposing `self.strides` in BOTH
+# `ComplexConv2D.call` (all four `keras.ops.conv` calls) AND
+# `ComplexConv2D.compute_output_shape` left the three suites at 263 passed --
+# exactly baseline. The same both-sides transposition of `pool_size` + `strides`
+# in `ComplexAveragePooling2D` also left them at 263. `kernel_size` asymmetry is
+# already pinned ABSOLUTELY by the two-tap value test; `strides` asymmetry was
+# not pinned at all. The two cells below fix that: each states a hand-computed
+# output SHAPE and the hand-computed VALUES at that shape, so a transposition
+# changes WHICH input elements are sampled and no amount of self-consistency
+# saves it.
+
+def _ramp_complex_2x4() -> tf.Tensor:
+    """A `(1, 2, 4, 1)` complex map whose every element is distinguishable.
+
+    real = [[1, 2, 3, 4], [5, 6, 7, 8]], imag = 10 * real. With a `1 + 0i`
+    kernel of size 1x1 the output IS the set of sampled inputs, so the values
+    name the sampled positions directly.
+    """
+    real = np.array([[[[1.0], [2.0], [3.0], [4.0]],
+                      [[5.0], [6.0], [7.0], [8.0]]]], dtype=np.float32)
+    return _complex_from_parts(real, real * 10.0)
+
+
+def test_complex_conv2d_asymmetric_strides_sample_the_hand_computed_positions():
+    """`strides=(1, 2)` on a 2x4 map: an ABSOLUTE shape AND value oracle.
+
+    A 1x1 identity kernel with `padding='VALID'` and `strides=(1, 2)` keeps every
+    row and every SECOND column, so the output is exactly
+
+        [[1, 3],
+         [5, 7]]   (+ 10i each)
+
+    Transposing the strides to `(2, 1)` -- even consistently, in both `call` and
+    `compute_output_shape` -- keeps every second ROW and every column instead,
+    giving `(1, 1, 4, 1)` and `[[1, 2, 3, 4]]`. Both assertions below therefore
+    fire, which is what the relative grid could not do.
+    """
+    layer = ComplexConv2D(filters=1, kernel_size=1, strides=(1, 2), padding="VALID")
+    layer.build((1, 2, 4, 1))
+    _assign_complex(layer.kernel, [[[[1 + 0j]]]])
+    _assign_complex(layer.bias, [0 + 0j])
+
+    outputs = layer(_ramp_complex_2x4())
+
+    assert tuple(outputs.shape) == (1, 2, 2, 1), (
+        "ComplexConv2D with strides=(1, 2) on a (1, 2, 4, 1) input must produce "
+        f"(1, 2, 2, 1) -- height undivided, width halved -- but produced "
+        f"{tuple(outputs.shape)}; a height/width transposition of `strides` "
+        "gives (1, 1, 4, 1)"
+    )
+    assert layer.compute_output_shape((1, 2, 4, 1)) == (1, 2, 2, 1), (
+        "compute_output_shape disagrees with the hand-computed (1, 2, 2, 1) for "
+        f"strides=(1, 2): {layer.compute_output_shape((1, 2, 4, 1))}"
+    )
+    _assert_complex_allclose(
+        outputs, [[[[1.0], [3.0]], [[5.0], [7.0]]]],
+        [[[[10.0], [30.0]], [[50.0], [70.0]]]],
+        "ComplexConv2D with strides=(1, 2) sampled the wrong input elements -- "
+        "it kept every second ROW instead of every second COLUMN",
+    )
+
+
+def test_complex_average_pooling_asymmetric_window_averages_the_hand_computed_pairs():
+    """`pool_size=(1, 2)`, `strides=(1, 2)` on a 2x4 map: ABSOLUTE shape AND values.
+
+    A 1-high, 2-wide window stepping 2 across averages HORIZONTAL pairs:
+
+        [[ (1+2)/2, (3+4)/2 ],     [[1.5, 3.5],
+         [ (5+6)/2, (7+8)/2 ]]  =   [5.5, 7.5]]   (imag = 10x)
+
+    Transposing `pool_size` and `strides` together to `(2, 1)` -- consistently,
+    in both `call` and `compute_output_shape` -- averages VERTICAL pairs instead
+    and gives `(1, 1, 4, 1)` = `[[3, 4, 5, 6]]`. Note 1.5 != 3 and 3.5 != 4, so
+    the value assertion is not satisfiable by the transposed layout even where
+    the shapes happen to coincide.
+    """
+    layer = ComplexAveragePooling2D(pool_size=(1, 2), strides=(1, 2), padding="VALID")
+
+    outputs = layer(_ramp_complex_2x4())
+
+    assert tuple(outputs.shape) == (1, 2, 2, 1), (
+        "ComplexAveragePooling2D with pool_size=strides=(1, 2) on a "
+        f"(1, 2, 4, 1) input must produce (1, 2, 2, 1) but produced "
+        f"{tuple(outputs.shape)}; transposing the window gives (1, 1, 4, 1)"
+    )
+    assert layer.compute_output_shape((1, 2, 4, 1)) == (1, 2, 2, 1), (
+        "compute_output_shape disagrees with the hand-computed (1, 2, 2, 1) for "
+        f"pool_size=strides=(1, 2): {layer.compute_output_shape((1, 2, 4, 1))}"
+    )
+    _assert_complex_allclose(
+        outputs, [[[[1.5], [3.5]], [[5.5], [7.5]]]],
+        [[[[15.0], [35.0]], [[55.0], [75.0]]]],
+        "ComplexAveragePooling2D with a 1x2 window averaged VERTICAL pairs -- "
+        "`pool_size`/`strides` are transposed",
+    )
+
+
+# ---------------------------------------------------------------------
+# D-002 evidence pin: the Initializer determinism trap (Step 2.3)
+# ---------------------------------------------------------------------
+
+def test_one_initializer_instance_replays_its_draw_at_a_fixed_shape():
+    """The trap that made the D-002 anchor wrong TWICE, pinned so it cannot recur.
+
+    The anchor at `base.py:ComplexLayer.__init__` describes the wire-up it is
+    refusing. Two successive wordings described it as "draw real and imag
+    separately from the passed initializer" using ONE instance -- which is
+    degenerate, because a keras 3.8 `Initializer` instance is DETERMINISTIC PER
+    SHAPE. This test asserts the mechanism directly in both directions, so a
+    third wrong wording cannot ship under a green suite:
+
+    * one instance called twice at one shape -> bit-identical arrays, hence
+      `imag == real` and a "complex" weight with exactly 2 distinct phases;
+    * two DISTINCT-SEED instances -> different arrays, hence a real phase spread.
+    """
+    shape = (5, 5, 3, 20)          # CoShNet's first-conv kernel
+
+    for name, ctor in (
+        ("GlorotUniform", keras.initializers.GlorotUniform),
+        ("HeNormal", keras.initializers.HeNormal),
+    ):
+        one = ctor()
+        first, second = np.array(one(shape)), np.array(one(shape))
+        assert np.array_equal(first, second), (
+            f"a single {name} instance returned DIFFERENT arrays on two calls at "
+            "the same shape. keras Initializer determinism-per-shape is the "
+            "premise of the D-002 anchor's TRAP paragraph; if it no longer "
+            "holds, reword the anchor rather than deleting this test"
+        )
+
+        degenerate = first + 1j * second
+        assert len(np.unique(np.round(np.angle(degenerate), 4))) == 2, (
+            f"the one-instance {name} 'complex' draw did not collapse to 2 "
+            "phases; the anchor's stated tell (it is a real kernel times (1+i)) "
+            "is stale"
+        )
+
+        spread = np.array(ctor(seed=1)(shape)) + 1j * np.array(ctor(seed=2)(shape))
+        assert len(np.unique(np.round(np.angle(spread), 4))) > 1000, (
+            f"two DISTINCT-SEED {name} instances produced only "
+            f"{len(np.unique(np.round(np.angle(spread), 4)))} distinct phases -- "
+            "the wire-up the anchor describes as workable is not workable, so "
+            "the anchor is wrong again"
+        )
+
+
 if __name__ == '__main__':
     pytest.main([__file__])

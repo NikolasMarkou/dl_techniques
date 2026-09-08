@@ -60,11 +60,13 @@ class ComplexLayer(keras.layers.Layer):
         for both ``ComplexDense`` and ``ComplexConv2D``, and the kernel is not
         the spy's value -- ``_init_complex_weights`` draws its own Rayleigh
         magnitude and uniform phase. It is pinned to preserve behaviour, not
-        because a wire-up is impossible: drawing the real and imaginary parts
-        separately from the passed real initializer works for all four stock
-        initializers, but none of them reproduces the shipped default draw, so
-        honouring this parameter would move every CoShNet kernel's scale. Kept
-        because existing ``.keras`` files pass it through ``from_config``;
+        because a wire-up is impossible: real and imaginary parts drawn from two
+        DISTINCT-SEED ``Initializer`` instances do give a genuine complex weight,
+        but at a different scale from the shipped draw, so honouring this
+        parameter would move every CoShNet kernel's scale. (One instance called
+        twice does NOT -- a keras 3.8 ``Initializer`` is deterministic per shape,
+        so that yields ``imag == real``; see the DECISION anchor in ``__init__``.)
+        Kept because existing ``.keras`` files pass it through ``from_config``;
         removing it would raise a ``TypeError`` loading those checkpoints.
         Defaults to ``GlorotUniform``.
     """
@@ -87,17 +89,20 @@ class ComplexLayer(keras.layers.Layer):
         self.kernel_regularizer = kernel_regularizer
         # DECISION plan-2026-09-08T070501-528ded1a/D-002: kernel_initializer is inert -- a spy
         # Initializer records 0 __call__ invocations during build() on both weight-owning subclasses.
-        # It is pinned to PRESERVE BEHAVIOUR, not because wiring it up is impossible. A coherent
-        # wire-up DOES exist: drawing the real and imaginary parts SEPARATELY from the passed real
-        # initializer yields a genuine complex64 weight for all four stock initializers. MEASURED at
-        # CoShNet's real (5, 5, 3, 20) kernel, mean|z|: GlorotUniform 0.0715, HeNormal 0.1923,
-        # Orthogonal 0.1313, Constant(0.1) 0.1414 -- against the shipped Rayleigh-magnitude /
-        # uniform-phase draw's 0.1846. None of them reproduces the shipped default, so any wire-up
-        # replaces Trabelsi's scheme and moves every CoShNet kernel's scale. Do NOT wire it up under
-        # this parameter name; propose it as a new opt-in mode with its own decision. (The narrower
-        # claim that an Initializer refuses dtype="complex64" is true of GlorotUniform, HeNormal and
-        # Orthogonal but NOT of Constant, which accepts it -- so it is not the reason either.)
-        # See decisions.md D-002.
+        # The pin is BEHAVIOUR PRESERVATION, not impossibility. A working wire-up DOES exist: draw the
+        # real and imaginary parts from TWO DISTINCT-SEED Initializer instances (or from an explicitly
+        # complex initializer). It is refused because it moves every CoShNet kernel's scale and drops
+        # Trabelsi's scheme -- per-component std at CoShNet's (5, 5, 3, 20) kernel, analytic and
+        # seed-free: shipped sqrt(2/(75+20)) = 0.145095 (mean|z| = sigma*sqrt(pi/2) = 0.181850) against
+        # HeNormal's sqrt(2/75) = 0.163299 (mean|z| 0.204665; MEASURED 0.204822 at seeds 1 and 2) and
+        # GlorotUniform's 0.058977, 2.46x low because keras reads this shape as fan_in=75/fan_out=500.
+        # TRAP, and the reason this comment has been rewritten twice: do NOT probe a wire-up with ONE
+        # instance called twice. A keras 3.8 Initializer is DETERMINISTIC PER SHAPE -- `i(s)` is
+        # bit-identical to `i(s)`, seeded or not -- so imag == real, the "complex" weight is a real
+        # kernel times (1+i) with exactly 2 distinct phases, and every mean|z| so measured is merely
+        # sqrt(2)*mean|r| (Constant(0.1) reading exactly 0.141421 = 0.1*sqrt(2) is the tell). Pinned by
+        # test_one_initializer_instance_replays_its_draw_at_a_fixed_shape. Do NOT wire this parameter
+        # up under its current name; propose it as a new opt-in mode. See decisions.md D-002.
         self.kernel_initializer = kernel_initializer or keras.initializers.GlorotUniform()
 
     def _init_complex_weights(
