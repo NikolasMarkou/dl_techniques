@@ -574,3 +574,49 @@ def test_a_non_rank_4_input_is_caught_at_build():
     layer = MultiDconvHeadTransposedAttention(dim=_DIM, num_heads=_NUM_HEADS)
     with pytest.raises(ValueError, match="4D input shape"):
         layer.build((None, _HEIGHT * _WIDTH, _DIM))
+
+
+# ---------------------------------------------------------------------
+# Factory registration (`ATTENTION_REGISTRY['multi_dconv_head_transposed']`).
+#
+# `test_attention_factory.py`'s grid CONSTRUCTS every registered type but never
+# builds one, so it is blind to both claims below: that the registry defaults
+# reach the instance, and that this key is rank-4 NHWC only.
+# ---------------------------------------------------------------------
+
+
+class TestFactoryRegistration:
+
+    def test_the_key_builds_the_right_class_through_the_factory(self):
+        from dl_techniques.layers.attention.factory import create_attention_layer
+
+        layer = create_attention_layer(
+            'multi_dconv_head_transposed', dim=_DIM, num_heads=_NUM_HEADS
+        )
+        assert isinstance(layer, MultiDconvHeadTransposedAttention)
+        assert layer.dim == _DIM
+        assert layer.num_heads == _NUM_HEADS
+        # the registry default, forwarded rather than re-defaulted by the layer
+        assert layer.use_bias is False
+
+    def test_a_rank3_input_raises_through_the_factory(self):
+        """Rank-4 NHWC only. A `(B, S, C)` sequence must RAISE rather than be
+        silently reinterpreted as an image."""
+        from dl_techniques.layers.attention.factory import create_attention_layer
+
+        layer = create_attention_layer(
+            'multi_dconv_head_transposed', dim=_DIM, num_heads=_NUM_HEADS
+        )
+        with pytest.raises(ValueError, match="4D input shape"):
+            layer(np.zeros((2, _HEIGHT * _WIDTH, _DIM), dtype="float32"))
+
+    def test_a_rank4_input_is_the_control(self):
+        """Anti-vacuity: the raise above must be about RANK, not about the layer
+        being broken for every input."""
+        from dl_techniques.layers.attention.factory import create_attention_layer
+
+        layer = create_attention_layer(
+            'multi_dconv_head_transposed', dim=_DIM, num_heads=_NUM_HEADS
+        )
+        y = layer(np.zeros((2, _HEIGHT, _WIDTH, _DIM), dtype="float32"))
+        assert tuple(y.shape) == (2, _HEIGHT, _WIDTH, _DIM)

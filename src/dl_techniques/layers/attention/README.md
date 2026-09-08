@@ -1,6 +1,6 @@
 # `dl_techniques.layers.attention`
 
-Thirty-four attention and token-mixing layers behind one factory. `create_attention_layer(attention_type, name=None, **kwargs)`
+Thirty-five attention and token-mixing layers behind one factory. `create_attention_layer(attention_type, name=None, **kwargs)`
 looks the type up in `ATTENTION_REGISTRY`, rejects any keyword the target class does not declare,
 fills in the registry defaults and constructs. Nothing on that path filters and drops: an undeclared
 keyword is a `ValueError`, never a discarded argument.
@@ -13,7 +13,7 @@ see [Call-signature caveats](#call-signature-caveats).
 
 ## Catalogue
 
-Thirty-four keys. `list_attention_types()` returns them sorted; `get_attention_requirements(key)`
+Thirty-five keys. `list_attention_types()` returns them sorted; `get_attention_requirements(key)`
 returns one entry's metadata (a deep copy, except the `class` value).
 
 | Key | Class | What it is | Pick it when | Required params |
@@ -33,6 +33,7 @@ returns one entry's metadata (a deep copy, except the `class` value).
 | `lighthouse` | `LighthouseAttention` | Coarse-to-fine pyramid plus top-K causal SDPA, scattered back with `segment_sum`. | Long-context causal LM wanting exact attention sub-quadratically. | `dim`, `num_heads` |
 | `linear` | `LinearAttention` | Bias-free, degree-1-homogeneous O(N) attention via a positive feature map and associativity. | Bias-free denoiser stacks; long non-causal sequences. | `dim` |
 | `mobile_mqa` | `MobileMQA` | Multi-query attention for vision on mobile/edge. | Edge vision models. | `dim` |
+| `multi_dconv_head_transposed` | `MultiDconvHeadTransposedAttention` | Restormer MDTA: attention across CHANNELS on a rank-4 NHWC map. 1x1 + depthwise 3x3 qkv projection; Q/K L2-normalised over the flattened spatial axis, so each head's affinity matrix is `(C/heads, C/heads)` and the cost is linear in `H*W`. Learnable per-head temperature. | High-resolution image restoration (denoise / deblur / derain / document) where pixel-pair attention is unaffordable. **Rank-4 NHWC only.** | `dim`, `num_heads` |
 | `multi_head` | `MultiHeadAttention` | Standard MHSA. | The default. | `dim` |
 | `multi_head_cross` | `MultiHeadCrossAttention` | Self- or cross-attention with pluggable attention probabilities. | Encoder-decoders and custom attention. | `dim` |
 | `multi_head_latent` | `MultiHeadLatentAttention` | DeepSeek-V2 MLA with KV compression into a latent. | LLM inference with a small KV cache. | `dim`, `num_heads`, `kv_latent_dim` |

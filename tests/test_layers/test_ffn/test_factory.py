@@ -680,7 +680,9 @@ class TestFFNFactory:
             'counting', 'gated_mlp', 'power_mlp',  'orthoglu', 'logic',
             'kan', 'tversky',
             # plan_2026-06-19_2ea7a9a0: 4 new classes + 2 GLUFFN aliases
-            'monarch', 'mixer', 'squared_relu', 'lowrank', 'reglu', 'bilinear'
+            'monarch', 'mixer', 'squared_relu', 'lowrank', 'reglu', 'bilinear',
+            # plan-2026-09-08T111844-de235227: Restormer GDFN (rank-4 NHWC only)
+            'gated_dconv'
         }
         actual_types = set(info.keys())
 
@@ -1074,7 +1076,7 @@ class TestKanAndTverskyFactory:
 # guards below fail loudly if the registry is ever gutted, rather than passing
 # over an empty or truncated derived list. Bump it deliberately when a genuinely
 # new FFN type is registered.
-_EXPECTED_FFN_TYPE_COUNT = 21
+_EXPECTED_FFN_TYPE_COUNT = 22
 
 # Derived from the registry itself -- never hand-listed, so a newly-added type
 # is covered by these guards on the day it lands.

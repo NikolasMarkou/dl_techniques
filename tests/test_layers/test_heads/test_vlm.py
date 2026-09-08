@@ -2316,7 +2316,7 @@ class TestVLMFFNTypeGrid:
         ) is None
 
     def test_ffn_type_grid_covers_every_registry_type(self) -> None:
-        assert len(_GRID_ALL_FFN_TYPES) == 21
+        assert len(_GRID_ALL_FFN_TYPES) == 22
 
     @pytest.mark.parametrize("ffn_type", _GRID_ALL_FFN_TYPES)
     @pytest.mark.parametrize("site", ["site1", "site2"])

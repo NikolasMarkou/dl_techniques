@@ -5,8 +5,8 @@ interface that builds them from a config dict. Import a class directly, or
 call `create_attention_layer(type=...)` when the type comes from
 configuration.
 
-`factory.py` registers 34 keys; this package re-exports 37 layer classes,
-31 of them reachable through `create_attention_layer(type=...)`. The other
+`factory.py` registers 35 keys; this package re-exports 38 layer classes,
+32 of them reachable through `create_attention_layer(type=...)`. The other
 6 are direct-import only: `ProgressiveFocusedAttention`,
 `Ideogram4Attention`, `MMDiTJointAttention`, `AttentionRoutingCapsule`,
 `CapsuleBlockV2`, `WindowAttention`.
@@ -66,6 +66,10 @@ from .channel_attention import ChannelAttention
 from .spatial_attention import SpatialAttention
 from .non_local_attention import NonLocalAttention
 from .mobile_mqa import MobileMQA
+# key 'multi_dconv_head_transposed'; rank-4 NHWC only
+from .multi_dconv_head_transposed_attention import (
+    MultiDconvHeadTransposedAttention
+)
 # key 'area'
 from .area_attention import AreaAttention
 # key 'beit'
@@ -132,6 +136,8 @@ __all__ = [
     "SpatialAttention",
     "NonLocalAttention",
     "MobileMQA",
+    # factory key 'multi_dconv_head_transposed'; rank-4 NHWC only
+    "MultiDconvHeadTransposedAttention",
     # factory key 'area'
     "AreaAttention",
     # factory key 'beit'

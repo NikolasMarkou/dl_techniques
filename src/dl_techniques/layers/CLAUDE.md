@@ -14,8 +14,8 @@ see § Naming traps.
 
 | Subpackage | F | Contents |
 |---|:-:|---|
-| `attention/` | Y | 34 registered attention types — multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, window / single-window, mobile MQA, non-local, CBAM, linear (Miyasawa-compliant O(N)), energy, area, FNet Fourier, and more |
-| `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting, diff, logic, Swin MLP, residual block |
+| `attention/` | Y | 35 registered attention types — multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, window / single-window, mobile MQA, non-local, CBAM, linear (Miyasawa-compliant O(N)), energy, area, FNet Fourier, and more, plus Restormer's channel-wise MDTA (rank-4 NHWC only) |
+| `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting, diff, logic, Swin MLP, residual block, Restormer GDFN (rank-4 NHWC only) |
 | `norms/` | Y | RMS family (RMS, zero-centered, band, adaptive band), logit-norm family, dynamic tanh, GRN, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (not factory-registered) |
 | `embedding/` | Y | Patch (1D/2D), learned positional, sinusoidal (2D / scalar / timestep), RoPE family (plain, dual, continuous, multi-axis), BERT / ModernBERT / ALBERT-factorized token embeddings, class-label table with a classifier-free-guidance dropout row. `HierarchicalCodebookEmbedding` is direct-import-only |
 | `activations/` | Y | GoLU, Mish, hard sigmoid/swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability / routing outputs, basis function |
@@ -143,8 +143,8 @@ Check in this precedence order; proceed to the next step only when nothing fits.
    | Domain | Factory entry point | Registered types |
    |--------|---------------------|------------------|
    | Normalization | `create_normalization_layer()` in `norms/factory.py` | 18 |
-   | Attention | `create_attention_layer()` in `attention/factory.py` | 34 |
-   | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 21 |
+   | Attention | `create_attention_layer()` in `attention/factory.py` | 35 |
+   | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 22 |
    | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 15 |
    | Activations | `create_activation_layer()` in `activations/factory.py` | 24 |
    | Sequence pooling | `create_sequence_pooling_layer()` in `sequence_pooling/factory.py` | 3 (`sequence`, `attention`, `weighted`) |
@@ -180,7 +180,7 @@ two of its keys deliberately map to functions rather than classes, and why two m
 are deliberately NOT registered.
 
 **3. An "optional" parameter the layer derives is not safe to pass explicitly.** Consult the registry
-entry's `required_params`: `hidden_dim` is required for 13 of the 21 FFN types and derived for
+entry's `required_params`: `hidden_dim` is required for 13 of the 22 FFN types and derived for
 `swiglu` (a two-thirds rule plus `ffn_multiple_of`).
 
 **4. When you audit "who calls factory X", also sweep "who builds X's argument dict without calling

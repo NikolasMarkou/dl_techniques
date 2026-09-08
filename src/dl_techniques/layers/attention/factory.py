@@ -1,7 +1,7 @@
 """
 Attention layer factory: one registry, one construction path, strict kwargs.
 
-``ATTENTION_REGISTRY`` maps 34 string keys to the callable that builds each
+``ATTENTION_REGISTRY`` maps 35 string keys to the callable that builds each
 attention layer, plus that layer's metadata. ``create_attention_layer`` is
 the single construction path: it looks the key up, rejects any keyword the
 target type does not declare, fills in the registry defaults, and
@@ -98,6 +98,7 @@ Registered types:
     lighthouse            LighthouseAttention
     linear                LinearAttention
     mobile_mqa            MobileMQA
+    multi_dconv_head_transposed  MultiDconvHeadTransposedAttention
     multi_head            MultiHeadAttention
     multi_head_cross      MultiHeadCrossAttention
     multi_head_latent     MultiHeadLatentAttention
@@ -119,7 +120,7 @@ Registered types:
     window_zigzag         create_zigzag_window_attention
 
 This table is generated from ``ATTENTION_REGISTRY`` below, not transcribed.
-``README.md`` carries the same 34 keys with the instance type in its Class
+``README.md`` carries the same 35 keys with the instance type in its Class
 column, so the three window keys read ``WindowAttention`` there and name
 the builder function here. The registry is the source of truth for both.
 """
@@ -148,6 +149,9 @@ from .hopfield_attention import HopfieldAttention
 from .lighthouse_attention import LighthouseAttention
 from .linear_attention import LinearAttention
 from .mobile_mqa import MobileMQA
+from .multi_dconv_head_transposed_attention import (
+    MultiDconvHeadTransposedAttention
+)
 from .multi_head_attention import MultiHeadAttention
 from .multi_head_cross_attention import MultiHeadCrossAttention
 from .multi_head_latent_attention import MultiHeadLatentAttention
@@ -187,6 +191,7 @@ AttentionType = Literal[
     'lighthouse',
     'linear',
     'mobile_mqa',
+    'multi_dconv_head_transposed',
     'multi_head',
     'multi_head_cross',
     'multi_head_latent',
@@ -639,6 +644,28 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'paper': 'MobileViT: Light-weight, General-purpose, and Mobile-friendly Vision Transformer'
     },
 
+    'multi_dconv_head_transposed': {
+        'class': MultiDconvHeadTransposedAttention,
+        'description': (
+            'Restormer MDTA: channel-wise ("transposed") self-attention on rank-4 NHWC '
+            'feature maps. Q, K and V come from a 1x1 convolution followed by a fully '
+            'depthwise 3x3 convolution; queries and keys are L2-normalised over the '
+            'FLATTENED SPATIAL axis, so each affinity matrix is (C/heads, C/heads) per '
+            'head and the cost is linear in H*W instead of quadratic. A learnable '
+            'per-head temperature scales the logits before the softmax.'
+        ),
+        'required_params': ['dim', 'num_heads'],
+        'optional_params': {
+            'use_bias': False
+        },
+        'use_case': (
+            'High-resolution image restoration -- denoising, deblurring, deraining, '
+            'document restoration -- where pixel-pair attention is unaffordable. '
+            'Rank-4 NHWC input only; this layer has no rank-3 sequence path.'
+        ),
+        'complexity': 'O(H*W*C^2/heads), linear in the pixel count, vs O((H*W)^2*C) for spatial attention',
+        'paper': 'Restormer: Efficient Transformer for High-Resolution Image Restoration (Zamir et al., CVPR 2022)'
+    },
     'multi_head': {
         'class': MultiHeadAttention,
         'description': (

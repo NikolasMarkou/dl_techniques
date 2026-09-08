@@ -602,3 +602,81 @@ def test_a_non_rank_4_input_is_caught_at_build():
     layer = GatedDConvFeedForward(dim=_DIM, ffn_expansion_factor=_FACTOR)
     with pytest.raises(ValueError, match="4D input shape"):
         layer.build((None, _HEIGHT * _WIDTH, _DIM))
+
+
+# ---------------------------------------------------------------------
+# Factory registration (`FFN_REGISTRY['gated_dconv']`).
+#
+# DECISION plan-2026-09-08T111844-de235227/D-012 lives on the registry entry in
+# `ffn/factory.py`. An anchor is a comment; this class is its guard. The rank-3
+# transformer grids (`_ALL_FFN_TYPES = sorted(FFN_REGISTRY)` in
+# test_transformer.py, test_transformer_decoder.py and test_heads/test_vlm.py)
+# SWALLOW GDFN's rank raise -- they classify only the strict dropped-key marker
+# as a failure -- so their green says nothing about this key. These assertions
+# are what actually fails if GDFN silently starts accepting rank-3 input, or if
+# the registry's `output_dim_param: None` is "fixed" to a width parameter.
+# ---------------------------------------------------------------------
+
+
+class TestFactoryRegistration:
+
+    def test_the_key_builds_the_right_class_through_the_factory(self):
+        from dl_techniques.layers.ffn.factory import create_ffn_layer
+
+        layer = create_ffn_layer('gated_dconv', dim=_DIM)
+        assert isinstance(layer, GatedDConvFeedForward)
+        assert layer.dim == _DIM
+        # the registry default, forwarded rather than re-defaulted by the layer
+        assert layer.ffn_expansion_factor == _FACTOR
+        assert layer.use_bias is False
+
+    def test_a_rank3_input_raises_through_the_factory(self):
+        """The rank contract, pinned where the grids cannot pin it.
+
+        GDFN is rank-4 NHWC. Feeding it a rank-3 `(B, S, C)` sequence -- exactly
+        what a `TransformerLayer` does -- must RAISE. If a future change adds a
+        rank-3 path, or squeezes/expands the input to make one, this goes RED
+        and the change has to be argued for rather than slipping in under three
+        grids that swallow the exception.
+        """
+        from dl_techniques.layers.ffn.factory import create_ffn_layer
+
+        layer = create_ffn_layer('gated_dconv', dim=_DIM)
+        with pytest.raises(ValueError, match="4D input shape"):
+            layer.build((None, _HEIGHT * _WIDTH, _DIM))
+
+        fresh = create_ffn_layer('gated_dconv', dim=_DIM)
+        with pytest.raises(ValueError, match="4D input shape"):
+            fresh(np.zeros((2, _HEIGHT * _WIDTH, _DIM), dtype="float32"))
+
+    def test_a_rank4_input_is_the_control(self):
+        """Anti-vacuity for the guard above: the raise must be about RANK.
+
+        A layer that raised on every input would satisfy the rank-3 assertion
+        while being entirely broken, so the rank-4 path is exercised here in the
+        same class.
+        """
+        from dl_techniques.layers.ffn.factory import create_ffn_layer
+
+        layer = create_ffn_layer('gated_dconv', dim=_DIM)
+        y = layer(np.zeros((2, _HEIGHT, _WIDTH, _DIM), dtype="float32"))
+        assert tuple(y.shape) == (2, _HEIGHT, _WIDTH, _DIM)
+
+    def test_the_registry_declares_no_output_width_param(self):
+        """`output_dim_param is None` is a claim about the layer, so assert the
+        claim against the layer, not against the registry alone: the output
+        width equals the INPUT width, so there is no width parameter a consumer
+        could set."""
+        from dl_techniques.layers.ffn.factory import FFN_REGISTRY, create_ffn_layer
+
+        entry = FFN_REGISTRY['gated_dconv']
+        assert 'output_dim_param' in entry
+        assert entry['output_dim_param'] is None, (
+            "FFN_REGISTRY['gated_dconv']['output_dim_param'] must stay None: "
+            "GDFN's output width equals its input width, so naming a width "
+            "parameter here would tell a width-rewriting consumer it may "
+            "reshape this layer's output. See decisions.md D-013."
+        )
+        layer = create_ffn_layer('gated_dconv', dim=_DIM)
+        x = np.zeros((2, _HEIGHT, _WIDTH, _DIM), dtype="float32")
+        assert layer(x).shape[-1] == x.shape[-1]
