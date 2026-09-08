@@ -52,6 +52,7 @@ from dl_techniques.datasets.document_restoration.tasks import (
     LOSS_L1,
     N_OUTPUT_CHANNELS,
     N_PROMPT_CHANNELS,
+    PROMPT_SIDECAR_SUFFIXES,
     TaskSpec,
     get_task,
     task_names,
@@ -112,12 +113,37 @@ BINARIZATION_GT_THRESHOLD_U8: int = 155
 scale. Upstream's loader thresholds the GT with ``bin_map[bin_map > 155] = 255``
 (``loaders/docres_loader.py:110-115``) before building its class target."""
 
+# DECISION plan-2026-09-08T111844-de235227/D-032
+# This is a KNOWN, DELIBERATE inversion of upstream's internal class order, and
+# it is NOT to be "corrected" to 0 without also retraining every binarization
+# checkpoint. Upstream ink is class 0 (`loaders/docres_loader.py:114-123`
+# thresholds the GT to {0,255} then divides by 255, so ink -> 0; and
+# `inference.py:250-252` argmaxes then multiplies by 255, so class 1 renders
+# white). Flipping this constant flips the meaning of every trained head's two
+# supervised channels: the checkpoint under
+# `results/doc_res_binarization_docres_20260908_224114/` was trained with
+# ink = class 1 and would emit inverted pages against a flipped constant, and
+# the F = 79.7 datum in the leaf README would no longer be reproducible from
+# it. Nothing observable is bought by the flip -- see D-032 in decisions.md.
 BINARY_INK_CLASS_INDEX: int = 1
-"""Which of the two supervised channels means *ink*. Upstream never states it
-(the finding notes the channel-vs-class assignment was not traceable without a
-checkpoint), so this port FIXES the convention here rather than leaving it
-implicit: class 0 is background, class 1 is ink. The inference shim reads this
-constant instead of restating the choice."""
+"""Which of the two supervised channels means *ink*: class 0 is background,
+class 1 is ink.
+
+**This inverts upstream's internal convention, deliberately.** Upstream's ink
+is class 0, and that IS traceable from source without a checkpoint --
+``loaders/docres_loader.py:114-123`` thresholds the ground truth to
+``{0, 255}`` and divides by 255, so ink becomes 0, and
+``inference.py:250-252`` takes ``argmax`` and multiplies by 255, so class 1
+renders as white background. (An earlier version of this docstring claimed the
+assignment "was not traceable without a checkpoint". That claim was wrong.)
+
+The divergence is unobservable outside the port: no DocRes checkpoint is ever
+loaded (``pretrained=True`` raises ``NotImplementedError``, and D-007's channel
+permutation would block a transfer anyway), the training target and the
+inference ``argmax`` both read THIS constant so they cannot drift, and the
+written-out page uses upstream's own polarity regardless
+(:data:`infer_doc_res.INK_LEVEL_U8` is 0, the DIBCO convention). See the
+anchor above and D-032."""
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +480,51 @@ class SampleTriplet:
     ground_truth: Path
 
 
+class UnsupportedPromptDtypeError(NotImplementedError):
+    """The task's prompt sidecars are not in a format this pipeline can read.
+
+    Raised at worklist-build time and at dataset-build time, i.e. before
+    ``fit()``, rather than letting the failure surface mid-epoch inside a
+    ``tf.numpy_function``. See :func:`require_uint8_prompt_sidecars`.
+    """
+
+
+# DECISION plan-2026-09-08T111844-de235227/D-034
+# The training pipeline supports uint8 (`.png`) prompt sidecars ONLY, and this
+# guard is what says so out loud. Do NOT "fix" it by adding an `np.load` arm to
+# `_decode_triplet_numpy`: that would repair ONE of the three things a float32
+# task needs and make the other two look supported. The other two are (a) the
+# single `/255.0` in `decode_triplet`, which would re-divide an already-[0,1]
+# float prompt, and (b) the whole 9-channel uint8 stack, which cannot carry
+# dewarping's continuous backward-map ground truth at all. Dewarping is the
+# only float32 task, it has no corpus (Doc3D is registration-gated) and its
+# sidecars cannot even be precomputed (the prompt needs an MBD document mask
+# this port does not include), so an `.npy` arm would be untestable end to end
+# -- a second unverified claim rather than a fix. See D-034 in decisions.md.
+def require_uint8_prompt_sidecars(spec: TaskSpec) -> None:
+    """Refuse, by name, a task whose prompt sidecars this pipeline cannot read.
+
+    :param spec: The task spec.
+    :raises UnsupportedPromptDtypeError: If ``spec.prompt_dtype`` is not
+        ``"uint8"``.
+    """
+    if spec.prompt_dtype == "uint8":
+        return
+    raise UnsupportedPromptDtypeError(
+        f"task {spec.name!r} declares prompt_dtype {spec.prompt_dtype!r}, whose "
+        f"sidecars are written as "
+        f"'{PROMPT_SIDECAR_SUFFIXES[spec.prompt_dtype]}' files. This training "
+        "pipeline reads uint8 image sidecars only: it decodes the page, the "
+        "prompt and the ground truth through PIL into ONE (H, W, 9) uint8 "
+        "stack and normalises it with a single /255. Training this task needs "
+        "three things this port does not have -- a document-mask source so the "
+        "sidecars can be precomputed at all (upstream uses an MBD segmentation "
+        "network), a decoder arm for the array sidecar, and a dtype-aware "
+        "normalisation so an already-[0, 1] prompt is not divided by 255 "
+        "again. See src/train/doc_res/README.md."
+    )
+
+
 # DECISION plan-2026-09-08T111844-de235227/D-029: pairing is by
 # :func:`pairing_key` AND by pixel size. Do not simplify this to a
 # stem-only match: NoisyOffice ships `clean_images_grayscale_
@@ -478,8 +549,11 @@ def collect_dataset_triplets(dir_path: Path, spec: TaskSpec) -> List[SampleTripl
     :param dir_path: The dataset directory.
     :param spec: The task spec; supplies the sidecar suffix.
     :return: The usable triplets, in sorted input order.
+    :raises UnsupportedPromptDtypeError: If the task's prompt is not ``uint8``;
+        see :func:`require_uint8_prompt_sidecars`.
     """
-    suffix = ".png" if spec.prompt_dtype == "uint8" else ".npy"
+    require_uint8_prompt_sidecars(spec)
+    suffix = PROMPT_SIDECAR_SUFFIXES[spec.prompt_dtype]
 
     by_key: Dict[str, List[Path]] = {}
     for gt in iter_ground_truth_images(dir_path):
@@ -789,7 +863,12 @@ def create_dataset(
         drop a short final batch.
     :return: The batched, prefetched dataset.
     :raises ValueError: If ``triplets`` is empty.
+    :raises UnsupportedPromptDtypeError: If the task's prompt sidecars are not
+        uint8 images. Checked here as well as in
+        :func:`collect_dataset_triplets` because a caller may hand-build a
+        worklist; the decode arm below is the thing that cannot read them.
     """
+    require_uint8_prompt_sidecars(spec)
     if not triplets:
         raise ValueError("no (page, prompt, ground-truth) triplets for the dataset")
 

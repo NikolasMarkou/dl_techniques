@@ -477,6 +477,32 @@ class TestBinarizationIsArgmaxNotAThreshold:
             f"{np.unique(after)}"
         )
 
+    def test_the_internal_class_order_diverges_but_the_written_page_does_not(
+            self,
+    ):
+        """D-032. The divergence from upstream is INTERNAL and stays internal.
+
+        Upstream's ink is class **0**, and that is traceable from source:
+        ``loaders/docres_loader.py:114-123`` thresholds the GT to ``{0, 255}``
+        then divides by 255 (ink -> 0), and ``inference.py:250-252`` argmaxes
+        then multiplies by 255 (class 1 -> white background). This port fixes
+        ink at class 1 instead -- deliberately, because flipping it now would
+        invert every page the shipped binarization checkpoint produces.
+
+        What makes that safe is the second half of this guard: the WRITTEN page
+        carries upstream's own polarity regardless. Ink is 0 and background is
+        255, the DIBCO convention the ground truth uses, so no external
+        consumer can observe the internal order. If this guard ever goes red on
+        its second half, the divergence has escaped and the constant must be
+        flipped (and every checkpoint retrained).
+        """
+        assert BINARY_INK_CLASS_INDEX == 1, (
+            "upstream is 0; this port's 1 is a recorded, deliberate divergence "
+            "(D-032) -- do not change it without retraining the checkpoints"
+        )
+        assert inference.INK_LEVEL_U8 == 0
+        assert inference.BACKGROUND_LEVEL_U8 == 255
+
     def test_the_padding_is_cropped_off_a_binarized_page(self):
         page = _page(33, 41, seed=9)
         result = inference.restore(
@@ -508,16 +534,16 @@ class TestTheHomomorphicBranchIsLive:
         assert below.resized is False, "1599 px must be padded, not resized"
         assert below.array.shape[1:3] == (1600, 40), below.array.shape
 
+        cap = get_task("deshadowing").max_input_size
+        assert cap == 1600, cap
         at = inference.build_input_plan(
-            _page(inference.MAX_INPUT_SIZE, 40, seed=1), get_task("deshadowing")
+            _page(cap, 40, seed=1), get_task("deshadowing")
         )
         assert at.resized is True, (
-            f"{inference.MAX_INPUT_SIZE} px must take the resized branch; "
-            "upstream's condition is `if max(w,h) < MAX_SIZE: pad`"
+            f"{cap} px must take the resized branch; upstream's condition is "
+            "`if max(w,h) < MAX_SIZE: pad`"
         )
-        assert at.array.shape[1:3] == (
-            inference.MAX_INPUT_SIZE, inference.MAX_INPUT_SIZE,
-        )
+        assert at.array.shape[1:3] == (cap, cap)
 
     def test_the_homomorphic_output_differs_from_a_plain_upsample(self):
         """A branch that agreed with the fallback would be decoration.
@@ -837,6 +863,84 @@ class TestEnd2EndChainsThreeStagesInOrder:
 # ---------------------------------------------------------------------
 # the TABLE drives the behaviour
 # ---------------------------------------------------------------------
+
+
+class TestTheCapIsATableFieldNotAMode:
+    """D-033. ``max_input_size`` is per TASK; deblurring does not carry it.
+
+    The homomorphic re-composition is a multiplicative-illumination-field
+    model. It is right for a shadow and physically wrong for a blur, which is a
+    convolution -- and upstream's ``deblurring()`` (``inference.py:200-227``)
+    has no ``MAX_SIZE`` branch at all. Since most document photographs exceed
+    1600 px, this is deblurring's COMMON path, so these guards watch the common
+    case rather than an edge case.
+    """
+
+    def test_deblurring_is_padded_at_and_above_the_size_that_caps_deshadowing(
+            self,
+    ):
+        """Same page, two tasks, two branches -- and no task string compared."""
+        cap = get_task("deshadowing").max_input_size
+        page = _page(cap, 40, seed=7)
+
+        deshadow = inference.build_input_plan(page, get_task("deshadowing"))
+        deblur = inference.build_input_plan(page, get_task("deblurring"))
+
+        assert deshadow.resized is True
+        assert deblur.resized is False, (
+            "deblurring must NOT be resized-and-re-composed: a blur is a "
+            "convolution, not a multiplicative field (upstream has no cap here)"
+        )
+        assert deblur.array.shape[1:3] == (cap, 40), deblur.array.shape
+
+    def test_the_shipped_table_gives_the_cap_to_exactly_the_upstream_two(self):
+        """The literal binding, pinned. Upstream: `inference.py:141-166`."""
+        capped = {
+            name for name in task_names()
+            if get_task(name).max_input_size is not None
+        }
+        assert capped == {"deshadowing", "appearance"}, capped
+
+    def test_a_deblurring_page_above_the_cap_keeps_every_original_pixel(self):
+        """The consequence that matters, measured end to end on the plan.
+
+        A padded plan crops back to the original; a resized plan cannot. This
+        asserts the network sees the page's own resolution.
+        """
+        cap = get_task("deshadowing").max_input_size
+        page = _page(cap + 9, 40, seed=11)
+        plan = inference.build_input_plan(page, get_task("deblurring"))
+        assert plan.resized is False
+        # `pad_to_multiple` pads up to a multiple of 8, never down.
+        assert plan.array.shape[1] >= page.shape[0]
+        assert plan.array.shape[1] - plan.pad_h == page.shape[0]
+        assert plan.array.shape[2] - plan.pad_w == page.shape[1]
+
+    def test_the_branch_follows_the_FIELD_not_the_task(self):
+        """A fabricated row moves the cap; the shipped code follows it.
+
+        This is what makes the guard above a table test rather than two
+        hard-coded expectations: giving deblurring a small cap resizes it, and
+        taking deshadowing's away pads it.
+        """
+        page = _page(200, 64, seed=17)
+
+        capped_deblur = inference.build_input_plan(
+            page, _spec_with("deblurring", max_input_size=128)
+        )
+        assert capped_deblur.resized is True
+        assert capped_deblur.array.shape[1:3] == (128, 128)
+
+        uncapped_deshadow = inference.build_input_plan(
+            page, _spec_with("deshadowing", max_input_size=None)
+        )
+        assert uncapped_deshadow.resized is False
+
+    def test_a_non_positive_cap_is_rejected_by_the_table_validator(self):
+        """A zero cap would resize every page to 0x0; the table refuses it."""
+        bad = _spec_with("deshadowing", max_input_size=0)
+        with pytest.raises(ValueError, match="max_input_size"):
+            tasks_module._validate((bad,))
 
 
 class TestTheTableDrivesTheBehaviour:

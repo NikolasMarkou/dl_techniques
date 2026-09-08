@@ -511,14 +511,18 @@ def test_the_loss_slices_the_prediction_and_round_trips():
     assert float(restored(y_true, a)) == pytest.approx(float(loss(y_true, a)))
 
 
-def test_no_task_string_is_compared_against_in_this_module():
-    """Structural twin of the behavioural guard above.
+def _task_string_branch_offenders(source_path: Path) -> list:
+    """Every task-string COMPARISON or dict KEY in one module.
 
-    A task name may appear as a DEFAULT (``task: str = "binarization"``); it may
-    never appear in a comparison or as a dict key, which are the two shapes a
-    per-task branch takes.
+    Interface contract: the shared instrument behind the repo-wide invariant in
+    ``tasks.py``'s module docstring. Takes a path to a Python source file;
+    returns a list of human-readable ``"<kind> at line N"`` strings, empty when
+    the module is clean. It deliberately does NOT flag a task name used as a
+    default, a tuple element or a data value -- ``infer_doc_res.END2END_STAGES``
+    is a legitimate ordered tuple of stage names and is not a branch. Never
+    raises; a syntactically invalid module would raise from ``ast.parse``.
     """
-    tree = ast.parse(Path(inspect.getfile(C)).read_text())
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
     names = set(task_names())
     offenders = []
     for node in ast.walk(tree):
@@ -532,10 +536,122 @@ def test_no_task_string_is_compared_against_in_this_module():
             for key in node.keys:
                 if isinstance(key, ast.Constant) and key.value in names:
                     offenders.append(f"dict key at line {node.lineno}")
+    return offenders
+
+
+def test_no_task_string_is_compared_against_in_this_module():
+    """Structural twin of the behavioural guard above.
+
+    A task name may appear as a DEFAULT (``task: str = "binarization"``); it may
+    never appear in a comparison or as a dict key, which are the two shapes a
+    per-task branch takes.
+    """
+    offenders = _task_string_branch_offenders(Path(inspect.getfile(C)))
     assert not offenders, (
         "task-string branching inside train/doc_res/common.py: "
         + ", ".join(offenders)
     )
+
+
+def test_no_task_string_is_compared_against_in_any_shipped_train_doc_res_module():
+    """The same rule, over EVERY module in ``src/train/doc_res/``.
+
+    The per-module guards (this file's, and ``test_inference.py``'s text
+    backstop) each watched one file, so ``prepare_doc_res_data.py`` and
+    ``train_doc_res.py`` -- the two entry points a user actually runs -- were
+    unguarded while ``tasks.py`` asserted the rule tree-wide. This closes that
+    gap by discovering the modules from the package directory, so a NEW module
+    is covered the day it is added rather than the day someone remembers.
+    """
+    package_dir = Path(inspect.getfile(C)).parent
+    modules = sorted(package_dir.glob("*.py"))
+    assert len(modules) >= 5, [m.name for m in modules]
+
+    offenders = {
+        module.name: found
+        for module in modules
+        if (found := _task_string_branch_offenders(module))
+    }
+    assert not offenders, (
+        "task-string branching inside src/train/doc_res/: "
+        f"{offenders}. Task specificity belongs in the TASKS table; read a "
+        "field off the spec instead of comparing a name."
+    )
+
+
+# ---------------------------------------------------------------------------
+# The float32 prompt sidecar the pipeline cannot read (D-034)
+# ---------------------------------------------------------------------------
+
+
+def _float32_prompt_spec(name: str = "binarization"):
+    """A spec whose prompt sidecars are ``.npy`` arrays, as dewarping's are."""
+    return replace(get_task(name), prompt_dtype="float32")
+
+
+def test_the_shipped_dewarping_task_is_the_reason_this_guard_exists():
+    """Anchors the guards below to a real row of the table, not a hypothetical.
+
+    If this ever fails because dewarping became a uint8 task, the two guards
+    below stop testing the shipped tree and must be re-aimed.
+    """
+    assert get_task("dewarping").prompt_dtype == "float32"
+    assert C.PROMPT_SIDECAR_SUFFIXES["float32"] == ".npy"
+
+
+@pytest.mark.parametrize("task", sorted(task_names()))
+def test_every_task_declares_a_dtype_with_a_sidecar_suffix(task):
+    """The writer's suffix and the reader's suffix come from ONE mapping."""
+    assert get_task(task).prompt_dtype in C.PROMPT_SIDECAR_SUFFIXES
+
+
+def test_a_dtype_with_no_sidecar_suffix_is_rejected_by_the_table_validator():
+    """The enforcement behind the pin above, exercised directly.
+
+    A dtype with no entry in the mapping has no on-disk representation, so the
+    staging script could not name the file it writes. ``_validate`` refuses it
+    at import time, which is why the pin above can only ever fail as a
+    collection error on the shipped table.
+    """
+    import dl_techniques.datasets.document_restoration.tasks as tasks_module
+
+    bad = replace(get_task("binarization"), prompt_dtype="float64")
+    with pytest.raises(ValueError, match="prompt_dtype"):
+        tasks_module._validate((bad,))
+
+
+def test_collecting_triplets_for_a_float32_prompt_task_refuses_by_name(tmp_path):
+    """A float32 prompt is refused at WORKLIST time, not mid-epoch.
+
+    The decoder opens all three paths with ``PIL.Image.open``, which raises
+    ``UnidentifiedImageError`` on an ``.npy`` file from inside a
+    ``tf.numpy_function`` -- i.e. after ``fit()`` has started. This turns that
+    into a named refusal at startup that says what is missing.
+    """
+    with pytest.raises(C.UnsupportedPromptDtypeError) as excinfo:
+        C.collect_dataset_triplets(tmp_path, _float32_prompt_spec())
+
+    message = str(excinfo.value)
+    assert ".npy" in message, message
+    for needed in ("mask", "decoder arm", "normalisation"):
+        assert needed in message, message
+
+
+def test_building_a_dataset_for_a_float32_prompt_task_refuses_by_name(config):
+    """The second entry point: a hand-built worklist must be refused too."""
+    triplets = C.collect_task_triplets(config)
+    assert triplets
+    with pytest.raises(C.UnsupportedPromptDtypeError):
+        C.create_dataset(
+            triplets, config, _float32_prompt_spec(), is_training=True
+        )
+
+
+def test_a_uint8_prompt_task_is_not_refused(config):
+    """The guard discriminates: every shipped-trainable task still builds."""
+    C.require_uint8_prompt_sidecars(get_task("binarization"))
+    triplets = C.collect_task_triplets(config)
+    assert C.create_dataset(triplets, config, config.spec, is_training=True)
 
 
 # ---------------------------------------------------------------------------

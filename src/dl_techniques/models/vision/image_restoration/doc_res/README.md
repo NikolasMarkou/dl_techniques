@@ -198,7 +198,7 @@ An unknown variant raises `ValueError` listing the valid keys.
 
 ## 7. Constraints you must read before using this
 
-### 7.1 Upstream PyTorch weights CANNOT be loaded into this port
+### 7.1 Upstream PyTorch weights cannot be loaded WITHOUT a channel permutation
 
 This is the constraint most likely to cost you a wasted experiment, so it is stated
 before anything else can go wrong.

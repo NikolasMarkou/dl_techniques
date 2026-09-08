@@ -9,9 +9,20 @@ prediction into a picture.
 Upstream spreads those three decisions across ``inference.py``, ``eval.py``,
 ``train.py`` and ``loaders/docres_loader.py``, with the prompt recipes
 duplicated verbatim three times. **This table is the one place they live in
-this port.** Nothing else in the tree may branch on a task string: the staging
-script, the training pipeline and the inference shim all resolve a name through
-:func:`get_task` and read fields off the returned :class:`TaskSpec`.
+this port.** No consumer may *branch* on a task string -- no ``== "name"``
+comparison and no dict keyed by task names: the staging script, the training
+pipeline and the inference shim all resolve a name through :func:`get_task` and
+read fields off the returned :class:`TaskSpec`. That is the invariant, and it is
+exactly what ``test_pipeline.py::test_no_task_string_is_compared_against_in_
+the_shipped_train_doc_res_modules`` checks, over every module in
+``src/train/doc_res/``.
+
+It is deliberately narrower than "no task name appears outside this table". One
+task-name literal legitimately lives elsewhere: ``infer_doc_res.END2END_STAGES``
+names the three stages of the composite ``end2end`` mode, in order, because that
+ORDER is a property of the composite pipeline (``inference.py:305-312``) and not
+of any single task. It selects nothing and branches on nothing -- every element
+is still resolved through :func:`get_task`.
 
 The table is deliberately free of Keras: ``loss`` and ``postprocess`` are
 *names*, not objects. That keeps this module importable by the offline sidecar
@@ -27,11 +38,15 @@ Public surface:
     * :func:`get_task` — resolve a name, raising with the legal keys.
     * :func:`task_names` — the legal names, in table order.
     * The ``LOSS_*`` / ``POSTPROCESS_*`` name constants and their frozensets.
+    * :data:`PROMPT_SIDECAR_SUFFIXES` — the one dtype -> file-suffix mapping,
+      shared by the sidecar writer and the sidecar reader.
+    * :data:`CLAMP_MAX_INPUT_SIZE` — the value behind
+      :attr:`TaskSpec.max_input_size` for the two tasks that carry it.
 """
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Tuple
+from typing import Any, Callable, Mapping, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 
@@ -69,8 +84,10 @@ LOSSES: frozenset = frozenset({LOSS_L1, LOSS_CATEGORICAL_CROSSENTROPY})
 # ---------------------------------------------------------------------------
 
 POSTPROCESS_CLAMP_IMAGE: str = "clamp_image"
-"""``clip(pred, 0, 1) * 255 -> uint8``. Above 1600 px the caller additionally
-applies the homomorphic re-composition (``inference.py:163-166``)."""
+"""``clip(pred, 0, 1) * 255 -> uint8``. A task that also declares a
+:attr:`TaskSpec.max_input_size` gets the homomorphic re-composition above it
+(``inference.py:163-166``); the re-composition is bound to that FIELD, not to
+this mode, because it models a multiplicative degradation only. See D-033."""
 
 POSTPROCESS_ARGMAX_BINARY: str = "argmax_binary"
 """``argmax`` over the two supervised channels, scaled to ``{0, 255}``."""
@@ -93,6 +110,23 @@ channel is architecturally present and never trained."""
 N_PROMPT_CHANNELS: int = 3
 """Every prompt is 3 channels, so the network input is always ``3 + 3 = 6``."""
 
+PROMPT_SIDECAR_SUFFIXES: Mapping[str, str] = MappingProxyType(
+    {"uint8": ".png", "float32": ".npy"}
+)
+"""``prompt_dtype`` -> the file suffix its precomputed sidecar is written with.
+
+The ONE home of that mapping: the staging script that WRITES sidecars and the
+training pipeline that READS them both key off this dict, so a suffix known in
+two places cannot drift into a writer/reader mismatch. It is also the authority
+:func:`_validate` checks ``prompt_dtype`` against -- a dtype with no suffix has
+no on-disk representation and is therefore not a legal declaration."""
+
+CLAMP_MAX_INPUT_SIZE: int = 1600
+"""Longest edge above which upstream runs a ``clamp_image`` task at
+``1600x1600`` and rebuilds full resolution homomorphically
+(``inference.py:150-166``). The value of :attr:`TaskSpec.max_input_size` for
+the two tasks upstream applies it to."""
+
 
 @dataclass(frozen=True)
 class TaskSpec:
@@ -112,6 +146,13 @@ class TaskSpec:
             loss sees, counted from channel 0. The remainder are unsupervised.
         loss: One of :data:`LOSSES`.
         postprocess: One of :data:`POSTPROCESS_MODES`.
+        max_input_size: Longest edge at or above which inference runs the page
+            downscaled and rebuilds full resolution by homomorphic
+            re-composition, or ``None`` for a task that is always padded to a
+            multiple of 8 and run at full resolution. ``None`` is the default
+            because the re-composition is a multiplicative-field model, which
+            is right only for a multiplicative degradation. See the D-033
+            anchor below.
     """
 
     name: str
@@ -121,6 +162,7 @@ class TaskSpec:
     n_supervised_channels: int
     loss: str
     postprocess: str
+    max_input_size: Optional[int] = None
 
     @property
     def supervised_slice(self) -> slice:
@@ -132,6 +174,18 @@ class TaskSpec:
         return slice(0, self.n_supervised_channels)
 
 
+# DECISION plan-2026-09-08T111844-de235227/D-033
+# `max_input_size` is per TASK, not per post-processing mode, and deblurring's
+# `None` is LOAD-BEARING. Do NOT "tidy" the three clamp_image tasks into one
+# shared cap. At or above the cap the inference shim does not merely downscale:
+# it treats the low-resolution prediction as a multiplicative illumination
+# FIELD and rebuilds the page as `original / resize(resize(original)/pred)`
+# (`infer_doc_res._postprocess_clamp_image`). That model is right for a
+# multiplicative degradation (a shadow, an appearance cast) and physically
+# wrong for a convolutional one (a blur) -- which is why upstream's
+# `deblurring()` (`inference.py:200-227`) has no MAX_SIZE branch at all and
+# always pads. Most document photographs exceed 1600 px, so this is the common
+# path for deblurring, not an edge case. See D-033 in decisions.md.
 _TASK_LIST: Tuple[TaskSpec, ...] = (
     # `train.py:149` -> L1 on channels [:2] only; the loaded mask ground truth
     # is never used in the loss, so the 3rd channel is unsupervised.
@@ -152,6 +206,7 @@ _TASK_LIST: Tuple[TaskSpec, ...] = (
         n_supervised_channels=3,
         loss=LOSS_L1,
         postprocess=POSTPROCESS_CLAMP_IMAGE,
+        max_input_size=CLAMP_MAX_INPUT_SIZE,
     ),
     TaskSpec(
         name="appearance",
@@ -161,6 +216,7 @@ _TASK_LIST: Tuple[TaskSpec, ...] = (
         n_supervised_channels=3,
         loss=LOSS_L1,
         postprocess=POSTPROCESS_CLAMP_IMAGE,
+        max_input_size=CLAMP_MAX_INPUT_SIZE,
     ),
     TaskSpec(
         name="deblurring",
@@ -170,6 +226,10 @@ _TASK_LIST: Tuple[TaskSpec, ...] = (
         n_supervised_channels=3,
         loss=LOSS_L1,
         postprocess=POSTPROCESS_CLAMP_IMAGE,
+        # `inference.py:200-227`: upstream's `deblurring()` has NO MAX_SIZE
+        # branch. A blur is a convolution, not a multiplicative field, so the
+        # homomorphic re-composition the cap triggers would be the wrong model.
+        max_input_size=None,
     ),
     # `train.py:146` -> CrossEntropy on channels [:2] as a 2-class logit pair,
     # `inference.py:249-251` -> softmax + argmax over the same two.
@@ -196,8 +256,9 @@ def _validate(specs: Tuple[TaskSpec, ...]) -> None:
 
     Raises:
         ValueError: On a duplicate name, an unknown loss or post-processing
-            mode, a non-string dtype tag, or a supervised-channel count outside
-            ``1..N_OUTPUT_CHANNELS``.
+            mode, a dtype tag with no entry in
+            :data:`PROMPT_SIDECAR_SUFFIXES`, a supervised-channel count outside
+            ``1..N_OUTPUT_CHANNELS``, or a non-positive ``max_input_size``.
     """
     seen = set()
     for spec in specs:
@@ -214,7 +275,7 @@ def _validate(specs: Tuple[TaskSpec, ...]) -> None:
                 f"task {spec.name!r} declares unknown postprocess "
                 f"{spec.postprocess!r}; legal: {sorted(POSTPROCESS_MODES)}"
             )
-        if spec.prompt_dtype not in ("uint8", "float32"):
+        if spec.prompt_dtype not in PROMPT_SIDECAR_SUFFIXES:
             raise ValueError(
                 f"task {spec.name!r} declares unknown prompt_dtype "
                 f"{spec.prompt_dtype!r}"
@@ -223,6 +284,12 @@ def _validate(specs: Tuple[TaskSpec, ...]) -> None:
             raise ValueError(
                 f"task {spec.name!r} supervises {spec.n_supervised_channels} of "
                 f"{N_OUTPUT_CHANNELS} output channels, which is out of range"
+            )
+        if spec.max_input_size is not None and spec.max_input_size <= 0:
+            raise ValueError(
+                f"task {spec.name!r} declares max_input_size "
+                f"{spec.max_input_size!r}; it must be a positive pixel count "
+                "or None"
             )
 
 

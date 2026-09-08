@@ -422,13 +422,16 @@ class RestormerDownsample(keras.layers.Layer):
         # measures that absorption bit-identically rather than asserting it.
         #
         # LOAD-BEARING CONSEQUENCE: the absorption argument holds only for
-        # from-scratch training. It makes this port INCOMPATIBLE WITH LOADING
-        # UPSTREAM DOCRES PYTORCH WEIGHTS -- a transferred checkpoint would
-        # feed every downstream conv a permuted channel axis it was never
-        # trained on. That is why `pretrained=True` raises
-        # `NotImplementedError`. If weight transfer is ever wanted, the fix is
-        # an explicit permutation layer at each of these sites, NOT a tweak
-        # here. See decisions.md D-007.
+        # from-scratch training. UPSTREAM DOCRES PYTORCH WEIGHTS CANNOT BE
+        # LOADED INTO THIS PORT WITHOUT UNDOING THE PERMUTATION -- a naively
+        # transferred checkpoint feeds every downstream conv a permuted channel
+        # axis it was never trained on, silently. The difference is a FIXED,
+        # known permutation, not an unknown one, so a transfer script that
+        # permutes the affected conv weight tensors would work; nothing like
+        # that is shipped, which is why `pretrained=True` raises
+        # `NotImplementedError`. If weight transfer is ever wanted, write that
+        # permutation explicitly (a permutation layer at each of these sites,
+        # or a permuting loader), NOT a tweak here. See decisions.md D-007.
         self.shuffle = PixelUnshuffle2D(scale=2, name="pixel_unshuffle")
 
     @property

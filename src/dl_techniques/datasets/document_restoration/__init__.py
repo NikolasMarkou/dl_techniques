@@ -23,8 +23,9 @@ Public surface:
       helpers (the dewarping mask is a caller input; the MBD network that
       produces it upstream is not part of this port).
     * :class:`TaskSpec`, :data:`TASKS`, :func:`get_task`, :func:`task_names`.
-    * :data:`N_OUTPUT_CHANNELS`, :data:`N_PROMPT_CHANNELS`, and the ``LOSS_*``
-      / ``POSTPROCESS_*`` name constants.
+    * :data:`N_OUTPUT_CHANNELS`, :data:`N_PROMPT_CHANNELS`,
+      :data:`PROMPT_SIDECAR_SUFFIXES`, :data:`CLAMP_MAX_INPUT_SIZE`, and the
+      ``LOSS_*`` / ``POSTPROCESS_*`` name constants.
 """
 
 from .dtsprompt import (
@@ -43,6 +44,7 @@ from .dtsprompt import (
     sauvola_mod_binarization,
 )
 from .tasks import (
+    CLAMP_MAX_INPUT_SIZE,
     LOSS_CATEGORICAL_CROSSENTROPY,
     LOSS_L1,
     LOSSES,
@@ -52,6 +54,7 @@ from .tasks import (
     POSTPROCESS_CLAMP_IMAGE,
     POSTPROCESS_FLOW_REMAP,
     POSTPROCESS_MODES,
+    PROMPT_SIDECAR_SUFFIXES,
     TASKS,
     TaskSpec,
     get_task,
@@ -60,6 +63,7 @@ from .tasks import (
 
 __all__ = [
     "BACKGROUND_WORKING_SIZE",
+    "CLAMP_MAX_INPUT_SIZE",
     "DILATE_KERNEL_SIZE",
     "MEDIAN_KERNEL_SIZE",
     "SAUVOLA_BINARY_THRESHOLD",
@@ -72,6 +76,7 @@ __all__ = [
     "POSTPROCESS_CLAMP_IMAGE",
     "POSTPROCESS_FLOW_REMAP",
     "POSTPROCESS_MODES",
+    "PROMPT_SIDECAR_SUFFIXES",
     "TASKS",
     "TaskSpec",
     "appearance_prompt",

@@ -69,7 +69,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from dl_techniques.datasets.document_restoration import TASKS, get_task
+from dl_techniques.datasets.document_restoration import (
+    PROMPT_SIDECAR_SUFFIXES,
+    TASKS,
+    get_task,
+)
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------------
@@ -1221,7 +1225,14 @@ def precompute_sidecars(
     import numpy as np
     from PIL import Image
 
-    suffix = ".png" if spec.prompt_dtype == "uint8" else ".npy"
+    # UNREACHABLE TODAY for anything but ".png": the only float32 task is
+    # dewarping, and dewarping is the only `requires_mask` task, which returned
+    # "skipped" above. The `.npy` writer arm below is kept because it is the
+    # correct WRITE half and costs two lines, but note that nothing can read it
+    # yet -- `common.require_uint8_prompt_sidecars` refuses a float32 task at
+    # the training end (D-034). A float32 task becomes reachable only once a
+    # document-mask source exists.
+    suffix = PROMPT_SIDECAR_SUFFIXES[spec.prompt_dtype]
     started = time.time()
     written = present = failed = 0
     for image in images:

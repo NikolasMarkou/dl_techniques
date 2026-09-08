@@ -84,16 +84,30 @@ RESAMPLING STAYS IN FLOAT.
     ``common.py`` uses) and resamples the float. The difference is below one
     grey level and it removes a quantisation, not a behaviour.
 
-THE 1600 px CAP APPLIES TO EVERY ``clamp_image`` TASK.
-    Upstream applies it to appearance and deshadowing but not to deblurring,
-    which is a per-task-string branch. The ``TASKS`` table binds all three to
-    ``POSTPROCESS_CLAMP_IMAGE`` and that constant's own docstring already
-    attaches the homomorphic re-composition to the *mode*. Keying the cap off
-    the mode is the only way to honour "no task-string branching outside
-    ``TASKS``"; deblurring consequently gains the cap. Nothing observes the
-    difference today (the deblurring corpus host is dead and no deblurring
-    checkpoint exists), and the alternative is the branch the table exists to
-    forbid. See D-030.
+THE 1600 px CAP IS A PER-TASK FIELD, AND DEBLURRING DOES NOT CARRY IT.
+    Upstream applies the cap to appearance and deshadowing but not to
+    deblurring. Step 13 keyed the cap off ``spec.postprocess`` to avoid a
+    task-string branch, which gave deblurring the cap (D-030); that was
+    understated as "a resolution cap". It is not one. At or above the cap
+    :func:`_postprocess_clamp_image` re-composes homomorphically -- it treats
+    the low-resolution prediction as a multiplicative illumination FIELD and
+    returns ``original / resize(resize(original)/pred)``. That model is right
+    for a shadow or an appearance cast and physically WRONG for a blur, which
+    is a convolution; and since most document photographs exceed 1600 px, it
+    would have been deblurring's common path, not an edge case. The cap is now
+    ``TaskSpec.max_input_size``, a table field: 1600 for appearance and
+    deshadowing, ``None`` for deblurring and everything else. No task string is
+    compared -- the branch reads a field. See D-033, which supersedes D-030's
+    accepted consequence.
+
+THE PROMPT IS COMPUTED BEFORE THE PAD, WHERE UPSTREAM SOMETIMES PADS FIRST.
+    Upstream computes the prompt on the PADDED array for deblurring
+    (``inference.py:206-208``) and binarization (``:234-236``), and on the
+    original for appearance and deshadowing. This port always computes it on
+    the original, per the entry above. The affected region is the <=7
+    replicate-padded rows/columns that ``crop_padding`` discards anyway, plus a
+    possible +-1 in the Sauvola window size (``int(0.05 * min(H, W))``).
+    Measured as negligible; recorded because it is a deviation.
 
 ``argmax`` IS TAKEN DIRECTLY, WITHOUT THE SOFTMAX.
     Upstream computes ``argmax(softmax(logits))``. Softmax is strictly
@@ -145,7 +159,6 @@ __all__ = [
     "FLOW_SMOOTHING_KERNEL",
     "FLOW_SMOOTHING_PASSES",
     "INPUT_BUILDERS",
-    "MAX_INPUT_SIZE",
     "NON_CONFIG_DESTS",
     "POSTPROCESSORS",
     "InputPlan",
@@ -195,12 +208,9 @@ flow remap (``inference.py:96``). A flow field is a coordinate map, so it is
 resolution-independent: it is predicted small, smoothed, and scaled up to the
 source resolution before the warp."""
 
-MAX_INPUT_SIZE: int = 1600
-"""Above this longest edge, a ``clamp_image`` task runs at ``1600x1600`` and
-the full-resolution output is rebuilt by homomorphic re-composition rather than
-by upsampling the prediction (``inference.py:141-166``). The threshold is
-inclusive: ``max(h, w) >= MAX_INPUT_SIZE`` takes the resized branch, matching
-upstream's ``if max(w,h) < MAX_SIZE: pad``."""
+# The 1600 px value lives in the TASKS table (`CLAMP_MAX_INPUT_SIZE`), read off
+# `spec.max_input_size` per task. It is deliberately NOT restated here: it is a
+# per-task property, not a property of this module. See D-033.
 
 FLOW_SMOOTHING_PASSES: int = 15
 """Box-blur passes over the predicted flow before the warp
@@ -217,9 +227,12 @@ BACKGROUND_LEVEL_U8: int = 255
 
 INK_LEVEL_U8: int = 0
 """Value written for the *ink* class of a binarized page. Ink is black and
-background is white, which is the DIBCO convention the ground truth uses; which
-predicted channel means ink is not restated here but read from
-``common.BINARY_INK_CLASS_INDEX``."""
+background is white -- the DIBCO convention the ground truth uses, and
+upstream's own output polarity (``inference.py:250-252``). Which predicted
+CHANNEL means ink is not restated here but read from
+``common.BINARY_INK_CLASS_INDEX``, whose value deliberately diverges from
+upstream's; that divergence stops here, because the page written out uses the
+polarity above either way. See D-032."""
 
 IMAGE_SUFFIXES: Tuple[str, ...] = (
     ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp",
@@ -487,16 +500,20 @@ def _plan_fixed_size(
 def _plan_capped(
         page: np.ndarray, spec: TaskSpec, mask: Optional[np.ndarray]
 ) -> InputPlan:
-    """Clamp-image preparation: pad below :data:`MAX_INPUT_SIZE`, resize above.
+    """Clamp-image preparation: pad, or resize if the task declares a cap.
 
-    Above the cap the network runs at ``1600x1600`` and the post-processor
-    rebuilds full resolution homomorphically; below it the page is padded and
-    the prediction is cropped, so the network sees every original pixel.
+    At or above ``spec.max_input_size`` the network runs at
+    ``max_input_size`` squared and the post-processor rebuilds full resolution
+    homomorphically; below it -- and for a task whose ``max_input_size`` is
+    ``None``, which is every size for deblurring -- the page is padded and the
+    prediction is cropped, so the network sees every original pixel. The
+    threshold is inclusive, matching upstream's ``if max(w,h) < MAX_SIZE: pad``.
     """
     height, width = page.shape[:2]
     prompt = _prompt_channels(page, spec, mask)
-    if max(height, width) >= MAX_INPUT_SIZE:
-        size = MAX_INPUT_SIZE
+    cap = spec.max_input_size
+    if cap is not None and max(height, width) >= cap:
+        size = cap
         small_page = np.clip(
             np.rint(resize_bilinear(page, size, size)), 0, 255
         ).astype(np.uint8)
@@ -529,15 +546,20 @@ def _plan_padded(
     )
 
 
-# DECISION plan-2026-09-08T111844-de235227/D-030
+# DECISION plan-2026-09-08T111844-de235227/D-030 (amended by D-033)
 # Both dispatch tables are keyed by the TASKS table's own POSTPROCESS_*
 # constants. Do NOT re-key either one on `spec.name`, and do NOT add an
-# `if spec.name == "deblurring"` to restore upstream's uncapped deblurring
-# path: a task-string comparison anywhere outside TASKS is exactly the
-# duplication the table was built to end, and the mode constant's docstring in
-# tasks.py already binds the homomorphic re-composition to the MODE. The
-# consequence is stated and accepted -- deblurring inherits the 1600 px cap it
-# does not have upstream. See D-030 in decisions.md.
+# `if spec.name == "deblurring"`: a task-string comparison anywhere outside
+# TASKS is exactly the duplication the table was built to end.
+# D-030 originally paid for that with a consequence it understated as "the
+# 1600 px cap": at or above the cap `_postprocess_clamp_image` re-composes
+# homomorphically -- a multiplicative-illumination-field model that is right
+# for a shadow and physically WRONG for a blur, on the >=1600 px path most
+# document photographs take. That consequence is no longer paid. `_plan_capped`
+# reads `spec.max_input_size`, a TABLE FIELD, which is None for deblurring
+# (upstream `inference.py:200-227` has no MAX_SIZE branch there). The dispatch
+# key stays `spec.postprocess`; only the threshold moved into the table. See
+# D-030 and D-033 in decisions.md.
 INPUT_BUILDERS: Dict[
     str, Callable[[np.ndarray, TaskSpec, Optional[np.ndarray]], InputPlan]
 ] = {

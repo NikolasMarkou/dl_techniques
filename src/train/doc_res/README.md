@@ -100,7 +100,7 @@ year: six ship `.rar`, one ships `.7z`, the rest `.zip`.
 **H-DIBCO 2015 is dead.** Five candidate hosts were probed and all five 404. It stays in the
 manifest on purpose, so every run names it rather than quietly showing a ten-row table.
 
-### Doc3D — the wired, empty dewarping slot
+### Doc3D — the empty dewarping slot, and the three things still missing
 
 Doc3D is the only corpus that can train dewarping, and it is **not downloadable by script**.
 Its HuggingFace home (`StonyBrook-CVLab/doc3D-dataset`) requires accepting a contact-info
@@ -110,9 +110,28 @@ normal, albedo and mesh components. Even granted, a full pull would dominate the
 volume; the minimum for a supervised unwarping loss is `img` + `bm`.
 
 `prepare_doc_res_data.py` never attempts it. It creates
-`.../doc_res/dewarping/doc3d/` with a README stating the gate and the size. Dropping the
-extracted corpus in that directory is the only step needed; the manifest entry, the task
-binding and the trainer's startup check already point at it.
+`.../doc_res/dewarping/doc3d/` with a README stating the gate and the size. The manifest
+entry, the task binding and the trainer's startup check already point at it.
+
+**Dropping the corpus in is NOT the only step needed.** Three things are missing, and the
+trainer says so by name rather than crashing:
+
+1. **A document-mask source.** The dewarping prompt is the only one that takes a per-page
+   mask (`requires_mask=True`); upstream gets it from a separate MBD segmentation network
+   this port does not include. Without it `precompute_sidecars` returns `status="skipped"`
+   for every dewarping dataset, so there are no sidecars to read in the first place.
+2. **An `.npy`-capable decoder.** Dewarping is the only task with `prompt_dtype="float32"`,
+   so its sidecar is an array (`PROMPT_SIDECAR_SUFFIXES["float32"] == ".npy"`), and
+   `_decode_triplet_numpy` reads all three files through `PIL.Image.open`. It also stacks
+   them into one **uint8** `(H, W, 9)` tensor, which cannot carry a continuous backward-map
+   ground truth either.
+3. **Dtype-aware normalisation.** The pipeline has exactly one `/255.0`, which is correct
+   for a uint8 prompt and would divide an already-`[0, 1]` float prompt a second time.
+
+Today, with no corpus staged, `--task dewarping` stops earlier still, at
+`MissingTrainingDataError` (below). Once Doc3D lands, it stops at
+`UnsupportedPromptDtypeError`, which names all three gaps — rather than failing inside a
+`tf.numpy_function` mid-epoch. See decisions.md D-034.
 
 Asking to *train* dewarping without it fails at startup, loudly, naming the gate:
 
@@ -151,7 +170,9 @@ The binarization prompt is `[Sauvola threshold, Sobel gradient, Sauvola binary]`
 ~8 s/call in step 9 — budget roughly 10x per page for those tasks when their corpora arrive.
 
 Dewarping sidecars are **not** precomputed: that prompt needs a per-page document mask, which
-upstream gets from an MBD segmentation network this port does not include.
+upstream gets from an MBD segmentation network this port does not include. The `.npy` writer
+arm for a `float32` prompt is therefore unreachable today, and the training pipeline refuses
+a `float32` task outright — see "the three things still missing" above.
 
 ## Archive extraction
 
