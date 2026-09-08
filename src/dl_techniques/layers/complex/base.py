@@ -63,7 +63,10 @@ class ComplexLayer(keras.layers.Layer):
         because a wire-up is impossible: real and imaginary parts drawn from two
         DISTINCT-SEED ``Initializer`` instances do give a genuine complex weight,
         but at a different scale from the shipped draw, so honouring this
-        parameter would move every CoShNet kernel's scale. (One instance called
+        parameter would move every CoShNet kernel's scale. At CoShNet's
+        ``(5, 5, 3, 20)`` kernel the shipped scheme's analytic ``mean|z|`` is
+        ``0.181850`` (12 seeds: mean ``0.181919``, std ``0.001900``, spread
+        ``+/-0.005``) against ``HeNormal``'s ``0.204665``. (One instance called
         twice does NOT -- a keras 3.8 ``Initializer`` is deterministic per shape,
         so that yields ``imag == real``; see the DECISION anchor in ``__init__``.)
         Kept because existing ``.keras`` files pass it through ``from_config``;
@@ -93,9 +96,12 @@ class ComplexLayer(keras.layers.Layer):
         # real and imaginary parts from TWO DISTINCT-SEED Initializer instances (or from an explicitly
         # complex initializer). It is refused because it moves every CoShNet kernel's scale and drops
         # Trabelsi's scheme -- per-component std at CoShNet's (5, 5, 3, 20) kernel, analytic and
-        # seed-free: shipped sqrt(2/(75+20)) = 0.145095 (mean|z| = sigma*sqrt(pi/2) = 0.181850) against
+        # seed-free: shipped sqrt(2/(75+20)) = 0.145095, mean|z| = sigma*sqrt(pi/2) = 0.181850, against
         # HeNormal's sqrt(2/75) = 0.163299 (mean|z| 0.204665; MEASURED 0.204822 at seeds 1 and 2) and
         # GlorotUniform's 0.058977, 2.46x low because keras reads this shape as fan_in=75/fan_out=500.
+        # Quote the ANALYTIC mean|z|, never one draw's: 12 seeds through this method give mean 0.181919,
+        # std 0.001900, min 0.179526, max 0.184856, and an independent 5-seed run reached 0.1780/0.1863,
+        # so read +/-0.005 as sampling spread. HeNormal's gap is ~4x that, which is why the ruling holds.
         # TRAP, and the reason this comment has been rewritten twice: do NOT probe a wire-up with ONE
         # instance called twice. A keras 3.8 Initializer is DETERMINISTIC PER SHAPE -- `i(s)` is
         # bit-identical to `i(s)`, seeded or not -- so imag == real, the "complex" weight is a real
