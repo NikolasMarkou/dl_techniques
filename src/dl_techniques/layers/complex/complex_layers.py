@@ -298,8 +298,18 @@ class ComplexConv2D(ComplexLayer):
         batch_size = input_shape[0]
 
         if self.padding == 'SAME':
-            output_height = input_shape[1] // self.strides[0] if input_shape[1] is not None else None
-            output_width = input_shape[2] // self.strides[1] if input_shape[2] is not None else None
+            # ceil(dim / stride), matching what keras.ops.conv(padding='same')
+            # actually computes. The expression is `ComplexAveragePooling2D`'s,
+            # verbatim: floor division disagreed with the real forward pass in
+            # every cell where the stride does not divide the input evenly.
+            if input_shape[1] is not None:
+                output_height = (input_shape[1] + self.strides[0] - 1) // self.strides[0]
+            else:
+                output_height = None
+            if input_shape[2] is not None:
+                output_width = (input_shape[2] + self.strides[1] - 1) // self.strides[1]
+            else:
+                output_width = None
         else:  # VALID padding
             if input_shape[1] is not None:
                 output_height = (input_shape[1] - self.kernel_size[0]) // self.strides[0] + 1

@@ -20,7 +20,8 @@ from dl_techniques.layers.complex.complex_layers import (
     ComplexLayer,
     ComplexConv2D,
     ComplexDense,
-    ComplexReLU
+    ComplexReLU,
+    ComplexAveragePooling2D,
 )
 
 
@@ -514,6 +515,117 @@ def test_kernel_initializer_is_never_invoked_during_build(factory, build_shape):
     assert not np.allclose(np.real(kernel), _SpyInitializer.SENTINEL), (
         "the kernel carries the spy's sentinel value — the initializer's output "
         "reached the weights"
+    )
+
+
+# ---------------------------------------------------------------------
+# `compute_output_shape` pinned against the REAL forward pass
+# (plan-2026-09-08T070501-528ded1a Step 3; grid measured at Step 1, decisions.md D-001)
+# ---------------------------------------------------------------------
+
+# The full Step-1(a) grid, promoted from a throwaway probe into a real guard:
+# {ComplexConv2D, ComplexAveragePooling2D} x padding{SAME,VALID} x stride{1,2,3}
+# x input spatial{7,8,9} x kernel|pool{2,3} = 72 cells. The oracle is the shape
+# of a REAL forward pass on a complex64 input, never a re-derived formula --
+# a formula-vs-formula test would have agreed with the defect it is here to catch.
+
+_SHAPE_GRID = [
+    (cls_name, padding, stride, size, k)
+    for cls_name in ("ComplexConv2D", "ComplexAveragePooling2D")
+    for padding in ("SAME", "VALID")
+    for stride in (1, 2, 3)
+    for size in (7, 8, 9)
+    for k in (2, 3)
+]
+
+
+def _make_shape_grid_layer(cls_name: str, padding: str, stride: int, k: int):
+    """Build the layer for one grid cell (unbuilt)."""
+    if cls_name == "ComplexConv2D":
+        return ComplexConv2D(filters=4, kernel_size=k, strides=stride, padding=padding)
+    return ComplexAveragePooling2D(pool_size=k, strides=stride, padding=padding)
+
+
+def _shape_grid_id(cell) -> str:
+    cls_name, padding, stride, size, k = cell
+    return f"{cls_name}-{padding}-stride{stride}-in{size}-k{k}"
+
+
+@pytest.mark.parametrize(
+    "cls_name,padding,stride,size,k",
+    _SHAPE_GRID,
+    ids=[_shape_grid_id(cell) for cell in _SHAPE_GRID],
+)
+def test_compute_output_shape_agrees_with_forward_pass(cls_name, padding, stride, size, k):
+    """`compute_output_shape` must equal `tuple(forward_output.shape)`, built AND unbuilt.
+
+    Guide 3.4 requires `compute_output_shape` to answer from stored config alone,
+    so the unbuilt instance is a separate object that is never built or called.
+
+    MEASURED RED at HEAD in exactly the 8 cells where `ComplexConv2D` is under
+    `SAME` padding and the stride does not divide the input evenly (independent
+    of `k`): `compute_output_shape` floored where `keras.ops.conv(padding='same')`
+    ceils. See decisions.md D-001 for the full 72-cell reading.
+    """
+    inputs = tf.complex(
+        tf.random.normal((1, size, size, 3)),
+        tf.random.normal((1, size, size, 3)),
+    )
+    input_shape = tuple(inputs.shape)
+
+    # Unbuilt: answered from stored config only, before any build() or call().
+    unbuilt = _make_shape_grid_layer(cls_name, padding, stride, k)
+    unbuilt_shape = tuple(unbuilt.compute_output_shape(input_shape))
+
+    built = _make_shape_grid_layer(cls_name, padding, stride, k)
+    outputs = built(inputs)
+    forward_shape = tuple(outputs.shape)
+    built_shape = tuple(built.compute_output_shape(input_shape))
+
+    assert built_shape == forward_shape, (
+        f"{cls_name} padding={padding} strides={stride} input={input_shape} k={k}: "
+        f"compute_output_shape returned {built_shape} but the real forward pass "
+        f"produced {forward_shape}"
+    )
+    assert unbuilt_shape == forward_shape, (
+        f"{cls_name} padding={padding} strides={stride} input={input_shape} k={k}: "
+        f"an UNBUILT layer's compute_output_shape returned {unbuilt_shape} but the "
+        f"real forward pass produced {forward_shape} (guide 3.4: the answer must "
+        "come from stored config alone)"
+    )
+
+
+@pytest.mark.parametrize(
+    "cls_name,padding,stride,k",
+    [
+        (cls_name, padding, stride, k)
+        for cls_name in ("ComplexConv2D", "ComplexAveragePooling2D")
+        for padding in ("SAME", "VALID")
+        for stride in (1, 2, 3)
+        for k in (2, 3)
+    ],
+    ids=[
+        f"{cls_name}-{padding}-stride{stride}-k{k}"
+        for cls_name in ("ComplexConv2D", "ComplexAveragePooling2D")
+        for padding in ("SAME", "VALID")
+        for stride in (1, 2, 3)
+        for k in (2, 3)
+    ],
+)
+def test_compute_output_shape_propagates_none_dimensions(cls_name, padding, stride, k):
+    """Undefined spatial dims and an undefined batch must propagate as `None`, not raise.
+
+    A functional model built on `keras.Input` hands exactly this shape in, so a
+    raise here is a graph-construction failure rather than a wrong number.
+    """
+    layer = _make_shape_grid_layer(cls_name, padding, stride, k)
+    output_shape = tuple(layer.compute_output_shape((None, None, None, 3)))
+
+    expected_channels = 4 if cls_name == "ComplexConv2D" else 3
+    assert output_shape == (None, None, None, expected_channels), (
+        f"{cls_name} padding={padding} strides={stride} k={k}: expected "
+        f"(None, None, None, {expected_channels}) from a fully undefined spatial "
+        f"input, got {output_shape}"
     )
 
 
