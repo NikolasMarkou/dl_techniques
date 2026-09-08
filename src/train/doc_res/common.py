@@ -190,9 +190,12 @@ class DocResTrainingConfig:
     def __post_init__(self) -> None:
         """Validate the knobs at construction time.
 
-        :raises ValueError: On an unknown task or variant, a non-positive count,
-            a ``patch_size`` that is not a multiple of
-            :data:`SPATIAL_DIVISOR`, or a ``val_split`` outside ``[0, 1)``.
+        :raises ValueError: On an unknown task, a non-positive count, a
+            ``patch_size`` that is not a multiple of :data:`SPATIAL_DIVISOR`,
+            or a ``val_split`` outside ``[0, 1)``. NOT on an unknown
+            ``model_variant``: that is checked by ``DocRes.from_variant``, the
+            one authority on the legal keys, when :func:`build_model` runs
+            (D-031).
         """
         get_task(self.task)  # raises, listing the legal names
 

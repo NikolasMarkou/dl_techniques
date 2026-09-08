@@ -1,9 +1,38 @@
-# `train/doc_res` — DocRes data staging
+# `train/doc_res` — DocRes staging, training and inference
 
 DocRes conditions one Restormer backbone on five document-restoration tasks by concatenating
-three classical-CV "prompt" channels onto the RGB input. This directory holds the training
-path for that port. **Only the data-staging half exists so far** (plan step 10); the trainer,
-the CLI and the inference shim land in steps 11-13.
+three classical-CV "prompt" channels onto the RGB input. This directory holds the whole
+non-model half of that port:
+
+| Module | What it does |
+|---|---|
+| `prepare_doc_res_data.py` | Downloads, verifies, lays out and prompt-precomputes the corpora. |
+| `common.py` | The config, the CLI flags, the path worklist, the tf.data pipeline, the table-driven loss, the optimizer and `fit()`. |
+| `train_doc_res.py` | The training entry point. |
+| `infer_doc_res.py` | The inference entry point: pad, predict, post-process, write. |
+
+**Binarization is the only task with a staged training corpus today** — see
+[What is staged, and what is not](#what-is-staged-and-what-is-not) for the reason each of the
+other four is empty.
+
+```bash
+# train (one task per run)
+MPLBACKEND=Agg .venv/bin/python -m train.doc_res.train_doc_res \
+    --task binarization --epochs 2 --steps-per-epoch 50 --gpu 1
+
+# restore one page, or a directory of them
+MPLBACKEND=Agg .venv/bin/python -m train.doc_res.infer_doc_res \
+    --task binarization --input page.png --output-dir results/docres_infer \
+    --checkpoint results/doc_res_binarization_<stamp>/best_model.keras --gpu 1
+```
+
+`infer_doc_res.py` is where the padding lives. `DocRes` refuses an input whose height or width
+is not a multiple of 8 rather than padding silently, so the shim pads the top and left
+(upstream's `stride_integral`) and crops exactly that back off the prediction — an output page
+has the input page's size to the pixel. Per-task post-processing is read off the `TASKS` table
+(`dl_techniques/datasets/document_restoration/tasks.py`); no task string is compared anywhere
+outside it. **Without `--checkpoint` the model is freshly initialised and the run says so at
+WARNING level** — the output is noise, not a restoration.
 
 ## Staging
 
