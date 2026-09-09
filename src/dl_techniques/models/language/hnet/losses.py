@@ -87,7 +87,12 @@ def _compute_dtype(tensor: Any) -> str:
     :returns: ``"float64"`` or ``"float32"``.
     :rtype: str
     """
-    return "float64" if keras.backend.standardize_dtype(tensor.dtype) == "float64" else "float32"
+    # `keras.backend.standardize_dtype` is a banned Keras-2 backend call
+    # (`tests/test_the_keras2_backend_calls_are_gone.py`); the documented
+    # replacement for the single-dtype form is the `.name`-or-`str` reduction
+    # below, which normalises a `tf.DType`, a `np.dtype` and a plain string alike.
+    dtype_name = getattr(tensor.dtype, "name", None) or str(tensor.dtype)
+    return "float64" if dtype_name == "float64" else "float32"
 
 
 def ratio_loss(
