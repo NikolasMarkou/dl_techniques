@@ -151,6 +151,15 @@ def ratio_loss(
     true_ratio = keras.ops.sum(selected * valid) / denominator
     average_prob = keras.ops.sum(prob * valid) / denominator
 
+    # DECISION plan-2026-09-09T042752-6d66ac56/D-021: the three constants below stay
+    # PYTHON floats. Do NOT "tidy" them into `keras.ops.cast(1.0, dtype)` or
+    # `keras.ops.cast(n, "float64")`: that cast rounds through float32 FIRST, which
+    # was MEASURED to put a 4.6e-08 relative error into `N / (N - 1)` for every N whose
+    # ratio is not a binary fraction -- the float64 parity arm failed at N = 4 and N = 6
+    # and passed at N = 2 and N = 9 only because 2.0 and 1.125 are exact in float32.
+    # A float64 arm that happens to pick binary-fraction constants cannot see this.
+    # Mutation L10 restores the cast and is killed by exactly those two
+    # parametrizations in `test_losses.py::TestRatioLossParity`. See decisions.md D-021.
     # `train.py:37-40`. The three constants stay PYTHON floats and are combined with the
     # float64/float32 reductions directly: `keras.ops.cast(<python float>, "float64")`
     # rounds through float32 first, which was MEASURED here to put a 4.6e-08 relative

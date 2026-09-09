@@ -457,6 +457,161 @@ class TestExplicitlyPassedValues:
 
 
 # ---------------------------------------------------------------------
+# 2b. D-031: `d_intermediate` is CONSUMED
+# ---------------------------------------------------------------------
+
+
+#: The SwiGLU width of every stage of every shipped variant, MEASURED on the
+#: pre-D-031 code (where `d_intermediate` reached nothing) and re-measured after the
+#: wiring. Hand-written here as an INDEPENDENT second source: it is deliberately NOT
+#: recomputed from `build_mlp`, `reference_swiglu_hidden` or the config, because the
+#: whole claim of D-031 is that wiring a previously-dead field did not move one single
+#: shipped model. A table derived from the code under test could not make that claim.
+#: `(variant, stage) -> hidden width`.
+SHIPPED_SWIGLU_WIDTHS = {
+    ("hnet_1stage_L", 0): 2816,
+    ("hnet_1stage_L", 1): 4096,
+    ("hnet_1stage_XL", 0): 2816,
+    ("hnet_1stage_XL", 1): 5504,
+    ("hnet_2stage_L", 0): 2816,
+    ("hnet_2stage_L", 1): 2816,
+    ("hnet_2stage_L", 2): 4096,
+    ("hnet_2stage_XL", 0): 2816,
+    ("hnet_2stage_XL", 1): 4096,
+    ("hnet_2stage_XL", 2): 5504,
+    ("hnet_2stage_XL_chinese", 0): 2816,
+    ("hnet_2stage_XL_chinese", 1): 4096,
+    ("hnet_2stage_XL_chinese", 2): 5504,
+    ("hnet_2stage_XL_code", 0): 2816,
+    ("hnet_2stage_XL_code", 1): 4096,
+    ("hnet_2stage_XL_code", 2): 5504,
+}
+
+
+class TestGuardSixIntermediateWidth:
+    """``build_mlp`` reads ``d_intermediate``. For one iteration it did not.
+
+    The anchor in :func:`build_mlp` names this class. It is its guard.
+
+    The defect this replaces was invisible on the entire population that was checked:
+    every shipped variant's JSON ``d_intermediate`` EQUALS the width the 2/3 rule
+    derives, so ``[0, 0]``, ``[0, 999]`` and ``[0, 4096]`` all built the identical
+    128-wide SwiGLU and no variant test could tell. So the tests below are in two
+    halves that must BOTH hold: an explicit value must MOVE the width (which is what
+    was broken), and no shipped variant's width may move (which is what the repair must
+    not break).
+    """
+
+    # -- half one: a non-derived value actually changes the built width ------------
+
+    @pytest.mark.parametrize(
+        "d_model,d_intermediate,expected",
+        [
+            # The reviewer's own reproducer shapes, at the width they used.
+            (16, 0, 128),      # derived: round_up(8*16/3 = 42, 128)
+            (16, 999, 1024),   # honoured, rounded up
+            (16, 4096, 4096),  # honoured, already a multiple
+            # A value BELOW the derived width, so "bigger wins" cannot pass this.
+            (1024, 256, 256),  # derived would be 2816
+            # A value that is not a multiple of 128 and is not adjacent to one.
+            (256, 130, 256),
+        ],
+    )
+    def test_an_explicit_intermediate_width_is_honoured(
+        self, d_model, d_intermediate, expected
+    ):
+        """MAIN. RED against the pre-D-031 `build_mlp`, which returned 128/128/128."""
+        assert build_mlp(d_model, d_intermediate).hidden_dim == expected
+
+    def test_the_three_reviewer_values_do_not_all_build_the_same_layer(self):
+        """ANTI-VACUITY twin: the measured symptom, stated as the symptom.
+
+        The reviewer's finding was literally "``[0,0]``, ``[0,999]`` and ``[0,4096]``
+        all build an identical 128-wide SwiGLU". This asserts the negation directly,
+        so the finding cannot silently come back in a form the parametrized arm above
+        happens not to cover.
+        """
+        widths = {build_mlp(16, di).hidden_dim for di in (0, 999, 4096)}
+        assert len(widths) == 3, widths
+
+    def test_zero_derives_and_matches_the_reference_transcription(self):
+        """``0`` is the port's spelling of upstream's ``None``, not a zero-width MLP."""
+        for d_model in (64, 128, 320, 1024, 1536, 2048):
+            assert (
+                build_mlp(d_model, 0).hidden_dim
+                == build_mlp(d_model).hidden_dim
+                == reference_swiglu_hidden(d_model)
+            )
+
+    def test_the_rounding_is_upstreams_rounding_of_an_EXPLICIT_value(self):
+        """``mlp.py:24`` rounds a value it was GIVEN, not only a value it derived."""
+        multiple = SWIGLU_MULTIPLE_OF
+        for requested in (1, 127, 128, 129, 2815, 2816, 5503):
+            expected = (requested + multiple - 1) // multiple * multiple
+            assert build_mlp(64, requested).hidden_dim == expected
+
+    def test_a_negative_intermediate_width_is_refused(self):
+        with pytest.raises(ValueError, match="d_intermediate"):
+            build_mlp(64, -1)
+
+    # -- the value must REACH the layers, not just the builder ---------------------
+
+    def test_the_width_reaches_HNetBlock_and_survives_get_config(self):
+        block = HNetBlock(d_model=16, kind="T", d_intermediate=512, num_heads=2)
+        assert block.mlp.hidden_dim == 512
+        assert block.get_config()["d_intermediate"] == 512
+        assert HNetBlock(d_model=16, kind="T", num_heads=2).mlp.hidden_dim == 128
+
+    def test_the_width_reaches_every_block_of_an_HNetIsotropic_stack(self):
+        stack = HNetIsotropic(
+            d_model=16, layout="T2t1T1", d_intermediate=384, num_heads=2
+        )
+        widths = [b.mlp.hidden_dim for b in stack.blocks if b.mlp is not None]
+        assert widths == [384, 384, 384], widths
+        # The lowercase letter really has no MLP, so the sweep above is not vacuous.
+        assert [b.mlp is None for b in stack.blocks] == [False, False, True, False]
+        assert stack.get_config()["d_intermediate"] == 384
+
+    # -- half two: the shipped models did not move --------------------------------
+
+    def test_no_shipped_variants_swiglu_width_moved(self):
+        """The claim D-031 must earn: wiring a dead field changed no shipped model.
+
+        Compared against :data:`SHIPPED_SWIGLU_WIDTHS`, a hand-written table measured
+        on the code BEFORE the wiring. 16 (variant, stage) pairs.
+        """
+        measured = {
+            (name, stage): build_mlp(
+                cfg.d_model[stage], cfg.d_intermediate[stage]
+            ).hidden_dim
+            for name, cfg in MODEL_VARIANTS.items()
+            for stage in range(cfg.num_stages)
+        }
+        assert measured == SHIPPED_SWIGLU_WIDTHS
+
+    def test_the_shipped_configs_are_the_reason_the_defect_was_invisible(self):
+        """TWIN, and it is the finding: every POSITIVE shipped value equals the
+        derived one, which is exactly why no variant test could have caught this.
+
+        If a future variant is added whose ``d_intermediate`` genuinely diverges from
+        the 2/3 rule, this test goes RED -- and that is correct: it is the signal that
+        the population which used to hide the defect no longer does, and that
+        :data:`SHIPPED_SWIGLU_WIDTHS` must be re-measured rather than edited.
+        """
+        agreeing = 0
+        for name, cfg in MODEL_VARIANTS.items():
+            for stage in range(cfg.num_stages):
+                width = cfg.d_intermediate[stage]
+                if width == 0:
+                    continue
+                assert width == reference_swiglu_hidden(cfg.d_model[stage]), (
+                    name, stage, width
+                )
+                agreeing += 1
+        assert agreeing == 10, agreeing
+
+
+# ---------------------------------------------------------------------
 # 3. D-005: the RoPE decision, and its two guards
 # ---------------------------------------------------------------------
 

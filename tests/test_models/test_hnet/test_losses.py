@@ -381,3 +381,87 @@ class TestTotalRatioLoss:
     def test_no_chunking_levels_is_exactly_zero(self):
         """A 1-stage-only (never chunking) layout contributes no ratio loss at all."""
         assert float(total_ratio_loss([], ())) == 0.0
+
+
+# ---------------------------------------------------------------------
+# 5. D-031: the record's `padding_mask` is actually PICKED UP
+# ---------------------------------------------------------------------
+
+
+class TestTotalRatioLossReadsThePaddingMask:
+    """Surviving mutation S-5: `mask=record.get("padding_mask")` -> `mask=None` was
+    GREEN across all 426 model tests.
+
+    Not because the masked mean is untested -- ``TestPaddingMask`` above tests
+    :func:`ratio_loss`'s ``mask`` argument thoroughly -- but because every routing
+    record in every fixture in this repository carried an ALL-TRUE ``padding_mask``,
+    so the `sum/count` expression gives the identical number whether the key is read
+    or dropped. A mask that masks nothing cannot detect a mask that is ignored.
+
+    Every fixture below therefore masks something.
+    """
+
+    @staticmethod
+    def masked_record(seed, keep_fraction=0.5):
+        """A record whose ``padding_mask`` genuinely removes trailing positions."""
+        p, two_class, boundary = routing_draw(seed=seed)
+        valid = np.ones_like(boundary)
+        cut = int(p.shape[1] * keep_fraction)
+        valid[:, cut:] = False
+        assert not valid.all() and valid.any(), "the fixture must mask SOMETHING"
+        return {
+            "boundary_prob": two_class,
+            "boundary_mask": boundary,
+            "padding_mask": valid,
+        }
+
+    def test_a_restrictive_padding_mask_changes_the_total(self):
+        """MAIN, and the direct kill for S-5.
+
+        The same records, once through :func:`total_ratio_loss` (which must read
+        ``padding_mask``) and once through :func:`ratio_loss` with ``mask=None``
+        (which is what S-5 turned the former into). They must differ.
+        """
+        records = [self.masked_record(21), self.masked_record(22)]
+        targets = (6.0, 3.0)
+
+        with_mask = float(total_ratio_loss(records, targets))
+        ignoring_mask = sum(
+            float(ratio_loss(r["boundary_prob"], r["boundary_mask"], target_ratio=n))
+            for r, n in zip(records, targets)
+        )
+
+        assert abs(with_mask - ignoring_mask) > 1e-3, (
+            f"total_ratio_loss ignored the records' padding_mask: {with_mask} == "
+            f"{ignoring_mask}"
+        )
+
+    def test_it_equals_the_per_record_masked_terms(self):
+        """The POSITIVE statement of the same claim: the total is the masked sum.
+
+        The arm above says "not the unmasked value"; this says "IS the masked value",
+        so a third behaviour (dropping the record entirely, or masking with the wrong
+        mask) fails one of the two.
+        """
+        records = [self.masked_record(21), self.masked_record(22)]
+        targets = (6.0, 3.0)
+
+        total = float(total_ratio_loss(records, targets))
+        parts = sum(
+            float(ratio_loss(r["boundary_prob"], r["boundary_mask"],
+                             mask=r["padding_mask"], target_ratio=n))
+            for r, n in zip(records, targets)
+        )
+
+        atol = parity_atol(records[0]["boundary_mask"].size, "float64", 3.0)
+        np.testing.assert_allclose(total, parts, rtol=0, atol=atol)
+
+    def test_a_record_with_no_padding_mask_key_still_works(self):
+        """``.get`` is deliberate: a record without the key means "no mask".
+
+        This is the behaviour S-5 made unconditional, and it must remain available --
+        the guard above forbids it being the ONLY behaviour, not its existence.
+        """
+        record = self.masked_record(21)
+        del record["padding_mask"]
+        assert np.isfinite(float(total_ratio_loss([record], (6.0,))))

@@ -54,7 +54,11 @@ from dl_techniques.models.language.hnet.config import (
     n_residuals,
     n_residuals_by_stage,
 )
-from dl_techniques.models.language.hnet.losses import DEFAULT_TARGET_RATIO
+from dl_techniques.models.language.hnet.losses import (
+    DEFAULT_TARGET_RATIO,
+    ratio_loss,
+    total_ratio_loss,
+)
 from dl_techniques.models.language.hnet.model import (
     EMBEDDING_INIT_STDDEV,
     INITIALIZER_RANGE,
@@ -696,12 +700,145 @@ class TestWeightTying:
 
 
 # ---------------------------------------------------------------------
+# 3b. D-031: the config's `d_intermediate` reaches the assembled model's WEIGHTS
+# ---------------------------------------------------------------------
+
+
+class TestConfiguredIntermediateWidthReachesTheModel:
+    """A config field is only alive if it moves a weight shape on the built model.
+
+    ``tests/test_models/test_hnet/test_components.py::TestGuardSixIntermediateWidth``
+    pins the builder and the two stack classes. This pins the whole path
+    ``HNetArchConfig -> HNetStage._stack_kwargs -> HNetIsotropic -> HNetBlock ->
+    build_mlp -> SwiGLUFFN.build``, which is the path that was severed: the field
+    existed at one end and nothing at the other end read it (reviewer C-2).
+    """
+
+    @staticmethod
+    def _swiglu_kernel_shapes(model):
+        return sorted(
+            tuple(w.shape) for w in model.weights
+            if "/mlp/" in w.path and w.path.endswith("/kernel")
+        )
+
+    def test_an_explicit_width_moves_the_built_swiglu_kernels(self):
+        """MAIN. The inner ``T1`` stage carries the model's only MLP."""
+        derived = one_stage_config()
+        explicit = one_stage_config()
+        object.__setattr__(explicit, "d_intermediate", (0, 384))
+
+        shapes_derived = self._swiglu_kernel_shapes(make_model(derived))
+        shapes_explicit = self._swiglu_kernel_shapes(make_model(explicit))
+
+        # d_model = 16 -> derived round_up(8*16/3, 128) = 128.
+        assert shapes_derived == [(16, 128), (16, 128), (128, 16)], shapes_derived
+        assert shapes_explicit == [(16, 384), (16, 384), (384, 16)], shapes_explicit
+
+    def test_the_two_models_differ_ONLY_in_the_mlp_widths(self):
+        """TWIN: the change is scoped, so the arm above is not reading a re-shuffle.
+
+        Every non-MLP weight shape is identical between the two models; only the
+        three SwiGLU kernels move. A wiring that accidentally resized the mixer or
+        the embedding would pass the first arm and fail this one.
+        """
+        explicit = one_stage_config()
+        object.__setattr__(explicit, "d_intermediate", (0, 384))
+
+        def non_mlp(model):
+            # The leading path component is the MODEL's auto-uniquified name
+            # (`h_net`, `h_net_1`, ...), which differs between two instances in one
+            # process and says nothing about shape. Strip it.
+            return sorted(
+                (w.path.split("/", 1)[1], tuple(w.shape)) for w in model.weights
+                if "/mlp/" not in w.path
+            )
+
+        assert non_mlp(make_model(one_stage_config())) == non_mlp(make_model(explicit))
+
+    def test_the_declared_field_is_not_dead(self):
+        """The shape H17 forbids: a declared field nothing consumes.
+
+        Stated as an EXECUTABLE liveness check rather than as prose, because prose is
+        exactly what shipped last time -- the config docstring described a meaning
+        (``0`` = "no MLP at this stage") that no code implemented and the file's own
+        fixtures violated.
+        """
+        widths = set()
+        for value in (0, 256, 512):
+            cfg = one_stage_config()
+            object.__setattr__(cfg, "d_intermediate", (0, value))
+            widths.add(self._swiglu_kernel_shapes(make_model(cfg))[-1][0])
+        assert widths == {128, 256, 512}, widths
+
+
+# ---------------------------------------------------------------------
 # 4. The ratio loss reaches the optimizer through add_loss
 # ---------------------------------------------------------------------
 
 
 class TestRatioLossWiring:
     """`add_loss`, and specifically NOT a custom `train_step`."""
+
+    def test_a_padded_batch_changes_the_ratio_loss_ON_THE_ASSEMBLED_MODEL(self):
+        """D-031 / S-5, at model level: the mask reaches the loss AS A MASK.
+
+        The reviewer's blind-spot list: "a padded / masked batch never reaches the
+        assembled model -- every routing record's ``padding_mask`` is all-True in every
+        fixture, which is why mutating the ratio loss to ignore the mask entirely stays
+        green".
+
+        Note the shape of the assertion, which was chosen after MEASURING the obvious
+        one and finding it toothless: simply comparing ``model.losses`` with and
+        without a mask is GREEN under S-5, because the mask also changes the routing
+        (it reaches attention and chunking), so ``boundary_prob`` itself moves and the
+        loss moves with it whether or not the mask is read as a mask. The comparison
+        that discriminates is against the SAME routing records reduced both ways: the
+        model's own loss must equal the MASKED reduction of the records its forward
+        pass produced, and must not equal the unmasked reduction of those same records.
+        """
+        model = make_model(ratio_loss_alpha=1.0)
+        x = byte_ids()
+        mask = np.ones(x.shape, dtype="bool")
+        mask[:, x.shape[1] // 2:] = False
+
+        model(x, padding_mask=mask, training=True)
+        reported = float(model.losses[0])
+
+        # The identical forward pass, re-run to capture the routing records the model
+        # kept to itself. Deterministic: `training=True` adds no noise in this model.
+        _, records = model.backbone(
+            model.embeddings(x), padding_mask=mask, training=True
+        )
+        assert records, "the fixture must have at least one chunking level"
+        masked_sum = float(total_ratio_loss(records, model.target_ratios))
+        unmasked_sum = sum(
+            float(ratio_loss(r["boundary_prob"], r["boundary_mask"],
+                             target_ratio=n))
+            for r, n in zip(records, model.target_ratios)
+        )
+
+        np.testing.assert_allclose(reported, masked_sum, rtol=0, atol=1e-6)
+        assert abs(masked_sum - unmasked_sum) > 1e-3, (
+            f"the fixture's mask is not restrictive enough to discriminate: "
+            f"{masked_sum} vs {unmasked_sum}"
+        )
+
+    def test_an_all_true_padding_mask_is_the_unmasked_value(self):
+        """TWIN. The arm above must be measuring the MASK, not merely the argument.
+
+        Passing a mask that masks nothing must reproduce the no-mask number, so the
+        difference reported above is attributable to the masked positions rather than
+        to any incidental change of code path.
+        """
+        model = make_model()
+        x = byte_ids()
+
+        model(x, training=True)
+        unmasked = float(model.losses[0])
+        model(x, padding_mask=np.ones(x.shape, dtype="bool"), training=True)
+        all_true = float(model.losses[0])
+
+        np.testing.assert_allclose(all_true, unmasked, rtol=0, atol=0.0)
 
     def test_the_ratio_loss_reaches_model_losses(self):
         model = make_model()

@@ -39,6 +39,13 @@ This package has **no factory and no registry**.
     # sequence-restructuring stack with a single consumer and no factory is
     # `layers/blt/`. See decisions.md D-004 for the rejected alternative and
     # the price paid (a 33rd `layers/` subpackage, three single-use classes).
+    #
+    # DECISION plan-2026-09-09T042752-6d66ac56/D-015: the SAME ruling, restated
+    # at the step that actually created this package surface, so the anchor
+    # audit can link both entries to the site. D-015 also records that every
+    # count `layers/CLAUDE.md` states about this package was RE-DERIVED rather
+    # than incremented; if you add or remove a class here, re-run the commands
+    # printed beside those numbers instead of editing them.
 
 Each class is registered under its OWN module path
 (``dl_techniques.layers.dynamic_chunking.<module>``), so importing this package

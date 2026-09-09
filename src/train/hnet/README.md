@@ -39,6 +39,33 @@ MPLBACKEND=Agg .venv/bin/python -m train.hnet.train_hnet \
 MPLBACKEND=Agg .venv/bin/python -m train.hnet.prepare_hnet_data --dry-run
 ```
 
+## Sampling from a checkpoint
+
+```bash
+MPLBACKEND=Agg .venv/bin/python -m train.hnet.infer_hnet --help
+
+MPLBACKEND=Agg .venv/bin/python -m train.hnet.infer_hnet \
+    --checkpoint results/hnet_dev_20260909_161050/best_model.keras \
+    --prompt "The history of " --max-new-bytes 48 --temperature 0.0
+```
+
+`infer_hnet.py` is the sampling entry point: load a `.keras` checkpoint, continue a prompt byte by
+byte, decode. `--temperature 0.0` is greedy `argmax` and draws no randomness at all; a positive
+temperature samples, and `--top-p` truncates to a nucleus. There is no KV cache — each step re-runs
+the whole prefix, because this port does not implement the reference's incremental `inference_params`
+path and a second, unvalidated forward path is worse than a slow correct one.
+
+**Decoding is defensive on purpose.** The model emits BYTES, the sample is cut wherever
+`--max-new-bytes` says, and that is routinely mid-codepoint: a naive `bytes(ids).decode()` raises
+`UnicodeDecodeError` there. `split_at_codepoint_boundary` is `codecs`' incremental UTF-8 decoder
+plus one `getstate()` read, so a truncated trailing codepoint is HELD BACK and reported, while a
+genuinely invalid byte is replaced rather than buffered forever.
+
+What sampling from the one checkpoint that exists actually produces is stated under Scale below and
+in `decisions.md` D-028/D-031: 48 greedy bytes from `hnet_dev_20260909_161050` are 48 consecutive
+spaces. That is what a 170572-parameter model at `val_loss = 3.46` (~4.99 bits/byte) looks like
+after 200 steps. No quality claim is made or implied.
+
 Artifacts land in a timestamped `hnet_*` directory under repo-root `results/` (`--output-dir`
 moves the root). Checkpoint selection is on `val_loss`, whose direction is resolved by
 `train.common.resolve_monitor_mode` and never hand-written beside the monitor name.
@@ -78,15 +105,37 @@ timestep — so cost grows with sequence length faster than linearly. Measured d
 | 8192 | 38.7089 | 3.064 |
 
 Read the last column: the per-doubling cost is itself rising (1.97 → 2.39 → 2.71 → 3.06), so the
-short-sequence numbers do not extrapolate. **One block** at `L = 8192` costs 38.7 s per step; a
-model with eight of them would cost roughly five minutes per step, which puts byte-level context
-lengths in the reference's regime out of reach on this hardware regardless of which card is used.
-The same probe on the RTX 4070 (12 GB) is 1.03–1.30x slower and OOMs in the backward pass at
-`L = 4096`.
+short-sequence numbers do not extrapolate along `L` either. The same probe on the RTX 4070 (12 GB)
+is 1.03–1.30x slower and OOMs in the backward pass at `L = 4096`.
 
-That is why `dev` exists and why the shipped defaults are `--seq-len 512 --batch-size 8`. It is
-also why no reference variant has been trained here: at `d_model = 1024` with 22+ inner layers,
-none of them is a run this machine can finish.
+### What this table does NOT license
+
+**The table is a `d_model = 256, d_state = 128` measurement of ONE bare block. It is not a
+per-`L` constant and it does not transfer to another width.** An earlier version of this section
+multiplied its last row by a block count — "8 x 38.7 s ≈ five minutes per step" — and concluded
+that byte-level context lengths were out of reach on any card here. That extrapolation was then
+tested, and it was wrong by about **30x in the safe direction**: the same reasoning predicted
+2.0–3.5 s/step for the `dev` layout (two Mamba-2 blocks at `L = 512` plus one attention block) and
+the measured cost was **67 ms/step**, 168 s wall-clock for the whole 200-step run. The scan is
+compute-bound in `d_model x d_state`, which is `256 x 128 = 32768` in the probe and `64 x 16 =
+1024` at dev scale — a 32x reduction that shows up as a ~30x speed-up. Cost rises with BOTH width
+and length; a timing taken at one width says nothing about another. (`decisions.md` D-009 for the
+table, D-028 for the refutation.)
+
+So the two numbers this repository can actually reproduce are stated, and nothing is derived from
+them by multiplication:
+
+| Measured | Value | Where |
+|---|---|---|
+| one bare `Mamba2Layer(d_model=256, d_state=128, expand=2, headdim=64)`, `batch = 8`, fwd+bwd | the table above, 0.9886 s/step at `L = 512` up to 38.7089 s/step at `L = 8192`, RTX 4090 | D-009 |
+| the `dev` layout end to end through this trainer, `--seq-len 512 --batch-size 8`, RTX 4090 | **67 ms/step** steady state; 200 steps in 168 s | D-028, `results/hnet_dev_20260909_161050/` |
+
+**No ceiling is quoted for any reference variant, because none has been measured.** At
+`d_model = 1024` with 22+ inner layers a variant is far outside both rows above, in width and in
+depth at once, and this plan refuses to name a number for a configuration it never ran. What can
+be said without extrapolating: `dev` exists and the shipped defaults are `--seq-len 512
+--batch-size 8` because those are the settings that WERE run to completion here; whether a
+reference variant is feasible on this hardware is an open question, not a settled "no".
 
 ## Design notes worth knowing before editing
 

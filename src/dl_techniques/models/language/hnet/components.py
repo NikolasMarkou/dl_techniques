@@ -175,7 +175,14 @@ def build_causal_keep_mask(
     # `TypeError: ('pred must not be a Python bool', True)` the moment the function is
     # traced, at `jit_compile=False` as well as under XLA, and their EAGER result is
     # bitwise equal to this form, so the wrong call looks correct until it is traced.
-    # Measured plan step 2(b). See decisions.md D-010(b).
+    # Measured plan step 2(b). See decisions.md D-010(b), and D-017 -- which adopts
+    # this same site at the step that wrote it -- for why the predicate is rank-3 and
+    # a KEEP predicate rather than an additive bias.
+    # DECISION plan-2026-09-09T042752-6d66ac56/D-017: rank-3 `(1, L, L)` and integral.
+    # Do NOT flatten it to rank 2 (`GroupedQueryAttention` then reads it as a
+    # key-padding mask, which encodes no causal structure at all) and do NOT convert it
+    # to an additive `-1e9` bias (under `mixed_float16` that yields `0 * -inf = NaN` at
+    # every unmasked position). Both were MEASURED, D-010(e).
     positions = keras.ops.arange(seq_len)
     query_pos = positions[:, None]
     key_pos = positions[None, :]
@@ -334,6 +341,13 @@ def build_mixer(
     # split-half layer without also permuting the q/k projection rows -- and do not
     # assume RoPE is inert here: it was MEASURED live at 7.33e-01 (step 2(d)), against a
     # rope_percentage=0.0 floor of ~3e-07. See decisions.md D-005 and D-010(d).
+    # DECISION plan-2026-09-09T042752-6d66ac56/D-017: D-017 claims this same site --
+    # it is the step that wrote `build_mixer` -- for the three values passed
+    # EXPLICITLY here and below rather than defaulted: RMSNorm `epsilon=1e-5` (the
+    # factory default `1e-6` is 100x off with no shape symptom), Mamba-2
+    # `norm_before_gate=False` (that default FLIPPED in this repo on 2026-08-15), and
+    # SwiGLU `(4, 128)` with no `hidden_dim` unless one is configured. Do not delete
+    # any of the three as redundant with a default.
     rope_percentage = rotary_emb_dim / head_dim
 
     return create_attention_layer(
@@ -350,16 +364,67 @@ def build_mixer(
     )
 
 
-def build_mlp(d_model: int, name: Optional[str] = None) -> keras.layers.Layer:
+def build_mlp(
+        d_model: int,
+        d_intermediate: int = 0,
+        name: Optional[str] = None,
+) -> keras.layers.Layer:
     """Build the SwiGLU MLP that accompanies an uppercase layout letter.
+
+    Interface contract: pure. Constructs and returns an UNBUILT layer; allocates no
+    weights, reads nothing, and its resolved ``hidden_dim`` is readable before ``build``.
+
+    The hidden width follows the reference (``hnet/modules/mlp.py:21-24``) exactly:
+
+    ==========================  ================================================
+    ``d_intermediate``          hidden width
+    ==========================  ================================================
+    ``0`` (the "unset" value)   ``round_up(8 * d_model / 3, 128)`` -- derived
+    ``> 0``                     ``round_up(d_intermediate, 128)`` -- honoured
+    ==========================  ================================================
 
     :param d_model: Model width; also the MLP's output width.
     :type d_model: int
+    :param d_intermediate: The stage's configured SwiGLU width, i.e.
+        ``HNetArchConfig.d_intermediate[stage_idx]``. ``0`` means "derive it", which
+        is how this port spells the reference's ``d_intermediate=None``; any positive
+        value is HONOURED (rounded up to :data:`SWIGLU_MULTIPLE_OF`, as upstream also
+        rounds an explicit value).
+    :type d_intermediate: int
     :param name: Layer name.
     :type name: Optional[str]
-    :returns: The SwiGLU layer, sized ``round_up(8 * d_model / 3, 128)``.
+    :returns: The SwiGLU layer.
     :rtype: keras.layers.Layer
+    :raises ValueError: if ``d_intermediate`` is negative.
     """
+    if d_intermediate < 0:
+        raise ValueError(
+            f"d_intermediate must be non-negative (0 means 'derive it'), got "
+            f"{d_intermediate}"
+        )
+
+    # DECISION plan-2026-09-09T042752-6d66ac56/D-031: `d_intermediate` is CONSUMED
+    # here and this is the only place it is consumed. Do NOT "simplify" this back to
+    # the unconditional derivation: it was exactly that for one whole iteration, and
+    # the six shipped variants hid it because every one of their JSON widths happens
+    # to EQUAL the derived value (1024->2816, 1536->4096, 2048->5504), so a config
+    # field that reached nothing was invisible on the entire population that was
+    # checked. `0` is this port's spelling of the reference's `None` sentinel (an
+    # int tuple cannot carry `None`), NOT "an MLP of width zero"; upstream would
+    # build `Linear(d_model, 0)` for a literal 0 and no shipped config does that,
+    # because every stage carrying a 0 is lowercase and has no MLP at all.
+    # Guarded by test_components.py::TestGuardSixIntermediateWidth. See D-031.
+    if d_intermediate > 0:
+        multiple = SWIGLU_MULTIPLE_OF
+        hidden_dim = (d_intermediate + multiple - 1) // multiple * multiple
+        return create_ffn_layer(
+            "swiglu",
+            name=name,
+            output_dim=d_model,
+            hidden_dim=hidden_dim,
+            use_bias=False,
+        )
+
     return create_ffn_layer(
         "swiglu",
         name=name,
@@ -396,6 +461,10 @@ class HNetBlock(keras.layers.Layer):
     :param kind: Layout letter -- ``"m"``, ``"M"``, ``"t"`` or ``"T"``. Case selects
         whether the MLP branch exists.
     :type kind: str
+    :param d_intermediate: SwiGLU hidden width for ``M``/``T``; ``0`` derives
+        ``round_up(8 * d_model / 3, 128)``. Ignored by lowercase letters, which have
+        no MLP. See :func:`build_mlp`.
+    :type d_intermediate: int
     :param num_heads: Attention heads, for ``t``/``T``.
     :type num_heads: int
     :param rotary_emb_dim: Rotated head dimensions, for ``t``/``T``.
@@ -429,6 +498,7 @@ class HNetBlock(keras.layers.Layer):
             self,
             d_model: int,
             kind: str,
+            d_intermediate: int = 0,
             num_heads: int = 0,
             rotary_emb_dim: int = 0,
             max_seq_len: int = 2048,
@@ -450,6 +520,7 @@ class HNetBlock(keras.layers.Layer):
 
         self.d_model = d_model
         self.kind = kind
+        self.d_intermediate = d_intermediate
         self.num_heads = num_heads
         self.rotary_emb_dim = rotary_emb_dim
         self.max_seq_len = max_seq_len
@@ -481,7 +552,7 @@ class HNetBlock(keras.layers.Layer):
             self.norm2 = create_normalization_layer(
                 "rms_norm", name="norm2", epsilon=norm_epsilon
             )
-            self.mlp = build_mlp(d_model, name="mlp")
+            self.mlp = build_mlp(d_model, d_intermediate, name="mlp")
         else:
             self.norm2 = None
             self.mlp = None
@@ -570,6 +641,7 @@ class HNetBlock(keras.layers.Layer):
         config.update({
             "d_model": self.d_model,
             "kind": self.kind,
+            "d_intermediate": self.d_intermediate,
             "num_heads": self.num_heads,
             "rotary_emb_dim": self.rotary_emb_dim,
             "max_seq_len": self.max_seq_len,
@@ -600,6 +672,9 @@ class HNetIsotropic(keras.layers.Layer):
     :type d_model: int
     :param layout: The layout string, e.g. ``"m4"``, ``"T22"``, ``"m4T1"``.
     :type layout: str
+    :param d_intermediate: SwiGLU hidden width for this stage's uppercase letters;
+        ``0`` derives it. See :func:`build_mlp`.
+    :type d_intermediate: int
     :param num_heads: Attention heads at this stage.
     :type num_heads: int
     :param rotary_emb_dim: Rotated head dimensions at this stage.
@@ -635,6 +710,7 @@ class HNetIsotropic(keras.layers.Layer):
             self,
             d_model: int,
             layout: str,
+            d_intermediate: int = 0,
             num_heads: int = 0,
             rotary_emb_dim: int = 0,
             window_size: int = -1,
@@ -662,6 +738,7 @@ class HNetIsotropic(keras.layers.Layer):
 
         self.d_model = d_model
         self.layout = layout
+        self.d_intermediate = d_intermediate
         self.num_heads = num_heads
         self.rotary_emb_dim = rotary_emb_dim
         self.window_size = window_size
@@ -684,6 +761,7 @@ class HNetIsotropic(keras.layers.Layer):
             HNetBlock(
                 d_model=d_model,
                 kind=letter,
+                d_intermediate=d_intermediate,
                 num_heads=num_heads,
                 rotary_emb_dim=rotary_emb_dim,
                 max_seq_len=max_seq_len,
@@ -770,6 +848,7 @@ class HNetIsotropic(keras.layers.Layer):
         config.update({
             "d_model": self.d_model,
             "layout": self.layout,
+            "d_intermediate": self.d_intermediate,
             "num_heads": self.num_heads,
             "rotary_emb_dim": self.rotary_emb_dim,
             "window_size": self.window_size,

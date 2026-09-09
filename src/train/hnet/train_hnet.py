@@ -56,13 +56,21 @@ SEEDING IS NOT REPEATED HERE.
 
 Scale, honestly
 ---------------
-The measured cost of this architecture on this hardware is in ``README.md``
-and is not encouraging: the Mamba-2 mixer runs a sequential scan, and one bare
-block at ``L=8192, batch=8`` costs 38.7 s per training step on an RTX 4090
-(plan ``decisions.md`` D-009). Byte-level context lengths in the reference's
-regime are out of reach here regardless of card. ``--arch-variant dev`` exists
-for that reason; the six reference variants are constructible and trainable in
-principle, and none of them has ever been trained in this repository.
+Two measurements exist and ``README.md`` holds both. The Mamba-2 mixer runs a
+sequential scan, and one BARE block at ``d_model=256, d_state=128, L=8192,
+batch=8`` costs 38.7 s per training step on an RTX 4090 (``decisions.md``
+D-009). The ``dev`` layout end to end through this trainer costs **67 ms per
+step** at ``--seq-len 512 --batch-size 8`` on the same card (D-028).
+
+Those two numbers are not on the same scale and neither extrapolates to the
+other: the scan is compute-bound in ``d_model x d_state``, so the first number
+describes a 32768-wide state and the second a 1024-wide one. Multiplying the
+first by a block count is exactly the reasoning that predicted 2.0-3.5 s/step
+for the run that measured 67 ms/step -- a ~30x error -- and that prediction has
+been withdrawn from the README rather than repeated here. No cost is claimed
+for any reference variant, because none has been run: the six are constructible
+and trainable in principle, and whether this hardware can finish one is an open
+question. ``--arch-variant dev`` is what WAS run to completion.
 """
 
 from __future__ import annotations

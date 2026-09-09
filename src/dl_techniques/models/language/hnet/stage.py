@@ -299,6 +299,10 @@ class HNetStage(keras.layers.Layer):
         ssm = get_stage_cfg(arch_config.ssm_cfg, stage_idx)
         self._stack_kwargs: Dict[str, Any] = {
             "d_model": self.d_model,
+            # Per-stage, list-indexed exactly like `attn`/`ssm` above and exactly like
+            # the reference's `config.d_intermediate[self.stage_idx]`
+            # (`hnet/modules/isotropic.py:81`). See D-031 and `build_mlp`.
+            "d_intermediate": arch_config.d_intermediate[stage_idx],
             "num_heads": attn["num_heads"],
             "rotary_emb_dim": attn["rotary_emb_dim"],
             "window_size": attn["window_size"],

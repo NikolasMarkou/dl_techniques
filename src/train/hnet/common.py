@@ -669,6 +669,8 @@ def build_optimizer(
         {
             "type": "cosine_decay",
             "learning_rate": config.learning_rate,
+            # DECISION plan-2026-09-09T042752-6d66ac56/D-026: `decay_steps` is
+            # `total_steps - warmup_steps`, NOT `total_steps`. Do not "simplify" it.
             # `decay_steps` is measured from the END of warmup, not from step
             # 0: `WarmupSchedule.__call__` hands the primary schedule
             # `step - warmup_steps` (``warmup_schedule.py:174-178``). Passing

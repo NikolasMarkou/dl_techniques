@@ -194,6 +194,15 @@ class ChunkLayer(keras.layers.Layer):
                 "layer(hidden_states, boundary_mask=...)"
             )
 
+        # DECISION plan-2026-09-09T042752-6d66ac56/D-013: the padding mask is AND-ed
+        # into `boundary_mask` here. This is a deliberate DIVERGENCE and must not be
+        # "corrected" to match `dc.py`, whose padded branch reads `boundary_mask`
+        # alone because its router has already masked it. The AND is defensive: a
+        # padded position can then never be selected as a chunk boundary even if an
+        # upstream router left the bit set, and it is idempotent whenever the router
+        # did its job, so it costs nothing in the normal case. Guarded by
+        # `test_chunk_layer.py::test_the_padding_mask_removes_a_boundary_the_router_left_set`.
+        # See decisions.md D-013.
         keep = keras.ops.cast(boundary_mask, "bool")
         if mask is not None:
             keep = keras.ops.logical_and(keep, keras.ops.cast(mask, "bool"))

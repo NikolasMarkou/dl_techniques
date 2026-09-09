@@ -343,6 +343,15 @@ def n_residuals(spec: StageSpec) -> int:
     return spec.encoder.height + spec.decoder.height + n_residuals(spec.main)
 
 
+# DECISION plan-2026-09-09T042752-6d66ac56/D-016: TWO functions, deliberately, and
+# neither is redundant. Do NOT delete `n_residuals_by_stage` as a duplicate of
+# `n_residuals`: the reference does NOT scale a hierarchy by one number. `hnet.py:121-147`
+# threads `parent_residuals` INWARD, so stage k is scaled by the outside-in CUMULATIVE
+# count -- (8, 52) for hnet_1stage_L, (8, 20, 74) for hnet_2stage_XL -- and the two agree
+# ONLY at the innermost stage. Using the total everywhere scales a 2-stage model's outer
+# sandwich by 74 instead of 8, an init sqrt(74/8) = 3.04x too small, with no shape symptom.
+# `n_residuals` is kept because it IS the pinned total and the last element of the tuple
+# provably equals it. See decisions.md D-016 (the surprise) and D-021 (the choice).
 def n_residuals_by_stage(spec: StageSpec) -> Tuple[int, ...]:
     """The reference's OUTSIDE-IN CUMULATIVE residual counts, one per stage.
 
@@ -545,8 +554,16 @@ class HNetArchConfig:
     :type arch_layout: Any
     :param d_model: Hidden width at each stage.
     :type d_model: Tuple[int, ...]
-    :param d_intermediate: SwiGLU intermediate width at each stage; ``0`` means the
-        stage's stacks carry no MLP (which must agree with the layout's letter case).
+    :param d_intermediate: SwiGLU intermediate width at each stage. It is CONSUMED --
+        :func:`~dl_techniques.models.language.hnet.components.build_mlp` honours any
+        positive value verbatim (rounded up to a multiple of 128, as upstream also
+        rounds one), and ``0`` means "derive it" as ``round_up(8 * d_model / 3, 128)``.
+        ``0`` is this port's spelling of the reference's ``d_intermediate=None``
+        sentinel, which an int tuple cannot carry; it does NOT mean "an MLP of width
+        zero". Every shipped variant pairs its ``0`` entries with an all-lowercase
+        stage, which has no MLP at all, so the sentinel is never actually reached
+        there -- but a caller MAY pair ``0`` with an uppercase stage and get the
+        derived width, which is what this port's own test fixtures do.
     :type d_intermediate: Tuple[int, ...]
     :param vocab_size: Byte vocabulary; 256 for the raw-byte models.
     :type vocab_size: int
