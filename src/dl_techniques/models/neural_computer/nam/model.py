@@ -63,6 +63,10 @@ import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.models.language.tree_transformer.model import (
     PositionalEncoding,
     TreeTransformerBlock,
@@ -74,6 +78,7 @@ from .config import NAMConfig, NAM_VARIANTS
 from .cell import NAMCell
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.nam.model")
 class NAM(keras.Model):

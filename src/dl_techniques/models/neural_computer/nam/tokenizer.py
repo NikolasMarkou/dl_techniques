@@ -15,6 +15,7 @@ from typing import List
 
 import numpy as np
 
+# ---------------------------------------------------------------------
 
 # Token vocabulary — fixed, not learned
 VOCAB = {
@@ -57,6 +58,7 @@ DOT_ID = 20
 # Operator index mapping (for the 4-way classifier)
 OPERATOR_TO_INDEX = {14: 0, 15: 1, 16: 2, 17: 3}  # +, -, *, /
 
+# ---------------------------------------------------------------------
 
 class ArithmeticTokenizer:
     """
@@ -165,3 +167,5 @@ class ArithmeticTokenizer:
             mask |= token_ids == d_id
         mask |= token_ids == DOT_ID
         return mask
+
+# ---------------------------------------------------------------------
