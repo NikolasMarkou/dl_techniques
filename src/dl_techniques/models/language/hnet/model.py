@@ -103,6 +103,17 @@ INITIALIZER_RANGE: float = 0.02
 
 #: The ratio-loss coefficient. One scalar for the whole hierarchy; the per-level targets
 #: are the ``target_ratios`` constructor argument.
+#:
+#: **This value is a choice of THIS PORT and not a transcription.** Unlike
+#: :data:`EMBEDDING_INIT_STDDEV` and :data:`INITIALIZER_RANGE` above, which cite
+#: ``mixer_seq.py``, it cites nothing because there is nothing to cite: the coefficient
+#: lives in the reference's training script, which is not part of the released
+#: repository, and ``grep -rn "0\.03"`` over the whole reference tree returns ZERO hits.
+#: ``0.03`` is the weight the paper reports for the load-balancing term, adopted here as
+#: a documented default. Same evidential position as
+#: :data:`~dl_techniques.models.language.hnet.losses.DEFAULT_TARGET_RATIO`, and disclosed
+#: the same way; see README section 5.7. Do not later cite it as reference-faithful.
+#: Pinned by ``test_model.py::TestRatioLossWiring`` -- value, provenance and effect.
 RATIO_LOSS_ALPHA: float = 0.03
 
 #: The layer names that write INTO the residual stream, and therefore take the

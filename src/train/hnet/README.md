@@ -11,11 +11,18 @@ directory holds the whole non-model half of the port.
 | `common.py` | The config, the CLI flags, the tf.data byte pipeline, the optimizer, model construction and `fit()`. |
 | `train_hnet.py` | The training entry point. |
 
-**Nothing in this repository has ever trained an H-Net.** There are no pretrained weights, no
-checkpoints and no measured loss, accuracy or throughput for any trained model — only the
-architecture-level and pipeline-level test suites, plus the hardware measurements quoted below.
-`HNet.from_variant(..., pretrained=True)` raises `NotImplementedError` naming the variant, for
-exactly that reason.
+**No H-Net has been trained in this repository beyond a 200-step dev-scale smoke run.** There are
+no pretrained weights and no trained reference variant. What HAS run, once, is the smoke run of
+2026-09-09: the `dev` layout (`["m1", ["T1"], "m1"]`, 170572 parameters — four orders below
+`hnet_1stage_L`) on the staged Wikipedia dump, `--seq-len 512 --batch-size 8`, 10 epochs x 20 steps
+= **200 optimizer steps in 168 s** on GPU 0, logged to
+`results/hnet_dev_20260909_161050/training_log.csv`: train loss 5.4403 -> 3.5595 (ratio **0.6543**),
+`val_loss` 5.1516 -> 3.4630 monotonically, and a `best_model.keras` that reloads and reproduces its
+logits exactly. That is a proof the pipeline runs and the loss falls; it is **not** a trained model
+and carries no quality claim. Greedy decoding from that checkpoint emits 64 consecutive spaces —
+what a 170k-parameter model at ~4.99 bits/byte looks like. No accuracy, perplexity or throughput
+number for any reference variant exists. `HNet.from_variant(..., pretrained=True)` raises
+`NotImplementedError` naming the variant, for exactly that reason.
 
 ## Running it
 
@@ -100,8 +107,10 @@ none of them is a run this machine can finish.
 
 ## Where the rest lives
 
-- Model package: `src/dl_techniques/models/language/hnet/` (architecture, variants, the four
-  recorded divergences from the reference).
+- Model package: `src/dl_techniques/models/language/hnet/` (architecture, variants, and the
+  recorded divergences from the reference — do not restate the count here, it drifted from four to
+  six once already; re-derive it with
+  `grep -c '^### 5\.' src/dl_techniques/models/language/hnet/README.md`, which reads **7** today).
 - Chunking layers: `src/dl_techniques/layers/dynamic_chunking/`.
 - Byte pipeline primitives: `src/dl_techniques/datasets/byte_lm.py`.
 - Tests: `tests/test_train/test_hnet/`, `tests/test_models/test_hnet/`,

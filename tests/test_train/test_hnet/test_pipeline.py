@@ -41,7 +41,7 @@ import tensorflow as tf
 
 from dl_techniques.datasets.byte_lm import BYTE_VOCAB_SIZE
 from dl_techniques.models.language.hnet.config import MODEL_VARIANTS
-from dl_techniques.models.language.hnet.model import HNet
+from dl_techniques.models.language.hnet.model import RATIO_LOSS_ALPHA, HNet
 from train.common import resolve_monitor_mode
 from train.hnet import common as hnet_common
 from train.hnet.common import (
@@ -225,9 +225,24 @@ class TestRatioLossReachesTheOptimizer:
             model(inputs, training=True)
             return float(model.losses[0])
 
-        small = ratio_at(0.03)
-        large = ratio_at(0.30)
+        small = ratio_at(RATIO_LOSS_ALPHA)
+        large = ratio_at(10.0 * RATIO_LOSS_ALPHA)
         assert large == pytest.approx(10.0 * small, rel=1e-4)
+
+    def test_the_trainer_default_alpha_IS_the_model_packages_constant(self):
+        """The trainer's default must be the pinned constant, not a re-typed copy.
+
+        `HNetTrainingConfig.ratio_loss_alpha` defaults to `RATIO_LOSS_ALPHA`, so a
+        change to the constant changes every run launched from this CLI. Until
+        2026-09-09 nothing here observed that: `RATIO_LOSS_ALPHA 0.03 -> 0.30` was
+        MEASURED green across all 239 tests of this suite, because every alpha guard
+        above passed a literal. `test_models/test_hnet/test_model.py` owns the value
+        and effect pins; this arm owns the WIRING -- that the trainer reads the
+        constant rather than carrying a second copy that can drift from it.
+        """
+        assert tiny_config().ratio_loss_alpha == RATIO_LOSS_ALPHA
+        assert HNetTrainingConfig().ratio_loss_alpha == RATIO_LOSS_ALPHA
+        assert RATIO_LOSS_ALPHA == 0.03
 
     def test_the_trainer_never_defines_a_custom_train_step(self):
         """A HARD repo invariant, asserted on the objects rather than the text."""

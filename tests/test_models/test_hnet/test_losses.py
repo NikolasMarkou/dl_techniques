@@ -264,6 +264,37 @@ class TestTargetRatioPrecondition:
     def test_the_default_target_ratio_is_a_legal_one(self):
         assert DEFAULT_TARGET_RATIO > 1.0
 
+    def test_the_default_target_ratio_is_pinned_to_its_documented_value(self):
+        """The VALUE, against a literal written here rather than imported.
+
+        MEASURED 2026-09-09: `DEFAULT_TARGET_RATIO 6.0 -> 3.0` -- a halving of the
+        compression every default run optimises toward, since `HNet.__init__` turns
+        `target_ratios=None` into `(DEFAULT_TARGET_RATIO,) * n_levels` -- survived all
+        426 tests of `test_models/test_hnet/` AND all 239 of
+        `test_train/test_hnet/ + test_byte_lm.py`. `> 1.0` above is a precondition
+        check, not a pin: `3.0` satisfies it. This is the spelling half; the arm below
+        is the behavioural half, and neither is sufficient alone.
+        """
+        assert DEFAULT_TARGET_RATIO == 6.0
+
+    def test_the_default_target_ratio_is_OBSERVABLE_in_the_loss(self):
+        """The EFFECT half: omitting `target_ratio` must weight by 6.0 exactly.
+
+        `ratio_loss` is called WITHOUT the argument and compared against the literal
+        `6.0`, so the default path itself is graded rather than the constant's
+        spelling. The `3.0` arm is the DIFFER twin: without it, two readings of one
+        mutated constant would agree perfectly.
+        """
+        p, two_class, mask = routing_draw(seed=71)
+        default = float(ratio_loss(two_class, mask))
+        pinned = float(ratio_loss(two_class, mask, target_ratio=6.0))
+        halved = float(ratio_loss(two_class, mask, target_ratio=3.0))
+
+        np.testing.assert_allclose(default, pinned, rtol=0, atol=0.0)
+        assert abs(halved - default) > 1e-3, (
+            f"the instrument cannot tell N=3 from N=6: {halved} vs {default}"
+        )
+
 
 # ---------------------------------------------------------------------
 # 4. The sum over chunking levels

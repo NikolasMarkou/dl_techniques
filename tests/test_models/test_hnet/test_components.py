@@ -26,9 +26,13 @@ measured it UNDER-counting against a float64 oracle and missing normalize chains
 entirely, and a bound below a correct implementation's own noise floor can never pass.
 Each bound below is derived at its call site and its attained value is recorded there.
 
-Everything runs on CPU. No GPU arm is needed: the quantities pinned here are structural
-(shapes, dtypes, dispatch, exact zeros from a mask) and D-010 measured the two device
-families agreeing on all of them.
+Most of what is pinned here is structural (shapes, dtypes, dispatch, exact zeros from a
+mask) and D-010 measured the two device families agreeing on all of it. The ONE exception
+is the traced-vs-eager comparison, which is arithmetic: its bound is
+:func:`traced_parity_atol`, which MEASURES the active device's matmul precision instead of
+assuming float32. That claim was wrong here until 2026-09-09 -- the XLA arm was RED on a
+TF32 GPU at 2.69e-03 against a 1.24e-05 float32 bound -- and the wrongness was invisible
+because the file said no GPU arm was needed.
 """
 
 import inspect
@@ -57,6 +61,7 @@ from dl_techniques.models.language.hnet import components as components_module
 from dl_techniques.models.language.hnet.config import MODEL_VARIANTS
 from dl_techniques.models.language.mamba.components_v2 import Mamba2Layer
 from dl_techniques.layers.attention.group_query_attention import GroupedQueryAttention
+from tests.numerics import matmul_precision_atol, matmul_unit_roundoff
 
 from ..test_sam.dead_component_oracle import fit_one_step_moved_variables
 
@@ -821,6 +826,52 @@ def build_mixed_model(seq_len=12, d_model=32):
     return keras.Model(inputs, stack(inputs))
 
 
+def traced_parity_atol(scale, d_model=32):
+    """Bound on ``|traced forward - eager forward|`` for :func:`build_mixed_model`.
+
+    ONE definition, so the assertion and its anti-vacuity twin below cannot drift apart.
+
+    Two terms, and the larger wins -- the same shape as
+    ``test_routing_module.routing_parity_atol``:
+
+    1. **Reassociation, at true float32.** The traced kernels are free to reorder each
+       length-``d_model`` contraction, bounding the error by
+       ``d_model * eps_float32 * max|y|`` = ``32 * 1.19e-07 * max|y|``.
+    2. **A narrower matmul format.** :func:`~tests.numerics.matmul_precision_atol`
+       MEASURES the active device's matmul unit roundoff and allows 4 of them. On a
+       tensor-core GPU with TF32 enabled -- the default -- that is ``4 * 2**-11``, i.e.
+       ~4100x term 1, and it is a change of arithmetic rather than a defect.
+
+    MEASURED 2026-09-09, ``max|traced - eager|`` relative to ``max|y| ~ 3.24``, swept
+    over ten input scalings ``c`` (the round-off diagnostic: an error FLAT in ``c`` and
+    bit-identical at powers of two is round-off, an error growing or decaying with ``c``
+    is an additive-bias defect):
+
+    ==============================  =============  =============  ===========
+    regime                          graph          XLA            bound
+    ==============================  =============  =============  ===========
+    CPU (true float32)              1.19e-06       8.94e-07       1.24e-05
+    GPU 4090, TF32 DISABLED         1.31e-06       1.07e-06       1.24e-05
+    GPU 4090, TF32 ON (default)     1.31e-06       2.69e-03       6.33e-03
+    ==============================  =============  =============  ===========
+
+    The TF32-disabled GPU row is what rules out a real defect: XLA on the SAME device
+    attains the float32 bound with a 12x margin once TF32 is off, and the relative error
+    under TF32 is flat at 3.7e-04 to 9.7e-04 across ``c`` -- ~2 TF32 unit roundoffs,
+    which is round-off, not bias. Before this term existed the XLA arm read 2.69e-03
+    against 1.24e-05 on GPU 0 and was RED.
+
+    :param scale: ``max|eager output|``.
+    :type scale: float
+    :param d_model: Contraction length of the traced path.
+    :type d_model: int
+    :return: Absolute tolerance, valid in whichever matmul regime is active.
+    :rtype: float
+    """
+    reassociation = d_model * float(np.finfo(np.float32).eps) * float(scale)
+    return max(reassociation, matmul_precision_atol(scale))
+
+
 class TestTrainingAndSerialization:
 
     def test_every_weight_moves_after_one_real_optimizer_step(self):
@@ -891,12 +942,9 @@ class TestTrainingAndSerialization:
     def test_the_forward_pass_traces_in_graph_mode_and_under_xla(self, jit_compile):
         """Both mixer families, traced.
 
-        Tolerance derivation (NOT ``tests/numerics.reassociation_atol``, which D-012
-        measured under-counting): the traced kernels are free to reassociate each
-        length-``d_model`` contraction, so the error is bounded by
-        ``d_model * eps_float32 * max|y|`` -- 32 * 1.19e-07 * max|y|. Computed at the
-        call site below and printed in the failure message. Attained: 1.19e-06 (graph)
-        and 8.94e-07 (XLA) against a bound of ~1.1e-05.
+        Tolerance is :func:`traced_parity_atol` -- derived, regime-aware, and shared with
+        the anti-vacuity twin below. It is NOT ``tests/numerics.reassociation_atol``,
+        which D-012 measured under-counting on this path.
         """
         model = build_mixed_model()
         x = np.array(keras.random.normal((3, 12, 32), seed=5))
@@ -907,17 +955,38 @@ class TestTrainingAndSerialization:
         )
         got = np.array(traced(tf.constant(x)))
 
-        atol = 32 * float(np.finfo(np.float32).eps) * float(np.max(np.abs(eager)))
+        atol = traced_parity_atol(float(np.max(np.abs(eager))))
         assert atol > 0.0
         np.testing.assert_allclose(got, eager, rtol=0, atol=atol)
 
     def test_that_traced_bound_is_tight_enough_to_reject_a_wrong_answer(self):
-        """TWIN: the derived bound is not so loose that anything passes."""
+        """TWIN: the derived bound is not so loose that anything passes.
+
+        Runs in whichever matmul regime is active, so it re-proves discriminating
+        power on a TF32 GPU (where the bound is 510x looser) and not only on CPU.
+        MEASURED on GPU 0 under TF32: a different input moves the output by 4.3906e+00
+        against a bound of 6.3335e-03 -- a factor of 693.
+        """
         model = build_mixed_model()
         x = np.array(keras.random.normal((3, 12, 32), seed=5))
         other = np.array(keras.random.normal((3, 12, 32), seed=6))
         eager = np.array(model(x, training=False))
-        atol = 32 * float(np.finfo(np.float32).eps) * float(np.max(np.abs(eager)))
+        atol = traced_parity_atol(float(np.max(np.abs(eager))))
         assert np.max(
             np.abs(np.array(model(other, training=False)) - eager)
         ) > atol
+
+    def test_the_traced_bound_is_the_reassociation_term_on_a_true_float32_device(self):
+        """The regime term must be INERT where the arithmetic really is float32.
+
+        Without this, a future edit that loosened the allowance would silently
+        loosen every CPU run too, and no CPU test would notice. On a true-float32
+        device the bound must be exactly the ``32 * eps * scale`` reassociation term
+        it always was; only on a reduced-precision device may it be larger.
+        """
+        scale = 3.2428
+        reassociation = 32 * float(np.finfo(np.float32).eps) * scale
+        if matmul_unit_roundoff() > float(np.finfo(np.float32).eps) / 2.0:
+            assert traced_parity_atol(scale) > reassociation
+        else:
+            assert traced_parity_atol(scale) == reassociation

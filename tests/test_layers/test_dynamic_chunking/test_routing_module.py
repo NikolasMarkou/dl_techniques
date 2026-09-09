@@ -40,6 +40,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.layers.dynamic_chunking.routing_module import RoutingModule
+from tests.numerics import matmul_precision_atol, matmul_unit_roundoff
 
 from .hnet_reference_numpy import routing_reference
 
@@ -53,6 +54,18 @@ _TAIL_FACTOR = 8.0                               # 8-sigma tail on the random wa
 
 def routing_parity_atol(d_model: int, scale: float) -> float:
     """Bound on ``|float32 RoutingModule output - float64 oracle output|``.
+
+    **Two arithmetic regimes, one expression.** The derivation below assumes the device
+    performs TRUE float32 matmuls. On a tensor-core GPU with TF32 enabled -- the DEFAULT
+    on this box -- ``q_proj``/``k_proj`` are computed with a 10-bit mantissa instead, and
+    that is a different regime, not a defect: see the module-level note under
+    :func:`~tests.numerics.matmul_unit_roundoff`. The returned bound is therefore the
+    MAXIMUM of the float32 random-walk term derived below and
+    :func:`~tests.numerics.matmul_precision_atol`, which is 4 unit roundoffs of whatever
+    precision the active device's matmul was MEASURED to use. On CPU and on a
+    TF32-disabled GPU the second term is ~2.4e-07 and the first one wins at every
+    ``d_model``, so the CPU bound -- and with it every CPU-measured RED proof in this
+    file -- is bit-for-bit what it was before the regime term was added.
 
     Interface contract: pure function, no state, never raises for
     ``d_model >= 0``; returns a strictly positive float. Callers MUST pass
@@ -106,11 +119,12 @@ def routing_parity_atol(d_model: int, scale: float) -> float:
     :type d_model: int
     :param scale: Magnitude of the compared output, ``max|expected|``.
     :type scale: float
-    :return: Absolute tolerance.
+    :return: Absolute tolerance, valid in whichever matmul regime is currently active.
     :rtype: float
     """
     ops_count = 10.0 * float(d_model) + 1.0
-    return _TAIL_FACTOR * np.sqrt(ops_count) * _F32_U * max(1.0, float(scale))
+    float32_term = _TAIL_FACTOR * np.sqrt(ops_count) * _F32_U * max(1.0, float(scale))
+    return max(float32_term, matmul_precision_atol(scale))
 
 
 # ---------------------------------------------------------------------
@@ -350,7 +364,12 @@ class TestForwardPass:
         prob, _, selected = _run(RoutingModule(d_model=8), hidden)
         assert np.all(np.isfinite(prob)) and np.all(np.isfinite(selected))
         assert np.all(prob >= 0.0) and np.all(prob <= 1.0)
-        np.testing.assert_allclose(prob.sum(axis=-1), 1.0, rtol=0, atol=1e-6)
+        # Derived: `[1 - p, p]` is two float32 values whose exact sum is 1, so the
+        # rounded sum is off by at most 2 unit roundoffs of 1.0, and `p` itself carries
+        # the routing chain's own error -- `routing_parity_atol` bounds both.
+        np.testing.assert_allclose(
+            prob.sum(axis=-1), 1.0, rtol=0, atol=routing_parity_atol(8, 1.0)
+        )
 
     def test_position_zero_is_always_a_boundary_and_always_has_probability_one(self):
         rng = np.random.default_rng(6)
@@ -510,13 +529,31 @@ class TestGuardOneOracleParity:
             f"instrument is blind: max|delta| = {observed:.3e} <= atol = {atol:.3e}"
         )
 
-    def test_the_derived_bound_sits_above_the_measured_float32_noise(self):
+    def test_the_derived_bound_sits_above_the_active_devices_measured_noise(self):
         """The bound must be ATTAINABLE, not merely non-infinite.
 
         A bound below a correct implementation's own noise floor can never pass
         and therefore measures nothing (`tests/numerics.py`, D-024). This records
         the ratio so a future change that shrinks the bound is caught here rather
         than by a mysterious red elsewhere.
+
+        **This runs in whichever matmul regime is active, and it is the arm that
+        proved the old bound unattainable on a GPU.** MEASURED 2026-09-09, worst of
+        16 draws at ``d_model = 8``, and the bound each regime derives:
+
+        ==============================  ============  ==========  =====
+        regime                          measured      bound       ratio
+        ==============================  ============  ==========  =====
+        CPU (true float32)              8.65e-08      4.29e-06    0.02
+        GPU RTX 4090, TF32 DISABLED     8.65e-08      4.29e-06    0.02
+        GPU RTX 4090, TF32 ON (default) 1.51e-04      1.95e-03    0.08
+        ==============================  ============  ==========  =====
+
+        The middle row is the load-bearing one: with TF32 off, the GPU attains the
+        float32 bound exactly, so that bound is NOT unattainable hardware -- it is
+        unattainable *arithmetic*, and the regime term is what names the difference.
+        Before the regime term existed this test read 1.51e-04 against 4.29e-06 on
+        GPU 0 and was RED.
         """
         rng = np.random.default_rng(303)
         worst = 0.0
@@ -526,7 +563,31 @@ class TestGuardOneOracleParity:
             ref_prob, _, _ = routing_reference(hidden)
             worst = max(worst, float(np.max(np.abs(prob - ref_prob))))
         atol = routing_parity_atol(8, 1.0)
-        assert 0.0 < worst < atol, f"measured {worst:.3e} vs bound {atol:.3e}"
+        regime = (
+            "reduced-precision (TF32)"
+            if matmul_unit_roundoff() > _F32_U
+            else "true float32"
+        )
+        assert 0.0 < worst < atol, (
+            f"{regime} matmul: measured {worst:.3e} vs bound {atol:.3e}"
+        )
+
+    def test_the_bound_cannot_go_vacuous_in_either_regime(self):
+        """A regime-aware bound must not become a licence to pass anything.
+
+        The signal these guards exist to catch is O(0.1): the DIFFER twin above
+        perturbs the oracle by rolling the sequence one position, and a boundary
+        probability is O(1). MEASURED, the loosest bound this file can produce is
+        the TF32 one, ``4 * 2**-11 = 1.95e-03`` per unit of output scale -- two
+        orders below the signal. This test pins that gap so a future "just widen
+        the allowance" edit is caught here and not by a guard silently going
+        blind. It is deliberately expressed against the LOOSEST regime, so it is
+        equally meaningful on CPU, where the returned bound is 450x tighter still.
+        """
+        for d_model in (2, 4, 8, 16, 32):
+            assert routing_parity_atol(d_model, 1.0) < 1.0e-2, d_model
+        # And the regime term itself is one of exactly two known values.
+        assert matmul_unit_roundoff() in (_F32_U, 2.0 ** -11)
 
 
 # =====================================================================
@@ -645,7 +706,9 @@ class TestGuardTwoIdentityInitIsRawCosine:
         hidden[0, 1] = [1.0, 0.0, 0.0, 0.0]
         prob, _, _ = _run(RoutingModule(d_model=4), hidden)
         assert np.all(np.isfinite(prob))
-        np.testing.assert_allclose(prob[0, 1:, 1], [0.5, 0.5], rtol=0, atol=1e-6)
+        np.testing.assert_allclose(
+            prob[0, 1:, 1], [0.5, 0.5], rtol=0, atol=routing_parity_atol(4, 1.0)
+        )
 
         # DIFFER twin: a NON-zero row does not sit at 0.5.
         hidden[0, 2] = [-1.0, 0.0, 0.0, 0.0]

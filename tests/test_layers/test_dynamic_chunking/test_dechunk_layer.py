@@ -93,6 +93,31 @@ ERROR_GROWTH_ALLOWANCE = 2
 EMA_ATOL_COEFFICIENT = ROUNDED_OPS_PER_EMA_STEP * ERROR_GROWTH_ALLOWANCE
 
 
+def clamped_copy_atol(inner: np.ndarray) -> float:
+    """Bound for a comparison run at ``p = 1``, where the clamp makes the copy INEXACT.
+
+    Interface contract: pure, returns a strictly positive float; ``inner`` may be any
+    shape. Callers pass ``rtol=0``.
+
+    ``p = 1`` is clamped to :data:`DEFAULT_CLAMP_MAX` = ``1 - 1e-4`` (``dc.py:256``), so
+    ``h_t = p*x_t + (1-p)*h_{t-1}`` is not ``x_t`` but ``x_t`` short by
+    ``(1 - p) * |x_t - h_{t-1}|``. Both terms are bounded by ``max|inner|``, so the
+    systematic residue is at most ``2 * (1 - DEFAULT_CLAMP_MAX) * max|inner|`` -- and it
+    is a CLAMP offset, orders above the float32 rounding of :func:`ema_atol`, which is
+    why those call sites carried a pasted 1e-2 absolute tolerance instead of a derived
+    bound. At
+    ``max|inner| = 40`` this returns 8.0e-03, i.e. the pasted 1e-2 was very nearly right
+    and entirely unexplained.
+
+    :param inner: The ``(B, M, D)`` inner hidden states fed to the layer.
+    :type inner: numpy.ndarray
+    :return: Absolute tolerance to use with ``rtol=0``.
+    :rtype: float
+    """
+    clamp_residue = 2.0 * (1.0 - DEFAULT_CLAMP_MAX) * float(np.max(np.abs(inner)))
+    return clamp_residue + ema_atol(inner)
+
+
 def ema_atol(inner: np.ndarray) -> float:
     """The derived absolute bound for one comparison, from the input's own scale.
 
@@ -447,7 +472,13 @@ class TestForwardPass:
         boundary = np.zeros((1, 4), dtype=bool)
         boundary[0, :] = True
         out = _run(DeChunkLayer(), inner, np.zeros((1, 4), "float32"), boundary)
-        np.testing.assert_allclose(out[0, 0], DEFAULT_CLAMP_MIN, rtol=0, atol=1e-9)
+        # Derived, not pasted: with p clamped UP to `clamp_min` and h_{-1} = 0 the
+        # first step is one multiply of a magnitude-1e-4 value, so `ema_atol` on an
+        # input of that scale is the bound (1.9e-11 here).
+        np.testing.assert_allclose(
+            out[0, 0], DEFAULT_CLAMP_MIN, rtol=0,
+            atol=ema_atol(np.array([DEFAULT_CLAMP_MIN], dtype="float32")),
+        )
         assert float(np.min(np.abs(out))) > 0.0
 
         # DIFFER twin: the upper clamp is live too -- at p = 1 the un-clamped
@@ -646,8 +677,8 @@ class TestGuardTwoScatterSemantics:
         p = DEFAULT_CLAMP_MAX if 0.9 > DEFAULT_CLAMP_MAX else 0.9
         h0 = p * inner[0, 0]
         h1 = p * inner[0, 1] + (1.0 - p) * h0
-        np.testing.assert_allclose(out[0, 0], h0, rtol=0, atol=1e-6)
-        np.testing.assert_allclose(out[0, 3], h1, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(out[0, 0], h0, rtol=0, atol=ema_atol(inner))
+        np.testing.assert_allclose(out[0, 3], h1, rtol=0, atol=ema_atol(inner))
 
     def test_the_scatter_index_is_a_cumsum_and_not_a_position(self):
         """A boundary at position ``k`` maps to chunk ``rank(k)``, not to chunk ``k``.
@@ -664,8 +695,12 @@ class TestGuardTwoScatterSemantics:
 
         out = _run(DeChunkLayer(), inner, prob, boundary)
         # p ~ 1 makes the EMA an (almost) exact copy, so the columns are readable.
-        np.testing.assert_allclose(out[0, 0, 0], 10.0, rtol=0, atol=1e-2)
-        np.testing.assert_allclose(out[0, 5, 0], 20.0, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(
+            out[0, 0, 0], 10.0, rtol=0, atol=clamped_copy_atol(inner)
+        )
+        np.testing.assert_allclose(
+            out[0, 5, 0], 20.0, rtol=0, atol=clamped_copy_atol(inner)
+        )
         # DIFFER twin: chunk index 5 would have been 40.0-ish (or clipped to
         # 40.0 at the last column), which this row is measurably not.
         assert abs(float(out[0, 5, 0]) - 40.0) > 1.0
@@ -688,8 +723,12 @@ class TestGuardTwoScatterSemantics:
         out = _run(DeChunkLayer(), inner, prob, boundary)
         assert np.isfinite(out).all()
         # Positions 0 and 1 precede every boundary: clipped to chunk 0 (~1.0).
-        np.testing.assert_allclose(out[0, 0, 0], 1.0, rtol=0, atol=1e-2)
-        np.testing.assert_allclose(out[0, 1, 0], 1.0, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(
+            out[0, 0, 0], 1.0, rtol=0, atol=clamped_copy_atol(inner)
+        )
+        np.testing.assert_allclose(
+            out[0, 1, 0], 1.0, rtol=0, atol=clamped_copy_atol(inner)
+        )
         # DIFFER twin: NumPy's wrap would have put the LAST column (~3.0) there,
         # and the oracle -- which is NumPy -- does exactly that. The divergence
         # is real and is recorded, not accidental.
@@ -712,7 +751,9 @@ class TestGuardTwoScatterSemantics:
 
         out = _run(DeChunkLayer(), inner, prob, boundary)
         assert np.isfinite(out).all()
-        np.testing.assert_allclose(out[0, 0, 0], 1.0, rtol=0, atol=1e-2)
+        np.testing.assert_allclose(
+            out[0, 0, 0], 1.0, rtol=0, atol=clamped_copy_atol(inner)
+        )
         for position in range(1, seq_len):
             np.testing.assert_allclose(out[0, position, 0], out[0, 1, 0], rtol=0, atol=0.0)
         # DIFFER twin: the clipped tail is the SECOND column, not the first.
@@ -840,7 +881,17 @@ class TestGuardThreeUnderflowAtTheClamp:
         assert np.isfinite(short_closed).all()
         boundary = np.ones((2, 8), dtype=bool)
         recurrence = dechunk_reference(short_inner, short_p, boundary)
-        np.testing.assert_allclose(short_closed, recurrence, rtol=0, atol=1e-9)
+        # Derived: both sides are float64 here, and the comparison is 8 EMA steps of
+        # 4 rounded ops each on unit-scale values, so `8 * 4 * eps_float64 * max|x|`
+        # bounds it (7.1e-15) -- three orders tighter than the pasted 1e-9 it replaces.
+        closed_form_atol = (
+            8 * ROUNDED_OPS_PER_EMA_STEP
+            * float(np.finfo(np.float64).eps)
+            * float(np.max(np.abs(short_inner)))
+        )
+        np.testing.assert_allclose(
+            short_closed, recurrence, rtol=0, atol=closed_form_atol
+        )
 
 
 # =====================================================================

@@ -153,8 +153,13 @@ three chunking layers) for deserialization, so no `custom_objects` argument is n
 
 ## 5. Recorded divergences from the reference
 
-Six. Each is a deliberate choice with a consequence, not an approximation, and each is anchored in
-the source and recorded in `plans/plan-2026-09-09T042752-6d66ac56/decisions.md`.
+Seven. Each is a deliberate choice with a consequence, not an approximation, and each is anchored in
+the source and recorded in `plans/plan-2026-09-09T042752-6d66ac56/decisions.md`. The count is not
+copied between documents: re-derive it with
+
+```bash
+grep -c '^### 5\.' src/dl_techniques/models/language/hnet/README.md
+```
 
 ### 5.1 RoPE pairing is interleaved, not the reference's split-half
 
@@ -243,6 +248,22 @@ targeting for its single-stage byte models, adopted here as a documented default
 such at its definition site in `losses.py`. Do not later cite it as reference-faithful (D-021).
 
 Every training entry point is expected to set `target_ratios` per chunking level explicitly.
+
+### 5.7 `RATIO_LOSS_ALPHA = 0.03` is this port's choice too
+
+The same situation as § 5.6, one line up in `model.py`, and it was not disclosed until the
+adversarial review of 2026-09-09 pointed out that the constant sits between two CITED ones
+(`EMBEDDING_INIT_STDDEV` cites `mixer_seq.py:60`, `INITIALIZER_RANGE` cites `mixer_seq.py:53`) and
+therefore reads as transcribed. It is not: `grep -rn "0[.]03"` over the whole reference repository
+returns **zero** hits, because the coefficient lives in the training script the reference does not
+release. `0.03` is the weight the paper reports for the load-balancing term, adopted here as a
+documented default and now labelled as such at its definition site.
+
+**Consequence**: it is the auxiliary-loss weight of every run launched from `src/train/hnet/`
+(`HNetTrainingConfig.ratio_loss_alpha` defaults to it), so a training campaign should treat it as a
+hyper-parameter to sweep rather than as a fidelity constraint. Pinned by
+`test_model.py::TestRatioLossWiring` in three ways — value, provenance, and observable effect on
+`model.losses` — because a 10x change to it previously survived all 665 tests of this port.
 
 ## 6. Tests
 

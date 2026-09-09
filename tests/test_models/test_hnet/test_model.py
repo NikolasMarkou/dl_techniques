@@ -37,6 +37,7 @@ Every dimension here is tiny on purpose. This is a correctness step, and the Mam
 is sequential.
 """
 
+import collections
 import inspect
 import math
 
@@ -53,6 +54,7 @@ from dl_techniques.models.language.hnet.config import (
     n_residuals,
     n_residuals_by_stage,
 )
+from dl_techniques.models.language.hnet.losses import DEFAULT_TARGET_RATIO
 from dl_techniques.models.language.hnet.model import (
     EMBEDDING_INIT_STDDEV,
     INITIALIZER_RANGE,
@@ -144,6 +146,35 @@ def make_model(config=None, max_chunks=(6,), seed=13, build=True, **kwargs):
     return model
 
 
+def reduced_variant_config(variant):
+    """A SHIPPED variant's config at a unit-test width.
+
+    Overrides exactly four fields -- ``d_model``, ``d_intermediate``, ``num_heads`` and
+    ``rotary_emb_dim``, plus ``ssm_cfg.d_state`` -- and keeps ``arch_layout``,
+    ``window_size`` and ``vocab_size`` verbatim, so the LAYOUT (26 to 48 blocks, and the
+    only finite attention windows in the package) is what gets exercised. The
+    ``rotary_emb_dim / head_dim`` ratio is preserved exactly at the shipped 50%.
+
+    Interface contract: pure, no I/O, returns a new frozen
+    :class:`HNetArchConfig`; raises ``KeyError`` for an unknown variant name.
+
+    :param variant: A key of ``MODEL_VARIANTS``.
+    :type variant: str
+    :returns: The same architecture at ``d_model = 32`` everywhere.
+    :rtype: HNetArchConfig
+    """
+    spec = MODEL_VARIANTS[variant].to_dict()
+    stages = len(spec["d_model"])
+    spec["d_model"] = [32] * stages
+    spec["d_intermediate"] = [0] * stages
+    spec["attn_cfg"] = dict(spec["attn_cfg"])
+    spec["attn_cfg"]["num_heads"] = [4] * stages
+    spec["attn_cfg"]["rotary_emb_dim"] = [4] * stages
+    spec["ssm_cfg"] = dict(spec["ssm_cfg"])
+    spec["ssm_cfg"]["d_state"] = 8
+    return HNetArchConfig.from_dict(spec)
+
+
 def byte_ids(batch=2, length=12, seed=5, vocab=256):
     return np.random.default_rng(seed).integers(0, vocab, (batch, length)).astype("int32")
 
@@ -174,6 +205,106 @@ def weight_named(model, suffix):
 
 
 # ---------------------------------------------------------------------
+# An INDEPENDENT inventory of the residual-writing / residual-reading kernels
+# ---------------------------------------------------------------------
+#
+# DECISION plan-2026-09-09T042752-6d66ac56/D-030: these four literals are a SECOND,
+# hand-derived source for the writer/reader partition, and they must stay independent of
+# `dl_techniques.models.language.hnet.model.RESIDUAL_WRITING_PROJECTIONS`. Do NOT
+# "de-duplicate" them by importing the production tuple and selecting with it -- that is
+# exactly the shape this replaced. MEASURED 2026-09-09: with the guard selecting on the
+# production tuple, mutating it to `("out_proj", "w_o")` left all 426 tests green while
+# every `down_proj` init std moved 0.007090 -> 0.020053, and `("out_proj", "down_proj")`
+# was likewise 426/426 green. A guard whose selection predicate is the thing it grades
+# cannot fail on that thing. The one place the two sources are compared is
+# `test_the_production_constant_still_names_exactly_the_writers`, and it compares them as
+# an equality between sets, never as a filter. Rationale: decisions.md D-030.
+
+#: Dense projections that WRITE into the residual stream and therefore take the
+#: depth-scaled ``0.02 / sqrt(n_k)``. Hand-derived from the three mixer/FFN
+#: implementations, not imported: Mamba-2's ``out_proj``, attention's ``w_o``, SwiGLU's
+#: ``down_proj`` (upstream ``hnet.py:127-129`` selects ``out_proj`` and ``fc2``).
+INDEPENDENT_RESIDUAL_WRITERS = frozenset({"out_proj", "w_o", "down_proj"})
+
+#: Dense projections that READ the residual stream and keep the flat ``0.02``.
+INDEPENDENT_RESIDUAL_READERS = frozenset(
+    {"in_proj", "w_q", "w_k", "w_v", "gate_proj", "up_proj"}
+)
+
+#: Kernels inside a stack that are NOT ``keras.layers.Dense`` and that the production
+#: walk therefore never visits. Mamba-2's depthwise convolution is the only one; it must
+#: keep its factory default, which is what the assertion on it measures.
+STACK_NON_DENSE_KERNELS = frozenset({"conv1d"})
+
+#: The exact per-stage kernel inventory implied by ``two_stage_config()``'s layout
+#: ``["m1", ["T1m1", ["T1"], "m1T1"], "m1"]``, derived by hand from the letters:
+#:
+#: * stage 0 -- encoder ``m1`` and decoder ``m1``: two Mamba-2 blocks, each contributing
+#:   ``in_proj`` + ``conv1d`` + ``out_proj``;
+#: * stage 1 -- encoder ``T1m1`` and decoder ``m1T1``: two attention blocks (each
+#:   ``w_q``/``w_k``/``w_v``/``w_o`` plus a SwiGLU ``gate_proj``/``up_proj``/``down_proj``,
+#:   because an UPPERCASE letter carries an MLP) and two Mamba-2 blocks;
+#: * stage 2 -- innermost ``T1``: one attention block with its MLP.
+#:
+#: Equality against this table is what makes a RENAME visible: the production code's own
+#: ``n_scaled == 0`` raise only fires when a stack loses ALL of its writers, so a partial
+#: rename is silent there.
+EXPECTED_STACK_KERNELS = {
+    0: {"in_proj": 2, "conv1d": 2, "out_proj": 2},
+    1: {
+        "in_proj": 2, "conv1d": 2, "out_proj": 2,
+        "w_q": 2, "w_k": 2, "w_v": 2, "w_o": 2,
+        "gate_proj": 2, "up_proj": 2, "down_proj": 2,
+    },
+    2: {
+        "w_q": 1, "w_k": 1, "w_v": 1, "w_o": 1,
+        "gate_proj": 1, "up_proj": 1, "down_proj": 1,
+    },
+}
+
+#: Totals implied by the table above: 2 + 6 + 2 writers, 2 + 12 + 5 readers.
+EXPECTED_WRITER_KERNELS = 10
+EXPECTED_READER_KERNELS = 19
+
+
+def projection_name(path):
+    """The layer name that owns ``path`` -- e.g. ``out_proj`` for ``.../out_proj/kernel``."""
+    return path.rsplit("/", 2)[-2] if "/" in path else ""
+
+
+def is_stack_kernel(path):
+    """True for a kernel inside a stage's ISOTROPIC STACKS.
+
+    Excludes everything the reference's ``_init_weights`` never visits: the routing
+    module's q/k projections, the gated residual projection, the byte embedding and the
+    LM head. Upstream iterates ``self.encoder``, ``self.decoder`` and
+    ``self.main_network`` only (``hnet.py:121-147``).
+    """
+    if "/backbone/" not in path:
+        return False
+    tail = path.split("/backbone/", 1)[1]
+    return "routing_module/" not in tail and "residual_proj/" not in tail
+
+
+def stage_of(path, num_stages):
+    """Depth of the stage owning ``path``, counted from the outside.
+
+    Each nested ``HNetStage`` is attached as ``main_network``, so the depth is the number
+    of ``main_network/`` segments -- EXCEPT that the innermost stage's own isotropic stack
+    is also attached under that name, adding one extra segment. Clamping to the last
+    stage is that off-by-one, not a fudge: MEASURED, the deepest path on the two-stage
+    nest is ``backbone/main_network/main_network/main_network/block_0/...`` while the
+    stage indices only run to 2.
+    """
+    body = path.split("backbone/", 1)[1]
+    depth = 0
+    while body.startswith("main_network/"):
+        body = body.split("main_network/", 1)[1]
+        depth += 1
+    return min(depth, num_stages - 1)
+
+
+# ---------------------------------------------------------------------
 # 1. The depth-scaled init -- THE decision this step makes
 # ---------------------------------------------------------------------
 
@@ -201,70 +332,140 @@ class TestDepthScaledInit:
     def test_a_two_stage_model_scales_each_stage_by_its_own_cumulative_count(self):
         """THE guard for the n_residuals correction (D-016 -> D-021).
 
-        Every residual-writing projection is checked against `0.02 / sqrt(n_k)` for its
-        OWN stage's cumulative count. A flat hierarchy-wide denominator would give every
-        stage `0.02 / sqrt(10) = 0.00632`; stage 0 must instead read
-        `0.02 / sqrt(2) = 0.01414`, which is 2.24x away and far outside the 6-sigma
-        sampling bound below (the smallest kernel here is 16x16 = 256 elements, whose
-        bound at 0.0141 is 0.0037).
+        **This guard does NOT consult** ``RESIDUAL_WRITING_PROJECTIONS``. It grades the
+        production walk against :data:`EXPECTED_STACK_KERNELS`, an independent
+        hand-written inventory derived from the LAYOUT (below), and the independence is
+        the whole point of the rewrite: until 2026-09-09 the selection predicate was
+        ``if name not in RESIDUAL_WRITING_PROJECTIONS: continue`` -- the same object the
+        production code applies -- so dropping a name from that tuple removed those
+        kernels from the scaling AND from the checking at once. MEASURED: with the tuple
+        mutated to ``("out_proj", "w_o")`` the whole 426-test suite stayed green while
+        every ``down_proj`` kernel's realised init std moved 0.007090 -> 0.020053 (2.83x,
+        and 3.16x at the innermost stage; 8.49x at ``hnet_2stage_L``'s innermost stack).
 
-        Asserted on the REALISED sample std of the built kernels, so an initializer that
-        is configured but never consulted cannot pass.
+        Three things are asserted, in this order:
+
+        1. **The inventory is complete and exact.** Every Dense kernel inside a stage's
+           isotropic stacks is counted per ``(stage, name)`` and compared for EQUALITY
+           against the hand-written table. A projection renamed upstream, a stack that
+           lost a block, or a new Dense nobody classified all fail here -- which is the
+           completeness pin the reviewer's blind-spot list asked for, since the
+           production ``n_scaled == 0`` raise only fires when a stack loses ALL three.
+        2. **Every WRITER reads ``0.02 / sqrt(n_k)``** for its OWN stage's cumulative
+           count, on the REALISED sample std, so a configured-but-unconsulted
+           initializer cannot pass.
+        3. **Every READER reads the flat 0.02**, and at stage 0 the writers are proven
+           distinguishable from the flat hierarchy-wide value (``0.02/sqrt(10)``,
+           2.24x away and far outside the 6-sigma sampling bound -- the smallest kernel
+           here is 16x16 = 256 elements, whose bound at 0.0141 is 0.0037).
         """
         config = two_stage_config()
         model = make_model(config, max_chunks=(8, 4))
         counts = n_residuals_by_stage(config.stage_spec)
         flat = n_residuals(config.stage_spec)
+        assert len(counts) == len(EXPECTED_STACK_KERNELS), (
+            "the hand-written inventory must cover every stage of the layout"
+        )
 
-        # backbone -> stage 0; backbone/main_network -> stage 1; and so on.
-        def stage_of(path):
-            """Depth of the stage owning `path`, counted from the outside.
-
-            Each nested `HNetStage` is attached as `main_network`, so the depth is the
-            number of `main_network/` segments -- EXCEPT that the innermost stage's own
-            isotropic stack is also attached under that name, adding one extra segment.
-            Clamping to the last stage is that off-by-one, not a fudge: measured, the
-            deepest path here is
-            `backbone/main_network/main_network/main_network/block_0/...` on a 3-stage
-            nest whose stage indices only run to 2.
-            """
-            body = path.split("backbone/", 1)[1]
-            depth = 0
-            while body.startswith("main_network/"):
-                body = body.split("main_network/", 1)[1]
-                depth += 1
-            return min(depth, len(counts) - 1)
-
-        checked = 0
+        # --- 1. the inventory, by EQUALITY, against the independent table ------
+        observed = {stage: collections.Counter() for stage in EXPECTED_STACK_KERNELS}
         for weight in model.weights:
-            name = weight.path.rsplit("/", 2)[-2] if "/" in weight.path else ""
-            if name not in RESIDUAL_WRITING_PROJECTIONS:
-                continue
             if not weight.path.endswith("/kernel"):
                 continue
-            stage_idx = stage_of(weight.path)
-            expected = INITIALIZER_RANGE / math.sqrt(counts[stage_idx])
+            if not is_stack_kernel(weight.path):
+                continue
+            observed[stage_of(weight.path, len(counts))][
+                projection_name(weight.path)
+            ] += 1
+
+        for stage_idx, expected in EXPECTED_STACK_KERNELS.items():
+            assert dict(observed[stage_idx]) == expected, (
+                f"stage {stage_idx}'s isotropic stacks hold "
+                f"{dict(observed[stage_idx])}, not the {expected} the layout "
+                f"{config.arch_layout!r} implies. A projection has been renamed, a "
+                f"block has moved, or a new Dense is unclassified -- in any of those "
+                f"cases the depth-scaled init is silently grading the wrong set."
+            )
+
+        # --- 2 and 3. the realised std of every one of them --------------------
+        checked_writers = 0
+        checked_readers = 0
+        for weight in model.weights:
+            if not weight.path.endswith("/kernel"):
+                continue
+            if not is_stack_kernel(weight.path):
+                continue
+            name = projection_name(weight.path)
+            stage_idx = stage_of(weight.path, len(counts))
             got = realised_std(weight)
+
+            if name in STACK_NON_DENSE_KERNELS:
+                # Not a Dense, so the production walk never touches it. Assert it kept
+                # the FACTORY DEFAULT rather than skipping it silently: a walk that
+                # started re-initialising convolutions would otherwise be invisible.
+                # The default is `glorot_uniform`, whose std is
+                # `sqrt(6/(fan_in+fan_out))/sqrt(3)`; for the (4, 1, 48) depthwise
+                # kernel here Keras' `compute_fans` gives fan_in = 4, fan_out = 192,
+                # i.e. 0.10102 (MEASURED 0.09649 to 0.10435 over the four kernels,
+                # inside the 6-sigma sampling bound of 0.0309 on 192 draws).
+                fan_in = int(np.prod(weight.shape[:-2]) * weight.shape[-2])
+                fan_out = int(np.prod(weight.shape[:-2]) * weight.shape[-1])
+                glorot = math.sqrt(6.0 / (fan_in + fan_out)) / math.sqrt(3.0)
+                bound = sampling_bound(int(np.prod(weight.shape)), glorot)
+                assert abs(got - glorot) < bound, (
+                    f"{weight.path}: realised std {got:.5f} is not the untouched "
+                    f"glorot_uniform {glorot:.5f} (bound {bound:.5f}); the "
+                    f"depth-scaled walk must visit keras.layers.Dense ONLY"
+                )
+                continue
+            if name in INDEPENDENT_RESIDUAL_WRITERS:
+                expected = INITIALIZER_RANGE / math.sqrt(counts[stage_idx])
+                checked_writers += 1
+            elif name in INDEPENDENT_RESIDUAL_READERS:
+                expected = INITIALIZER_RANGE
+                checked_readers += 1
+            else:
+                raise AssertionError(
+                    f"{weight.path}: {name!r} is classified neither as a residual "
+                    f"writer nor as a reader nor as a non-Dense stack kernel. Every "
+                    f"kernel in a stack must be one of the three, or the depth-scaled "
+                    f"init is grading a set nobody enumerated."
+                )
             bound = sampling_bound(int(np.prod(weight.shape)), expected)
 
             assert abs(got - expected) < bound, (
-                f"{weight.path}: realised std {got:.5f} is not "
-                f"{expected:.5f} = 0.02/sqrt({counts[stage_idx]}) "
-                f"(bound {bound:.5f})"
+                f"{weight.path}: realised std {got:.5f} is not {expected:.5f} "
+                f"(bound {bound:.5f}); this kernel is classified as a "
+                f"{'WRITER' if name in INDEPENDENT_RESIDUAL_WRITERS else 'READER'} "
+                f"of the residual stream by the test's own table"
             )
-            if stage_idx == 0:
+            if name in INDEPENDENT_RESIDUAL_WRITERS and stage_idx == 0:
                 flat_expected = INITIALIZER_RANGE / math.sqrt(flat)
                 assert abs(got - flat_expected) > bound, (
                     f"{weight.path}: the FLAT hierarchy-wide denominator "
                     f"({flat}) would have given {flat_expected:.5f}; this test must "
                     f"be able to tell the two apart"
                 )
-            checked += 1
 
-        assert checked >= 6, (
-            f"only {checked} residual-writing kernels were checked; the two-stage "
-            f"config must expose several at more than one depth"
+        assert (checked_writers, checked_readers) == (
+            EXPECTED_WRITER_KERNELS, EXPECTED_READER_KERNELS
+        ), (
+            f"checked {checked_writers} writers / {checked_readers} readers; the "
+            f"layout implies {EXPECTED_WRITER_KERNELS} / {EXPECTED_READER_KERNELS}"
         )
+
+    def test_the_production_constant_still_names_exactly_the_writers(self):
+        """The independent table and the production tuple must agree -- SEPARATELY.
+
+        The guard above deliberately never reads
+        :data:`~dl_techniques.models.language.hnet.model.RESIDUAL_WRITING_PROJECTIONS`,
+        so this is the one place the two are compared, and it compares them as an
+        equality between two sets rather than by using one to select the other. A
+        deliberate change to the production tuple must therefore be accompanied by a
+        deliberate change to :data:`INDEPENDENT_RESIDUAL_WRITERS`, and cannot be made
+        invisible by the suite's own selection.
+        """
+        assert set(RESIDUAL_WRITING_PROJECTIONS) == INDEPENDENT_RESIDUAL_WRITERS
 
     def test_the_projections_that_READ_the_residual_stream_are_not_scaled(self):
         """`in_proj`, `w_q`/`w_k`/`w_v`, `gate_proj`, `up_proj` keep the plain 0.02.
@@ -360,7 +561,7 @@ class TestDepthScaledInit:
         kernels = [
             w for w in inner.weights
             if w.path.endswith("/kernel")
-            and w.path.rsplit("/", 2)[-2] in RESIDUAL_WRITING_PROJECTIONS
+            and projection_name(w.path) in INDEPENDENT_RESIDUAL_WRITERS
             and "/backbone/encoder/" in w.path
         ]
         assert kernels, "the outer encoder must own a residual-writing kernel"
@@ -532,6 +733,87 @@ class TestRatioLossWiring:
         assert one > 0.0
         np.testing.assert_allclose(two, 2.0 * one, rtol=1e-5, atol=0.0)
 
+    def test_the_alpha_constant_is_pinned_to_its_documented_value(self):
+        """The VALUE, against a literal written here rather than imported.
+
+        MEASURED 2026-09-09: `RATIO_LOSS_ALPHA 0.03 -> 0.30` -- a 10x change to the
+        auxiliary-loss weight of every default training run, since
+        `HNetTrainingConfig.ratio_loss_alpha` defaults to it -- survived all 426 tests
+        of this suite AND all 239 of `test_train/test_hnet/ + test_byte_lm.py`. The
+        three existing alpha guards above all pass alpha EXPLICITLY, so the CONSTANT
+        was never the thing under test. This is the spelling half of the pin; the
+        behavioural half is the test below, and neither is sufficient alone.
+        """
+        assert RATIO_LOSS_ALPHA == 0.03
+
+    def test_the_alpha_constants_provenance_is_disclosed_at_its_definition_site(self):
+        """It is the one init/loss constant in `model.py` with no upstream citation.
+
+        `EMBEDDING_INIT_STDDEV` cites `mixer_seq.py:60` and `INITIALIZER_RANGE` cites
+        `mixer_seq.py:53`; `RATIO_LOSS_ALPHA` sits between them and cited nothing, which
+        reads as "transcribed". It is not: `grep -rn "0[.]03"` over the whole reference
+        repository returns ZERO hits, because the reference does not publish its
+        training script. That is the same evidential position as `DEFAULT_TARGET_RATIO`,
+        which `losses.py` labels explicitly -- so this one must be labelled too, and
+        this guard is what keeps the label from being deleted as noise.
+        """
+        source = inspect.getsource(model_module)
+        head, _, _ = source.partition("RATIO_LOSS_ALPHA: float")
+        preamble = head[-1200:]
+        assert "this port" in preamble.lower(), (
+            "the RATIO_LOSS_ALPHA definition site must say the value is this port's "
+            "choice rather than a transcription from the reference"
+        )
+        assert "not a transcription" in preamble
+
+    def test_the_default_alpha_is_OBSERVABLE_in_model_losses(self):
+        """The EFFECT half: a model that names no alpha must weight by 0.03 exactly.
+
+        A pin that only asserts `CONST == 0.03` is a spelling check -- it goes green
+        the moment someone changes the constant AND the pin together, which is exactly
+        what a careless edit does. This arm compares a DEFAULT-constructed model
+        against one given the literal `0.03`, so the default path itself is graded:
+        under `RATIO_LOSS_ALPHA = 0.30` the two disagree by 10x and this fails.
+        """
+        default = make_model()
+        pinned = make_model(ratio_loss_alpha=0.03)
+        tenfold = make_model(ratio_loss_alpha=0.30)
+        x = byte_ids()
+        for model in (default, pinned, tenfold):
+            model(x, training=True)
+
+        np.testing.assert_allclose(
+            float(default.losses[0]), float(pinned.losses[0]), rtol=0, atol=0.0
+        )
+        # DIFFER twin: the comparison above is not two readings of one constant.
+        assert float(tenfold.losses[0]) > 5.0 * float(default.losses[0])
+
+    def test_the_default_target_ratio_reaches_the_MODEL_not_only_the_loss(self):
+        """`target_ratios=None` must fill in 6.0 at every chunking level.
+
+        `test_losses.py` pins the constant and its effect on `ratio_loss`; this is the
+        second half of the same mutation's reachable surface, because the trainer never
+        calls `ratio_loss` directly -- it builds an `HNet` with `target_ratios=None`.
+        MEASURED: `DEFAULT_TARGET_RATIO 6.0 -> 3.0` used to survive all 426 tests here.
+        """
+        default = make_model(two_stage_config(), max_chunks=(8, 4))
+        assert default.target_ratios == (DEFAULT_TARGET_RATIO,) * 2
+        assert default.target_ratios == (6.0, 6.0)
+
+        pinned = make_model(two_stage_config(), max_chunks=(8, 4),
+                            target_ratios=(6.0, 6.0))
+        halved = make_model(two_stage_config(), max_chunks=(8, 4),
+                            target_ratios=(3.0, 3.0))
+        x = byte_ids()
+        for model in (default, pinned, halved):
+            model(x, training=True)
+
+        np.testing.assert_allclose(
+            float(default.losses[0]), float(pinned.losses[0]), rtol=0, atol=0.0
+        )
+        # DIFFER twin: the equality above is not two readings of one constant.
+        assert abs(float(halved.losses[0]) - float(default.losses[0])) > 1e-6
+
     def test_a_two_stage_model_contributes_one_term_per_chunking_level(self):
         """The sum is over levels; a 2-stage model must not read like a 1-stage one."""
         deep = make_model(two_stage_config(), max_chunks=(8, 4))
@@ -597,6 +879,101 @@ class TestVariants:
         assert model.arch_config is MODEL_VARIANTS[variant]
         assert len(model.max_chunks) == model.arch_config.num_stages - 1
         assert len(model.target_ratios) == model.arch_config.num_stages - 1
+
+    @pytest.mark.parametrize("variant", sorted(MODEL_VARIANTS))
+    def test_every_shipped_variant_builds_round_trips_and_serializes(
+        self, variant, tmp_path
+    ):
+        """SC-6, on the SHIPPED layouts, at a recorded width reduction.
+
+        The test above constructs the six variants and leaves them UNBUILT, and until
+        2026-09-09 that was the whole of the six-variant coverage: the adversarial review
+        found SC-6's own command (`-k variant`) collecting 18 tests, none of which built,
+        round-tripped or saved a shipped variant, while the symbolic-build and `.keras`
+        guards ran on 16/16/32-wide hand-written configs. The six real layouts -- 26 to 48
+        blocks deep, and the ONLY configs in the package with a finite attention window --
+        were never run forward, never built and never serialized.
+
+        **The width reduction, recorded as SC-6 requires.** Four fields are overridden and
+        nothing else; in particular `arch_layout`, `window_size` and `vocab_size` are the
+        shipped values, because the layout is the thing under test:
+
+        ==================  ================================  ===============
+        field               shipped                           here
+        ==================  ================================  ===============
+        `d_model`           1024 / 1536 / 2048 per stage      32 at every stage
+        `d_intermediate`    0 / 2816 / 4096 / 5504            0 (derived)
+        `num_heads`         16                                4
+        `rotary_emb_dim`    32 / 48 / 64                      4
+        `ssm_cfg.d_state`   the shipped value                 8
+        ==================  ================================  ===============
+
+        `rotary_emb_dim / head_dim` is preserved EXACTLY at 50%: shipped is 32/64, 48/96
+        and 64/128, and here it is 4/8. That ratio is what D-005 pins, so the reduction
+        does not weaken the one attention property this file cares about.
+
+        `hnet_1stage_L` at its real width is ~600M parameters; materialising six of those
+        is not a unit test, and SC-6's own text permits "reduced `d_model` overrides ...
+        with the override recorded". This is that record.
+        """
+        config = reduced_variant_config(variant)
+        model = HNet(
+            config,
+            max_chunks=(8,) * (config.num_stages - 1),
+            max_seq_len=64,
+            headdim=8,
+        )
+
+        # (a) symbolic build at (None, None) int32.
+        model.build((None, None))
+        assert model.built
+
+        # (b) the arch config round-trips by VALUE through the dict form.
+        rebuilt = type(config).from_dict(config.to_dict())
+        assert rebuilt == config, variant
+
+        # (c) a real forward pass at a length shorter than the chunk caps, which is
+        #     the D-029 regime the shipped defaults actually run in.
+        x = byte_ids(batch=2, length=16)
+        logits = np.array(model(x, training=False))
+        assert logits.shape == (2, 16, config.vocab_size)
+        assert np.all(np.isfinite(logits))
+
+        # (d) `.keras` save/load reproduces the logits. atol=0.0: a reload restores the
+        #     same weights and runs the same graph, so any movement at all is a defect,
+        #     not noise.
+        path = tmp_path / f"{variant}.keras"
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+        np.testing.assert_allclose(
+            np.array(reloaded(x, training=False)), logits, rtol=0, atol=0.0
+        )
+
+    def test_the_reduced_variant_configs_keep_the_shipped_layout(self):
+        """Anti-vacuity twin for the sweep above: the reduction must not flatten it.
+
+        A `reduced_variant_config` that quietly replaced the layout, the window or the
+        stage count would turn six deep, windowed, differently-shaped models into six
+        copies of one tiny one, and the sweep would still be green. This pins the three
+        fields that must survive the shrink.
+        """
+        layouts = set()
+        for variant, shipped in MODEL_VARIANTS.items():
+            reduced = reduced_variant_config(variant)
+            assert reduced.arch_layout == shipped.arch_layout, variant
+            assert reduced.num_stages == shipped.num_stages, variant
+            assert reduced.attn_cfg.window_size == shipped.attn_cfg.window_size, variant
+            layouts.add(str(reduced.arch_layout))
+        assert len(layouts) == len(MODEL_VARIANTS), (
+            "the six reduced configs must remain six DIFFERENT layouts"
+        )
+        # And at least one of them really carries a finite attention window, which no
+        # hand-written fixture in this file does.
+        assert any(
+            w > 0
+            for variant in MODEL_VARIANTS
+            for w in reduced_variant_config(variant).attn_cfg.window_size
+        )
 
     def test_an_unknown_variant_lists_every_available_name(self):
         with pytest.raises(ValueError) as excinfo:
