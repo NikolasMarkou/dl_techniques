@@ -52,6 +52,8 @@ import keras
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+from .indexing import batched_gather, pad_permutation_to_width
+
 # ---------------------------------------------------------------------
 
 
@@ -75,7 +77,7 @@ class ChunkLayer(keras.layers.Layer):
                |                        |
                |        [:, :max_chunks]  <-- D-007 FIXED width
                |                        |
-               +---- take_along_axis ---+                        (dc.py:193-199)
+               +---- batched_gather ----+                        (dc.py:193-199)
                               |
                 next_hidden_states (B, max_chunks, D)
 
@@ -98,7 +100,12 @@ class ChunkLayer(keras.layers.Layer):
     ``0`` before slicing, so the surplus columns hold row-0 hidden states and are
     marked invalid (``num_tokens <= L < max_chunks``). The padding is built by
     ``repeat`` on a static count rather than by a data-dependent ``pad``, so the
-    whole path stays traceable.
+    whole path stays traceable. Both the padding and the truncation live in
+    :func:`~dl_techniques.layers.dynamic_chunking.indexing.pad_permutation_to_width`,
+    which :class:`~dl_techniques.layers.dynamic_chunking.dechunk_layer.DeChunkLayer`
+    calls with the same width -- the two layers used to hold this rule in two
+    hand-copied blocks and drifted apart, which is exactly the defect the shared
+    helper exists to prevent.
 
     :param max_chunks: Fixed output width ``C``. Constructor argument, never
         derived from the data -- see the D-007 anchor in :meth:`call`.
@@ -229,17 +236,18 @@ class ChunkLayer(keras.layers.Layer):
         # `test_future_byte_does_not_change_the_past`.
         # Guards: test_chunk_layer.py::TestGuardTwoPositionOrderTruncation and
         # ::TestGuardThreeBatchIndependence. Rationale: decisions.md D-007.
-        filler = keras.ops.repeat(
-            keras.ops.zeros_like(seq_sorted_indices[:, :1]), self.max_chunks, axis=1
-        )  # (B, C) -- right-pads the permutation when max_chunks > L
-        gather_idx = keras.ops.concatenate([seq_sorted_indices, filler], axis=1)
-        gather_idx = gather_idx[:, : self.max_chunks]  # (B, C)
+        # Truncation and right-padding both live in `pad_permutation_to_width`,
+        # which DeChunkLayer calls with the SAME width, so the two sides cannot
+        # disagree about what inner column j means. See indexing.py's docstring:
+        # the asymmetry (this layer padded, DeChunkLayer did not) WAS the bug.
+        gather_idx = pad_permutation_to_width(
+            seq_sorted_indices, self.max_chunks
+        )  # (B, C)
 
-        # dc.py:193-199 -- `take_along_axis` broadcasts the trailing axis, so no
-        # explicit expand to (B, C, D) is needed.
-        next_hidden_states = keras.ops.take_along_axis(
-            hidden_states, keras.ops.expand_dims(gather_idx, axis=-1), axis=1
-        )  # (B, C, D)
+        # dc.py:193-199 -- a per-row gather. NOT `keras.ops.take_along_axis`;
+        # see the D-029 anchor in indexing.batched_gather for why that op is
+        # unusable here under XLA.
+        next_hidden_states = batched_gather(hidden_states, gather_idx)  # (B, C, D)
 
         # dc.py:201-204 -- at a fixed width, a row with more boundaries than
         # `max_chunks` is all-valid and loses its tail chunks (D-007).

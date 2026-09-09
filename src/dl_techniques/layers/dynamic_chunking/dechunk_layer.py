@@ -55,6 +55,16 @@ would index ``-1``. Both are clipped to a defined, deterministic value rather
 than left to the backend's out-of-range behaviour, which differs between NumPy
 (wraps) and TensorFlow (undefined). Both clips are guarded.
 
+The inner width ``M`` may also EXCEED the outer length ``L``, which is the normal
+case for a short input: ``default_max_chunks(2, max_seq_len=2048)`` is ``(1024,)``,
+so any prompt below 1024 bytes has ``L < M``. The permutation is then right-padded
+with index ``0`` to width ``M``, by the SAME
+:func:`~dl_techniques.layers.dynamic_chunking.indexing.pad_permutation_to_width`
+``ChunkLayer`` calls -- the two layers' handling of ``M > L``, ``M == L`` and
+``M < L`` is symmetric by construction rather than by convention, because the
+asymmetry (``ChunkLayer`` padded, this layer did not) was a real shipped defect
+that made every H-Net raise on any sequence shorter than its own ``max_chunks[0]``.
+
 The layer holds **no weights**: it is a gather, a clamp, a scan and a scatter.
 The test suite asserts that absence deliberately rather than skipping the
 gradient-flow check.
@@ -73,6 +83,8 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+from .indexing import batched_gather, dim, pad_permutation_to_width
 
 # ---------------------------------------------------------------------
 
@@ -102,7 +114,7 @@ class DeChunkLayer(keras.layers.Layer):
               |                                   |
               |     token_idx = arange(L) + (~keep) * L      (dc.py:265-269)
               |     seq_sorted_indices = argsort(token_idx)
-              +-----------> take_along_axis(p, idx[:, :M])  (dc.py:271-273)
+              +--> batched_gather(p, pad_to_width(idx, M))  (dc.py:271-273)
                                      |
                                 p (B, M)          inner (B, M, D)
                                      |                   |
@@ -113,7 +125,7 @@ class DeChunkLayer(keras.layers.Layer):
                                               |
                       plug_back_idx = clip(cumsum(keep) - 1, 0, M-1)
                                               |            (dc.py:302-308)
-                                        take_along_axis
+                                        batched_gather
                                               |
                                         (B, L, D)
 
@@ -341,7 +353,7 @@ class DeChunkLayer(keras.layers.Layer):
         # not be a Python bool', True)` under plain `tf.function` as well as
         # under XLA (D-010(b)).
         seq_len = keras.ops.shape(keep)[1]
-        inner_len = keras.ops.shape(inner_hidden_states)[1]
+        inner_len = dim(inner_hidden_states, 1)  # M, statically when known
         positions = keras.ops.expand_dims(
             keras.ops.arange(seq_len, dtype="int32"), axis=0
         )  # (1, L)
@@ -350,10 +362,28 @@ class DeChunkLayer(keras.layers.Layer):
         ) * keras.ops.cast(seq_len, "int32")
         seq_sorted_indices = keras.ops.argsort(token_idx, axis=1)  # (B, L)
 
-        # dc.py:271-273 -- keep the first M columns, i.e. the INNER width.
-        p = keras.ops.take_along_axis(
-            p_full, seq_sorted_indices[:, :inner_len], axis=1
+        # dc.py:271-273 -- take the permutation to the INNER width M, through
+        # ChunkLayer's own `pad_permutation_to_width`, so the two layers treat
+        # `M > L`, `M == L` and `M < L` IDENTICALLY.
+        #
+        # DECISION plan-2026-09-09T042752-6d66ac56/D-029: do NOT go back to
+        # `seq_sorted_indices[:, :inner_len]`. That slice yields `min(L, M)`
+        # columns, not `M`, while `_ema_scan` below iterates `M` times and reads
+        # `p[:, step]` -- so every `L < M` call died with
+        # `InvalidArgumentError: slice index <L> of dimension 1 out of bounds`.
+        # ChunkLayer already right-padded its own gather for exactly this case;
+        # this side did not, and the ONE-SIDEDNESS was the defect. It was not an
+        # edge case: `default_max_chunks(2, max_seq_len=2048)` is `(1024,)`, so
+        # `create_hnet("hnet_1stage_L")` rejected every input shorter than 1024
+        # bytes at its own constructor defaults, and a 19-byte generation prompt
+        # is what found it. Guards:
+        # test_dechunk_layer.py::TestGuardFiveWidthSymmetry and
+        # test_model.py::TestShortSequencesAtTheConstructorDefaults.
+        # Rationale: decisions.md D-029.
+        gather_idx = pad_permutation_to_width(
+            seq_sorted_indices, inner_len
         )  # (B, M)
+        p = batched_gather(p_full, gather_idx)  # (B, M)
 
         # dc.py:333 -- the kernel-free recurrence; see `_ema_scan`'s D-014 anchor.
         out = self._ema_scan(inner_hidden_states, p)  # (B, M, D)
@@ -374,13 +404,12 @@ class DeChunkLayer(keras.layers.Layer):
             keras.ops.cast(inner_len - 1, "int32"),
         )
 
-        # `take_along_axis` broadcasts the trailing axis, so no explicit expand
-        # to (B, L, D) is needed. NEVER numpy fancy indexing -- `t[b_idx, i_idx]`
-        # raises eagerly on a TF tensor, so a layer using it is dead on every
-        # forward pass.
-        return keras.ops.take_along_axis(
-            out, keras.ops.expand_dims(plug_back_idx, axis=-1), axis=1
-        )  # (B, L, D)
+        # A per-row gather, through the SAME helper ChunkLayer uses -- see the
+        # D-029 anchor in indexing.batched_gather for why `take_along_axis` is
+        # unusable here under XLA. NEVER numpy fancy indexing either --
+        # `t[b_idx, i_idx]` raises eagerly on a TF tensor, so a layer using it is
+        # dead on every forward pass.
+        return batched_gather(out, plug_back_idx)  # (B, L, D)
 
     def compute_output_shape(
         self,

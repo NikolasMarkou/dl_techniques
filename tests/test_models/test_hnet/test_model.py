@@ -1105,3 +1105,130 @@ class TestConstructorContract:
         model = make_model(config)
         assert model(byte_ids(vocab=37), training=False).shape[-1] == 37
         assert np.asarray(model.embeddings.embeddings).shape == (37, 16)
+
+
+class TestShortSequencesAtTheConstructorDefaults:
+    """A sequence shorter than ``max_chunks[0]`` must work -- it is the DEFAULT path.
+
+    ``max_chunks`` defaults to ``default_max_chunks(num_stages, max_seq_len)``,
+    i.e. ``max_seq_len // 2`` at the first chunking level. So EVERY model built
+    without an explicit ``max_chunks`` rejects half its own advertised length
+    range unless ``L >= max_chunks[0]`` is handled, and
+    ``create_hnet("hnet_1stage_L")`` -- whose default is ``(1024,)`` at
+    ``max_seq_len=2048`` -- rejected every prompt below 1024 bytes. A 19-byte
+    generation prompt is what found it (decisions.md D-028, D-029).
+
+    The shipped variants are not INSTANTIATED here: ``hnet_1stage_L`` is
+    ~600M parameters and building one is not a unit test. The severity claim is
+    pinned on the config arithmetic instead, and the behaviour is graded on the
+    tiny architecture through the SAME defaulting code path -- ``max_chunks``
+    omitted, so ``HNet.__init__`` derives it.
+    """
+
+    def test_the_shipped_variants_default_to_a_cap_above_a_short_prompt(self):
+        """Config-level: the default cap really does exceed an ordinary prompt.
+
+        This is arithmetic on :func:`default_max_chunks`, not a forward pass, and
+        it is what makes the behavioural tests below load-bearing rather than
+        academic.
+        """
+        assert default_max_chunks(2, 2048) == (1024,)
+        assert default_max_chunks(3, 2048) == (1024, 512)
+        for prompt in (19, 64, 255, 1023):
+            assert prompt < default_max_chunks(2, 2048)[0]
+
+    @pytest.mark.parametrize("length", [1, 2, 5, 19, 31])
+    def test_the_model_accepts_a_sequence_shorter_than_its_default_cap(self, length):
+        """``max_chunks`` OMITTED -- the constructor default is under test."""
+        keras.utils.set_random_seed(13)
+        model = HNet(one_stage_config(), max_seq_len=64, headdim=8)
+        model.build((None, None))
+        assert model.max_chunks == (32,), "the default cap, not an explicit one"
+        assert length < model.max_chunks[0], "this test must exercise L < M"
+
+        logits = model(byte_ids(batch=2, length=length), training=False)
+
+        assert tuple(logits.shape) == (2, length, 256)
+        assert np.isfinite(np.asarray(logits)).all()
+
+    def test_a_two_level_layout_also_accepts_a_short_sequence(self):
+        """Both chunking levels default-cap, and both must tolerate ``L < M``."""
+        keras.utils.set_random_seed(13)
+        model = HNet(two_stage_config(), max_seq_len=64, headdim=8)
+        model.build((None, None))
+        assert model.max_chunks == (32, 16)
+
+        logits = model(byte_ids(batch=2, length=6), training=False)
+
+        assert tuple(logits.shape) == (2, 6, 256)
+        assert np.isfinite(np.asarray(logits)).all()
+
+    def test_a_long_sequence_still_gives_the_same_values_it_did(self):
+        """Anti-regression twin: extending the domain must not move ``L >= M``.
+
+        The two calls differ only in that the second is a strict prefix-free
+        second batch; what is asserted is that the ``L > M`` path still produces
+        finite, length-consistent logits at the explicit cap the suite has always
+        used.
+        """
+        model = make_model()
+        for length in (12, 40):
+            logits = model(byte_ids(batch=2, length=length), training=False)
+            assert tuple(logits.shape) == (2, length, 256)
+            assert np.isfinite(np.asarray(logits)).all()
+
+
+class TestDefaultCompileEntryPoints:
+    """``predict`` / ``evaluate`` / ``fit`` on a plain NumPy array, DEFAULT compile.
+
+    No ``jit_compile`` is passed anywhere in this class, deliberately. Under the
+    GPU default ``jit_compile="auto"`` every one of these three raised
+    ``INVALID_ARGUMENT: Input 0 to node .../chunk_layer/BroadcastArgs with op
+    BroadcastArgs must be a compile-time constant`` -- the gather's dynamic
+    broadcast (decisions.md D-029). Pinning ``jit_compile=False`` here would make
+    the class green while leaving every ordinary caller broken, so it is not
+    done; the repair is in the layer.
+
+    These pass trivially on CPU, where XLA is not engaged. They are RED on GPU
+    against the pre-fix code, which is where they were proven.
+    """
+
+    def _compiled(self):
+        model = make_model()
+        model.compile(
+            optimizer=keras.optimizers.Adam(1e-3),
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        )
+        return model
+
+    def test_predict_works_on_a_plain_numpy_array(self):
+        model = self._compiled()
+        x = byte_ids(batch=5, length=12)
+
+        logits = model.predict(x, batch_size=2, verbose=0)
+
+        assert logits.shape == (5, 12, 256)
+        assert np.isfinite(logits).all()
+
+    def test_evaluate_works_on_a_plain_numpy_array(self):
+        model = self._compiled()
+        x = byte_ids(batch=5, length=12)
+
+        loss = model.evaluate(x, x, batch_size=2, verbose=0)
+
+        assert np.isfinite(float(np.asarray(loss).ravel()[0]))
+
+    def test_fit_works_on_a_plain_numpy_array_with_a_ragged_last_batch(self):
+        """``5 % 2 == 1``: the last batch is short, so the batch dim is dynamic.
+
+        That is the condition D-028 measured as necessary -- a static batch (a
+        ``tf.data`` pipeline with ``drop_remainder=True``) never hit the defect,
+        which is why the trainer's own validation loop stayed green while
+        ``model.predict(numpy_array)`` was dead.
+        """
+        model = self._compiled()
+        x = byte_ids(batch=5, length=12)
+
+        history = model.fit(x, x, epochs=1, batch_size=2, verbose=0)
+
+        assert np.isfinite(history.history["loss"][0])

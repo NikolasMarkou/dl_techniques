@@ -200,6 +200,17 @@ must be measured on the corpus you train on, not assumed rare; `default_max_chun
 starting point (`max_seq_len // 2`, halving per level, a 3x margin over the 6.0 target ratio) and
 says so at its definition site.
 
+**The other direction — a sequence SHORTER than the cap — is supported and was not.** `L <
+max_chunks[0]` is the ordinary case for a short input: `default_max_chunks(2, max_seq_len=2048)` is
+`(1024,)`, so any prompt below 1024 bytes has `L < M`. `ChunkLayer` right-pads its permutation with
+index `0` for that case; `DeChunkLayer` did not, so **every** H-Net raised
+`InvalidArgumentError: slice index <L> of dimension 1 out of bounds` on such an input — at its own
+constructor defaults, including `create_hnet("hnet_1stage_L")`. Both layers now share
+`layers/dynamic_chunking/indexing.py::pad_permutation_to_width`, so `M > L`, `M == L` and `M < L`
+are handled identically on the two sides by construction. Anchor:
+`# DECISION plan-2026-09-09T042752-6d66ac56/D-029`. The surplus inner columns are inert — a row's
+valid chunk count never exceeds `L`, so `plug_back_idx` never reads them.
+
 Truncation is by position and not by boundary probability on purpose: magnitude-order truncation
 lets a later, higher-scoring byte displace an earlier boundary, which is a causality defect
 `layers/blt/blt_blocks.py` already measured and guards against.

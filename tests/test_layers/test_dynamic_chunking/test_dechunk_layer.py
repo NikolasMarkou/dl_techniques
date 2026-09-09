@@ -1240,3 +1240,123 @@ class TestSerialization:
             )
 
         assert float(np.max(np.abs(outputs[1e-4] - outputs[0.4]))) > 1e-3
+
+
+# =====================================================================
+# Guard (v): the three width regimes, M < L, M == L, M > L
+# =====================================================================
+
+
+class TestGuardFiveWidthSymmetry:
+    """The inner width ``M`` may sit below, at, or ABOVE the outer length ``L``.
+
+    ``M > L`` is not an exotic case: ``M`` is the constructor's ``max_chunks``
+    cap and ``default_max_chunks(2, max_seq_len=2048)`` is ``(1024,)``, so every
+    input shorter than 1024 bytes has ``L < M`` at the shipped defaults. This
+    layer used to slice its permutation with ``[:, :M]`` -- which yields
+    ``min(L, M)`` columns -- while ``_ema_scan`` iterated ``M`` times, so every
+    such call died with ``InvalidArgumentError: slice index <L> of dimension 1
+    out of bounds``. ``ChunkLayer`` right-padded for exactly this case and this
+    layer did not; the asymmetry WAS the bug (decisions.md D-029).
+
+    ``dechunk_reference`` transcribes upstream, where ``M <= L`` always holds, so
+    it is not consulted above its own domain. Above it the assertion is
+    INERTNESS: widening ``M`` past ``L`` must not move a single output value,
+    because ``plug_back_idx`` is bounded by ``num_tokens - 1 <= L - 1``.
+    """
+
+    @pytest.mark.parametrize(
+        "seq_len,inner_len,regime",
+        [
+            (8, 3, "M < L"),
+            (8, 8, "M == L"),
+            (8, 13, "M > L"),
+            (3, 16, "M >> L"),
+            (1, 4, "L = 1"),
+        ],
+    )
+    def test_the_layer_returns_full_resolution_in_every_regime(
+        self, seq_len, inner_len, regime
+    ):
+        """``(B, L, D)`` out, whatever ``M`` is -- and no exception."""
+        rng = np.random.default_rng(20260909)
+        batch_size, d_model = 4, 3
+        inner = rng.standard_normal((batch_size, inner_len, d_model)).astype("float32")
+        prob = rng.uniform(0.05, 0.95, (batch_size, seq_len)).astype("float32")
+        boundary = _boundaries(rng, batch_size, seq_len, min(2, seq_len))
+
+        out = _run(DeChunkLayer(), inner, prob, boundary)
+
+        assert out.shape == (batch_size, seq_len, d_model), regime
+
+    @pytest.mark.parametrize("seq_len,inner_len", [(8, 3), (8, 8), (6, 6)])
+    def test_inside_the_oracle_domain_the_values_are_unchanged(
+        self, seq_len, inner_len
+    ):
+        """``M <= L`` still matches the float64 transcription at its derived bound."""
+        rng = np.random.default_rng(4242)
+        batch_size, d_model = 3, 4
+        inner = rng.standard_normal((batch_size, inner_len, d_model)).astype("float32")
+        prob = rng.uniform(0.05, 0.95, (batch_size, seq_len)).astype("float32")
+        boundary = _boundaries(rng, batch_size, seq_len, min(inner_len, seq_len))
+
+        out = _run(DeChunkLayer(), inner, prob, boundary)
+        expected = dechunk_reference(inner, prob, boundary)
+
+        np.testing.assert_allclose(out, expected, rtol=0, atol=ema_atol(inner))
+
+    @pytest.mark.parametrize("extra", [1, 2, 9, 24])
+    def test_widening_the_inner_sequence_past_L_changes_nothing(self, extra):
+        """Padding columns are INERT: the ``(B, L, D)`` output is bit-identical.
+
+        The pair is run end to end -- ``ChunkLayer`` at width ``L`` and again at
+        width ``L + extra`` on the same hidden states -- so the extra inner
+        columns are the real gathered/padded ones, not hand-built.
+        """
+        from dl_techniques.layers.dynamic_chunking.chunk_layer import ChunkLayer
+
+        rng = np.random.default_rng(909)
+        batch_size, seq_len, d_model = 3, 5, 4
+        hidden = rng.standard_normal((batch_size, seq_len, d_model)).astype("float32")
+        prob = rng.uniform(0.05, 0.95, (batch_size, seq_len)).astype("float32")
+        boundary = _boundaries(rng, batch_size, seq_len, 2)
+
+        outs = []
+        for width in (seq_len, seq_len + extra):
+            inner, _ = ChunkLayer(max_chunks=width)(
+                keras.ops.convert_to_tensor(hidden),
+                boundary_mask=keras.ops.convert_to_tensor(boundary),
+            )
+            outs.append(
+                _run(
+                    DeChunkLayer(),
+                    keras.ops.convert_to_numpy(inner),
+                    prob,
+                    boundary,
+                )
+            )
+
+        np.testing.assert_allclose(outs[1], outs[0], rtol=0, atol=0.0)
+
+        # DIFFER twin: the comparison is not comparing two constants.
+        assert float(np.max(np.abs(outs[0]))) > 1e-3
+
+    def test_the_short_sequence_that_found_the_defect(self):
+        """The reported reproducer, at its reported shapes.
+
+        ``inner_hidden_states=(1, 256, 64)`` against ``boundary_prob=(1, 19, 2)``
+        -- a 19-byte generation prompt into a model whose cap is 256. It raised
+        ``InvalidArgumentError: slice index 19 of dimension 1 out of bounds``
+        before this fix.
+        """
+        rng = np.random.default_rng(19)
+        inner = rng.standard_normal((1, 256, 64)).astype("float32")
+        prob = rng.uniform(0.05, 0.95, (1, 19, 2)).astype("float32")
+        boundary = np.zeros((1, 19), dtype=bool)
+        boundary[:, 0] = True
+        boundary[:, 7] = True
+
+        out = _run(DeChunkLayer(), inner, prob, boundary)
+
+        assert out.shape == (1, 19, 64)
+        assert np.isfinite(out).all()

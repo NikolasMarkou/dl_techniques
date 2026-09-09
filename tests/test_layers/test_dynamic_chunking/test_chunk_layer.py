@@ -958,3 +958,111 @@ class TestSerialization:
             saved_widths[max_chunks] = loaded.get_layer("chunker").max_chunks
             assert loaded.output_shape[1] == max_chunks
         assert saved_widths == {2: 2, 7: 7}
+
+
+# =====================================================================
+# Guard (v): the three width regimes, L < C, L == C, L > C
+# =====================================================================
+
+
+class TestGuardFiveWidthSymmetry:
+    """``max_chunks`` may sit below, at, or above the sequence length ``L``.
+
+    This layer always handled all three; :class:`DeChunkLayer` did not, and the
+    ONE-SIDEDNESS was the defect (see ``indexing.py``'s module docstring and
+    decisions.md D-029). Both layers now share
+    :func:`~dl_techniques.layers.dynamic_chunking.indexing.pad_permutation_to_width`,
+    and both suites carry a class of this name so the pair is graded on the same
+    three regimes.
+
+    The oracle is not consulted above its own domain: ``chunk_reference``
+    transcribes upstream, where ``C <= L`` always holds because upstream's width
+    IS ``max(boundary_mask.sum(-1))``. For ``C > L`` the assertion is therefore
+    (a) parity with the oracle at width ``L`` on the first ``L`` columns and
+    (b) a stated, checked value for the surplus columns.
+    """
+
+    @pytest.mark.parametrize(
+        "seq_len,max_chunks,regime",
+        [
+            (8, 3, "L > C"),
+            (8, 8, "L == C"),
+            (8, 13, "L < C"),
+            (3, 16, "L << C"),
+            (1, 4, "L = 1"),
+        ],
+    )
+    def test_the_output_width_is_max_chunks_in_every_regime(
+        self, seq_len, max_chunks, regime
+    ):
+        """Shape is ``(B, max_chunks, D)`` whatever ``L`` is -- D-007's whole point."""
+        rng = np.random.default_rng(20260909)
+        batch_size, d_model = 4, 3
+        hidden = rng.standard_normal((batch_size, seq_len, d_model)).astype("float32")
+        boundary = _random_boundaries(rng, batch_size, seq_len, max(1, seq_len // 2))
+
+        inner, inner_mask = _run(ChunkLayer(max_chunks=max_chunks), hidden, boundary)
+
+        assert inner.shape == (batch_size, max_chunks, d_model), regime
+        assert inner_mask.shape == (batch_size, max_chunks), regime
+
+    @pytest.mark.parametrize("seq_len,max_chunks", [(8, 3), (8, 8), (8, 13), (3, 16)])
+    def test_the_first_min_L_C_columns_are_the_oracle_gather(self, seq_len, max_chunks):
+        """Inside the oracle's domain the gather is unchanged, bit for bit."""
+        rng = np.random.default_rng(11)
+        batch_size, d_model = 4, 5
+        hidden = rng.standard_normal((batch_size, seq_len, d_model)).astype("float32")
+        boundary = _random_boundaries(rng, batch_size, seq_len, max(1, seq_len // 2))
+
+        inner, _ = _run(ChunkLayer(max_chunks=max_chunks), hidden, boundary)
+        overlap = min(seq_len, max_chunks)
+        expected, _ = chunk_reference(hidden, boundary, max_chunks=overlap)
+
+        np.testing.assert_allclose(
+            inner[:, :overlap], expected, rtol=0, atol=GATHER_ATOL
+        )
+
+    def test_the_surplus_columns_are_index_zero_and_are_marked_invalid(self):
+        """``L < C``: the pad is index 0's row, and ``inner_mask`` says so.
+
+        Anti-vacuity: the assertion can fail. Position 0's hidden state is drawn
+        from the same distribution as every other row, so ``inner[:, L:]``
+        matching it is a statement about the padding rule, not an identity --
+        the twin below shows it differs from position 1's row.
+        """
+        rng = np.random.default_rng(1234)
+        batch_size, seq_len, max_chunks, d_model = 3, 4, 10, 6
+        hidden = rng.standard_normal((batch_size, seq_len, d_model)).astype("float32")
+        boundary = np.zeros((batch_size, seq_len), dtype=bool)
+        boundary[:, 0] = True
+        boundary[:, 2] = True
+
+        inner, inner_mask = _run(ChunkLayer(max_chunks=max_chunks), hidden, boundary)
+
+        for column in range(seq_len, max_chunks):
+            np.testing.assert_allclose(
+                inner[:, column], hidden[:, 0], rtol=0, atol=GATHER_ATOL
+            )
+        assert not inner_mask[:, seq_len:].any(), "padded columns must be invalid"
+        assert inner_mask[:, :2].all(), "the two real chunks must be valid"
+
+        # DIFFER twin: the pad is position 0 SPECIFICALLY, not "any row".
+        assert float(np.max(np.abs(inner[:, -1] - hidden[:, 1]))) > 1e-3
+
+    def test_the_valid_column_count_never_exceeds_the_sequence_length(self):
+        """``num_tokens <= L``, so no surplus column can ever be read back.
+
+        This is what makes the padding inert for
+        :class:`~dl_techniques.layers.dynamic_chunking.dechunk_layer.DeChunkLayer`,
+        whose ``plug_back_idx`` is bounded by ``num_tokens - 1``.
+        """
+        rng = np.random.default_rng(77)
+        batch_size, seq_len, max_chunks, d_model = 6, 5, 32, 2
+        hidden = rng.standard_normal((batch_size, seq_len, d_model)).astype("float32")
+        boundary = np.ones((batch_size, seq_len), dtype=bool)  # EVERY position
+
+        _, inner_mask = _run(ChunkLayer(max_chunks=max_chunks), hidden, boundary)
+
+        counts = inner_mask.sum(axis=1)
+        assert counts.tolist() == [seq_len] * batch_size
+        assert int(counts.max()) <= seq_len < max_chunks
