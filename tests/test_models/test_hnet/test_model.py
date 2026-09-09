@@ -20,10 +20,18 @@ What this file pins
 
 Instruments
 -----------
-The shared oracles are reused rather than reinvented: ``gradient_flow_oracle``,
-``smoke_contract_oracle``, ``knob_sensitivity_oracle`` (instrument matched to knob CLASS)
-and ``test_sam/dead_component_oracle``. ``tests/numerics.reassociation_atol`` is
-deliberately NOT used -- D-012 measured it under-counting.
+The shared oracles are reused rather than reinvented: ``gradient_flow_oracle``
+(after one REAL optimizer step, never at init), ``smoke_contract_oracle``,
+``knob_sensitivity_oracle`` (instrument matched to knob CLASS -- structural knobs on the
+weight-SHAPE signature, value knobs on the output at an identical signature, scoped value
+knobs on one named subtree's weights), ``roundtrip_instrument_oracle``,
+``lazy_build_contract_oracle``, ``precision_arm_oracle`` and
+``test_sam/dead_component_oracle``. ``tests/numerics.reassociation_atol`` is deliberately
+NOT used -- D-012 measured it under-counting against a float64 oracle and blind to
+normalize chains; every bound here is derived at its call site with ``rtol=0``.
+
+The causality guard is NOT here: it lives in ``test_causality.py``, and the invariants a
+shape test is blind to live in ``test_architecture_facts.py``.
 
 Every dimension here is tiny on purpose. This is a correctness step, and the Mamba-2 scan
 is sequential.
@@ -56,7 +64,20 @@ from dl_techniques.models.language.hnet.model import (
 )
 
 from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
-from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from ..knob_sensitivity_oracle import (
+    assert_scoped_value_knob_changes_weights,
+    assert_structural_knob_changes_weights,
+    assert_value_knob_changes_output,
+)
+from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing
+from ..precision_arm_oracle import assert_precision_arm
+from ..roundtrip_instrument_oracle import (
+    assert_build_parity,
+    assert_roundtrip_output_values,
+    assert_weights_restored_before_first_call,
+    measure_build_parity,
+    measure_roundtrip,
+)
 from ..smoke_contract_oracle import assert_contract_rejects_a_broken_forward
 from ..test_sam.dead_component_oracle import fit_one_step_moved_variables
 
@@ -867,6 +888,193 @@ class TestSharedOracles:
             {"untied": build(False), "tied": build(True)},
             knob="tie_word_embeddings",
         )
+
+
+# ---------------------------------------------------------------------
+# 9b. The rest of the shared instrument family
+# ---------------------------------------------------------------------
+
+
+def _unbuilt_builder(config=None, **kwargs):
+    """A zero-argument factory returning an UNBUILT model.
+
+    The round-trip and lazy-build instruments materialise the model themselves -- that
+    ordering is the whole content of R-073 -- so handing them a pre-built one would
+    measure something else.
+    """
+    def builder():
+        return HNet(
+            one_stage_config() if config is None else config,
+            max_chunks=kwargs.pop("max_chunks", (6,)),
+            max_seq_len=64,
+            headdim=8,
+            **kwargs,
+        )
+    return builder
+
+
+def _built_builder(config=None, max_chunks=(6,), **kwargs):
+    """A zero-argument factory returning a BUILT model, for the knob instruments."""
+    def builder():
+        model = HNet(
+            one_stage_config() if config is None else config,
+            max_chunks=max_chunks,
+            max_seq_len=64,
+            headdim=8,
+            **kwargs,
+        )
+        model.build((None, None))
+        return model
+    return builder
+
+
+def _make_inputs():
+    """DETERMINISTIC -- the instruments call this three times and compare exactly."""
+    return byte_ids(seed=5)
+
+
+class TestTheRoundTripInstrument:
+    """R-063 / R-072 / R-073, through the shared oracle rather than by hand."""
+
+    def test_a_keras_round_trip_restores_every_weight_before_the_first_call(self):
+        """MEASURED: output delta 0.0, weight delta 0.0, weights read after 0 calls.
+
+        ``atol=0.0`` on both arms. Restoration is a copy, not a computation, and the
+        forward is deterministic -- the instrument's own ``self_max_delta`` reads exactly
+        0.0, asserted here so a future non-determinism cannot quietly widen the bound.
+        """
+        report = measure_roundtrip(_unbuilt_builder(), _make_inputs)
+
+        assert report["self_max_delta"] == 0.0, (
+            "the model no longer repeats itself bit-exactly, so atol=0.0 below is "
+            f"measuring the RNG ({report['self_max_delta']})"
+        )
+        assert_roundtrip_output_values(report, atol=0.0)
+        assert_weights_restored_before_first_call(report, atol=0.0)
+
+    def test_the_lazy_and_explicit_build_paths_agree_on_relative_paths(self):
+        """MEASURED: 38 weights, zero auto-name drift, explicit/lazy ratio exactly 1.0.
+
+        ``autoname_stems=()`` is the strong reading: every sub-layer in this tree carries
+        an explicit ``name=``, so no drift is waived.
+        """
+        report = measure_build_parity(
+            _unbuilt_builder(), _make_inputs, input_shape=(None, None)
+        )
+
+        assert report["n_lazy"] == report["n_lazy_unique"], (
+            f"{report['n_lazy'] - report['n_lazy_unique']} weights share a relative "
+            "path, so the pairing below is ambiguous"
+        )
+        assert report["explicit"]["status"] == "built"
+        assert report["explicit"]["ratio"] == 1.0, (
+            "HNet.build((None, None)) must materialise the whole tree; a ratio below 1 "
+            "means a sub-layer is built only by the first call"
+        )
+        assert_build_parity(report, autoname_stems=())
+
+    def test_the_lazy_build_costs_nothing(self):
+        """The lazy path's weights survive a save/load cycle at ``atol=0.0``.
+
+        The oracle refuses to run if perturbing every weight leaves the output unmoved,
+        so the exact round trip below cannot be a statement about a forward pass that
+        ignores its own parameters.
+        """
+        report = assert_lazy_build_costs_nothing(
+            _unbuilt_builder(), _make_inputs, input_shape=(None, None), atol=0.0
+        )
+
+        assert report["n_perturbed"] == report["n_weights"]
+        assert report["perturb_liveness"] > 1e-3, report["perturb_liveness"]
+        assert report["roundtrip_max_delta"] == 0.0
+
+
+class TestThePrecisionArm:
+    """``mixed_float16`` against a float32 control, all four parts.
+
+    ``allowed_none_grads=0``: a healthy model has no dead gradient, and this one is
+    measured not to. ``rtol_against_float32=1e-2`` is the oracle's documented realistic
+    half-precision bound; MEASURED here, the two arms' ``absmax`` read 0.287842 (fp16)
+    against 0.287878 (float32), a relative difference of 1.3e-04, i.e. 77x inside it.
+    """
+
+    def test_the_mixed_float16_arm_holds_with_a_float32_control(self):
+        assert_precision_arm(
+            _unbuilt_builder(),
+            _make_inputs,
+            expected_compute_dtype="float16",
+            check_backward=True,
+            allowed_none_grads=0,
+            rtol_against_float32=1e-2,
+        )
+
+
+class TestTheKnobInstrumentsMatchTheKnobClass:
+    """Structural knobs on the SHAPE signature, value knobs on the output.
+
+    The two structural knobs (``arch_layout``, ``tie_word_embeddings``) are pinned by
+    :class:`TestSharedOracles`. These are the other two classes, which that instrument
+    cannot judge: a value knob leaves the shape signature alone, so an output difference
+    IS attributable to the knob -- and a scoped value knob is judged on the weights of
+    one named subtree.
+    """
+
+    def test_max_chunks_is_a_value_knob(self):
+        """The chunk cap changes no weight shape and every output. MEASURED 4.39e-01."""
+        deltas = assert_value_knob_changes_output(
+            {
+                "cap_6": _built_builder(max_chunks=(6,)),
+                "cap_3": _built_builder(max_chunks=(3,)),
+            },
+            _make_inputs(),
+            knob="max_chunks",
+        )
+        assert min(deltas.values()) > 1e-2, deltas
+
+    def test_the_attention_window_is_a_value_knob(self):
+        """``window_size`` is a keep-predicate band: same weights, different attention.
+
+        MEASURED 4.00e-04 against the oracle's 1e-05 bar -- a 40x margin, and small for a
+        stated reason: at initialisation attention's residual-writing ``w_o`` is
+        depth-scaled to ``0.02 / sqrt(4) = 0.01``, so attention contributes little to the
+        residual stream. The bar is NOT widened; the measurement is recorded.
+        """
+        def windowed(window):
+            config = HNetArchConfig(
+                arch_layout=["m1", ["T1"], "m1"],
+                d_model=[16, 16],
+                d_intermediate=[0, 0],
+                ssm_cfg=SSM,
+                attn_cfg=AttnSpec(
+                    num_heads=(2, 2), rotary_emb_dim=(4, 4), window_size=window
+                ),
+            )
+            return _built_builder(config)
+
+        deltas = assert_value_knob_changes_output(
+            {"global": windowed((-1, -1)), "banded": windowed((-1, 2))},
+            _make_inputs(),
+            knob="window_size",
+        )
+        assert min(deltas.values()) > 1e-5, deltas
+
+    def test_initializer_range_is_a_scoped_value_knob_on_the_head(self):
+        """It must reach the ``lm_head`` kernel specifically. MEASURED 1.73e+00.
+
+        Scoped rather than global because ``initializer_range`` reaches every Dense in
+        the tree: an unscoped output assertion would pass even if the head alone were
+        left on a hard-coded 0.02.
+        """
+        deltas = assert_scoped_value_knob_changes_weights(
+            {
+                "narrow": _built_builder(initializer_range=0.02),
+                "wide": _built_builder(initializer_range=0.5),
+            },
+            _make_inputs(),
+            knob="initializer_range",
+            scope="lm_head",
+        )
+        assert min(deltas.values()) > 0.0, deltas
 
 
 # ---------------------------------------------------------------------
