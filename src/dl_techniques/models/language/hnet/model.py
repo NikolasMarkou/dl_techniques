@@ -198,6 +198,15 @@ class HNet(keras.Model):
         (2, 16, 256)
     """
 
+    #: The six shipped variants. This is the SAME object as
+    #: :data:`~dl_techniques.models.language.hnet.config.MODEL_VARIANTS`, aliased onto
+    #: the class rather than copied: the house shape reaches a model's variant table
+    #: through the class (``models/CLAUDE.md`` § House Model Module Shape), and
+    #: ``tests/test_models/test_package_api_contract.py`` resolves the table a
+    #: ``from_variant`` looks names up in off its owning class. A second literal table
+    #: here would be a second home for six cited rows, i.e. a copy that drifts.
+    MODEL_VARIANTS: Dict[str, HNetArchConfig] = MODEL_VARIANTS
+
     def __init__(
             self,
             arch_config: HNetArchConfig,

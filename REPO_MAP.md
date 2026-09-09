@@ -129,7 +129,15 @@ other shapes:
   `heads/nlp/factory.py`, `heads/vision/factory.py`, `heads/vlm/factory.py`. Task heads are
   selected by *domain first*, then by key.
 
-And one deliberate absence: **`src/dl_techniques/layers/transformers/` has no factory module
+Two deliberate absences. **`src/dl_techniques/layers/dynamic_chunking/` has no factory and
+no registry** — its three layers (`RoutingModule`, `ChunkLayer`, `DeChunkLayer`) are H-Net's
+learned sequence chunking, they only make sense as a triple, and they have exactly one
+consumer, `src/dl_techniques/models/language/hnet/`. A one-key dispatcher would be machinery
+with no payoff; the shipped precedent for this shape is `layers/blt/`. Tested by
+`tests/test_layers/test_dynamic_chunking/` and `tests/test_models/test_hnet/`, and the
+package init carries the reasoning as a `# DECISION` anchor.
+
+And: **`src/dl_techniques/layers/transformers/` has no factory module
 and no registry** — transformer blocks are direct-imported by class, by design. Do not
 "fix" the absence by adding a registry. It is not factory-free, though:
 `transformers/vision_encoder.py` and `transformers/text_encoder.py` each define a family of

@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **89 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **90 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (89 of 89 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (90 of 90 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -36,7 +36,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | Family | Leaves | What it holds |
 |---|---|---|
 | [`vision/`](vision/) | **38** | image backbones, detectors, segmenters, denoisers, generators |
-| [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
+| [`language/`](language/) | 18 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **10** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
@@ -47,7 +47,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **89** | |
+| **Sum** | **90** | |
 
 ### `vision/` (38)
 
@@ -92,7 +92,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `vq_vae_rotation/` | VQ-VAE with rotation-based codebook updates |
 | `yolo12/` | YOLOv12 detection |
 
-### `language/` (17)
+### `language/` (18)
 
 | Package | |
 |---|---|
@@ -105,6 +105,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `gemma/` | Gemma LLM |
 | `gpt2/` | GPT-2 architecture |
 | `hierarchical_reasoning_model/` | HRM |
+| `hnet/` | H-Net — tokenizer-free byte LM whose chunk boundaries are learned; a recursive encoder/chunk/inner/dechunk/decoder hierarchy over `layers/dynamic_chunking/`. No pretrained weights, and six divergences from the reference recorded in its README |
 | `mamba/` | Mamba, selective state space |
 | `masked_language_model/` | MLM training |
 | `mini_vec2vec/` | Mini Vec2Vec |

@@ -9,6 +9,7 @@
 - `gemma/` — Gemma
 - `gpt2/` — GPT-2
 - `hierarchical_reasoning_model/` — HRM
+- `hnet/` — H-Net (hierarchical dynamic chunking, byte-level)
 - `mamba/` — Mamba (state-space)
 - `masked_language_model/` — masked-language-model training head
 - `mini_vec2vec/` — Mini Vec2Vec
