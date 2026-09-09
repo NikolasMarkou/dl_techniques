@@ -231,9 +231,11 @@ class TextDecoder(keras.layers.Layer):
 
         # Create transformer decoder layers
         # DECISION plan-2026-08-18T140459-7991552f/D-067: kernel_initializer
-        # below must not be dropped -- without it every block silently fell back to TransformerLayer's glorot_uniform instead of initializer_range. See decisions.md.
+        # below must not be dropped -- without it every block silently fell back
+        # to TransformerLayer's glorot_uniform instead of initializer_range. See decisions.md.
         # DECISION plan-2026-08-22T035419-a11304c8/D-160: use 1/sqrt(2 * depth),
-        # not 1/sqrt(depth) -- the 2 counts residual additions per block (attention + FFN), matching upstream GPT-2's _init_weights. See decisions.md.
+        # not 1/sqrt(depth) -- the 2 counts residual additions per block (attention + FFN),
+        # matching upstream GPT-2's _init_weights. See decisions.md.
         residual_output_kernel_initializer = None
         if self.scale_residual_initializer_by_depth:
             residual_output_kernel_initializer = initializers.TruncatedNormal(
@@ -245,7 +247,8 @@ class TextDecoder(keras.layers.Layer):
             # Linearly increase drop rate per layer
             layer_drop_rate = self.stochastic_depth_rate * i / max(1, self.depth - 1)
             # DECISION plan-2026-08-19T070627-a616f581/D-007: pass
-            # attention_norm_args/ffn_norm_args so block norms track layer_norm_eps -- they used to fall back to the factory's 1e-6 default while final_norm ran at 1e-12. See decisions.md.
+            # attention_norm_args/ffn_norm_args so block norms track layer_norm_eps
+            # they used to fall back to the factory's 1e-6 default while final_norm ran at 1e-12. See decisions.md.
             layer = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
@@ -422,7 +425,8 @@ class TextDecoder(keras.layers.Layer):
             x = ops.add(x, pos_embed)
         elif self.positional_type == 'sincos':
             # Cast to this layer's compute dtype; measured bit-identical under
-            # float32. Does not fix sincos under mixed_float16/float64 -- that cast lives inside continuous_sin_cos_embedding.py.
+            # float32. Does not fix sincos under mixed_float16/float64
+            # that cast lives inside continuous_sin_cos_embedding.py.
             pos_coords = ops.cast(positions, self.compute_dtype)
             pos_coords = ops.expand_dims(pos_coords, axis=-1)
             pos_coords = ops.expand_dims(pos_coords, axis=0)
