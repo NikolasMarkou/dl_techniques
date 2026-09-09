@@ -12,6 +12,19 @@ Data loading, generation, and preprocessing utilities for various domains.
 - `sut.py` — SUT-Crack dataset loader (TF-optimized, vectorized processing)
 - `vqa_dataset.py` — VQA dataset processor for nanoVLM training (supports The Cauldron format)
 - `nlp.py` — Wikipedia / HF text dataset helpers (`load_wikipedia_train_val`, packed-CLM article counts, shard utilities)
+- `byte_lm.py` — byte-level packed-CLM primitives for `vocab_size=256` models
+  (`text_to_byte_ids`, `byte_ids_to_text`, `pack_byte_windows`,
+  `build_byte_clm_dataset`, `estimate_byte_clm_steps_per_epoch`). Consumes the
+  raw UTF-8 strings `nlp.py`'s `load_wikipedia_train_val` already returns —
+  bytes are derived downstream of text exactly as tokens are. It is the byte
+  sibling of `train.common.nlp`'s tiktoken pipeline, which has **no** byte
+  path; `estimate_byte_clm_steps_per_epoch` mirrors
+  `train.common.nlp.estimate_clm_steps_per_epoch`'s contract in byte units
+  rather than extending it, because `dl_techniques` must not import `train`.
+  `DEFAULT_AVG_BYTES_PER_ARTICLE = 3054` and
+  `DEFAULT_WIKIPEDIA_TOTAL_BYTES = 19_567_594_259` are MEASURED over all 41
+  staged Wikipedia Arrow shards, not inherited from the 440-tokens/article
+  heuristic.
 - `bdd100k_video.py` — BDD100K video dataset loader
 - `synthetic_drone_video.py` — Synthetic drone-video sequence generator
 - `pusht_hdf5.py` — PushT robotics HDF5 dataset loader
@@ -54,3 +67,5 @@ Data loading, generation, and preprocessing utilities for various domains.
 ## Testing
 
 Tests in `tests/test_datasets/` (if present) or integration tests within model test suites.
+The `tests/test_datasets/` tree is FLAT for top-level modules — `byte_lm.py` is tested by
+`tests/test_datasets/test_byte_lm.py`, mirroring `test_masked_patches.py` and friends.
