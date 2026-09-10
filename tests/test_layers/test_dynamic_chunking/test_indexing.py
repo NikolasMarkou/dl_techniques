@@ -11,7 +11,7 @@ either reds those suites hard (the filler index: 4 failed; the row offsets:
 
 :func:`~dl_techniques.layers.dynamic_chunking.indexing.dim` is the exception,
 and this module is its home. Review pass 2 forced it to always return the
-dynamic shape and measured **235 passed on CPU** and green on GPU 0 under
+dynamic shape and measured **234 passed on CPU** and green on GPU 0 under
 ``jit_compile="auto"``, then asked the right question: is the static path
 load-bearing and unguarded, or is its stated rationale wrong?
 

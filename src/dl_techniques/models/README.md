@@ -105,7 +105,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `gemma/` | Gemma LLM |
 | `gpt2/` | GPT-2 architecture |
 | `hierarchical_reasoning_model/` | HRM |
-| `hnet/` | H-Net — tokenizer-free byte LM whose chunk boundaries are learned; a recursive encoder/chunk/inner/dechunk/decoder hierarchy over `layers/dynamic_chunking/`. No pretrained weights, and six divergences from the reference recorded in its README |
+| `hnet/` | H-Net — tokenizer-free byte LM whose chunk boundaries are learned; a recursive encoder/chunk/inner/dechunk/decoder hierarchy over `layers/dynamic_chunking/`. No pretrained weights; the divergences from the reference are enumerated in its own README (`grep -c '^### 5\.'` re-derives the count there, rather than restating it here) |
 | `mamba/` | Mamba, selective state space |
 | `masked_language_model/` | MLM training |
 | `mini_vec2vec/` | Mini Vec2Vec |

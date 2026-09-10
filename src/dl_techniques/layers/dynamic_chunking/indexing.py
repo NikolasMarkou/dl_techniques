@@ -47,7 +47,7 @@ __all__ = [
 # i.e. `keras.ops.shape` ALREADY returns a Python int for every statically
 # known axis and a tensor only for an unknown one -- which is exactly this
 # function's stated behaviour. Deleting the static branch therefore leaves
-# `tests/test_layers/test_dynamic_chunking/` at 244 passed on CPU: mutation
+# `tests/test_layers/test_dynamic_chunking/` at 249 passed on CPU: mutation
 # S-10 is EQUIVALENT on this backend, not an untested path. No guard can fail
 # without the static branch, because there is nothing for it to detect; what
 # `test_indexing.py::TestDimIsTheBackendsOwnAnswer` pins instead is that
