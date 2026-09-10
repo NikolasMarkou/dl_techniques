@@ -274,8 +274,41 @@ def convex_upsample(
     # (2) additionally by the uniform-mask control against an independently
     # computed numpy reference. Both mutations were run and observed RED; see
     # decisions.md D-010.
-    patches = keras.ops.image.extract_patches(
-        scaled, size=3, strides=1, dilation_rate=1, padding="same"
+    # DECISION plan-2026-09-10T065432-05fcb6dd/D-018: the 3x3 neighbourhood is
+    # gathered with an IDENTITY-KERNEL CONVOLUTION, not with
+    # `keras.ops.image.extract_patches`. That is not a preference and it is not
+    # a re-derivation: the two lines below are `keras/src/ops/image.py`'s OWN
+    # `_extract_patches` body (`kernel = reshape(eye(out_dim), (ph, pw, cin,
+    # out_dim))`, then a conv), and they were measured bit-identical to it
+    # (max|delta| == 0.0 on a (2,4,7,3) probe), so the `(kh, kw, c)`
+    # major-to-minor trailing-axis layout that anchor (1) above depends on is
+    # unchanged and its impulse guards still bind.
+    #
+    # `keras.ops.image.extract_patches` CANNOT be used here, because this
+    # function runs inside a symbolically-traced `build()`: Keras 3.8's
+    # `ExtractPatches.compute_output_spec` binds its local `strides` only under
+    # `if not self.strides`, so any explicit stride -- including the `strides=1`
+    # this call needs -- raises `UnboundLocalError: cannot access local variable
+    # 'strides'` on the SYMBOLIC path while working perfectly eagerly. Passing
+    # `strides=None` to dodge that would silently switch the operator to
+    # stride 3, i.e. a 3x-decimated neighbourhood. Do NOT "restore" the
+    # `extract_patches` call: it makes `DocScannerRectifier.build()` -- and
+    # therefore `materialize_sublayers`, and therefore every `.keras` reload --
+    # fail with an error naming neither this function nor patches.
+    # See decisions.md D-018.
+    channels_static = scaled.shape[-1]
+    if channels_static is None:
+        raise ValueError(
+            "convex_upsample needs a statically-known channel count on `flow` "
+            "(it builds a one-hot gather kernel of that width); got None."
+        )
+    patch_kernel = keras.ops.reshape(
+        keras.ops.eye(
+            CONVEX_NEIGHBOURS * channels_static, dtype=scaled.dtype),
+        (3, 3, channels_static, CONVEX_NEIGHBOURS * channels_static),
+    )
+    patches = keras.ops.conv(
+        scaled, patch_kernel, strides=1, padding="same", dilation_rate=1
     )
 
     shape = keras.ops.shape(flow)

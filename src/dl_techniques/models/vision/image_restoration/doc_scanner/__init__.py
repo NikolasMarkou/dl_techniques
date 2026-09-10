@@ -16,11 +16,24 @@ There is no correlation volume anywhere in this architecture, despite the RAFT
 lineage: the update block's ``corr`` input is a bilinear resample of the
 encoder's own feature map at the current coordinates. Do not add one.
 
-The public surface is finalized by the step that lands the model classes; until
-then this module deliberately re-exports NOTHING, so that no half-built name can
-be imported from the package root and depended on. ``components.py`` carries the
-port's constants and its single ``_VARIANT_SPEC`` width table, and is imported
-directly by this package's own modules and tests.
+The public surface grows one class at a time as the port lands. Right now it is
+the RECTIFIER only: :class:`~.model.DocScannerRectifier` and its factory
+:func:`~.model.create_doc_scanner_rectifier`. The segmenter and the composite
+``DocScanner`` are not here yet and must not be imported from the package root
+until they are -- a half-built name exported early is a name something starts
+depending on.
+
+The rectifier is exported NOW rather than at the end for a concrete reason:
+``tests/test_models/test_package_api_contract.py`` walks each model package's
+own namespace to find every ``pretrained``-taking entry point and CALL it, and a
+factory that is not exported is a factory that guard cannot reach. Leaving it
+unexported would have parked two live ``pretrained=True`` raise paths outside
+behavioural coverage until the last step of the port.
+
+``components.py`` and ``warp.py`` carry the port's constants, its single
+``_VARIANT_SPEC`` width table and its sampling convention. They stay unexported
+on purpose: they are the port's internals, imported directly by this package's
+own modules and tests.
 
 Two constraints a caller will need before using this package:
 
@@ -45,4 +58,9 @@ References:
       (https://arxiv.org/abs/2005.09007) -- the localization backbone.
 """
 
-__all__: list = []
+from .model import DocScannerRectifier, create_doc_scanner_rectifier
+
+__all__: list = [
+    "DocScannerRectifier",
+    "create_doc_scanner_rectifier",
+]
