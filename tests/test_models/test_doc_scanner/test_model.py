@@ -778,8 +778,15 @@ class TestTheVariantTable:
         )
         row = DocScannerRectifier.MODEL_VARIANTS["docscanner-l"]
         spec = _VARIANT_SPEC["docscanner-l"]
+        # LITERAL, never read from the module's own exclusion tuple: both
+        # sides would then move together and this would stop measuring
+        # anything. `mask_head_output_channels` is structural and derived
+        # inside the update block; the two `seg_*` rows belong to the
+        # SEGMENTATION stage (step 8) and have never been rectifier arguments.
+        not_constructor_args = (
+            "mask_head_output_channels", "seg_mid_channels", "seg_out_channels")
         for key, value in spec.items():
-            if key == "mask_head_output_channels":
+            if key in not_constructor_args:
                 assert key not in row
                 continue
             assert row[key] == (list(value) if isinstance(value, tuple)

@@ -109,13 +109,20 @@ from .warp import convex_upsample, coords_grid, sample_at_pixel_coords
 #
 # * `mask_head_output_channels` -- structural, fixed by `SPATIAL_DIVISOR ** 2 *
 #   CONVEX_NEIGHBOURS`, and derived inside `DocScannerUpdateBlock` itself.
-# * nothing else; every remaining key IS a constructor argument, which is what
-#   makes `from_variant` a splat rather than a translation table.
+# * `seg_mid_channels` / `seg_out_channels` -- they belong to the OTHER stage.
+#   `_VARIANT_SPEC` is the port's single width table and describes the whole
+#   two-stage model, so from step 8 it carries the U2NET-P's widths too; the
+#   rectifier's constructor has never taken them. This exclusion list is
+#   therefore "not a RECTIFIER argument", not "not a real width".
+# * every remaining key IS a constructor argument, which is what makes
+#   `from_variant` a splat rather than a translation table.
 # ---------------------------------------------------------------------
 
 #: Spec keys that are not rectifier constructor arguments.
 _SPEC_KEYS_NOT_CONSTRUCTOR_ARGS: Tuple[str, ...] = (
     "mask_head_output_channels",
+    "seg_mid_channels",
+    "seg_out_channels",
 )
 
 #: One line per variant, kept beside the table it annotates rather than inside

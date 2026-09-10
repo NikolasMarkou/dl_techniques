@@ -207,6 +207,29 @@ _VARIANT_SPEC: Dict[str, Dict[str, Any]] = {
         # resolution; the collision is a coincidence and must not be turned into
         # a link between a channel count and an image size.
         "mask_head_hidden": 288,
+        # --- the SEGMENTATION stage's widths ----------------------------
+        #
+        # These two rows belong to the OTHER stage. `seg.py:456-478` builds
+        # every one of the U2NET-P's eleven RSU stages as
+        # `RSU*(in_ch, 16, 64)` -- `stage1 = RSU7(in_ch, 16, 64)`,
+        # `stage2 = RSU6(64, 16, 64)`, ... `stage1d = RSU7(128, 16, 64)`. The
+        # "P" (pruned) variant is defined by that uniformity: the full U2NET at
+        # `seg.py:344-450` varies mid/out per stage (`RSU7(3, 32, 64)`, ...),
+        # and the port must not borrow ITS numbers.
+        #
+        # They are CALL-SITE readings, per D-006: `RSU7.__init__`'s signature
+        # default is `mid_ch=12, out_ch=3` and nothing ever constructs an RSU
+        # that way. A 12-wide RSU passes every shape test in this package,
+        # because the outer projection fixes the block's output width and the
+        # ladder is width-agnostic in between.
+        #
+        # They are INDEPENDENT of every rectifier row above. `seg_out_channels`
+        # is 64 and `encoder_stem_channels` is 80; the two stages were sized
+        # separately by two different papers and there is no relationship to
+        # express. Do NOT derive one from the other, and do NOT "notice" that
+        # 64 also appears in `SPATIAL_DIVISOR ** 2`.
+        "seg_mid_channels": 16,
+        "seg_out_channels": 64,
     },
 }
 
