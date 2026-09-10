@@ -147,11 +147,19 @@ class TestAlignCornersAdapterAgainstAHandComputedReference:
     def test_align_corners_adapter_is_edge_clamped_not_zero_padded(self):
         """``F.grid_sample``'s default padding is ``'zeros'``; ours clamps.
 
-        Recorded deliberately rather than asserted as parity: upstream never
-        samples out of range in its own forward path (``coords1`` stays inside
-        the image for any trained network), and the plan's edge-case note calls
-        clamping the graceful degradation for a badly-initialised one. A future
-        reader comparing against torch will find this difference here.
+        A DELIBERATE, MEASURED divergence from the reference -- the fifth, and
+        the only one that is exercised on every iteration of every forward
+        pass. See `decisions.md` D-056 and README section 7.5, row 5.
+
+        The earlier justification here -- "upstream never samples out of range
+        in its own forward path" -- was an unmeasured claim and is REFUTED: on
+        a freshly built ``docscanner-l`` at 288x288, 5.1%-7.3% of ``warpfea``
+        queries already fall outside the 36x36 feature map at iteration 0,
+        rising to 18.6%-32.2% by iteration 11 (seeds 0, 1, 2). The two samplers
+        therefore disagree on a large minority of queries; the divergence is
+        kept because zero-padding an out-of-domain query is not obviously more
+        correct than clamping it, and because changing it now would silently
+        alter the training signal.
         """
         fmap = _ramp_5x5()
         pix = np.array([[[[-3.0, 9.0]]]], dtype="float32")

@@ -289,7 +289,7 @@ for two *different* reasons, and neither is repairable here.
   transferred checkpoint would be **silently wrong** rather than merely untested. See
   §7.5.
 
-### 7.5 Four measured divergences from the PyTorch reference
+### 7.5 Five measured divergences from the PyTorch reference
 
 Each is anchored at its site in the source with the decision that settled it.
 
@@ -299,10 +299,11 @@ Each is anchored at its site in the source with the decision that settled it.
 | 2 | Every **stride-2** convolution pads explicitly (`ZeroPadding2D` then `padding="valid"`); stride-1 3×3 stays on `"same"` | Keras `"same"` is *not* torch's symmetric `padding=k//2` at stride 2 — it biases the sampling grid by one pixel on one side. At stride 1 the two agree exactly. (`D-012`) |
 | 3 | Instance norm is a direct `keras.layers.GroupNormalization(groups=C, epsilon=1e-5, center=False, scale=False)` | The repo's normalization factory has neither instance nor group norm among its 18 keys. Keras' own GroupNorm default epsilon is `1e-3` — a silent 100× against torch's `1e-5` — so it is passed explicitly at every site, and `affine=False` is reproduced as `center=False, scale=False`. (`D-011`) |
 | 4 | The convex upsample's `extract_patches` is replaced by `keras.ops.conv` against a one-hot gather kernel | That *is* `_extract_patches`' own body, inlined. Keras 3.8's public `extract_patches` mis-handles the symbolic path this model reaches through `build()`; the substitution is bit-identical eagerly. (`D-018`) |
+| 5 | `sample_at_pixel_coords` **edge-clamps** out-of-range queries; `F.grid_sample(img, grid, align_corners=True)` (`DocScanner/model.py:18`) takes torch's default `padding_mode='zeros'` | Measured on a 5×5 ramp holding `5y + x`: `(x=-3, y=1) → 5.0`, `(x=7, y=1) → 9.0`, `(x=2, y=-2) → 2.0`, `(x=3, y=9) → 23.0`, `(x=-0.5, y=1) → 5.0` — torch returns `0.0` or a zero-faded value for each. This is **not** a dormant edge case: on a freshly built `docscanner-l` at 288×288, **5.1%–7.3%** of `warpfea` queries land outside the 36×36 feature map at iteration 0 and **18.6%–32.2%** by iteration 11 (seeds 0, 1, 2). Kept because zero-padding an out-of-domain query is not more correct than clamping it — a zero feature is a *confident* statement about content that is simply absent — and because it is the graceful-degradation behaviour the composite's full-resolution warp relies on. (`D-056`) |
 
 Consequence: **train from scratch, or restore your own checkpoint with
 `model.load_weights(path)`.** Do not write a weight-transfer script against this port
-without first solving all four.
+without first solving all five.
 
 ### 7.6 The published DocUNet-benchmark MS-SSIM / LD numbers are NOT reproducible here
 
