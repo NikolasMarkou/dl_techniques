@@ -1,38 +1,21 @@
 """
-Mamba-2 encoder: state-space-duality blocks with head-scalar state decay,
-grouped B/C projections and an optional parallel gated-MLP path.
+Mamba-2 encoder: state-space-duality blocks with head-scalar decay and grouped B/C.
 
-Mamba-1 gives each inner-dimension channel its own `d_inner x d_state`
-transition, so the state must stay small or the parameter cost explodes.
-Mamba-2 restricts the transition `A` to one scalar per head instead of a
-diagonal matrix, which lets `d_state` grow to 128 (eight times v1's default)
-at negligible cost. Unrolled, the resulting recurrence is a lower-triangular
-matrix with a scalar decay mask in place of softmax, which is the
-structured-state-space-duality view the architecture is named for. `B` and
-`C` are shared across `ngroups` head groups and broadcast to the heads each
-group serves, the same grouping grouped-query attention uses. `z`, `x`, `B`,
-`C` and `dt` all come from one `in_proj` at the top of the block, before the
-convolution, rather than after it as in v1, so every projection in the block
-depends only on the block's own input.
-
-Setting `d_ssm < d_inner` routes the first `d_mlp` channels around the SSM
-as a gated MLP (`silu(z0) * x0`), concatenated back before the output
-projection.
-
-The scan runs sequentially with `while_loop`, not the chunked-matmul SSD
-algorithm the paper describes, so treat this as a correctness reference
-rather than a speed benchmark. The model returns only
-`{'last_hidden_state'}`; attach a task head externally. The final
-normalization is always plain `LayerNormalization` — the `rmsnorm` flag
-governs only the in-block SSM-output norm. `MODEL_VARIANTS` follows the
-released Mamba-2 checkpoint configs (`130m/370m/780m/1.3b/2.7b`); the
-Mamba-1 series names (`1.4b`/`2.8b`) still resolve as aliases to the
-matching v2 shapes. `780m` here and `790m` in `mamba_v1.py` are each correct
-for their own series, not a mismatch.
-
-Residual handling matches v1: blocks return `(output, running_residual)` and
-the final addition happens once in the model tail, so a caller stacking
-blocks by hand must thread the residual through.
+Defines :class:`Mamba2`, a stack of ``Mamba2ResidualBlock`` layers returning hidden
+states. Where Mamba-1 gives every inner channel its own ``d_inner x d_state``
+transition, Mamba-2 restricts the transition ``A`` to one scalar per head, so
+``d_state`` can reach 128 at little cost and the unrolled recurrence becomes a
+lower-triangular matrix with a scalar decay mask in place of softmax. ``B`` and ``C``
+are shared across ``ngroups`` head groups and broadcast to the heads each group
+serves, as in grouped-query attention, and ``z``, ``x``, ``B``, ``C`` and ``dt`` all
+come from one ``in_proj`` above the convolution. Setting ``d_ssm < d_inner`` routes
+the leading channels around the SSM as a gated MLP, concatenated back before the
+output projection. The scan is a sequential ``while_loop`` rather than the paper's
+chunked-matmul algorithm, so this is a correctness reference and not a speed
+benchmark. The model returns only ``{'last_hidden_state'}``, so a task head is
+attached externally; ``rmsnorm`` governs the in-block SSM-output norm while the final
+norm is always ``LayerNormalization``; and each block returns
+``(output, running_residual)`` with the single add in the model tail.
 
 References:
     - Dao and Gu, 2024. Transformers are SSMs: Generalized Models and Efficient
@@ -61,50 +44,118 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.mamba.mamba_v2")
 class Mamba2(keras.Model):
-    """
-    Mamba-2 encoder: a stack of Mamba2ResidualBlocks producing hidden states.
+    """Encode token ids into hidden states with a stack of Mamba-2 blocks.
+
+    Every constructor argument past ``pad_token_id`` is a pass-through to the blocks,
+    which forward it to their ``Mamba2Layer``. The encoder has no task head; attach
+    one to ``last_hidden_state``.
 
     Architecture:
 
     .. code-block:: text
 
-        Input (token IDs)
-               │
-               ▼
-        Token Embedding
-               │
-               ▼
-        Mamba2ResidualBlock x num_layers
-               │
-               ▼
-        Final LayerNorm
-               │
-               ▼
-        Output (hidden states)
+        input_ids [B, L]  (tensor, or a dict under "input_ids")
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ embedding         │
+        └───────────────────┘
+                 │  [B, L, d_model]
+                 ▼
+        ┌───────────────────┐
+        │ mamba2_block_0    │
+        └───────────────────┘
+                 │
+                 ▼
+                ...
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ mamba2_block_{n-1}│
+        └───────────────────┘
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ final_norm        │  layernorm, always
+        └───────────────────┘
+                 │
+                 ▼
+        {"last_hidden_state": [B, L, d_model]}
 
-    :param vocab_size: Size of the vocabulary.
-    :param d_model: Dimensionality of the model's hidden states.
-    :param num_layers: Number of Mamba residual blocks.
+    Residual wiring:
+
+    .. code-block:: text
+
+              hidden                residual
+                │                      │
+                ▼                      ▼
+        ┌──────────────────────────────────┐
+        │ mamba2_block_i(hidden, residual) │
+        └──────────────────────────────────┘
+                │                      │
+                ▼                      ▼
+              hidden                residual
+                │                      │
+                └──────────┬───────────┘
+                           ▼
+                          add
+                           │
+                           ▼
+                      final_norm
+
+    The first block receives ``residual=None`` and the add is skipped if it stays None.
+
+    Variants:
+
+    .. code-block:: text
+
+        variant  d_model  num_layers  checkpoint     alias
+        130m       768        24      mamba2-130m    base
+        370m      1024        48      mamba2-370m
+        780m      1536        48      mamba2-780m
+        1.3b      2048        48      mamba2-1.3b    1.4b
+        2.7b      2560        64      mamba2-2.7b    2.8b
+
+    Checkpoints are the ``state-spaces/`` releases; the aliases are the v1 names.
+
+    :param vocab_size: Size of the vocabulary. Must be positive.
+    :param d_model: Dimensionality of the model's hidden states. Must be positive.
+    :param num_layers: Number of Mamba residual blocks. Must be positive.
     :param d_state: Dimensionality of SSM latent state.
     :param d_conv: Kernel size for causal convolutions.
     :param expand: Expansion factor for internal dimensions.
     :param headdim: Dimensionality of each SSM head.
     :param norm_epsilon: Epsilon for all normalization layers.
-    :param pad_token_id: ID of the padding token.
-    :param rmsnorm: If True, use RMSNorm instead of LayerNormalization.
-    :param d_ssm: Dimensionality of the SSM. Defaults to `d_model * expand`.
+    :param pad_token_id: ID of the padding token. Stored for callers that build a
+        mask; this model does not read it.
+    :param rmsnorm: If True, the in-block SSM-output norm is an RMSNorm. The model's
+        final norm is a ``LayerNormalization`` either way.
+    :param d_ssm: Dimensionality of the SSM. Defaults to ``d_model * expand``. A
+        smaller value routes the leading ``d_inner - d_ssm`` channels around the SSM
+        as a gated MLP.
     :param norm_before_gate: Forwarded to every
         :class:`~dl_techniques.models.language.mamba.components_v2.Mamba2Layer` in the
-        stack; see that class for the semantics. Exposed here because its
-        docstring names ``norm_before_gate=True`` as the remedy for a checkpoint
-        trained under the pre-2026-08-15 default, and nothing between this model
-        and that layer forwarded it.
-    :param ngroups: Forwarded to every ``Mamba2Layer`` in the stack.
+        stack; see that class for the semantics and for which checkpoints need
+        ``True``.
+    :param ngroups: Number of head groups sharing one ``B``/``C``. Forwarded to every
+        ``Mamba2Layer`` in the stack.
     :param dt_min: Forwarded to every ``Mamba2Layer`` in the stack.
     :param dt_max: Forwarded to every ``Mamba2Layer`` in the stack.
     :param dt_init_floor: Forwarded to every ``Mamba2Layer`` in the stack.
     :param bias: Forwarded to every ``Mamba2Layer`` in the stack.
     :param conv_bias: Forwarded to every ``Mamba2Layer`` in the stack.
+    :param **kwargs: Additional keyword arguments for ``keras.Model``.
+
+    :raises ValueError: If ``vocab_size``, ``d_model`` or ``num_layers`` is not
+        positive.
+
+    Input shape:
+        A 2D tensor ``(batch_size, sequence_length)`` of token IDs, or a dictionary
+        holding that tensor under ``'input_ids'``.
+
+    Output shape:
+        Dictionary with ``'last_hidden_state'``, a 3D tensor
+        ``(batch_size, sequence_length, d_model)``.
 
     Note:
         Every default here matches the corresponding `Mamba2Layer` default,
@@ -112,18 +163,8 @@ class Mamba2(keras.Model):
         plan-2026-08-18T140459-7991552f/D-036.
     """
 
-    # DECISION plan-2026-08-18T140459-7991552f/D-024: sourced from the Mamba-2
+    # DECISION plan-2026-08-18T140459-7991552f/D-024: shapes come from the Mamba-2
     # release configs (Dao and Gu 2024), not the Mamba-1 paper. See decisions.md.
-    #
-    #   variant  d_model  n_layer   released as
-    #   130m       768      24      state-spaces/mamba2-130m
-    #   370m      1024      48      state-spaces/mamba2-370m
-    #   780m      1536      48      state-spaces/mamba2-780m
-    #   1.3b      2048      48      state-spaces/mamba2-1.3b
-    #   2.7b      2560      64      state-spaces/mamba2-2.7b
-    #
-    # vocab_size is not carried here: checkpoints use 50277 padded to a
-    # multiple of 16, and from_variant requires the caller to state it.
     MODEL_VARIANTS = {
         "2.7b": {"d_model": 2560, "num_layers": 64},
         "1.3b": {"d_model": 2048, "num_layers": 48},
@@ -132,8 +173,8 @@ class Mamba2(keras.Model):
         "130m": {"d_model": 768, "num_layers": 24, "name": "base"},
     }
 
-    # Mamba-1 series names, kept resolving to the v2 rows with identical
-    # d_model/num_layers so no caller silently changes model.
+    # Mamba-1 series names, resolving to the v2 rows with the same d_model and
+    # num_layers, so no caller silently changes model.
     VARIANT_ALIASES = {
         "base": "130m",
         "1.4b": "1.3b",
@@ -190,7 +231,6 @@ class Mamba2(keras.Model):
         self.bias = bias
         self.conv_bias = conv_bias
 
-        # If d_ssm is not provided, it should default to d_inner.
         d_inner = d_model * expand
         if d_ssm is None:
             d_ssm = d_inner
@@ -230,6 +270,17 @@ class Mamba2(keras.Model):
             inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
             training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
+        """Embed the ids, run every block, then add the residual and normalize.
+
+        :param inputs: A tensor of token ids ``(batch, seq_len)``, or a dictionary
+            holding one under ``'input_ids'``.
+        :param training: Accepted for the Keras signature. It is not forwarded to the
+            sub-layers, which have no training-dependent behaviour here.
+        :return: Dictionary with ``'last_hidden_state'`` of shape
+            ``(batch, seq_len, d_model)``.
+        :raises ValueError: If a dictionary input has no ``'input_ids'`` key, or the
+            ids are ``None``.
+        """
         if isinstance(inputs, dict):
             if "input_ids" not in inputs:
                 raise ValueError("Dictionary input must contain 'input_ids' key")
@@ -252,6 +303,20 @@ class Mamba2(keras.Model):
 
     @classmethod
     def from_variant(cls, variant: str, vocab_size: int, **kwargs: Any) -> "Mamba2":
+        """Create a Mamba-2 model from a variant or alias name.
+
+        The variant row sets ``d_model`` and ``num_layers``, and the ``130m`` row also
+        names the model ``"base"``. Anything in ``kwargs`` overrides those values.
+        ``vocab_size`` stays a caller argument, since the released checkpoints use
+        50277 padded up to a multiple of 16.
+
+        :param variant: A key of ``MODEL_VARIANTS`` or of ``VARIANT_ALIASES``.
+        :param vocab_size: Size of the vocabulary.
+        :param **kwargs: Additional arguments, overriding the variant's values.
+        :return: A configured model.
+        :rtype: Mamba2
+        :raises ValueError: If ``variant`` is in neither table; the message lists both.
+        """
         variant = cls.VARIANT_ALIASES.get(variant, variant)
         if variant not in cls.MODEL_VARIANTS:
             available = list(cls.MODEL_VARIANTS.keys()) + list(cls.VARIANT_ALIASES.keys())
@@ -263,6 +328,11 @@ class Mamba2(keras.Model):
         return cls(**config)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return every constructor argument for serialization.
+
+        :return: The configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "vocab_size": self.vocab_size, "d_model": self.d_model,
