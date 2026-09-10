@@ -53,7 +53,8 @@ class ConvNeXtV2(keras.Model):
 
     A modern ConvNet that adds Global Response Normalization inside the
     inverted bottleneck, an explicit inter-channel competition that prevents
-    the feature collapse V1 exhibits under masked-autoencoder pretraining. GRN is the only structural change from :class:`ConvNeXtV1`: a patchify stem
+    the feature collapse V1 exhibits under masked-autoencoder pretraining. G
+    RN is the only structural change from :class:`ConvNeXtV1`: a patchify stem
     feeds ``len(depths)`` stages of :class:`ConvNextV2Block` -- depthwise
     ``KxK`` convolution, LayerNorm, ``F -> 4F`` expansion, GELU, GRN, ``4F ->
     F`` reduction, and a learnable ``gamma`` -- separated by LayerNorm +
