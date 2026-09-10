@@ -7,9 +7,12 @@ hysteresis tracking — as ordinary convolutions and a bounded morphological
 loop, so it composes into a Keras graph and differentiates through like
 any other layer, while contributing no trainable capacity.
 
-The forward path uses raw TensorFlow ops and is TensorFlow-backend-only:
-`tf.nn.dilation2d` performs the directional morphology in the suppression
-and hysteresis stages, and `keras.ops` has no equivalent primitive.
+The forward path uses only `keras.ops` and is backend-agnostic. `keras.ops`
+has no generic grayscale-dilation primitive, but both dilation stages use
+fixed, known structuring elements rather than general ones: the suppression
+stage's per-angle line footprint is expressed as a max over three shifted,
+``-inf``-padded slices, and the hysteresis stage's flat square footprint is
+an ordinary ``keras.ops.max_pool``.
 
 References:
     - Canny, 1986. A Computational Approach to Edge Detection. IEEE TPAMI 8(6).
@@ -21,7 +24,6 @@ References:
 
 import keras
 import numpy as np
-import tensorflow as tf
 from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -135,8 +137,6 @@ class Canny(keras.layers.Layer):
         # Initialize weight attributes - created in build()
         self.gaussian_kernel = None
         self.sobel_kernel = None
-        self.angle_kernel = None
-        self.dilation_kernel = None
 
     def _build_gaussian_kernel(self) -> np.ndarray:
         """Create a 2D Gaussian kernel for image smoothing.
@@ -169,22 +169,6 @@ class Canny(keras.layers.Layer):
         # Stack to shape (H, W, in_channels, out_channels) -> (3, 3, 1, 2)
         return np.stack([gx_kernel, gy_kernel], axis=-1).reshape((3, 3, 1, 2))
 
-    def _build_angle_kernels(self) -> np.ndarray:
-        """Create kernels for angle-specific non-maximum suppression.
-
-        :return: Concatenated angle kernels of shape ``(3, 3, 4)``.
-        :rtype: np.ndarray
-        """
-        inf = np.inf
-        # Kernels for 0°, 45°, 90°, 135° detection
-        k0 = np.array([[[-inf], [-inf], [-inf]], [[0.0], [0.0], [0.0]], [[-inf], [-inf], [-inf]]])
-        k45 = np.array([[[-inf], [-inf], [0.0]], [[-inf], [0.0], [-inf]], [[0.0], [-inf], [-inf]]])
-        k90 = np.array([[[-inf], [0.0], [-inf]], [[-inf], [0.0], [-inf]], [[-inf], [0.0], [-inf]]])
-        k135 = np.array([[[0.0], [-inf], [-inf]], [[-inf], [0.0], [-inf]], [[-inf], [-inf], [0.0]]])
-        # Concatenate on the last axis to create a (3, 3, 4) filter
-        # for tf.nn.dilation2d, where depth matches input channels.
-        return np.concatenate([k0, k45, k90, k135], axis=-1).astype(np.float32)
-
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the layer's non-trainable weights (kernels).
 
@@ -203,18 +187,6 @@ class Canny(keras.layers.Layer):
             name="sobel_kernel", shape=sobel_val.shape,
             initializer=keras.initializers.Constant(sobel_val),
             trainable=False,
-        )
-
-        angle_val = self._build_angle_kernels()
-        self.angle_kernel = self.add_weight(
-            name="angle_kernel", shape=angle_val.shape,
-            initializer=keras.initializers.Constant(angle_val),
-            trainable=False,
-        )
-
-        self.dilation_kernel = self.add_weight(
-            name="dilation_kernel", shape=(self.tracking_connection, self.tracking_connection, 1),
-            initializer=keras.initializers.Ones(), trainable=False,
         )
 
         super().build(input_shape)
@@ -243,10 +215,7 @@ class Canny(keras.layers.Layer):
 
         # Stage 3: Non-maximum suppression
         angle_responses = self._compute_angle_responses(theta, grad_mag)
-        max_pool_angle = tf.nn.dilation2d(
-            angle_responses, self.angle_kernel, strides=(1, 1, 1, 1),
-            padding='SAME', data_format='NHWC', dilations=(1, 1, 1, 1)
-        )
+        max_pool_angle = self._directional_max(angle_responses)
 
         # Stage 4: Double thresholding
         strong_edges, weak_edges = self._apply_double_threshold(
@@ -290,17 +259,65 @@ class Canny(keras.layers.Layer):
         )
         return stacked_masks * grad_mag
 
+    @staticmethod
+    def _directional_max(angle_responses: keras.KerasTensor) -> keras.KerasTensor:
+        """Per-angle directional dilation over a fixed 3-pixel line footprint.
+
+        Reproduces ``tf.nn.dilation2d`` with the layer's former ``(3, 3, 4)``
+        angle kernel (values in ``{0, -inf}``): channel ``c`` is the max over
+        the 3 pixels lying on that channel's line through the center — 0°
+        horizontal, 90° vertical, 45° anti-diagonal, 135° main diagonal.
+        ``-inf`` padding reproduces ``dilation2d``'s ``'SAME'`` boundary
+        behaviour, since out-of-bounds taps never win a max.
+
+        :param angle_responses: Angle-weighted response tensor of shape
+            ``(B, H, W, 4)``, channel order ``[0°, 45°, 90°, 135°]``.
+        :type angle_responses: keras.KerasTensor
+        :return: Directional max tensor of the same shape.
+        :rtype: keras.KerasTensor
+        """
+        padded = keras.ops.pad(
+            angle_responses, [[0, 0], [1, 1], [1, 1], [0, 0]],
+            constant_values=-np.inf
+        )
+
+        c0, c45, c90, c135 = (padded[..., i:i + 1] for i in range(4))
+
+        # 0 degrees: horizontal line (mid row, left/mid/right column)
+        out0 = keras.ops.maximum(
+            keras.ops.maximum(c0[:, 1:-1, :-2, :], c0[:, 1:-1, 1:-1, :]),
+            c0[:, 1:-1, 2:, :]
+        )
+        # 45 degrees: anti-diagonal (top-right, mid, bottom-left)
+        out45 = keras.ops.maximum(
+            keras.ops.maximum(c45[:, :-2, 2:, :], c45[:, 1:-1, 1:-1, :]),
+            c45[:, 2:, :-2, :]
+        )
+        # 90 degrees: vertical line (mid column, top/mid/bottom row)
+        out90 = keras.ops.maximum(
+            keras.ops.maximum(c90[:, :-2, 1:-1, :], c90[:, 1:-1, 1:-1, :]),
+            c90[:, 2:, 1:-1, :]
+        )
+        # 135 degrees: main diagonal (top-left, mid, bottom-right)
+        out135 = keras.ops.maximum(
+            keras.ops.maximum(c135[:, :-2, :-2, :], c135[:, 1:-1, 1:-1, :]),
+            c135[:, 2:, 2:, :]
+        )
+
+        return keras.ops.concatenate([out0, out45, out90, out135], axis=-1)
+
     def _apply_double_threshold(
-            self, max_pool_angle: tf.Tensor, angle_responses: tf.Tensor, grad_mag: tf.Tensor
+            self, max_pool_angle: keras.KerasTensor, angle_responses: keras.KerasTensor,
+            grad_mag: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Apply double thresholding to find strong and weak edges.
 
         :param max_pool_angle: Max-pooled angle response tensor.
-        :type max_pool_angle: tf.Tensor
+        :type max_pool_angle: keras.KerasTensor
         :param angle_responses: Angle response tensor.
-        :type angle_responses: tf.Tensor
+        :type angle_responses: keras.KerasTensor
         :param grad_mag: Gradient magnitude tensor.
-        :type grad_mag: tf.Tensor
+        :type grad_mag: keras.KerasTensor
         :return: Tuple of ``(strong_edges, weak_edges)`` binary masks.
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
@@ -324,34 +341,39 @@ class Canny(keras.layers.Layer):
         return strong, weak
 
     def _track_edges(
-            self, strong_edges: tf.Tensor, weak_edges: tf.Tensor
+            self, strong_edges: keras.KerasTensor, weak_edges: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Track edges using hysteresis with a tf.while_loop.
+        """Track edges using hysteresis with a keras.ops.while_loop.
+
+        The dilation over the (all-ones) ``tracking_connection`` structuring
+        element is mathematically identical to a flat max pool of the same
+        window, so it is expressed directly as ``keras.ops.max_pool``.
 
         :param strong_edges: Binary mask of strong edges.
-        :type strong_edges: tf.Tensor
+        :type strong_edges: keras.KerasTensor
         :param weak_edges: Binary mask of weak edges.
-        :type weak_edges: tf.Tensor
+        :type weak_edges: keras.KerasTensor
         :return: Final binary edge map.
         :rtype: keras.KerasTensor
         """
+        pool_size = (self.tracking_connection, self.tracking_connection)
 
         def loop_cond(current, has_changed):
             return has_changed
 
         def loop_body(current, has_changed):
-            previous = tf.identity(current)
-            dilated = tf.nn.dilation2d(
-                current, self.dilation_kernel, strides=(1, 1, 1, 1),
-                padding='SAME', data_format='NHWC', dilations=(1, 1, 1, 1)
+            previous = current
+            dilated = keras.ops.max_pool(
+                current, pool_size=pool_size, strides=(1, 1), padding="same"
             )
             newly_strong = dilated * weak_edges
             current = keras.ops.clip(strong_edges + newly_strong, 0.0, 1.0)
             has_changed = keras.ops.any(keras.ops.not_equal(current, previous))
             return current, has_changed
 
-        final_edges, _ = tf.while_loop(
-            loop_cond, loop_body, loop_vars=(strong_edges, tf.constant(True)),
+        final_edges, _ = keras.ops.while_loop(
+            loop_cond, loop_body,
+            loop_vars=(strong_edges, keras.ops.convert_to_tensor(True)),
             maximum_iterations=self.tracking_iterations
         )
         return final_edges
