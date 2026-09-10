@@ -9,7 +9,8 @@ block. The sampling primitives themselves (``coords_grid``,
 -- see its docstring for why the port's one sampling convention is a module of
 its own. At this point this module carries the module-level CONSTANTS, the
 single ``_VARIANT_SPEC`` width table, the instance-norm stand-in, and the
-feature encoder with its residual unit.
+feature encoder with its residual unit, and the separable recurrent update
+core ``SepConvGRU``.
 
 Why the width table lives HERE and not in ``model.py``
 ------------------------------------------------------
@@ -693,6 +694,323 @@ class DocScannerFeatureEncoder(keras.layers.Layer):
         return config
 
 
+# ---------------------------------------------------------------------
+# The separable recurrent update core.
+# ---------------------------------------------------------------------
+
+# `update.py:37-39`: the FIRST pass' three convolutions are `(1, 5)` kernels
+# with `padding=(0, 2)`. In torch's `(kH, kW)` ordering that is a kernel one
+# pixel tall and five wide, so it mixes along the WIDTH axis only. Keras'
+# `kernel_size` is `(kH, kW)` as well -- the tuple transfers verbatim, and the
+# axis it acts on does NOT change with the channels-last layout, because the
+# layout moves the CHANNEL axis, not the spatial pair.
+GRU_HORIZONTAL_KERNEL_SIZE: Tuple[int, int] = (1, 5)
+
+# `update.py:41-43`: the SECOND pass' kernels are `(5, 1)` with
+# `padding=(2, 0)` -- five tall, one wide, mixing along HEIGHT only.
+GRU_VERTICAL_KERNEL_SIZE: Tuple[int, int] = (5, 1)
+
+
+# DECISION plan-2026-09-10T065432-05fcb6dd/D-014: three orderings in this class
+# are silent when wrong, i.e. every shape, dtype, gradient and serialization test
+# stays green under the mutation.
+#   (1) The two passes are SEQUENTIAL, not parallel and not commutative: the
+#       vertical pass consumes the `h` the horizontal pass just produced
+#       (`update.py:50` feeds `update.py:53`), and the SAME `x` both times.
+#       Do NOT compute both from the entry `h` and combine them.
+#   (2) Horizontal is FIRST. The order is observable only on an input whose
+#       horizontal and vertical structure differ, on a NON-SQUARE fixture.
+#   (3) `q` is convolved over `concat(r * h, x)`, NOT over `concat(h, x)`
+#       (`update.py:49`). Dropping the reset gate leaves a working GRU that
+#       simply cannot forget, which no shape or finiteness probe can see.
+# Also: these are STRIDE-1 convolutions, so Keras `"same"` and torch's symmetric
+# `padding=(0, 2)` / `(2, 0)` agree exactly -- D-012's stride-2 asymmetry does
+# NOT apply here, and that equivalence is asserted rather than assumed
+# (`TestTheStrideOnePaddingMatchesTorchsSymmetricPadding`). See decisions.md D-014.
+@register_dl_technique("dl_techniques.models.doc_scanner.components")
+class SepConvGRU(keras.layers.Layer):
+    """The rectifier's recurrent update core (``update.py:35-61``).
+
+    A convolutional GRU whose 5x5 receptive field is factorized into two
+    sequential 1-D passes, after RAFT. Each pass is a complete GRU step --
+    update gate ``z``, reset gate ``r``, candidate ``q`` -- over the
+    concatenation of the hidden state and the (unchanging) context input:
+
+    .. code-block:: text
+
+        pass 1, kernel (1, 5), mixes along WIDTH
+            hx = concat([h, x])
+            z  = sigmoid(convz1(hx))
+            r  = sigmoid(convr1(hx))
+            q  = tanh(convq1(concat([r * h, x])))
+            h  = (1 - z) * h + z * q
+
+        pass 2, kernel (5, 1), mixes along HEIGHT, consuming the h ABOVE
+            hx = concat([h, x])
+            z  = sigmoid(convz2(hx))
+            r  = sigmoid(convr2(hx))
+            q  = tanh(convq2(concat([r * h, x])))
+            h  = (1 - z) * h + z * q
+
+    Gate polarity is the reference's and is worth stating because it is the
+    opposite of some GRU write-ups: ``z == 1`` means "take the candidate
+    entirely" (``h_new == q``) and ``z == 0`` means "keep the old state"
+    (``h_new == h``). An inverted convention still trains and still produces
+    finite output of the right shape.
+
+    Widths. Every convolution reads ``hidden_dim + input_dim`` channels and
+    emits ``hidden_dim``; at the one shipped variant that is ``160 + 320 ->
+    160``. Both numbers come from ``_VARIANT_SPEC``, which reads them from
+    ``update.py:88``'s CALL SITE and never from ``update.py:36``'s dead
+    ``hidden_dim=128, input_dim=192+128`` default -- see the ``_VARIANT_SPEC``
+    anchor and decisions.md D-006 / D-007.
+
+    Initialization. The reference does NOT re-initialize these convolutions
+    (``extractor.py:106-108`` re-inits the ENCODER's, and ``update.py`` has no
+    equivalent), so upstream they carry torch's ``Conv2d`` default. This port
+    leaves Keras' ``glorot_uniform`` default in place rather than transcribing
+    torch's ``kaiming_uniform(a=sqrt(5))``: the model is trained from scratch,
+    no checkpoint is transferred, and inventing an initializer the reference
+    never states would be a divergence dressed as fidelity.
+
+    :param hidden_dim: Width of the hidden state, and of every convolution's
+        output. ``_VARIANT_SPEC["docscanner-l"]["hidden_dim"]`` at the shipped
+        variant.
+    :type hidden_dim: int
+    :param input_dim: Width of the context input ``x``.
+        ``_VARIANT_SPEC["docscanner-l"]["gru_input_dim"]`` at the shipped
+        variant.
+    :type input_dim: int
+    :param kwargs: Forwarded to ``keras.layers.Layer``.
+    :type kwargs: Any
+    :raises ValueError: If either width is not positive.
+
+    Example:
+
+    .. code-block:: python
+
+        spec = _VARIANT_SPEC["docscanner-l"]
+        gru = SepConvGRU(
+            hidden_dim=spec["hidden_dim"], input_dim=spec["gru_input_dim"])
+        net = gru([hidden_state, context])   # (B, H, W, hidden_dim)
+    """
+
+    def __init__(
+            self,
+            hidden_dim: int,
+            input_dim: int,
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        if input_dim <= 0:
+            raise ValueError(f"input_dim must be positive, got {input_dim}")
+
+        self.hidden_dim = hidden_dim
+        self.input_dim = input_dim
+
+        # All six sub-layers are created UNCONDITIONALLY here; none is built
+        # lazily inside `call`, and none is created behind a flag.
+        self.convz1 = self._gate_conv(GRU_HORIZONTAL_KERNEL_SIZE, "convz1")
+        self.convr1 = self._gate_conv(GRU_HORIZONTAL_KERNEL_SIZE, "convr1")
+        self.convq1 = self._gate_conv(GRU_HORIZONTAL_KERNEL_SIZE, "convq1")
+
+        self.convz2 = self._gate_conv(GRU_VERTICAL_KERNEL_SIZE, "convz2")
+        self.convr2 = self._gate_conv(GRU_VERTICAL_KERNEL_SIZE, "convr2")
+        self.convq2 = self._gate_conv(GRU_VERTICAL_KERNEL_SIZE, "convq2")
+
+    def _gate_conv(
+            self,
+            kernel_size: Tuple[int, int],
+            name: str
+    ) -> keras.layers.Conv2D:
+        """One of the six gate convolutions.
+
+        ``padding="same"`` at stride 1 is torch's symmetric ``padding=(0, 2)``
+        / ``(2, 0)`` EXACTLY -- the odd kernel extents 5 and 1 both need an even
+        total pad, which TF splits evenly, so no side is favoured. D-012's
+        stride-2 asymmetry cannot arise here.
+
+        :param kernel_size: ``(kh, kw)``; ``(1, 5)`` mixes width, ``(5, 1)``
+            mixes height.
+        :type kernel_size: Tuple[int, int]
+        :param name: Sub-layer name.
+        :type name: str
+        :return: An unbuilt convolution emitting ``hidden_dim`` channels.
+        :rtype: keras.layers.Conv2D
+        """
+        return keras.layers.Conv2D(
+            filters=self.hidden_dim,
+            kernel_size=kernel_size,
+            strides=1,
+            padding="same",
+            use_bias=True,
+            name=name,
+        )
+
+    def build(self, input_shape: Sequence[Tuple[Optional[int], ...]]) -> None:
+        """Build all six convolutions on the concatenated ``[h, x]`` width.
+
+        :param input_shape: A two-element sequence
+            ``[hidden_shape, input_shape]``, each ``(batch, height, width,
+            channels)``.
+        :type input_shape: Sequence[tuple]
+        :raises ValueError: If two shapes were not supplied, if either is not
+            rank 4, or if either channel count disagrees with the width this
+            layer was constructed for.
+        """
+        if self.built:
+            return
+
+        if len(input_shape) != 2:
+            raise ValueError(
+                f"SepConvGRU is called on a two-element sequence "
+                f"[hidden_state, inputs]; got {len(input_shape)} element(s): "
+                f"{input_shape}"
+            )
+
+        hidden_shape, context_shape = (tuple(s) for s in input_shape)
+
+        for label, shape in (
+                ("hidden_state", hidden_shape), ("inputs", context_shape)):
+            if len(shape) != 4:
+                raise ValueError(
+                    f"Expected a 4D {label} shape (batch, height, width, "
+                    f"channels), got {len(shape)}D: {shape}"
+                )
+
+        if hidden_shape[-1] is not None and hidden_shape[-1] != self.hidden_dim:
+            raise ValueError(
+                f"hidden_state has {hidden_shape[-1]} channels but this "
+                f"SepConvGRU was built for hidden_dim={self.hidden_dim}"
+            )
+        if context_shape[-1] is not None and context_shape[-1] != self.input_dim:
+            raise ValueError(
+                f"inputs has {context_shape[-1]} channels but this SepConvGRU "
+                f"was built for input_dim={self.input_dim}"
+            )
+
+        # Every one of the six convolutions sees the SAME concatenated width:
+        # `concat([h, x])` for z and r, `concat([r * h, x])` for q, and `r * h`
+        # has the same width as `h`.
+        concat_shape = (
+            hidden_shape[0],
+            hidden_shape[1],
+            hidden_shape[2],
+            self.hidden_dim + self.input_dim,
+        )
+
+        for conv in (
+                self.convz1, self.convr1, self.convq1,
+                self.convz2, self.convr2, self.convq2,
+        ):
+            conv.build(concat_shape)
+
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: Sequence[keras.KerasTensor],
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Run the horizontal pass, then the vertical pass on its output.
+
+        :param inputs: ``[hidden_state, context]``. ``hidden_state`` is
+            ``(batch, height, width, hidden_dim)``; ``context`` is
+            ``(batch, height, width, input_dim)`` and is the SAME tensor for
+            both passes.
+        :type inputs: Sequence[keras.KerasTensor]
+        :param training: Unused -- this layer holds no training-dependent
+            sub-layer -- and accepted only so Keras may forward it.
+        :type training: Optional[bool]
+        :return: The updated hidden state, ``(batch, height, width,
+            hidden_dim)``.
+        :rtype: keras.KerasTensor
+        """
+        hidden_state, context = inputs
+
+        # --- pass 1: (1, 5) kernels, mixing along WIDTH -------------------
+        hidden_state = self._gru_step(
+            hidden_state, context, self.convz1, self.convr1, self.convq1)
+
+        # --- pass 2: (5, 1) kernels, mixing along HEIGHT -------------------
+        # It consumes the hidden state pass 1 JUST produced, and the same
+        # `context`. Swapping these two blocks is shape-preserving.
+        hidden_state = self._gru_step(
+            hidden_state, context, self.convz2, self.convr2, self.convq2)
+
+        return hidden_state
+
+    @staticmethod
+    def _gru_step(
+            hidden_state: keras.KerasTensor,
+            context: keras.KerasTensor,
+            conv_z: keras.layers.Conv2D,
+            conv_r: keras.layers.Conv2D,
+            conv_q: keras.layers.Conv2D,
+    ) -> keras.KerasTensor:
+        """One complete gated step (``update.py:46-50``), for one pass.
+
+        :param hidden_state: ``(batch, height, width, hidden_dim)``.
+        :type hidden_state: keras.KerasTensor
+        :param context: ``(batch, height, width, input_dim)``.
+        :type context: keras.KerasTensor
+        :param conv_z: The update-gate convolution of this pass.
+        :type conv_z: keras.layers.Conv2D
+        :param conv_r: The reset-gate convolution of this pass.
+        :type conv_r: keras.layers.Conv2D
+        :param conv_q: The candidate convolution of this pass.
+        :type conv_q: keras.layers.Conv2D
+        :return: The updated hidden state, same shape as ``hidden_state``.
+        :rtype: keras.KerasTensor
+        """
+        gate_input = keras.ops.concatenate([hidden_state, context], axis=-1)
+
+        update_gate = keras.ops.sigmoid(conv_z(gate_input))
+        reset_gate = keras.ops.sigmoid(conv_r(gate_input))
+
+        # The candidate reads the RESET hidden state, not the raw one.
+        candidate = keras.ops.tanh(conv_q(keras.ops.concatenate(
+            [reset_gate * hidden_state, context], axis=-1)))
+
+        # z == 1 -> take the candidate; z == 0 -> keep the state.
+        return (1.0 - update_gate) * hidden_state + update_gate * candidate
+
+    def compute_output_shape(
+            self,
+            input_shape: Sequence[Tuple[Optional[int], ...]]
+    ) -> Tuple[Optional[int], ...]:
+        """The hidden state's shape, unchanged -- both passes are stride 1.
+
+        :param input_shape: ``[hidden_shape, context_shape]``.
+        :type input_shape: Sequence[tuple]
+        :return: The output shape tuple.
+        :rtype: tuple
+        """
+        hidden_shape = tuple(input_shape[0])
+        return (
+            hidden_shape[0],
+            hidden_shape[1],
+            hidden_shape[2],
+            self.hidden_dim,
+        )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return every constructor argument.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            "hidden_dim": self.hidden_dim,
+            "input_dim": self.input_dim,
+        })
+        return config
+
+
 __all__: List[str] = [
     "INSTANCE_NORM_EPSILON",
     "SPATIAL_DIVISOR",
@@ -703,4 +1021,7 @@ __all__: List[str] = [
     "BM_CALIBRATION_SCALE",
     "DocScannerResidualBlock",
     "DocScannerFeatureEncoder",
+    "SepConvGRU",
+    "GRU_HORIZONTAL_KERNEL_SIZE",
+    "GRU_VERTICAL_KERNEL_SIZE",
 ]

@@ -1062,3 +1062,455 @@ class TestTheEncoderTrainsAndRoundTrips:
         )
         assert tuple(traced(tf.zeros((3, 32, 24, 3))).shape) == (
             3, 4, 3, _FNET_OUTPUT_DIM)
+
+# =====================================================================
+# SepConvGRU -- the separable recurrent update core (step 5).
+#
+# Three orderings in this layer are SHAPE-PRESERVING when wrong, so every
+# guard below is a value-level or dependence-level assertion:
+#
+# * the two passes swapped (vertical first). The influence SUPPORT is
+#   identical either way -- a 5x5 box around the perturbed pixel -- so a
+#   support probe is structurally vacuous here and the guard has to compare
+#   VALUES against a composition built in the test.
+# * the (1, 5) and (5, 1) kernels swapped, i.e. the horizontal pass mixing
+#   height. Same shape, same parameter count.
+# * `q` convolved over `concat(h, x)` instead of `concat(r * h, x)`. That is
+#   still a working recurrent cell; it simply cannot forget.
+#
+# Fixtures are NON-SQUARE (H=4, W=7) throughout, because a square fixture
+# cannot separate the two spatial axes.
+# =====================================================================
+
+from dl_techniques.models.vision.image_restoration.doc_scanner.components import (  # noqa: E402
+    GRU_HORIZONTAL_KERNEL_SIZE,
+    GRU_VERTICAL_KERNEL_SIZE,
+    SepConvGRU,
+)
+
+_HIDDEN_DIM = _SPEC["hidden_dim"]
+_GRU_INPUT_DIM = _SPEC["gru_input_dim"]
+
+# Small stand-in widths for the value probes. The two differ so that a
+# hidden/context concatenation order mix-up cannot be silently shape-legal.
+_TEST_HIDDEN = 6
+_TEST_INPUT = 5
+
+# The non-square probe fixture, and the perturbed pixel inside it.
+_PROBE_H, _PROBE_W = 4, 7
+_PROBE_ROW, _PROBE_COL = 1, 3
+
+# `update.py:37-43`: a 5-tap 1-D kernel reaches two pixels either side.
+_GRU_KERNEL_REACH = 2
+
+# ONE GRU step reaches TWICE that far along its own axis, and this was measured
+# rather than predicted. `q = tanh(convq(cat([r * h, x])))` convolves over
+# `r * h`, and `r` is ITSELF a convolution output, so the two 5-taps COMPOSE:
+# a perturbation at column c moves the output as far as c +/- 4. The reach on
+# the orthogonal axis stays exactly 0, which is the part these guards are
+# pointed at. Predicting 2 here produced a RED at columns 0 and 6 with
+# magnitudes 0.035 and 0.152 -- real influence, not float noise.
+_GRU_STEP_REACH = 2 * _GRU_KERNEL_REACH
+
+
+def _gru(hidden: int = _TEST_HIDDEN, context: int = _TEST_INPUT) -> SepConvGRU:
+    return SepConvGRU(hidden_dim=hidden, input_dim=context)
+
+
+def _built_gru(
+        hidden: int = _TEST_HIDDEN,
+        context: int = _TEST_INPUT,
+        height: int = _PROBE_H,
+        width: int = _PROBE_W,
+) -> SepConvGRU:
+    gru = _gru(hidden, context)
+    gru.build([(None, height, width, hidden), (None, height, width, context)])
+    return gru
+
+
+def _probe_pair(seed: int) -> tuple:
+    """A ``(hidden_state, context)`` pair with structure on BOTH axes.
+
+    The context carries a bright COLUMN and the hidden state a bright ROW, so
+    the two spatial axes are not interchangeable in the fixture. A fixture
+    symmetric under transposition -- or merely square -- cannot tell the
+    horizontal pass from the vertical one.
+    """
+    rng = np.random.default_rng(seed)
+    hidden = rng.standard_normal(
+        (2, _PROBE_H, _PROBE_W, _TEST_HIDDEN)).astype("float32") * 0.1
+    context = rng.standard_normal(
+        (2, _PROBE_H, _PROBE_W, _TEST_INPUT)).astype("float32") * 0.1
+    hidden[:, _PROBE_ROW, :, :] += 1.0      # a bright ROW in the state
+    context[:, :, _PROBE_COL, :] += 1.0     # a bright COLUMN in the context
+    return hidden, context
+
+
+def _numpy(tensor) -> np.ndarray:
+    return np.asarray(keras.ops.convert_to_numpy(tensor))
+
+
+class TestTheGRUPreservesItsSpatialShapeAndHiddenWidth:
+    """Both passes are stride 1, so only the channel axis is decided here."""
+
+    def test_the_shipped_widths_at_the_rectifiers_own_resolution(self):
+        """(B, 36, 36, 160) + (B, 36, 36, 320) -> (B, 36, 36, 160).
+
+        36 is ``288 // SPATIAL_DIVISOR``, the resolution the refinement loop
+        actually runs at. The widths come from ``_VARIANT_SPEC``; no literal.
+        """
+        gru = _gru(_HIDDEN_DIM, _GRU_INPUT_DIM)
+        side = 288 // SPATIAL_DIVISOR
+        hidden = np.zeros((1, side, side, _HIDDEN_DIM), dtype="float32")
+        context = np.zeros((1, side, side, _GRU_INPUT_DIM), dtype="float32")
+        out = gru([hidden, context])
+        assert tuple(out.shape) == (1, side, side, _HIDDEN_DIM)
+        assert np.isfinite(_numpy(out)).all()
+
+    def test_a_non_square_input_keeps_its_own_height_and_width(self):
+        gru = _gru()
+        hidden, context = _probe_pair(seed=0)
+        out = gru([hidden, context])
+        assert tuple(out.shape) == (2, _PROBE_H, _PROBE_W, _TEST_HIDDEN)
+
+    def test_compute_output_shape_agrees_with_the_real_call(self):
+        gru = _built_gru()
+        declared = gru.compute_output_shape(
+            [(None, _PROBE_H, _PROBE_W, _TEST_HIDDEN),
+             (None, _PROBE_H, _PROBE_W, _TEST_INPUT)])
+        hidden, context = _probe_pair(seed=1)
+        assert declared[1:] == tuple(gru([hidden, context]).shape)[1:]
+
+    def test_every_convolution_reads_the_concatenated_width(self):
+        """``hidden_dim + input_dim`` in, ``hidden_dim`` out -- all six.
+
+        This is the width the dead-default trap (D-006/D-007) attacks: nothing
+        about the layer's SHAPE behaviour changes if the hidden width is 128
+        instead of 160, because the state simply carries a different width end
+        to end.
+        """
+        gru = _built_gru(_HIDDEN_DIM, _GRU_INPUT_DIM, height=6, width=5)
+        convs = (gru.convz1, gru.convr1, gru.convq1,
+                 gru.convz2, gru.convr2, gru.convq2)
+        assert len(convs) == 6
+        for conv in convs:
+            assert tuple(conv.kernel.shape)[2:] == (
+                _HIDDEN_DIM + _GRU_INPUT_DIM, _HIDDEN_DIM), conv.name
+
+    @pytest.mark.parametrize("bad_hidden,bad_input", [(0, 4), (4, 0), (-1, 4)])
+    def test_a_non_positive_width_is_refused(self, bad_hidden, bad_input):
+        with pytest.raises(ValueError, match="must be positive"):
+            SepConvGRU(hidden_dim=bad_hidden, input_dim=bad_input)
+
+    def test_a_channel_count_that_disagrees_with_the_declared_width_is_refused(self):
+        gru = _gru()
+        with pytest.raises(ValueError, match="hidden_state has"):
+            gru.build([(None, 4, 7, _TEST_HIDDEN + 1), (None, 4, 7, _TEST_INPUT)])
+        with pytest.raises(ValueError, match="inputs has"):
+            _gru().build([(None, 4, 7, _TEST_HIDDEN), (None, 4, 7, _TEST_INPUT + 1)])
+
+    def test_a_single_tensor_instead_of_the_pair_is_refused(self):
+        with pytest.raises(ValueError, match="two-element sequence"):
+            _gru().build([(None, 4, 7, _TEST_HIDDEN)])
+
+
+class TestTheStrideOnePaddingMatchesTorchsSymmetricPadding:
+    """D-012 does NOT apply here, and that is measured rather than asserted.
+
+    ``extractor.py``'s stride-2 convolutions needed explicit padding because
+    Keras ``"same"`` splits an odd total pad as ``0/1`` where torch pads
+    ``1/1``. These convolutions are STRIDE 1 with odd kernel extents, so the
+    required total pad is even and every split is symmetric -- ``"same"`` IS
+    torch's ``padding=(0, 2)`` / ``(2, 0)``, exactly. The two arms below
+    compare ``"same"`` against an explicitly, symmetrically pre-padded
+    ``"valid"`` convolution sharing the same weights, and require a difference
+    of exactly zero.
+    """
+
+    @pytest.mark.parametrize(
+        "kernel_size,pad", [
+            (GRU_HORIZONTAL_KERNEL_SIZE, ((0, 0), (_GRU_KERNEL_REACH, _GRU_KERNEL_REACH))),
+            (GRU_VERTICAL_KERNEL_SIZE, ((_GRU_KERNEL_REACH, _GRU_KERNEL_REACH), (0, 0))),
+        ])
+    def test_same_equals_an_explicit_symmetric_pad_plus_valid(
+            self, kernel_size, pad, golden_reference_device):
+        """Pinned to the golden-reference device.
+
+        The two arms feed convolutions of DIFFERENT input widths, so on an
+        RTX 4070 the backend picks different algorithms for them and TF32
+        rounding makes the exact-zero claim read ``4.6e-4`` -- precision, not a
+        pixel shift. Measured on GPU 2026-09-10 during step 5. The distinction
+        this test exists to make is O(1), not O(1e-4): the D-012 stride-2
+        mismatch it is modelled on moved a unit impulse to a different index
+        entirely. Pinning the device keeps the claim EXACT rather than
+        loosening a tolerance to within a factor of two of the defect it is
+        supposed to see.
+        """
+        rng = np.random.default_rng(11)
+        x = rng.standard_normal((1, _PROBE_H, _PROBE_W, 3)).astype("float32")
+        padded = np.pad(x, ((0, 0), pad[0], pad[1], (0, 0)))
+
+        with keras.device(golden_reference_device):
+            same = keras.layers.Conv2D(4, kernel_size, padding="same")
+            valid = keras.layers.Conv2D(4, kernel_size, padding="valid")
+            same.build(x.shape)
+            valid.build(padded.shape)
+            valid.set_weights(same.get_weights())
+
+            delta = np.abs(_numpy(same(x)) - _numpy(valid(padded))).max()
+
+        assert delta == 0.0
+
+
+class TestEachPassMixesAlongExactlyOneAxis:
+    """The ``(1, 5)`` pass moves information along WIDTH, ``(5, 1)`` along HEIGHT.
+
+    Measured as a DEPENDENCE, not as a support: with generic weights and
+    non-zero biases every output pixel is non-zero regardless, so "where is the
+    output non-zero" answers nothing. Perturbing exactly one input pixel and
+    asking which OUTPUT pixels moved answers it, and is blind to the bias.
+
+    Torch's ``(kH, kW)`` kernel ordering is Keras' ordering too, and the
+    channels-last layout moves the CHANNEL axis, not the spatial pair -- so the
+    tuples transfer verbatim. That reasoning is exactly what this test refuses
+    to take on trust: an axis swap is shape-preserving and parameter-count
+    preserving.
+    """
+
+    @staticmethod
+    def _influence_mask(convs) -> np.ndarray:
+        """Which output pixels move when input pixel ``(row, col)`` moves."""
+        gru = _built_gru()
+        hidden, context = _probe_pair(seed=3)
+        hidden, context = hidden[:1], context[:1]
+
+        perturbed = context.copy()
+        perturbed[0, _PROBE_ROW, _PROBE_COL, :] += 5.0
+
+        selected = [getattr(gru, name) for name in convs]
+        base = _numpy(SepConvGRU._gru_step(hidden, context, *selected))
+        moved = _numpy(SepConvGRU._gru_step(hidden, perturbed, *selected))
+        return np.abs(moved - base).max(axis=-1)[0] > 1e-6
+
+    def test_the_first_pass_spreads_along_width_only(self):
+        mask = self._influence_mask(("convz1", "convr1", "convq1"))
+        rows, cols = np.nonzero(mask)
+        assert set(rows.tolist()) == {_PROBE_ROW}, (
+            "the (1, 5) pass moved information ACROSS ROWS; its kernel is "
+            "acting on the height axis. See decisions.md D-014.")
+        assert set(cols.tolist()) == set(range(
+            max(0, _PROBE_COL - _GRU_STEP_REACH),
+            min(_PROBE_W, _PROBE_COL + _GRU_STEP_REACH + 1)))
+
+    def test_the_second_pass_spreads_along_height_only(self):
+        mask = self._influence_mask(("convz2", "convr2", "convq2"))
+        rows, cols = np.nonzero(mask)
+        assert set(cols.tolist()) == {_PROBE_COL}, (
+            "the (5, 1) pass moved information ACROSS COLUMNS; its kernel is "
+            "acting on the width axis. See decisions.md D-014.")
+        # The composed reach is 4 and the fixture is only 4 rows tall, so every
+        # row is inside it; the load-bearing arm is the column one above.
+        assert set(rows.tolist()) == set(range(
+            max(0, _PROBE_ROW - _GRU_STEP_REACH),
+            min(_PROBE_H, _PROBE_ROW + _GRU_STEP_REACH + 1)))
+
+    def test_the_two_passes_are_not_the_same_operator(self):
+        """A vacuity control: the two masks must actually differ."""
+        first = self._influence_mask(("convz1", "convr1", "convq1"))
+        second = self._influence_mask(("convz2", "convr2", "convq2"))
+        assert not np.array_equal(first, second)
+
+
+class TestThePassOrderIsHorizontalThenVertical:
+    """``update.py:46-59``: horizontal FIRST, and the vertical pass consumes
+    the state the horizontal pass just produced.
+
+    The influence SUPPORT is identical under a swap -- a 5x5 box either way --
+    which is why this guard compares values against a composition assembled in
+    the test. Two further arms keep it from being vacuous: the swapped
+    composition and the parallel (both-from-the-entry-state) composition must
+    each differ from the layer's real output by a stated margin. Without those,
+    a fixture that happened not to distinguish the orders would let the guard
+    pass for the wrong reason.
+    """
+
+    MIN_SEPARATION = 1e-3
+
+    @staticmethod
+    def _compositions():
+        gru = _built_gru()
+        hidden, context = _probe_pair(seed=5)
+        actual = _numpy(gru([hidden, context]))
+
+        horizontal = (gru.convz1, gru.convr1, gru.convq1)
+        vertical = (gru.convz2, gru.convr2, gru.convq2)
+
+        after_h = SepConvGRU._gru_step(hidden, context, *horizontal)
+        h_then_v = _numpy(SepConvGRU._gru_step(after_h, context, *vertical))
+
+        after_v = SepConvGRU._gru_step(hidden, context, *vertical)
+        v_then_h = _numpy(SepConvGRU._gru_step(after_v, context, *horizontal))
+
+        # The plausible wrong wiring: the vertical pass reading the ENTRY
+        # state instead of the one the horizontal pass just produced.
+        entry_fed_vertical = _numpy(after_v)
+        return actual, h_then_v, v_then_h, entry_fed_vertical
+
+    def test_the_layer_equals_the_vertical_pass_applied_to_the_horizontal_result(self):
+        actual, h_then_v, _, _ = self._compositions()
+        np.testing.assert_allclose(actual, h_then_v, rtol=0, atol=ATOL)
+
+    def test_the_swapped_order_produces_a_measurably_different_state(self):
+        """Non-vacuity: this fixture CAN tell the two orders apart."""
+        actual, _, v_then_h, _ = self._compositions()
+        assert np.abs(actual - v_then_h).max() > self.MIN_SEPARATION, (
+            "the fixture cannot distinguish the pass order, so the arm above "
+            "would pass under a swap. Give the two spatial axes different "
+            "structure. See decisions.md D-014.")
+
+    def test_the_second_pass_consumes_the_updated_state_not_the_entry_state(self):
+        """Non-vacuity for the SEQUENTIAL dependence specifically."""
+        actual, _, _, entry_fed_vertical = self._compositions()
+        assert np.abs(actual - entry_fed_vertical).max() > self.MIN_SEPARATION
+
+
+class TestTheCandidateIsConvolvedOverTheResetHiddenState:
+    """``update.py:49``: ``q = tanh(convq(cat([r * h, x])))``.
+
+    The reset gate is applied to ``h`` BEFORE the candidate convolution and
+    nowhere else. Feeding the raw ``h`` instead leaves a perfectly functional
+    gated cell -- same shape, same parameters, finite output, trainable -- that
+    has simply lost the ability to forget. The guard is two-sided: the layer
+    must equal the reset form and must NOT equal the raw form.
+    """
+
+    @staticmethod
+    def _forms():
+        gru = _built_gru()
+        hidden, context = _probe_pair(seed=7)
+
+        actual = _numpy(SepConvGRU._gru_step(
+            hidden, context, gru.convz1, gru.convr1, gru.convq1))
+
+        gate_input = keras.ops.concatenate([hidden, context], axis=-1)
+        z = keras.ops.sigmoid(gru.convz1(gate_input))
+        r = keras.ops.sigmoid(gru.convr1(gate_input))
+
+        with_reset = keras.ops.tanh(gru.convq1(keras.ops.concatenate(
+            [r * hidden, context], axis=-1)))
+        without_reset = keras.ops.tanh(gru.convq1(gate_input))
+
+        def blend(candidate):
+            return _numpy((1.0 - z) * hidden + z * candidate)
+
+        return actual, blend(with_reset), blend(without_reset)
+
+    def test_it_matches_the_reset_gated_candidate(self):
+        actual, with_reset, _ = self._forms()
+        np.testing.assert_allclose(actual, with_reset, rtol=0, atol=ATOL)
+
+    def test_it_does_not_match_the_raw_hidden_state_candidate(self):
+        actual, _, without_reset = self._forms()
+        assert np.abs(actual - without_reset).max() > 1e-3, (
+            "this fixture cannot see the reset gate -- r is saturated at 1 or "
+            "the hidden state is ~0, so the arm above would pass under the "
+            "mutation. See decisions.md D-014.")
+
+
+class TestTheUpdateGatePolarity:
+    """``h = (1 - z) * h + z * q``: ``z == 1`` TAKES the candidate.
+
+    An inverted convention is arithmetically respectable and trains fine, so
+    nothing but a forced-gate probe distinguishes them. ``z`` is driven to its
+    rails by zeroing both update-gate kernels and setting their biases, which
+    makes ``z`` a constant independent of the input.
+    """
+
+    RAIL = 30.0
+
+    @staticmethod
+    def _gru_with_forced_update_gate(bias_value: float) -> SepConvGRU:
+        gru = _built_gru()
+        for conv in (gru.convz1, gru.convz2):
+            conv.kernel.assign(keras.ops.zeros(conv.kernel.shape))
+            conv.bias.assign(keras.ops.full(conv.bias.shape, bias_value))
+        return gru
+
+    def test_a_saturated_gate_replaces_the_state_with_the_candidate(self):
+        gru = self._gru_with_forced_update_gate(self.RAIL)
+        hidden, context = _probe_pair(seed=9)
+        actual = _numpy(gru([hidden, context]))
+
+        # Both passes now output their own candidate outright, so the result is
+        # the SECOND pass' candidate evaluated on the first pass' candidate.
+        first = keras.ops.tanh(gru.convq1(keras.ops.concatenate(
+            [keras.ops.sigmoid(gru.convr1(keras.ops.concatenate(
+                [hidden, context], axis=-1))) * hidden, context], axis=-1)))
+        gate_input = keras.ops.concatenate([first, context], axis=-1)
+        second = keras.ops.tanh(gru.convq2(keras.ops.concatenate(
+            [keras.ops.sigmoid(gru.convr2(gate_input)) * first, context],
+            axis=-1)))
+
+        np.testing.assert_allclose(actual, _numpy(second), rtol=0, atol=1e-5)
+        assert np.abs(actual - hidden).max() > 1e-3, (
+            "the forced z=1 arm reproduced the ENTRY state, i.e. the gate "
+            "polarity is inverted. See decisions.md D-014.")
+
+    def test_a_closed_gate_returns_the_state_untouched(self):
+        gru = self._gru_with_forced_update_gate(-self.RAIL)
+        hidden, context = _probe_pair(seed=9)
+        actual = _numpy(gru([hidden, context]))
+        np.testing.assert_allclose(actual, hidden, rtol=0, atol=1e-5)
+
+
+def _gru_functional_model() -> keras.Model:
+    """The GRU wrapped so the shared model oracles can judge it."""
+    hidden = keras.Input(shape=(_PROBE_H, _PROBE_W, _TEST_HIDDEN), name="hidden")
+    context = keras.Input(shape=(_PROBE_H, _PROBE_W, _TEST_INPUT), name="context")
+    gru = SepConvGRU(hidden_dim=_TEST_HIDDEN, input_dim=_TEST_INPUT, name="gru")
+    return keras.Model([hidden, context], gru([hidden, context]),
+                       name="doc_scanner_sep_conv_gru")
+
+
+def _gru_inputs() -> list:
+    hidden, context = _probe_pair(seed=13)
+    return [hidden, context]
+
+
+class TestTheGRUTrainsAndRoundTrips:
+    """The shared oracles, adopted rather than reimplemented."""
+
+    def test_every_trainable_weight_receives_a_live_gradient(self):
+        assert_gradients_reach_every_trainable_weight(
+            _gru_functional_model(), _gru_inputs(), training=True)
+
+    def test_the_saved_and_reloaded_gru_reproduces_its_output_exactly(self):
+        report = measure_roundtrip(
+            _gru_functional_model, _gru_inputs, training=False)
+        assert report["self_max_delta"] == 0.0
+        assert_roundtrip_output_values(report, atol=0.0)
+
+    def test_the_weights_are_restored_before_the_reloaded_model_is_called(self):
+        report = measure_roundtrip(
+            _gru_functional_model, _gru_inputs, training=False)
+        assert report["call_count_before_weight_read"] == 0
+        assert_weights_restored_before_first_call(report, atol=0.0)
+
+    def test_the_config_round_trips_every_constructor_argument(self):
+        gru = _gru(_HIDDEN_DIM, _GRU_INPUT_DIM)
+        clone = SepConvGRU.from_config(gru.get_config())
+        assert clone.hidden_dim == _HIDDEN_DIM
+        assert clone.input_dim == _GRU_INPUT_DIM
+
+    def test_it_runs_under_a_traced_tf_function_with_an_unknown_batch(self):
+        gru = _built_gru()
+        traced = tf.function(
+            lambda h, x: gru([h, x]),
+            input_signature=[
+                tf.TensorSpec([None, _PROBE_H, _PROBE_W, _TEST_HIDDEN], tf.float32),
+                tf.TensorSpec([None, _PROBE_H, _PROBE_W, _TEST_INPUT], tf.float32),
+            ],
+        )
+        out = traced(tf.zeros((3, _PROBE_H, _PROBE_W, _TEST_HIDDEN)),
+                     tf.zeros((3, _PROBE_H, _PROBE_W, _TEST_INPUT)))
+        assert tuple(out.shape) == (3, _PROBE_H, _PROBE_W, _TEST_HIDDEN)
