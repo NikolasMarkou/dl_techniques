@@ -45,6 +45,7 @@ from dl_techniques.losses import (
 - `colbert_loss.py` — ColBERT retrieval losses: v1 pairwise/listwise softmax cross-entropy and v2 cross-encoder KL distillation
 - `decoupled_information_loss.py` — Information-theoretic regularization
 - `dino_loss.py` — DINO/iBOT self-supervised loss
+- `doc_scanner_flow_sequence_loss.py` — DocScanner's progressive-rectification objective (arXiv:2110.14968v2 Eq. 9-14): an iteration-weighted `gamma**(K-k)` sum over the `(B, K, H, W, 2)` refinement sequence, each term an L1 on the backward flow plus `alpha` times a circle-consistency (line-straightness) penalty on the two-step composed warp. **The only module in `losses/` that imports from `models/`** — it reuses the doc_scanner port's single pixel-coordinate sampler rather than minting a second sampling convention; see the D-031 anchor at the import
 - `feature_alignment_loss.py` — Feature alignment for knowledge distillation
 - `flow_matching_velocity_loss.py` — Rectified-flow / flow-matching velocity-regression loss
 - `focal_causal_lm_loss.py` — Focal loss variant for causal LM training

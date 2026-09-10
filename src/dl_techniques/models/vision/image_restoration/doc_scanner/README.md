@@ -79,6 +79,11 @@ The rectifier's training-mode output rank differs on purpose: this repo forbids 
 `train_step`, so the twelve-iteration exponentially-weighted sequence loss can only reach
 `compile(loss=...)` if the sequence is a model **output**.
 
+That loss is `dl_techniques.losses.DocScannerFlowSequenceLoss` — it lives in `losses/`, the
+repo's home for losses, not in this package. It takes the `(B, 12, H, W, 2)` sequence as
+`y_pred` and the 4-channel stack `[f_gt(2), g(2)]` as `y_true`, where `g` is the
+ground-truth **forward** map the circle-consistency term needs (paper Eq. 12).
+
 The rectifier's map and the composite's map **are not interchangeable**. One is in pixels
 and runs to 287 at a 288 input; the other is normalized. See §7.3.
 
@@ -355,8 +360,8 @@ defaults cannot be misread that way. Use `from_variant` or a `create_*` factory.
 
 Module constants with an upstream citation each, in `.components`:
 `INSTANCE_NORM_EPSILON = 1e-5`, `SPATIAL_DIVISOR = 8`, `REFINE_ITERATIONS = 12`,
-`SEQUENCE_LOSS_GAMMA = 0.85` (the paper, not the code — the release ships no training
-loop), `SEG_MASK_THRESHOLD = 0.5`, `BM_CALIBRATION_DIVISOR = 286.8`,
+`SEQUENCE_LOSS_GAMMA = 0.85` and `LINE_LOSS_WEIGHT = 0.5` (both the paper, not the code —
+the release ships no training loop), `SEG_MASK_THRESHOLD = 0.5`, `BM_CALIBRATION_DIVISOR = 286.8`,
 `BM_CALIBRATION_SCALE = 0.99`, `MASK_LOGIT_SCALE = 0.25`, `CONVEX_NEIGHBOURS = 9`,
 `FLOW_CHANNELS = 2`, `SEG_OUTPUT_CHANNELS = 1`.
 

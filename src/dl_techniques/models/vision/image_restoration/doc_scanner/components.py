@@ -99,6 +99,15 @@ REFINE_ITERATIONS: int = 12
 # there, and that is expected rather than a transcription error.
 SEQUENCE_LOSS_GAMMA: float = 0.85
 
+# The weight the sequence loss puts on the circle-consistency (line) term
+# relative to the L1 flow term, `L^(k) = L_f^(k) + alpha * L_line^(k)`.
+#
+# NOT FROM THE CODE either, for the same reason as `SEQUENCE_LOSS_GAMMA`: the
+# upstream release ships inference only. The value is the paper's:
+# arXiv:2110.14968v2, Eq. 10, where alpha is introduced as "a constant
+# weighting factor" and is given as 0.5 alongside `K = 12` and `gamma = 0.85`.
+LINE_LOSS_WEIGHT: float = 0.5
+
 # The composite pipeline binarizes the segmenter's confidence map before using
 # it as a multiplicative background mask: `inference.py:25`,
 # `msk = (msk > 0.5).float()`.
@@ -1952,6 +1961,7 @@ __all__: List[str] = [
     "SPATIAL_DIVISOR",
     "REFINE_ITERATIONS",
     "SEQUENCE_LOSS_GAMMA",
+    "LINE_LOSS_WEIGHT",
     "SEG_MASK_THRESHOLD",
     "BM_CALIBRATION_DIVISOR",
     "BM_CALIBRATION_SCALE",
