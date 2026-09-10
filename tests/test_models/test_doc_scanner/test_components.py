@@ -462,12 +462,23 @@ class TestConvexUpsampleNeighbourOrdering:
 
         np.testing.assert_allclose(out, expected, rtol=0, atol=1e-3)
 
-    def test_the_centre_neighbour_is_a_plain_nearest_upsample(self):
-        """k = 4 alone: a pure block-replicating 8x upsample of ``8 * flow``."""
+    def test_the_centre_neighbour_is_a_plain_nearest_upsample(
+            self, golden_reference_device):
+        """k = 4 alone: a pure block-replicating 8x upsample of ``8 * flow``.
+
+        Pinned to the golden-reference device. This is the only probe in the
+        module whose expectation is an arbitrary float rather than 0 or a small
+        integer, and on an RTX 4070 with TF32 matmul enabled it reads
+        ``0.273438`` (= 35/128, a 10-bit mantissa) against a true ``0.273542``
+        -- a 3.3e-3 error that is precision, not ordering. Measured
+        2026-09-10 during step 4; the other arms are exact at any precision and
+        do not need the pin.
+        """
         rng = np.random.default_rng(11)
         flow = rng.standard_normal((1, _UP_H, _UP_W, 2)).astype("float32")
 
-        out = np.array(convex_upsample(flow, _one_hot_mask(4)))
+        with keras.device(golden_reference_device):
+            out = np.array(convex_upsample(flow, _one_hot_mask(4)))
         expected = np.repeat(
             np.repeat(flow * SPATIAL_DIVISOR, SPATIAL_DIVISOR, axis=1),
             SPATIAL_DIVISOR,
@@ -658,3 +669,396 @@ class TestConvexUpsampleGradientsAndGraphSafety:
             _UP_W * SPATIAL_DIVISOR,
             2,
         )
+
+
+# =====================================================================
+# The feature encoder: the 80-channel stem norm, the torch-exact stride-2
+# padding, the shortcut algebra, gradients and the round trip.
+#
+# Everything below is pointed at a defect class that a shape test cannot see:
+#
+# * `norm1` built at the reference's literal 64 instead of the 80 channels
+#   `conv1` actually emits (H-7 / F-02). Upstream this is INERT, because
+#   `nn.InstanceNorm2d` defaults to `affine=False` and never uses the argument;
+#   here the argument is the GROUP COUNT, so it either raises (64 does not
+#   divide 80) or -- for a divisor that does, like 16 -- silently normalizes in
+#   5-channel groups while every shape, dtype, gradient and serialization test
+#   stays green. Hence the guards below assert the group count AND the
+#   per-channel statistics, never just the output shape.
+# * a stride-2 convolution padded with Keras "same" instead of torch's
+#   symmetric `padding=k//2`. Identical output SHAPE, feature map shifted by one
+#   pixel (D-012).
+# =====================================================================
+
+from dl_techniques.models.vision.image_restoration.doc_scanner.components import (  # noqa: E402
+    INSTANCE_NORM_EPSILON,
+    _VARIANT_SPEC,
+    DocScannerFeatureEncoder,
+    DocScannerResidualBlock,
+    _instance_norm,
+)
+from ..gradient_flow_oracle import (  # noqa: E402
+    assert_gradients_reach_every_trainable_weight,
+)
+from ..roundtrip_instrument_oracle import (  # noqa: E402
+    assert_roundtrip_output_values,
+    assert_weights_restored_before_first_call,
+    measure_roundtrip,
+)
+
+_SPEC = _VARIANT_SPEC["docscanner-l"]
+_STEM_CHANNELS = _SPEC["encoder_stem_channels"]
+_STAGE_CHANNELS = _SPEC["encoder_stage_channels"]
+_FNET_OUTPUT_DIM = _SPEC["fnet_output_dim"]
+
+# The reference's literal, kept here ONLY so the guards can say what must not
+# be built. `extractor.py:90` / `:93`.
+_REFERENCE_NORM1_LITERAL = 64
+
+
+def _encoder() -> DocScannerFeatureEncoder:
+    """The encoder at the one shipped variant's widths. No literal enters here."""
+    return DocScannerFeatureEncoder(
+        stem_channels=_STEM_CHANNELS,
+        stage_channels=_STAGE_CHANNELS,
+        output_dim=_FNET_OUTPUT_DIM,
+    )
+
+
+def _built_encoder(height: int = 64, width: int = 48) -> DocScannerFeatureEncoder:
+    encoder = _encoder()
+    encoder.build((None, height, width, 3))
+    return encoder
+
+
+class TestTheStemNormIsEightyWideNotSixtyFour:
+    """H-7. The reference's ``InstanceNorm2d(64)`` is fed 80 channels.
+
+    ``extractor.py:93`` constructs the norm with 64; ``extractor.py:95``
+    constructs the convolution that feeds it with 80 outputs. Torch never
+    notices because ``affine=False`` allocates nothing. This port must use 80.
+    """
+
+    def test_the_group_count_is_the_stem_width_and_not_the_references_literal(self):
+        encoder = _built_encoder()
+        assert encoder.norm1.groups == _STEM_CHANNELS
+        assert encoder.norm1.groups != _REFERENCE_NORM1_LITERAL, (
+            "norm1 was built at the reference's 64. That literal is inert in "
+            "torch (affine=False allocates no parameters) but is the GROUP "
+            "COUNT here. See extractor.py:93 vs :95 and decisions.md D-011.")
+
+    def test_the_group_count_matches_what_the_stem_convolution_actually_emits(self):
+        """The two are read from the same place, so they cannot drift apart."""
+        encoder = _built_encoder()
+        assert encoder.conv1.filters == encoder.norm1.groups
+
+    def test_all_eighty_channels_are_normalized_independently(self):
+        """The numerical form of the same claim, for a divisor that DOES divide 80.
+
+        ``groups=16`` divides 80 and would raise nothing; it would normalize in
+        5-channel groups. Only a per-channel statistic can see that, so this is
+        the guard that survives when the crash-shaped one does not.
+        """
+        channels = _STEM_CHANNELS
+        rng = np.random.default_rng(0)
+        # Deliberately different per-channel mean and scale, so a grouped
+        # normalization CANNOT accidentally produce per-channel zero mean.
+        offsets = np.arange(channels, dtype="float32") * 3.0 - 40.0
+        scales = 1.0 + np.arange(channels, dtype="float32") * 0.25
+        sample = rng.standard_normal((2, 9, 7, channels)).astype("float32")
+        sample = sample * scales + offsets
+
+        norm = _instance_norm(channels, name="probe")
+        norm.build((None, 9, 7, channels))
+        out = np.asarray(keras.ops.convert_to_numpy(norm(sample)))
+
+        per_channel_mean = out.mean(axis=(1, 2))
+        per_channel_var = out.var(axis=(1, 2))
+        np.testing.assert_allclose(
+            per_channel_mean, np.zeros_like(per_channel_mean),
+            atol=1e-4, rtol=0,
+            err_msg="a channel was not normalized on its own; the group count "
+                    "does not equal the channel count")
+        np.testing.assert_allclose(
+            per_channel_var, np.ones_like(per_channel_var),
+            atol=1e-3, rtol=0,
+            err_msg="a channel's variance is not 1; channels are being pooled")
+
+    def test_the_norm_is_not_affine_matching_torchs_default(self):
+        """D-011. ``nn.InstanceNorm2d`` defaults to ``affine=False``.
+
+        Zero weights is the whole point: it is *why* the reference's 64 is inert
+        upstream. An affine port would be a divergence, so it is asserted, not
+        assumed.
+        """
+        encoder = _built_encoder()
+        assert len(encoder.norm1.weights) == 0
+        assert encoder.norm1.center is False
+        assert encoder.norm1.scale is False
+
+    def test_the_epsilon_is_torchs_and_not_the_keras_default(self):
+        """1e-5, not GroupNormalization's own 1e-3 -- a silent 100x."""
+        encoder = _built_encoder()
+        assert encoder.norm1.epsilon == INSTANCE_NORM_EPSILON
+        assert encoder.norm1.epsilon != 1e-3
+
+
+class TestTheStrideTwoPaddingIsTorchsAndNotKerasSame:
+    """D-012. Same output shape, one-pixel-shifted sampling grid.
+
+    A 7x7 stride-2 convolution with torch's ``padding=3`` samples input centres
+    at ``2j``. Keras/TF ``"same"`` splits its 5 pad columns as 2/3 and samples
+    ``2j + 1``. Both give ``ceil(H / 2)`` outputs, so no shape assertion can
+    tell them apart. These two tests are two-sided: an impulse at an even index
+    must be SEEN and an impulse at the neighbouring odd index must NOT be.
+    """
+
+    @staticmethod
+    def _centre_tap_stem(encoder: DocScannerFeatureEncoder) -> None:
+        """Make ``conv1`` a single tap at the kernel centre, bias 0."""
+        kernel = np.zeros(encoder.conv1.kernel.shape, dtype="float32")
+        kernel[3, 3, 0, 0] = 1.0
+        encoder.conv1.kernel.assign(kernel)
+        encoder.conv1.bias.assign(
+            np.zeros(encoder.conv1.bias.shape, dtype="float32"))
+
+    @pytest.mark.parametrize("row,col", [(2, 4), (4, 2), (6, 6)])
+    def test_the_stem_reads_an_impulse_at_an_even_index_into_half_that_index(
+            self, row, col):
+        encoder = _built_encoder(height=16, width=16)
+        self._centre_tap_stem(encoder)
+
+        impulse = np.zeros((1, 16, 16, 3), dtype="float32")
+        impulse[0, row, col, 0] = 1.0
+        out = np.asarray(keras.ops.convert_to_numpy(
+            encoder.conv1(encoder.pad1(impulse))))[0, :, :, 0]
+
+        assert out[row // 2, col // 2] == pytest.approx(1.0), (
+            "torch's padding=3 puts the kernel centre of output j on input 2j; "
+            "Keras 'same' puts it on 2j+1. See decisions.md D-012.")
+        assert out.sum() == pytest.approx(1.0)
+
+    @pytest.mark.parametrize("row,col", [(3, 5), (5, 3)])
+    def test_the_stem_does_not_see_an_impulse_at_an_odd_index(self, row, col):
+        """The other side of the same claim: under Keras 'same' THIS would fire."""
+        encoder = _built_encoder(height=16, width=16)
+        self._centre_tap_stem(encoder)
+
+        impulse = np.zeros((1, 16, 16, 3), dtype="float32")
+        impulse[0, row, col, 0] = 1.0
+        out = np.asarray(keras.ops.convert_to_numpy(
+            encoder.conv1(encoder.pad1(impulse))))[0, :, :, 0]
+
+        assert out.sum() == pytest.approx(0.0, abs=1e-6), (
+            "an odd-indexed impulse reached a stride-2 output centre; the "
+            "padding is Keras 'same', not torch's symmetric padding")
+
+    def test_the_residual_blocks_stride_two_conv_has_the_same_alignment(self):
+        """The 3x3 stride-2 branch conv, same claim, ``padding=1``."""
+        block = DocScannerResidualBlock(filters=4, stride=2)
+        block.build((None, 8, 8, 3))
+        kernel = np.zeros(block.conv1.kernel.shape, dtype="float32")
+        kernel[1, 1, 0, 0] = 1.0
+        block.conv1.kernel.assign(kernel)
+        block.conv1.bias.assign(np.zeros(block.conv1.bias.shape, dtype="float32"))
+
+        even = np.zeros((1, 8, 8, 3), dtype="float32")
+        even[0, 4, 2, 0] = 1.0
+        odd = np.zeros((1, 8, 8, 3), dtype="float32")
+        odd[0, 5, 3, 0] = 1.0
+
+        even_out = np.asarray(keras.ops.convert_to_numpy(
+            block.conv1(block.pad1(even))))[0, :, :, 0]
+        odd_out = np.asarray(keras.ops.convert_to_numpy(
+            block.conv1(block.pad1(odd))))[0, :, :, 0]
+
+        assert even_out[2, 1] == pytest.approx(1.0)
+        assert odd_out.sum() == pytest.approx(0.0, abs=1e-6)
+
+    def test_the_projection_shortcut_subsamples_the_even_indices(self):
+        """The 1x1 stride-2 shortcut must read input ``2j``, like torch's."""
+        block = DocScannerResidualBlock(filters=3, stride=2)
+        block.build((None, 7, 9, 3))
+        eye = np.zeros(block.downsample_conv.kernel.shape, dtype="float32")
+        for index in range(3):
+            eye[0, 0, index, index] = 1.0
+        block.downsample_conv.kernel.assign(eye)
+        block.downsample_conv.bias.assign(
+            np.zeros(block.downsample_conv.bias.shape, dtype="float32"))
+
+        rng = np.random.default_rng(3)
+        sample = rng.standard_normal((2, 7, 9, 3)).astype("float32")
+        out = np.asarray(keras.ops.convert_to_numpy(
+            block.downsample_conv(sample)))
+        np.testing.assert_allclose(out, sample[:, ::2, ::2, :], atol=0, rtol=0)
+
+
+class TestTheResidualBlockShortcut:
+    """``extractor.py:26-30, 36-39``: identity at stride 1, projection at stride 2."""
+
+    def test_a_stride_one_block_has_no_projection_at_all(self):
+        block = DocScannerResidualBlock(filters=8, stride=1)
+        assert block.downsample_conv is None
+        assert block.norm3 is None
+        assert block.pad1 is None, (
+            "stride 1 needs no explicit pad: Keras 'same' IS torch padding=1 "
+            "there. A pad layer here would shift the identity path.")
+
+    def test_a_stride_two_block_has_a_projection_and_its_own_norm(self):
+        block = DocScannerResidualBlock(filters=8, stride=2)
+        assert block.downsample_conv is not None
+        assert block.norm3 is not None
+
+    def test_the_stride_one_shortcut_is_the_RAW_input_not_a_projection(self):
+        """Zero the branch and the block must reduce to ``relu(x)`` exactly.
+
+        A projection shortcut -- even an accidentally-added one -- would put a
+        convolution and a normalization on this path, and the equality below
+        would fail by an amount no shape test could report.
+        """
+        block = DocScannerResidualBlock(filters=5, stride=1)
+        block.build((None, 6, 4, 5))
+        for conv in (block.conv1, block.conv2):
+            conv.kernel.assign(np.zeros(conv.kernel.shape, dtype="float32"))
+            conv.bias.assign(np.zeros(conv.bias.shape, dtype="float32"))
+
+        rng = np.random.default_rng(11)
+        sample = rng.standard_normal((2, 6, 4, 5)).astype("float32")
+        out = np.asarray(keras.ops.convert_to_numpy(block(sample)))
+        np.testing.assert_allclose(out, np.maximum(sample, 0.0), atol=0, rtol=0)
+
+    def test_a_stride_one_block_refuses_a_channel_change(self):
+        """The identity add is illegal there, and the reference never builds one."""
+        block = DocScannerResidualBlock(filters=8, stride=1)
+        with pytest.raises(ValueError, match="IDENTITY shortcut"):
+            block.build((None, 6, 6, 16))
+
+    def test_the_second_relu_is_inside_the_branch_before_the_add(self):
+        """``extractor.py:34,39``: ``relu(norm2(conv2(y)))`` and then ``relu(x + y)``.
+
+        The usual ResNet ordering adds the UN-activated branch. Under that
+        ordering the branch can be negative, so a strictly-negative input plus
+        a branch tuned to cancel it would leave 0; under the reference's
+        ordering the branch is already non-negative, so it cannot cancel and
+        the block's output is >= relu(x) everywhere.
+        """
+        block = DocScannerResidualBlock(filters=6, stride=1)
+        block.build((None, 5, 5, 6))
+        rng = np.random.default_rng(5)
+        sample = rng.standard_normal((3, 5, 5, 6)).astype("float32")
+        out = np.asarray(keras.ops.convert_to_numpy(block(sample)))
+        assert (out >= np.maximum(sample, 0.0) - 1e-5).all(), (
+            "the branch went negative before the add, so the second ReLU is "
+            "outside it; the reference applies one on the branch AND one after")
+
+
+class TestTheEncoderShapeLadder:
+    """Stem 2, stages 1/2/2 -- total stride 8, and 320 output channels."""
+
+    def test_a_square_288_input_lands_at_36_by_36_by_320(self):
+        encoder = _encoder()
+        out = encoder(np.zeros((2, 288, 288, 3), dtype="float32"))
+        assert tuple(out.shape) == (2, 36, 36, _FNET_OUTPUT_DIM)
+        assert 288 // SPATIAL_DIVISOR == 36
+
+    def test_a_non_square_input_keeps_height_and_width_distinct(self):
+        """288x224 -> 36x28. A square fixture cannot see an H/W transpose."""
+        encoder = _encoder()
+        out = encoder(np.zeros((2, 288, 224, 3), dtype="float32"))
+        assert tuple(out.shape) == (2, 36, 28, _FNET_OUTPUT_DIM)
+
+    def test_compute_output_shape_agrees_with_the_real_forward(self):
+        encoder = _encoder()
+        declared = encoder.compute_output_shape((None, 288, 224, 3))
+        out = encoder(np.zeros((2, 288, 224, 3), dtype="float32"))
+        assert declared[1:] == tuple(out.shape)[1:]
+
+    def test_the_stage_ladder_is_two_blocks_each_with_the_stride_on_the_first(self):
+        """``extractor.py:99-101, 115-118``."""
+        encoder = _encoder()
+        assert [block.filters for block in encoder.blocks] == [
+            _STAGE_CHANNELS[0], _STAGE_CHANNELS[0],
+            _STAGE_CHANNELS[1], _STAGE_CHANNELS[1],
+            _STAGE_CHANNELS[2], _STAGE_CHANNELS[2],
+        ]
+        assert [block.stride for block in encoder.blocks] == [1, 1, 2, 1, 2, 1]
+
+    def test_the_output_projection_carries_no_norm_and_no_activation(self):
+        """``extractor.py:104``, ``:131``: the 1x1 is bare.
+
+        The rectifier splits these 320 channels into a ``tanh`` hidden state and
+        a ``relu`` context; a ReLU here would half-rectify the hidden state
+        before ``tanh`` ever saw it. Negative outputs are the observable.
+        """
+        encoder = _encoder()
+        rng = np.random.default_rng(7)
+        out = np.asarray(keras.ops.convert_to_numpy(
+            encoder(rng.standard_normal((2, 64, 48, 3)).astype("float32"))))
+        assert (out < 0.0).any(), "the encoder output is non-negative; something " \
+                                  "rectifying was appended to the output 1x1"
+
+    def test_a_stage_count_that_breaks_the_stride_contract_is_refused(self):
+        """The rectifier upsamples by exactly SPATIAL_DIVISOR; the two must agree."""
+        with pytest.raises(ValueError, match="total stride"):
+            DocScannerFeatureEncoder(
+                stem_channels=_STEM_CHANNELS,
+                stage_channels=_STAGE_CHANNELS[:2],
+                output_dim=_FNET_OUTPUT_DIM,
+            )
+
+
+def _encoder_functional_model() -> keras.Model:
+    """The encoder wrapped so the shared model oracles can judge it."""
+    inputs = keras.Input(shape=(32, 24, 3))
+    return keras.Model(inputs, _encoder()(inputs), name="doc_scanner_fnet")
+
+
+def _encoder_inputs() -> np.ndarray:
+    return np.linspace(-1.0, 1.0, 2 * 32 * 24 * 3, dtype="float32").reshape(
+        (2, 32, 24, 3))
+
+
+class TestTheEncoderTrainsAndRoundTrips:
+    """The shared oracles, adopted rather than reimplemented."""
+
+    def test_every_trainable_weight_receives_a_live_gradient(self):
+        model = _encoder_functional_model()
+        assert_gradients_reach_every_trainable_weight(
+            model, _encoder_inputs(), training=True)
+
+    def test_the_saved_and_reloaded_encoder_reproduces_its_output_exactly(self):
+        report = measure_roundtrip(
+            _encoder_functional_model, _encoder_inputs, training=False)
+        assert report["self_max_delta"] == 0.0, (
+            "the encoder became non-deterministic; the exact bound below would "
+            "then be measuring that instead of the round trip")
+        assert_roundtrip_output_values(report, atol=0.0)
+
+    def test_the_weights_are_restored_before_the_reloaded_model_is_called(self):
+        report = measure_roundtrip(
+            _encoder_functional_model, _encoder_inputs, training=False)
+        assert report["call_count_before_weight_read"] == 0
+        assert_weights_restored_before_first_call(report, atol=0.0)
+
+    def test_the_encoder_config_round_trips_every_constructor_argument(self):
+        encoder = _encoder()
+        clone = DocScannerFeatureEncoder.from_config(encoder.get_config())
+        assert clone.stem_channels == encoder.stem_channels
+        assert tuple(clone.stage_channels) == tuple(encoder.stage_channels)
+        assert clone.output_dim == encoder.output_dim
+
+    def test_the_block_config_round_trips_every_constructor_argument(self):
+        block = DocScannerResidualBlock(filters=12, stride=2)
+        clone = DocScannerResidualBlock.from_config(block.get_config())
+        assert clone.filters == 12
+        assert clone.stride == 2
+
+    def test_it_runs_under_a_traced_tf_function_with_an_unknown_batch(self):
+        encoder = _encoder()
+        encoder.build((None, 32, 24, 3))
+        traced = tf.function(
+            lambda batch: encoder(batch),
+            input_signature=[tf.TensorSpec([None, 32, 24, 3], tf.float32)],
+        )
+        assert tuple(traced(tf.zeros((3, 32, 24, 3))).shape) == (
+            3, 4, 3, _FNET_OUTPUT_DIM)

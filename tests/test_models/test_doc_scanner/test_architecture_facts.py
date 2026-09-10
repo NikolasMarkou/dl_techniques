@@ -29,6 +29,7 @@ repeatedly. If a number here genuinely must change, this file changes too, in
 the same commit, deliberately.
 """
 
+import keras
 import pytest
 
 from dl_techniques.models.vision.image_restoration.doc_scanner import components
@@ -199,3 +200,41 @@ class TestVariantSpecWidths:
         was never referenced anywhere would simply stop being checked.
         """
         assert field in components._VARIANT_SPEC["docscanner-l"]
+
+
+class TestRegistrationKeysStripFamilyAndSubfamily:
+    """H-3. ``dl_techniques.models.doc_scanner.<module>``, literal.
+
+    The classes live at
+    ``src/dl_techniques/models/vision/image_restoration/doc_scanner/``, so a key
+    derived from the import path would carry ``vision`` and
+    ``image_restoration``. Both are filing decisions that have been reshuffled
+    before, and a key built from them breaks every archive when they move again.
+
+    Asserted with a literal ``==``, never through a save/load round trip: the
+    process shares ONE registry, so a round trip resolves a typo'd key to the
+    typo'd class perfectly happily.
+    """
+
+    _PACKAGE = "dl_techniques.models.doc_scanner.components"
+
+    @pytest.mark.parametrize(
+        "cls_name,expected",
+        [
+            ("DocScannerResidualBlock",
+             "dl_techniques.models.doc_scanner.components>DocScannerResidualBlock"),
+            ("DocScannerFeatureEncoder",
+             "dl_techniques.models.doc_scanner.components>DocScannerFeatureEncoder"),
+        ],
+    )
+    def test_the_registered_name_is_exactly_this_string(self, cls_name, expected):
+        cls = getattr(components, cls_name)
+        assert keras.saving.get_registered_name(cls) == expected
+
+    @pytest.mark.parametrize(
+        "cls_name", ["DocScannerResidualBlock", "DocScannerFeatureEncoder"]
+    )
+    def test_the_shared_registration_contract_holds(
+            self, cls_name, registration_contract):
+        registration_contract(
+            getattr(components, cls_name), expected_package=self._PACKAGE)
