@@ -1,6 +1,6 @@
 # Models Package
 
-Model architectures, grouped into 11 families under `src/dl_techniques/models/`.
+Model architectures, grouped into 12 families under `src/dl_techniques/models/`.
 `src/dl_techniques/models/README.md` is the catalogue: every family, every leaf package,
 one line each. This file is the authoring contract.
 
@@ -20,9 +20,16 @@ Four families nest one level further (`vision/image_restoration`, `vision/keypoi
 wrong test. Re-derive any count with the command beside it; never quote one from memory.
 
 ```bash
-find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 102 packages
-find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 287 .py
+find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 108 packages
+find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 321 .py
 ```
+
+Both re-derived 2026-09-10 by running exactly those two commands. The previous readings
+here were **102 / 287**, and the drift is mostly not the port that noticed it: the
+`vision/image_restoration/doc_scanner/` package contributes 1 package and 5 `.py`, so
+subtracting it still leaves 107 / 316. About 6 packages and 34 files arrived from other
+work that never re-ran the commands. Do the same when you land a package: run them, do not
+transcribe them.
 
 ## Conventions
 
@@ -69,21 +76,33 @@ independent of the defining module, so two same-named model classes claim one sl
 import silently wins. The helper still binds `Custom>ClassName` as an alias, which is why
 archives written before the registration migration keep loading.
 
-### Docstring style — measurably mixed
+### Docstring style — re-derive it, never assume it
 
 ```bash
-grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l  # 88
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 95
+grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l  # 12
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 204
 ```
 
-Over 287 files: Google-only 80, Sphinx-only 87, both 8, neither 112. No package-wide rule.
-**Match the file you are editing; never convert one wholesale.** Perishable — re-run the
-greps. A different instrument gives a different answer (unanchored `Args:` returns 89).
+Over 321 files (re-derived 2026-09-10): Google-only **3**, Sphinx-only **195**, both **9**,
+neither **114**. **Match the file you are editing; never convert one wholesale** — that rule
+is unchanged and the 3 remaining Google-only files are exactly the ones it protects.
+Perishable — re-run the greps. The unanchored instrument agrees here (bare `Args:` also
+returns 12); it did not always.
+
+> **This refutes a claim two other files still carry.** The reading previously printed here
+> was *"over 287 files: Google-only 80, Sphinx-only 87, both 8, neither 112 — no
+> package-wide rule"*, and `src/dl_techniques/CLAUDE.md` plus the repo-root `CLAUDE.md`
+> both still describe `models/` as **"measurably MIXED"** on the strength of it. At 195
+> Sphinx-only against 3 Google-only that characterisation is no longer what the numbers
+> say. The drift is inherited — a docstring-conversion campaign, not any one model port —
+> and correcting those two files is owed a pass of its own. The numbers live HERE; that is
+> also why the repo-root pointer sending you to `src/dl_techniques/CLAUDE.md`
+> § Core Conventions → Code Style for them is itself stale (that section prints none).
 
 ## Tests are FLAT and do not mirror this layout
 
 `tests/test_models/` is one directory per leaf package, one level deep — `test_beit/`, not
-`test_vision/test_beit/`. This is deliberate: 218 relative imports (`from ..oracle`) reach
+`test_vision/test_beit/`. This is deliberate: 258 relative imports (`from ..oracle`) reach
 shared oracle modules at `tests/test_models/*.py`, and nesting would rewrite all of them for
 no behavioural gain. Do not "fix" it.
 

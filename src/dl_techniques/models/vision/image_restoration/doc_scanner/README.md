@@ -69,7 +69,7 @@ own 320-channel feature map at the current coordinates. Do not add one.
 | `DocScannerSegmenter` | a `list` of **seven** `(B, H, W, 1)` sigmoid maps `[d0, …, d6]` | confidence in `[0, 1]` |
 | `DocScannerRectifier`, `training=False` | `(B, H, W, 2)` | **absolute full-resolution pixel coordinates** |
 | `DocScannerRectifier`, `training=True` | `(B, 12, H, W, 2)` — the whole refinement sequence | same |
-| `DocScanner` | `(B, H, W, 2)`, always | **calibrated**, roughly `[-0.99, +0.99]` |
+| `DocScanner` | `(B, H, W, 2)`, always | **calibrated** — `[-0.99, +0.99]` *only while the rectifier's raw map stays inside `[0, W-1]`* |
 
 Channel 0 is the **x** (column) coordinate, channel 1 is **y** (row) — the order
 `coords_grid` emits, matching the reference. Six of the segmenter's seven maps exist for
@@ -85,7 +85,16 @@ repo's home for losses, not in this package. It takes the `(B, 12, H, W, 2)` seq
 ground-truth **forward** map the circle-consistency term needs (paper Eq. 12).
 
 The rectifier's map and the composite's map **are not interchangeable**. One is in pixels
-and runs to 287 at a 288 input; the other is normalized. See §7.3.
+and *should* run to 287 at a 288 input; the other is normalized. See §7.3.
+
+**Neither range is enforced, and an untrained model leaves both.** The rectifier's output
+is an unconstrained regression — nothing clamps it to the image domain — and the
+calibration `(2 * bm / 286.8 - 1) * 0.99` is affine, so it inherits whatever the rectifier
+emits. Measured on a freshly initialized `docscanner-l` at 288×288 (2026-09-10): the
+rectifier spans `[-77.59, +298.07]` px and the composite `[-1.434, +1.036]`. The nominal
+ranges above are a property of a *converged* model, not a contract of the class. The
+downstream sampler is edge-clamped, so an out-of-domain map degrades the gather rather
+than producing NaN — which is also why nothing crashes to tell you about it.
 
 ---
 
@@ -107,9 +116,11 @@ feature encoder, then twelve GRU update steps, each emitting a residual to a
 **7,328,752 parameters** (feature encoder 3,080,080 + update block 4,248,672). One update
 block, applied twelve times — the recurrence is in the state, not in the parameters.
 
-**They are trained independently.** `src/train/doc_scanner/` therefore has two entry
-points, `train_doc_scanner_segmenter.py` and `train_doc_scanner_rectifier.py`, and neither
-needs the composite.
+**They are trained independently.** `src/train/doc_scanner/` therefore has two *training*
+entry points, `train_doc_scanner_segmenter.py` and `train_doc_scanner_rectifier.py`, and
+neither needs the composite. It carries two further CLIs that train nothing:
+`prepare_doc_scanner_data.py` stages the UVDoc archive, and `stage_uvdoc_samples.py`
+densifies renders out of it into the sidecar layout the pipeline reads.
 
 ---
 
@@ -295,16 +306,45 @@ without first solving all four.
 
 ### 7.6 The published DocUNet-benchmark MS-SSIM / LD numbers are NOT reproducible here
 
-Two independent reasons, both structural:
+**This is a limitation of the port, stated flatly, not a hedge.** The upstream README's
+table gives DocScanner-L **MS-SSIM 0.5178 / LD 7.45** on the DocUNet benchmark. Nothing in
+this package can produce those numbers, and no future run of it will, for four independent
+structural reasons — each of which alone is sufficient:
 
-* **No released weights** are loadable (§7.4), so every number would come from a
-  from-scratch run.
-* **A different corpus.** This port trains on **UVDoc** (openly downloadable, 27.5 GB)
-  plus a synthetic generator, not on the paper's Doc3D (549 GB, registration-gated) —
-  a different corpus at a different scale.
+1. **No released weights are loadable.** `pretrained=True` raises on all three classes
+   (§7.4). Every figure would come from a from-scratch run of this re-implementation.
+2. **A different training corpus.** The paper trains on **Doc3D** (549 GB,
+   registration-gated behind a contact-info agreement, not obtainable by script). This
+   port trains on **UVDoc** (27.5 GB, openly downloadable, no auth) plus the synthetic
+   generator in `dl_techniques.datasets.document_rectification`.
+3. **A different corpus scale.** Doc3D is **100,000 renders**. UVDoc is **20,000 renders**
+   — and those 20,000 are drawn from only **4,032 distinct geometries** (five renders per
+   geometry, measured over the whole archive), so the *deformation* diversity is smaller
+   again than the 5× render-count ratio suggests.
+4. **The benchmark itself is not staged on this machine.** There is no DocUNet benchmark
+   under the dataset root; `doc_res/dewarping/{doc3d,dir300}/` are README-only stubs. The
+   score could not be *measured* here even with a converged model.
+
+And if you do stage the benchmark, one thing to check before scoring anything:
+
+> **Two DocUNet samples are known-bad.** The upstream README records that `64_1.png` and
+> `64_2.png` are **rotated by 180 degrees** relative to their ground-truth documents, that
+> most published work scores them anyway, and that "the performances in most of the
+> existing work are computed with these two ***mistaken*** samples". A number computed with
+> them and a number computed without them are not comparable, and the published 0.5178 /
+> 7.45 is of the *with* kind.
+
+**What this package does demonstrate** is the architecture, end to end and under load. The
+rectifier has been trained for real against densified UVDoc backward maps
+(`results/doc_scanner_rectifier_docscanner-l_20260910_203552`): four epochs, training loss
+390.96 → 200.17 → 176.28 → 159.92, validation 52.90 → 35.94 → 31.35 → 32.71, read from that
+run's `training_log.csv` and not from the progress bar, which under-reports by a smoothed
+running mean. That is a *learning curve*, not a benchmark, and the two validation numbers
+are not comparable to the training ones (the sequence loss scores all twelve iterations at
+training time and only the last at validation time — see the trainer README).
 
 The deliverable of this package is a working, verified architecture, not a paper-matching
-score. Any MS-SSIM/LD figure measured from a model trained here is a figure about *this*
+score. Any MS-SSIM/LD figure measured from a model trained here is a figure about *that*
 training run and must be reported as such.
 
 ---
