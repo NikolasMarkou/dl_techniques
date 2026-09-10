@@ -1,4 +1,16 @@
-"""DocScanner's model classes. At this step: the rectifier.
+"""DocScanner's model classes: the rectifier and the segmenter.
+
+The two stages are trained INDEPENDENTLY (paper §4.3) and are two separate
+``keras.Model`` subclasses here, not one model with a flag. They share this
+module because they share the variant table they are both projected from --
+``components._VARIANT_SPEC`` is ONE table describing a TWO-stage model, and the
+two projections are deliberately opposite rules (see the D-023 anchor above
+:func:`_segmenter_variant_rows`).
+
+:class:`DocScannerSegmenter` is stage 1: the pruned U2-Net that predicts the
+document/background confidence map. Its own class docstring carries its ladder,
+its seven-output contract and why it constrains no input size. Everything
+structural it uses lives in :mod:`.u2net_blocks`.
 
 :class:`DocScannerRectifier` is stage 2 of DocScanner -- the RAFT-lineage
 progressive refiner that turns a (already background-masked) page photograph
@@ -68,12 +80,17 @@ per the repo-wide convention (H-3). It is NOT the full import path.
 
 References:
     - Upstream release: https://github.com/fh2019ustc/DocScanner --
-      ``model.py:31-99`` (this class), ``model.py:45-51``
-      (``initialize_flow``), ``inference.py:28-29`` (the call site).
+      ``model.py:31-99`` (the rectifier), ``model.py:45-51``
+      (``initialize_flow``), ``seg.py:451-543`` (the segmenter),
+      ``inference.py:17-31`` (both call sites).
     - Feng et al., 2021. DocScanner: Robust Document Image Rectification with
       Progressive Learning. (https://arxiv.org/abs/2110.14968), v2.
     - Teed & Deng, 2020. RAFT: Recurrent All-Pairs Field Transforms for Optical
       Flow. ECCV 2020. (https://arxiv.org/abs/2003.12039).
+    - Qin et al., 2020. U2-Net: Going Deeper with Nested U-Structure for
+      Salient Object Detection. Pattern Recognition.
+      (https://arxiv.org/abs/2005.09007) -- the segmentation backbone and the
+      deep-supervision scheme its seven outputs exist for.
 """
 
 import keras
@@ -89,10 +106,27 @@ from dl_techniques.utils.model_build import materialize_sublayers
 from .components import (
     FLOW_CHANNELS,
     REFINE_ITERATIONS,
+    SEG_OUTPUT_CHANNELS,
     SPATIAL_DIVISOR,
     DocScannerFeatureEncoder,
     DocScannerUpdateBlock,
     _VARIANT_SPEC,
+)
+# The three private names are imported rather than restated. `_POOL_PADDING` is
+# D-019's MEASURED `ceil_mode=True` remedy and `_upsample_like` is D-020's
+# half-pixel resize; writing `padding="same"` or a second resize helper here
+# would be a second copy of a decision that was settled by measurement, i.e. a
+# rule kept in lockstep by hand. They are private to the package, not to the
+# module.
+from .u2net_blocks import (
+    RSU4,
+    RSU4F,
+    RSU5,
+    RSU6,
+    RSU7,
+    _POOL_PADDING,
+    _POOL_SIZE,
+    _upsample_like,
 )
 from .warp import convex_upsample, coords_grid, sample_at_pixel_coords
 
@@ -172,6 +206,76 @@ def _variant_rows() -> Dict[str, Dict[str, Any]]:
         # citation in components.py).
         row["iters"] = REFINE_ITERATIONS
         row["description"] = _VARIANT_DESCRIPTIONS[name]
+        rows[name] = row
+    return rows
+
+
+# DECISION plan-2026-09-10T065432-05fcb6dd/D-023: the SEGMENTER's variant row is
+# built by INCLUDING every `seg_`-prefixed spec key (prefix stripped to give the
+# constructor argument name), while the rectifier's row above is built by
+# EXCLUDING a hard-coded list. The two rules are deliberately opposite and must
+# stay that way. Do NOT "make them consistent" by giving the segmenter an
+# exclusion list too: `_VARIANT_SPEC` is ONE table describing a TWO-stage model
+# (D-006), so a row projected by exclusion silently absorbs every key added for
+# the other stage. That is not hypothetical -- step 8 added `seg_mid_channels`
+# and `seg_out_channels` to the spec and three of the rectifier's step-7 tests
+# went RED for exactly that reason. An inclusion rule cannot fail that way: a
+# key added for the rectifier is invisible here by construction.
+#
+# The prefix, not a hand-written map, is what makes the rule STATED rather than
+# maintained. Guarded from both sides by `TestTheSegmenterVariantTable`: every
+# `seg_`-prefixed spec key must reach the row, and no un-prefixed key may.
+# See decisions.md D-023.
+_SEG_SPEC_KEY_PREFIX: str = "seg_"
+
+#: One line per variant, as :data:`_VARIANT_DESCRIPTIONS` is for the rectifier.
+#: Separate because the two stages are cited to two different files and were
+#: sized by two different papers; a shared string would have to be vague about
+#: both.
+_SEGMENTER_VARIANT_DESCRIPTIONS: Dict[str, str] = {
+    "docscanner-l": (
+        "The U2NET-P ('P' for pruned) localization backbone that DocScanner's "
+        "released inference wrapper constructs as U2NETP(3, 1) "
+        "(inference.py:20). Every one of its eleven RSU stages is built at the "
+        "uniform mid/out widths 16/64 (seg.py:456-478) -- read from those CALL "
+        "SITES, never from RSU7.__init__'s dead mid_ch=12, out_ch=3 defaults. "
+        "The FULL U2NET at seg.py:344-450 varies mid/out per stage and this "
+        "port must not borrow its numbers. There is one row for the same "
+        "reason the rectifier has one row: -L is the released, executable "
+        "architecture."
+    ),
+}
+
+
+def _segmenter_variant_rows() -> Dict[str, Dict[str, Any]]:
+    """Project ``_VARIANT_SPEC``'s ``seg_*`` keys onto the segmenter signature.
+
+    Interface contract -- two readers, :attr:`DocScannerSegmenter.MODEL_VARIANTS`
+    and the guard that pins the projection rule:
+
+    * Parameters: none.
+    * Returns: ``{variant: {constructor_kwarg: value, ...,
+      "output_channels": int, "description": str}}``, where each
+      ``constructor_kwarg`` is a spec key with :data:`_SEG_SPEC_KEY_PREFIX`
+      stripped.
+    * Failure mode: raises ``KeyError`` if a spec row has no description --
+      deliberately, for the reason :func:`_variant_rows` gives.
+
+    See the D-023 anchor above for why this INCLUDES by prefix where
+    :func:`_variant_rows` EXCLUDES by list.
+
+    :return: The segmenter's variant table.
+    :rtype: Dict[str, Dict[str, Any]]
+    """
+    rows: Dict[str, Dict[str, Any]] = {}
+    for name, spec in _VARIANT_SPEC.items():
+        row: Dict[str, Any] = {
+            key[len(_SEG_SPEC_KEY_PREFIX):]: value
+            for key, value in spec.items()
+            if key.startswith(_SEG_SPEC_KEY_PREFIX)
+        }
+        row["output_channels"] = SEG_OUTPUT_CHANNELS
+        row["description"] = _SEGMENTER_VARIANT_DESCRIPTIONS[name]
         rows[name] = row
     return rows
 
@@ -742,7 +846,412 @@ def create_doc_scanner_rectifier(
         variant, pretrained=pretrained, **kwargs)
 
 
+# ---------------------------------------------------------------------
+# Stage 1: the U2NET-P segmenter.
+# ---------------------------------------------------------------------
+
+#: The six encoder stages of ``U2NETP``, outermost first (``seg.py:456-470``).
+#: The two innermost are the pooling-FREE ``RSU4F``: by 1/16 and 1/32 of the
+#: input there is nothing left to pool, so the block grows its receptive field
+#: by dilation instead. This tuple's LENGTH is the ladder depth; it is not a
+#: knob, because each entry is a different class.
+_ENCODER_STAGE_CLASSES: Tuple[type, ...] = (RSU7, RSU6, RSU5, RSU4, RSU4F, RSU4F)
+
+#: The five decoder stages, DEEPEST FIRST -- ``stage5d, stage4d, stage3d,
+#: stage2d, stage1d`` (``seg.py:473-477``). DERIVED from the encoder tuple
+#: rather than written out again: the U2NET-P is a symmetric U, so the decoder
+#: stage that consumes ``hxN``'s skip is the same CLASS as the encoder stage
+#: that produced it (``stage5d``/``stage5`` are both ``RSU4F``,
+#: ``stage1d``/``stage1`` both ``RSU7``). A second hand-written tuple would be
+#: that symmetry maintained by hand.
+_DECODER_STAGE_CLASSES: Tuple[type, ...] = tuple(
+    reversed(_ENCODER_STAGE_CLASSES[:-1]))
+
+#: The number of 3x3 side-supervision heads (``seg.py:479-484``). SIX, against
+#: FIVE decoder stages -- see the D-022 anchor inside
+#: :meth:`DocScannerSegmenter.call`.
+_SIDE_HEAD_COUNT: int = len(_DECODER_STAGE_CLASSES) + 1
+
+#: ``side1..side6 = nn.Conv2d(64, out_ch, 3, padding=1)``, ``seg.py:479-484``.
+_SIDE_HEAD_KERNEL_SIZE: int = 3
+
+#: ``outconv = nn.Conv2d(6, out_ch, 1)``, ``seg.py:486`` -- a 1x1 FUSION over
+#: the six stacked side maps. Its input width is ``_SIDE_HEAD_COUNT *
+#: output_channels``, which is where upstream's literal 6 comes from.
+_FUSION_KERNEL_SIZE: int = 1
+
+
+@register_dl_technique("dl_techniques.models.doc_scanner.model")
+class DocScannerSegmenter(keras.Model):
+    """DocScanner's localization stage: a pruned U2-Net (``seg.py:451-543``).
+
+    A six-stage encoder ladder of ReSidual U-blocks, a five-stage decoder that
+    mirrors it, six 3x3 side-supervision heads resized onto the outermost head's
+    resolution, and a 1x1 convolution that FUSES those six into the map anyone
+    actually uses. Everything structural is in :mod:`.u2net_blocks`; this class
+    is the wiring.
+
+    The output contract: SEVEN maps
+    -------------------------------
+    ``call`` returns a ``list`` of seven tensors, each
+    ``(batch, height, width, output_channels)`` and each already through a
+    ``sigmoid``, in upstream's order ``[d0, d1, d2, d3, d4, d5, d6]``
+    (``seg.py:549-550``).
+
+    * ``d0`` is the FUSION and the only one the pipeline consumes --
+      ``inference.py:24`` unpacks ``msk, _1, ..., _6 = self.msk(x)`` and drops
+      the rest.
+    * ``d1..d6`` exist for DEEP SUPERVISION: U2-Net's loss is the sum of the
+      BCE of all seven, which is why they are outputs at all and not debug
+      state. They are returned rather than hidden for the same reason
+      :class:`DocScannerRectifier` returns its whole iteration sequence -- this
+      repo forbids a custom ``train_step`` (H-5), so anything the loss needs has
+      to arrive as a model OUTPUT.
+
+    All seven are at the INPUT resolution. That is not a coincidence of 288
+    being divisible by 32: ``d1``'s source ``hx1d`` is the outermost decoder
+    stage, which never left the input resolution, and every other head is
+    resized onto ``d1``.
+
+    Any input size works
+    --------------------
+    Unlike :class:`DocScannerRectifier`, which needs extents divisible by 8 and
+    statically known, this model imposes NOTHING on height and width. The
+    ``ceil_mode`` pooling remedy (D-019) and the resize-onto-the-skip decoder
+    (D-020) between them absorb a ragged ladder: at height 37 the encoder levels
+    run ``37, 19, 10, 5, 3, 2`` and every concatenation still meets at the
+    skip's own size.
+
+    :param mid_channels: Upstream's ``mid_ch``, the width of every RSU block's
+        interior. 16 for the pruned variant; read from
+        ``_VARIANT_SPEC["seg_mid_channels"]``, never as a literal.
+    :type mid_channels: int
+    :param out_channels: Upstream's ``out_ch``, the width every RSU block emits
+        and therefore the width of every skip. 64 for the pruned variant.
+    :type out_channels: int
+    :param output_channels: Channels each of the seven maps carries. One
+        confidence plane (``inference.py:20``, ``U2NETP(3, 1)``).
+    :type output_channels: int
+    :param kwargs: Additional keyword arguments for ``keras.Model``.
+    :type kwargs: Any
+
+    :raises ValueError: If any of the three widths is not positive.
+
+    Example:
+        .. code-block:: python
+
+            model = DocScannerSegmenter.from_variant("docscanner-l")
+            maps = model(page, training=False)        # 7 x (B, 288, 288, 1)
+            mask = keras.ops.cast(maps[0] > 0.5, page.dtype)
+    """
+
+    #: Derived from ``_VARIANT_SPEC``'s ``seg_*`` rows, never restated. See the
+    #: D-023 anchor above :func:`_segmenter_variant_rows`.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = _segmenter_variant_rows()
+
+    def __init__(
+            self,
+            mid_channels: int,
+            out_channels: int,
+            output_channels: int = SEG_OUTPUT_CHANNELS,
+            **kwargs: Any
+    ) -> None:
+        """Validate the widths and create every sub-layer."""
+        super().__init__(**kwargs)
+
+        for label, value in (
+                ("mid_channels", mid_channels),
+                ("out_channels", out_channels),
+                ("output_channels", output_channels),
+        ):
+            if value <= 0:
+                raise ValueError(f"{label} must be positive, got {value}")
+
+        self.mid_channels = mid_channels
+        self.out_channels = out_channels
+        self.output_channels = output_channels
+
+        # Every sub-layer is created HERE, unconditionally -- never in `build`
+        # and never on first call. `build` only materializes them (H-6).
+        self.encoder_stages: List[keras.layers.Layer] = [
+            stage_class(
+                mid_channels=mid_channels,
+                out_channels=out_channels,
+                name=f"stage{index + 1}",
+            )
+            for index, stage_class in enumerate(_ENCODER_STAGE_CLASSES)
+        ]
+
+        # One fewer pool than encoder stages: `seg.py` pools after every stage
+        # except the deepest (`stage6` has no pool).
+        self.pools: List[keras.layers.MaxPooling2D] = [
+            keras.layers.MaxPooling2D(
+                pool_size=_POOL_SIZE,
+                strides=_POOL_SIZE,
+                padding=_POOL_PADDING,
+                name=f"pool{index + 1}{index + 2}",
+            )
+            for index in range(len(_ENCODER_STAGE_CLASSES) - 1)
+        ]
+
+        # Deepest first, so `decoder_stages[0]` is `stage5d`. Each consumes
+        # `concat(upsampled_deeper, skip)`; both halves are `out_channels` wide,
+        # so the declared input is `2 * out_channels` -- upstream's literal 128
+        # DERIVED, not transcribed (`seg.py:473-477`, `RSU4F(128, 16, 64)`). The
+        # RSU blocks infer their input width from the tensor, so that derivation
+        # is not passed anywhere and is instead asserted on the built weights by
+        # `TestTheDecoderConsumesTwiceTheSkipWidth`.
+        self.decoder_stages: List[keras.layers.Layer] = [
+            stage_class(
+                mid_channels=mid_channels,
+                out_channels=out_channels,
+                name=f"stage{len(_DECODER_STAGE_CLASSES) - index}d",
+            )
+            for index, stage_class in enumerate(_DECODER_STAGE_CLASSES)
+        ]
+
+        self.side_convs: List[keras.layers.Conv2D] = [
+            keras.layers.Conv2D(
+                filters=output_channels,
+                kernel_size=_SIDE_HEAD_KERNEL_SIZE,
+                padding="same",
+                name=f"side{index + 1}",
+            )
+            for index in range(_SIDE_HEAD_COUNT)
+        ]
+
+        self.outconv = keras.layers.Conv2D(
+            filters=output_channels,
+            kernel_size=_FUSION_KERNEL_SIZE,
+            padding="same",
+            name="outconv",
+        )
+
+    # -----------------------------------------------------------------
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer by tracing ``call`` symbolically.
+
+        Without this, a subclassed model inherits ``Layer.build``, which marks
+        the model built while every sub-layer is still unbuilt -- so a
+        ``.keras`` reload would restore nothing and the first forward pass would
+        create fresh random weights with nothing raising (H-6).
+
+        :param input_shape: ``(batch, height, width, channels)``. No constraint
+            on height or width; see the class docstring.
+        :type input_shape: Any
+        :raises ValueError: If the shape is not rank 4.
+        """
+        if self.built:
+            return
+
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"DocScannerSegmenter expects a 4D input shape "
+                f"(batch, height, width, channels), got {len(input_shape)}D: "
+                f"{input_shape}"
+            )
+
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> List[keras.KerasTensor]:
+        """Run the nested U and emit seven confidence maps.
+
+        :param inputs: ``(batch, height, width, channels)``, channels-last.
+            Upstream feeds raw 3-channel RGB (``inference.py:20``); the
+            ``sobel_net`` edge channel defined at ``seg.py:8-31`` is DEAD CODE
+            upstream and is deliberately not ported.
+        :type inputs: keras.KerasTensor
+        :param training: Forwarded to every block; the RSU blocks contain
+            ``BatchNormalization``, so it is load-bearing here in a way it is
+            not for the rectifier.
+        :type training: Optional[bool]
+        :return: Seven tensors ``[d0, d1, ..., d6]``, each
+            ``(batch, height, width, output_channels)`` and each in ``[0, 1]``.
+            ``d0`` is the fusion; see the class docstring.
+        :rtype: List[keras.KerasTensor]
+        """
+        # Down: `hx1 .. hx6`, pooling between stages but not after the last.
+        encoder_outputs: List[keras.KerasTensor] = []
+        level = inputs
+        for index, stage in enumerate(self.encoder_stages):
+            level = stage(level, training=training)
+            encoder_outputs.append(level)
+            if index < len(self.pools):
+                level = self.pools[index](level)
+
+        # Up: `hx5d .. hx1d`, collected deepest-first to match
+        # `self.decoder_stages`. The deepest decoder's partner is `hx6` itself
+        # (`seg.py:515-517`: `hx6up = _upsample_like(hx6, hx5)` then
+        # `stage5d(cat((hx6up, hx5)))`), so unlike the ladder INSIDE an RSU
+        # block every decoder here resizes -- there is no unpooled bottom.
+        decoder_outputs: List[keras.KerasTensor] = []
+        deeper = encoder_outputs[-1]
+        for index, stage in enumerate(self.decoder_stages):
+            skip = encoder_outputs[-2 - index]
+            # ORDER: deeper FIRST, skip second -- `torch.cat((hx6up, hx5), 1)`.
+            # Both halves are `out_channels` wide, so a swap is entirely
+            # shape-preserving. Guarded by `TestTheDecoderConcatenationOrder`.
+            merged = keras.ops.concatenate(
+                [_upsample_like(deeper, skip), skip], axis=-1)
+            deeper = stage(merged, training=training)
+            decoder_outputs.append(deeper)
+
+        # DECISION plan-2026-09-10T065432-05fcb6dd/D-022: `side6` reads
+        # `encoder_outputs[-1]` -- the ENCODER's deepest output `hx6` -- and NOT
+        # a decoder output. There are SIX side heads and only FIVE decoder
+        # stages, because the U2NET-P supervises the bottom of the U where the
+        # decoder has not started yet: `seg.py:546` is `d6 = self.side6(hx6)`,
+        # against `d1..d5 = sideN(hx{N}d)`. Do NOT "fix" the asymmetry by
+        # appending a sixth decoder stage, and do NOT feed `side6` the deepest
+        # decoder output `hx5d`: `hx5d` and `hx6` are both `out_channels` wide
+        # and both are resized onto `d1` anyway, so either error is entirely
+        # shape-preserving -- it still yields seven finite maps in [0, 1] that
+        # train and serialize. Guarded by
+        # `TestTheSixthSideHeadReadsTheEncoder`. See decisions.md D-022.
+        side_sources: List[keras.KerasTensor] = list(reversed(decoder_outputs))
+        side_sources.append(encoder_outputs[-1])
+
+        side_logits = [
+            conv(source)
+            for conv, source in zip(self.side_convs, side_sources)
+        ]
+
+        # `d1` is the reference resolution -- it comes off `hx1d`, which never
+        # left the input resolution -- and upstream applies no resize to it at
+        # all (`seg.py:534`). Every other head is resized ONTO it.
+        reference = side_logits[0]
+        resized_logits = [reference] + [
+            _upsample_like(logit, reference) for logit in side_logits[1:]
+        ]
+
+        # The FUSION. `d0` is a learned 1x1 combination of all six, not a copy
+        # of any one of them: `outconv(cat((d1, ..., d6), 1))`, `seg.py:548`.
+        fused = self.outconv(keras.ops.concatenate(resized_logits, axis=-1))
+
+        return [
+            keras.ops.sigmoid(logit) for logit in [fused] + resized_logits
+        ]
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> List[Tuple[Optional[int], ...]]:
+        """Seven identically-shaped maps at the INPUT resolution.
+
+        :param input_shape: ``(batch, height, width, channels)``.
+        :type input_shape: tuple
+        :return: A list of seven ``(batch, height, width, output_channels)``.
+        :rtype: List[tuple]
+        """
+        batch, height, width, _ = input_shape
+        return [
+            (batch, height, width, self.output_channels)
+        ] * (_SIDE_HEAD_COUNT + 1)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return every constructor argument needed to recreate this model.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            "mid_channels": self.mid_channels,
+            "out_channels": self.out_channels,
+            "output_channels": self.output_channels,
+        })
+        return config
+
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            pretrained: bool = False,
+            **kwargs: Any
+    ) -> "DocScannerSegmenter":
+        """Create a segmenter from the one cited configuration.
+
+        :param variant: A key of :attr:`MODEL_VARIANTS`. Currently only
+            ``"docscanner-l"``; the row's ``description`` says why.
+        :type variant: str
+        :param pretrained: Must be ``False``.
+        :type pretrained: bool
+        :param kwargs: Constructor overrides applied on top of the variant's
+            configuration.
+        :type kwargs: Any
+        :return: The constructed, unbuilt model.
+        :rtype: DocScannerSegmenter
+        :raises ValueError: If ``variant`` is not a known key; the message lists
+            the available ones.
+        :raises NotImplementedError: If ``pretrained`` is ``True``.
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown DocScanner variant '{variant}'. Available variants: "
+                f"{sorted(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        if pretrained:
+            raise NotImplementedError(
+                f"No pretrained weights are distributed for DocScanner "
+                f"segmentation variant '{variant}'. There is no Keras "
+                f"checkpoint, and the upstream PyTorch one cannot be "
+                f"transferred because IT DOES NOT EXIST IN THE REFERENCE "
+                f"CHECKOUT: inference.py:103 loads './model_pretrained/seg.pth' "
+                f"and no such file is present there -- only an external "
+                f"download link in the upstream README. That absence is also "
+                f"why the one clue to the checkpoint's key layout cannot be "
+                f"acted on: inference.py:40's `reload_seg_model` keeps "
+                f"`{{k[6:]: v ...}}`, i.e. it strips a SIX-CHARACTER key "
+                f"prefix, and which prefix that is -- and whether every key "
+                f"carries it -- is unverifiable without the file. A conversion "
+                f"script written against that guess would fail SILENTLY for "
+                f"every key it mismatched, because `reload_seg_model` filters "
+                f"non-matching keys out rather than raising. Train from "
+                f"scratch with `src/train/doc_scanner/`, or restore your own "
+                f"checkpoint with `model.load_weights(path)`."
+            )
+
+        config = dict(cls.MODEL_VARIANTS[variant])
+        config.pop("description", None)
+        config.update(kwargs)
+        return cls(**config)
+
+
+# ---------------------------------------------------------------------
+
+
+def create_doc_scanner_segmenter(
+        variant: str = "docscanner-l",
+        pretrained: bool = False,
+        **kwargs: Any
+) -> DocScannerSegmenter:
+    """Create a DocScanner segmenter. The module-level entry point.
+
+    :param variant: A key of :attr:`DocScannerSegmenter.MODEL_VARIANTS`.
+        Defaults to ``"docscanner-l"``.
+    :type variant: str
+    :param pretrained: Must be ``False``; see
+        :meth:`DocScannerSegmenter.from_variant`.
+    :type pretrained: bool
+    :param kwargs: Constructor overrides forwarded unchanged.
+    :type kwargs: Any
+    :return: The constructed, unbuilt model.
+    :rtype: DocScannerSegmenter
+    """
+    return DocScannerSegmenter.from_variant(
+        variant, pretrained=pretrained, **kwargs)
+
+
 __all__: List[str] = [
     "DocScannerRectifier",
+    "DocScannerSegmenter",
     "create_doc_scanner_rectifier",
+    "create_doc_scanner_segmenter",
 ]

@@ -121,6 +121,17 @@ BM_CALIBRATION_SCALE: float = 0.99
 # so it is a module constant rather than a `_VARIANT_SPEC` row.
 FLOW_CHANNELS: int = 2
 
+# The number of channels every one of the segmentation stage's seven outputs
+# carries: ONE document/background confidence plane. Read from the CALL SITE,
+# `inference.py:20`'s `U2NETP(3, 1)`, not from `seg.py:453`'s `out_ch=1`
+# constructor default -- the two agree here, which is exactly why the habit
+# matters: reading the default is only ever right by luck (D-006). Like
+# `FLOW_CHANNELS` this is structural rather than a tunable width -- the six
+# side heads and the fusion convolution all emit it, and `inference.py:25`
+# thresholds a single plane -- so it is a module constant, not a
+# `_VARIANT_SPEC` row.
+SEG_OUTPUT_CHANNELS: int = 1
+
 # DECISION plan-2026-09-10T065432-05fcb6dd/D-015: the size of the convex-upsample
 # neighbourhood -- a 3x3 window, so 9 candidate source pixels per destination
 # sub-pixel (`model.py:58`'s `F.unfold(..., [3, 3], padding=1)`). It is DEFINED
@@ -1950,6 +1961,7 @@ __all__: List[str] = [
     "GRU_HORIZONTAL_KERNEL_SIZE",
     "GRU_VERTICAL_KERNEL_SIZE",
     "FLOW_CHANNELS",
+    "SEG_OUTPUT_CHANNELS",
     "CONVEX_NEIGHBOURS",
     "MASK_LOGIT_SCALE",
     "DocScannerMotionEncoder",
