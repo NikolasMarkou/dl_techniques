@@ -18,6 +18,7 @@ tiktoken
 datasets # hugging face datasets
 Pillow
 requests
+h5py # MATLAB v7.3 / HDF5 readers: datasets/pusht_hdf5.py, datasets/document_rectification/uvdoc.py
 python-dotenv
 streamlit~=1.58 # applications/anomaly_detection web GUI
 streamlit-webrtc~=0.72 # live webcam streaming for anomaly_detection

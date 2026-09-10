@@ -18,6 +18,16 @@ supplies the normalised ``(x/W, y/H)`` flat-UV grid this package's warp math is
 expressed in, including its channel-order and per-axis-normalisation decisions.
 
 Modules:
+    * :mod:`~dl_techniques.datasets.document_rectification.uvdoc` -- the UVDoc
+      reader and densifier. UVDoc's ground truth is a **coarse 89x61
+      correspondence lattice** in MATLAB v7.3 (HDF5) ``.mat`` files, already in
+      the backward direction (rectified domain, distorted-pixel values), so it
+      is densified with an interpolating tensor-product spline rather than
+      inverted. Its forward map ``g`` IS fitted, by ``scipy.interpolate``, and
+      is the one genuinely approximate step in this whole port -- bounded,
+      measured and gated by a rejection path. numpy + scipy at module scope;
+      ``h5py`` and ``Pillow`` (both ``data``-extra only) are imported lazily
+      inside the two functions that need them.
     * :mod:`~dl_techniques.datasets.document_rectification.synthetic_warp` --
       the synthetic warped-page generator. **numpy + scipy only** at module
       scope (``cv2`` and ``skimage`` are undeclared dependencies; ``Pillow``
@@ -30,6 +40,17 @@ Modules:
       two directions.
 
 Public surface:
+    * :class:`UVDocSource`, :func:`load_geometry`, :func:`load_image` -- UVDoc.
+    * :func:`read_grid2d`, :func:`read_segmentation`, :func:`read_uvmap`,
+      :func:`control_point_uv`, :func:`densify_backward_map`,
+      :func:`invert_backward_map`, :func:`rectified_pixel_grid` -- the UVDoc
+      ground-truth path, piece by piece.
+    * :func:`assess_densification`, :func:`is_unusable`,
+      :func:`held_out_densification_error`, :func:`roundtrip_error`,
+      :class:`UVDocQuality`, :class:`UVDocGeometry`,
+      :class:`UVDocDensificationError`, :class:`UVDocError` -- UVDoc's measured
+      accuracy and its rejection path (the synthetic side's counterpart is
+      :func:`is_degenerate`, which can re-draw instead of rejecting).
     * :class:`InvertibleWarp`, :func:`sample_warp` -- the warp itself.
     * :func:`render_sample`, :func:`generate_sample` -- ``(image, f_gt, mask)``.
     * :func:`assess_warp`, :func:`is_degenerate`, :func:`map_jacobian_stats`,
@@ -40,6 +61,30 @@ Public surface:
     * :func:`load_rgb` -- lazy-Pillow file reader.
 """
 
+from .uvdoc import (
+    MAX_HELD_OUT_DENSIFICATION_PIXELS,
+    MAX_HULL_MISS_FRACTION,
+    MAX_INTERIOR_ROUNDTRIP_PIXELS,
+    ROUNDTRIP_BORDER_PIXELS,
+    UVDocDensificationError,
+    UVDocError,
+    UVDocGeometry,
+    UVDocQuality,
+    UVDocSource,
+    assess_densification,
+    control_point_uv,
+    densify_backward_map,
+    held_out_densification_error,
+    invert_backward_map,
+    is_unusable,
+    load_geometry,
+    load_image,
+    read_grid2d,
+    read_segmentation,
+    read_uvmap,
+    rectified_pixel_grid,
+    roundtrip_error,
+)
 from .synthetic_warp import (
     BACKGROUND_CROP_SCALE_RANGE,
     DEFAULT_CONTROL_POINTS,
@@ -72,6 +117,28 @@ from .synthetic_warp import (
 
 __all__ = [
     "BACKGROUND_CROP_SCALE_RANGE",
+    "MAX_HELD_OUT_DENSIFICATION_PIXELS",
+    "MAX_HULL_MISS_FRACTION",
+    "MAX_INTERIOR_ROUNDTRIP_PIXELS",
+    "ROUNDTRIP_BORDER_PIXELS",
+    "UVDocDensificationError",
+    "UVDocError",
+    "UVDocGeometry",
+    "UVDocQuality",
+    "UVDocSource",
+    "assess_densification",
+    "control_point_uv",
+    "densify_backward_map",
+    "held_out_densification_error",
+    "invert_backward_map",
+    "load_geometry",
+    "load_image",
+    "read_grid2d",
+    "read_segmentation",
+    "read_uvmap",
+    "rectified_pixel_grid",
+    "roundtrip_error",
+    "is_unusable",
     "DEFAULT_CONTROL_POINTS",
     "DEFAULT_PAGE_MARGIN",
     "DEFAULT_PERSPECTIVE_AMPLITUDE",

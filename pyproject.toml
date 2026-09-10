@@ -55,14 +55,20 @@ apps = [
 # (tiktoken); datasets/{nlp,universal_dataset_loader}.py (datasets);
 # datasets/vision/{coco,imagenet}.py (tensorflow-datasets);
 # datasets/vision/coco_multitask_local.py (Pillow); datasets/time_series/utils.py
-# (requests). The core install does not need them; importing one of those
-# specific modules without this extra raises ModuleNotFoundError.
+# (requests); datasets/pusht_hdf5.py and
+# datasets/document_rectification/uvdoc.py (h5py — UVDoc ships MATLAB v7.3
+# ground truth, which is HDF5 and which scipy.io.loadmat refuses). The core
+# install does not need them; importing one of those specific modules without
+# this extra raises ModuleNotFoundError. Every one of these imports is INSIDE
+# the function that needs it, so the surrounding module still imports on a core
+# install.
 data = [
     "tiktoken",
     "datasets",
     "tensorflow-datasets",
     "Pillow",
-    "requests"
+    "requests",
+    "h5py"
 ]
 
 [tool.setuptools]

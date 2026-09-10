@@ -673,7 +673,14 @@ def _top_level_imports(path: pathlib.Path):
 
 
 class TestTheShippedPackageStaysOnDeclaredDependencies:
-    """``cv2``/``skimage`` are undeclared; ``Pillow`` is only in the data extra."""
+    """``cv2``/``skimage`` are undeclared; ``Pillow`` and ``h5py`` are extra-only.
+
+    One forbidden set for the whole package, not one per module: ``uvdoc.py``
+    needs ``h5py`` to read UVDoc's MATLAB v7.3 ground truth and ``PIL`` to
+    decode its renders, and both are declared only in ``pyproject.toml``'s
+    ``data`` extra -- so both are imported inside the function that needs them,
+    exactly like ``synthetic_warp.load_rgb``.
+    """
 
     def _sources(self):
         package = importlib.import_module(
@@ -681,8 +688,8 @@ class TestTheShippedPackageStaysOnDeclaredDependencies:
         )
         return sorted(pathlib.Path(package.__file__).parent.glob("*.py"))
 
-    def test_no_module_imports_cv2_skimage_or_pillow_at_module_scope(self):
-        forbidden = {"cv2", "skimage", "PIL"}
+    def test_no_module_imports_an_extra_only_dependency_at_module_scope(self):
+        forbidden = {"cv2", "skimage", "PIL", "h5py"}
         offenders = {
             path.name: sorted(_top_level_imports(path) & forbidden)
             for path in self._sources()
