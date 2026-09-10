@@ -47,8 +47,6 @@ from dl_techniques.layers.norms import (
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 from dl_techniques.utils.model_build import materialize_sublayers
 
-# ---------------------------------------------------------------------
-
 from .components import (  # noqa: F401
     PositionalEncoding,
     GroupAttention,
@@ -57,8 +55,6 @@ from .components import (  # noqa: F401
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-# Main TreeTransformer Model
 # ---------------------------------------------------------------------
 
 
