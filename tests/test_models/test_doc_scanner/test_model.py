@@ -18,8 +18,11 @@ saves, reloads and trains its loss down.
    (``model.py:86``). Dropping the ``stop_gradient`` is invisible at inference
    -- the forward VALUES are bit-identical -- and changes only the gradients.
 3. **``warpfea`` is re-sampled from ``fmap1``, never chained from the previous
-   ``warpfea``** (``model.py:92``). Chaining is shape-identical and only
-   diverges from the third iteration on.
+   ``warpfea``** (``model.py:92``), and it is sampled AFTER the coordinate
+   update, not before. Chaining is shape-identical and only diverges from the
+   third iteration on; hoisting the resample above ``coords1 = coords1 +
+   delta_flow`` reads the same ``fmap1`` every time and merely lags the
+   features by one iteration.
 4. **``bm_up`` is in ABSOLUTE full-resolution pixel units** (``model.py:91``),
    not normalized and not a residual. With the flow head zeroed, the model must
    emit exactly the identity coordinate grid.
@@ -458,22 +461,29 @@ class TestWarpedFeaturesAreResampledFromTheEncoderOutput:
         model = _built(iters=iters)
 
         seen = []
+        seen_pix = []
         real = model_module.sample_at_pixel_coords
 
+        # BOTH arguments are recorded. Recording only `fmap` is what let the
+        # statement ORDER of the loop body go unguarded: `warpfea = sample(...)`
+        # moved one line UP, above `coords1 = coords1 + delta_flow`, reads the
+        # SAME `fmap1` on every call and is invisible to a `fmap`-only spy.
+        # `pix_xy` is the one argument that separates the two orders.
         def spy(fmap, pix_xy):
             seen.append(_as_numpy(fmap))
+            seen_pix.append(_as_numpy(pix_xy))
             return real(fmap, pix_xy)
 
         monkeypatch.setattr(model_module, "sample_at_pixel_coords", spy)
         model(_inputs(), training=True)
-        return model, seen
+        return model, seen, seen_pix
 
     def test_the_sampler_is_called_once_per_iteration(self, monkeypatch):
-        _, seen = self._record_first_arguments(monkeypatch, 4)
+        _, seen, _ = self._record_first_arguments(monkeypatch, 4)
         assert len(seen) == 4
 
     def test_every_call_reads_the_same_encoder_feature_map(self, monkeypatch):
-        _, seen = self._record_first_arguments(monkeypatch, 4)
+        _, seen, _ = self._record_first_arguments(monkeypatch, 4)
         for index, array in enumerate(seen[1:], start=1):
             np.testing.assert_allclose(
                 array, seen[0], rtol=0, atol=0.0,
@@ -486,9 +496,47 @@ class TestWarpedFeaturesAreResampledFromTheEncoderOutput:
     def test_that_map_is_the_encoders_own_output(self, monkeypatch):
         """Non-vacuity for the arm above: identical-to-each-other is not
         enough; they must all be ``fnet(x)``, not some other constant."""
-        model, seen = self._record_first_arguments(monkeypatch, 4)
+        model, seen, _ = self._record_first_arguments(monkeypatch, 4)
         expected = _as_numpy(model.fnet(_inputs(), training=True))
         np.testing.assert_allclose(seen[0], expected, rtol=0, atol=ATOL)
+
+    def test_the_first_sample_is_taken_AFTER_the_first_coordinate_update(
+            self, monkeypatch):
+        """``model.py``: the loop body updates ``coords1`` BEFORE it re-samples.
+
+        The statement ORDER is the claim. Hoisting
+        ``warpfea = sample_at_pixel_coords(fmap1, coords1)`` one line up, above
+        ``coords1 = coords1 + delta_flow``, gives the update block features
+        resampled at the PREVIOUS iteration's coordinates -- a one-iteration
+        lag. That mutation is shape-identical, finite, trainable and
+        serializable, it reads the same ``fmap1`` on every call (so every arm
+        above stays GREEN), and it was MEASURED to move the emitted map by
+        ``max|delta| = 0.916`` px on ``docscanner-l``.
+
+        The discriminator is the sampler's SECOND argument on call 0. Shipped,
+        it is ``coords0 + delta_flow_0``. Hoisted, it is exactly ``coords0`` --
+        the identity coordinate field, which is what ``coords1`` is initialized
+        to and what the loop has not yet touched.
+        """
+        _, _, seen_pix = self._record_first_arguments(monkeypatch, 4)
+        identity = _as_numpy(coords_grid(
+            BATCH, HEIGHT // SPATIAL_DIVISOR, WIDTH // SPATIAL_DIVISOR))
+
+        # Precondition, so the assertion below cannot pass merely because the
+        # two arrays are differently shaped.
+        assert seen_pix[0].shape == identity.shape, (
+            f"the recorded query field is {seen_pix[0].shape} but the identity "
+            f"field is {identity.shape}; the comparison is not the intended "
+            f"one")
+
+        deviation = float(np.max(np.abs(seen_pix[0] - identity)))
+        assert deviation > 0.0, (
+            "the FIRST call to `sample_at_pixel_coords` queried the identity "
+            "coordinate field, i.e. `coords1` before `delta_flow` was added to "
+            "it. The resample has been hoisted above the coordinate update, so "
+            "the update block reads features lagged by one iteration. See the "
+            "D-017 anchor in model.py: `coords1 = coords1 + delta_flow` comes "
+            "FIRST, the resample LAST.")
 
 
 class TestTheEncoderOutputIsSplitStateFirstThenContext:

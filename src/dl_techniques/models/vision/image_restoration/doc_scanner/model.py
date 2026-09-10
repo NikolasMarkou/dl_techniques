@@ -691,6 +691,18 @@ class DocScannerRectifier(keras.Model):
         # motion encoder reads. Guarded by
         # ``TestWarpedFeaturesAreResampledFromTheEncoderOutput``, which spies on
         # every call and requires all of them to receive the SAME array.
+        #
+        # DECISION plan-2026-09-10T065432-05fcb6dd/D-055: the STATEMENT ORDER
+        # inside the loop below is part of that claim. ``coords1 = coords1 +
+        # delta_flow`` comes FIRST and the resample LAST. Do NOT hoist
+        # ``warpfea = sample_at_pixel_coords(fmap1, coords1)`` above the
+        # coordinate update "to group the sampling with the flow": that reads
+        # the SAME ``fmap1`` on every call (so the spy above stays green) and
+        # merely lags the features by one iteration -- shape-identical, finite,
+        # trainable, serializable, and MEASURED to move the emitted map by
+        # ``max|delta| = 0.916`` px. Guarded by the same class's
+        # ``test_the_first_sample_is_taken_AFTER_the_first_coordinate_update``,
+        # which inspects the sampler's SECOND argument.
         warpfea = fmap1
 
         # `model.py:46-51`. `coodslar` is FULL resolution and is what makes the
