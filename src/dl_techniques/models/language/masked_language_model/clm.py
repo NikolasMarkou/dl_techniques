@@ -1,33 +1,17 @@
 """
-Causal language model pre-trainer that wraps a decoder backbone, shifts
-inputs against labels by one position, and projects hidden states to
-vocabulary logits through a head tied to the backbone's embedding matrix
-when one can be found.
-
-Next-token prediction scores every position in one forward pass, unlike
-masked language modelling which scores roughly 15% of them. Because a
-model-agnostic wrapper cannot inject a causal mask into an arbitrary
-backbone, `build()` instead runs a future-leak probe: two forward passes
-differing only at one position, checking that every earlier position's
-hidden state is unchanged. A bidirectional backbone fails this with a
-`ValueError` instead of training silently toward a collapsed loss. Weight
-tying looks for the backbone's embedding matrix through several attribute
-paths in order and falls back to an untied `Dense` head, with a warning,
-if none match.
-
-The shift convention is `x = input_ids[:, :-1]`, `y = input_ids[:, 1:]`,
-applied inside `train_step`/`test_step`. The attention mask is sliced twice:
-the input-aligned half feeds the backbone, the label-aligned half feeds the
-loss and metrics — using the same slice for both would score the first
-padding id as if it were a real label. The perplexity tracker averages
-`exp(batch_loss)` over batches, which by Jensen's inequality is an upper
-bound on corpus perplexity; exponentiate the tracked loss instead when
-comparing against a perplexity computed from an aggregated loss.
-
-The backbone must expose a `hidden_size` attribute and return a mapping
-containing `last_hidden_state`. `train_step` uses `tf.GradientTape`
-directly, so this model is TensorFlow-backend only. Set
-`verify_causality=False` to skip the future-leak probe.
+``CausalLanguageModel`` wraps a decoder backbone into a next-token
+pre-trainer: it shifts inputs against labels by one position and projects
+hidden states to vocabulary logits through a head tied to the backbone's
+embedding matrix when one can be found. Next-token prediction scores every
+position in one forward pass, unlike masked language modelling, which scores
+a small share of them. A model-agnostic wrapper cannot inject a causal mask
+into an arbitrary backbone, so ``build`` runs a future-leak probe instead:
+two forward passes that differ at one position, checking that every earlier
+hidden state is unchanged. A bidirectional backbone raises ``ValueError``
+there rather than training toward a collapsed loss. The backbone must expose
+a ``hidden_size`` attribute and return a mapping containing
+``last_hidden_state``, and ``train_step`` uses ``tf.GradientTape`` directly,
+so this model runs on the TensorFlow backend only.
 
 References:
     - Bengio et al., 2003. A Neural Probabilistic Language Model. JMLR 3:1137-1155.
@@ -45,35 +29,163 @@ from keras import ops
 import tensorflow as tf
 from typing import Dict, Any, Optional, Union, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.masked_language_model.clm")
 class CausalLanguageModel(keras.Model):
-    """A model-agnostic Causal Language Modeling (CLM) pre-trainer.
+    """Pre-train a causal backbone with next-token prediction.
 
-    This model wraps a given causal backbone (like GPT) and adds the necessary
-    logic for autoregressive pre-training.
+    The model shifts each sequence against itself, runs the shifted input
+    through the backbone, and projects the hidden states to vocabulary logits.
+    The shift convention is ``x = input_ids[:, :-1]``, ``y = input_ids[:, 1:]``,
+    applied inside ``train_step`` and ``test_step``; ``call`` scores the inputs
+    as given, so it is usable for generation.
 
-    Weight tying: the model attempts to tie the output projection to the
-    backbone's input embeddings during `build()`. If `tie_weights=False` is
-    set explicitly, a standard Dense layer is created during initialization
-    instead, so serialization has a layer to restore into.
+    Weight tying: the output projection is tied to the backbone's input
+    embeddings during ``build``. With ``tie_weights=False`` a ``Dense`` layer is
+    created during initialization instead, so serialization has a layer to
+    restore into.
 
-    Causality: the backbone must be causal. `build()` verifies it with a
-    future-leak probe and raises `ValueError` if a past position moves when
-    a future token changes. Pass `verify_causality=False` to skip the check.
+    Causality: the backbone has to be causal. ``build`` checks it with a
+    future-leak probe and raises ``ValueError`` if a past position moves when a
+    future token changes. Pass ``verify_causality=False`` to skip the check.
 
-    :param backbone: An instance of a Keras model that acts as the decoder.
+    The perplexity tracker averages ``exp(batch_loss)`` over batches, which by
+    Jensen's inequality is an upper bound on corpus perplexity. Exponentiate
+    the tracked loss instead when comparing against a perplexity computed from
+    an aggregated loss.
+
+    Architecture:
+
+    .. code-block:: text
+
+         inputs {input_ids, attention_mask}
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │   backbone    │
+                  └───────────────┘
+                          │ last_hidden_state [B, L, H]
+                          ▼
+                  ┌───────────────┐
+                  │  output head  │
+                  └───────────────┘
+                          │
+                          ▼
+              logits [B, L, vocab_size]
+
+    Training and evaluation step:
+
+    .. code-block:: text
+
+                                  input_ids, attention_mask
+                                              │
+                                              ▼
+                                        shift by one
+              ┌───────────┬───────────────────┤
+              ▼           ▼                   │
+          y_labels  loss_weights              │
+              │           │                   ▼
+              │           │               x_inputs
+              │           │                   │
+              │           │                   ▼
+              │           │            ┌─────────────┐
+              │           │            │  backbone   │
+              │           │            └─────────────┘
+              │           │                   │
+              │           │                   ▼
+              │           │            ┌─────────────┐
+              │           │            │ output head │
+              │           │            └─────────────┘
+              │           │                   │ logits
+              ▼           ▼                   ▼
+        ┌───────────────────────────────────────────────┐
+        │  loss = sum(ce * w) / sum(w)                  │
+        │  w = loss_weights                             │
+        └───────────────────────────────────────────────┘
+                                │
+                                ▼
+                   loss, accuracy, perplexity
+
+    Shift convention:
+
+    .. code-block:: text
+
+        position        0    1    2    3    4
+        input_ids       t0   t1   t2   t3   t4
+        x_inputs        t0   t1   t2   t3
+        y_labels             t1   t2   t3   t4
+        backbone mask   m0   m1   m2   m3
+        loss_weights         m1   m2   m3   m4
+
+    The attention mask is sliced twice, since a weight multiplies a label.
+
+    Output head:
+
+    .. code-block:: text
+
+                          tied                       untied
+
+                      hidden_states               hidden_states
+                            │                           │
+                            ▼                           ▼
+                   matmul embeddings^T          ┌───────────────┐
+                            │                   │  clm_output   │
+                            ▼                   └───────────────┘
+                      + output_bias                     │
+                            │                           ▼
+                            ▼                        logits
+                         logits
+
+    The tied branch reuses the backbone's embedding matrix and adds its own bias.
+
+    Weight tying lookup, tried in order:
+
+    .. code-block:: text
+
+                  backbone
+                      │
+                      ▼
+        ┌─────────────────────────────────┐
+        │  get_embedding_matrix()         │
+        │  token_embeddings               │
+        │  embeddings.word_embeddings     │
+        │  embeddings                     │
+        └─────────────────────────────────┘
+                         │
+              ┌──────────┴──────────┐
+              ▼                     ▼
+          tied head           untied Dense
+
+    No match leaves the head untied and logs a warning.
+
+    :param backbone: An instance of a Keras model that acts as the decoder. It
+        must expose ``hidden_size`` and return a mapping containing
+        ``last_hidden_state``.
     :param vocab_size: The size of the vocabulary.
     :param initializer_range: Standard deviation for weight initialization.
     :param tie_weights: Whether to tie the output layer weights. Defaults to True.
     :param verify_causality: Whether to probe the backbone for future leakage at
         build time. Defaults to True.
     :param causality_tolerance: Maximum tolerated absolute change at a past
-        position. Defaults to 0.0 - a genuinely masked contribution is exactly
-        zero, so any movement at all is leakage.
+        position. Defaults to 0.0, since a masked contribution is exactly zero
+        and any movement is leakage.
+    :raises ValueError: If ``vocab_size`` or ``initializer_range`` is not
+        positive, if the backbone has no ``hidden_size`` attribute, or if the
+        causality probe finds leakage.
+
+    :ivar backbone: The wrapped decoder, saved and reused for fine-tuning.
+    :ivar loss_tracker: Tracker behind the reported ``loss`` metric.
+    :ivar acc_metric: Tracker behind the reported ``accuracy`` metric, scored
+        on the label-aligned mask.
+    :ivar perplexity_metric: Tracker behind the reported ``perplexity`` metric.
     """
 
     def __init__(
@@ -86,6 +198,7 @@ class CausalLanguageModel(keras.Model):
         causality_tolerance: float = 0.0,
         **kwargs: Any,
     ) -> None:
+        """Initialize the CausalLanguageModel."""
         super().__init__(**kwargs)
         self._validate_config(vocab_size, initializer_range)
 
@@ -96,16 +209,17 @@ class CausalLanguageModel(keras.Model):
         self.verify_causality = verify_causality
         self.causality_tolerance = causality_tolerance
 
+        # The head width follows the backbone, so the contract is checked here.
         if not hasattr(self.backbone, "hidden_size"):
             raise ValueError("The provided backbone must have a 'hidden_size' attribute.")
         self.hidden_size = self.backbone.hidden_size
 
-        # Components
+        # Both are resolved in `build`, once tying is settled.
         self.embedding_weights = None
         self.output_bias = None
 
-        # If tie_weights is False, we create the layer immediately.
-        # This guarantees it exists for load_model() to restore weights into it.
+        # An untied head is created now, so `load_model` has a layer to restore
+        # weights into; the tied branch resolves in `build`.
         if not self.tie_weights:
             self.use_weight_tying = False
             self.output_layer = keras.layers.Dense(
@@ -116,15 +230,19 @@ class CausalLanguageModel(keras.Model):
                 name="clm_output",
             )
         else:
-            self.use_weight_tying = True  # Attempting to tie
+            self.use_weight_tying = True
             self.output_layer = None
 
-        # Trackers
+        # Updated by hand in `train_step` and `test_step`.
         self.loss_tracker = keras.metrics.Mean(name="loss")
         self.acc_metric = keras.metrics.SparseCategoricalAccuracy(name="accuracy")
         self.perplexity_metric = keras.metrics.Mean(name="perplexity")
 
     def _validate_config(self, vocab_size: int, initializer_range: float) -> None:
+        """Validate the constructor arguments.
+
+        :raises ValueError: If either argument is not positive.
+        """
         if vocab_size <= 0:
             raise ValueError(f"vocab_size must be positive, got {vocab_size}")
         if initializer_range <= 0.0:
@@ -132,28 +250,29 @@ class CausalLanguageModel(keras.Model):
 
     @property
     def metrics(self):
+        """Return the three trackers ``train_step`` and ``test_step`` report.
+
+        :return: The metrics Keras should track.
+        """
         return [self.loss_tracker, self.acc_metric, self.perplexity_metric]
 
     # DECISION plan-2026-08-19T163559-499b6f0e/D-035: match by variable shape
-    # first, not `layer.weight` — that assumes the PyTorch spelling and raises
-    # on an unbuilt Keras layer. See decisions.md D-035 and D-049.
+    # first, not `layer.weight`. See decisions.md D-035 and D-049.
     def _embedding_variable_of(
             self, layer: Any
     ) -> Optional[keras.KerasTensor]:
         """Return `layer`'s ``(vocab_size, hidden_size)`` variable, or None.
 
-        Shape matching works for a built layer of any provenance and
-        degrades to None (tying disabled) instead of crashing.
+        Shape matching works for a built layer of any provenance and returns
+        None, which disables tying, instead of raising.
 
-        Interface contract (2 callers by design):
-            :param layer: Any object that may own the token-embedding variable.
-            :returns: The variable whose shape is exactly
-                ``(vocab_size, hidden_size)``, else the value of a
-                ``embeddings`` / ``weight`` attribute if one is readable, else
-                ``None``.
-            :raises: Nothing. An unreadable attribute is treated as absent.
+        :param layer: Any object that may own the token-embedding variable.
+        :return: The variable whose shape is exactly
+            ``(vocab_size, hidden_size)``, else the value of an ``embeddings``
+            or ``weight`` attribute if one is readable, else ``None``.
         """
-        for variable in getattr(layer, "variables", ()):  # built layers only
+        # `variables` is populated only once the layer is built.
+        for variable in getattr(layer, "variables", ()):
             if tuple(variable.shape) == (self.vocab_size, self.hidden_size):
                 return variable
         for attribute in ("embeddings", "weight"):
@@ -166,18 +285,21 @@ class CausalLanguageModel(keras.Model):
         return None
 
     def _locate_embedding_weights(self) -> Optional[keras.KerasTensor]:
-        """Attempts to find the embedding weights in the backbone."""
-        # 1. Explicit Method
+        """Attempts to find the embedding weights in the backbone.
+
+        :return: The first matching embedding variable, or ``None`` if no
+            attribute path resolves.
+        """
         if hasattr(self.backbone, "get_embedding_matrix"):
             return self.backbone.get_embedding_matrix()
 
-        # 2. Token Embeddings Layer (KerasNLP / Custom)
+        # KerasNLP and custom backbones.
         if hasattr(self.backbone, "token_embeddings"):
             located = self._embedding_variable_of(self.backbone.token_embeddings)
             if located is not None:
                 return located
 
-        # 3. HF Style
+        # Hugging Face nests the matrix under `embeddings`.
         embeddings = getattr(self.backbone, "embeddings", None)
         if embeddings is not None:
             word_embeddings = getattr(embeddings, "word_embeddings", None)
@@ -192,15 +314,17 @@ class CausalLanguageModel(keras.Model):
         return None
 
     def build(self, input_shape):
-        """Builds the model and initializes the output head/weight tying."""
-        # 1. Ensure backbone is built to access its variables.
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-049: this determines which
-        # weight-tying branch is chosen, so it must give the same answer on
-        # save and on load. Do not restore a bare except pass. See decisions.md.
+        """Builds the model and initializes the output head/weight tying.
+
+        :param input_shape: Shape of the input to ``call``.
+        :raises ValueError: If the causality probe finds future leakage.
+        """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-049: the backbone must be
+        # built before tying resolves, and a failure gets reported. See decisions.md.
         if not self.backbone.built:
             try:
                 self.backbone.build(input_shape)
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Could not build the backbone from input_shape "
                     f"{input_shape} ({type(exc).__name__}: {exc}). Weight "
@@ -209,7 +333,6 @@ class CausalLanguageModel(keras.Model):
                     "load."
                 )
 
-        # 2. Attempt Weight Tying logic if requested
         if self.tie_weights:
             self.embedding_weights = self._locate_embedding_weights()
 
@@ -224,7 +347,7 @@ class CausalLanguageModel(keras.Model):
                     )
                 logger.info("CLM Head initialized with Weight Tying enabled.")
             else:
-                # Fallback to untied if embeddings not found
+                # The first build has nothing to warn about yet.
                 if self.built:
                     logger.warning(
                         "Weight tying requested but embedding weights could not "
@@ -240,13 +363,12 @@ class CausalLanguageModel(keras.Model):
                         name="clm_output",
                     )
 
-        # 3. Ensure the output layer is built if it exists
         if self.output_layer is not None and not self.output_layer.built:
              self.output_layer.build((None, self.hidden_size))
 
         super().build(input_shape)
 
-        # 4. Refuse a backbone that leaks the future (see module docstring).
+        # A leaking backbone fails here rather than mid-training.
         if self.verify_causality:
             self._verify_backbone_causality()
 
@@ -258,7 +380,8 @@ class CausalLanguageModel(keras.Model):
         Runs the backbone twice over identical random ids that differ only at
         position ``t = seq_len // 2`` and compares ``last_hidden_state`` at every
         position before ``t``. A causal backbone gives a bit-identical prefix; a
-        bidirectional one moves it.
+        bidirectional one moves it. A probe that cannot run at all warns and
+        returns.
 
         :param seq_len: Probe sequence length.
         :param batch_size: Probe batch size.
@@ -285,7 +408,7 @@ class CausalLanguageModel(keras.Model):
             moved = self.backbone(
                 {"input_ids": perturbed, "attention_mask": mask}, training=False
             )["last_hidden_state"]
-        except Exception as exc:  # noqa: BLE001 - the probe is best-effort
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Could not run the causality probe on the backbone "
                 f"({type(exc).__name__}: {exc}). Causality is UNVERIFIED; a "
@@ -318,21 +441,30 @@ class CausalLanguageModel(keras.Model):
         inputs: Union[Dict[str, keras.KerasTensor], keras.KerasTensor],
         training: Optional[bool] = False,
     ) -> keras.KerasTensor:
-        """Forward pass for prediction/generation."""
+        """Score the inputs as given, with no shift applied.
+
+        :param inputs: Backbone inputs, a mapping with ``input_ids`` and any
+            other keys the backbone takes.
+        :param training: Whether to run in training mode. Defaults to False.
+        :return: Logits of shape (batch, seq_len, vocab_size).
+        """
         backbone_outputs = self.backbone(inputs, training=training)
         sequence_output = backbone_outputs["last_hidden_state"]
         logits = self._apply_output_head(sequence_output)
         return logits
 
     def _apply_output_head(self, hidden_states: keras.KerasTensor) -> keras.KerasTensor:
-        """Projects hidden states to vocabulary logits."""
-        # JIT Build: Ensure components exist if build() wasn't called explicitly
+        """Projects hidden states to vocabulary logits.
+
+        :param hidden_states: Backbone output, shape (batch, seq_len, hidden_size).
+        :return: Logits of shape (batch, seq_len, vocab_size).
+        """
+        # `call` can run before an explicit build, so the head resolves here.
         if self.use_weight_tying and self.embedding_weights is None:
             self.build(hidden_states.shape)
         elif not self.use_weight_tying and self.output_layer is None:
             self.build(hidden_states.shape)
 
-        # Application
         if self.use_weight_tying and self.embedding_weights is not None:
             logits = ops.matmul(
                 hidden_states,
@@ -340,7 +472,6 @@ class CausalLanguageModel(keras.Model):
             )
             logits = logits + self.output_bias
         else:
-            # Fallback for untied or if weight tying failed
             logits = self.output_layer(hidden_states)
 
         return logits
@@ -350,11 +481,15 @@ class CausalLanguageModel(keras.Model):
     ) -> Tuple[Dict[str, keras.KerasTensor], keras.KerasTensor, Optional[keras.KerasTensor]]:
         """Prepares causal inputs by shifting tokens.
 
-        Returns the shifted inputs, the shifted labels and the label-aligned
-        loss weights. The backbone gets the input-aligned mask slice
+        The backbone gets the input-aligned mask slice
         ``attention_mask[:, :-1]``; the loss gets ``attention_mask[:, 1:]``,
         because a weight multiplies a label. Using the input-aligned slice for
         both scores the final real token against a padding label.
+
+        :param inputs: Mapping with ``input_ids`` and optionally
+            ``attention_mask``.
+        :return: The shifted inputs, the shifted labels, and the label-aligned
+            loss weights, which are ``None`` when no mask was supplied.
         """
         input_ids = inputs["input_ids"]
         attention_mask = inputs.get("attention_mask", None)
@@ -378,6 +513,13 @@ class CausalLanguageModel(keras.Model):
     def train_step(
         self, data: Union[Dict[str, keras.KerasTensor], Tuple]
     ) -> Dict[str, keras.KerasTensor]:
+        """Shift the batch, take one optimizer step, and report the metrics.
+
+        :param data: A batch of inputs, or a tuple Keras unpacks into inputs,
+            targets and sample weights. Targets are ignored, since the labels
+            come from the shift.
+        :return: Mapping from metric name to current value.
+        """
         if isinstance(data, tuple):
             inputs, _, _ = keras.utils.unpack_x_y_sample_weight(data)
         else:
@@ -390,9 +532,8 @@ class CausalLanguageModel(keras.Model):
             sequence_output = backbone_outputs["last_hidden_state"]
             logits = self._apply_output_head(sequence_output)
             loss = self.compute_loss(y=y_labels, y_pred=logits, sample_weight=loss_weights)
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-036: scale_loss must run
-            # inside the tape and tape.gradient must differentiate the scaled value —
-            # omitting it silently divides the whole update under mixed_float16. See decisions.md.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-036: scale_loss runs inside
+            # the tape; skipping it shrinks every mixed_float16 update. See decisions.md.
             scaled_loss = self.optimizer.scale_loss(loss)
 
         trainable_vars = self.trainable_variables
@@ -408,6 +549,12 @@ class CausalLanguageModel(keras.Model):
     def test_step(
         self, data: Union[Dict[str, keras.KerasTensor], Tuple]
     ) -> Dict[str, keras.KerasTensor]:
+        """Shift the batch, score it without a gradient, and report metrics.
+
+        :param data: A batch of inputs, or a tuple Keras unpacks into inputs,
+            targets and sample weights. Targets are ignored.
+        :return: Mapping from metric name to current value.
+        """
         if isinstance(data, tuple):
             inputs, _, _ = keras.utils.unpack_x_y_sample_weight(data)
         else:
@@ -434,6 +581,15 @@ class CausalLanguageModel(keras.Model):
         sample_weight: Optional[keras.KerasTensor] = None,
         **kwargs: Any,
     ) -> keras.KerasTensor:
+        """Compute cross entropy over all positions, reduced by the weights.
+
+        :param x: Unused, present for the ``keras.Model`` signature.
+        :param y: Shifted token ids, shape (batch, seq_len - 1).
+        :param y_pred: Head logits, shape (batch, seq_len - 1, vocab_size).
+        :param sample_weight: Label-aligned mask. Without it the result is the
+            plain mean over every position.
+        :return: Scalar loss.
+        """
         loss_fn = keras.losses.SparseCategoricalCrossentropy(
             from_logits=True, reduction="none"
         )
@@ -448,6 +604,10 @@ class CausalLanguageModel(keras.Model):
             return ops.mean(loss)
 
     def get_config(self) -> Dict[str, Any]:
+        """Returns the configuration of the model for serialization.
+
+        :return: Dictionary containing all constructor arguments.
+        """
         config = super().get_config()
         config.update(
             {
@@ -463,6 +623,13 @@ class CausalLanguageModel(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CausalLanguageModel":
+        """Creates a model from its configuration.
+
+        :param config: Configuration produced by ``get_config``.
+        :return: The deserialized model, with its backbone rebuilt first.
+        """
         backbone_config = config.pop("backbone")
         backbone = keras.saving.deserialize_keras_object(backbone_config)
         return cls(backbone=backbone, **config)
+
+# ---------------------------------------------------------------------

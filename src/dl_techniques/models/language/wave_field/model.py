@@ -287,7 +287,7 @@ class WaveFieldLLM(keras.Model):
         final_norm
           │
           ├──────────────────────────┬──────────────────────────┐
-          ▼ (tie_word_embeddings)    ▼ (not tied)                ▼
+          ▼ (tie_word_embeddings)    ▼ (not tied)               ▼
         matmul with token emb.ᵀ     lm_head (Dense)        last_hidden_state
           │                          │                            │
           └────────────┬─────────────┘                            │
