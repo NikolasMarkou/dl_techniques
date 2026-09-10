@@ -54,15 +54,15 @@ class SHGCNModel(keras.Model):
             ┌──────────────┐               │
             │ sHGCN layer 1├───────────────┤
             └──────┬───────┘               │
-                    │ [N, hidden[0]]        │
-                   ...                      │
-                    │ [N, hidden[-1]]       │
-                    ▼                        │
+                   │  [N, hidden[0]]       │
+                  ...                      │
+                   │ [N, hidden[-1]]       │
+                   ▼                       │
             ┌──────────────┐               │
             │ sHGCN layer L├───────────────┘
             │  (output)    │
             └──────┬───────┘
-                    ▼
+                   ▼
              output [N, output_dim]
 
     :param hidden_dims: Per-layer hidden dimensions, e.g. ``[64, 32]``. At
@@ -254,6 +254,7 @@ class SHGCNModel(keras.Model):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNNodeClassifier(keras.Model):
@@ -269,12 +270,12 @@ class SHGCNNodeClassifier(keras.Model):
             ┌───────────────┐
             │ sHGCN backbone│
             └──────┬────────┘
-                    │ [N, embedding_dim]
-                    ▼
+                   │ [N, embedding_dim]
+                   ▼
             ┌───────────────┐
             │ Dense+softmax │
             └──────┬────────┘
-                    ▼
+                   ▼
             probabilities [N, num_classes]
 
     :param num_classes: Number of output classes. Must be at least 2.
@@ -432,6 +433,7 @@ class SHGCNNodeClassifier(keras.Model):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNLinkPredictor(keras.Model):
@@ -442,21 +444,21 @@ class SHGCNLinkPredictor(keras.Model):
         .. code-block:: text
 
             features, adjacency        edge_pairs [E, 2]
-                  │                          │
-                  ▼                          │
-            ┌───────────────┐                │
-            │ sHGCN backbone│                │
-            └──────┬────────┘                │
-                    │ embeddings [N, D]        │
-                    ▼                          │
+                  │                            │
+                  ▼                            │
+            ┌───────────────┐                  │
+            │ sHGCN backbone│                  │
+            └──────┬────────┘                  │
+                   │ embeddings [N, D]         │
+                   ▼                           │
             ┌────────────────────────────┐     │
             │ gather src/tgt embeddings  │◄────┘
             └──────┬─────────────────────┘
-                    ▼
-            ┌───────────────────┐
+                   ▼
+            ┌────────────────────┐
             │ Fermi-Dirac decoder│
             └──────┬─────────────┘
-                    ▼
+                   ▼
             edge probabilities [E]
 
     :param hidden_dims: Per-layer hidden dimensions for the sHGCN backbone.
@@ -674,6 +676,7 @@ def create_shgcn(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_shgcn_node_classifier(
         num_classes: int,
@@ -721,6 +724,7 @@ def create_shgcn_node_classifier(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_shgcn_link_predictor(
         hidden_dims: Optional[List[int]] = None,
