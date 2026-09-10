@@ -33,6 +33,8 @@ from dl_techniques.models.vision.image_restoration.doc_scanner.components import
     SPATIAL_DIVISOR,
 )
 from dl_techniques.models.vision.image_restoration.doc_scanner.warp import (
+    CONVEX_NEIGHBOURS,
+    convex_upsample,
     coords_grid,
     sample_at_pixel_coords,
 )
@@ -368,3 +370,291 @@ class TestGradientsReachTheCoordinates:
 
         assert grad is not None
         assert np.all(np.isfinite(grad.numpy()))
+
+
+
+# =====================================================================
+# convex_upsample
+# =====================================================================
+#
+# The 3x3 neighbour index `k` used throughout this section is the row-major
+# `(kh, kw)` index of `F.unfold`/`extract_patches`, so neighbour `k` of source
+# pixel `(h, w)` is the input pixel `(h + k // 3 - 1, w + k % 3 - 1)`:
+#
+#     k = 0 1 2      (dy, dx) = (-1,-1) (-1, 0) (-1,+1)
+#         3 4 5                 ( 0,-1) ( 0, 0) ( 0,+1)
+#         6 7 8                 (+1,-1) (+1, 0) (+1,+1)
+#
+# k = 4 is the centre. A guard that only exercises k = 4 cannot distinguish a
+# transposed 3x3 from a correct one, which is why every k is exercised below.
+
+_UP_H, _UP_W = 4, 7  # NON-SQUARE, deliberately -- see rule 1 in the module docstring.
+_MASK_CHANNELS = CONVEX_NEIGHBOURS * SPATIAL_DIVISOR * SPATIAL_DIVISOR
+_VERY_NEGATIVE = -1.0e4  # softmax of this against 0.0 is one-hot to ~1e-4343.
+
+
+def _neighbour_offset(k: int) -> tuple:
+    """``k`` -> ``(dy, dx)``, the row-major 3x3 offset. Written out, not derived
+    from the implementation under test."""
+    return ((-1, -1), (-1, 0), (-1, 1),
+            (0, -1), (0, 0), (0, 1),
+            (1, -1), (1, 0), (1, 1))[k]
+
+
+def _one_hot_mask(k: int) -> np.ndarray:
+    """A ``(1, H, W, 576)`` logit mask that selects neighbour ``k`` everywhere.
+
+    Built in the ``(neighbour, sub_row, sub_col)`` decomposition and then
+    flattened, so a wrongly-ordered reshape inside ``convex_upsample`` reads a
+    DIFFERENT neighbour per sub-pixel and smears the impulse.
+    """
+    logits = np.full(
+        (1, _UP_H, _UP_W, CONVEX_NEIGHBOURS, SPATIAL_DIVISOR, SPATIAL_DIVISOR),
+        _VERY_NEGATIVE,
+        dtype="float32",
+    )
+    logits[:, :, :, k, :, :] = 0.0
+    return logits.reshape(1, _UP_H, _UP_W, _MASK_CHANNELS)
+
+
+def _impulse_flow(row: int, col: int, channel: int = 0) -> np.ndarray:
+    flow = np.zeros((1, _UP_H, _UP_W, 2), dtype="float32")
+    flow[0, row, col, channel] = 1.0
+    return flow
+
+
+class TestConvexUpsampleNeighbourOrdering:
+    """The delta-impulse ordering guard: where does the mass LAND?
+
+    One non-zero neighbour weight at a known 3x3 offset must move the impulse
+    to exactly the destination block that offset predicts. This is the only
+    instrument that can see the two reshape orderings, both of which are
+    shape-preserving.
+    """
+
+    @pytest.mark.parametrize("k", list(range(CONVEX_NEIGHBOURS)))
+    def test_a_one_hot_neighbour_moves_the_impulse_by_that_offset(self, k):
+        src_row, src_col = 2, 3  # interior, so every one of the 9 offsets is in range.
+        out = np.array(
+            convex_upsample(_impulse_flow(src_row, src_col), _one_hot_mask(k))
+        )
+
+        assert out.shape == (
+            1,
+            _UP_H * SPATIAL_DIVISOR,
+            _UP_W * SPATIAL_DIVISOR,
+            2,
+        )
+
+        dy, dx = _neighbour_offset(k)
+        # Neighbour k of source (h, w) is input (h + dy, w + dx); the impulse at
+        # (src_row, src_col) is therefore READ by source pixel
+        # (src_row - dy, src_col - dx), whose whole 8x8 destination block lights up.
+        dst_h, dst_w = src_row - dy, src_col - dx
+
+        expected = np.zeros_like(out)
+        expected[
+            0,
+            dst_h * SPATIAL_DIVISOR : (dst_h + 1) * SPATIAL_DIVISOR,
+            dst_w * SPATIAL_DIVISOR : (dst_w + 1) * SPATIAL_DIVISOR,
+            0,
+        ] = float(SPATIAL_DIVISOR)
+
+        np.testing.assert_allclose(out, expected, rtol=0, atol=1e-3)
+
+    def test_the_centre_neighbour_is_a_plain_nearest_upsample(self):
+        """k = 4 alone: a pure block-replicating 8x upsample of ``8 * flow``."""
+        rng = np.random.default_rng(11)
+        flow = rng.standard_normal((1, _UP_H, _UP_W, 2)).astype("float32")
+
+        out = np.array(convex_upsample(flow, _one_hot_mask(4)))
+        expected = np.repeat(
+            np.repeat(flow * SPATIAL_DIVISOR, SPATIAL_DIVISOR, axis=1),
+            SPATIAL_DIVISOR,
+            axis=2,
+        )
+
+        np.testing.assert_allclose(out, expected, rtol=0, atol=1e-3)
+
+    def test_an_offset_neighbour_reads_zero_across_the_border(self):
+        """``F.unfold(..., padding=1)`` is ZERO-padded, not edge-clamped.
+
+        Distinct from :func:`sample_at_pixel_coords`, which clamps. Selecting
+        the 'up' neighbour on the top row must therefore yield zeros.
+        """
+        flow = np.ones((1, _UP_H, _UP_W, 2), dtype="float32")
+        out = np.array(convex_upsample(flow, _one_hot_mask(1)))  # (dy, dx) = (-1, 0)
+
+        top_block = out[0, :SPATIAL_DIVISOR, :, :]
+        np.testing.assert_allclose(top_block, 0.0, rtol=0, atol=1e-3)
+        # ...and the row below it reads the (all-ones) row above, scaled by 8.
+        np.testing.assert_allclose(
+            out[0, SPATIAL_DIVISOR : 2 * SPATIAL_DIVISOR, :, :],
+            float(SPATIAL_DIVISOR),
+            rtol=0,
+            atol=1e-3,
+        )
+
+
+class TestConvexUpsampleSubPixelInterleave:
+    """Which of the two 8s is the sub-ROW and which is the sub-COLUMN.
+
+    Swapping them transposes every 8x8 block. Output shape, dtype and
+    finiteness are all identical, and at the square 288x288 training resolution
+    the swapped variant is not even out of range -- so only an ASYMMETRIC
+    sub-pixel probe can see it.
+    """
+
+    def test_one_sub_pixel_selecting_a_different_neighbour_lands_asymmetrically(self):
+        sub_row, sub_col = 1, 0  # asymmetric: (1, 0) and (0, 1) are distinguishable.
+
+        logits = np.full(
+            (1, _UP_H, _UP_W, CONVEX_NEIGHBOURS, SPATIAL_DIVISOR, SPATIAL_DIVISOR),
+            _VERY_NEGATIVE,
+            dtype="float32",
+        )
+        logits[:, :, :, 4, :, :] = 0.0  # everything selects the centre...
+        logits[:, :, :, 4, sub_row, sub_col] = _VERY_NEGATIVE
+        logits[:, :, :, 1, sub_row, sub_col] = 0.0  # ...except this one, which selects 'up'.
+        mask = logits.reshape(1, _UP_H, _UP_W, _MASK_CHANNELS)
+
+        src_row, src_col = 2, 3
+        out = np.array(convex_upsample(_impulse_flow(src_row, src_col), mask))
+
+        # The centre-selecting sub-pixels of block (2, 3) see the impulse...
+        centre_block = out[
+            0,
+            src_row * SPATIAL_DIVISOR : (src_row + 1) * SPATIAL_DIVISOR,
+            src_col * SPATIAL_DIVISOR : (src_col + 1) * SPATIAL_DIVISOR,
+            0,
+        ]
+        assert centre_block[0, 0] == pytest.approx(SPATIAL_DIVISOR, abs=1e-3)
+        # ...but the one deviant sub-pixel does not: it reads (src_row - 1, src_col).
+        assert centre_block[sub_row, sub_col] == pytest.approx(0.0, abs=1e-3)
+
+        # And the impulse reappears one BLOCK down, at sub-pixel (1, 0) of it --
+        # NOT at (0, 1), which is where a swapped interleave would put it.
+        below = out[
+            0,
+            (src_row + 1) * SPATIAL_DIVISOR : (src_row + 2) * SPATIAL_DIVISOR,
+            src_col * SPATIAL_DIVISOR : (src_col + 1) * SPATIAL_DIVISOR,
+            0,
+        ]
+        assert below[sub_row, sub_col] == pytest.approx(SPATIAL_DIVISOR, abs=1e-3)
+        assert below[sub_col, sub_row] == pytest.approx(0.0, abs=1e-3)
+
+
+class TestConvexUpsampleUniformMaskControl:
+    """With every logit equal, the operator degenerates to a known filter.
+
+    The expected value is computed independently in numpy -- an explicit
+    zero-padded 3x3 mean followed by a block-replicating 8x upsample -- never by
+    calling :func:`convex_upsample`.
+    """
+
+    @staticmethod
+    def _reference(flow: np.ndarray) -> np.ndarray:
+        scaled = flow * SPATIAL_DIVISOR
+        padded = np.pad(scaled, ((0, 0), (1, 1), (1, 1), (0, 0)))
+        mean = np.zeros_like(scaled)
+        for h in range(scaled.shape[1]):
+            for w in range(scaled.shape[2]):
+                mean[:, h, w, :] = padded[:, h : h + 3, w : w + 3, :].sum(
+                    axis=(1, 2)
+                ) / float(CONVEX_NEIGHBOURS)
+        return np.repeat(
+            np.repeat(mean, SPATIAL_DIVISOR, axis=1), SPATIAL_DIVISOR, axis=2
+        )
+
+    def test_a_uniform_mask_is_a_mean_filtered_nearest_upsample(self):
+        rng = np.random.default_rng(7)
+        flow = rng.standard_normal((2, _UP_H, _UP_W, 2)).astype("float32")
+        mask = np.full((2, _UP_H, _UP_W, _MASK_CHANNELS), 0.3, dtype="float32")
+
+        out = np.array(convex_upsample(flow, mask))
+
+        np.testing.assert_allclose(out, self._reference(flow), rtol=0, atol=1e-5)
+
+    def test_the_weights_are_convex_so_a_constant_field_is_attenuated_at_the_border(self):
+        """Non-negative and summing to one: a constant interior stays constant.
+
+        The border does NOT, because the padding is zero rather than reflective
+        -- so this also pins the padding mode against a uniform mask.
+        """
+        flow = np.full((1, _UP_H, _UP_W, 2), 0.5, dtype="float32")
+        mask = np.zeros((1, _UP_H, _UP_W, _MASK_CHANNELS), dtype="float32")
+
+        out = np.array(convex_upsample(flow, mask))
+
+        interior = out[
+            0, SPATIAL_DIVISOR : -SPATIAL_DIVISOR, SPATIAL_DIVISOR : -SPATIAL_DIVISOR, :
+        ]
+        np.testing.assert_allclose(
+            interior, 0.5 * SPATIAL_DIVISOR, rtol=0, atol=1e-5
+        )
+        # A corner sees only 4 of its 9 neighbours.
+        assert out[0, 0, 0, 0] == pytest.approx(
+            0.5 * SPATIAL_DIVISOR * 4.0 / CONVEX_NEIGHBOURS, abs=1e-5
+        )
+
+
+class TestConvexUpsampleTakesRawLogits:
+    """The ``0.25`` of ``update.py:104`` belongs to the mask head, not here."""
+
+    def test_scaling_the_logits_changes_the_output(self):
+        rng = np.random.default_rng(23)
+        flow = rng.standard_normal((1, _UP_H, _UP_W, 2)).astype("float32")
+        logits = rng.standard_normal(
+            (1, _UP_H, _UP_W, _MASK_CHANNELS)
+        ).astype("float32") * 4.0
+
+        sharp = np.array(convex_upsample(flow, logits))
+        soft = np.array(convex_upsample(flow, logits * 0.25))
+
+        # If this function silently applied (or absorbed) a scaling of its own,
+        # one of these would be a no-op. Softmax is not scale-invariant.
+        assert np.max(np.abs(sharp - soft)) > 1e-3
+
+
+class TestConvexUpsampleGradientsAndGraphSafety:
+
+    def test_gradients_reach_both_the_flow_and_the_mask(self):
+        rng = np.random.default_rng(5)
+        flow = tf.Variable(
+            rng.standard_normal((1, _UP_H, _UP_W, 2)).astype("float32")
+        )
+        mask = tf.Variable(
+            rng.standard_normal((1, _UP_H, _UP_W, _MASK_CHANNELS)).astype("float32")
+        )
+
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_sum(convex_upsample(flow, mask) ** 2)
+
+        g_flow, g_mask = tape.gradient(loss, [flow, mask])
+
+        assert g_flow is not None and g_mask is not None
+        assert np.all(np.isfinite(g_flow.numpy()))
+        assert np.all(np.isfinite(g_mask.numpy()))
+        # A non-trivial mask gradient is the real assertion: a `stop_gradient`
+        # or an argmax-style selection would leave this identically zero.
+        assert np.max(np.abs(g_mask.numpy())) > 0.0
+
+    def test_it_runs_under_a_traced_tf_function_with_an_unknown_batch(self):
+        """No Python branch on a symbolic value; the reshape must stay dynamic."""
+        traced = tf.function(
+            convex_upsample,
+            input_signature=[
+                tf.TensorSpec([None, _UP_H, _UP_W, 2], tf.float32),
+                tf.TensorSpec([None, _UP_H, _UP_W, _MASK_CHANNELS], tf.float32),
+            ],
+        )
+        out = traced(
+            tf.zeros((3, _UP_H, _UP_W, 2)),
+            tf.zeros((3, _UP_H, _UP_W, _MASK_CHANNELS)),
+        )
+        assert tuple(out.shape) == (
+            3,
+            _UP_H * SPATIAL_DIVISOR,
+            _UP_W * SPATIAL_DIVISOR,
+            2,
+        )

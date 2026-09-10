@@ -9,13 +9,20 @@ reach ``torch.nn.functional.grid_sample`` through ``bilinear_sampler``
 passes ``align_corners=True``.
 
 This module is that convention, and nothing else. It holds no layer, no weight
-and no registered class -- only :func:`coords_grid` and
-:func:`sample_at_pixel_coords`, the two pure functions that every other part of
-the port routes its resampling through. It is deliberately separate from
-``components.py`` (which holds the width table and the Keras layers) so that
-the sampling convention is findable as one thing rather than being distributed
-through a layer zoo: it is invariant #1 of this port, and a violation of it is
-sub-pixel, silent, and invisible to every shape test.
+and no registered class -- only :func:`coords_grid`,
+:func:`sample_at_pixel_coords` and :func:`convex_upsample`, the three pure
+functions that every other part of the port routes its resampling through. It
+is deliberately separate from ``components.py`` (which holds the width table
+and the Keras layers) so that the sampling convention is findable as one thing
+rather than being distributed through a layer zoo: it is invariant #1 of this
+port, and a violation of it is sub-pixel, silent, and invisible to every shape
+test.
+
+:func:`convex_upsample` belongs here for the same reason: it is a resampling
+operator (a learned 3x3-neighbourhood blend followed by a sub-pixel
+scatter), it holds no weights -- the mask it consumes is produced by the
+update block's mask head -- and its own failure mode is a permuted or
+transposed backward map with no shape symptom at all.
 
 Why there is no new sampler here
 --------------------------------
@@ -40,12 +47,18 @@ axis's own size. Composing it with torch's ``align_corners=True`` normalization
 
 Stride-independence
 -------------------
-Neither function mentions :data:`~.components.SPATIAL_DIVISOR`. That is a
-property, not an omission: each one reads the extent it needs from its own
-argument, so the SAME code samples the stride-8 feature map and the
-full-resolution image. The rectifier calls :func:`coords_grid` three times --
-once at full resolution and twice at ``H // SPATIAL_DIVISOR`` (upstream
-``model.py:47-49``) -- and the divisor lives at those call sites, never here.
+Neither :func:`coords_grid` nor :func:`sample_at_pixel_coords` mentions
+:data:`~.components.SPATIAL_DIVISOR`. That is a property, not an omission: each
+one reads the extent it needs from its own argument, so the SAME code samples
+the stride-8 feature map and the full-resolution image. The rectifier calls
+:func:`coords_grid` three times -- once at full resolution and twice at
+``H // SPATIAL_DIVISOR`` (upstream ``model.py:47-49``) -- and the divisor lives
+at those call sites, never here.
+
+:func:`convex_upsample` is the exception, and necessarily so: the divisor is
+not an extent it can read off an argument, it is the RATIO between its input
+and its output. It reads :data:`~.components.SPATIAL_DIVISOR` directly, and no
+``8`` appears in this module as a literal.
 
 References:
     - Upstream release: https://github.com/fh2019ustc/DocScanner --
@@ -60,6 +73,8 @@ from typing import List, Union
 import keras
 
 from dl_techniques.layers.spatial_layer import interpolate_grid
+
+from .components import SPATIAL_DIVISOR
 
 # ---------------------------------------------------------------------
 
@@ -176,7 +191,126 @@ def sample_at_pixel_coords(
 
 # ---------------------------------------------------------------------
 
+# The size of the convex-upsample neighbourhood: a 3x3 window, so 9 candidate
+# source pixels per destination sub-pixel. This is the ONLY place the 9 is
+# written down. It is structural (upstream ``model.py:58``'s ``F.unfold(...,
+# [3, 3], padding=1)``), not a tunable width, which is why it is a module
+# constant here rather than a `_VARIANT_SPEC` row -- but the update block's mask
+# head must emit `SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS` (= 576) channels and
+# derives that count from this name rather than restating it.
+CONVEX_NEIGHBOURS: int = 9
+
+# ---------------------------------------------------------------------
+
+
+def convex_upsample(
+    flow: "keras.KerasTensor",
+    mask: "keras.KerasTensor",
+) -> "keras.KerasTensor":
+    """Learned convex 8x upsample of a coordinate/flow field (RAFT-style).
+
+    Ports upstream ``RAFT.upsample_flow`` (``model.py:54-65``) to channels-last.
+    Every destination sub-pixel is a CONVEX combination -- the weights are a
+    softmax, so they are non-negative and sum to one -- of the 9 pixels in the
+    3x3 neighbourhood of its source pixel, with the field values pre-scaled by
+    :data:`~.components.SPATIAL_DIVISOR` because the coordinate units grow with
+    the resolution.
+
+    ``mask`` is consumed as RAW LOGITS. Upstream applies its ``0.25`` scaling in
+    the update block (``update.py:104``, ``mask = .25 * self.mask(net)``), i.e.
+    strictly before this function is reached, so that factor belongs to the mask
+    head and is deliberately NOT applied here.
+
+    :param flow: ``(B, H, W, C)`` field to upsample, channels-last. ``C`` is 2
+        in this port, but nothing here depends on that.
+    :type flow: keras.KerasTensor
+    :param mask: ``(B, H, W, CONVEX_NEIGHBOURS * SPATIAL_DIVISOR ** 2)`` raw
+        logits, i.e. ``(B, H, W, 576)``. The trailing axis decomposes
+        major-to-minor as ``(neighbour, sub_row, sub_col)`` -- see the anchor in
+        the body, which is the whole content of this function.
+    :type mask: keras.KerasTensor
+    :return: ``(B, H * SPATIAL_DIVISOR, W * SPATIAL_DIVISOR, C)``. Destination
+        pixel ``(8 * h + i, 8 * w + j)`` is the mask-weighted sum of
+        ``SPATIAL_DIVISOR * flow`` over the 3x3 neighbourhood of ``(h, w)``,
+        zero-padded at the field border.
+    :rtype: keras.KerasTensor
+    """
+    divisor = SPATIAL_DIVISOR
+
+    scaled = keras.ops.multiply(
+        flow, keras.ops.cast(divisor, flow.dtype)
+    )
+
+    # DECISION plan-2026-09-10T065432-05fcb6dd/D-010: THREE orderings meet on the
+    # next dozen lines and none of them has a shape symptom when reversed.
+    #
+    # (1) THE PATCH AXIS. `keras.ops.image.extract_patches` is channels-LAST and
+    #     lays its `9 * C` trailing axis out as `(kh, kw, c)` major-to-minor --
+    #     MEASURED, not assumed (probe: a (1,4,7,2) position-encoded input gives
+    #     `[103,-103, 104,-104, 105,-105, 203,-203, ...]` at (h=2,w=3), so `c` is
+    #     MINOR). `torch.nn.functional.unfold` lays the SAME data out as
+    #     `(c, kh, kw)` -- channel MAJOR. So `up_flow.view(N, 2, 9, ...)` from
+    #     `model.py:59` must NOT be transcribed as a `(..., C, 9)` reshape here;
+    #     the correct channels-last split is `(..., 9, C)`. Both reshapes accept
+    #     the same 18-element vector.
+    #
+    # (2) THE 576 SPLIT. `mask.view(N, 1, 9, 8, 8, H, W)` at `model.py:56` splits
+    #     a channels-FIRST 576 axis as `(9, 8, 8)` major-to-minor, i.e. channel
+    #     `c = k * 64 + i * 8 + j`. That index arithmetic is a property of the
+    #     NUMBER, not of the memory layout, so the channels-last trailing 576
+    #     axis splits identically: `(9, 8, 8)` = `(neighbour, sub_row, sub_col)`.
+    #     Do NOT "translate" it to `(8, 8, 9)` by reversing it as if it were a
+    #     channels-first/last conversion -- it is not one, and `8 * 8 * 9 == 576`
+    #     either way.
+    #
+    # (3) THE INTERLEAVE. `model.py:63`'s `permute(0, 1, 4, 2, 5, 3)` maps
+    #     `(N, C, i, j, H, W) -> (N, C, H, i, W, j)`, so the FIRST 8 (`i`) is the
+    #     sub-ROW and the SECOND (`j`) is the sub-COLUMN: destination
+    #     `(8h + i, 8w + j)`. Swapping them transposes every 8x8 block while
+    #     leaving the output shape, dtype and finiteness untouched, and at the
+    #     square 288x288 training resolution it does not even go out of range.
+    #
+    # (1) and (3) are pinned by the delta-impulse tests in
+    # `TestConvexUpsampleNeighbourOrdering` / `TestConvexUpsampleSubPixelInterleave`
+    # (deliberately NON-SQUARE, H=4 W=7 -- a square fixture cannot see (3)), and
+    # (2) additionally by the uniform-mask control against an independently
+    # computed numpy reference. Both mutations were run and observed RED; see
+    # decisions.md D-010.
+    patches = keras.ops.image.extract_patches(
+        scaled, size=3, strides=1, dilation_rate=1, padding="same"
+    )
+
+    shape = keras.ops.shape(flow)
+    batch, height, width, channels = shape[0], shape[1], shape[2], shape[3]
+
+    patches = keras.ops.reshape(
+        patches, (batch, height, width, CONVEX_NEIGHBOURS, 1, 1, channels)
+    )
+    weights = keras.ops.reshape(
+        mask, (batch, height, width, CONVEX_NEIGHBOURS, divisor, divisor, 1)
+    )
+
+    # `torch.softmax(mask, dim=2)` -- over the 9 NEIGHBOURS, never over the 64
+    # sub-pixels. Each destination sub-pixel gets its own independent convex
+    # combination; the 64 of them are not in competition with one another.
+    weights = keras.ops.softmax(weights, axis=3)
+
+    # (B, H, W, 9, 8, 8, C) -> (B, H, W, 8, 8, C), the `dim=2` sum of
+    # `model.py:62`.
+    blended = keras.ops.sum(weights * patches, axis=3)
+
+    # (B, H, W, i, j, C) -> (B, H, i, W, j, C), then fold each (H, i) and
+    # (W, j) pair into one axis. This is `model.py:63-65`.
+    blended = keras.ops.transpose(blended, (0, 1, 3, 2, 4, 5))
+    return keras.ops.reshape(
+        blended, (batch, height * divisor, width * divisor, channels)
+    )
+
+# ---------------------------------------------------------------------
+
 __all__: List[str] = [
+    "CONVEX_NEIGHBOURS",
+    "convex_upsample",
     "coords_grid",
     "sample_at_pixel_coords",
 ]
