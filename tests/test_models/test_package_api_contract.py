@@ -1140,7 +1140,7 @@ _TRANSFORMER_NORM_ARG_KWARGS = ("attention_norm_args", "ffn_norm_args")
 #: this one by ``_accepted_params``' ``inspect.signature``-derived set, and
 #: conflating the two would hide which predicate a waiver actually clears.
 #:
-#: The single entry is the ViT-family ``scale`` shape already catalogued in
+#: The first entry is the ViT-family ``scale`` shape already catalogued in
 #: ``_NAME_COLLISIONS``, reached here through a different factory:
 #: ``SigLIPVisionTransformer`` stores ``self.scale = str(scale)`` (the variant
 #: size, ``vision/vit_siglip/model.py:357``) while ``LayerNormalization.__init__``
@@ -1148,8 +1148,29 @@ _TRANSFORMER_NORM_ARG_KWARGS = ("attention_norm_args", "ffn_norm_args")
 #:
 #: Key is ``(path relative to src/dl_techniques, class, normalization type,
 #: param)`` -- never a line number, for the reason ``_SCHEDULED_FIXES`` gives.
+#: The second and third are GIN's learnable self-loop weight. `epsilon` in
+#: ``GraphNeuralNetworkLayer`` is NOT a normalization epsilon: it is documented
+#: as ":param epsilon: Learnable self-loop weight for GIN", defaults to **0.0**,
+#: and is consumed once, as
+#: ``add_weight('gin_epsilon', initializer=Constant(self.epsilon))`` feeding
+#: ``(1 + eps) * h_self`` in the GIN branch (Xu et al. 2019). Forwarding it into
+#: ``create_normalization_layer`` -- the repair this predicate's message
+#: proposes -- would put **0.0 in a normalization denominator in the SHIPPED
+#: DEFAULT configuration**, and would overwrite the deliberate, measured 1e-6
+#: that ``# DECISION plan-2026-09-07T183458-be1c267e/D-004`` installed in those
+#: two branches. So the predicate is right about the SHAPE and wrong about the
+#: MEANING, which is exactly what this constant exists for.
+#:
+#: The claim is not left to this comment. It is asserted BY EXECUTION in
+#: ``tests/test_layers/test_graphs/test_graph_neural_network.py::
+#: TestTheTwoEpsilonsAreDifferentThings`` -- at ``epsilon=0.7``,
+#: ``gin_epsilon == [0.7, 0.7]`` while ``norm_layers[i].epsilon == 1e-06``.
+#: PROVEN RED: forwarding ``epsilon=self.epsilon`` at both call sites turns 4
+#: arms there red (2 of them the pre-existing D-004 house-epsilon arms).
 _NORM_NAME_COLLISIONS = {
     ("models/vision/vit_siglip/model.py", "SigLIPVisionTransformer", "layer_norm", "scale"),
+    ("layers/graphs/graph_neural_network.py", "GraphNeuralNetworkLayer", "layer_norm", "epsilon"),
+    ("layers/graphs/graph_neural_network.py", "GraphNeuralNetworkLayer", "batch_norm", "epsilon"),
 }
 
 

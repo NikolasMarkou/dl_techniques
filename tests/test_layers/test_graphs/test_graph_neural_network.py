@@ -775,3 +775,81 @@ class TestTheSecondaryContractsThisLayerAdvertises:
         ]
         for index in range(2):
             assert layer.norm_layers[index].name == f"gnn_{expected}_{index}"
+
+
+# ---------------------------------------------------------------------
+# `epsilon` IS GIN'S SELF-LOOP WEIGHT, NOT A NORMALIZATION EPSILON
+# ---------------------------------------------------------------------
+
+class TestTheTwoEpsilonsAreDifferentThings:
+    """The executable half of the `_NORM_NAME_COLLISIONS` waiver for this class.
+
+    `tests/test_models/test_package_api_contract.py::
+    TestNormalizationKnobsAreForwarded::test_no_declared_and_stored_param_is_dropped`
+    is a purely STATIC predicate: it sees a class that declares and stores
+    `self.epsilon`, sees `create_normalization_layer('layer_norm')` /
+    `('batch_norm')` in the same class without an `epsilon=` kwarg, and reports
+    a dropped knob. On this class that inference is WRONG, and acting on it
+    would be a real defect -- `epsilon` here is GIN's learnable self-loop weight
+    (`:param epsilon: Learnable self-loop weight for GIN`, default **0.0**,
+    consumed as `add_weight('gin_epsilon', initializer=Constant(self.epsilon))`
+    and then as `(1 + eps) * h_self`). Forwarding it would put **0.0** in a
+    normalization denominator in the SHIPPED DEFAULT configuration, and would
+    also overwrite the deliberate, measured `1e-6` that
+    `# DECISION plan-2026-09-07T183458-be1c267e/D-004` installed.
+
+    A waiver justified only by a comment rots silently, so the claim it rests on
+    -- "these two `epsilon`s are unrelated quantities" -- is asserted here BY
+    EXECUTION. This arm goes RED the moment someone "closes" the contract test
+    by forwarding `self.epsilon` into the factory. MEASURED at
+    `epsilon=0.7`: `gin_epsilon == [0.7, 0.7]`, `norm_layers[i].epsilon ==
+    1e-06`.
+    """
+
+    GIN_EPSILON = 0.7
+
+    @pytest.mark.parametrize("normalization", ["layer", "batch"])
+    def test_a_non_default_gin_epsilon_does_not_reach_the_normalization_layer(
+            self, normalization
+    ):
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D,
+            num_layers=2,
+            message_passing="gin",
+            normalization=normalization,
+            epsilon=self.GIN_EPSILON,
+        )
+        layer.build(((B, N, D), (B, N, N)))
+
+        for index, norm in enumerate(layer.norm_layers):
+            assert norm.epsilon == pytest.approx(1e-6, rel=0, abs=0), (
+                f"norm_layers[{index}].epsilon is {norm.epsilon}, i.e. the GIN "
+                "self-loop weight leaked into a normalization denominator. "
+                "These are unrelated quantities -- see D-004 and the "
+                "_NORM_NAME_COLLISIONS waiver in "
+                "tests/test_models/test_package_api_contract.py."
+            )
+
+    def test_the_gin_epsilon_weight_is_where_the_knob_actually_lands(self):
+        """Anti-vacuity for the arm above.
+
+        Without this, a build that silently ignored `epsilon` everywhere would
+        also satisfy the 1e-6 assertions.
+        """
+        layer = GraphNeuralNetworkLayer(
+            concept_dim=D,
+            num_layers=2,
+            message_passing="gin",
+            normalization="layer",
+            epsilon=self.GIN_EPSILON,
+        )
+        layer.build(((B, N, D), (B, N, N)))
+
+        assert layer.gin_epsilon is not None
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(layer.gin_epsilon),
+            np.full((2,), self.GIN_EPSILON, dtype="float32"),
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert layer.get_config()["epsilon"] == pytest.approx(self.GIN_EPSILON)

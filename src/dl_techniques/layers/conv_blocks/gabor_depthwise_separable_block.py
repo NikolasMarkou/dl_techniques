@@ -60,6 +60,10 @@ from dl_techniques.utils.logger import logger
 from ..norms import create_normalization_layer
 from ..activations import resolve_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation,
+    deserialize_activation,
+)
 from dl_techniques.initializers.gabor_filters_initializer import (
     RangeLike,
     create_gabor_depthwise_conv2d,
@@ -389,7 +393,26 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
         self.normalize = normalize
         self.normalization_type = normalization_type
         self.normalization_kwargs = normalization_kwargs or {}
-        self.activation = activation
+        # DECISION plan-2026-09-09T042752-6d66ac56/D-033: `activation` goes
+        # through the D-400 pair (`deserialize_activation` here,
+        # `serialize_activation` in `get_config`), NOT stored raw. Do NOT
+        # "simplify" this back to `self.activation = activation` and add the
+        # site to `_PROVABLY_NOT_AN_ACTIVATION_OBJECT` in
+        # `tests/test_the_raw_activation_config_population_is_closed.py`: that
+        # exemption is only legitimate when the stored value is provably a
+        # str/bool at every reachable assignment, and here it is NOT. The
+        # `Optional[str]` hint is not enforced, and a callable reaches the
+        # forward path intact -- `resolve_activation_layer` falls through to
+        # `keras.layers.Activation`, which accepts one. MEASURED at HEAD with
+        # an unregistered `def scaled_relu(x)`: `get_config()['activation']`
+        # was the raw function ("Object of type function is not JSON
+        # serializable") and `load_model` raised
+        # `TypeError: <Functional> could not be deserialized properly`. This is
+        # compatible with D-010 below, which is about the KERNEL INITIALIZER,
+        # not this attribute: both resolve in `__init__` and emit the resolved
+        # form from `get_config`, which is the same shape. See decisions.md
+        # D-033.
+        self.activation = deserialize_activation(activation)
         self.activation_kwargs = activation_kwargs or {}
         self.pointwise_use_bias = pointwise_use_bias
         # DECISION plan-2026-09-05T115518-e69163e4/D-010: resolve the initializer
@@ -403,9 +426,12 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        if activation is not None and activation not in _POSITIVELY_HOMOGENEOUS_ACTIVATIONS:
+        # Read `self.activation`, not the raw argument: on the load path the
+        # argument is the serialized form and only the attribute is live.
+        if (self.activation is not None
+                and self.activation not in _POSITIVELY_HOMOGENEOUS_ACTIVATIONS):
             logger.warning(
-                f"GaborDepthwiseSeparableBlock activation={activation!r} is not in the "
+                f"GaborDepthwiseSeparableBlock activation={self.activation!r} is not in the "
                 f"positively-homogeneous allowlist "
                 f"{sorted(str(a) for a in _POSITIVELY_HOMOGENEOUS_ACTIVATIONS)}; "
                 f"D(a*x) == a*D(x) will not hold. This allowlist is narrow and "
@@ -450,9 +476,9 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
         # registry-only factory, and do not hand-roll a `keras.layers.Activation`
         # fallback: the resolver already is one. See decisions.md D-012.
         self.gabor_activation = None
-        if activation is not None:
+        if self.activation is not None:
             self.gabor_activation = resolve_activation_layer(
-                activation,
+                self.activation,
                 name='gabor_activation',
                 **self.activation_kwargs
             )
@@ -628,7 +654,9 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
             'normalize': self.normalize,
             'normalization_type': self.normalization_type,
             'normalization_kwargs': self.normalization_kwargs,
-            'activation': self.activation,
+            # D-033 (anchored at the `self.activation` assignment in
+            # `__init__`): the inverse half of `deserialize_activation`.
+            'activation': serialize_activation(self.activation),
             'activation_kwargs': self.activation_kwargs,
             'pointwise_use_bias': self.pointwise_use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
