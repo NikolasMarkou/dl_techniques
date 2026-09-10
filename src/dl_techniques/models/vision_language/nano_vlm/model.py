@@ -74,20 +74,20 @@ class NanoVLM(keras.Model):
         images [B,H,W,C]          text_tokens [B,T]
               │                          │
               ▼                          ▼
-        ┌───────────────┐        ┌───────────────────┐
-        │ VisionEncoder  │        │ TextDecoder /      │
-        │ output_mode=   │        │ TextEncoder         │
-        │ 'none'         │        │                     │
-        └───────┬────────┘        └──────────┬──────────┘
+        ┌────────────────┐        ┌───────────────────┐
+        │ VisionEncoder  │        │ TextDecoder /     │
+        │ output_mode=   │        │ TextEncoder       │
+        │ 'none'         │        │                   │
+        └───────┬────────┘        └───────────┬───────┘
                 │ [B,Sv,D]                    │ [B,St,D]
                 └───────────┬─────────────────┘
                             ▼
-                ┌───────────────────────┐
+                ┌─────────────────────────┐
                 │ MultiModalFusion        │  8 strategies
                 └───────────┬─────────────┘
                             │
               ┌─────────────┴─────────────┐
-              ▼ 'cross_attention'          ▼ other 7 strategies
+              ▼ 'cross_attention'         ▼ other 7 strategies
         (vision_fused, text_fused)     single tensor [B,S,D]
               │
         concat on sequence axis
@@ -95,11 +95,11 @@ class NanoVLM(keras.Model):
         combined [B, Sv+S or S, D]
                             │
                             ▼
-              ┌───────────────────────┐
-              │ output_projection or   │  tied to word
-              │ tied embedding matmul  │  embeddings if
+              ┌─────────────────────────┐
+              │ output_projection or    │  tied to word
+              │ tied embedding matmul   │  embeddings if
               └───────────┬─────────────┘  use_shared_embedding
-                            ▼
+                          ▼
               logits [B, combined_len, vocab_size]
 
     :param vision_config: Configuration for the vision encoder. Must include

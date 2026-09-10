@@ -1,32 +1,27 @@
-"""
-`YOLOv12FeatureExtractor` builds the backbone and neck of YOLOv12 and produces a
-three-level feature pyramid that any detection, segmentation, or classification
-head can consume.
+"""YOLOv12 backbone and neck, producing a three-level feature pyramid.
 
-The backbone stacks cross-stage partial blocks (C3k2, A2C2f) instead of plain
-convolutions, so gradients reach early layers through a shortcut path while the
-main path still deepens the features. The neck fuses scales twice: a top-down
-pass (FPN) upsamples and concatenates deep features into shallow ones, then a
-bottom-up pass (PAN) does the reverse, so every output level carries both fine
-detail and global context.
-
-The model takes a fixed `input_shape` at construction time and always returns
-three feature maps at strides 8, 16, and 32 (P3, P4, P5). Scale is chosen from
-`SCALE_CONFIGS` ('n', 's', 'm', 'l', 'x'), which sets both the channel width and
-the block depth.
+Defines :class:`YOLOv12FeatureExtractor`, whose output is the P3/P4/P5 pyramid that
+a detection, segmentation or classification head consumes. The backbone stacks
+cross-stage partial blocks (C3k2, A2C2f) instead of plain convolutions, so
+gradients reach early layers through a shortcut path while the main path still
+deepens the features. The neck fuses scales twice: a top-down pass upsamples and
+concatenates deep features into shallow ones, then a bottom-up pass does the
+reverse, so every output level carries both fine detail and global context. Height
+and width must divide by 32, since the backbone downsamples five times and the neck
+upsamples twice; the ``input_shape`` passed at construction is stored for
+serialization and does not constrain what ``call`` accepts. Scale comes from
+``SCALE_CONFIGS`` ('n', 's', 'm', 'l', 'x') and sets both the channel width and the
+block depth. The output is always three feature maps, at strides 8, 16 and 32.
 
 References:
     - Tian et al., 2025. YOLOv12: Attention-Centric Real-Time Object Detectors.
-      (https://arxiv.org/abs/2502.12524) -- the backbone/neck this extracts.
-    - Lin et al., 2017. Feature Pyramid Networks for Object Detection. CVPR
-      2017. (https://arxiv.org/abs/1612.03144) -- the multi-scale P3/P4/P5
-      pyramid the neck produces.
+      (https://arxiv.org/abs/2502.12524)
+    - Lin et al., 2017. Feature Pyramid Networks for Object Detection. CVPR 2017.
+      (https://arxiv.org/abs/1612.03144)
     - Liu et al., 2018. Path Aggregation Network for Instance Segmentation.
-      CVPR 2018. (https://arxiv.org/abs/1803.01534) -- the bottom-up path the
-      neck adds on top of FPN.
+      CVPR 2018. (https://arxiv.org/abs/1803.01534)
     - Wang et al., 2020. CSPNet: A New Backbone that can Enhance Learning
-      Capability of CNN. (https://arxiv.org/abs/1911.11929) -- the cross-stage
-      partial blocks the backbone stacks.
+      Capability of CNN. (https://arxiv.org/abs/1911.11929)
 """
 
 import keras
@@ -49,62 +44,114 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.yolo12.feature_extractor")
 class YOLOv12FeatureExtractor(keras.Model):
-    """YOLOv12 backbone and neck, producing a P3/P4/P5 feature pyramid.
+    """Extract a P3/P4/P5 feature pyramid from an image.
+
+    Five strided convolutions take the image down to stride 32 through the C3k2 and
+    A2C2f backbone blocks. The neck then runs a top-down pass (``up1``, ``up2``),
+    which produces P3, and a bottom-up pass (``neck_down1``, ``neck_down2``), which
+    produces P4 and P5. ``call`` returns the three maps as a list.
 
     Architecture:
 
     .. code-block:: text
 
         input [B, H, W, 3]
-          │
-          ▼
-        ┌─────────────┐
-        │ stem1, stem2│  strides 2, 2
-        └──────┬──────┘
-               ▼
-        ┌─────────────┐
-        │ b1 (C3k2)   │
-        └──────┬──────┘
-               ▼ down1
-        ┌─────────────┐
-        │ b2 (C3k2)   │──────────────────┐ p3 (pre-neck)
-        └──────┬──────┘                  │
-               ▼ down2                   │
-        ┌─────────────┐                  │
-        │ b3 (A2C2f)  │───────────┐ p4    │
-        └──────┬──────┘           │       │
-               ▼ down3            │       │
-        ┌─────────────┐           │       │
-        │ b4 (A2C2f)  │ p5        │       │
-        └──────┬──────┘           │       │
-               ▼ up1               │       │
-          concat(p4) ──► h1 (A2C2f)│       │
-               │           │       │       │
-               ▼ up2       │       │       │
-          concat(p3) ──► h2 (A2C2f)────────┘
-               │  = P3 out │       │
-               ▼ down1     │       │
-          concat(h1) ──► h3 (A2C2f)
-               │  = P4 out │
-               ▼ down2     │
-          concat(p5) ──► h4 (C3k2)
-                  = P5 out
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ stem1  conv /2    │
+        └───────────────────┘
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ stem2  conv /2    │  groups 2
+        └───────────────────┘
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ b1  C3k2          │
+        └───────────────────┘
+                 │  down1 /2
+                 ▼
+        ┌───────────────────┐
+        │ b2  C3k2          │──┐ p3
+        └───────────────────┘  │
+                 │  down2 /2   │
+                 ▼             │
+        ┌───────────────────┐  │
+        │ b3  A2C2f         │──┼──┐ p4
+        └───────────────────┘  │  │
+                 │  down3 /2   │  │
+                 ▼             │  │
+        ┌───────────────────┐  │  │
+        │ b4  A2C2f         │──┼──┼──┐ p5
+        └───────────────────┘  │  │  │
+                 │  up1 x2     │  │  │
+                 ▼             │  │  │
+              concat ◄─────────┼──┘  │
+                 │             │     │
+                 ▼             │     │
+        ┌───────────────────┐  │     │
+        │ h1  A2C2f         │──┼─────┼──┐ h1
+        └───────────────────┘  │     │  │
+                 │  up2 x2     │     │  │
+                 ▼             │     │  │
+              concat ◄─────────┘     │  │
+                 │                   │  │
+                 ▼                   │  │
+        ┌───────────────────┐        │  │
+        │ h2  A2C2f         │────────┼──┼──► P3  stride 8
+        └───────────────────┘        │  │
+                 │  neck_down1 /2    │  │
+                 ▼                   │  │
+              concat ◄───────────────┼──┘
+                 │                   │
+                 ▼                   │
+        ┌───────────────────┐        │
+        │ h3  A2C2f         │────────┼──► P4  stride 16
+        └───────────────────┘        │
+                 │  neck_down2 /2    │
+                 ▼                   │
+              concat ◄───────────────┘
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ h4  C3k2          │──► P5  stride 32
+        └───────────────────┘
 
-    The top-down path (up1/up2) fuses deep features into shallow ones; the
-    bottom-up path (neck_down1/neck_down2) fuses back the other way. P3 comes
-    from the top-down path, P4 and P5 from the bottom-up path.
+    Every concat joins on the channel axis.
 
-    :param input_shape: Input image shape ``(height, width, channels)``.
+    Variants:
+
+    .. code-block:: text
+
+        scale  depth  width    c1    c2    c3    c4    c5     c6
+        n       0.50   0.25    16    32    64   128   128    256
+        s       0.50   0.50    32    64   128   256   256    512
+        m       0.50   1.00    64   128   256   512   512   1024
+        l       1.00   1.00    64   128   256   512   512   1024
+        x       1.00   1.50    96   192   384   768   768   1536
+
+    width scales the channel counts; depth scales the block repeats, floored at 1.
+
+    :param input_shape: Input image shape ``(height, width, channels)``. Stored for
+        serialization; ``build`` and ``call`` take their shapes from the actual input.
     :type input_shape: Tuple[int, int, int]
     :param scale: Scale key into ``SCALE_CONFIGS``, one of 'n', 's', 'm', 'l', 'x'.
     :type scale: str
     :param kernel_initializer: Weight initializer for all layers.
     :type kernel_initializer: str
-    :param name: Model name.
+    :param name: Model name. ``None`` becomes ``"yolov12_feature_extractor_<scale>"``.
     :type name: Optional[str]
+    :param **kwargs: Extra keyword arguments passed to ``keras.Model``.
 
-    Input shape: ``(batch, height, width, channels)``.
-    Output shape: three tensors ``[P3, P4, P5]`` at strides 8, 16, 32.
+    :raises ValueError: If ``scale`` is not a key of ``SCALE_CONFIGS``.
+
+    Input shape: ``(batch, height, width, channels)``, with height and width
+    divisible by 32.
+
+    Output shape: three tensors ``[P3, P4, P5]`` at strides 8, 16, 32, with
+    ``filters['c3']``, ``filters['c5']`` and ``filters['c6']`` channels.
     """
 
     # Scale configurations: [depth_multiple, width_multiple]
@@ -116,10 +163,8 @@ class YOLOv12FeatureExtractor(keras.Model):
         "x": [1.00, 1.50],  # extra-large
     }
 
-    # `MODEL_VARIANTS` is the canonical name across `models/` (see
-    # `models/CLAUDE.md` § House Model Module Shape). `SCALE_CONFIGS` remains the
-    # definition because `multitask.py` and the tests already read it by that
-    # name; this is an alias to the same dict, not a copy.
+    # `MODEL_VARIANTS` is the canonical name across `models/`; `SCALE_CONFIGS` stays
+    # the definition because `multitask.py` and the tests read it. Same dict, not a copy.
     MODEL_VARIANTS = SCALE_CONFIGS
 
     @classmethod
@@ -135,7 +180,7 @@ class YOLOv12FeatureExtractor(keras.Model):
         :type variant: str
         :param input_shape: Input image shape ``(height, width, channels)``.
         :type input_shape: Tuple[int, int, int]
-        :param kwargs: Extra constructor arguments.
+        :param **kwargs: Extra constructor arguments.
         :return: A configured feature extractor.
         :rtype: YOLOv12FeatureExtractor
         :raises ValueError: If `variant` is not a key of ``MODEL_VARIANTS``.
@@ -158,17 +203,12 @@ class YOLOv12FeatureExtractor(keras.Model):
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize the feature extractor.
+        """Resolve the scale into channel counts and block repeats.
 
-        :param input_shape: Input image shape ``(height, width, channels)``.
-        :type input_shape: Tuple[int, int, int]
-        :param scale: Model scale ('n', 's', 'm', 'l', 'x').
-        :type scale: str
-        :param kernel_initializer: Weight initializer.
-        :type kernel_initializer: str
-        :param name: Model name.
-        :type name: Optional[str]
-        :param kwargs: Extra keyword arguments passed to ``keras.Model``.
+        Arguments are documented on the class. Sub-layers are instantiated later, in
+        ``build``.
+
+        :raises ValueError: If ``scale`` is not a key of ``SCALE_CONFIGS``.
         """
         if name is None:
             name = f"yolov12_feature_extractor_{scale}"
@@ -208,10 +248,10 @@ class YOLOv12FeatureExtractor(keras.Model):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the feature extractor and materialize every sub-layer weight.
 
-        ``_build_layers`` only instantiates the sub-layers; each one otherwise
-        creates its variables lazily on first call, which would leave them
-        unbuilt and drop their weights on a ``.keras`` reload. Running one
-        dummy forward here materializes every variable before that can happen.
+        ``_build_layers`` only instantiates the sub-layers; each one otherwise creates
+        its variables lazily on first call, which would leave them unbuilt and drop
+        their weights on a ``.keras`` reload. One dummy forward here materializes every
+        variable first. Spatial dims that are ``None`` become 32 in that dummy pass.
 
         :param input_shape: Input tensor shape ``(B, H, W, C)``.
         :type input_shape: Tuple[Optional[int], ...]
@@ -250,7 +290,6 @@ class YOLOv12FeatureExtractor(keras.Model):
             name="backbone_stem_2"
         )
 
-        # Backbone blocks
         self.b1 = C3k2Block(
             filters=self.filters['c3'],
             n=self.n_c3k2_1,
@@ -308,7 +347,6 @@ class YOLOv12FeatureExtractor(keras.Model):
             name="backbone_b4"
         )
 
-        # Neck (PAN) layers
         self.up1 = keras.layers.UpSampling2D(
             size=2,
             interpolation="nearest",
@@ -390,8 +428,7 @@ class YOLOv12FeatureExtractor(keras.Model):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> List[keras.KerasTensor]:
-        """Run the shared backbone/neck computation used by both ``call`` and
-        ``build``'s dummy forward.
+        """Run the computation shared by ``call`` and ``build``'s dummy forward.
 
         :param inputs: Input tensor ``(batch, height, width, channels)``.
         :type inputs: keras.KerasTensor
@@ -413,7 +450,6 @@ class YOLOv12FeatureExtractor(keras.Model):
         p5 = self.down3(p4, training=training)
         p5 = self.b4(p5, training=training)
 
-        # Top-down path: fuse deep features into shallow ones.
         x = self.up1(p5)
         x = ops.concatenate([x, p4], axis=-1)
         h1 = self.h1(x, training=training)
@@ -422,7 +458,6 @@ class YOLOv12FeatureExtractor(keras.Model):
         x = ops.concatenate([x, p3], axis=-1)
         h2 = self.h2(x, training=training)
 
-        # Bottom-up path: fuse back, producing the final P4/P5 outputs.
         x = self.neck_down1(h2, training=training)
         x = ops.concatenate([x, h1], axis=-1)
         h3 = self.h3(x, training=training)
@@ -435,6 +470,9 @@ class YOLOv12FeatureExtractor(keras.Model):
 
     def compute_output_shape(self, input_shape: Tuple[int, ...]) -> List[Tuple[int, ...]]:
         """Compute the output shapes of the three feature maps.
+
+        The spatial dims are integer divisions by 8, 16 and 32, so they match the real
+        outputs only when height and width divide by 32.
 
         :param input_shape: Input tensor shape.
         :type input_shape: Tuple[int, ...]
@@ -455,7 +493,11 @@ class YOLOv12FeatureExtractor(keras.Model):
         ]
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the config needed to reconstruct this model."""
+        """Return the config needed to reconstruct this model.
+
+        :return: Dict with ``input_shape``, ``scale`` and ``kernel_initializer``.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "input_shape": self.input_shape_config,
@@ -465,19 +507,34 @@ class YOLOv12FeatureExtractor(keras.Model):
         return config
 
     def get_build_config(self) -> Dict[str, Any]:
-        """Return the shape needed to rebuild this model."""
+        """Return the shape needed to rebuild this model.
+
+        :return: Dict holding the shape ``build`` was last called with.
+        :rtype: Dict[str, Any]
+        """
         return {
             "input_shape": self._build_input_shape,
         }
 
     def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Rebuild this model from a `get_build_config` result."""
+        """Rebuild this model from a `get_build_config` result.
+
+        :param config: Dict as returned by :meth:`get_build_config`. A ``None`` shape
+            is skipped.
+        :type config: Dict[str, Any]
+        """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "YOLOv12FeatureExtractor":
-        """Reconstruct a model instance from a `get_config` result."""
+        """Reconstruct a model instance from a `get_config` result.
+
+        :param config: Dict as returned by :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new feature extractor.
+        :rtype: YOLOv12FeatureExtractor
+        """
         return cls(**config)
 
 # ---------------------------------------------------------------------
@@ -493,9 +550,10 @@ def create_yolov12_feature_extractor(
     :type input_shape: Tuple[int, int, int]
     :param scale: Model scale.
     :type scale: str
-    :param kwargs: Extra arguments passed to ``YOLOv12FeatureExtractor``.
+    :param **kwargs: Extra arguments passed to ``YOLOv12FeatureExtractor``.
     :return: A configured feature extractor.
     :rtype: YOLOv12FeatureExtractor
+    :raises ValueError: If ``scale`` is not a key of ``SCALE_CONFIGS``.
 
     Example:
         >>> extractor = create_yolov12_feature_extractor(
