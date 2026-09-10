@@ -1,25 +1,20 @@
 """CliffordNet, an isotropic image classifier built from geometric-algebra blocks and no FFN.
 
-A standard vision block splits into a token mixer (attention or convolution) and a
-separate channel mixer (an MLP). CliffordNet replaces both with one operation, the
-Clifford geometric product `u v = u . v + u ^ v` of two per-pixel channel streams: the
-symmetric part plays the role of an attention score, and the antisymmetric part, which
-attention normally discards, captures edges and texture where the streams disagree.
-Because the product is bilinear, a block with no FFN still mixes channels. Each block
-computes a pointwise detail stream and a depthwise-convolved context stream, and
-samples only a few offsets of their pairwise product (`shifts`) instead of the full
-`O(D^2)` interaction, giving `O(N * D * |shifts|)` cost. `CliffordNetBlock` itself
-returns only the gamma-scaled update, not `x + update`; the residual add and the
-stochastic-depth gate live in this model's `call()`.
-
-The model is isotropic (MetaFormer-style): one patch-embedding stem, then `depth`
-identical blocks at constant width, no downsampling or stage structure. The head pools
-before it normalizes (`GlobalAveragePooling2D` then `LayerNormalization`), the reverse
-of the usual order. A directly constructed `CliffordNet(...)` uses Keras'
-`glorot_uniform` initializer by default, while every `MODEL_VARIANTS` entry overrides
-it with `TruncatedNormal(0.02)` to match the reference. No pretrained weights are
-distributed: `pretrained=True` raises `NotImplementedError`; pass a local
-`.keras` path instead.
+This file holds :class:`CliffordNet`, its ``MODEL_VARIANTS`` table and the
+``create_cliffordnet`` factory. Where a standard vision block separates a token
+mixer from a channel-mixing MLP, a CliffordNet block does both with the Clifford
+geometric product `u v = u . v + u ^ v` of two per-pixel channel streams: the
+symmetric part acts as an attention score and the antisymmetric part carries the
+disagreement between the streams. The product is bilinear, so channels mix
+without an FFN. Each block takes a pointwise detail stream and a
+depthwise-convolved context stream and samples only a few channel offsets of
+their pairwise product (`shifts`), costing `O(N * D * |shifts|)` instead of
+`O(D^2)`. The model is isotropic: one patch-embedding stem, then `depth`
+identical blocks at constant width, with no stage structure. `CliffordNetBlock`
+returns the gamma-scaled update alone, so the residual add and the
+stochastic-depth gate sit in this model's `call`. The head pools before it
+normalizes. No pretrained weights are distributed, so `pretrained=True` raises
+`NotImplementedError`; pass a local `.keras` path instead.
 
 References:
     - Ji, Z., 2026. CliffordNet: All You Need is Geometric Algebra.
@@ -39,10 +34,13 @@ References:
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
-
 import keras
 from keras import initializers, regularizers
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.layers.geometric.clifford_block import (
     CliMode,
@@ -55,82 +53,142 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# Match the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
+# Matches the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 
-# DECISION plan-2026-08-23T091307-9a110062/D-480: stem BatchNorm momentum pinned to
-# 0.9 to match the reference (Keras and torch define momentum oppositely — a torch-side 0.1 is this 0.9, do not "correct" it). See decisions.md.
+# DECISION plan-2026-08-23T091307-9a110062/D-480: momentum stays 0.9; Keras and
+# torch define it oppositely, so the reference's 0.1 is this value. See
+# decisions.md.
 _STEM_BN_MOMENTUM = 0.9
 
-
-# ---------------------------------------------------------------------------
-# Helper: stochastic-depth rate schedule
-# ---------------------------------------------------------------------------
-
-
-# ===========================================================================
-# CliffordNet
-# ===========================================================================
-
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.cliffordnet.model")
 class CliffordNet(keras.Model):
-    """Isotropic CliffordNet vision backbone.
+    """Classify images with a stack of identical geometric-algebra blocks.
+
+    Constant width throughout, so the only spatial reduction is the stem's.
 
     Architecture:
 
     .. code-block:: text
 
         input [B, H, W, C_in]
-          |
-          v
-        GeometricStem (patch_size-dependent conv(s) + BatchNorm)  -> [B, H', W', channels]
-          |
-          v
-        CliffordNetBlock x depth (constant width, transform-only)
-          |
-          v
-        GlobalAveragePooling2D  -> [B, channels]
-          |
-          v
-        LayerNormalization
-          |
-          v
-        Dense(num_classes)  -> [B, num_classes]
+              │
+              ▼
+        ┌──────────────────────────────┐
+        │ stem, patch_size dependent   │
+        │ ending in batch norm         │
+        └──────────────────────────────┘
+              │ [B, H/p, W/p, D]
+              ▼
+        ┌──────────────────────────────┐
+        │ x + drop_path(block(x))      │  x depth
+        └──────────────────────────────┘
+              │ [B, H/p, W/p, D]
+              ▼
+        ┌──────────────────────────────┐
+        │ global average pool          │
+        └──────────────────────────────┘
+              │ [B, D]
+              ▼
+        ┌──────────────────────────────┐
+        │ layer norm                   │
+        └──────────────────────────────┘
+              │
+              ▼
+        ┌──────────────────────────────┐
+        │ dropout                      │  (dropout_rate > 0)
+        └──────────────────────────────┘
+              │
+              ▼
+        ┌──────────────────────────────┐
+        │ dense to num_classes         │
+        └──────────────────────────────┘
+              │
+              ▼
+        logits [B, num_classes]
 
-    The patch embedding is a ``GeometricStem``: a ``BatchNormalization`` (not
-    ``LayerNormalization``) follows the convolution(s), and for ``patch_size=2`` the
-    convolution uses ``kernel_size=3`` with ``strides=2``.
+    Pooling comes before the normalization, the reverse of the usual order.
 
-    :param num_classes: Number of output classes.
-    :param channels: Feature dimensionality ``D`` (constant throughout).
-    :param depth: Number of CliffordNet blocks ``L``.
-    :param patch_size: Stride of the patch-embedding convolution.
-        ``patch_size=2`` is optimal for CIFAR-scale inputs.
+    Block wiring:
+
+    .. code-block:: text
+
+        x
+        ├──────────────────────────────┐
+        ▼                              │
+        clifford block, gamma-scaled   │
+        │                              │
+        ▼                              │
+        stochastic depth               │
+        │                              │
+        ▼                              │
+       (+)◄────────────────────────────┘
+        │
+        ▼
+        out
+
+    ``StochasticDepth(0.0)`` is the identity, so a rate of 0 gives exactly
+    ``x + block(x)``.
+
+    Stem variants:
+
+    .. code-block:: text
+
+        patch_size   layers                                     stride
+        1            conv3 D/2, bn, silu, conv3 D, bn           1
+        2            conv3 D stride 2, bn                       2
+        4            conv3 D/2 /2, bn, silu, conv3 D /2, bn     4
+        other p      conv p D stride p, bn                      p
+
+    The two-conv stems are always bias-free; the single-conv stems follow
+    ``use_bias``. Every variant ends in the shared ``stem_norm`` batch norm.
+
+    Variants:
+
+    .. code-block:: text
+
+        variant   channels  depth  shifts           global context
+        nano           128     12  1, 2             no
+        lite           128     12  1, 2, 4, 8, 16   no
+        lite_g         128     12  1, 2, 4, 8, 16   yes
+
+    All three use ``patch_size=2``, ``cli_mode='full'``, ``ctx_mode='diff'``,
+    ``layer_scale_init=1e-5`` and ``TruncatedNormal(0.02)`` kernels.
+
+    :param num_classes: Number of output classes. Must be positive.
+    :param channels: Feature dimensionality ``D`` (constant throughout). Must
+        be positive.
+    :param depth: Number of CliffordNet blocks ``L``. Must be positive.
+    :param patch_size: Total stride of the patch-embedding stem, and the
+        selector for which stem is built. Must be positive. ``patch_size=2``
+        is optimal for CIFAR-scale inputs.
     :param shifts: Channel-shift offsets for the sparse rolling product.
-    :param cli_mode: ``"inner"`` | ``"wedge"`` | ``"full"`` (default).
-    :param ctx_mode: ``"diff"`` (default) | ``"abs"``.
+        ``None`` resolves to ``[1, 2]``.
+    :param cli_mode: ``"inner"`` | ``"wedge"`` | ``"full"`` (default). Not
+        validated here; an unknown value reaches the block.
+    :param ctx_mode: ``"diff"`` (default) | ``"abs"``. Not validated here.
     :param use_global_context: Add the global-average-pool gFFN-G branch.
     :param layer_scale_init: Initial LayerScale value. Defaults to ``1e-5``.
     :param stochastic_depth_rate: Maximum DropPath rate (linearly scheduled
         across blocks). Defaults to ``0.0``.
-    :param dropout_rate: Pre-classifier head dropout. Defaults to ``0.0``.
-    :param use_bias: Whether Dense / projection layers use bias.
-    :param kernel_initializer: Kernel initializer.
+    :param dropout_rate: Pre-classifier head dropout. At ``0.0``, the default,
+        no Dropout layer is created.
+    :param use_bias: Whether the Dense layers, the classifier and the
+        single-conv stems use a bias.
+    :param kernel_initializer: Kernel initializer. Defaults to Keras'
+        ``glorot_uniform``, while every ``MODEL_VARIANTS`` entry overrides it
+        with ``TruncatedNormal(0.02)`` to match the reference.
     :param bias_initializer: Bias initializer.
     :param kernel_regularizer: Kernel regularizer.
     :param bias_regularizer: Bias regularizer.
     :param kwargs: Passed to :class:`keras.Model`.
 
-    **Call arguments:**
-
-    :param inputs: Image tensor ``(B, H, W, C_in)``.
-    :param training: Python bool or ``None``.
-
-    :returns: Logit tensor ``(B, num_classes)``.
+    :raises ValueError: If ``num_classes``, ``channels``, ``depth`` or
+        ``patch_size`` is not positive.
     """
 
-    # Architecture constants
     LAYERNORM_EPSILON: float = 1e-6
 
     def __init__(
@@ -164,7 +222,6 @@ class CliffordNet(keras.Model):
         if patch_size <= 0:
             raise ValueError(f"patch_size must be positive, got {patch_size}")
 
-        # Store configuration
         self.num_classes = num_classes
         self.channels = channels
         self.depth = depth
@@ -182,7 +239,6 @@ class CliffordNet(keras.Model):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Build sub-component groups
         self._build_stem()
         self._build_blocks()
         self._build_head()
@@ -194,12 +250,16 @@ class CliffordNet(keras.Model):
             f"use_global_context={use_global_context})"
         )
 
-    # ------------------------------------------------------------------
-    # Private builder helpers
-    # ------------------------------------------------------------------
-
     def _build_stem(self) -> None:
-        """Build and assign patch-embedding (GeometricStem) layers."""
+        """Build the patch-embedding layers for the configured ``patch_size``.
+
+        Sizes 1, 2 and 4 get their own stems and anything else falls back to a
+        single conv whose kernel and stride both equal ``patch_size``. See the
+        stem table in the class docstring.
+
+        :return: Nothing.
+        :rtype: None
+        """
         _conv_kw: Dict[str, Any] = dict(
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -208,7 +268,6 @@ class CliffordNet(keras.Model):
         )
 
         if self.patch_size == 1:
-            # Two-conv stem, no spatial downsampling.
             self.stem_conv1 = keras.layers.Conv2D(
                 filters=self.channels // 2,
                 kernel_size=3,
@@ -231,7 +290,6 @@ class CliffordNet(keras.Model):
                 **_conv_kw,
             )
         elif self.patch_size == 2:
-            # Single 3x3 conv with stride 2 (CIFAR-scale).
             self.stem_conv = keras.layers.Conv2D(
                 filters=self.channels,
                 kernel_size=3,
@@ -242,7 +300,7 @@ class CliffordNet(keras.Model):
                 **_conv_kw,
             )
         elif self.patch_size == 4:
-            # Two stride-2 convs (4x total downsampling, ImageNet-scale).
+            # Two stride-2 convs reach 4x, rather than one stride-4 kernel.
             self.stem_conv1 = keras.layers.Conv2D(
                 filters=self.channels // 2,
                 kernel_size=3,
@@ -265,7 +323,6 @@ class CliffordNet(keras.Model):
                 **_conv_kw,
             )
         else:
-            # Generic: square kernel equal to patch_size.
             self.stem_conv = keras.layers.Conv2D(
                 filters=self.channels,
                 kernel_size=self.patch_size,
@@ -276,13 +333,20 @@ class CliffordNet(keras.Model):
                 **_conv_kw,
             )
 
-        # Final BatchNorm applied to every stem variant (matches GeometricStem.norm).
+        # Every stem variant ends here, matching GeometricStem.norm.
         self.stem_norm = keras.layers.BatchNormalization(
             name="stem_norm", momentum=_STEM_BN_MOMENTUM
         )
 
     def _build_blocks(self) -> None:
-        """Build and assign the CliffordNet block list with linear drop-path schedule."""
+        """Build the block list, pairing each block with its drop-path gate.
+
+        The rates ramp linearly from 0 to ``stochastic_depth_rate`` across the
+        ``depth`` blocks.
+
+        :return: Nothing.
+        :rtype: None
+        """
         drop_rates = linear_drop_path_rates(self.depth, self.stochastic_depth_rate)
 
         _block_kw: Dict[str, Any] = dict(
@@ -305,9 +369,8 @@ class CliffordNet(keras.Model):
                 name=f"clifford_block_{i}",
                 **_block_kw,
             )
-            # External residual + drop_path (blocks are now transform-only):
-            # x = x + StochasticDepth(rate)(block(x)). StochasticDepth(0.0) is
-            # identity, so the rate=0 case is exactly x + block(x).
+            # The blocks are transform-only, so the residual and the gate are
+            # applied around them in call().
             drop_path = StochasticDepth(
                 drop_path_rate=drop_rates[i],
                 name=f"clifford_drop_path_{i}",
@@ -315,10 +378,14 @@ class CliffordNet(keras.Model):
             self.blocks_list.append({"block": block, "drop_path": drop_path})
 
     def _build_head(self) -> None:
-        """Build and assign classifier head layers.
+        """Build the classifier head layers.
 
-        Order: GlobalAveragePooling2D -> LayerNorm -> (Dropout) -> Dense.
-        GAP is applied *before* LayerNorm, matching the original ``forward()``.
+        Pooling precedes the normalization, matching the reference
+        ``forward()``, and the dropout layer exists only when
+        ``dropout_rate`` is above 0.
+
+        :return: Nothing.
+        :rtype: None
         """
         self.global_pool = keras.layers.GlobalAveragePooling2D(
             name="global_pool"
@@ -341,14 +408,15 @@ class CliffordNet(keras.Model):
             name="classifier",
         )
 
-    # ------------------------------------------------------------------
-    # Build
-    # ------------------------------------------------------------------
-
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the model via a symbolic forward pass.
 
+        A 3-tuple is accepted and read as an unbatched shape, with the batch
+        axis prepended.
+
         :param input_shape: Input tensor shape ``(B, H, W, C_in)``.
+        :return: Nothing.
+        :rtype: None
         """
         if len(input_shape) == 3:
             build_shape = (None,) + tuple(input_shape)
@@ -358,16 +426,15 @@ class CliffordNet(keras.Model):
         _ = self.call(dummy)
         super().build(input_shape)
 
-    # ------------------------------------------------------------------
-    # Forward pass helpers
-    # ------------------------------------------------------------------
-
     def _apply_stem(
         self,
         inputs: keras.KerasTensor,
         training: Optional[bool],
     ) -> keras.KerasTensor:
         """Apply the patch embedding stem.
+
+        The two-conv stems (``patch_size`` 1 and 4) put a batch norm and a SiLU
+        between their convolutions; the others go straight to ``stem_norm``.
 
         :param inputs: Raw image batch ``(B, H, W, C_in)``.
         :param training: Whether in training mode (affects BatchNorm).
@@ -383,20 +450,17 @@ class CliffordNet(keras.Model):
 
         return self.stem_norm(x, training=training)
 
-    # ------------------------------------------------------------------
-    # Call
-    # ------------------------------------------------------------------
-
     def call(
         self,
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass.
+        """Run the forward pass.
 
         :param inputs: Image batch ``(B, H, W, C_in)``.
         :param training: Whether in training mode.
-        :return: Class logits ``(B, num_classes)``.
+        :return: Class logits ``(B, num_classes)``, with no output activation
+            applied.
         """
         x = self._apply_stem(inputs, training=training)
 
@@ -405,18 +469,14 @@ class CliffordNet(keras.Model):
                 block_info["block"](x, training=training), training=training
             )
 
-        # Head: GAP first, then LayerNorm (matches original forward order).
-        x = self.global_pool(x)           # (B, channels)
-        x = self.head_norm(x)             # LayerNorm on (B, channels)
+        # Pooling before the norm, so the norm runs over channels alone.
+        x = self.global_pool(x)
+        x = self.head_norm(x)
 
         if self.head_dropout is not None:
             x = self.head_dropout(x, training=training)
 
         return self.classifier(x)
-
-    # ------------------------------------------------------------------
-    # Shape inference
-    # ------------------------------------------------------------------
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
@@ -428,30 +488,25 @@ class CliffordNet(keras.Model):
         """
         return (input_shape[0], self.num_classes)
 
-    # ------------------------------------------------------------------
-    # Weight loading helpers
-    # ------------------------------------------------------------------
-
     def load_pretrained_weights(
         self,
         weights_path: str,
         skip_mismatch: bool = True
     ) -> None:
-        """Load pretrained weights into the model.
-
-        Handles loading with smart mismatch handling, useful when the
-        number of classes differs or when loading backbone-only weights.
+        """Load weights from a local checkpoint into this model.
 
         Weights are transferred layer-by-layer via
         :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
-        the canonical replacement for ``self.load_weights(by_name=True)`` (which
-        raises on ``.keras`` files in Keras 3.8+).
+        the canonical replacement for ``self.load_weights(by_name=True)``, which
+        raises on ``.keras`` files in Keras 3.8+. Any failure inside the
+        transfer is re-raised as ``ValueError``.
 
         :param weights_path: Path to the ``.keras`` weights file.
-        :param skip_mismatch: Skip layers with mismatched shapes. Useful
-            when loading weights with different ``num_classes``. Maps to
-            ``strict=not skip_mismatch``.
-            transfer is always name-based, so this argument is ignored.
+        :param skip_mismatch: Skip layers whose shapes do not match, which is
+            what allows a checkpoint with a different ``num_classes`` to load.
+            Passed through as ``strict=not skip_mismatch``.
+        :return: Nothing.
+        :rtype: None
         :raises FileNotFoundError: If ``weights_path`` does not exist.
         :raises ValueError: If weights cannot be loaded.
         """
@@ -484,28 +539,25 @@ class CliffordNet(keras.Model):
         dataset: str = "cifar100",
         cache_dir: Optional[str] = None,
     ) -> str:
-        """Stub: no public CliffordNet checkpoints are distributed.
+        """Refuse to download, since no public CliffordNet checkpoints exist.
 
         :param variant: Model variant name (e.g. ``"nano"``, ``"lite"``).
         :param dataset: Dataset the weights were trained on.
         :param cache_dir: Directory to cache downloaded weights (unused).
         :return: Never returns — always raises.
-        :raises NotImplementedError: Always. No public CliffordNet
-            checkpoints exist. To load local weights, pass
+        :raises NotImplementedError: Always. To load local weights, pass
             ``pretrained='/path/to/weights.keras'`` to
             :meth:`CliffordNet.from_variant`.
         """
-        # DECISION plan_2026-05-11_0090b0b8/D-001
+        # DECISION plan_2026-05-11_0090b0b8/D-001: raise rather than return a
+        # random-init model; NotImplementedError is outside from_variant's except
+        # clause, so it reaches the caller. See decisions.md.
         raise NotImplementedError(
             "No public CliffordNet checkpoints are distributed. "
             "To load local weights, pass "
             "`pretrained='/path/to/weights.keras'` instead of "
             "`pretrained=True`."
         )
-
-    # ------------------------------------------------------------------
-    # Serialization
-    # ------------------------------------------------------------------
 
     def get_config(self) -> Dict[str, Any]:
         """Return serialisable configuration.
@@ -547,21 +599,27 @@ class CliffordNet(keras.Model):
     def from_config(cls, config: Dict[str, Any]) -> "CliffordNet":
         """Reconstruct model from configuration dict.
 
+        The serialized initializers are left as dicts, since
+        ``initializers.get`` accepts a config dict in ``__init__``.
+
         :param config: Dictionary produced by :meth:`get_config`.
         :return: New :class:`CliffordNet` instance.
         """
-        # Deserialize regularizers if they were serialized as dicts.
         for key in ("kernel_regularizer", "bias_regularizer"):
             if config.get(key) and isinstance(config[key], dict):
                 config[key] = regularizers.deserialize(config[key])
         return cls(**config)
 
-    # ------------------------------------------------------------------
-    # Summary override
-    # ------------------------------------------------------------------
-
     def summary(self, **kwargs: Any) -> None:
-        """Print model summary with additional architecture information."""
+        """Print the Keras summary, then log the resolved configuration.
+
+        An unbuilt model is built first against a 3-channel input of unknown
+        spatial size.
+
+        :param kwargs: Forwarded to :meth:`keras.Model.summary`.
+        :return: Nothing.
+        :rtype: None
+        """
         if not self.built:
             logger.warning(
                 "Model is not built; calling build() with a symbolic input."
@@ -583,11 +641,6 @@ class CliffordNet(keras.Model):
         logger.info(f"  dropout_rate        : {self.dropout_rate}")
         logger.info(f"  num_classes         : {self.num_classes}")
 
-    # ------------------------------------------------------------------
-    # Factory class methods
-    # ------------------------------------------------------------------
-
-    # Pre-defined variant configurations
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "nano": dict(
             channels=128,
@@ -638,13 +691,17 @@ class CliffordNet(keras.Model):
 
         :param variant: One of ``"nano"``, ``"lite"``, ``"lite_g"``.
         :param num_classes: Number of output classes.
-        :param pretrained: If ``True``, downloads pretrained weights. If a
-            string, treats it as a local path to a ``.keras`` weights file.
-        :param weights_dataset: Dataset for pretrained weights.
+        :param pretrained: A local path to a ``.keras`` weights file. ``True``
+            attempts a download, which always raises ``NotImplementedError``
+            since no checkpoints are hosted.
+        :param weights_dataset: Dataset key for pretrained weights. The
+            classifier-skip decision compares ``num_classes`` against 100
+            whatever this says.
         :param cache_dir: Directory to cache downloaded weights.
-        :param kwargs: Override any default hyperparameter.
+        :param kwargs: Override any variant default.
         :return: Configured :class:`CliffordNet` instance.
         :raises ValueError: If ``variant`` is not recognised.
+        :raises NotImplementedError: If ``pretrained`` is ``True``.
 
         Example::
 
@@ -689,7 +746,9 @@ class CliffordNet(keras.Model):
                         dataset=weights_dataset,
                         cache_dir=cache_dir,
                     )
-                # DECISION plan_2026-05-11_0090b0b8/D-001
+                # DECISION plan_2026-05-11_0090b0b8/D-001: only transport errors
+                # degrade to random init here; do not widen this to
+                # NotImplementedError. See decisions.md.
                 except (IOError, OSError, ValueError) as exc:
                     logger.warning(
                         f"Failed to download pretrained weights: {exc}. "
@@ -697,7 +756,8 @@ class CliffordNet(keras.Model):
                     )
                     load_weights_path = None
 
-            # If num_classes differs from CIFAR-100 (100), skip classifier.
+            # The hosted checkpoints would be CIFAR-100, so a different head
+            # width means the classifier cannot be transferred.
             pretrained_classes = 100
             if num_classes != pretrained_classes:
                 skip_mismatch = True
@@ -720,13 +780,9 @@ class CliffordNet(keras.Model):
 
         return model
 
-    # ------------------------------------------------------------------
-    # Convenience wrappers (delegate to from_variant)
-    # ------------------------------------------------------------------
-
     @classmethod
     def nano(cls, num_classes: int, **kwargs: Any) -> "CliffordNet":
-        """CliffordNet-Nano: ~1.4 M params.
+        """Create CliffordNet-Nano.
 
         ``channels=128``, ``depth=12``, ``shifts=[1, 2]``, differential
         context, no global branch.
@@ -739,7 +795,7 @@ class CliffordNet(keras.Model):
 
     @classmethod
     def lite(cls, num_classes: int, **kwargs: Any) -> "CliffordNet":
-        """CliffordNet-Lite: ~2.6 M params.
+        """Create CliffordNet-Lite.
 
         ``channels=128``, ``depth=12``, ``shifts=[1, 2, 4, 8, 16]``,
         differential context, no global branch.
@@ -752,9 +808,10 @@ class CliffordNet(keras.Model):
 
     @classmethod
     def lite_g(cls, num_classes: int, **kwargs: Any) -> "CliffordNet":
-        """CliffordNet-Lite + gFFN-G: ~3.4 M params.
+        """Create CliffordNet-Lite with the gFFN-G branch.
 
-        Adds the global-average-pool context branch for ~+0.5% accuracy.
+        Same widths and shifts as ``lite``, plus the global-average-pool
+        context branch.
 
         :param num_classes: Number of output classes.
         :param kwargs: Override any default hyperparameter.
@@ -771,12 +828,12 @@ def create_cliffordnet(
         cache_dir: Optional[str] = None,
         **kwargs: Any,
 ) -> "CliffordNet":
-    """Convenience function to create CliffordNet models.
+    """Create a CliffordNet model from a variant name.
 
-    Mirrors :func:`dl_techniques.models.vision.resnet.model.create_resnet` and
-    :func:`dl_techniques.models.language.tree_transformer.model.create_tree_transformer`
-    for consistency across the model zoo: a thin module-level factory that
-    delegates to :meth:`CliffordNet.from_variant`.
+    A thin module-level factory that delegates to
+    :meth:`CliffordNet.from_variant`, mirroring
+    :func:`dl_techniques.models.vision.resnet.model.create_resnet` and
+    :func:`dl_techniques.models.language.tree_transformer.model.create_tree_transformer`.
 
     :param variant: Model variant, one of ``"nano"``, ``"lite"``, ``"lite_g"``.
     :type variant: str
@@ -791,6 +848,8 @@ def create_cliffordnet(
     :param kwargs: Additional arguments forwarded to `CliffordNet.from_variant` (e.g. `stochastic_depth_rate`, `dropout_rate`).
     :return: A `CliffordNet` instance.
     :rtype: CliffordNet
+    :raises ValueError: If `variant` is not recognised.
+    :raises NotImplementedError: If `pretrained` is `True`.
 
     Example:
         >>> # Create CliffordNet-Lite with random init for CIFAR-100
@@ -814,3 +873,5 @@ def create_cliffordnet(
         cache_dir=cache_dir,
         **kwargs,
     )
+
+# ---------------------------------------------------------------------

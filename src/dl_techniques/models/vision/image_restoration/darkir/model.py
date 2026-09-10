@@ -75,7 +75,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
         │                                                  │
         │  LayerNorm                                       │
         │       ▼                                          │
-        │  [DWConv 3×3]  <- extra_depth_wise, before the  │
+        │  [DWConv 3×3]  <- extra_depth_wise, before the   │
         │       ▼            1×1 in the encoder            │
         │  Conv1×1 → C·dw_expand                           │
         │       ▼                                          │
@@ -83,7 +83,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
         │       ▼                                          │
         │  SimpleGate → C·dw_expand/2                      │
         │       ▼                                          │
-        │  GAP -> Conv1x1 -> multiply   (no sigmoid:         │
+        │  GAP -> Conv1x1 -> multiply   (no sigmoid:       │
         │       ▼                      unbounded rescale)  │
         │  Conv1×1 → C                                     │
         └─────┬────────────────────────────────────────────┘
@@ -94,7 +94,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
         │  path 2: frequency modulation                    │
         │                                                  │
         │  LayerNorm → FreMLP → multiply by y              │
-        │  (multiplicative, not additive: the spectrum      │
+        │  (multiplicative, not additive: the spectrum     │
         │   scales the spatial features)                   │
         └─────┬────────────────────────────────────────────┘
               ▼
@@ -439,9 +439,9 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         │       ▼                                          │
         │  SimpleGate₂ → C·ffn_expand/2                    │
         │       ▼                                          │
-        │  Conv1x1 -> C           (additive, unlike the     │
-        └─────┬─────────────────  encoder's multiplicative │
-              ▼                   frequency path)          │
+        │  Conv1x1 -> C           (additive, unlike the    │
+        └─────┬─────────────────  encoder's multiplicative ┘
+              ▼                   frequency path)
         out = y + γ ⊙ (path 2)
               ▼
         Output [B, H, W, C]
