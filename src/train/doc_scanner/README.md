@@ -136,6 +136,53 @@ If it is not staged, `require_staged_uvdoc` raises the trainers' own `MissingTra
 naming what is missing (`.part` present means *interrupted*, which re-running resumes) and points
 at `--data-source synthetic` as the alternative that needs no download.
 
+### Precomputing the samples: `stage_uvdoc_samples.py`
+
+The `geom_name` memoization above is **per process** — it dies with the run and every fresh worker
+pays it again. `stage_uvdoc_samples.py` makes it durable by writing `(image, f_gt, g, mask)`
+sidecars once:
+
+```bash
+python -m train.doc_scanner.stage_uvdoc_samples --dry-run              # counts + disk estimate
+python -m train.doc_scanner.stage_uvdoc_samples --limit-geometries 80  # a cheap subset
+python -m train.doc_scanner.stage_uvdoc_samples                        # all 20,000, ~1.2 h
+```
+
+Layout, under `<cache-root>/<H>x<W>/` (default cache root
+`/media/arxwn/data0_4tb/datasets/doc_scanner/uvdoc/staged`):
+
+| path | holds |
+|---|---|
+| `manifest.json` | schema, `height`, `width`, `seed`, source archive. Its presence is what makes the directory a cache; a foreign schema is **refused**, not ignored |
+| `geometry/<geom_name>.npz` | `f_gt`, `g` float32 absolute pixels; `mask` uint8 |
+| `render/<sample_id>.npz` | `image` uint8, plus the `geom_name` that joins it to its geometry |
+
+Keyed by **geometry**, not by render — the same reason the in-process cache is: 4,032 geometries
+behind 20,000 renders. The join key lives *in* the render file, so there is no shared index to
+read-modify-write and staging is purely additive; an interrupted run leaves a smaller corpus, never
+an index promising files that are not there. Every file is written to a `.tmp` sibling and
+`os.replace`d into place.
+
+Two things worth knowing before you pick a subset:
+
+* **`--limit` is the wrong knob for a subset.** It takes a prefix of render ids, and UVDoc's ids do
+  not group by geometry: measured over the whole corpus, the first 100 / 400 / 1,000 / 4,032 ids
+  span exactly 100 / 400 / 1,000 / 4,032 *distinct* geometries — one apiece, with the five renders
+  of a geometry about 4,032 ids apart. A `--limit` subset therefore pays one densification per
+  render. `--limit-geometries N` stages whole geometries (~5 renders each), so a subset has the
+  corpus's real fan-out and costs a fifth of the interpolation (D-052).
+* **The staged render is 8-bit.** `f_gt` and `g` are float32 — their supervision signal is
+  sub-pixel and quantizing them would be a real defect — but the image is stored as the uint8 it
+  was decoded from, so it agrees with `load_image` to within 1/255 rather than exactly. Storing it
+  float32 would quadruple the corpus (5.0 GB → 19.9 GB) to preserve at most half a grey level
+  (D-050).
+
+The trainers pick the cache up automatically: when `<uvdoc-cache-root>/<S>x<S>/` holds a manifest
+for the run's `--image-size`, `--data-source uvdoc` reads sidecars and **never opens the 27.5 GB
+archive** — the worklist itself comes from `render/*.npz`. Pass `--uvdoc-cache-root ''` to force the
+archive path. Guards in `tests/test_train/test_doc_scanner/test_stage_uvdoc_samples.py` prove this
+by pointing `--uvdoc-root` at a path that does not exist.
+
 ### Supervision
 
 | Stage | `y` | Loss |

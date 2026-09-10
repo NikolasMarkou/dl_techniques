@@ -71,6 +71,13 @@ emitting the SAME contract so no downstream code branches on the source:
     1.06 s and there are only 4,032 distinct geometries behind the 20,000
     renders, so geometry is cached by ``geom_name``
     (:func:`cached_uvdoc_geometry`) and the second render of a geometry is free.
+    That cache is per-process and dies with the run; ``python -m
+    train.doc_scanner.stage_uvdoc_samples`` makes it durable by writing
+    ``(image, f_gt, g, mask)`` sidecars under
+    :data:`DEFAULT_UVDOC_CACHE_ROOT`, and when a directory for this run's
+    ``image_size`` is staged there the archive is never opened at all
+    (:func:`uvdoc_cache_dir`, :func:`read_uvdoc_sidecar`). The two forms emit
+    the same contract; only the source of the bytes differs.
 
 Supervision, per stage
 ----------------------
@@ -112,6 +119,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -154,9 +162,10 @@ from train.common.run_io import save_training_history_json
 __all__ = [
     "DEFAULT_BACKGROUNDS_ROOT",
     "DEFAULT_PAGES_ROOT",
+    "DEFAULT_UVDOC_CACHE_ROOT",
     "DEFAULT_UVDOC_ROOT",
-    "DOC_SCANNER_STAGES",
     "DOC_SCANNER_SOURCES",
+    "DOC_SCANNER_STAGES",
     "DocScannerDataError",
     "DocScannerRectifierObjective",
     "DocScannerTrainingConfig",
@@ -166,6 +175,10 @@ __all__ = [
     "SOURCE_UVDOC",
     "STAGE_RECTIFIER",
     "STAGE_SEGMENTER",
+    "UVDOC_CACHE_GEOMETRY_DIR",
+    "UVDOC_CACHE_MANIFEST",
+    "UVDOC_CACHE_RENDER_DIR",
+    "UVDOC_CACHE_SCHEMA",
     "add_common_arguments",
     "build_loss",
     "build_model",
@@ -176,12 +189,15 @@ __all__ = [
     "collect_uvdoc_sample_ids",
     "config_from_args",
     "create_dataset",
+    "read_uvdoc_sidecar",
     "rectifier_target",
     "require_training_data",
     "segmenter_target",
     "stage_defaults",
+    "staged_uvdoc_sample_ids",
     "synthetic_sample",
     "train",
+    "uvdoc_cache_dir",
     "uvdoc_sample",
 ]
 
@@ -237,6 +253,45 @@ DEFAULT_UVDOC_ROOT: str = (
 )
 """The staged UVDoc archive. ``UVDocSource`` reads members straight out of the
 zip, so nothing is extracted."""
+
+DEFAULT_UVDOC_CACHE_ROOT: str = (
+    "/media/arxwn/data0_4tb/datasets/doc_scanner/uvdoc/staged"
+)
+"""Root of the PRECOMPUTED UVDoc sidecar corpus, written by
+``train.doc_scanner.stage_uvdoc_samples``. Optional: with nothing staged there
+the ``uvdoc`` source reads the archive and densifies in-process, which is
+correct but pays ~1.06 s per DISTINCT geometry on every fresh worker."""
+
+UVDOC_CACHE_SCHEMA: int = 1
+"""Sidecar schema version, recorded in every ``manifest.json`` and checked on
+read. A reader that finds a different number REFUSES the directory rather than
+silently mixing two layouts."""
+
+UVDOC_CACHE_MANIFEST: str = "manifest.json"
+"""Marker AND contract of one staged size-scoped directory. Its presence is
+what makes a directory a usable cache; it records the stored ``height`` and
+``width``, the ``seed`` and the archive the sidecars were derived from."""
+
+UVDOC_CACHE_GEOMETRY_DIR: str = "geometry"
+"""``<geom_name>.npz`` -- ``f_gt``, ``g``, ``mask``. Keyed by GEOMETRY, not by
+render: 20,000 UVDoc renders share 4,032 geometries, so a per-render layout
+would store the same 1.7 MB triple five times over and, worse, would invite a
+writer that densifies once per render (~6 h instead of ~1.2 h)."""
+
+UVDOC_CACHE_RENDER_DIR: str = "render"
+"""``<sample_id>.npz`` -- the resampled render plus the ``geom_name`` that
+joins it to its geometry sidecar. The join key lives IN the render file rather
+than in a shared index, so staging stays purely additive: a new render is one
+new file and no read-modify-write of anything global."""
+
+UVDOC_CACHE_IMAGE_KEY: str = "image"
+UVDOC_CACHE_GEOM_NAME_KEY: str = "geom_name"
+UVDOC_CACHE_F_GT_KEY: str = "f_gt"
+UVDOC_CACHE_G_KEY: str = "g"
+UVDOC_CACHE_MASK_KEY: str = "mask"
+"""The five ``.npz`` array names. Named constants rather than literals because
+the writer lives in a different module from this reader and a typo in either
+would be a ``KeyError`` at the first training batch, not at staging time."""
 
 IMAGE_SUFFIXES: Tuple[str, ...] = (
     ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff",
@@ -321,6 +376,12 @@ class DocScannerTrainingConfig:
     :param backgrounds_root: Root walked for background textures. Optional; an
         empty or missing root falls back to a procedural texture.
     :param uvdoc_root: ``UVDoc_final.zip`` or a staged UVDoc directory.
+    :param uvdoc_cache_root: Root of the precomputed UVDoc sidecar corpus
+        (:data:`DEFAULT_UVDOC_CACHE_ROOT`). When a size-scoped directory
+        exists under it for this run's ``image_size``, the ``uvdoc`` source
+        reads staged ``(image, f_gt, g, mask)`` from there and never opens the
+        archive; when it does not, the archive path is used unchanged. Set it
+        to ``""`` to force the archive path.
     :param model_variant: A key of the stage model's ``MODEL_VARIANTS``.
     :param image_size: Square sample size. Must be a positive multiple of 32:
         ``SPATIAL_DIVISOR`` (8) is the rectifier's constraint, but the
@@ -374,6 +435,7 @@ class DocScannerTrainingConfig:
     pages_root: str = DEFAULT_PAGES_ROOT
     backgrounds_root: str = DEFAULT_BACKGROUNDS_ROOT
     uvdoc_root: str = DEFAULT_UVDOC_ROOT
+    uvdoc_cache_root: str = DEFAULT_UVDOC_CACHE_ROOT
 
     model_variant: str = "docscanner-l"
     image_size: int = 288
@@ -581,6 +643,16 @@ def add_common_arguments(
         help="UVDoc_final.zip or a staged UVDoc directory.",
     )
     parser.add_argument(
+        "--uvdoc-cache-root", type=str, default=defaults.uvdoc_cache_root,
+        help=(
+            "Root of the precomputed UVDoc sidecar corpus written by "
+            "`python -m train.doc_scanner.stage_uvdoc_samples`. Used when a "
+            "directory for this --image-size exists under it; otherwise the "
+            "archive is read and densified in-process. Pass an empty string "
+            "to force the archive path."
+        ),
+    )
+    parser.add_argument(
         "--model-variant", type=str, default=defaults.model_variant,
         help="DocScanner variant key.",
     )
@@ -698,6 +770,7 @@ def config_from_args(
         pages_root=args.pages_root,
         backgrounds_root=args.backgrounds_root,
         uvdoc_root=args.uvdoc_root,
+        uvdoc_cache_root=args.uvdoc_cache_root,
         model_variant=args.model_variant,
         image_size=args.image_size,
         batch_size=args.batch_size,
@@ -773,15 +846,177 @@ def collect_background_paths(config: DocScannerTrainingConfig) -> List[Path]:
     return _walk_images(Path(config.backgrounds_root))
 
 
+def uvdoc_cache_dir(
+        config: DocScannerTrainingConfig,
+) -> Optional[Path]:
+    """The staged sidecar directory for this run, or ``None``.
+
+    Interface contract -- three callers in this module
+    (:func:`collect_uvdoc_sample_ids`, :func:`uvdoc_sample`,
+    :func:`require_training_data`) plus the writer,
+    ``train.doc_scanner.stage_uvdoc_samples``, which builds the SAME path from
+    the same constants rather than restating the layout:
+
+    * Parameters: ``config``; reads ``uvdoc_cache_root`` and ``image_size``.
+    * Returns: ``<uvdoc_cache_root>/<S>x<S>`` when that directory holds a
+      readable, schema-matching ``manifest.json``; ``None`` when the root is
+      empty/unset or nothing is staged for this size. ``None`` is the ordinary
+      "no cache, read the archive" answer and is NOT an error. The training
+      config is square-only, so only a square staged directory is reachable
+      from here; the writer can emit non-square ones and the guard suite reads
+      those through :func:`read_uvdoc_sidecar` directly.
+    * Failure mode: :class:`DocScannerDataError` when a manifest IS present but
+      unreadable or from another schema/size. A stale cache is reported, never
+      silently half-used -- reading v1 sidecars with a v2 reader is exactly the
+      class of defect that shows up as a training curve, not an exception.
+
+    :param config: The run config.
+    :type config: DocScannerTrainingConfig
+    :return: The staged directory, or ``None``.
+    :rtype: Optional[Path]
+    :raises DocScannerDataError: On an unreadable or mismatched manifest.
+    """
+    root = str(config.uvdoc_cache_root or "").strip()
+    if not root:
+        return None
+    directory = Path(root) / f"{config.image_size}x{config.image_size}"
+    manifest_path = directory / UVDOC_CACHE_MANIFEST
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError) as error:
+        raise DocScannerDataError(
+            f"the UVDoc sidecar manifest {str(manifest_path)!r} exists but is "
+            f"not readable JSON ({error}). Re-run `python -m "
+            "train.doc_scanner.stage_uvdoc_samples`, or pass "
+            "--uvdoc-cache-root '' to read the archive directly."
+        ) from error
+    if manifest.get("schema") != UVDOC_CACHE_SCHEMA:
+        raise DocScannerDataError(
+            f"{str(manifest_path)!r} records sidecar schema "
+            f"{manifest.get('schema')!r}, but this reader is schema "
+            f"{UVDOC_CACHE_SCHEMA}. Re-stage that directory or point "
+            "--uvdoc-cache-root elsewhere."
+        )
+    if (
+            int(manifest.get("height", -1)) != int(config.image_size)
+            or int(manifest.get("width", -1)) != int(config.image_size)
+    ):
+        raise DocScannerDataError(
+            f"{str(manifest_path)!r} records "
+            f"{manifest.get('height')!r}x{manifest.get('width')!r} inside a "
+            f"directory named for {config.image_size}x{config.image_size}. "
+            "The sidecars and their location disagree; nothing here is safe "
+            "to read."
+        )
+    return directory
+
+
+def staged_uvdoc_sample_ids(directory: Path) -> List[str]:
+    """Sorted render ids present in a staged sidecar directory.
+
+    Derived by LISTING ``render/``, not by reading an index file, so a staged
+    corpus is exactly the set of render sidecars that were actually written --
+    an interrupted staging run leaves a smaller corpus, never a corpus whose
+    index promises files that are not there.
+
+    :param directory: A directory returned by :func:`uvdoc_cache_dir`.
+    :type directory: Path
+    :return: Sorted sample ids (possibly empty).
+    :rtype: List[str]
+    """
+    renders = directory / UVDOC_CACHE_RENDER_DIR
+    if not renders.is_dir():
+        return []
+    return sorted(path.stem for path in renders.glob("*.npz"))
+
+
+def read_uvdoc_sidecar(
+        directory: Path,
+        sample_id: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Read one staged ``(image, f_gt, g, mask)`` quadruple.
+
+    Interface contract -- two callers, :func:`uvdoc_sample` here and the
+    writer's own round-trip guard:
+
+    * Parameters: ``directory`` from :func:`uvdoc_cache_dir`; ``sample_id``, a
+      render id.
+    * Returns the SAME four arrays, in the same shapes, dtypes, units and
+      channel order, that ``load_image`` + ``load_geometry`` return for that
+      render -- ``image`` ``(H, W, 3)`` float32 in ``[0, 1]``, ``f_gt`` and
+      ``g`` ``(H, W, 2)`` float32 absolute pixels, ``mask`` ``(H, W, 1)``
+      float32 in ``{0, 1}``. The one measured difference is that ``image`` is
+      stored 8-bit, so it agrees with ``load_image`` to within 1/255 rather
+      than exactly (see the writer's D-050).
+    * Failure mode: :class:`UVDocError` naming the missing or malformed file --
+      the SAME exception type the archive path raises, so ``uvdoc_sample``'s
+      one reject path covers both corpus forms.
+
+    :param directory: The staged sidecar directory.
+    :type directory: Path
+    :param sample_id: Render id.
+    :type sample_id: str
+    :return: ``(image, f_gt, g, mask)``.
+    :rtype: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+    :raises UVDocError: On a missing or malformed sidecar.
+    """
+    render_path = directory / UVDOC_CACHE_RENDER_DIR / f"{sample_id}.npz"
+    try:
+        with np.load(render_path) as payload:
+            stored_image = np.asarray(payload[UVDOC_CACHE_IMAGE_KEY])
+            geometry_name = str(payload[UVDOC_CACHE_GEOM_NAME_KEY])
+    except (OSError, ValueError, KeyError) as error:
+        raise UVDocError(
+            f"unreadable UVDoc render sidecar {str(render_path)!r}: {error}"
+        ) from error
+
+    geometry_path = (
+        directory / UVDOC_CACHE_GEOMETRY_DIR / f"{geometry_name}.npz"
+    )
+    try:
+        with np.load(geometry_path) as payload:
+            f_gt = np.asarray(payload[UVDOC_CACHE_F_GT_KEY])
+            g = np.asarray(payload[UVDOC_CACHE_G_KEY])
+            stored_mask = np.asarray(payload[UVDOC_CACHE_MASK_KEY])
+    except (OSError, ValueError, KeyError) as error:
+        raise UVDocError(
+            f"render sidecar {str(render_path)!r} names geometry "
+            f"{geometry_name!r}, but {str(geometry_path)!r} is unreadable: "
+            f"{error}"
+        ) from error
+
+    image = stored_image.astype(np.float32) / np.float32(255.0)
+    return image, f_gt, g, stored_mask.astype(np.float32)
+
+
 def collect_uvdoc_sample_ids(config: DocScannerTrainingConfig) -> List[str]:
     """Render ids of the staged UVDoc corpus.
 
-    :param config: The run config; reads ``uvdoc_root`` and ``max_geometries``.
+    Prefers the precomputed sidecar corpus when one exists for this
+    ``image_size`` -- the worklist must name what the sample producer can
+    actually read, and a worklist of all 20,000 archive ids against a
+    300-render cache would miss it 98% of the time.
+
+    :param config: The run config; reads ``uvdoc_cache_root``, ``uvdoc_root``,
+        ``image_size`` and ``max_geometries``.
     :type config: DocScannerTrainingConfig
     :return: Sorted sample ids, capped at ``max_geometries``.
     :rtype: List[str]
     :raises MissingTrainingDataError: If the archive cannot be opened.
     """
+    cache = uvdoc_cache_dir(config)
+    if cache is not None:
+        ids = staged_uvdoc_sample_ids(cache)
+        if ids:
+            if config.max_geometries is not None:
+                ids = ids[: config.max_geometries]
+            return ids
+        logger.warning(
+            "DocScanner: %s holds a manifest but no render sidecar; falling "
+            "back to the archive at %r.", cache, config.uvdoc_root,
+        )
     try:
         with UVDocSource(config.uvdoc_root) as source:
             ids = sorted(source.sample_ids())
@@ -846,6 +1081,16 @@ def require_training_data(config: DocScannerTrainingConfig) -> None:
             "DocScanner: %d page rasters under %s", len(pages), config.pages_root
         )
         return
+
+    cache = uvdoc_cache_dir(config)
+    if cache is not None:
+        staged = staged_uvdoc_sample_ids(cache)
+        if staged:
+            logger.info(
+                "DocScanner: %d staged UVDoc sidecars under %s (the 27.5 GB "
+                "archive is not opened).", len(staged), cache,
+            )
+            return
 
     if not os.path.exists(config.uvdoc_root):
         raise MissingTrainingDataError(
@@ -1105,21 +1350,26 @@ def uvdoc_sample(
     if not sample_ids:
         raise ValueError("uvdoc_sample needs a non-empty worklist")
     size = (config.image_size, config.image_size)
+    cache = uvdoc_cache_dir(config)
 
     last_error: Optional[UVDocError] = None
     for attempt in range(MAX_SAMPLE_ATTEMPTS):
         sample_id = str(sample_ids[(int(index) + attempt) % len(sample_ids)])
         try:
-            with UVDocSource(config.uvdoc_root) as source:
-                geometry_name = source.geometry_for_sample(sample_id)
-                image = load_image(source, sample_id, size=size)
-            geometry = cached_uvdoc_geometry(config, geometry_name)
+            if cache is not None:
+                image, f_gt, g, mask = read_uvdoc_sidecar(cache, sample_id)
+            else:
+                with UVDocSource(config.uvdoc_root) as source:
+                    geometry_name = source.geometry_for_sample(sample_id)
+                    image = load_image(source, sample_id, size=size)
+                geometry = cached_uvdoc_geometry(config, geometry_name)
+                f_gt, g, mask = geometry.f_gt, geometry.g, geometry.mask
         except UVDocError as error:
             last_error = error
             continue
         if config.stage == STAGE_SEGMENTER:
-            return image, geometry.mask
-        return image, rectifier_target(geometry.f_gt, geometry.g)
+            return image, mask
+        return image, rectifier_target(f_gt, g)
 
     raise last_error  # pragma: no cover - MAX_SAMPLE_ATTEMPTS bad renders
 

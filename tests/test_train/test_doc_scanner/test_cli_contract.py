@@ -45,6 +45,7 @@ writes into the repo-root ``results/``.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import fields as dataclass_fields
 from dataclasses import replace
@@ -598,10 +599,21 @@ class TestTheUvdocGateNamesTheDownload:
     """A missing 27.5 GB corpus must say so, not glob emptily."""
 
     def test_a_missing_uvdoc_root_is_reported_with_the_alternative(self, tmp_path):
+        # `uvdoc_cache_root` is pinned to an EMPTY tmp_path, not left at its
+        # default. Step 18 gave the uvdoc source a second, precomputed corpus
+        # form, and the gate accepts a staged sidecar directory WITHOUT the
+        # archive on purpose (that is the point of the cache). On a machine
+        # where the default cache root happens to be populated -- as it is on
+        # the developer machine that staged 400 renders -- a config that leaves
+        # it at the default no longer reaches the archive branch at all, and
+        # this arm silently stops testing the message it names. Pinning the
+        # cache root is what keeps it pointed at the archive branch; the
+        # cache branch has its own arms in `test_stage_uvdoc_samples.py`.
         config = replace(
             common.stage_defaults(STAGE_RECTIFIER),
             data_source=common.SOURCE_UVDOC,
             uvdoc_root=str(tmp_path / "no-uvdoc-here.zip"),
+            uvdoc_cache_root=str(tmp_path / "no-cache-here"),
         )
         with pytest.raises(MissingTrainingDataError) as excinfo:
             common.require_training_data(config)
@@ -611,3 +623,32 @@ class TestTheUvdocGateNamesTheDownload:
             "the gate must name the corpus that needs no download; otherwise "
             f"the user's only option looks like a 27.5 GB fetch. Got {message!r}"
         )
+
+    def test_a_populated_cache_root_makes_the_archive_optional(self, tmp_path):
+        """The other half, so the arm above cannot be `green` by accident.
+
+        The gate deliberately passes with NO archive when sidecars are staged
+        for this `image_size`; without this arm, someone could `fix` the arm
+        above by making the gate demand the archive unconditionally and never
+        notice that a sidecar-only machine can no longer train.
+        """
+        directory = tmp_path / "cache" / "288x288"
+        (directory / common.UVDOC_CACHE_RENDER_DIR).mkdir(parents=True)
+        (directory / common.UVDOC_CACHE_RENDER_DIR / "00000.npz").write_bytes(
+            b""
+        )
+        (directory / common.UVDOC_CACHE_MANIFEST).write_text(
+            json.dumps({
+                "schema": common.UVDOC_CACHE_SCHEMA,
+                "height": 288,
+                "width": 288,
+            })
+        )
+        config = replace(
+            common.stage_defaults(STAGE_RECTIFIER),
+            data_source=common.SOURCE_UVDOC,
+            uvdoc_root=str(tmp_path / "no-uvdoc-here.zip"),
+            uvdoc_cache_root=str(tmp_path / "cache"),
+            image_size=288,
+        )
+        common.require_training_data(config)
