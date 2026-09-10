@@ -680,7 +680,7 @@ class TestFFNTypeGridEncoder:
 
     def test_ffn_type_grid_covers_every_registry_type(self) -> None:
         """Anti-vacuity: the parametrization must not quietly shrink."""
-        assert len(_ALL_FFN_TYPES) == 21, (
+        assert len(_ALL_FFN_TYPES) == 22, (
             f"FFN_REGISTRY now has {len(_ALL_FFN_TYPES)} types, not 21; "
             f"re-derive the grid numbers in decisions.md D-018 rather than "
             f"editing this assertion"

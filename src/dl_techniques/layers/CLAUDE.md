@@ -14,8 +14,8 @@ see § Naming traps.
 
 | Subpackage | F | Contents |
 |---|:-:|---|
-| `attention/` | Y | 34 registered attention types — multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, window / single-window, mobile MQA, non-local, CBAM, linear (Miyasawa-compliant O(N)), energy, area, FNet Fourier, and more |
-| `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting, diff, logic, Swin MLP, residual block |
+| `attention/` | Y | 35 registered attention types — multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, window / single-window, mobile MQA, non-local, CBAM, linear (Miyasawa-compliant O(N)), energy, area, FNet Fourier, and more, plus Restormer's channel-wise MDTA (rank-4 NHWC only) |
+| `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting, diff, logic, Swin MLP, residual block, Restormer GDFN (rank-4 NHWC only) |
 | `norms/` | Y | RMS family (RMS, zero-centered, band, adaptive band), logit-norm family, dynamic tanh, GRN, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (not factory-registered) |
 | `embedding/` | Y | Patch (1D/2D), learned positional, sinusoidal (2D / scalar / timestep), RoPE family (plain, dual, continuous, multi-axis), BERT / ModernBERT / ALBERT-factorized token embeddings, class-label table with a classifier-free-guidance dropout row. `HierarchicalCodebookEmbedding` is direct-import-only |
 | `activations/` | Y | GoLU, Mish, hard sigmoid/swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability / routing outputs, basis function |
@@ -43,6 +43,7 @@ see § Naming traps.
 | `regularization/` | — | Regularization and routing: layer scale, scheduled dropout, stochastic depth, stochastic gradient, selective gradient mask, router, FiLM, conditional output |
 | `generative/` | — | Generative / latent-variable layers: restricted Boltzmann machine, sparse autoencoder, VAE reparameterization samplers, vector quantizer (+ rotation-trick variant) |
 | `blt/` | — | Byte Latent Transformer stack: tokenizer, entropy model, dynamic patcher, patch pooling, local encoder/decoder, global transformer, plus the HRM-fused reasoning core |
+| `dynamic_chunking/` | — | H-Net learned dynamic chunking, one class per module: `routing_module.py` (`RoutingModule` — identity-init q/k, adjacent cosine similarity, hard `p > 0.5` boundary, NOT `argmax` — D-012 bans the argmax spelling because it resolves a p == 0.5 tie to the LOWER index, i.e. to "no boundary", which `>` reproduces and `>=` does not), `chunk_layer.py` (`ChunkLayer` — position-order stable-partition gather to a fixed `max_chunks` width), `dechunk_layer.py` (`DeChunkLayer` — EMA recurrence over the inner sequence + scatter back to full resolution), plus the shared, class-free `indexing.py` (`pad_permutation_to_width` + `batched_gather` — the ONE definition of the chunk/dechunk permutation padding and of the XLA-safe per-row gather; the two layers held these rules in two hand-copied blocks and drifted apart, see D-029). Curated `__init__`, **no factory** (D-004: one consumer, `models/language/hnet/`; same shape as `blt/`). The three are a triple — route → chunk → inner network → dechunk — not independently useful |
 | `acc_unet/` | — | ACC-UNet cluster: HANC block + layer (hierarchical-context aggregation), multi-level feature compilation (cross-scale fusion) |
 | `yolo12/` | — | YOLOv12 backbone blocks (`Bottleneck`, `C3k2Block`, `A2C2fBlock`) and task heads (detection/segmentation/classification) |
 | `tabular/` | — | TabM batched-ensemble MLP building blocks (D-007: named for the domain, not the paper acronym), one class per module: `scale_ensemble.py`, `linear_efficient_ensemble.py`, `nlinear.py`, `tabm_mlp_block.py`, `tabm_backbone.py`, plus the private `_ensemble_scaling.py` (the shared `EnsembleInitDistribution` alias + the `'ones'`/`'normal'`/`'random-signs'` resolver). The `'random-signs'` initializer itself is `initializers/random_signs.py::RandomSigns`, not a `tabular/` symbol |
@@ -102,7 +103,7 @@ for a subpackage (see D-005: a 1-file subpackage adds a directory for zero organ
 
 | Trap | Detail |
 |---|---|
-| **`RepMixerBlock` is two different architectures** | `fastvit/FastVitRepMixerBlock` (timm FastViT MCi, consumed by `models/vision/fastvit/`) is **NOT** the top-level `repmixer_block.py::RepMixerBlock` (consumed by `models/vision_language/fastvlm/`). The FastViT names carry a `FastVit` prefix precisely because the serialization registry is keyed by bare class name |
+| **`RepMixerBlock` is two different architectures** | `fastvit/FastVitRepMixerBlock` (timm FastViT MCi, consumed by `models/vision/fastvit/`) is **NOT** `conv_blocks/repmixer_block.py::RepMixerBlock` (consumed by `models/vision_language/fastvlm/`). The FastViT names carry a `FastVit` prefix precisely because the serialization registry is keyed by bare class name |
 | **`MLPBlock` is `ffn/mlp.py`'s, and only its** | `tabular/tabm_mlp_block.py`'s two-Dense ensemble block is **`TabMMLPBlock`**. `ffn/mlp.py::MLPBlock` keeps the bare name because it is the FFN factory's `'mlp'` key, so moving it would move a public factory key. Same rule as `FastVitRepMixerBlock`: the narrower consumer takes the package prefix |
 | **`Downsample` / `Upsample` are `ideogram4/vae.py`'s** | `models/vision/image_restoration/pw_fnet/model.py` spells its pair **`PWFNetDownsample`** / **`PWFNetUpsample`**. pw_fnet's is a strided `Conv2D` / `Conv2DTranspose`; ideogram4's is a kernel-4 conv with manual asymmetric padding / `UpSampling2D`+`Conv2D`. NOT interchangeable; do not merge them |
 
@@ -110,13 +111,31 @@ for a subpackage (see D-005: a 1-file subpackage adds a directory for zero organ
 
 ### `__init__.py` policy varies by subpackage — check before assuming
 
-The `layers/__init__.py` root **is** empty. Most subpackages are **not**.
+The `layers/__init__.py` root **is** empty. The subpackages split almost evenly — 16 curate a
+public surface, 17 export nothing — so neither shape is the default and you have to look.
 
 | Shape | Subpackages | How to import |
 |---|---|---|
-| **Curated re-export with `__all__`** | `activations`, `attention` (44 names), `embedding`, `fastvit`, `ffn`, `heads`, `logic`, `memory`, `mixtures`, `moe`, `norms`, `sequence_pooling`, `time_series`, `transformers` | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
-| **Empty** | `fusion`, `geometric`, `graphs`, `physics`, `reasoning`, `statistics`, `tokenizers`, `complex`, `conv_blocks`, `signal_processing`, `pooling`, `structured_linear`, `regularization`, `generative`, `blt`, `acc_unet`, `yolo12`, `tabular`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
-| **No `__init__.py` at all** | `experimental/` — a namespace package | submodule imports only |
+| **Curated re-export with `__all__`** (16) | `activations` (34 names), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (40), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (23), `sequence_pooling` (12), `time_series` (33), `tokenizers` (8), `transformers` (32) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
+| **Exports nothing** (17) | `acc_unet`, `blt`, `complex`, `conv_blocks`, `fusion`, `generative`, `geometric`, `graphs`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
+
+All 33 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
+`fusion` is the only "exports nothing" entry whose `__init__.py` is not a zero-byte file — it is
+docstring-only and deliberately binds no name, and its docstring says so. Re-derive both rows and
+every `__all__` length with:
+
+```bash
+# from the repo root
+for f in $(find src/dl_techniques/layers -mindepth 2 -maxdepth 2 -name __init__.py | sort); do
+  p=$(basename "$(dirname "$f")")
+  if grep -qE '^__all__' "$f"; then
+    n=$(.venv/bin/python -c "import importlib;print(len(importlib.import_module('dl_techniques.layers.$p').__all__))" 2>/dev/null)
+    echo "CURATED $p ($n)"
+  else
+    echo "EXPORTS-NOTHING $p"
+  fi
+done | sort | tee /dev/stderr | cut -d' ' -f1 | uniq -c
+```
 
 Submodule imports keep working in both cases — e.g.
 `from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention` — but for a
@@ -143,8 +162,8 @@ Check in this precedence order; proceed to the next step only when nothing fits.
    | Domain | Factory entry point | Registered types |
    |--------|---------------------|------------------|
    | Normalization | `create_normalization_layer()` in `norms/factory.py` | 18 |
-   | Attention | `create_attention_layer()` in `attention/factory.py` | 34 |
-   | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 21 |
+   | Attention | `create_attention_layer()` in `attention/factory.py` | 35 |
+   | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 22 |
    | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 15 |
    | Activations | `create_activation_layer()` in `activations/factory.py` | 24 |
    | Sequence pooling | `create_sequence_pooling_layer()` in `sequence_pooling/factory.py` | 3 (`sequence`, `attention`, `weighted`) |
@@ -180,7 +199,7 @@ two of its keys deliberately map to functions rather than classes, and why two m
 are deliberately NOT registered.
 
 **3. An "optional" parameter the layer derives is not safe to pass explicitly.** Consult the registry
-entry's `required_params`: `hidden_dim` is required for 13 of the 21 FFN types and derived for
+entry's `required_params`: `hidden_dim` is required for 13 of the 22 FFN types and derived for
 `swiglu` (a two-thirds rule plus `ffn_multiple_of`).
 
 **4. When you audit "who calls factory X", also sweep "who builds X's argument dict without calling

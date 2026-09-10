@@ -95,7 +95,7 @@ class EntropyRegularizer(keras.regularizers.Regularizer):
         └──────────────┬───────────────┘
                        v
         ┌──────────────────────────────┐
-        │ H = -sum(p * log(max(p,eps))) │  reduced over `axis`
+        │ H = -sum(p * log(max(p,eps)))│  reduced over `axis`
         └──────────────┬───────────────┘
                        v
         ┌──────────────────────────────┐
@@ -103,7 +103,7 @@ class EntropyRegularizer(keras.regularizers.Regularizer):
         └──────────────┬───────────────┘
                        v
         ┌──────────────────────────────┐
-        │ mean((H_norm - target)^2)     │
+        │ mean((H_norm - target)^2)    │
         └──────────────┬───────────────┘
                        v
                   * strength

@@ -101,6 +101,7 @@ _SPECIAL_TOKEN_NAMES: Dict[int, str] = {
     NEWLINE_ID: "\n",
 }
 
+# ---------------------------------------------------------------------
 
 def char_to_id(char: str) -> int:
     """Map a single character to its vocabulary id.
@@ -126,6 +127,7 @@ def char_to_id(char: str) -> int:
         return code_point - FIRST_PRINTABLE + NUM_SPECIAL_TOKENS
     return UNK_ID
 
+# ---------------------------------------------------------------------
 
 def id_to_char(token_id: int) -> str:
     """Map a vocabulary id back to its character or special-token name.
@@ -145,6 +147,7 @@ def id_to_char(token_id: int) -> str:
         return _SPECIAL_TOKEN_NAMES[token_id]
     return chr(token_id - NUM_SPECIAL_TOKENS + FIRST_PRINTABLE)
 
+# ---------------------------------------------------------------------
 
 def normalize_text(
     text: str,
@@ -173,6 +176,7 @@ def normalize_text(
         text = text.lower()
     return text
 
+# ---------------------------------------------------------------------
 
 def encode_ascii(
     text: str,
@@ -203,6 +207,7 @@ def encode_ascii(
     )
     return [char_to_id(ch) for ch in normalized]
 
+# ---------------------------------------------------------------------
 
 def decode_ascii(
     token_ids: Sequence[int],
@@ -512,6 +517,7 @@ class ASCIICharTokenizer(keras.layers.Layer):
         )
         return config
 
+# ---------------------------------------------------------------------
 
 class ASCIICharPreprocessor:
     """
@@ -758,3 +764,5 @@ class ASCIICharPreprocessor:
             f"vocab_size={self.VOCAB_SIZE}, max_length={self.max_length}, "
             f"lowercase={self.lowercase})"
         )
+
+# ---------------------------------------------------------------------

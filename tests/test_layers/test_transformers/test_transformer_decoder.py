@@ -398,7 +398,7 @@ class TestFFNTypeGridDecoder:
         assert _strictness_break(lambda: _build_decoder('counting', {})) is None
 
     def test_ffn_type_grid_covers_every_registry_type(self) -> None:
-        assert len(_ALL_FFN_TYPES) == 21
+        assert len(_ALL_FFN_TYPES) == 22
 
     @pytest.mark.parametrize('ffn_type', _ALL_FFN_TYPES)
     @pytest.mark.parametrize(

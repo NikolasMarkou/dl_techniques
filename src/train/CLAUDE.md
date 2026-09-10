@@ -16,7 +16,7 @@ package and breaks `from train.common import ...`.
 
 ## Training script patterns
 
-Five shapes. Pick the closest exemplar and copy it; do not re-derive the scaffold.
+Six shapes. Pick the closest exemplar and copy it; do not re-derive the scaffold.
 
 | Pattern | Used by | Exemplar to copy | Monitor |
 |---|---|---|---|
@@ -25,6 +25,7 @@ Five shapes. Pick the closest exemplar and copy it; do not re-derive the scaffol
 | **Pattern 3: NLP pretrain/finetune** — `train.common.nlp` for tokenization, text datasets, warmup LR, callbacks; model code stays local | BERT, FNet, tree_transformer, GPT-2, wave_field | `src/train/bert/pretrain.py`, `src/train/bert/finetune.py` | `val_loss` |
 | **Pattern 4: Denoising / detection** — file-based datasets, domain callbacks appended to a `create_callbacks()` wrapper | BFCNN, BFUNet, YOLO12-COCO, ResNet, DarkIR | `src/train/bfunet/train_bfcnn_denoiser.py` | `val_loss` / `val_psnr` |
 | **Pattern 5: Depth estimation** — `train.common.megadepth` pipeline, depth metrics + visualization callbacks from `dl_techniques` | Depth Anything | `src/train/depth_anything/train_depth_anything.py` | `val_loss` |
+| **Pattern 6: Byte-level LM pretrain** — no tokenizer at all: `dl_techniques.datasets.byte_lm` packs raw UTF-8 into causal windows, and the auxiliary loss arrives through the model's `add_loss` rather than a custom `train_step` | H-Net | `src/train/hnet/common.py` | `val_loss` |
 
 `create_base_argument_parser()` supplies `--dataset`, `--image-size`, `--epochs`, `--batch-size`,
 `--learning-rate`, `--weight-decay`, `--lr-schedule`, `--patience`, `--gpu` and `--show-plots`; add
@@ -56,6 +57,13 @@ model-specific arguments on top of it.
 > **A path or filename known in two places is a function, not a string typed twice.** Those last
 > two exist because a write site and a read site once disagreed, and every default fine-tuning run
 > crashed at the end loading a file nothing wrote. Both ends of the contract call the producer.
+
+> **Pattern 6 shares the corpus, not the tokenizer.** `train.common.nlp` builds a
+> `tiktoken.Encoding` inside its generator thread, so a `vocab_size = 256` byte model cannot
+> use `preprocess_clm_dataset` at all. `dl_techniques.datasets.byte_lm` is the byte-unit
+> rebuild of exactly those transforms — including `estimate_byte_clm_steps_per_epoch`, the
+> sibling of `estimate_clm_steps_per_epoch`. Both pipelines consume the SAME
+> `load_wikipedia_train_val` text stream, so the conventions below apply unchanged.
 
 **Wikipedia/HF conventions** (`dl_techniques.datasets.nlp.load_wikipedia_train_val`):
 `min_article_length` defaults to `0` (packed CLM uses every token; pass 500+ only when a consumer

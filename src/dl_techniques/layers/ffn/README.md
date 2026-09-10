@@ -1,7 +1,7 @@
 # `dl_techniques.layers.ffn`
 
-Nineteen feed-forward layer classes reachable through one factory.
-`create_ffn_layer(ffn_type, name=None, **kwargs)` looks the type up in `FFN_REGISTRY` (**21 keys** over those 19
+Twenty feed-forward layer classes reachable through one factory.
+`create_ffn_layer(ffn_type, name=None, **kwargs)` looks the type up in `FFN_REGISTRY` (**22 keys** over those 20
 classes — `glu`, `reglu` and `bilinear` are three configurations of `GLUFFN`), rejects any keyword
 the target class does not declare, fills in the registry defaults and constructs. A keyword the type
 does not accept is a `ValueError`, never a silently dropped argument.
@@ -27,6 +27,7 @@ The factory contract and the registry sizes are owned by `src/dl_techniques/laye
 | `monarch` | `MonarchFFN` | Order-2 Monarch map: a product of two block-diagonal factors (Dao et al. 2022, arXiv:2204.00595). | Structured sub-quadratic replacement for dense projections. | `hidden_dim`, `output_dim` |
 | `mixer` | `MixerBlock` | Canonical MLP-Mixer token + channel mixing (Tolstikhin et al. 2021, arXiv:2105.01601). | Attention-free token mixing over a patch sequence. | `tokens_mlp_dim`, `channels_mlp_dim` |
 | `orthoglu` | `OrthoGLUFFN` | GLU with orthogonality regularization on the projections. | Deep nets needing stable training dynamics. | `hidden_dim`, `output_dim` |
+| `gated_dconv` | `GatedDConvFeedForward` | Restormer GDFN: 1x1 expand to `2*int(dim*ffn_expansion_factor)`, depthwise 3x3, split, exact-GELU on the FIRST chunk gating the second, 1x1 project back to `dim`. Output width == input width. | Image-restoration transformer blocks (Restormer, DocRes). **Rank-4 NHWC only.** | `dim` |
 | `gated_mlp` | `GatedMLP` | Channel-wise GLU from three 1x1 convolutions on rank-4 NHWC/NCHW input. | Position-wise channel gating in vision models. | `filters` |
 | `power_mlp` | `PowerMLPLayer` | Dual-branch MLP (power branch + basis branch). | Approximating sharp nonlinear functions. | `units` |
 | `kan` | `KANLinear` | Kolmogorov-Arnold layer: B-spline learnable univariate activations per connection. | Expressive per-connection nonlinearities; N-D inputs. | `features` |

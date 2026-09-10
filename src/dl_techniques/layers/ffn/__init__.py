@@ -1,8 +1,8 @@
 """
 Feed-forward network layers, and one factory that builds any of them.
 
-This package holds 19 FFN / MLP layer classes plus a factory that constructs
-them from a string key. The factory maps 21 keys onto the 19 classes —
+This package holds 20 FFN / MLP layer classes plus a factory that constructs
+them from a string key. The factory maps 22 keys onto the 20 classes —
 ``'glu'``, ``'reglu'`` and ``'bilinear'`` are three configurations of one
 class, ``GLUFFN``. It is strict: a keyword the chosen type does not declare
 raises ``ValueError`` rather than being silently dropped.
@@ -62,6 +62,7 @@ from .monarch_ffn import MonarchFFN
 from .mlp_mixer_block import MixerBlock
 from .squared_relu_ffn import SquaredReLUFFN
 from .lowrank_ffn import LowRankFFN
+from .gated_dconv_ffn import GatedDConvFeedForward
 
 from .factory import (
     FFNType,
@@ -94,6 +95,8 @@ __all__ = [
     "MixerBlock",
     "SquaredReLUFFN",
     "LowRankFFN",
+    # factory key 'gated_dconv'; rank-4 NHWC only
+    "GatedDConvFeedForward",
     # Factory interface
     "FFNType",
     "assemble_ffn_config",

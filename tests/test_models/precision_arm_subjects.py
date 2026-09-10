@@ -1003,6 +1003,30 @@ def _b_darkir():
 _extra("darkir", _b_darkir, lambda: _f32(1, 32, 32, 3))
 
 
+def _b_doc_res():
+    # The CLASS, not ``create_doc_res``: the factory resolves ``dim`` /
+    # ``num_blocks`` / ``heads`` from the variant table and then applies
+    # ``**kwargs`` on top of that dict, so overriding them is legal -- but the
+    # shipped variant is 15.2M parameters and this family builds 89 subjects.
+    # A REAL subject, not a `ROUNDTRIP_NO_SUBJECT_YET` exemption: DocRes
+    # round-trips (measured, iter-1/step-8), so an exemption would be a false
+    # statement about the package.
+    #
+    # ``heads=[1, 2, 4, 8]`` is kept at its shipped value while ``dim`` shrinks
+    # to 8: the head counts are what make the per-head channel width constant
+    # across levels, and flattening them to 1 would build a model whose MDTA
+    # never sees more than one head -- the round trip would then be blind to a
+    # per-head temperature that failed to serialize.
+    from dl_techniques.models.vision.image_restoration.doc_res.model import DocRes
+    return DocRes(dim=8, num_blocks=[1, 1, 1, 1], num_refinement_blocks=1,
+                  heads=[1, 2, 4, 8])
+
+
+# 32x32 and not smaller: DocRes has three downsampling stages and REFUSES a
+# spatial extent that is not a multiple of 8 (D-016), so the latent runs at 4x4.
+_extra("doc_res", _b_doc_res, lambda: _f32(1, 32, 32, 6))
+
+
 def _b_fftnet():
     from dl_techniques.models.language.fftnet.model import create_fftnet
     return create_fftnet("tiny", image_size=32, patch_size=16)

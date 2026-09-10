@@ -1,5 +1,5 @@
 """
-Builds any of this package's 21 FFN layers from a type string and a config,
+Builds any of this package's 22 FFN layers from a type string and a config,
 through :func:`create_ffn_layer`. The mapping from a type string such as
 ``'swiglu'`` to its class, required parameters and defaults lives in one
 dict, ``FFN_REGISTRY``, so a new FFN type becomes available everywhere by
@@ -56,6 +56,7 @@ from .monarch_ffn import MonarchFFN
 from .mlp_mixer_block import MixerBlock
 from .squared_relu_ffn import SquaredReLUFFN
 from .lowrank_ffn import LowRankFFN
+from .gated_dconv_ffn import GatedDConvFeedForward
 
 # ---------------------------------------------------------------------
 
@@ -63,6 +64,7 @@ FFNType = Literal[
     'bilinear',
     'counting',
     'differential',
+    'gated_dconv',
     'gated_mlp',
     'geglu',
     'gelu_tanh',
@@ -125,6 +127,43 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': 'Enhanced feature processing with differential pathways'
+    },
+    'gated_dconv': {
+        'class': GatedDConvFeedForward,
+        'description': (
+            'Restormer GDFN: rank-4 NHWC gated feed-forward network. A 1x1 convolution '
+            'expands to 2*int(dim*ffn_expansion_factor) channels, a fully depthwise 3x3 '
+            'convolution mixes them spatially, the result is split in two and the FIRST '
+            'chunk (exact/erf GELU) gates the second; a 1x1 convolution projects back to '
+            'dim. Output width equals input width.'
+        ),
+        'required_params': ['dim'],
+        # DECISION plan-2026-09-08T111844-de235227/D-012: this entry is RANK-4 NHWC
+        # ONLY. `_ALL_FFN_TYPES = sorted(FFN_REGISTRY)` in test_transformer.py,
+        # test_transformer_decoder.py and test_heads/test_vlm.py auto-parametrizes every
+        # registry key into a `TransformerLayer` on a RANK-3 (2,5,32) tensor. Those grids
+        # classify ONLY the strict dropped-key marker as a failure and swallow every other
+        # exception, so this key passes there while never running. That green is NOT
+        # coverage. Do NOT "fix" the raise by adding a rank-3 path to GatedDConvFeedForward,
+        # by special-casing it in the factory, or by exempting it from the grids -- the
+        # rank contract is pinned by
+        # test_gated_dconv_ffn.py::TestFactoryRegistration::test_a_rank3_input_raises...
+        # See decisions.md D-012.
+        # DECISION plan-2026-09-08T111844-de235227/D-013: output_dim_param is None
+        # DELIBERATELY -- GDFN's output width equals its input width, exactly the
+        # 'mixer' precedent later in this registry. Do not "fix" it to 'dim': `dim` is the INPUT width
+        # the layer is told to expect, not a width the caller can choose independently,
+        # and naming it here would tell a width-rewriting consumer it may reshape this
+        # layer's output. See decisions.md D-013.
+        'output_dim_param': None,
+        'optional_params': {
+            'ffn_expansion_factor': 2.66,
+            'use_bias': False
+        },
+        'use_case': (
+            'High-resolution image restoration blocks (Restormer, DocRes). Rank-4 NHWC '
+            'feature maps only; this layer has no rank-3 sequence path.'
+        )
     },
     'gated_mlp': {
         'class': GatedMLP,
@@ -733,7 +772,7 @@ def create_ffn_layer(
     ``ffn_type``, its required parameters and the parameters you provided,
     chained to the original with ``from``.
 
-    Variants (``FFN_REGISTRY``, 21 entries):
+    Variants (``FFN_REGISTRY``, 22 entries):
 
     .. code-block:: text
 
@@ -742,6 +781,7 @@ def create_ffn_layer(
         bilinear      GLUFFN                 hidden_dim, output_dim
         counting      CountingFFN            output_dim, count_dim
         differential  DifferentialFFN        hidden_dim, output_dim
+        gated_dconv   GatedDConvFeedForward  dim
         gated_mlp     GatedMLP               filters
         geglu         GeGLUFFN               hidden_dim, output_dim
         gelu_tanh     GELUMLPFFN             hidden_dim
@@ -763,8 +803,8 @@ def create_ffn_layer(
 
     ``get_ffn_info()`` returns the full registry, including each type's
     ``optional_params`` defaults and its ``output_dim_param`` (the
-    constructor argument setting output width -- ``None`` for ``mixer``,
-    whose output shape equals its input shape).
+    constructor argument setting output width -- ``None`` for ``mixer``
+    and ``gated_dconv``, whose output shape equals their input shape).
 
     Parameter handling is strict. A key ``ffn_type`` does not accept raises
     instead of being dropped. A wrapper layer that wants to offer generic
@@ -779,7 +819,7 @@ def create_ffn_layer(
         ffn = create_ffn_layer('mlp', hidden_dim=2048, output_dim=512,
                                name='block0_ffn')
 
-    :param ffn_type: An ``FFN_REGISTRY`` key. See ``FFNType`` for the 21
+    :param ffn_type: An ``FFN_REGISTRY`` key. See ``FFNType`` for the 22
         supported values.
     :type ffn_type: FFNType
     :param name: Keras layer name. Passed to the constructor only when it is not

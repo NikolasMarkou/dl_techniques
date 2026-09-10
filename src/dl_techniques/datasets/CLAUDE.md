@@ -12,6 +12,19 @@ Data loading, generation, and preprocessing utilities for various domains.
 - `sut.py` — SUT-Crack dataset loader (TF-optimized, vectorized processing)
 - `vqa_dataset.py` — VQA dataset processor for nanoVLM training (supports The Cauldron format)
 - `nlp.py` — Wikipedia / HF text dataset helpers (`load_wikipedia_train_val`, packed-CLM article counts, shard utilities)
+- `byte_lm.py` — byte-level packed-CLM primitives for `vocab_size=256` models
+  (`text_to_byte_ids`, `byte_ids_to_text`, `pack_byte_windows`,
+  `build_byte_clm_dataset`, `estimate_byte_clm_steps_per_epoch`). Consumes the
+  raw UTF-8 strings `nlp.py`'s `load_wikipedia_train_val` already returns —
+  bytes are derived downstream of text exactly as tokens are. It is the byte
+  sibling of `train.common.nlp`'s tiktoken pipeline, which has **no** byte
+  path; `estimate_byte_clm_steps_per_epoch` mirrors
+  `train.common.nlp.estimate_clm_steps_per_epoch`'s contract in byte units
+  rather than extending it, because `dl_techniques` must not import `train`.
+  `DEFAULT_AVG_BYTES_PER_ARTICLE = 3054` and
+  `DEFAULT_WIKIPEDIA_TOTAL_BYTES = 19_567_594_259` are MEASURED over all 41
+  staged Wikipedia Arrow shards, not inherited from the 440-tokens/article
+  heuristic.
 - `bdd100k_video.py` — BDD100K video dataset loader
 - `synthetic_drone_video.py` — Synthetic drone-video sequence generator
 - `pusht_hdf5.py` — PushT robotics HDF5 dataset loader
@@ -28,6 +41,17 @@ Data loading, generation, and preprocessing utilities for various domains.
     (2 global + N local views) `element_map_fn`; local views are rendered at the
     global pixel resolution, so `local_crop_size != global_crop_size` raises
     `NotImplementedError` (positional-embedding interpolation is not implemented)
+- `document_restoration/` — DocRes document-restoration data utilities:
+  - `dtsprompt.py` — the five DTSPrompt generators (`deshadow_prompt`,
+    `appearance_prompt`, `deblur_prompt`, `binarization_prompt`,
+    `dewarp_prompt`) built on ONE shared `estimate_background` primitive.
+    **numpy + scipy only — this module must not import `cv2` or `skimage`**
+    (neither is declared in `pyproject.toml`; both merely happen to be
+    installed). A suite guard enforces it; the tests may and do import them as
+    the OpenCV parity oracle.
+  - `tasks.py` — the single `TASKS` table binding each task name to its prompt
+    generator, supervised output-channel count, loss name and post-processing
+    mode. Nothing else in the tree branches on a DocRes task string.
 - `time_series/` — Time series dataset framework:
   - `base.py` — Base dataset class, `config.py` — dataset configuration
   - `generator.py` — Data generators, `pipeline.py` — preprocessing pipelines
@@ -43,3 +67,5 @@ Data loading, generation, and preprocessing utilities for various domains.
 ## Testing
 
 Tests in `tests/test_datasets/` (if present) or integration tests within model test suites.
+The `tests/test_datasets/` tree is FLAT for top-level modules — `byte_lm.py` is tested by
+`tests/test_datasets/test_byte_lm.py`, mirroring `test_masked_patches.py` and friends.

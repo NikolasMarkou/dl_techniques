@@ -298,7 +298,14 @@ def test_every_model_package_has_a_roundtrip_subject():
     # 88 as of 2026-09-04: nine packages landed since -- ascii_bert,
     # ascii_clifford_bert, ascii_convnext_bert, bit_diffusion, colbert, dit,
     # ets, levjepa and shared (embeddings_experimental's leaf base package).
-    assert len(on_disk) == 88, f"expected 88 packages, found {len(on_disk)}"
+    #
+    # 89 as of 2026-09-08: `doc_res` landed under
+    # `models/vision/image_restoration/`. It joined with a REAL subject
+    # (`precision_arm_subjects._b_doc_res`), not a `ROUNDTRIP_NO_SUBJECT_YET`
+    # entry -- which is why that table's own count assertion above is
+    # unchanged at 9. Both numbers are re-derived, never incremented from the
+    # one written here.
+    assert len(on_disk) == 89, f"expected 89 packages, found {len(on_disk)}"
 
 
 def test_every_waiver_table_names_only_real_subjects():

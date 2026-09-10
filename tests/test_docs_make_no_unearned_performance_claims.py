@@ -290,7 +290,15 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # is caught by `test_no_readme_advertises_a_pretrained_path_that_raises`,
         # not by this pin; this one only tracks WHO is in the conversation.
         "ascii_bert", "ascii_clifford_bert", "ascii_convnext_bert",
-        "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "dit", "fnet",
+        "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "dit",
+        # doc_res: README:215 says `pretrained=True` raises; model.py:707
+        # really does `raise NotImplementedError`. Both halves checked.
+        "doc_res", "fnet",
+        # hnet: README:14 and :147 both name `pretrained=True` only to say it
+        # raises; model.py:517 really does `raise NotImplementedError`, verified
+        # by EXECUTING `HNet.from_variant('hnet_1stage_L', pretrained=True)` and
+        # reading the raise, not by grepping for the word. Both halves checked.
+        "hnet",
         "gpt2", "kan", "masked_autoencoder", "mobile_clip", "mobilenet",
         "modern_bert", "resnet", "tree_transformer", "vit", "wave_field",
     }, sorted(p.parent.name for p in with_pretrained_true)

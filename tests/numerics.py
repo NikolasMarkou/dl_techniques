@@ -132,3 +132,103 @@ def reassociation_atol(reduction_lengths, num_steps: int, scale: float) -> float
     """
     ops_count = 2.0 * num_steps * float(sum(reduction_lengths))
     return _TAIL_FACTOR * np.sqrt(ops_count) * _F32_U * max(1.0, float(scale))
+
+
+# ---------------------------------------------------------------------
+# The ARITHMETIC REGIME of the active device's float32 matmul
+# ---------------------------------------------------------------------
+
+#: Unit roundoff of NVIDIA TensorFloat-32. TF32 carries a 10-bit explicit mantissa, so
+#: one ulp near 1.0 is ``2**-10`` and the unit roundoff is half of that. ~4100x the
+#: float32 unit roundoff of ``5.96e-08``. The literal is not new here: it is the
+#: ``_TF32_ULP = 2.0 ** -11`` of
+#: ``tests/test_layers/test_transformers/test_gated_linear_attention_block.py:1495``,
+#: promoted to the shared home so a third copy is not written.
+TF32_UNIT_ROUNDOFF = 2.0 ** -11
+
+#: How many unit roundoffs of the ACTIVE matmul precision a reassociated / retraced
+#: float32 comparison is allowed. Also not a new number: ``4.0 * _TF32_ULP * scale`` is
+#: the bound `test_gated_linear_attention_block.py` already uses in three places
+#: (``:1690``, ``:1792``, ``:1861``). One convention, not two.
+#:
+#: **This value is PINNED, and inflating it is a test failure, not a tuning knob.**
+#: MEASURED (review pass 2, mutation S-9): ``4.0 -> 12.0`` left both consuming suites
+#: at 156 passed on CPU *and* on GPU 0 -- on GPU because the vacuity ceiling then stood
+#: at ``1.0e-2`` (5.1x of headroom), and on CPU because ``max()`` keeps selecting the
+#: float32 term until roughly a 200x inflation. Both halves are now closed, by a pair
+#: rather than by a single guard, because a pin alone goes green when the constant and
+#: the pin are edited together:
+#:   * value pin -- ``test_routing_module.py::TestGuardOneOracleParity::
+#:     test_the_matmul_ulp_allowance_is_pinned_to_its_documented_value`` (regime
+#:     independent; this is the arm that bites on CPU).
+#:   * effect ceiling -- ``::test_the_bound_cannot_go_vacuous_in_either_regime``,
+#:     tightened from ``1.0e-2`` to ``4.0e-3``, a stated 2.05x margin over the
+#:     ``4 * 2**-11 = 1.953e-03`` this constant actually produces under TF32.
+#: See decisions.md D-032.
+MATMUL_ULP_ALLOWANCE = 4.0
+
+#: Detection threshold for :func:`matmul_unit_roundoff`. The probe below perturbs a
+#: float32 matmul operand by ``2**-13``, which float32 represents exactly and TF32
+#: cannot represent at all; half of it separates "the perturbation survived" from
+#: "the perturbation was rounded away".
+_MATMUL_PROBE_DELTA = 2.0 ** -13
+
+
+# DECISION plan-2026-09-09T042752-6d66ac56/D-030: this probe MEASURES the matmul
+# precision; it does NOT read `tf.config.experimental.tensor_float_32_execution_enabled()`.
+# Do NOT "simplify" it to that flag. MEASURED on this box: the flag reads True in a stock
+# process with NO CUDA device visible, because it is a config flag whose NUMERIC effect --
+# not its value -- is device-dependent. A bound selected off the flag would therefore be
+# 4100x too loose on every CPU-only run, i.e. the guards it feeds would stop failing.
+# The probe's three measured regimes (2026-09-09, RTX 4090):
+#   GPU, TF32 on  -> error 1.221e-04 (== 2**-13: the perturbation was rounded away)
+#   GPU, TF32 off -> error 0.0
+#   CPU           -> error 0.0        (flag True, effect absent -- the case the flag lies about)
+# Rationale: decisions.md D-030.
+def matmul_unit_roundoff(probe_size: int = 64) -> float:
+    """Measure the unit roundoff of the ACTIVE device's float32 matmul.
+
+    Interface contract: pure w.r.t. the caller's state, never raises, returns a strictly
+    positive float that is either :data:`TF32_UNIT_ROUNDOFF` or the float32 unit roundoff
+    ``5.96e-08``. It is deliberately NOT cached: a session may toggle TF32 mid-run (the
+    ``tf32_disabled`` fixture does exactly that), so a cached answer would describe a
+    regime that is no longer in force.
+
+    The probe multiplies ``full((n, n), 1 + 2**-13)`` by the identity. ``1 + 2**-13`` is
+    exact in float32 and is NOT representable in TF32's 10-bit mantissa, so a reduced
+    precision matmul returns exactly ``1.0`` and the error reads ``2**-13``.
+
+    :param probe_size: Side of the square probe matmul. 64 already dispatches to tensor
+        cores on this hardware (verified at 64/128/256/512 -- identical reading).
+    :type probe_size: int
+    :return: The unit roundoff in force for float32 matmul on the active device.
+    :rtype: float
+    """
+    import keras  # local: this module is otherwise pure NumPy and imported very widely.
+
+    value = 1.0 + _MATMUL_PROBE_DELTA
+    left = keras.ops.convert_to_tensor(
+        np.full((probe_size, probe_size), value, dtype="float32")
+    )
+    right = keras.ops.convert_to_tensor(np.eye(probe_size, dtype="float32"))
+    product = keras.ops.convert_to_numpy(keras.ops.matmul(left, right))
+    lost = float(np.max(np.abs(np.asarray(product) - value)))
+    return TF32_UNIT_ROUNDOFF if lost > _MATMUL_PROBE_DELTA / 2.0 else _F32_U
+
+
+def matmul_precision_atol(scale: float) -> float:
+    """Bound contributed by the ACTIVE device's matmul precision alone.
+
+    A companion to :func:`reassociation_atol`, not a replacement: that helper bounds the
+    error of REORDERING true float32 arithmetic, and this one bounds the error of doing
+    the arithmetic in a NARROWER format than float32. On a true-float32 device the two
+    are nine orders apart and this term is inert; on a tensor-core GPU with TF32 enabled
+    it dominates by ~4100x. Callers take the MAXIMUM of the two, so one expression covers
+    both regimes and neither regime loosens the other.
+
+    :param scale: Magnitude of the compared output, ``max|expected|``.
+    :type scale: float
+    :return: Absolute tolerance.
+    :rtype: float
+    """
+    return MATMUL_ULP_ALLOWANCE * matmul_unit_roundoff() * max(1.0, float(scale))

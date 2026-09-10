@@ -9,6 +9,7 @@ of section D's OFF assertions), and degenerate spatial inputs.
 """
 
 import os
+import json
 import re
 import logging
 
@@ -2506,3 +2507,168 @@ class TestTrainingIsForwardedExplicitly:
         )
         out = block(sample_input, training=True)
         assert tuple(out.shape) == (B, H, W, F)
+
+
+# ---------------------------------------------------------------------
+# W. A CALLABLE `activation` SURVIVES SERIALIZATION (D-033)
+# ---------------------------------------------------------------------
+#
+# WHY THIS SECTION EXISTS. `activation` is hinted `Optional[str]`, but Python
+# does not enforce annotations and this block never coerced the value:
+# `resolve_activation_layer` falls through to `keras.layers.Activation`, which
+# accepts a callable, so a callable reached the forward path intact and was
+# then stored RAW in `get_config()`. That is defect family N-1
+# (`tests/test_the_raw_activation_config_population_is_closed.py`, which was
+# RED on this exact site), and the repair is D-400's symmetric pair --
+# `deserialize_activation` in `__init__`, `serialize_activation` in
+# `get_config`.
+#
+# PROVEN RED at pristine HEAD `a9c7b300b`, in a `git worktree`, with the
+# registered callable below:
+#   * `json.dumps(get_config()['activation'])` -> `TypeError: Object of type
+#     function is not JSON serializable`;
+#   * `model.save(...)` succeeded and `keras.models.load_model(...)` then raised
+#     `TypeError: <class 'keras.src.models.functional.Functional'> could not be
+#     deserialized properly`.
+# Both assertions below are those two failures. After the repair the config is
+# a `{'class_name': 'function', 'config': 'probe>...'}` dict, the reload needs
+# no `custom_objects`, and the forward output is bit-identical (max|delta| 0.0,
+# `training=False` explicit on both arms).
+#
+# DO NOT write this arm with a REGISTERED callable ONLY and conclude the family
+# is closed: D-400 measured that a registered callable round-trips on FORWARD
+# OUTPUT with and without the repair on a bare-layer path. What discriminates
+# is (a) `get_config()` being JSON-serializable and (b) `.activation` still
+# being callable -- not `max|delta|`. Both are asserted here for that reason.
+
+
+@keras.saving.register_keras_serializable(package="gabor_dsb_test")
+def _registered_scaled_relu(x):
+    """A REGISTERED callable activation, not a string, not a registry key.
+
+    Scaled by 2.0 rather than being a bare `relu` so that a silent fallback to
+    a default/identity activation cannot produce the same forward output.
+    """
+    return keras.ops.relu(x) * 2.0
+
+
+def _unregistered_scaled_relu(x):
+    """The same function with NO registration -- resolvable only via
+    `custom_objects`. This is the value that raised
+    'Could not interpret activation function identifier' in D-400's table."""
+    return keras.ops.relu(x) * 2.0
+
+
+class TestCallableActivationSerialization:
+    """Read the block comment above before touching these arms."""
+
+    @staticmethod
+    def _model(activation):
+        inputs = keras.Input(shape=(H, W, 3))
+        outputs = GaborDepthwiseSeparableBlock(
+            filters=F,
+            filters_per_channel=M,
+            kernel_size=K,
+            activation=activation,
+            name="blk",
+        )(inputs)
+        return keras.Model(inputs, outputs)
+
+    def test_get_config_is_json_serializable_for_a_callable_activation(self):
+        """Half one of the pair: `serialize_activation` in `get_config`."""
+        model = self._model(_registered_scaled_relu)
+        entry = model.get_layer("blk").get_config()["activation"]
+        # RED pre-fix: `TypeError: Object of type function is not JSON
+        # serializable`.
+        json.dumps(entry)
+        # Anti-vacuity: a repair that dropped the value entirely would also
+        # serialize. The serialized form must still name the function.
+        assert isinstance(entry, dict)
+        assert "gabor_dsb_test>_registered_scaled_relu" in json.dumps(entry)
+
+    def test_a_registered_callable_activation_survives_a_keras_round_trip(
+            self, sample_input, tmp_path
+    ):
+        """Half two: `deserialize_activation` in `__init__`.
+
+        No `custom_objects` is passed -- registration is what makes that
+        legitimate here, and it is also what makes the arm reach the real
+        `load_model` resolution path rather than a scope the test installed.
+        """
+        model = self._model(_registered_scaled_relu)
+        y0 = model(sample_input, training=False)
+
+        path = os.path.join(tmp_path, "gabor_callable_act.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)  # RED pre-fix: TypeError
+
+        block = loaded.get_layer("blk")
+        # NOT a raw dict: that is the state `serialize_activation` alone leaves
+        # behind, and the next `get_config()` would propagate it onward.
+        assert callable(block.activation), (
+            f"activation came back as {type(block.activation).__name__}, not a "
+            "callable -- deserialize_activation is not running in __init__"
+        )
+        assert not isinstance(block.activation, dict)
+        json.dumps(block.get_config()["activation"])
+
+        y1 = loaded(sample_input, training=False)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y0),
+            keras.ops.convert_to_numpy(y1),
+            rtol=0.0,
+            atol=0.0,
+            err_msg="callable activation changed the forward output across a "
+                    "`.keras` round trip",
+        )
+
+    def test_an_unregistered_callable_needs_only_custom_objects(
+            self, sample_input, tmp_path
+    ):
+        """The `custom_objects` row of D-400's table.
+
+        An UNREGISTERED callable cannot be resolved from a name by any repair --
+        nothing in the file names the object. What the repair buys is that
+        supplying `custom_objects` now yields a LIVE callable instead of a raw
+        dict, and that `save()` no longer emits a non-JSON config.
+        """
+        model = self._model(_unregistered_scaled_relu)
+        y0 = model(sample_input, training=False)
+
+        path = os.path.join(tmp_path, "gabor_unregistered_act.keras")
+        model.save(path)
+        loaded = keras.models.load_model(
+            path,
+            custom_objects={"_unregistered_scaled_relu": _unregistered_scaled_relu},
+        )
+
+        block = loaded.get_layer("blk")
+        assert callable(block.activation)
+        assert not isinstance(block.activation, dict)
+
+        y1 = loaded(sample_input, training=False)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y0),
+            keras.ops.convert_to_numpy(y1),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_a_string_activation_is_untouched_by_the_pair(self):
+        """The CONTROL. `serialize_activation` must pass strings through
+        verbatim: this repo stores activation-factory keys such as `'mish'`
+        that `keras.activations.serialize` outright REJECTS, and every shipped
+        config passes a string, so the pair has to be a no-op on them."""
+        for name in ("relu", "linear", "leaky_relu"):
+            block = GaborDepthwiseSeparableBlock(
+                filters=F, filters_per_channel=M, kernel_size=K, activation=name
+            )
+            assert block.activation == name
+            assert block.get_config()["activation"] == name
+
+        default = GaborDepthwiseSeparableBlock(
+            filters=F, filters_per_channel=M, kernel_size=K
+        )
+        assert default.activation is None
+        assert default.get_config()["activation"] is None
+        assert default.gabor_activation is None

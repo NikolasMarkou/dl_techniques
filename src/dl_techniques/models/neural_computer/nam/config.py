@@ -7,6 +7,7 @@ Defines ``NAMConfig`` dataclass and preset model variants.
 from dataclasses import dataclass, asdict
 from typing import Any, Dict
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class NAMConfig:
@@ -109,3 +110,6 @@ NAM_VARIANTS: Dict[str, Dict[str, Any]] = {
         halt_max_steps=32,
     ),
 }
+
+# ---------------------------------------------------------------------
+

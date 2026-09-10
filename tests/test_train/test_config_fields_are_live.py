@@ -103,6 +103,8 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/embeddings_experimental/config.py", "ExperimentConfig"),
     ("train/bit_diffusion/train_bit_diffusion.py", "TrainingConfig"),
     ("train/dit/train_dit.py", "TrainingConfig"),
+    ("train/doc_res/common.py", "DocResTrainingConfig"),
+    ("train/hnet/common.py", "HNetTrainingConfig"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
