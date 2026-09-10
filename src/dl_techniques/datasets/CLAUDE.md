@@ -52,6 +52,23 @@ Data loading, generation, and preprocessing utilities for various domains.
   - `tasks.py` — the single `TASKS` table binding each task name to its prompt
     generator, supervised output-channel count, loss name and post-processing
     mode. Nothing else in the tree branches on a DocRes task string.
+- `document_rectification/` — DocScanner **dewarping** data utilities. A sibling
+  of `document_restoration/`, not part of it: that package owns DocRes's
+  photometric tasks (`(image, prompt, restored)`), this one owns geometric
+  ground truth (`(image, f_gt, mask)`). The shared piece — `dtsprompt`'s
+  `base_coordinate_grid` — is imported, not copied.
+  - `synthetic_warp.py` — the synthetic warped-page generator. **numpy + scipy
+    only at module scope**, same house rule as `dtsprompt.py`, plus `PIL`:
+    Pillow is declared only in the `data` extra, so the single file-touching
+    helper `load_rgb` imports it lazily. A suite guard enforces all three.
+    Its warp is a composition of **closed-form-invertible** primitives (shear
+    couplings, one homography, one fit affine), so the backward map `f_gt`
+    (rectified grid -> distorted pixel coords, channel 0 `x`) and the forward
+    map `g` are BOTH exact and neither is ever fitted. Read the module
+    docstring before changing the warp family: the usual "render the image by
+    gathering through the map you supervise on" recipe pins down the OPPOSITE
+    direction, and emitting it as `f_gt` is a silent inversion with no shape,
+    dtype, unit or range symptom.
 - `time_series/` — Time series dataset framework:
   - `base.py` — Base dataset class, `config.py` — dataset configuration
   - `generator.py` — Data generators, `pipeline.py` — preprocessing pipelines
