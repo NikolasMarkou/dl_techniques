@@ -150,6 +150,21 @@ TF32_UNIT_ROUNDOFF = 2.0 ** -11
 #: float32 comparison is allowed. Also not a new number: ``4.0 * _TF32_ULP * scale`` is
 #: the bound `test_gated_linear_attention_block.py` already uses in three places
 #: (``:1690``, ``:1792``, ``:1861``). One convention, not two.
+#:
+#: **This value is PINNED, and inflating it is a test failure, not a tuning knob.**
+#: MEASURED (review pass 2, mutation S-9): ``4.0 -> 12.0`` left both consuming suites
+#: at 156 passed on CPU *and* on GPU 0 -- on GPU because the vacuity ceiling then stood
+#: at ``1.0e-2`` (5.1x of headroom), and on CPU because ``max()`` keeps selecting the
+#: float32 term until roughly a 200x inflation. Both halves are now closed, by a pair
+#: rather than by a single guard, because a pin alone goes green when the constant and
+#: the pin are edited together:
+#:   * value pin -- ``test_routing_module.py::TestGuardOneOracleParity::
+#:     test_the_matmul_ulp_allowance_is_pinned_to_its_documented_value`` (regime
+#:     independent; this is the arm that bites on CPU).
+#:   * effect ceiling -- ``::test_the_bound_cannot_go_vacuous_in_either_regime``,
+#:     tightened from ``1.0e-2`` to ``4.0e-3``, a stated 2.05x margin over the
+#:     ``4 * 2**-11 = 1.953e-03`` this constant actually produces under TF32.
+#: See decisions.md D-032.
 MATMUL_ULP_ALLOWANCE = 4.0
 
 #: Detection threshold for :func:`matmul_unit_roundoff`. The probe below perturbs a

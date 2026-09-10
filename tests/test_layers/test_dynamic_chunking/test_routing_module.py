@@ -40,7 +40,11 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.layers.dynamic_chunking.routing_module import RoutingModule
-from tests.numerics import matmul_precision_atol, matmul_unit_roundoff
+from tests.numerics import (
+    MATMUL_ULP_ALLOWANCE,
+    matmul_precision_atol,
+    matmul_unit_roundoff,
+)
 
 from .hnet_reference_numpy import routing_reference
 
@@ -572,6 +576,15 @@ class TestGuardOneOracleParity:
             f"{regime} matmul: measured {worst:.3e} vs bound {atol:.3e}"
         )
 
+    #: Ceiling for the loosest bound this file can produce, and it is a MEASURED
+    #: number rather than a round one. At ``MATMUL_ULP_ALLOWANCE = 4.0`` the TF32
+    #: bound is ``4 * 2**-11 = 1.953e-03`` per unit of output scale, so this
+    #: ceiling states a margin of **2.05x** over what the shipped constant
+    #: actually produces. The previous ``1.0e-2`` tolerated a 5.1x inflation of
+    #: the allowance, and review pass 2 MEASURED that: ``4.0 -> 12.0`` left both
+    #: suites at 156 passed on CPU *and* on GPU 0 (mutation S-9).
+    LOOSEST_ADMISSIBLE_BOUND = 4.0e-3
+
     def test_the_bound_cannot_go_vacuous_in_either_regime(self):
         """A regime-aware bound must not become a licence to pass anything.
 
@@ -583,11 +596,41 @@ class TestGuardOneOracleParity:
         the allowance" edit is caught here and not by a guard silently going
         blind. It is deliberately expressed against the LOOSEST regime, so it is
         equally meaningful on CPU, where the returned bound is 450x tighter still.
+
+        The ceiling was tightened from ``1.0e-2`` to
+        :data:`LOOSEST_ADMISSIBLE_BOUND` in D-032: the old value left 5.1x of
+        headroom, which is exactly the room a "just widen the allowance" edit
+        needs.
         """
         for d_model in (2, 4, 8, 16, 32):
-            assert routing_parity_atol(d_model, 1.0) < 1.0e-2, d_model
+            assert routing_parity_atol(d_model, 1.0) < self.LOOSEST_ADMISSIBLE_BOUND, (
+                d_model
+            )
         # And the regime term itself is one of exactly two known values.
         assert matmul_unit_roundoff() in (_F32_U, 2.0 ** -11)
+
+    def test_the_matmul_ulp_allowance_is_pinned_to_its_documented_value(self):
+        """The allowance is a free parameter on CPU. Pin it by VALUE.
+
+        This is the regime-independent half of the pair, and it is needed
+        because the ceiling above cannot see the constant on a true-float32
+        device: ``routing_parity_atol`` takes ``max(float32 derivation, regime
+        term)`` and the float32 term wins there at every ``d_model``, so on CPU
+        the allowance is inert until roughly a 200x inflation. MEASURED (review
+        pass 2, S-9): ``4.0 -> 12.0`` is 156 passed on CPU AND on GPU 0.
+
+        ``4.0`` is not a new number and the pin records where it comes from:
+        ``4.0 * _TF32_ULP * scale`` is the bound
+        ``tests/test_layers/test_transformers/test_gated_linear_attention_block.py``
+        already uses at three call sites. A pin ALONE would go green the moment
+        someone edited the constant and the pin together, which is why the
+        ceiling above exists as its twin -- D-030's own rule, applied to
+        D-030's own constant.
+        """
+        assert MATMUL_ULP_ALLOWANCE == 4.0
+        # The pin is only worth anything if the constant is actually what the
+        # bound is built from: 4 unit roundoffs of the ACTIVE matmul precision.
+        assert matmul_precision_atol(1.0) == MATMUL_ULP_ALLOWANCE * matmul_unit_roundoff()
 
 
 # =====================================================================

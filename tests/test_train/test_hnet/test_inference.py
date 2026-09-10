@@ -21,6 +21,12 @@ What is pinned, and what each guard would catch
    input, so the guards measure the hazard rather than assuming it.
 3. **The sampler**: greedy is exactly ``argmax`` and consumes no randomness;
    temperature and ``top_p`` do what they claim; the bad-argument raises fire.
+3b. **The three contracts that were unguarded until review pass 2** (D-032):
+   the next byte is drawn from the LAST position's logits, ``--temperature``
+   changes the distribution rather than merely being accepted, and
+   ``--context-bytes`` keeps the TAIL of the context. All three survived a
+   total-neutering mutation with 219 tests green, because the only model stub
+   in this file is position-blind and the only window guard asserted shapes.
 4. **End to end through ``main()``** on a tiny model saved to ``tmp_path``,
    with a real ``.keras`` round trip -- the only arm that proves the pieces are
    actually wired to each other.
@@ -81,23 +87,74 @@ def tiny_model():
 
 
 class CountingModel:
-    """A model stub that records the shapes it was called with.
+    """A model stub that records the shapes AND the contents it was called with.
 
     Returns logits that make byte id ``65`` ('A') the argmax at every position,
     so a greedy continuation is exactly predictable and any deviation is a
     defect rather than a coin flip.
+
+    **This fixture is position-BLIND on purpose, and that has a cost.** Because
+    its argmax is the same at every position, no assertion made against it can
+    say anything about WHICH logit row ``generate_bytes`` reads --
+    ``[0, -1, :]`` and ``[0, 0, :]`` produce identical output here. That blind
+    spot was measured (review pass 2, S-6: the wrong row leaves 219 tests
+    green), and :class:`PositionalModel` below exists to cover it. Keep the two
+    separate: making THIS stub position-dependent would make every greedy
+    assertion in the file depend on the window length as well.
+
+    ``windows`` records a COPY of each input array, which is what lets a guard
+    assert the sliding window's CONTENT rather than only its shape -- head
+    slicing and tail slicing produce the same shapes forever.
     """
 
     def __init__(self, vocab_size: int = 256, favourite: int = 65):
         self.calls: list = []
+        self.windows: list = []
         self.vocab_size = vocab_size
         self.favourite = favourite
 
     def __call__(self, inputs, training=None):
         array = np.asarray(inputs)
         self.calls.append((array.shape, training))
+        self.windows.append(array.copy())
         logits = np.zeros(array.shape + (self.vocab_size,), dtype="float32")
         logits[..., self.favourite] = 10.0
+        return logits
+
+
+#: Base id for :class:`PositionalModel`. Chosen so ``BASE + position`` stays a
+#: printable ASCII byte for every window this file uses and never collides with
+#: :class:`CountingModel`'s 65.
+POSITIONAL_BASE = 100
+
+
+class PositionalModel:
+    """A stub whose argmax DEPENDS on the position, so the row read is visible.
+
+    Position ``t`` of the returned ``(1, L, vocab)`` logits puts its peak at
+    ``POSITIONAL_BASE + t``. Reading the last row therefore yields
+    ``POSITIONAL_BASE + L - 1`` and reading the first yields
+    ``POSITIONAL_BASE`` -- two different bytes for every ``L > 1``, which is
+    exactly the discrimination :class:`CountingModel` cannot provide.
+
+    The autoregressive contract is that the next byte is drawn from the LAST
+    position's logits, because ``pack_byte_windows`` trains position ``t`` to
+    predict byte ``t + 1`` (``datasets/byte_lm.py``): the last row is the only
+    one whose prediction is not already known.
+    """
+
+    def __init__(self, vocab_size: int = 256, base: int = POSITIONAL_BASE):
+        self.calls: list = []
+        self.vocab_size = vocab_size
+        self.base = base
+
+    def __call__(self, inputs, training=None):
+        array = np.asarray(inputs)
+        self.calls.append((array.shape, training))
+        length = array.shape[1]
+        logits = np.zeros(array.shape + (self.vocab_size,), dtype="float32")
+        for position in range(length):
+            logits[:, position, (self.base + position) % self.vocab_size] = 10.0
         return logits
 
 
@@ -277,6 +334,243 @@ class TestGenerateBytes:
         )
         assert len(produced) == 4
         assert all(0 <= i < 256 for i in produced)
+
+
+# ---------------------------------------------------------------------
+# 3b. The three sampler contracts that were unguarded until review pass 2
+# ---------------------------------------------------------------------
+#
+# Every guard below was written against a MEASURED surviving mutation, not
+# against a hypothesis. `decisions.md` D-032 carries the RED table.
+
+
+class TestTheSamplerReadsTheLastPosition:
+    """The autoregressive contract: the next byte comes from the LAST row.
+
+    Reading ``[0, 0, :]`` instead of ``[0, -1, :]`` left the whole trainer
+    suite at 219 passed (review pass 2, S-6). Two independent reasons the
+    existing evidence could not see it, both defeated here:
+
+    1. :class:`CountingModel` is position-blind by construction, so every
+       greedy assertion in :class:`TestGenerateBytes` is satisfied by ANY row.
+       :class:`PositionalModel` fixes that, and the first arm below proves the
+       fixture really does discriminate before anything is asserted with it.
+    2. The 170k-parameter step-18 checkpoint emits ``0x20`` from every
+       position, so the two hand invocations D-031 records are byte-identical
+       under the wrong row. The REAL-model arm below therefore asserts against
+       a model whose per-position argmaxes are MEASURED to differ, and says so
+       in its own assertion rather than assuming it.
+    """
+
+    def test_the_positional_fixture_can_actually_discriminate(self):
+        """ANTI-VACUITY, and it comes first for a reason.
+
+        A fixture that is uniform along the axis under test makes every
+        assertion on that axis vacuous -- which is precisely how the defect
+        this class exists for survived. So: measure the fixture.
+        """
+        model = PositionalModel()
+        logits = np.asarray(model(np.zeros((1, 5), dtype="int32"), training=False))
+
+        by_position = [int(np.argmax(logits[0, t])) for t in range(5)]
+        assert by_position == [POSITIONAL_BASE + t for t in range(5)]
+        assert len(set(by_position)) == 5, (
+            "the fixture must differ ACROSS positions or the guards below "
+            "cannot tell one row from another"
+        )
+        assert by_position[0] != by_position[-1]
+
+    def test_greedy_generation_reads_the_LAST_row_not_the_first(self):
+        """MAIN. RED against ``[0, -1, :]`` -> ``[0, 0, :]``.
+
+        Prompt ``b"abc"`` is 3 bytes, so the first call sees ``L = 3`` and the
+        last row's peak is ``POSITIONAL_BASE + 2``. Each sampled byte grows the
+        context by one, so the window lengths are 3, 4, 5, 6 and the produced
+        ids are ``BASE + 2, BASE + 3, BASE + 4, BASE + 5``. Reading row 0 would
+        give ``BASE`` four times over -- a constant, and a different constant.
+        """
+        model = PositionalModel()
+        produced = generate_bytes(
+            model, list(b"abc"), max_new_bytes=4, temperature=0.0
+        )
+
+        assert produced == [POSITIONAL_BASE + k for k in (2, 3, 4, 5)], produced
+        # Stated separately so the failure message names the defect: the
+        # position-0 read yields this instead.
+        assert produced != [POSITIONAL_BASE] * 4
+
+    def test_the_windowed_read_is_the_last_row_of_the_WINDOW(self):
+        """The row index is relative to the window, not to the full context.
+
+        With ``context_bytes=3`` every call sees ``L = 3``, so the last row is
+        always ``BASE + 2`` and the output is a constant -- but a DIFFERENT
+        constant from the position-0 read's ``BASE``.
+        """
+        model = PositionalModel()
+        produced = generate_bytes(
+            model, list(b"hello"), max_new_bytes=3, temperature=0.0, context_bytes=3
+        )
+        assert produced == [POSITIONAL_BASE + 2] * 3, produced
+
+    @pytest.mark.parametrize("prompt", [b"The ", b"hello world"])
+    def test_on_a_REAL_HNet_the_first_byte_is_the_argmax_of_the_LAST_row(
+        self, tiny_model, prompt
+    ):
+        """The same contract on a real forward pass, not a stub.
+
+        MEASURED on this fixture (seed 19, CPU): ``b"The "`` gives per-position
+        argmaxes ``[228, 69, 68, 69]`` and ``b"hello world"`` gives
+        ``[107, ..., 15]``; the row-0 and row-(-1) logit vectors differ by
+        0.30 and 0.44 respectively. The first assertion re-derives that
+        difference at run time, so if the fixture ever became position-uniform
+        this guard would FAIL rather than quietly stop testing anything.
+        """
+        ids = np.asarray([list(prompt)], dtype="int32")
+        logits = np.asarray(tiny_model(ids, training=False))
+        first_row = int(np.argmax(logits[0, 0]))
+        last_row = int(np.argmax(logits[0, -1]))
+
+        assert first_row != last_row, (
+            f"vacuous fixture: rows 0 and -1 both peak at {last_row}; this "
+            "guard can no longer distinguish the two reads"
+        )
+
+        produced = generate_bytes(
+            tiny_model, list(prompt), max_new_bytes=1, temperature=0.0
+        )
+        assert produced == [last_row]
+
+
+class TestTemperatureIsApplied:
+    """``--temperature`` must change the DISTRIBUTION, not just be accepted.
+
+    Neutering the division (``values / temperature`` -> ``values * 1.0``) left
+    this module at 29 passed (review pass 2, S-7): every existing arm used
+    either ``0.0`` (which short-circuits before the division) or ``1.0`` (for
+    which the division is the identity). Both guards below therefore compare
+    ACROSS temperatures on one fixed logit vector.
+    """
+
+    #: One id 4 nats above 255 flat rivals. Analytic argmax mass:
+    #: 1.0 at T = 0.02, 0.17635 at T = 1.0, 0.00423 at T = 50.0.
+    PEAK_ID = 7
+    PEAK_LOGIT = 4.0
+
+    def _logits(self) -> np.ndarray:
+        logits = np.zeros(256, dtype="float32")
+        logits[self.PEAK_ID] = self.PEAK_LOGIT
+        return logits
+
+    def _argmax_share(self, temperature: float, draws: int = 400) -> float:
+        rng = np.random.default_rng(3)
+        sampled = [
+            sample_next_id(self._logits(), temperature=temperature, rng=rng)
+            for _ in range(draws)
+        ]
+        return sampled.count(self.PEAK_ID) / draws
+
+    def test_a_low_temperature_converges_to_greedy(self):
+        """MAIN (low end). At T = 0.02 every draw is the argmax.
+
+        MEASURED: 400/400 at T = 0.02. Under a temperature-ignoring sampler
+        this reads 0.1575, because the effective temperature is 1.0.
+        """
+        assert self._argmax_share(0.02) == 1.0
+
+    def test_a_moderate_temperature_does_NOT_converge(self):
+        """TWIN. Without this, the arm above could be measuring a flat fixture.
+
+        MEASURED: 0.1575 at T = 1.0 against an analytic 0.17635.
+        """
+        share = self._argmax_share(1.0)
+        assert 0.05 < share < 0.35, share
+
+    def test_a_high_temperature_flattens_the_distribution(self):
+        """MAIN (high end). At T = 50 the peak is worth barely more than uniform.
+
+        MEASURED: 0.0050 at T = 50.0 against a uniform 1/256 = 0.0039 and an
+        analytic 0.00423. A temperature-ignoring sampler reads 0.1575 here.
+        """
+        assert self._argmax_share(50.0) < 0.02
+
+    def test_the_argmax_share_falls_MONOTONICALLY_as_temperature_rises(self):
+        """The three arms above as one ordering, so no single band can drift.
+
+        This is the assertion a "spelling check" guard cannot make: accepting
+        the argument proves nothing about the ordering of its effects.
+        """
+        shares = [self._argmax_share(t) for t in (0.02, 1.0, 50.0)]
+        assert shares[0] > shares[1] > shares[2], shares
+
+
+class TestContextBytesKeepsTheTail:
+    """``--context-bytes`` must retain the MOST RECENT bytes.
+
+    Keeping the head (``context[:context_bytes]``) also left this module at
+    29 passed (review pass 2, S-8), because
+    ``test_context_bytes_caps_the_window`` asserts only the shapes
+    ``[(1,4), (1,4), (1,4)]`` -- which head slicing reproduces exactly. It is a
+    live degeneracy, not a cosmetic one: once the cap is reached the model is
+    re-fed the SAME frozen window forever and generation stops conditioning on
+    what it just produced. These guards assert the window's CONTENT.
+    """
+
+    def test_the_window_is_the_TAIL_of_the_context(self):
+        """MAIN. Hand-derived windows, byte for byte.
+
+        Prompt ``b"hello"`` (``[104, 101, 108, 108, 111]``) at ``cap = 4`` with
+        :class:`CountingModel`'s constant 65::
+
+            step 1: "ello"          -> [101, 108, 108, 111]
+            step 2: "llo" + 'A'     -> [108, 108, 111,  65]
+            step 3: "lo" + 'AA'     -> [108, 111,  65,  65]
+
+        Head slicing gives ``[104, 101, 108, 108]`` three times instead.
+        """
+        model = CountingModel()
+        generate_bytes(
+            model, list(b"hello"), max_new_bytes=3, temperature=0.0, context_bytes=4
+        )
+
+        windows = [w[0].tolist() for w in model.windows]
+        assert windows == [
+            [101, 108, 108, 111],
+            [108, 108, 111, 65],
+            [108, 111, 65, 65],
+        ], windows
+
+    def test_the_window_KEEPS_ADVANCING_past_the_cap(self):
+        """The degeneracy stated as a property rather than as a literal.
+
+        Generating more bytes than the cap must eventually flush the prompt out
+        of the window entirely. A frozen window never does, whatever its
+        length: it is the same array on every call.
+        """
+        model = CountingModel()
+        generate_bytes(
+            model, list(b"hello"), max_new_bytes=6, temperature=0.0, context_bytes=4
+        )
+
+        windows = [w[0].tolist() for w in model.windows]
+        assert windows[-1] == [65, 65, 65, 65], windows[-1]
+        assert len({tuple(w) for w in windows}) > 1, (
+            "the window never changed: generation stopped conditioning on the "
+            "bytes it produced"
+        )
+        # And each window after the first ends with the byte just sampled.
+        for previous, current in zip(windows, windows[1:]):
+            assert current[-1] == 65, (previous, current)
+
+    def test_an_uncapped_context_keeps_everything(self):
+        """TWIN: the tail slice is the CAP's doing, not the loop's."""
+        model = CountingModel()
+        generate_bytes(model, list(b"hello"), max_new_bytes=2, temperature=0.0)
+
+        windows = [w[0].tolist() for w in model.windows]
+        assert windows == [
+            [104, 101, 108, 108, 111],
+            [104, 101, 108, 108, 111, 65],
+        ], windows
 
 
 # ---------------------------------------------------------------------

@@ -159,7 +159,7 @@ reference variant is feasible on this hardware is an open question, not a settle
 - Model package: `src/dl_techniques/models/language/hnet/` (architecture, variants, and the
   recorded divergences from the reference — do not restate the count here, it drifted from four to
   six once already; re-derive it with
-  `grep -c '^### 5\.' src/dl_techniques/models/language/hnet/README.md`, which reads **7** today).
+  `grep -c '^### 5\.' src/dl_techniques/models/language/hnet/README.md`, which reads **8** today).
 - Chunking layers: `src/dl_techniques/layers/dynamic_chunking/`.
 - Byte pipeline primitives: `src/dl_techniques/datasets/byte_lm.py`.
 - Tests: `tests/test_train/test_hnet/`, `tests/test_models/test_hnet/`,

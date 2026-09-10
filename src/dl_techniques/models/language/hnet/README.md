@@ -153,7 +153,7 @@ three chunking layers) for deserialization, so no `custom_objects` argument is n
 
 ## 5. Recorded divergences from the reference
 
-Seven. Each is a deliberate choice with a consequence, not an approximation, and each is anchored in
+Eight. Each is a deliberate choice with a consequence, not an approximation, and each is anchored in
 the source and recorded in `plans/plan-2026-09-09T042752-6d66ac56/decisions.md`. The count is not
 copied between documents: re-derive it with
 
@@ -264,6 +264,36 @@ documented default and now labelled as such at its definition site.
 hyper-parameter to sweep rather than as a fidelity constraint. Pinned by
 `test_model.py::TestRatioLossWiring` in three ways — value, provenance, and observable effect on
 `model.losses` — because a 10x change to it previously survived all 665 tests of this port.
+
+### 5.8 `d_intermediate = 0` is a SENTINEL here, and an explicit width upstream
+
+The reference's `HNetConfig.d_intermediate` is a per-stage list whose "unset" value is `None`
+(`hnet/modules/mlp.py:21-24` reads `if d_intermediate is None: derive`, and any other value is used
+verbatim). This port types the field as a tuple of `int`, which cannot carry `None`, so **`0` is
+this port's spelling of that sentinel**: `build_mlp` derives `round_up(8 * d_model / 3, 128)` from
+it. Upstream, a literal `0` is not a sentinel at all — it is an explicit width, and
+`nn.Linear(d_model, 0)` is what upstream would build.
+
+**Why it is a divergence and not an implementation detail**: the two readings disagree for any
+caller that pairs `d_intermediate = 0` with an UPPERCASE layout letter, i.e. a stage that really has
+an MLP. Upstream gives that stage a zero-width MLP; this port gives it the derived width. That
+combination is reachable, and this plan's own fixtures reach it (`test_model.py`,
+`test_stage.py` and `test_causality.py` all pair `d_intermediate=[0, 0]` with a `T` stack).
+
+**Why no shipped model moves**: all six `MODEL_VARIANTS` rows carry their `0` on an all-lowercase
+stage, which has no MLP for either reading to apply to; every positive shipped value already equals
+the width the derivation produces (1024→2816, 1536→4096, 2048→5504). All 16 `(variant, stage)`
+widths were measured across the change and the diff is empty (D-031).
+
+**Consequence**: a config transcribed literally from an upstream JSON is safe, because upstream's
+own configs use `0` only where this port also has no MLP; a HAND-WRITTEN config that means "give
+this uppercase stage no MLP" cannot be expressed, and will silently get the derived width instead.
+Use a lowercase layout letter for that.
+
+Anchored at `components.py::build_mlp` and in `config.py`'s `HNetArchConfig` docstring; pinned by
+`test_components.py::TestGuardSixIntermediateWidth` and by the hand-written
+`SHIPPED_SWIGLU_WIDTHS` table. Recorded here after review pass 2 found that D-031 claimed this
+divergence was registered when it was not.
 
 ## 6. Tests
 

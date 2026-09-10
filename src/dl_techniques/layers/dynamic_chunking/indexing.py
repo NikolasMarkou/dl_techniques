@@ -36,18 +36,50 @@ __all__ = [
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-09-09T042752-6d66ac56/D-032: this function's original
+# docstring claimed the static path was REQUIRED under XLA ("a tensor that XLA
+# may refuse as an operand to a shape-consuming op"). That claim is FALSE on
+# this backend, and it was settled by measurement rather than by argument.
+# MEASURED (2026-09-10, TF 2.18 / Keras 3, CPU and GPU 0):
+#   keras.ops.shape(zeros((2,5,3)))          -> (2, 5, 3), all Python int
+#   the same call INSIDE a traced tf.function -> (2, 5, 3), all Python int
+#   traced at TensorSpec([2, None, 3])        -> (2, <SymbolicTensor>, 3)
+# i.e. `keras.ops.shape` ALREADY returns a Python int for every statically
+# known axis and a tensor only for an unknown one -- which is exactly this
+# function's stated behaviour. Deleting the static branch therefore leaves
+# `tests/test_layers/test_dynamic_chunking/` at 244 passed on CPU: mutation
+# S-10 is EQUIVALENT on this backend, not an untested path. No guard can fail
+# without the static branch, because there is nothing for it to detect; what
+# `test_indexing.py::TestDimIsTheBackendsOwnAnswer` pins instead is that
+# EQUIVALENCE, so the false rationale is not re-invented from the code's shape.
+# Do NOT restore the "XLA may refuse it" wording without a failing case to cite.
+# Keeping the wrapper (rather than inlining `keras.ops.shape(x)[axis]` at its
+# three call sites) is a readability choice with the cost stated: it is one
+# named place both chunking layers ask for an axis length, and it is where a
+# non-TF backend's divergence would be handled if one ever appeared.
+# Rationale: decisions.md D-032.
 def dim(x: keras.KerasTensor, axis: int) -> Union[int, keras.KerasTensor]:
     """Return an axis length as a Python ``int`` when it is statically known.
 
-    Preferring the static value matters under XLA: a Python ``int`` becomes a
-    compile-time constant, while ``keras.ops.shape(x)[axis]`` becomes a tensor
-    that XLA may refuse as an operand to a shape-consuming op.
+    On the TensorFlow backend this is exactly ``keras.ops.shape(x)[axis]`` --
+    MEASURED, see the D-032 anchor above: ``keras.ops.shape`` already yields a
+    Python ``int`` per statically known axis, eagerly and under tracing alike.
+    The explicit static branch is therefore a **statement of intent, not an
+    optimisation and not an XLA requirement**; it exists so the two chunking
+    layers ask for a length in one named way.
+
+    What the callers rely on, and what is guarded, is the RESULT: a statically
+    known axis is a Python ``int`` (so ``pad_permutation_to_width``'s ``width``
+    can be a compile-time constant and the traced graph keeps a readable inner
+    length), and an unknown one is whatever the backend hands back for it.
 
     :param x: Any tensor.
     :type x: keras.KerasTensor
     :param axis: Axis index; negative indices are allowed.
     :type axis: int
-    :return: ``int`` when the axis is static, otherwise a scalar tensor.
+    :return: ``int`` when the axis is static; otherwise whatever the backend
+        reports for that axis -- a scalar tensor under tracing, and ``None``
+        for a purely symbolic ``KerasTensor``.
     :rtype: int or keras.KerasTensor
     """
     static = x.shape[axis]

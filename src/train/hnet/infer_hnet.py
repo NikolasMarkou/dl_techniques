@@ -243,6 +243,25 @@ def generate_bytes(
         raise ValueError("prompt_ids is empty; there is nothing to condition on")
 
     produced: List[int] = []
+    # DECISION plan-2026-09-09T042752-6d66ac56/D-032: the two index expressions
+    # below are the autoregressive contract, and BOTH were silently unguarded
+    # until review pass 2 measured it.
+    #   * `context[-context_bytes:]` keeps the TAIL. Do NOT write
+    #     `context[:context_bytes]`: it keeps the head, so the window FREEZES
+    #     the moment the cap is reached and generation stops conditioning on
+    #     the bytes it just produced. MEASURED: that spelling left 219 tests
+    #     green (mutation S-8), because the only guard asserted the window's
+    #     SHAPE, which head slicing reproduces exactly.
+    #   * `[0, -1, :]` reads the LAST position's logits, which is the only row
+    #     whose prediction is not already known -- `pack_byte_windows` trains
+    #     position t to predict byte t+1 (`datasets/byte_lm.py`). Do NOT write
+    #     `[0, 0, :]`. MEASURED: also 219 green (mutation S-6), and the two
+    #     hand invocations D-031 offers as evidence CANNOT tell the two apart,
+    #     because the only checkpoint that exists emits 0x20 from every
+    #     position. The discriminating guards are
+    #     `test_inference.py::TestTheSamplerReadsTheLastPosition` (a
+    #     position-DEPENDENT stub) and `::TestContextBytesKeepsTheTail` (window
+    #     CONTENT, not shape). Rationale: decisions.md D-032.
     for _ in range(max_new_bytes):
         window = context if context_bytes is None else context[-context_bytes:]
         batch = np.asarray([window], dtype="int32")
