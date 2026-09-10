@@ -105,8 +105,36 @@ correspondence lattice, which is already in the backward direction. `load_geomet
 1.06 s and there are only 4,032 distinct geometries behind the 20,000 renders, so geometry is
 memoized by `geom_name`: a full pass pays 4,032 densifications (~1.2 h) instead of 20,000 (~6 h).
 
-The staging script (`prepare_doc_scanner_data.py`) is a later step; today the gate names the
-27.5 GB download and points at `--data-source synthetic` as the alternative that needs none.
+### Staging the corpus: `prepare_doc_scanner_data.py`
+
+```bash
+python -m train.doc_scanner.prepare_doc_scanner_data --dry-run   # say what it would do
+python -m train.doc_scanner.prepare_doc_scanner_data             # 27.5 GB, resumable
+```
+
+It writes exactly one directory, `<root>/doc_scanner/uvdoc/`, holding `UVDoc_final.zip` and its
+`UVDoc_final.zip.ok` marker. **Nothing is extracted** — `UVDocSource` reads members straight out
+of the zip, and half the archive's 182,492 members are `__MACOSX/` resource forks.
+
+The path it writes is *derived* from `common.DEFAULT_UVDOC_ROOT` rather than typed again, so the
+script cannot fill a directory the trainer does not read (D-047).
+
+Four properties, each with a guard in `tests/test_train/test_doc_scanner/test_prepare_data.py`:
+
+* **Idempotent** — a second run makes zero HTTP requests and writes nothing. Measured against the
+  real staged archive: `already-staged`, 182,492 members, size and mtime unchanged.
+* **Resumable** — an interruption leaves `UVDoc_final.zip.part`, which the next run continues with
+  `Range: bytes=<n>-`. A host that answers `200` to a ranged GET restarts rather than concatenates.
+* **Complete or absent, never in between** — completeness is proven by decoding and CRC-checking
+  every member, then renaming `.part` and writing `.ok` **last**. A full-length body with one
+  flipped byte is refused and leaves no `.zip`: its central directory still lists every member, so
+  a size or `infolist()` check would call it staged (D-048).
+* **Refuses rather than fills the volume** — `--min-free-gb` (default 100) is checked before the
+  URL is even verified.
+
+If it is not staged, `require_staged_uvdoc` raises the trainers' own `MissingTrainingDataError`
+naming what is missing (`.part` present means *interrupted*, which re-running resumes) and points
+at `--data-source synthetic` as the alternative that needs no download.
 
 ### Supervision
 
