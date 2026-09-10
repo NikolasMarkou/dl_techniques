@@ -74,7 +74,14 @@ import keras
 
 from dl_techniques.layers.spatial_layer import interpolate_grid
 
-from .components import SPATIAL_DIVISOR
+# `CONVEX_NEIGHBOURS` (the 3x3 = 9 neighbourhood of `model.py:58`'s
+# `F.unfold(..., [3, 3], padding=1)`) is DEFINED in `components.py` alongside
+# every other constant of this port, and re-exported here because it is part of
+# this module's contract: it names the axis `convex_upsample`'s mask softmaxes
+# over. It moved there when the update block's mask head needed
+# `SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS` -- see the anchor at its definition
+# site for why importing it the other way would have closed an import cycle.
+from .components import CONVEX_NEIGHBOURS, SPATIAL_DIVISOR
 
 # ---------------------------------------------------------------------
 
@@ -190,15 +197,6 @@ def sample_at_pixel_coords(
     return interpolate_grid(coords=coords_hw, grid=fmap, order=1)
 
 # ---------------------------------------------------------------------
-
-# The size of the convex-upsample neighbourhood: a 3x3 window, so 9 candidate
-# source pixels per destination sub-pixel. This is the ONLY place the 9 is
-# written down. It is structural (upstream ``model.py:58``'s ``F.unfold(...,
-# [3, 3], padding=1)``), not a tunable width, which is why it is a module
-# constant here rather than a `_VARIANT_SPEC` row -- but the update block's mask
-# head must emit `SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS` (= 576) channels and
-# derives that count from this name rather than restating it.
-CONVEX_NEIGHBOURS: int = 9
 
 # ---------------------------------------------------------------------
 

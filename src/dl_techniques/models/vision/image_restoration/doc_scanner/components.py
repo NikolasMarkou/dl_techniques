@@ -114,6 +114,42 @@ SEG_MASK_THRESHOLD: float = 0.5
 BM_CALIBRATION_DIVISOR: float = 286.8
 BM_CALIBRATION_SCALE: float = 0.99
 
+# The width of a coordinate/flow field: one x channel and one y channel.
+# `model.py:26-28` stacks exactly two coordinate planes, `update.py:69` reads a
+# 2-channel flow into the motion encoder's flow branch, and `update.py:10`
+# emits 2 channels from the flow head. It is structural, not a tunable width,
+# so it is a module constant rather than a `_VARIANT_SPEC` row.
+FLOW_CHANNELS: int = 2
+
+# DECISION plan-2026-09-10T065432-05fcb6dd/D-015: the size of the convex-upsample
+# neighbourhood -- a 3x3 window, so 9 candidate source pixels per destination
+# sub-pixel (`model.py:58`'s `F.unfold(..., [3, 3], padding=1)`). It is DEFINED
+# here, in the constants module, and imported by `warp.py`; do NOT move it back
+# to `warp.py`, where step 3 first put it. The import graph runs
+# `warp.py -> components.py` (warp already reads `SPATIAL_DIVISOR` from here),
+# so defining it in `warp.py` and importing it here for the mask head's
+# `SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS` would close an import CYCLE whose
+# failure mode depends on which module is imported first -- i.e. it works from
+# the tests and breaks from a different entry point. `warp.py` re-exports the
+# name, so `from ...warp import CONVEX_NEIGHBOURS` keeps working unchanged.
+# See decisions.md D-015.
+CONVEX_NEIGHBOURS: int = 9
+
+# The scalar the update block applies to its mask head's output before handing
+# it to `convex_upsample`: `update.py:104`, `mask = .25 * self.mask(net)`.
+#
+# DECISION plan-2026-09-10T065432-05fcb6dd/D-016: this belongs to the CALL SITE,
+# not to the mask head and not to `convex_upsample`. Upstream applies it in
+# `BasicUpdateBlock.forward`, strictly between the head and the upsample, and
+# `convex_upsample` is documented and guarded as taking RAW logits
+# (`TestConvexUpsampleTakesRawLogits`). Do NOT fold it into the head's final
+# convolution and do NOT re-apply it downstream: the mask is softmaxed over the
+# 9-neighbour axis, so this factor is a softmax TEMPERATURE (0.25 flattens the
+# distribution 4x). Dropping it or applying it twice changes every weight the
+# upsample produces, is invisible to every shape, dtype and finiteness test, and
+# leaves a model that still trains. See decisions.md D-016.
+MASK_LOGIT_SCALE: float = 0.25
+
 # ---------------------------------------------------------------------
 
 
@@ -147,15 +183,88 @@ _VARIANT_SPEC: Dict[str, Dict[str, Any]] = {
         # `extractor.py:98-101`: `in_planes = 80`, then `_make_layer(80,
         # stride=1)`, `_make_layer(160, stride=2)`, `_make_layer(240, stride=2)`.
         "encoder_stage_channels": (80, 160, 240),
+        # --- the update block's internal widths -------------------------
+        # `update.py:67-68`: the warped-feature branch is `Conv2d(320, 240, 1)`
+        # then `Conv2d(240, 160, 3)`. Its INPUT 320 is `fnet_output_dim` and is
+        # inferred from the tensor, not declared. 240 and 160 are RAFT-lineage
+        # literals: 240 coincides with the encoder's last stage width and 160
+        # with `hidden_dim`, but upstream states no such relationship, so they
+        # are transcribed as their own entries rather than "derived" from a
+        # coincidence. A derivation nobody wrote down is a fabrication.
+        "motion_corr_hidden": 240,
+        "motion_corr_out": 160,
+        # `update.py:69-70`: the flow branch is `Conv2d(2, 160, 7)` then
+        # `Conv2d(160, 80, 3)`. Same reading: not derived, transcribed.
+        "motion_flow_hidden": 160,
+        "motion_flow_out": 80,
+        # `update.py:89`: `FlowHead(hidden_dim, hidden_dim=320)` -- the CALL
+        # SITE. NOT `update.py:7`'s `hidden_dim=256` constructor default, which
+        # no call site reaches; that is exactly the D-006 dead-default trap, and
+        # a 256-wide flow head passes every shape test this port has.
+        "flow_head_hidden": 320,
+        # `update.py:92`: `nn.Conv2d(hidden_dim, 288, 3, padding=1)`. A genuine
+        # upstream literal with no derivation. It is NOT the 288 training
+        # resolution; the collision is a coincidence and must not be turned into
+        # a link between a channel count and an image size.
+        "mask_head_hidden": 288,
     },
 }
 
-# The motion encoder's, flow head's and mask head's internal widths
-# (`update.py:66-70`, `:89`, `:91-94`) are DERIVED from the row above rather
-# than independent -- e.g. the motion encoder's 158 is `hidden_dim - 2`, and the
-# mask head's 576 is `SPATIAL_DIVISOR ** 2 * 9`. They are added to this table by
-# the step that builds those blocks, expressed as derivations, so that no width
-# literal ever appears at a construction site.
+
+def _derived_update_block_widths(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Widths that are consequences of the row above, not independent choices.
+
+    Kept as a derivation rather than three more transcribed literals so that
+    changing ``hidden_dim`` in one place moves every dependent width with it.
+
+    :param spec: One ``_VARIANT_SPEC`` row, already carrying its base widths.
+    :type spec: Dict[str, Any]
+    :return: The derived widths, ready to merge into that row.
+    :rtype: Dict[str, Any]
+    :raises ValueError: If the row's ``gru_input_dim`` is not what the update
+        block will actually feed the GRU.
+    """
+    hidden_dim = spec["hidden_dim"]
+    context_dim = spec["context_dim"]
+    gru_input_dim = spec["gru_input_dim"]
+
+    # THE CONTEXT-WIDTH COMPOSITION. `update.py:98` builds the GRU's input as
+    # `cat([inp, motion_features])` at the CALL SITE -- the GRU does not
+    # assemble it and cannot see either half. `update.py:88` then declares that
+    # width as `160 + 160`. If either half drifts, the GRU's declared input
+    # width silently disagrees with what it receives, and the failure surfaces
+    # (if at all) as a confusing convolution build error far from the cause.
+    # Checked here, at import time, once.
+    if gru_input_dim != context_dim + hidden_dim:
+        raise ValueError(
+            f"gru_input_dim ({gru_input_dim}) must equal context_dim "
+            f"({context_dim}) + the motion encoder's output width "
+            f"({hidden_dim}); the update block assembles the GRU's input as "
+            f"concat([inp, motion_features]) (update.py:98) and update.py:88 "
+            f"declares that sum as 160 + 160."
+        )
+
+    return {
+        # `update.py:81`: the motion encoder returns `cat([out, flow])`, and
+        # `update.py:88` counts that as the second 160 of `input_dim=160+160`.
+        #
+        # The fusion convolution's own width -- `update.py:71`'s
+        # `Conv2d(160+80, 160-2, ...)`, i.e. 158 -- is deliberately NOT a row
+        # here. It is `output_dim - FLOW_CHANNELS`, and
+        # `DocScannerMotionEncoder` derives it from the `output_dim` it is
+        # given. Stating it in both places would be a rule kept in lockstep by
+        # hand, which is a defect waiting to happen rather than a single source.
+        "motion_output_dim": hidden_dim,
+        # `update.py:94`: `nn.Conv2d(288, 64*9, 1)`. The 64 is
+        # `SPATIAL_DIVISOR ** 2` (one weight per destination sub-pixel of the 8x
+        # upsample) and the 9 is `CONVEX_NEIGHBOURS`. Neither 9 nor 576 is
+        # restated here.
+        "mask_head_output_channels": SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS,
+    }
+
+
+for _variant_row in _VARIANT_SPEC.values():
+    _variant_row.update(_derived_update_block_widths(_variant_row))
 
 # ---------------------------------------------------------------------
 # The instance-norm stand-in, and the initializer the reference uses.
@@ -1011,6 +1120,799 @@ class SepConvGRU(keras.layers.Layer):
         return config
 
 
+# ---------------------------------------------------------------------
+# The update block and its two heads.
+# ---------------------------------------------------------------------
+
+
+# DECISION plan-2026-09-10T065432-05fcb6dd/D-016: the tail of this layer's output
+# is the RAW flow, re-appended unchanged -- `cat([out, flow])`, `update.py:81`.
+# Do NOT re-append the flow BRANCH (`flo`, the 80-channel `convf2` output): that
+# mutation is shape-breaking here and so is not the live hazard. The live hazard
+# is a SCALED or otherwise transformed flow -- normalising it, dividing it by the
+# spatial size, or re-using `convf1`'s input after an in-place edit. Any of those
+# keeps the width at exactly `motion_output_dim` and stays green under every
+# shape, dtype, gradient and serialization test, while removing the update
+# block's only direct, un-convolved view of where the coordinate field currently
+# is. See decisions.md D-016.
+@register_dl_technique("dl_techniques.models.doc_scanner.components")
+class DocScannerMotionEncoder(keras.layers.Layer):
+    """The update block's input encoder (``update.py:64-81``).
+
+    Two independent convolutional branches -- one over the resampled features,
+    one over the current flow -- concatenated, fused by a single convolution,
+    and finally concatenated with the RAW flow again:
+
+    .. code-block:: text
+
+        warped_features [B, H, W, 320]      flow [B, H, W, 2]
+              |                                   |
+        Conv2D 1x1 -> 240 -> ReLU           Conv2D 7x7 -> 160 -> ReLU
+        Conv2D 3x3 -> 160 -> ReLU           Conv2D 3x3 ->  80 -> ReLU
+              \\_____________ concat -> 240 _______/
+                                |
+                        Conv2D 3x3 -> 158 -> ReLU
+                                |
+                    concat([out, flow]) -> [B, H, W, 160]
+
+    **There is no correlation volume.** Upstream names this layer's second
+    parameter ``corr`` and the RAFT ancestry makes that read like a 4D cost
+    volume, but ``model.py:91`` passes ``warpfea`` -- a bilinear resample of the
+    encoder's own ``fmap1`` at the current coordinates (F-01, plan invariant
+    #2). Nothing in this port constructs a cost volume, so the parameter is
+    named ``warped_features`` here rather than transcribing a misnomer that
+    would invite one to be added.
+
+    Initialization follows :class:`SepConvGRU`: ``extractor.py:106-108``
+    re-initializes the ENCODER's convolutions and ``update.py`` has no
+    equivalent, so Keras' ``glorot_uniform`` default is left in place rather
+    than inventing an initializer the reference never states.
+
+    :param output_dim: Width of the returned tensor, i.e. the second half of
+        the GRU's input width. ``_VARIANT_SPEC[...]["motion_output_dim"]``.
+        The fusion convolution emits ``output_dim - FLOW_CHANNELS`` channels so
+        that re-appending the flow lands back on exactly this number.
+    :type output_dim: int
+    :param corr_hidden: Width of the warped-feature branch's 1x1 convolution
+        (``update.py:67``).
+    :type corr_hidden: int
+    :param corr_out: Width of the warped-feature branch's 3x3 convolution
+        (``update.py:68``).
+    :type corr_out: int
+    :param flow_hidden: Width of the flow branch's 7x7 convolution
+        (``update.py:69``).
+    :type flow_hidden: int
+    :param flow_out: Width of the flow branch's 3x3 convolution
+        (``update.py:70``).
+    :type flow_out: int
+    :param kwargs: Forwarded to ``keras.layers.Layer``.
+    :type kwargs: Any
+    :raises ValueError: If any width is not positive, or if ``output_dim`` does
+        not exceed :data:`FLOW_CHANNELS` (the fusion convolution would then have
+        a non-positive width).
+
+    Example:
+
+    .. code-block:: python
+
+        spec = _VARIANT_SPEC["docscanner-l"]
+        encoder = DocScannerMotionEncoder(
+            output_dim=spec["motion_output_dim"],
+            corr_hidden=spec["motion_corr_hidden"],
+            corr_out=spec["motion_corr_out"],
+            flow_hidden=spec["motion_flow_hidden"],
+            flow_out=spec["motion_flow_out"],
+        )
+        motion = encoder([flow, warped_features])   # (B, H, W, 160)
+    """
+
+    def __init__(
+            self,
+            output_dim: int,
+            corr_hidden: int,
+            corr_out: int,
+            flow_hidden: int,
+            flow_out: int,
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        for label, value in (
+                ("output_dim", output_dim),
+                ("corr_hidden", corr_hidden),
+                ("corr_out", corr_out),
+                ("flow_hidden", flow_hidden),
+                ("flow_out", flow_out),
+        ):
+            if value <= 0:
+                raise ValueError(f"{label} must be positive, got {value}")
+
+        if output_dim <= FLOW_CHANNELS:
+            raise ValueError(
+                f"output_dim ({output_dim}) must exceed FLOW_CHANNELS "
+                f"({FLOW_CHANNELS}): the fusion convolution emits "
+                f"output_dim - FLOW_CHANNELS channels (update.py:71's "
+                f"`160-2`) and the raw flow is concatenated back on."
+            )
+
+        self.output_dim = output_dim
+        self.corr_hidden = corr_hidden
+        self.corr_out = corr_out
+        self.flow_hidden = flow_hidden
+        self.flow_out = flow_out
+
+        # `update.py:71`: `Conv2d(160+80, 160-2, ...)`. Derived, never written.
+        self.fusion_channels = output_dim - FLOW_CHANNELS
+
+        # All five sub-layers are created UNCONDITIONALLY; none is behind a flag
+        # and none is created inside `call`. Every convolution below is STRIDE 1
+        # with an odd kernel, so Keras `"same"` is torch's symmetric
+        # `padding=k//2` exactly -- D-012's stride-2 asymmetry cannot arise
+        # here. The 1x1 needs no padding at all.
+        self.convc1 = keras.layers.Conv2D(
+            filters=corr_hidden,
+            kernel_size=1,
+            strides=1,
+            padding="valid",
+            use_bias=True,
+            name="convc1",
+        )
+        self.convc2 = keras.layers.Conv2D(
+            filters=corr_out,
+            kernel_size=3,
+            strides=1,
+            padding="same",
+            use_bias=True,
+            name="convc2",
+        )
+        self.convf1 = keras.layers.Conv2D(
+            filters=flow_hidden,
+            kernel_size=7,
+            strides=1,
+            padding="same",
+            use_bias=True,
+            name="convf1",
+        )
+        self.convf2 = keras.layers.Conv2D(
+            filters=flow_out,
+            kernel_size=3,
+            strides=1,
+            padding="same",
+            use_bias=True,
+            name="convf2",
+        )
+        self.conv = keras.layers.Conv2D(
+            filters=self.fusion_channels,
+            kernel_size=3,
+            strides=1,
+            padding="same",
+            use_bias=True,
+            name="conv",
+        )
+
+    def build(self, input_shape: Sequence[Tuple[Optional[int], ...]]) -> None:
+        """Build both branches and the fusion convolution.
+
+        :param input_shape: A two-element sequence
+            ``[flow_shape, warped_features_shape]``, each
+            ``(batch, height, width, channels)`` -- in that order, matching
+            ``update.py:73``'s ``forward(self, flow, corr)``.
+        :type input_shape: Sequence[tuple]
+        :raises ValueError: If two shapes were not supplied, if either is not
+            rank 4, or if the flow does not have :data:`FLOW_CHANNELS` channels.
+        """
+        if self.built:
+            return
+
+        if len(input_shape) != 2:
+            raise ValueError(
+                f"DocScannerMotionEncoder is called on a two-element sequence "
+                f"[flow, warped_features]; got {len(input_shape)} element(s): "
+                f"{input_shape}"
+            )
+
+        flow_shape, warped_shape = (tuple(s) for s in input_shape)
+
+        for label, shape in (
+                ("flow", flow_shape), ("warped_features", warped_shape)):
+            if len(shape) != 4:
+                raise ValueError(
+                    f"Expected a 4D {label} shape (batch, height, width, "
+                    f"channels), got {len(shape)}D: {shape}"
+                )
+
+        if flow_shape[-1] is not None and flow_shape[-1] != FLOW_CHANNELS:
+            raise ValueError(
+                f"flow must have exactly {FLOW_CHANNELS} channels (x, y), got "
+                f"{flow_shape[-1]}. Its width is what makes the fusion "
+                f"convolution's output_dim - {FLOW_CHANNELS} land back on "
+                f"output_dim after the raw flow is concatenated on."
+            )
+
+        self.convc1.build(warped_shape)
+        corr_shape = self.convc1.compute_output_shape(warped_shape)
+        self.convc2.build(corr_shape)
+        corr_shape = self.convc2.compute_output_shape(corr_shape)
+
+        self.convf1.build(flow_shape)
+        flo_shape = self.convf1.compute_output_shape(flow_shape)
+        self.convf2.build(flo_shape)
+        flo_shape = self.convf2.compute_output_shape(flo_shape)
+
+        fused_shape = (
+            corr_shape[0],
+            corr_shape[1],
+            corr_shape[2],
+            corr_shape[-1] + flo_shape[-1],
+        )
+        self.conv.build(fused_shape)
+
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: Sequence[keras.KerasTensor],
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Encode the resampled features and the current flow jointly.
+
+        :param inputs: ``[flow, warped_features]``. ``flow`` is
+            ``(batch, height, width, FLOW_CHANNELS)``; ``warped_features`` is
+            ``(batch, height, width, fnet_output_dim)`` and is a RESAMPLE of the
+            feature map, not a correlation volume.
+        :type inputs: Sequence[keras.KerasTensor]
+        :param training: Unused -- this layer holds no training-dependent
+            sub-layer -- and accepted only so Keras may forward it.
+        :type training: Optional[bool]
+        :return: ``(batch, height, width, output_dim)``, whose LAST
+            :data:`FLOW_CHANNELS` channels are ``flow`` itself, unchanged.
+        :rtype: keras.KerasTensor
+        """
+        flow, warped_features = inputs
+
+        corr = keras.ops.relu(self.convc1(warped_features))
+        corr = keras.ops.relu(self.convc2(corr))
+
+        flo = keras.ops.relu(self.convf1(flow))
+        flo = keras.ops.relu(self.convf2(flo))
+
+        fused = keras.ops.relu(
+            self.conv(keras.ops.concatenate([corr, flo], axis=-1))
+        )
+
+        # The RAW flow, not `flo` and not a rescaling of it (see the anchor
+        # above the class). Guarded by
+        # `TestTheMotionEncoderTailIsTheRawFlow`.
+        return keras.ops.concatenate([fused, flow], axis=-1)
+
+    def compute_output_shape(
+            self,
+            input_shape: Sequence[Tuple[Optional[int], ...]]
+    ) -> Tuple[Optional[int], ...]:
+        """Spatial axes are unchanged (every convolution is stride 1).
+
+        :param input_shape: ``[flow_shape, warped_features_shape]``.
+        :type input_shape: Sequence[tuple]
+        :return: The output shape tuple.
+        :rtype: tuple
+        """
+        flow_shape = tuple(input_shape[0])
+        return (flow_shape[0], flow_shape[1], flow_shape[2], self.output_dim)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return every constructor argument.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            "output_dim": self.output_dim,
+            "corr_hidden": self.corr_hidden,
+            "corr_out": self.corr_out,
+            "flow_hidden": self.flow_hidden,
+            "flow_out": self.flow_out,
+        })
+        return config
+
+
+# DECISION plan-2026-09-10T065432-05fcb6dd/D-016: this head has NO output
+# activation (`update.py:14`, `conv2(relu(conv1(x)))` -- the ReLU is between the
+# two convolutions, never after the second). Do NOT add one. The value it emits
+# is a residual added to a coordinate field (`model.py:88`,
+# `coords1 = coords1 + delta_flow`), so it MUST be able to be negative: a page
+# corner that has to move left or up cannot be reached otherwise. A ReLU or a
+# tanh here leaves a model that trains, produces finite output of exactly the
+# right shape, and can only ever push coordinates one way. See decisions.md
+# D-016.
+@register_dl_technique("dl_techniques.models.doc_scanner.components")
+class FlowHead(keras.layers.Layer):
+    """The residual-flow head (``update.py:6-14``).
+
+    ``Conv2D 3x3 -> hidden_dim -> ReLU -> Conv2D 3x3 -> FLOW_CHANNELS``, raw.
+
+    ``hidden_dim`` here is the MIDDLE width, not the input width -- upstream's
+    signature is ``FlowHead(input_dim, hidden_dim)`` and it is easy to read the
+    two the wrong way round. This port infers the input width from the tensor,
+    so the one declared width is unambiguous. Its value comes from
+    ``update.py:89``'s call site, ``FlowHead(hidden_dim, hidden_dim=320)``, and
+    NOT from ``update.py:7``'s dead ``hidden_dim=256`` default (D-006).
+
+    :param hidden_dim: Width of the intermediate convolution.
+        ``_VARIANT_SPEC[...]["flow_head_hidden"]``.
+    :type hidden_dim: int
+    :param kwargs: Forwarded to ``keras.layers.Layer``.
+    :type kwargs: Any
+    :raises ValueError: If ``hidden_dim`` is not positive.
+
+    Example:
+
+    .. code-block:: python
+
+        head = FlowHead(hidden_dim=_VARIANT_SPEC["docscanner-l"]["flow_head_hidden"])
+        delta_flow = head(net)   # (B, H, W, 2), unbounded, signed
+    """
+
+    def __init__(self, hidden_dim: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+
+        self.hidden_dim = hidden_dim
+
+        # Both stride 1 with odd kernels: `"same"` is torch's `padding=1`.
+        self.conv1 = keras.layers.Conv2D(
+            filters=hidden_dim,
+            kernel_size=3,
+            strides=1,
+            padding="same",
+            use_bias=True,
+            name="conv1",
+        )
+        self.conv2 = keras.layers.Conv2D(
+            filters=FLOW_CHANNELS,
+            kernel_size=3,
+            strides=1,
+            padding="same",
+            use_bias=True,
+            name="conv2",
+        )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build both convolutions explicitly.
+
+        :param input_shape: ``(batch, height, width, channels)``.
+        :type input_shape: tuple
+        :raises ValueError: If the input is not rank 4.
+        """
+        if self.built:
+            return
+
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input shape (batch, height, width, channels), "
+                f"got {len(input_shape)}D: {input_shape}"
+            )
+
+        shape = tuple(input_shape)
+        self.conv1.build(shape)
+        self.conv2.build(self.conv1.compute_output_shape(shape))
+
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Emit the raw, signed, unbounded coordinate residual.
+
+        :param inputs: ``(batch, height, width, channels)`` -- the GRU's hidden
+            state.
+        :type inputs: keras.KerasTensor
+        :param training: Unused; accepted only so Keras may forward it.
+        :type training: Optional[bool]
+        :return: ``(batch, height, width, FLOW_CHANNELS)``. NOT activated.
+        :rtype: keras.KerasTensor
+        """
+        return self.conv2(keras.ops.relu(self.conv1(inputs)))
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Spatial axes unchanged; the channel axis becomes ``FLOW_CHANNELS``.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: The output shape tuple.
+        :rtype: tuple
+        """
+        batch, height, width, _ = input_shape
+        return (batch, height, width, FLOW_CHANNELS)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return every constructor argument.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({"hidden_dim": self.hidden_dim})
+        return config
+
+
+@register_dl_technique("dl_techniques.models.doc_scanner.components")
+class DocScannerUpdateBlock(keras.layers.Layer):
+    """One refinement iteration (``update.py:84-106``).
+
+    .. code-block:: text
+
+        net, inp, warped_features, flow
+              |
+        motion_features = motion_encoder([flow, warped_features])   -> 160
+        gru_input       = concat([inp, motion_features])            -> 320
+        net             = gru([net, gru_input])                     -> 160
+              |
+        delta_flow = flow_head(net)                    -> 2   (raw, signed)
+        mask       = MASK_LOGIT_SCALE * mask_logits(net)  -> 576 (raw logits)
+              |
+        return (net, mask, delta_flow)
+
+    Three things here are silent when wrong -- no shape, dtype, finiteness or
+    serialization test can see any of them -- and each has a guard named beside
+    it:
+
+    1. **The GRU's input is ``concat([inp, motion_features])``, context FIRST**
+       (``update.py:98``). Both halves are ``context_dim == motion_output_dim``
+       wide at the shipped variant, so swapping them is perfectly shape-legal
+       and merely permutes which learned filters see which half. Guarded by
+       ``TestTheGRUInputIsContextThenMotion``.
+    2. **The ``0.25`` is applied HERE, exactly once** (``update.py:104``), not
+       inside the mask head and not inside ``convex_upsample`` -- see the
+       :data:`MASK_LOGIT_SCALE` anchor. Guarded by
+       ``TestTheMaskScaleIsAppliedExactlyOnce``.
+    3. **The return order is ``(net, mask, delta_flow)``** (``update.py:106``).
+       All three are float tensors of the same spatial size; at the shipped
+       widths their channel counts differ, but a caller that unpacks them in the
+       wrong order gets a coherent-looking model either way. Guarded BY VALUE,
+       not by shape, in ``TestTheReturnOrderIsNetMaskDeltaFlow``.
+
+    :param hidden_dim: Width of the recurrent state ``net``, and the flow head's
+        input. ``_VARIANT_SPEC[...]["hidden_dim"]``.
+    :type hidden_dim: int
+    :param context_dim: Width of the per-iteration context ``inp``.
+    :type context_dim: int
+    :param gru_input_dim: Width the GRU is built for. Must equal
+        ``context_dim + motion_output_dim``; see the composition check below.
+    :type gru_input_dim: int
+    :param motion_output_dim: Width the motion encoder returns.
+    :type motion_output_dim: int
+    :param motion_corr_hidden: ``update.py:67``.
+    :type motion_corr_hidden: int
+    :param motion_corr_out: ``update.py:68``.
+    :type motion_corr_out: int
+    :param motion_flow_hidden: ``update.py:69``.
+    :type motion_flow_hidden: int
+    :param motion_flow_out: ``update.py:70``.
+    :type motion_flow_out: int
+    :param flow_head_hidden: The flow head's middle width (``update.py:89``).
+    :type flow_head_hidden: int
+    :param mask_hidden: The mask head's middle width (``update.py:92``).
+    :type mask_hidden: int
+    :param kwargs: Forwarded to ``keras.layers.Layer``.
+    :type kwargs: Any
+    :raises ValueError: If any width is not positive, or if ``gru_input_dim``
+        does not equal ``context_dim + motion_output_dim``.
+
+    Example:
+
+    .. code-block:: python
+
+        spec = _VARIANT_SPEC["docscanner-l"]
+        block = DocScannerUpdateBlock(
+            hidden_dim=spec["hidden_dim"],
+            context_dim=spec["context_dim"],
+            gru_input_dim=spec["gru_input_dim"],
+            motion_output_dim=spec["motion_output_dim"],
+            motion_corr_hidden=spec["motion_corr_hidden"],
+            motion_corr_out=spec["motion_corr_out"],
+            motion_flow_hidden=spec["motion_flow_hidden"],
+            motion_flow_out=spec["motion_flow_out"],
+            flow_head_hidden=spec["flow_head_hidden"],
+            mask_hidden=spec["mask_head_hidden"],
+        )
+        net, mask, delta_flow = block([net, inp, warped_features, flow])
+    """
+
+    def __init__(
+            self,
+            hidden_dim: int,
+            context_dim: int,
+            gru_input_dim: int,
+            motion_output_dim: int,
+            motion_corr_hidden: int,
+            motion_corr_out: int,
+            motion_flow_hidden: int,
+            motion_flow_out: int,
+            flow_head_hidden: int,
+            mask_hidden: int,
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        for label, value in (
+                ("hidden_dim", hidden_dim),
+                ("context_dim", context_dim),
+                ("gru_input_dim", gru_input_dim),
+                ("motion_output_dim", motion_output_dim),
+                ("motion_corr_hidden", motion_corr_hidden),
+                ("motion_corr_out", motion_corr_out),
+                ("motion_flow_hidden", motion_flow_hidden),
+                ("motion_flow_out", motion_flow_out),
+                ("flow_head_hidden", flow_head_hidden),
+                ("mask_hidden", mask_hidden),
+        ):
+            if value <= 0:
+                raise ValueError(f"{label} must be positive, got {value}")
+
+        # THE CONTEXT-WIDTH COMPOSITION, asserted at the site that performs it.
+        # `update.py:98` assembles the GRU's input as `cat([inp,
+        # motion_features])`; `update.py:88` separately declares the GRU's
+        # `input_dim` as `160 + 160`. NOTHING inside the GRU can see either
+        # half, so if one drifts the two disagree silently until a convolution
+        # somewhere else fails to build. `_derived_update_block_widths` makes
+        # the same check against `_VARIANT_SPEC`; this one also covers a caller
+        # that passes widths by hand.
+        if gru_input_dim != context_dim + motion_output_dim:
+            raise ValueError(
+                f"gru_input_dim ({gru_input_dim}) must equal context_dim "
+                f"({context_dim}) + motion_output_dim ({motion_output_dim}) = "
+                f"{context_dim + motion_output_dim}: this block builds the "
+                f"GRU's input itself, as concat([inp, motion_features]) "
+                f"(update.py:98), and the GRU cannot see either half."
+            )
+
+        self.hidden_dim = hidden_dim
+        self.context_dim = context_dim
+        self.gru_input_dim = gru_input_dim
+        self.motion_output_dim = motion_output_dim
+        self.motion_corr_hidden = motion_corr_hidden
+        self.motion_corr_out = motion_corr_out
+        self.motion_flow_hidden = motion_flow_hidden
+        self.motion_flow_out = motion_flow_out
+        self.flow_head_hidden = flow_head_hidden
+        self.mask_hidden = mask_hidden
+
+        # `update.py:94`: `Conv2d(288, 64*9, 1)`. Structural, so it is derived
+        # rather than exposed as a knob -- it is fixed by the upsample factor
+        # and the neighbourhood size, both of which are properties of
+        # `convex_upsample`, not of the variant.
+        self.mask_output_channels = SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS
+
+        # All sub-layers unconditional; none created in `call`.
+        self.motion_encoder = DocScannerMotionEncoder(
+            output_dim=motion_output_dim,
+            corr_hidden=motion_corr_hidden,
+            corr_out=motion_corr_out,
+            flow_hidden=motion_flow_hidden,
+            flow_out=motion_flow_out,
+            name="motion_encoder",
+        )
+        self.gru = SepConvGRU(
+            hidden_dim=hidden_dim,
+            input_dim=gru_input_dim,
+            name="gru",
+        )
+        self.flow_head = FlowHead(
+            hidden_dim=flow_head_hidden,
+            name="flow_head",
+        )
+
+        # The mask head is upstream's `nn.Sequential(Conv2d(160, 288, 3, pad=1),
+        # ReLU, Conv2d(288, 576, 1))` (`update.py:91-94`), written out as two
+        # named convolutions rather than a `keras.Sequential` so that `build()`
+        # can propagate shapes explicitly and so that `mask_logits` below has
+        # something to expose. It is NOT a separate registered class: it has one
+        # call site, and promoting it would be a Complexity-Budget charge with
+        # no payoff.
+        self.mask_conv1 = keras.layers.Conv2D(
+            filters=mask_hidden,
+            kernel_size=3,
+            strides=1,
+            padding="same",
+            use_bias=True,
+            name="mask_conv1",
+        )
+        self.mask_conv2 = keras.layers.Conv2D(
+            filters=self.mask_output_channels,
+            kernel_size=1,
+            strides=1,
+            padding="valid",
+            use_bias=True,
+            name="mask_conv2",
+        )
+
+    def mask_logits(self, net: keras.KerasTensor) -> keras.KerasTensor:
+        """The mask head's output, **UNSCALED**.
+
+        Interface contract, because this method has two callers -- :meth:`call`
+        and the guard that pins the scale factor:
+
+        * Parameter: ``net``, ``(batch, height, width, hidden_dim)``.
+        * Returns: ``(batch, height, width, SPATIAL_DIVISOR ** 2 *
+          CONVEX_NEIGHBOURS)``, i.e. 576 channels of raw logits with
+          :data:`MASK_LOGIT_SCALE` **not** applied.
+        * Failure mode: raises whatever Keras raises if this layer has not been
+          built, or if ``net``'s width differs from ``hidden_dim``.
+
+        :meth:`call` is the only place the ``0.25`` is applied; a caller that
+        wants the value the upsample consumes must multiply it in.
+
+        :param net: The GRU's hidden state.
+        :type net: keras.KerasTensor
+        :return: Raw, unscaled mask logits.
+        :rtype: keras.KerasTensor
+        """
+        return self.mask_conv2(keras.ops.relu(self.mask_conv1(net)))
+
+    def build(self, input_shape: Sequence[Tuple[Optional[int], ...]]) -> None:
+        """Build the motion encoder, the GRU and both heads explicitly.
+
+        :param input_shape: A four-element sequence
+            ``[net_shape, inp_shape, warped_features_shape, flow_shape]``,
+            matching ``update.py:96``'s ``forward(self, net, inp, corr, flow)``.
+        :type input_shape: Sequence[tuple]
+        :raises ValueError: If four shapes were not supplied, if any is not rank
+            4, or if ``net`` / ``inp`` disagree with the widths this block was
+            constructed for.
+        """
+        if self.built:
+            return
+
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"DocScannerUpdateBlock is called on a four-element sequence "
+                f"[net, inp, warped_features, flow]; got {len(input_shape)} "
+                f"element(s): {input_shape}"
+            )
+
+        net_shape, inp_shape, warped_shape, flow_shape = (
+            tuple(s) for s in input_shape
+        )
+
+        for label, shape in (
+                ("net", net_shape),
+                ("inp", inp_shape),
+                ("warped_features", warped_shape),
+                ("flow", flow_shape),
+        ):
+            if len(shape) != 4:
+                raise ValueError(
+                    f"Expected a 4D {label} shape (batch, height, width, "
+                    f"channels), got {len(shape)}D: {shape}"
+                )
+
+        if net_shape[-1] is not None and net_shape[-1] != self.hidden_dim:
+            raise ValueError(
+                f"net has {net_shape[-1]} channels but this update block was "
+                f"built for hidden_dim={self.hidden_dim}"
+            )
+        if inp_shape[-1] is not None and inp_shape[-1] != self.context_dim:
+            raise ValueError(
+                f"inp has {inp_shape[-1]} channels but this update block was "
+                f"built for context_dim={self.context_dim}. That width is one "
+                f"half of the GRU's input; the motion encoder supplies the "
+                f"other (update.py:98)."
+            )
+
+        self.motion_encoder.build([flow_shape, warped_shape])
+        motion_shape = self.motion_encoder.compute_output_shape(
+            [flow_shape, warped_shape]
+        )
+
+        gru_input_shape = (
+            net_shape[0],
+            net_shape[1],
+            net_shape[2],
+            self.context_dim + motion_shape[-1],
+        )
+        self.gru.build([net_shape, gru_input_shape])
+
+        self.flow_head.build(net_shape)
+
+        self.mask_conv1.build(net_shape)
+        self.mask_conv2.build(self.mask_conv1.compute_output_shape(net_shape))
+
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: Sequence[keras.KerasTensor],
+            training: Optional[bool] = None
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
+        """Run one refinement iteration.
+
+        :param inputs: ``[net, inp, warped_features, flow]``. ``net`` is the
+            recurrent state ``(B, H, W, hidden_dim)``; ``inp`` is the
+            per-iteration context ``(B, H, W, context_dim)``, constant across
+            iterations upstream; ``warped_features`` is the feature map
+            RESAMPLED at the current coordinates (not a correlation volume);
+            ``flow`` is the current coordinate residual
+            ``(B, H, W, FLOW_CHANNELS)``.
+        :type inputs: Sequence[keras.KerasTensor]
+        :param training: Forwarded to the sub-layers.
+        :type training: Optional[bool]
+        :return: ``(net, mask, delta_flow)`` -- in that order. ``net`` is the
+            updated state ``(B, H, W, hidden_dim)``; ``mask`` is
+            ``(B, H, W, 576)`` of ``MASK_LOGIT_SCALE``-scaled logits, ready for
+            ``convex_upsample``, which softmaxes them; ``delta_flow`` is the
+            raw signed residual ``(B, H, W, FLOW_CHANNELS)``.
+        :rtype: tuple
+        """
+        net, inp, warped_features, flow = inputs
+
+        motion_features = self.motion_encoder(
+            [flow, warped_features], training=training)
+
+        # Context FIRST, motion second (update.py:98). Both halves are the same
+        # width at the shipped variant, so a swap is shape-legal.
+        gru_input = keras.ops.concatenate([inp, motion_features], axis=-1)
+
+        net = self.gru([net, gru_input], training=training)
+
+        delta_flow = self.flow_head(net, training=training)
+
+        # The 0.25, applied HERE and exactly once -- see the MASK_LOGIT_SCALE
+        # anchor. `convex_upsample` takes it from here as raw logits and
+        # softmaxes them; a second application would flatten the softmax
+        # another 4x, and none of that is visible in a shape.
+        mask = MASK_LOGIT_SCALE * self.mask_logits(net)
+
+        return net, mask, delta_flow
+
+    def compute_output_shape(
+            self,
+            input_shape: Sequence[Tuple[Optional[int], ...]]
+    ) -> Tuple[Tuple[Optional[int], ...], ...]:
+        """Three shapes, in the same order :meth:`call` returns their tensors.
+
+        :param input_shape: ``[net_shape, inp_shape, warped_shape, flow_shape]``.
+        :type input_shape: Sequence[tuple]
+        :return: ``(net_shape, mask_shape, delta_flow_shape)``.
+        :rtype: tuple
+        """
+        net_shape = tuple(input_shape[0])
+        batch, height, width = net_shape[0], net_shape[1], net_shape[2]
+        return (
+            (batch, height, width, self.hidden_dim),
+            (batch, height, width, self.mask_output_channels),
+            (batch, height, width, FLOW_CHANNELS),
+        )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return every constructor argument.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            "hidden_dim": self.hidden_dim,
+            "context_dim": self.context_dim,
+            "gru_input_dim": self.gru_input_dim,
+            "motion_output_dim": self.motion_output_dim,
+            "motion_corr_hidden": self.motion_corr_hidden,
+            "motion_corr_out": self.motion_corr_out,
+            "motion_flow_hidden": self.motion_flow_hidden,
+            "motion_flow_out": self.motion_flow_out,
+            "flow_head_hidden": self.flow_head_hidden,
+            "mask_hidden": self.mask_hidden,
+        })
+        return config
+
+
 __all__: List[str] = [
     "INSTANCE_NORM_EPSILON",
     "SPATIAL_DIVISOR",
@@ -1024,4 +1926,10 @@ __all__: List[str] = [
     "SepConvGRU",
     "GRU_HORIZONTAL_KERNEL_SIZE",
     "GRU_VERTICAL_KERNEL_SIZE",
+    "FLOW_CHANNELS",
+    "CONVEX_NEIGHBOURS",
+    "MASK_LOGIT_SCALE",
+    "DocScannerMotionEncoder",
+    "FlowHead",
+    "DocScannerUpdateBlock",
 ]

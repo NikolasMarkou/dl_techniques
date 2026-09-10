@@ -1514,3 +1514,586 @@ class TestTheGRUTrainsAndRoundTrips:
         out = traced(tf.zeros((3, _PROBE_H, _PROBE_W, _TEST_HIDDEN)),
                      tf.zeros((3, _PROBE_H, _PROBE_W, _TEST_INPUT)))
         assert tuple(out.shape) == (3, _PROBE_H, _PROBE_W, _TEST_HIDDEN)
+
+
+# =====================================================================
+# The update block and its two heads: the motion encoder's raw-flow tail,
+# the flow head's ABSENT output activation, the 0.25 applied exactly once,
+# the context-then-motion concatenation, and the return ORDER.
+#
+# Every arm below is pointed at a defect that survives a shape test. The
+# fixtures are NON-SQUARE (H=4, W=7) and the stand-in widths are all
+# DISTINCT, so a swapped concatenation or a permuted return cannot hide
+# behind two equal numbers -- at the shipped variant `context_dim`,
+# `hidden_dim` and `motion_output_dim` are all 160, which is exactly the
+# condition that makes those mistakes shape-legal in production.
+# =====================================================================
+
+from dl_techniques.models.vision.image_restoration.doc_scanner.components import (  # noqa: E402
+    CONVEX_NEIGHBOURS,
+    FLOW_CHANNELS,
+    MASK_LOGIT_SCALE,
+    DocScannerMotionEncoder,
+    DocScannerUpdateBlock,
+    FlowHead,
+)
+
+# Stand-in widths for the value probes. Pairwise distinct on purpose.
+_UB_HIDDEN = 4          # the recurrent state `net`
+_UB_CONTEXT = 5         # `inp`
+_UB_MOTION_OUT = 6      # the motion encoder's output
+_UB_GRU_INPUT = _UB_CONTEXT + _UB_MOTION_OUT
+_UB_CORR_HIDDEN = 7
+_UB_CORR_OUT = 3
+_UB_FLOW_HIDDEN = 9
+_UB_FLOW_OUT = 8
+_UB_FLOW_HEAD_HIDDEN = 11
+_UB_MASK_HIDDEN = 10
+
+# Stands in for the encoder's `fnet_output_dim` (320). Nothing in the motion
+# encoder depends on the value -- `convc1` infers it -- so a small one is a
+# faithful stand-in rather than a weakening.
+_UB_WARPED_CHANNELS = 12
+
+_UB_B, _UB_H, _UB_W = 2, 4, 7
+
+# The shipped widths, read from the table rather than restated.
+_MOTION_OUTPUT_DIM = _SPEC["motion_output_dim"]
+_MOTION_CORR_HIDDEN = _SPEC["motion_corr_hidden"]
+_MOTION_CORR_OUT = _SPEC["motion_corr_out"]
+_MOTION_FLOW_HIDDEN = _SPEC["motion_flow_hidden"]
+_MOTION_FLOW_OUT = _SPEC["motion_flow_out"]
+_FLOW_HEAD_HIDDEN = _SPEC["flow_head_hidden"]
+_MASK_HEAD_HIDDEN = _SPEC["mask_head_hidden"]
+_MASK_OUTPUT_CHANNELS = _SPEC["mask_head_output_channels"]
+
+
+def _motion_encoder(output_dim: int = _UB_MOTION_OUT) -> DocScannerMotionEncoder:
+    return DocScannerMotionEncoder(
+        output_dim=output_dim,
+        corr_hidden=_UB_CORR_HIDDEN,
+        corr_out=_UB_CORR_OUT,
+        flow_hidden=_UB_FLOW_HIDDEN,
+        flow_out=_UB_FLOW_OUT,
+    )
+
+
+def _built_motion_encoder(
+        height: int = _UB_H, width: int = _UB_W) -> DocScannerMotionEncoder:
+    encoder = _motion_encoder()
+    encoder.build([
+        (None, height, width, FLOW_CHANNELS),
+        (None, height, width, _UB_WARPED_CHANNELS),
+    ])
+    return encoder
+
+
+def _update_block(**overrides) -> DocScannerUpdateBlock:
+    kwargs = dict(
+        hidden_dim=_UB_HIDDEN,
+        context_dim=_UB_CONTEXT,
+        gru_input_dim=_UB_GRU_INPUT,
+        motion_output_dim=_UB_MOTION_OUT,
+        motion_corr_hidden=_UB_CORR_HIDDEN,
+        motion_corr_out=_UB_CORR_OUT,
+        motion_flow_hidden=_UB_FLOW_HIDDEN,
+        motion_flow_out=_UB_FLOW_OUT,
+        flow_head_hidden=_UB_FLOW_HEAD_HIDDEN,
+        mask_hidden=_UB_MASK_HIDDEN,
+    )
+    kwargs.update(overrides)
+    return DocScannerUpdateBlock(**kwargs)
+
+
+def _update_block_input_shapes(
+        height: int = _UB_H, width: int = _UB_W) -> list:
+    return [
+        (None, height, width, _UB_HIDDEN),
+        (None, height, width, _UB_CONTEXT),
+        (None, height, width, _UB_WARPED_CHANNELS),
+        (None, height, width, FLOW_CHANNELS),
+    ]
+
+
+def _built_update_block(**overrides) -> DocScannerUpdateBlock:
+    block = _update_block(**overrides)
+    block.build(_update_block_input_shapes())
+    return block
+
+
+def _update_block_inputs(seed: int = 5) -> list:
+    """``[net, inp, warped_features, flow]``, all structured and signed.
+
+    The flow carries values of BOTH signs and of magnitude ~1, so a guard that
+    compares the motion encoder's tail against it can tell a raw copy from a
+    scaled or rectified one.
+    """
+    rng = np.random.default_rng(seed)
+    shape = (_UB_B, _UB_H, _UB_W)
+    return [
+        rng.standard_normal(shape + (_UB_HIDDEN,)).astype("float32"),
+        rng.standard_normal(shape + (_UB_CONTEXT,)).astype("float32"),
+        rng.standard_normal(shape + (_UB_WARPED_CHANNELS,)).astype("float32"),
+        (rng.standard_normal(shape + (FLOW_CHANNELS,)) * 2.0).astype("float32"),
+    ]
+
+
+class TestTheMotionEncoderShapeLadder:
+    """Both branches, the fusion, and the width the GRU's input depends on."""
+
+    def test_the_output_is_exactly_output_dim_wide_on_a_non_square_map(self):
+        encoder = _built_motion_encoder()
+        flow, warped = _update_block_inputs()[3], _update_block_inputs()[2]
+        out = encoder([flow, warped])
+        assert tuple(out.shape) == (_UB_B, _UB_H, _UB_W, _UB_MOTION_OUT)
+
+    def test_the_fusion_convolution_is_two_channels_narrower_than_the_output(self):
+        """``update.py:71``'s ``160-2``, written as a derivation."""
+        encoder = _motion_encoder()
+        assert encoder.fusion_channels == _UB_MOTION_OUT - FLOW_CHANNELS
+        assert encoder.conv.filters == _UB_MOTION_OUT - FLOW_CHANNELS
+
+    def test_each_branch_carries_the_width_its_upstream_line_declares(self):
+        encoder = _motion_encoder()
+        assert (encoder.convc1.filters, encoder.convc1.kernel_size) == (
+            _UB_CORR_HIDDEN, (1, 1))
+        assert (encoder.convc2.filters, encoder.convc2.kernel_size) == (
+            _UB_CORR_OUT, (3, 3))
+        assert (encoder.convf1.filters, encoder.convf1.kernel_size) == (
+            _UB_FLOW_HIDDEN, (7, 7))
+        assert (encoder.convf2.filters, encoder.convf2.kernel_size) == (
+            _UB_FLOW_OUT, (3, 3))
+
+    def test_the_shipped_widths_land_on_the_second_half_of_the_gru_input(self):
+        """``update.py:88``'s ``input_dim=160+160``, re-derived from the table."""
+        assert _MOTION_OUTPUT_DIM == _GRU_INPUT_DIM - _SPEC["context_dim"]
+        encoder = DocScannerMotionEncoder(
+            output_dim=_MOTION_OUTPUT_DIM,
+            corr_hidden=_MOTION_CORR_HIDDEN,
+            corr_out=_MOTION_CORR_OUT,
+            flow_hidden=_MOTION_FLOW_HIDDEN,
+            flow_out=_MOTION_FLOW_OUT,
+        )
+        assert encoder.fusion_channels == _HIDDEN_DIM - FLOW_CHANNELS
+        shapes = [(None, 4, 7, FLOW_CHANNELS),
+                  (None, 4, 7, _SPEC["fnet_output_dim"])]
+        encoder.build(shapes)
+        assert encoder.compute_output_shape(shapes)[-1] == _HIDDEN_DIM
+
+    def test_a_flow_that_is_not_two_channels_is_refused(self):
+        encoder = _motion_encoder()
+        with pytest.raises(ValueError, match="exactly 2 channels"):
+            encoder.build([
+                (None, _UB_H, _UB_W, 3),
+                (None, _UB_H, _UB_W, _UB_WARPED_CHANNELS),
+            ])
+
+    def test_an_output_dim_that_cannot_carry_the_flow_is_refused(self):
+        with pytest.raises(ValueError, match="must exceed FLOW_CHANNELS"):
+            _motion_encoder(output_dim=FLOW_CHANNELS)
+
+
+class TestTheMotionEncoderTailIsTheRawFlow:
+    """``update.py:81``: ``return torch.cat([out, flow], dim=1)``.
+
+    The last :data:`FLOW_CHANNELS` channels are the flow ITSELF -- not the
+    80-channel flow branch (which would be shape-breaking and therefore is not
+    the live hazard), and not a rescaled, normalised or rectified copy of it
+    (which is shape-preserving and therefore is). Those trailing two channels
+    are the update block's only un-convolved view of where the coordinate field
+    currently sits.
+    """
+
+    def test_the_last_two_channels_are_bit_identical_to_the_input_flow(self):
+        encoder = _built_motion_encoder()
+        _, _, warped, flow = _update_block_inputs()
+        out = _numpy(encoder([flow, warped]))
+        np.testing.assert_allclose(
+            out[..., -FLOW_CHANNELS:], flow, atol=0.0, rtol=0.0)
+
+    def test_the_tail_survives_a_flow_of_both_signs_and_large_magnitude(self):
+        """A rectified or squashed tail passes an all-positive fixture."""
+        encoder = _built_motion_encoder()
+        _, _, warped, _ = _update_block_inputs()
+        flow = np.stack(
+            [np.full((_UB_B, _UB_H, _UB_W), -37.5, dtype="float32"),
+             np.full((_UB_B, _UB_H, _UB_W), 12.25, dtype="float32")],
+            axis=-1,
+        )
+        out = _numpy(encoder([flow, warped]))
+        np.testing.assert_allclose(
+            out[..., -FLOW_CHANNELS:], flow, atol=0.0, rtol=0.0)
+
+    def test_the_head_of_the_output_is_not_itself_a_copy_of_the_flow(self):
+        """Guards the degenerate reading where the whole output is the flow."""
+        encoder = _built_motion_encoder()
+        _, _, warped, flow = _update_block_inputs()
+        out = _numpy(encoder([flow, warped]))
+        head = out[..., :-FLOW_CHANNELS]
+        assert head.shape[-1] == _UB_MOTION_OUT - FLOW_CHANNELS
+        assert not np.allclose(head[..., :FLOW_CHANNELS], flow)
+
+
+class TestTheFlowHeadHasNoOutputActivation:
+    """``update.py:14``: ``conv2(relu(conv1(x)))`` -- the ReLU is BETWEEN them.
+
+    The head emits a residual that is ADDED to a coordinate field
+    (``model.py:88``), so it must be able to be negative: a corner that has to
+    move left or up is unreachable otherwise. A ReLU or tanh appended here
+    leaves a model that trains and whose every shape, dtype and finiteness
+    check passes.
+    """
+
+    def _head(self) -> FlowHead:
+        head = FlowHead(hidden_dim=_UB_FLOW_HEAD_HIDDEN)
+        head.build((None, _UB_H, _UB_W, _UB_HIDDEN))
+        return head
+
+    def test_a_forced_negative_output_arrives_unclipped_and_unsquashed(self):
+        """Zero the last kernel and bias it to -1: the output must be -1.
+
+        A ReLU would give 0.0 and a tanh would give -0.7615941. The exact
+        comparison separates all three.
+        """
+        head = self._head()
+        kernel, bias = head.conv2.get_weights()
+        head.conv2.set_weights([
+            np.zeros_like(kernel),
+            np.full_like(bias, -1.0),
+        ])
+        net = np.zeros((_UB_B, _UB_H, _UB_W, _UB_HIDDEN), dtype="float32")
+        out = _numpy(head(net))
+        np.testing.assert_allclose(out, -1.0, atol=0.0, rtol=0.0)
+
+    def test_a_randomly_initialized_head_emits_values_of_both_signs(self):
+        """Independent of any weight surgery: a rectifier emits no negatives."""
+        head = self._head()
+        rng = np.random.default_rng(21)
+        net = rng.standard_normal(
+            (_UB_B, _UB_H, _UB_W, _UB_HIDDEN)).astype("float32")
+        out = _numpy(head(net))
+        assert (out < 0).any(), "no negative residual: an activation was added"
+        assert (out > 0).any()
+
+    def test_neither_convolution_carries_a_keras_activation(self):
+        head = self._head()
+        assert head.conv1.activation is keras.activations.linear
+        assert head.conv2.activation is keras.activations.linear
+
+    def test_the_head_emits_exactly_two_channels_at_the_shipped_hidden_width(self):
+        head = FlowHead(hidden_dim=_FLOW_HEAD_HIDDEN)
+        shape = (None, _UB_H, _UB_W, _HIDDEN_DIM)
+        head.build(shape)
+        assert head.conv1.filters == _FLOW_HEAD_HIDDEN
+        assert head.compute_output_shape(shape)[-1] == FLOW_CHANNELS
+
+    def test_the_config_round_trips_every_constructor_argument(self):
+        head = FlowHead(hidden_dim=_FLOW_HEAD_HIDDEN)
+        clone = FlowHead.from_config(head.get_config())
+        assert clone.hidden_dim == _FLOW_HEAD_HIDDEN
+
+
+class TestTheMaskScaleIsAppliedExactlyOnce:
+    """``update.py:104``: ``mask = .25 * self.mask(net)``, at the CALL SITE.
+
+    The mask is softmaxed over the 9-neighbour axis inside
+    ``convex_upsample``, so this factor is a softmax TEMPERATURE. Omitting it
+    sharpens every convex weight; applying it twice flattens them a further 4x.
+    Both are silent in shape, dtype and finiteness, and both leave a model that
+    trains.
+    """
+
+    def test_the_returned_mask_is_the_head_output_scaled_exactly_once(self):
+        block = _built_update_block()
+        inputs = _update_block_inputs()
+        net, mask, _ = block(inputs)
+        expected = MASK_LOGIT_SCALE * _numpy(block.mask_logits(net))
+        np.testing.assert_allclose(_numpy(mask), expected, atol=0.0, rtol=0.0)
+
+    def test_it_is_neither_unscaled_nor_scaled_twice(self):
+        block = _built_update_block()
+        inputs = _update_block_inputs()
+        net, mask, _ = block(inputs)
+        logits = _numpy(block.mask_logits(net))
+        mask = _numpy(mask)
+        assert not np.allclose(mask, logits), "the 0.25 was never applied"
+        assert not np.allclose(mask, MASK_LOGIT_SCALE ** 2 * logits), \
+            "the 0.25 was applied twice"
+
+    def test_the_scale_is_the_upstream_quarter(self):
+        assert MASK_LOGIT_SCALE == 0.25
+
+    def test_the_mask_head_emits_one_weight_per_neighbour_and_sub_pixel(self):
+        block = _built_update_block()
+        assert block.mask_output_channels == (
+            SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS)
+        assert block.mask_output_channels == _MASK_OUTPUT_CHANNELS
+        assert block.mask_conv1.filters == _UB_MASK_HIDDEN
+        assert block.mask_conv1.kernel_size == (3, 3)
+        assert block.mask_conv2.kernel_size == (1, 1)
+
+
+class TestTheGRUInputIsContextThenMotion:
+    """``update.py:98``: ``inp = torch.cat([inp, motion_features], dim=1)``.
+
+    At the shipped variant both halves are 160 wide, so swapping them is
+    perfectly shape-legal and merely permutes which learned filters see which
+    half -- a defect no shape, gradient or serialization test can reach. Here
+    the two widths differ, and the halves are recovered from the tensor the GRU
+    actually received.
+    """
+
+    def test_the_gru_receives_the_context_first_and_the_motion_second(self):
+        block = _built_update_block()
+        net_in, inp, warped, flow = _update_block_inputs()
+
+        captured = {}
+        original_call = block.gru.call
+
+        def spy(inputs, training=None):
+            captured["gru_input"] = inputs[1]
+            return original_call(inputs, training=training)
+
+        block.gru.call = spy
+        try:
+            block([net_in, inp, warped, flow])
+        finally:
+            block.gru.call = original_call
+
+        gru_input = _numpy(captured["gru_input"])
+        assert gru_input.shape[-1] == _UB_GRU_INPUT
+
+        motion = _numpy(block.motion_encoder([flow, warped]))
+        np.testing.assert_allclose(
+            gru_input[..., :_UB_CONTEXT], inp, atol=0.0, rtol=0.0)
+        np.testing.assert_allclose(
+            gru_input[..., _UB_CONTEXT:], motion, atol=0.0, rtol=0.0)
+
+    def test_the_raw_flow_is_visible_at_the_very_end_of_the_gru_input(self):
+        """The composition of the two claims above: the last 2 channels of the
+        GRU's input are the coordinate field itself."""
+        block = _built_update_block()
+        net_in, inp, warped, flow = _update_block_inputs()
+        motion = _numpy(block.motion_encoder([flow, warped]))
+        gru_input = np.concatenate([inp, motion], axis=-1)
+        np.testing.assert_allclose(
+            gru_input[..., -FLOW_CHANNELS:], flow, atol=0.0, rtol=0.0)
+
+
+class TestTheReturnOrderIsNetMaskDeltaFlow:
+    """``update.py:106``: ``return net, mask, delta_flow``.
+
+    All three are float tensors of the same spatial size. Their channel counts
+    happen to differ at every variant this port ships, but the caller unpacks
+    positionally, so the order is pinned BY VALUE here: element 2 must be the
+    flow head applied to element 0, and element 1 must be the scaled mask head
+    applied to the same element 0.
+    """
+
+    def test_the_three_channel_counts_are_pairwise_distinct(self):
+        """Recorded because it decides whether a shape test could ever see a
+        permutation -- it could, here, but only by luck of the widths."""
+        block = _built_update_block()
+        counts = {_UB_HIDDEN, block.mask_output_channels, FLOW_CHANNELS}
+        assert len(counts) == 3
+
+    def test_element_zero_is_the_updated_state_and_not_the_input_state(self):
+        block = _built_update_block()
+        inputs = _update_block_inputs()
+        net, _, _ = block(inputs)
+        assert tuple(net.shape) == (_UB_B, _UB_H, _UB_W, _UB_HIDDEN)
+        assert not np.allclose(_numpy(net), inputs[0])
+
+    def test_element_two_is_the_flow_head_applied_to_element_zero(self):
+        block = _built_update_block()
+        net, _, delta_flow = block(_update_block_inputs())
+        np.testing.assert_allclose(
+            _numpy(delta_flow), _numpy(block.flow_head(net)),
+            atol=0.0, rtol=0.0)
+
+    def test_element_one_is_the_scaled_mask_head_applied_to_element_zero(self):
+        block = _built_update_block()
+        net, mask, _ = block(_update_block_inputs())
+        np.testing.assert_allclose(
+            _numpy(mask),
+            MASK_LOGIT_SCALE * _numpy(block.mask_logits(net)),
+            atol=0.0, rtol=0.0)
+
+    def test_the_delta_flow_is_signed(self):
+        """The residual must reach both directions; see the flow-head guards."""
+        block = _built_update_block()
+        _, _, delta_flow = block(_update_block_inputs())
+        values = _numpy(delta_flow)
+        assert (values < 0).any() and (values > 0).any()
+
+
+class TestTheUpdateBlockShapeLadderAndContracts:
+    """Shapes on a non-square map, and the width contracts that must refuse."""
+
+    def test_the_three_output_shapes_on_a_non_square_map(self):
+        block = _built_update_block()
+        net, mask, delta_flow = block(_update_block_inputs())
+        assert tuple(net.shape) == (_UB_B, _UB_H, _UB_W, _UB_HIDDEN)
+        assert tuple(mask.shape) == (
+            _UB_B, _UB_H, _UB_W, SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS)
+        assert tuple(delta_flow.shape) == (_UB_B, _UB_H, _UB_W, FLOW_CHANNELS)
+
+    def test_compute_output_shape_agrees_with_the_tensors_call_returns(self):
+        block = _built_update_block()
+        declared = block.compute_output_shape(_update_block_input_shapes())
+        actual = block(_update_block_inputs())
+        for declared_shape, tensor in zip(declared, actual):
+            assert declared_shape[1:] == tuple(tensor.shape)[1:]
+
+    def test_the_shipped_widths_build_at_the_refinement_resolution(self):
+        """36 = 288 // SPATIAL_DIVISOR, the resolution the loop runs at."""
+        side = 288 // SPATIAL_DIVISOR
+        block = DocScannerUpdateBlock(
+            hidden_dim=_HIDDEN_DIM,
+            context_dim=_SPEC["context_dim"],
+            gru_input_dim=_GRU_INPUT_DIM,
+            motion_output_dim=_MOTION_OUTPUT_DIM,
+            motion_corr_hidden=_MOTION_CORR_HIDDEN,
+            motion_corr_out=_MOTION_CORR_OUT,
+            motion_flow_hidden=_MOTION_FLOW_HIDDEN,
+            motion_flow_out=_MOTION_FLOW_OUT,
+            flow_head_hidden=_FLOW_HEAD_HIDDEN,
+            mask_hidden=_MASK_HEAD_HIDDEN,
+        )
+        shapes = [
+            (None, side, side, _HIDDEN_DIM),
+            (None, side, side, _SPEC["context_dim"]),
+            (None, side, side, _FNET_OUTPUT_DIM),
+            (None, side, side, FLOW_CHANNELS),
+        ]
+        block.build(shapes)
+        net_shape, mask_shape, flow_shape = block.compute_output_shape(shapes)
+        assert net_shape[-1] == _HIDDEN_DIM
+        assert mask_shape[-1] == _MASK_OUTPUT_CHANNELS
+        assert flow_shape[-1] == FLOW_CHANNELS
+        assert block.gru.input_dim == _GRU_INPUT_DIM
+
+    def test_a_gru_input_width_that_is_not_the_sum_of_its_halves_is_refused(self):
+        """The composition assertion: the block builds that tensor itself."""
+        with pytest.raises(ValueError, match="must equal context_dim"):
+            _update_block(gru_input_dim=_UB_GRU_INPUT + 1)
+
+    def test_the_variant_table_itself_satisfies_the_composition(self):
+        assert _GRU_INPUT_DIM == _SPEC["context_dim"] + _MOTION_OUTPUT_DIM
+
+    def test_a_net_or_inp_of_the_wrong_width_is_refused_at_build(self):
+        block = _update_block()
+        shapes = _update_block_input_shapes()
+        with pytest.raises(ValueError, match="built for hidden_dim"):
+            block.build([(None, _UB_H, _UB_W, _UB_HIDDEN + 1)] + shapes[1:])
+
+        block = _update_block()
+        with pytest.raises(ValueError, match="built for context_dim"):
+            block.build(
+                [shapes[0], (None, _UB_H, _UB_W, _UB_CONTEXT + 1)] + shapes[2:])
+
+    def test_it_is_called_on_exactly_four_tensors(self):
+        block = _update_block()
+        with pytest.raises(ValueError, match="four-element sequence"):
+            block.build(_update_block_input_shapes()[:3])
+
+    def test_it_runs_under_a_traced_tf_function_with_an_unknown_batch(self):
+        block = _built_update_block()
+        traced = tf.function(
+            lambda n, i, w, f: block([n, i, w, f]),
+            input_signature=[
+                tf.TensorSpec([None, _UB_H, _UB_W, _UB_HIDDEN], tf.float32),
+                tf.TensorSpec([None, _UB_H, _UB_W, _UB_CONTEXT], tf.float32),
+                tf.TensorSpec(
+                    [None, _UB_H, _UB_W, _UB_WARPED_CHANNELS], tf.float32),
+                tf.TensorSpec([None, _UB_H, _UB_W, FLOW_CHANNELS], tf.float32),
+            ],
+        )
+        shape = (3, _UB_H, _UB_W)
+        net, mask, delta_flow = traced(
+            tf.zeros(shape + (_UB_HIDDEN,)),
+            tf.zeros(shape + (_UB_CONTEXT,)),
+            tf.zeros(shape + (_UB_WARPED_CHANNELS,)),
+            tf.zeros(shape + (FLOW_CHANNELS,)),
+        )
+        assert tuple(net.shape) == shape + (_UB_HIDDEN,)
+        assert tuple(mask.shape) == shape + (
+            SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS,)
+        assert tuple(delta_flow.shape) == shape + (FLOW_CHANNELS,)
+
+
+def _update_block_functional_model() -> keras.Model:
+    """The update block wrapped so the shared model oracles can judge it."""
+    net = keras.Input(shape=(_UB_H, _UB_W, _UB_HIDDEN), name="net")
+    inp = keras.Input(shape=(_UB_H, _UB_W, _UB_CONTEXT), name="inp")
+    warped = keras.Input(
+        shape=(_UB_H, _UB_W, _UB_WARPED_CHANNELS), name="warped_features")
+    flow = keras.Input(shape=(_UB_H, _UB_W, FLOW_CHANNELS), name="flow")
+    block = _update_block(name="update_block")
+    return keras.Model(
+        [net, inp, warped, flow],
+        list(block([net, inp, warped, flow])),
+        name="doc_scanner_update_block",
+    )
+
+
+def _motion_encoder_functional_model() -> keras.Model:
+    flow = keras.Input(shape=(_UB_H, _UB_W, FLOW_CHANNELS), name="flow")
+    warped = keras.Input(
+        shape=(_UB_H, _UB_W, _UB_WARPED_CHANNELS), name="warped_features")
+    encoder = _motion_encoder()
+    encoder._name = "motion_encoder"
+    return keras.Model([flow, warped], encoder([flow, warped]),
+                       name="doc_scanner_motion_encoder")
+
+
+def _motion_encoder_inputs() -> list:
+    _, _, warped, flow = _update_block_inputs()
+    return [flow, warped]
+
+
+class TestTheUpdateBlockTrainsAndRoundTrips:
+    """The shared oracles, adopted rather than reimplemented."""
+
+    def test_every_trainable_weight_of_the_block_receives_a_live_gradient(self):
+        assert_gradients_reach_every_trainable_weight(
+            _update_block_functional_model(), _update_block_inputs(),
+            training=True)
+
+    def test_every_trainable_weight_of_the_motion_encoder_gets_a_gradient(self):
+        assert_gradients_reach_every_trainable_weight(
+            _motion_encoder_functional_model(), _motion_encoder_inputs(),
+            training=True)
+
+    def test_the_saved_and_reloaded_block_reproduces_its_output_exactly(self):
+        report = measure_roundtrip(
+            _update_block_functional_model, _update_block_inputs,
+            training=False)
+        assert report["self_max_delta"] == 0.0
+        assert_roundtrip_output_values(report, atol=0.0)
+
+    def test_the_weights_are_restored_before_the_reloaded_block_is_called(self):
+        report = measure_roundtrip(
+            _update_block_functional_model, _update_block_inputs,
+            training=False)
+        assert report["call_count_before_weight_read"] == 0
+        assert_weights_restored_before_first_call(report, atol=0.0)
+
+    def test_the_block_config_round_trips_every_constructor_argument(self):
+        block = _update_block()
+        clone = DocScannerUpdateBlock.from_config(block.get_config())
+        for field in (
+                "hidden_dim", "context_dim", "gru_input_dim",
+                "motion_output_dim", "motion_corr_hidden", "motion_corr_out",
+                "motion_flow_hidden", "motion_flow_out", "flow_head_hidden",
+                "mask_hidden",
+        ):
+            assert getattr(clone, field) == getattr(block, field), field
+
+    def test_the_motion_encoder_config_round_trips_every_constructor_argument(self):
+        encoder = _motion_encoder()
+        clone = DocScannerMotionEncoder.from_config(encoder.get_config())
+        for field in ("output_dim", "corr_hidden", "corr_out", "flow_hidden",
+                      "flow_out"):
+            assert getattr(clone, field) == getattr(encoder, field), field
+        assert clone.fusion_channels == encoder.fusion_channels
