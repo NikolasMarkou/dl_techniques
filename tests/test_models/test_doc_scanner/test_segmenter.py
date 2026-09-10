@@ -55,6 +55,7 @@ from dl_techniques.models.vision.image_restoration.doc_scanner.u2net_blocks impo
 
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,
+    gradient_report,
     stop_all_gradients,
 )
 from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing
@@ -621,6 +622,125 @@ class TestTheSharedOracleAdoptions:
         messages = assert_contract_rejects_a_broken_forward(
             built_model, _inputs(), _contract)
         assert messages
+
+
+class TestTheTrainingModeDeadBiasPopulationIsNamed:
+    """The population the gradient arm's ``training=False`` choice avoids.
+
+    Criterion 3 of this plan asserts gradient flow at INITIALIZATION and at
+    ``training=False``, and says so (it was corrected at iter-1/step-11.1 from
+    a wording that promised one real optimizer step). The mode is not a
+    convenience: at ``training=True`` every ``REBNCONV`` convolution bias is
+    ANALYTICALLY dead, because the bias shifts a whole channel and the batch
+    normalization immediately after it subtracts that shift back out (D-021).
+
+    So the arm above waives a population WITHOUT naming it. This class names
+    it, and bounds it from both sides -- dead under batch statistics, live
+    under moving ones -- so that "the biases are dead everywhere", which is a
+    real defect, cannot hide behind the mode choice.
+
+    Why not the oracle's own ``expect_zero``: that waiver demands a gradient
+    that is ``None`` or EXACTLY ``0.0``, and its anchor forbids adding a
+    tolerance. What a tape reports for an analytically-zero gradient is float32
+    cancellation NOISE -- measured ``2.12e-06`` at worst over this population,
+    and D-021 recorded one weight reading an exact ``0.0``, which is precisely
+    why the arm flaked. ``expect_zero`` therefore cannot express this
+    population, and widening it to express it would break the one oracle that
+    every model package in the repo shares.
+    """
+
+    #: A REBNCONV is ``conv -> BatchNormalization -> relu``, so its bias is the
+    #: dead one. ``outconv`` is the fusion convolution and has NO norm after
+    #: it, which makes it the control below.
+    POPULATION = ("rebnconv", "conv/bias")
+
+    @staticmethod
+    def _report(training: bool):
+        """A FRESH model per mode, deliberately.
+
+        Reusing one model would take the ``training=False`` reading against
+        moving statistics that the ``training=True`` reading had just updated,
+        so the control would no longer be the initialization this suite
+        measures everywhere else. Measured: sharing the model puts 4 weights of
+        ``stage5d/rebnconv4`` at an identically-zero gradient.
+        """
+        keras.utils.set_random_seed(0)
+        return gradient_report(_built(), _inputs(), training=training)
+
+    @classmethod
+    def _population(cls, report):
+        stem, tail = cls.POPULATION
+        return {
+            path: value for path, value in report.items()
+            if stem in path and path.endswith(tail)
+        }
+
+    def test_the_population_is_every_rebnconv_bias_and_nothing_else(self):
+        """Named by MEMBERSHIP, not by a count that could drift silently."""
+        report = self._report(training=True)
+        population = self._population(report)
+        biases = [p for p in report if p.endswith("conv/bias")]
+        assert len(population) == 112, (
+            f"the dead-bias population is {len(population)} weights, not 112. "
+            f"The RSU ladder changed; re-measure both bounds below rather "
+            f"than editing this number.")
+        # Selected by SUFFIX, never by the full path: Keras appends `_1`,
+        # `_2`, ... to the model name once a session has built more than one
+        # instance, so a hard-coded `doc_scanner_segmenter/...` key is a
+        # `KeyError` that depends on test ORDER. Measured, on this very arm.
+        outside = set(biases) - set(population)
+        assert [p for p in outside if p.endswith("outconv/bias")] == list(
+            outside), (
+            f"exactly one convolution bias in this model is NOT followed by a "
+            f"batch norm -- the fusion convolution's. Found {sorted(outside)}. "
+            f"If that set changed, the two bounds below no longer describe "
+            f"what they say they do.")
+        assert len(outside) == 1
+
+    def test_they_are_DEAD_under_batch_statistics(self):
+        """Measured max over the 112: ``2.12e-06``, i.e. cancellation noise."""
+        population = self._population(self._report(training=True))
+        worst = max(population.values())
+        assert worst < 1e-4, (
+            f"a REBNCONV bias reports max|grad| = {worst:.3e} under BATCH "
+            f"statistics. A bias immediately before a batch norm cannot have a "
+            f"real gradient -- a large one here means the conv and the norm "
+            f"are no longer adjacent. See D-021.")
+
+    def test_they_are_LIVE_under_moving_statistics(self):
+        """The other side: this is why ``use_bias=True`` is kept at all.
+
+        Measured min over the 112 at ``training=False``: ``9.79e-05``, against
+        a ``training=True`` worst case of ``2.12e-06`` -- a 46x separation.
+        """
+        live = self._population(self._report(training=False))
+        dead = self._population(self._report(training=True))
+        assert min(live.values()) > 1e-5, (
+            f"the smallest REBNCONV bias gradient under MOVING statistics is "
+            f"{min(live.values()):.3e}. The biases are then dead in BOTH "
+            f"modes, which is a real defect and not the D-021 redundancy.")
+        assert min(live.values()) > 10.0 * max(dead.values()), (
+            "the two modes are not separated. Without a separation the "
+            "'dead' bound above is satisfied by a model whose biases simply "
+            "receive tiny gradients everywhere.")
+
+    def test_the_unnormalized_bias_is_LIVE_in_BOTH_modes(self):
+        """Non-vacuity: the ONE conv bias with no norm after it must not be
+        dead at ``training=True``. If it were, the bound above would be
+        measuring a broken tape rather than the norm's subtraction.
+
+        Measured: ``0.268`` at ``training=True``.
+        """
+        report = self._report(training=True)
+        fusion, = [
+            value for path, value in report.items()
+            if path.endswith("outconv/bias")
+        ]
+        assert fusion > 1e-3, (
+            f"the fusion convolution's bias -- which has NO batch norm after "
+            f"it -- reports max|grad| = {fusion:.3e} at training=True. The "
+            f"dead-population bound above is then not measuring D-021's "
+            f"mechanism.")
 
 
 class TestTheFixtureIsNotDegenerate:
