@@ -62,6 +62,13 @@ the order :func:`~.warp.coords_grid` emits. It is NOT normalized. The
 the composite pipeline that feeds a sampler, not to this class, and applying it
 here would double-apply it there.
 
+:class:`DocScanner` is the two of them wired together as ``inference.py:17-31``
+wires them -- segment, threshold at 0.5, mask MULTIPLICATIVELY, rectify,
+calibrate. It is an INFERENCE assembly and cannot be trained end to end: the
+threshold has zero gradient almost everywhere, which is exactly right, because
+the paper trains the two modules INDEPENDENTLY (§4.3). See its own class
+docstring and the D-025/D-026/D-027 anchors in its ``call``.
+
 Why height and width must be statically known
 ---------------------------------------------
 :func:`~.warp.coords_grid` needs Python ints: it materializes an ``arange`` per
@@ -104,8 +111,11 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.model_build import materialize_sublayers
 
 from .components import (
+    BM_CALIBRATION_DIVISOR,
+    BM_CALIBRATION_SCALE,
     FLOW_CHANNELS,
     REFINE_ITERATIONS,
+    SEG_MASK_THRESHOLD,
     SEG_OUTPUT_CHANNELS,
     SPATIAL_DIVISOR,
     DocScannerFeatureEncoder,
@@ -1249,9 +1259,395 @@ def create_doc_scanner_segmenter(
         variant, pretrained=pretrained, **kwargs)
 
 
+# ---------------------------------------------------------------------
+# The composite: stage 1 -> threshold -> multiplicative mask -> stage 2 ->
+# calibration. `inference.py:17-31`.
+# ---------------------------------------------------------------------
+
+#: Where a composite variant row keeps the segmenter's own row.
+_COMPOSITE_SEGMENTER_KEY: str = "segmenter_config"
+
+#: Where a composite variant row keeps the rectifier's own row.
+_COMPOSITE_RECTIFIER_KEY: str = "rectifier_config"
+
+#: One line per variant, as for each stage separately. It says only what is
+#: true of the PAIR; the two stages' own descriptions are not repeated here and
+#: are reachable through :attr:`DocScannerSegmenter.MODEL_VARIANTS` and
+#: :attr:`DocScannerRectifier.MODEL_VARIANTS`.
+_COMPOSITE_VARIANT_DESCRIPTIONS: Dict[str, str] = {
+    "docscanner-l": (
+        "Both released stages wired as `inference.py:17-31` wires them: "
+        "U2NETP -> threshold at 0.5 -> multiplicative background mask -> the "
+        "12-iteration rectifier -> the (2 * bm / 286.8 - 1) * 0.99 "
+        "calibration. There is one row because each stage has one row, and "
+        "the reason each has one is in that stage's own description."
+    ),
+}
+
+
+def _composite_variant_rows() -> Dict[str, Dict[str, Any]]:
+    """Pair each stage's variant row under one key.
+
+    Interface contract -- two readers, :attr:`DocScanner.MODEL_VARIANTS` and
+    the guard that pins the pairing:
+
+    * Parameters: none.
+    * Returns: ``{variant: {"segmenter_config": {...},
+      "rectifier_config": {...}, "description": str}}``, where the two nested
+      dicts are exactly what :meth:`DocScannerSegmenter.from_variant` and
+      :meth:`DocScannerRectifier.from_variant` would construct from, minus
+      their own ``description``.
+    * Failure mode: raises ``KeyError`` if a spec row has no composite
+      description, for the reason :func:`_variant_rows` gives.
+
+    It CALLS the two stage projections rather than re-projecting
+    ``_VARIANT_SPEC`` a third time. A third projection would be a third
+    encoding of the D-006/D-023 rules, kept in lockstep by hand.
+
+    :return: The composite's variant table.
+    :rtype: Dict[str, Dict[str, Any]]
+    """
+    segmenter_rows = _segmenter_variant_rows()
+    rectifier_rows = _variant_rows()
+
+    rows: Dict[str, Dict[str, Any]] = {}
+    for name in _VARIANT_SPEC:
+        segmenter_config = dict(segmenter_rows[name])
+        segmenter_config.pop("description", None)
+        rectifier_config = dict(rectifier_rows[name])
+        rectifier_config.pop("description", None)
+        rows[name] = {
+            _COMPOSITE_SEGMENTER_KEY: segmenter_config,
+            _COMPOSITE_RECTIFIER_KEY: rectifier_config,
+            "description": _COMPOSITE_VARIANT_DESCRIPTIONS[name],
+        }
+    return rows
+
+
+@register_dl_technique("dl_techniques.models.doc_scanner.model")
+class DocScanner(keras.Model):
+    """The two stages wired together. An INFERENCE assembly (``inference.py:17-31``).
+
+    .. code-block:: text
+
+        msk, _1, ..., _6 = segmenter(x)      seven maps; only the first is used
+        msk              = (msk > 0.5)       BINARY, not soft
+        x                = msk * x           MULTIPLICATIVE, not concatenated
+        bm               = rectifier(x)      (B, H, W, 2), absolute pixel units
+        bm               = (2 * bm / 286.8 - 1) * 0.99
+
+    This class cannot be trained end to end, and that is not a limitation of
+    the port
+    -------------------------------------------------------------------------
+    The threshold ``(msk > 0.5)`` has zero gradient almost everywhere, so no
+    gradient reaches the segmenter through it -- ever. That matches the paper,
+    which trains the two modules INDEPENDENTLY (§4.3, finding F-15), and it is
+    why there are two trainers under ``src/train/doc_scanner/`` and not one.
+    Train :class:`DocScannerSegmenter` and :class:`DocScannerRectifier`
+    separately and assemble them here for inference. The property is pinned by
+    ``TestNoGradientReachesTheSegmenter`` rather than left as a claim; see the
+    D-025 anchor in :meth:`call`.
+
+    The output units
+    ----------------
+    :class:`DocScannerRectifier` emits ABSOLUTE full-resolution pixel
+    coordinates. This class emits the CALIBRATED map, roughly ``[-0.99, 0.99]``
+    -- the range a normalized sampler wants. The two are not interchangeable;
+    see the D-027 anchor in :meth:`call` for what ``286.8`` is and, more
+    importantly, what it is not.
+
+    :param segmenter_config: Constructor keyword arguments for
+        :class:`DocScannerSegmenter`.
+    :type segmenter_config: Dict[str, Any]
+    :param rectifier_config: Constructor keyword arguments for
+        :class:`DocScannerRectifier`.
+    :type rectifier_config: Dict[str, Any]
+    :param kwargs: Additional keyword arguments for ``keras.Model``.
+    :type kwargs: Any
+
+    :raises ValueError: If either configuration is not a non-empty mapping, or
+        if either stage rejects its own arguments.
+
+    Example:
+        .. code-block:: python
+
+            scanner = create_doc_scanner("docscanner-l")
+            scanner.build((None, 288, 288, 3))
+            bm = scanner(page, training=False)        # (B, 288, 288, 2)
+    """
+
+    #: Derived by PAIRING the two stages' own tables, never restated.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = _composite_variant_rows()
+
+    def __init__(
+            self,
+            segmenter_config: Dict[str, Any],
+            rectifier_config: Dict[str, Any],
+            **kwargs: Any
+    ) -> None:
+        """Validate both configurations and create both stages."""
+        super().__init__(**kwargs)
+
+        for label, config in (
+                (_COMPOSITE_SEGMENTER_KEY, segmenter_config),
+                (_COMPOSITE_RECTIFIER_KEY, rectifier_config),
+        ):
+            if not isinstance(config, dict) or not config:
+                raise ValueError(
+                    f"{label} must be a non-empty dict of constructor keyword "
+                    f"arguments for that stage, got {config!r}. Use "
+                    f"`DocScanner.from_variant('docscanner-l')` or "
+                    f"`create_doc_scanner()`; neither stage has constructor "
+                    f"defaults, deliberately (see the D-006 anchor in "
+                    f"components.py)."
+                )
+
+        self.segmenter_config = dict(segmenter_config)
+        self.rectifier_config = dict(rectifier_config)
+
+        # Both stages are created HERE, unconditionally. Each validates its own
+        # widths in its own constructor, so this class re-validates nothing:
+        # a duplicated width check is a rule kept in lockstep by hand.
+        self.segmenter = DocScannerSegmenter(
+            **self.segmenter_config, name="segmenter")
+        self.rectifier = DocScannerRectifier(
+            **self.rectifier_config, name="rectifier")
+
+    # -----------------------------------------------------------------
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize both stages by tracing ``call`` symbolically.
+
+        :param input_shape: ``(batch, height, width, 3)``. Height and width
+            must be concrete and divisible by
+            :data:`~.components.SPATIAL_DIVISOR` -- the RECTIFIER's constraint,
+            checked here so the message names this model's own stage rather
+            than arriving from two frames down.
+        :type input_shape: Any
+        :raises ValueError: If the shape is not rank 4, or if a spatial extent
+            is unknown or not a multiple of the stride.
+        """
+        if self.built:
+            return
+
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"DocScanner expects a 4D input shape "
+                f"(batch, height, width, channels), got {len(input_shape)}D: "
+                f"{input_shape}"
+            )
+
+        # The rectifier's own check, CALLED rather than copied. The segmenter
+        # imposes nothing, so the composite's contract is exactly the
+        # rectifier's and any second copy of the divisibility rule would be a
+        # second thing to update.
+        self.rectifier._require_static_multiple_of_the_stride(
+            input_shape[1], input_shape[2])
+
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Segment, mask, rectify, calibrate.
+
+        :param inputs: ``(batch, height, width, 3)``, channels-last RGB in
+            ``[0, 1]``. Height and width must be divisible by
+            :data:`~.components.SPATIAL_DIVISOR`.
+        :type inputs: keras.KerasTensor
+        :param training: Forwarded to the SEGMENTER only, whose RSU blocks
+            carry ``BatchNormalization``. See the D-026 anchor below for why
+            the rectifier is called with ``training=False`` unconditionally.
+        :type training: Optional[bool]
+        :return: ``(batch, height, width, FLOW_CHANNELS)`` -- the CALIBRATED
+            backward map, in ``(x, y)`` channel order, roughly
+            ``[-BM_CALIBRATION_SCALE, +BM_CALIBRATION_SCALE]``.
+        :rtype: keras.KerasTensor
+        """
+        # `inference.py:24`: `msk, _1,_2,_3,_4,_5,_6 = self.msk(x)`. Six of the
+        # seven maps are DEEP-SUPERVISION outputs and are dropped here; `d0`,
+        # the fusion, is the only one the pipeline consumes.
+        confidence = self.segmenter(inputs, training=training)[0]
+
+        # DECISION plan-2026-09-10T065432-05fcb6dd/D-025: `inference.py:25` is
+        # `msk = (msk > 0.5).float()` and then `x = msk * x` -- a HARD threshold
+        # and a MULTIPLICATIVE mask. Both halves are load-bearing and both have
+        # a tempting wrong variant:
+        #
+        # * Do NOT replace the threshold with the raw sigmoid (a "soft mask"),
+        #   and do NOT add a straight-through estimator or a temperature to
+        #   make it differentiable. It would train, it would be finite, it
+        #   would keep every shape -- and it would be a mechanism the reference
+        #   does not have. The non-differentiability is not a defect to route
+        #   around: the paper trains the two modules INDEPENDENTLY (§4.3), so
+        #   nothing is meant to flow from here back into the segmenter. This
+        #   class is an INFERENCE assembly.
+        # * Do NOT concatenate the mask onto the image. That is the other
+        #   common way to feed a mask to a downstream network, and here it
+        #   would silently change the rectifier's input width from 3 to 4 --
+        #   which the encoder infers from the tensor, so it builds happily.
+        #
+        # Guarded by `TestTheMaskIsAppliedByMultiplicationNotConcatenation`,
+        # `TestTheConfidenceMapIsThresholdedNotUsedRaw` and
+        # `TestNoGradientReachesTheSegmenter`. See decisions.md D-025.
+        mask = keras.ops.cast(
+            confidence > SEG_MASK_THRESHOLD, dtype=inputs.dtype)
+        masked = mask * inputs
+
+        # DECISION plan-2026-09-10T065432-05fcb6dd/D-026: the rectifier is
+        # called with `training=False` UNCONDITIONALLY, not with this call's
+        # `training`. Its flag does not select a normalization mode -- it has
+        # no `BatchNormalization` and no dropout anywhere, only non-affine
+        # GroupNormalization, which behaves identically either way -- it
+        # selects the OUTPUT RANK: `training=True` returns the whole
+        # `(B, 12, H, W, 2)` refinement sequence instead of one map. Forwarding
+        # it would make this model's output rank depend on a flag Keras sets
+        # implicitly inside `fit()`, on a model that CANNOT be fit (see D-025).
+        # Do NOT "fix" this by forwarding the flag for symmetry. Guarded by
+        # `TestTheOutputFormDoesNotDependOnTheTrainingFlag`. See decisions.md
+        # D-026.
+        backward_map = self.rectifier(masked, training=False)
+
+        # DECISION plan-2026-09-10T065432-05fcb6dd/D-027: `inference.py:29`'s
+        # `bm = (2 * (bm / 286.8) - 1) * 0.99`, transcribed exactly and applied
+        # EXACTLY ONCE, here and nowhere else in the port. The rectifier
+        # deliberately emits absolute pixel coordinates and says so; applying
+        # this there as well would double-apply it.
+        #
+        # What 286.8 is: an empirical constant of the RELEASED DocScanner-L
+        # checkpoint at its 288 training resolution. What it is NOT: a
+        # calibration for THIS port. No released checkpoint is ever loaded here
+        # -- `pretrained=True` raises on all three classes -- so the constant is
+        # carried for FIDELITY to the reference, not because it is calibrated
+        # for a from-scratch model. Anyone training this from scratch may well
+        # need a different divisor, and 288 is the obvious candidate. Do NOT
+        # silently "correct" it to 288 or drop the 0.99: that would be a
+        # different pipeline wearing the reference's name. Change it
+        # deliberately, and say so. Guarded by
+        # `TestTheCalibrationIsAppliedExactlyOnce`. See decisions.md D-027.
+        return (
+            2.0 * (backward_map / BM_CALIBRATION_DIVISOR) - 1.0
+        ) * BM_CALIBRATION_SCALE
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """One calibrated backward map, at the input resolution.
+
+        Unlike :meth:`DocScannerRectifier.compute_output_shape` this is the
+        WHOLE contract, not just the inference half: the composite's output
+        form does not depend on ``training`` (D-026).
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: ``(batch, height, width, FLOW_CHANNELS)``.
+        :rtype: tuple
+        """
+        batch, height, width, _ = input_shape
+        return (batch, height, width, FLOW_CHANNELS)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return every constructor argument needed to recreate this model.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            _COMPOSITE_SEGMENTER_KEY: dict(self.segmenter_config),
+            _COMPOSITE_RECTIFIER_KEY: dict(self.rectifier_config),
+        })
+        return config
+
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            pretrained: bool = False,
+            **kwargs: Any
+    ) -> "DocScanner":
+        """Create the composite from the one cited configuration.
+
+        :param variant: A key of :attr:`MODEL_VARIANTS`. Currently only
+            ``"docscanner-l"``; the row's ``description`` says why.
+        :type variant: str
+        :param pretrained: Must be ``False``.
+        :type pretrained: bool
+        :param kwargs: Constructor overrides applied on top of the variant's
+            configuration. To change one stage's widths, pass a whole
+            ``segmenter_config`` / ``rectifier_config`` -- they are replaced,
+            not merged, because a partial merge would silently mix two
+            variants' widths.
+        :type kwargs: Any
+        :return: The constructed, unbuilt model.
+        :rtype: DocScanner
+        :raises ValueError: If ``variant`` is not a known key; the message
+            lists the available ones.
+        :raises NotImplementedError: If ``pretrained`` is ``True``.
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown DocScanner variant '{variant}'. Available variants: "
+                f"{sorted(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        if pretrained:
+            raise NotImplementedError(
+                f"No pretrained weights are distributed for DocScanner "
+                f"variant '{variant}', and BOTH stages refuse for their own, "
+                f"different reasons -- neither of which this composite can "
+                f"repair. The segmentation checkpoint DOES NOT EXIST IN THE "
+                f"REFERENCE CHECKOUT (inference.py:103 loads "
+                f"'./model_pretrained/seg.pth' and no such file is there), and "
+                f"the rectification checkpoint, even if obtained, cannot be "
+                f"transferred into this port because the feature encoder's "
+                f"`norm1` width and every stride-2 padding differ (the D-011 "
+                f"and D-012 anchors in components.py). Call "
+                f"`DocScannerSegmenter.from_variant(..., pretrained=True)` or "
+                f"`DocScannerRectifier.from_variant(..., pretrained=True)` for "
+                f"the full statement of either. Train both stages from scratch "
+                f"with `src/train/doc_scanner/` -- they train INDEPENDENTLY -- "
+                f"then assemble them here."
+            )
+
+        config = dict(cls.MODEL_VARIANTS[variant])
+        config.pop("description", None)
+        config.update(kwargs)
+        return cls(**config)
+
+
+# ---------------------------------------------------------------------
+
+
+def create_doc_scanner(
+        variant: str = "docscanner-l",
+        pretrained: bool = False,
+        **kwargs: Any
+) -> DocScanner:
+    """Create the assembled two-stage DocScanner. The module-level entry point.
+
+    :param variant: A key of :attr:`DocScanner.MODEL_VARIANTS`. Defaults to
+        ``"docscanner-l"``.
+    :type variant: str
+    :param pretrained: Must be ``False``; see :meth:`DocScanner.from_variant`.
+    :type pretrained: bool
+    :param kwargs: Constructor overrides forwarded unchanged.
+    :type kwargs: Any
+    :return: The constructed, unbuilt model.
+    :rtype: DocScanner
+    """
+    return DocScanner.from_variant(variant, pretrained=pretrained, **kwargs)
+
+
 __all__: List[str] = [
+    "DocScanner",
     "DocScannerRectifier",
     "DocScannerSegmenter",
+    "create_doc_scanner",
     "create_doc_scanner_rectifier",
     "create_doc_scanner_segmenter",
 ]

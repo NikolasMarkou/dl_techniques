@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **90 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **91 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (90 of 90 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (91 of 91 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -35,7 +35,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **38** | image backbones, detectors, segmenters, denoisers, generators |
+| [`vision/`](vision/) | **39** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 18 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **10** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
@@ -71,6 +71,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `fractalnet/` | FractalNet |
 | `image_restoration/darkir/` | DarkIR low-light restoration |
 | `image_restoration/doc_res/` | DocRes — one Restormer backbone for five document tasks; the task is carried by 3 classical-CV prompt channels stacked onto RGB, so the input is 6 channels and nothing in the network is task-conditioned |
+| `image_restoration/doc_scanner/` | DocScanner document unwarping — a U2NET-P localizer and a RAFT-lineage 12-iteration refiner that emits a dense BACKWARD map. The two stages train **independently**, so there are two trainers and the composite `DocScanner` is inference-only: the 0.5 mask threshold between them has no gradient |
 | `image_restoration/pw_fnet/` | 2-level U-Net, FFT token mixing, multi-scale supervision. No wavelet op despite the paper's pyramid-wavelet design |
 | `image_restoration/scunet/` | SCUNet denoiser |
 | `keypoints/superpoint/` | SuperPoint keypoint detector + descriptor |
@@ -174,7 +175,7 @@ docstring `__init__.py` and, like the families, exports nothing:
 
 | Subfamily | Members |
 |---|---|
-| `vision/image_restoration/` | `darkir`, `doc_res`, `pw_fnet`, `scunet` — plus `README.md` and `BENCHMARKS.md`, a transcribed literature survey whose PSNR/SSIM numbers all come from papers and none from this repository |
+| `vision/image_restoration/` | `darkir`, `doc_res`, `doc_scanner`, `pw_fnet`, `scunet` — plus `README.md` and `BENCHMARKS.md`, a transcribed literature survey whose PSNR/SSIM numbers all come from papers and none from this repository |
 | `vision/keypoints/` | `superpoint` (one member today) |
 | `vision/super_resolution/` | `pft_sr` (one member today) |
 | `vision_language/sam/` | `sam1`, `sam2`, `sam3` |

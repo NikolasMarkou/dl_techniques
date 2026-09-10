@@ -293,7 +293,16 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "dit",
         # doc_res: README:215 says `pretrained=True` raises; model.py:707
         # really does `raise NotImplementedError`. Both halves checked.
-        "doc_res", "fnet",
+        "doc_res",
+        # doc_scanner: README section 7.4 names `pretrained=True` only to say
+        # it raises, and section 7.2 refers back to it; model.py really does
+        # `raise NotImplementedError` on ALL THREE classes' `from_variant` --
+        # verified by EXECUTING each of the three factories with
+        # `pretrained=True` (tests/test_models/test_doc_scanner/
+        # test_composite.py::TestPretrainedRaisesOnAllThree) and by the
+        # behavioural arm of test_package_api_contract.py, not by grepping for
+        # the word. Both halves checked.
+        "doc_scanner", "fnet",
         # hnet: README:14 and :147 both name `pretrained=True` only to say it
         # raises; model.py:517 really does `raise NotImplementedError`, verified
         # by EXECUTING `HNet.from_variant('hnet_1stage_L', pretrained=True)` and

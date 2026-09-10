@@ -16,24 +16,32 @@ There is no correlation volume anywhere in this architecture, despite the RAFT
 lineage: the update block's ``corr`` input is a bilinear resample of the
 encoder's own feature map at the current coordinates. Do not add one.
 
-The public surface grows one class at a time as the port lands. Right now it is
-the two STAGES: :class:`~.model.DocScannerSegmenter` and
-:class:`~.model.DocScannerRectifier`, with their factories
-:func:`~.model.create_doc_scanner_segmenter` and
-:func:`~.model.create_doc_scanner_rectifier`. The composite ``DocScanner`` that
-chains them is not here yet and must not be imported from the package root until
-it is -- a half-built name exported early is a name something starts depending
-on.
+The public surface is three models and three factories: the two STAGES,
+:class:`~.model.DocScannerSegmenter` and :class:`~.model.DocScannerRectifier`
+with :func:`~.model.create_doc_scanner_segmenter` and
+:func:`~.model.create_doc_scanner_rectifier`, plus the COMPOSITE
+:class:`~.model.DocScanner` and :func:`~.model.create_doc_scanner` that chain
+them exactly as ``inference.py:17-31`` does.
 
-Each stage is exported as it lands rather than all at the end, for a concrete
-reason: ``tests/test_models/test_package_api_contract.py`` walks each model
-package's own namespace to find every ``pretrained``-taking entry point and CALL
-it, and a factory that is not exported is a factory that guard cannot reach.
-Leaving them unexported would park live ``pretrained=True`` raise paths outside
-behavioural coverage until the last step of the port.
+Which one you want
+------------------
+* **Training: a STAGE.** The composite cannot be trained end to end, and that is
+  the architecture, not a gap in this port -- the ``(msk > 0.5)`` threshold
+  between the stages has zero gradient almost everywhere, and the paper trains
+  the two modules INDEPENDENTLY (§4.3). There are two trainers under
+  ``src/train/doc_scanner/`` for that reason.
+* **Inference: the COMPOSITE.** It is the only place the 0.5 threshold, the
+  multiplicative mask and the ``(2 * bm / 286.8 - 1) * 0.99`` calibration are
+  applied, and each is applied exactly once. Its output is the CALIBRATED
+  backward map in roughly ``[-0.99, 0.99]``; the rectifier alone emits ABSOLUTE
+  pixel coordinates and the two are not interchangeable.
 
-Both stages are usable on their own, which is the point: the paper trains them
-INDEPENDENTLY, so there are two trainers and neither needs the composite.
+Each entry point is exported for a concrete reason beyond convenience:
+``tests/test_models/test_package_api_contract.py`` walks each model package's
+own namespace to find every ``pretrained``-taking entry point and CALL it, and a
+factory that is not exported is a factory that guard cannot reach. Leaving any
+of them unexported would park a live ``pretrained=True`` raise path outside
+behavioural coverage.
 
 ``components.py`` and ``warp.py`` carry the port's constants, its single
 ``_VARIANT_SPEC`` width table and its sampling convention. They stay unexported
@@ -68,15 +76,19 @@ References:
 """
 
 from .model import (
+    DocScanner,
     DocScannerRectifier,
     DocScannerSegmenter,
+    create_doc_scanner,
     create_doc_scanner_rectifier,
     create_doc_scanner_segmenter,
 )
 
 __all__: list = [
+    "DocScanner",
     "DocScannerRectifier",
     "DocScannerSegmenter",
+    "create_doc_scanner",
     "create_doc_scanner_rectifier",
     "create_doc_scanner_segmenter",
 ]
