@@ -75,12 +75,12 @@ class YOLOv12MultiTask(keras.Model):
         └──────────┬──────────┘
                     │ [P3, P4, P5]
           ┌─────────┼──────────────────┐
-          ▼          ▼                  ▼
-        ┌──────┐  ┌───────────┐   ┌────────────┐
+          ▼         ▼                  ▼
+        ┌──────┐  ┌────────────┐   ┌────────────┐
         │detect│  │segment     │   │classify    │  (each optional)
         │ head │  │ head       │   │ head       │
         └──┬───┘  └─────┬──────┘   └─────┬──────┘
-           ▼             ▼                ▼
+           ▼            ▼                ▼
         boxes/cls     per-pixel        class
         (DFL)         mask             logits
 
