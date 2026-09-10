@@ -33,8 +33,11 @@ Which one you want
 * **Inference: the COMPOSITE.** It is the only place the 0.5 threshold, the
   multiplicative mask and the ``(2 * bm / 286.8 - 1) * 0.99`` calibration are
   applied, and each is applied exactly once. Its output is the CALIBRATED
-  backward map in roughly ``[-0.99, 0.99]``; the rectifier alone emits ABSOLUTE
-  pixel coordinates and the two are not interchangeable.
+  backward map, NOMINALLY ``[-0.99, 0.99]``; the rectifier alone emits ABSOLUTE
+  pixel coordinates and the two are not interchangeable. The nominal range is a
+  property of a CONVERGED model and is NOT enforced -- an untrained
+  ``docscanner-l`` measures ``[-1.411, +1.284]`` (D-054), and the out-of-domain
+  gather that follows is silently edge-clamped (D-056). See README section 2.
 
 Each entry point is exported for a concrete reason beyond convenience:
 ``tests/test_models/test_package_api_contract.py`` walks each model package's

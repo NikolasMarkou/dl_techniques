@@ -91,7 +91,8 @@ and *should* run to 287 at a 288 input; the other is normalized. See §7.3.
 is an unconstrained regression — nothing clamps it to the image domain — and the
 calibration `(2 * bm / 286.8 - 1) * 0.99` is affine, so it inherits whatever the rectifier
 emits. Measured on a freshly initialized `docscanner-l` at 288×288 (2026-09-10): the
-rectifier spans `[-77.59, +298.07]` px and the composite `[-1.434, +1.036]`. The nominal
+rectifier spans `[-77.59, +298.07]` px and the composite `[-1.434, +1.036]`; re-measured
+over seeds 0/1/2, `[-61.0, +329.4]` px and `[-1.411, +1.284]`. The nominal
 ranges above are a property of a *converged* model, not a contract of the class. The
 downstream sampler is edge-clamped, so an out-of-domain map degrades the gather rather
 than producing NaN — which is also why nothing crashes to tell you about it.

@@ -1363,10 +1363,20 @@ class DocScanner(keras.Model):
     The output units
     ----------------
     :class:`DocScannerRectifier` emits ABSOLUTE full-resolution pixel
-    coordinates. This class emits the CALIBRATED map, roughly ``[-0.99, 0.99]``
-    -- the range a normalized sampler wants. The two are not interchangeable;
-    see the D-027 anchor in :meth:`call` for what ``286.8`` is and, more
-    importantly, what it is not.
+    coordinates. This class emits the CALIBRATED map, nominally
+    ``[-0.99, 0.99]`` -- the range a normalized sampler wants. The two are not
+    interchangeable; see the D-027 anchor in :meth:`call` for what ``286.8`` is
+    and, more importantly, what it is not.
+
+    **That range is NOT enforced, and an untrained model leaves it** (D-054).
+    The rectifier's map is an unconstrained regression, nothing clamps it to
+    the image domain, and the calibration is affine, so it inherits whatever
+    the rectifier emits. MEASURED on a freshly initialized ``docscanner-l`` at
+    288x288, seeds 0/1/2: the rectifier spans ``[-61.0, +329.4]`` px and this
+    class ``[-1.411, +1.284]``. Read ``[-0.99, 0.99]`` as a property of a
+    CONVERGED model, not as a contract. The failure is SILENT -- the downstream
+    sampler is edge-clamped (D-056), so an out-of-domain map degrades the
+    gather instead of raising. README section 2 carries the same caveat.
 
     :param segmenter_config: Constructor keyword arguments for
         :class:`DocScannerSegmenter`.
@@ -1475,8 +1485,11 @@ class DocScanner(keras.Model):
             the rectifier is called with ``training=False`` unconditionally.
         :type training: Optional[bool]
         :return: ``(batch, height, width, FLOW_CHANNELS)`` -- the CALIBRATED
-            backward map, in ``(x, y)`` channel order, roughly
-            ``[-BM_CALIBRATION_SCALE, +BM_CALIBRATION_SCALE]``.
+            backward map, in ``(x, y)`` channel order, NOMINALLY
+            ``[-BM_CALIBRATION_SCALE, +BM_CALIBRATION_SCALE]``. That bound is
+            not enforced and an untrained model leaves it (D-054: measured
+            ``[-1.411, +1.284]`` on a fresh ``docscanner-l``); see the class
+            docstring and README section 2.
         :rtype: keras.KerasTensor
         """
         # `inference.py:24`: `msk, _1,_2,_3,_4,_5,_6 = self.msk(x)`. Six of the
