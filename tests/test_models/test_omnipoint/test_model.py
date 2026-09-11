@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import keras
 import pytest
@@ -110,6 +112,33 @@ class TestOmniPoint:
         assert restored.embed_dim == model.embed_dim
         assert restored.grid_h == model.grid_h
         assert restored.grid_w == model.grid_w
+
+    # ------------------------------------------------------------------
+    # `.keras` save/load round-trip (Success Criterion 9)
+    # ------------------------------------------------------------------
+
+    def test_save_load_keras_round_trip(self, model, batch, tmp_path):
+        """Full `.keras` archive round-trip: registration key survives, and the
+        reloaded model reproduces the SAME model's forward pass bit-identically
+        on the SAME input (not just a `get_config`/`from_config` structural
+        comparison, which `test_config_round_trip` above already covers)."""
+        expected_key = "dl_techniques.models.omnipoint.model>OmniPoint"
+        assert keras.saving.get_registered_name(OmniPoint) == expected_key
+
+        outputs_before = model(batch)
+
+        save_path = os.path.join(tmp_path, "omnipoint.keras")
+        model.save(save_path)
+        reloaded = keras.models.load_model(save_path)
+
+        assert keras.saving.get_registered_name(type(reloaded)) == expected_key
+
+        outputs_after = reloaded(batch)
+        for before, after in zip(outputs_before, outputs_after):
+            np.testing.assert_array_equal(
+                keras.ops.convert_to_numpy(before),
+                keras.ops.convert_to_numpy(after),
+            )
 
     # ------------------------------------------------------------------
     # pretrained=True raise (Success Criterion 4)

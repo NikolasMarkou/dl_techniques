@@ -348,6 +348,17 @@ class OmniPoint(keras.Model):
                 name=f"encoder_vit_{self.vit_scale}",
             )
         super().build(input_shape)
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-023: force-build every head via a
+        # dummy forward pass here, not lazily at first real `call()`. `.keras` reload runs
+        # `build_from_config` -> `build()` only, never `call()`; a lazily-built head is
+        # still 0-weight afterward, so saved head weights have nowhere to land and the
+        # first post-reload `call()` silently re-randomizes them (D-124's identical defect
+        # in `DPTDecoder`, one layer up the call stack). See decisions.md.
+        dummy_spatial = keras.ops.zeros((1, self.grid_h, self.grid_w, self.embed_dim))
+        dummy_cls = keras.ops.zeros((1, self.embed_dim))
+        _ = self.ray_distance_head(dummy_spatial)
+        _ = self.mask_head(dummy_spatial)
+        _ = self.metric_scale_head(dummy_cls)
 
     def _features_to_spatial(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Drop the CLS token and reshape ``(B, N+1, D)`` -> ``(B, h, w, D)``.
