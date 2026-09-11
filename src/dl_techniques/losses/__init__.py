@@ -212,6 +212,18 @@ from .yolo12_multitask_loss import (
     create_yolov12_crack_loss,
 )
 
+# from .omnipoint_losses
+from .omnipoint_losses import (
+    RayDirectionLoss,
+    PointDistanceLoss,
+    MetricScaleLoss,
+    MaskLoss,
+    NormalConsistencyLoss,
+    LocalConsistencyLoss,
+    OmniPointCombinedLoss,
+    compute_optimal_scale,
+)
+
 
 # Define __all__ for a clean public API
 __all__ = [
@@ -353,4 +365,13 @@ __all__ = [
     "create_yolov12_multitask_loss",
     "create_yolov12_coco_loss",
     "create_yolov12_crack_loss",
+    # omnipoint_losses
+    "RayDirectionLoss",
+    "PointDistanceLoss",
+    "MetricScaleLoss",
+    "MaskLoss",
+    "NormalConsistencyLoss",
+    "LocalConsistencyLoss",
+    "OmniPointCombinedLoss",
+    "compute_optimal_scale",
 ]
