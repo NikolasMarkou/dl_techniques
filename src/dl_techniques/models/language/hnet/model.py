@@ -68,8 +68,12 @@ EMBEDDING_INIT_STDDEV: float = 1.0
 INITIALIZER_RANGE: float = 0.02
 
 #: Coefficient on the summed ratio loss; the per-level targets are the
-#: ``target_ratios`` constructor argument. This is the weight the paper reports for
-#: the load-balancing term, adopted here as a default, not read from the reference code.
+#: ``target_ratios`` constructor argument. The reference training script that would set
+#: this coefficient is not released, and grepping the whole reference repository for
+#: ``0.03`` returns zero hits -- so, like
+#: :data:`~dl_techniques.models.language.hnet.losses.DEFAULT_TARGET_RATIO`, this is a
+#: documented default of this port and not a transcription from the reference code.
+#: ``0.03`` is the load-balancing weight the paper reports.
 RATIO_LOSS_ALPHA: float = 0.03
 
 #: Dense names that write into the residual stream and so take the depth-scaled
