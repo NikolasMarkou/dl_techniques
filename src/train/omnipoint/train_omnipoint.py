@@ -25,8 +25,8 @@ COPY per output slot rather than calling it once over the whole tuple (MEASURED 
 
 .. warning::
     **`--enable-conditioning` trains INTRINSICS conditioning only, never sparse-depth
-    conditioning** (`decisions.md` D-028). `OmniPointTrainingWrapper.call()` derives the
-    per-sample intrinsics ray map from `data.py`'s own `gt_ray` (the same
+    conditioning** (`decisions.md` D-028, refined by D-029). `OmniPointTrainingWrapper.call()`
+    derives the per-sample intrinsics ray map from `data.py`'s own `gt_ray` (the same
     `pinhole_ray_map(K, ...)` value, reused rather than re-derived) and feeds it to
     `OmniPoint` every step, so the intrinsics-conditioning weights DO receive gradient
     when this flag is set. Sparse-depth conditioning remains genuinely unwired: no
@@ -34,6 +34,18 @@ COPY per output slot rather than calling it once over the whole tuple (MEASURED 
     MegaDepth loader synthesizes or supplies a sparse subsample), so
     `sparse_depth`/`sparse_depth_mask` are never passed and those weights receive zero
     gradient -- a documented, intentional limitation, not a silent defect.
+
+    **`intrinsics_present` is randomized PER-SAMPLE, not a fixed `True`** (`decisions.md`
+    D-029, a completion fix to D-028's own gap): D-028 shipped with `intrinsics_present`
+    hardwired to all-`True`, which made `gt_ray` -- the literal `L_ray` supervision target
+    -- also the conditioning input on every step, a trivially-satisfiable copy task, and
+    left `intrinsics_state/absent_embedding` permanently dead. `--intrinsics-conditioning-prob`
+    (default `0.9`, matching the OmniPoint paper's own Supplementary Section B convention:
+    "geometric conditions ... enabled with a probability of 90% to preserve robustness under
+    RGB-only inputs") now draws a fresh per-sample Bernoulli flag every call via a
+    `keras.random.SeedGenerator`-backed stateless draw, so both the present and absent
+    embeddings train and `L_ray` stays a genuine RGB-only inference task for the ~10% of
+    samples drawn absent each step.
 
 Usage::
 
@@ -115,6 +127,7 @@ class OmniPointTrainingConfig:
     # Model
     omnipoint_variant: str = "omnipoint_base"
     enable_conditioning: bool = False
+    intrinsics_conditioning_prob: float = 0.9
 
     # Loss weights (OmniPointCombinedLoss)
     lambda_ray: float = 1.0
@@ -150,6 +163,11 @@ class OmniPointTrainingConfig:
             )
         if not 0.0 < self.train_split < 1.0:
             raise ValueError(f"train_split must be in (0, 1), got {self.train_split}")
+        if not 0.0 <= self.intrinsics_conditioning_prob <= 1.0:
+            raise ValueError(
+                f"intrinsics_conditioning_prob must be in [0, 1], got "
+                f"{self.intrinsics_conditioning_prob}"
+            )
 
 
 # ---------------------------------------------------------------------
@@ -233,6 +251,13 @@ class OmniPointTrainingWrapper(keras.Model):
     Args:
         omnipoint: The real `OmniPoint` model instance (saved/exported after training).
         combined_loss: A configured `OmniPointCombinedLoss` instance.
+        intrinsics_conditioning_prob: Per-sample Bernoulli probability that a given
+            sample's `intrinsics_present` flag is drawn `True` (see D-029). Ignored
+            when `omnipoint.enable_conditioning` is `False`.
+        seed: Optional integer seed backing this wrapper's `keras.random.SeedGenerator`
+            (D-029) -- matches the `ScheduledDropout`/`ClifordRNN`/etc. convention of a
+            layer-held stateless RNG rather than an unseeded call, so the per-sample
+            draw is reproducible across runs given the same seed.
         name: Layer name.
         **kwargs: Passthrough to the `keras.Model` base class.
     """
@@ -241,12 +266,27 @@ class OmniPointTrainingWrapper(keras.Model):
             self,
             omnipoint: keras.Model,
             combined_loss: OmniPointCombinedLoss,
+            intrinsics_conditioning_prob: float = 0.9,
+            seed: Optional[int] = None,
             name: str = "omnipoint_training_wrapper",
             **kwargs: Any,
     ) -> None:
         super().__init__(name=name, **kwargs)
         self.omnipoint = omnipoint
         self.combined_loss = combined_loss
+        self.intrinsics_conditioning_prob = float(intrinsics_conditioning_prob)
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-029
+        # Do NOT draw `intrinsics_present` from raw unseeded `numpy.random` (or a
+        # Python-level `random.random()`) inside `call()` -- `call()` is traced once
+        # under `tf.function` by `fit()`, so a host-side RNG call would draw ONCE at
+        # trace time and bake a single frozen mask into the graph for every subsequent
+        # step, never re-drawing (measured convention: `ScheduledDropout`,
+        # `EnergyTransformer`, `BitLinear` and `ClifordRNN` all hold a
+        # `keras.random.SeedGenerator` as layer state and pass it as `seed=` to a
+        # `keras.random.*` call precisely so the draw is a graph OP that re-executes
+        # every step, not a Python-side constant). This is that same pattern, applied
+        # to a Bernoulli draw instead of a dropout mask.
+        self.seed_generator = keras.random.SeedGenerator(seed)
 
     def call(
             self,
@@ -284,7 +324,35 @@ class OmniPointTrainingWrapper(keras.Model):
         # already being wired. See decisions.md D-028 and
         # `src/train/omnipoint/README.md` for the intrinsics-only scope this implies for
         # `--enable-conditioning`.
-        intrinsics_present = keras.ops.ones((keras.ops.shape(rgb)[0],), dtype="bool")
+        #
+        # SUPERSEDED IN PART by D-029, directly below: `intrinsics_present` is no
+        # longer the unconditional all-`True` this comment originally shipped -- see
+        # D-029 for why an all-`True` flag made `L_ray` a copy task and left
+        # `intrinsics_state/absent_embedding` permanently dead.
+        #
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-029
+        # Do NOT hardwire `intrinsics_present` to all-`True` -- MEASURED (pass-2 adversarial
+        # review, `findings/review-iter-1-pass2.md` concern 1): `gt_ray` (`y_true[0]`) IS the
+        # literal `L_ray` supervision target (D-028), so feeding it in as the conditioning
+        # input on every single step, unconditionally flagged present, turns `L_ray` into a
+        # trivially-satisfiable copy task and leaves `intrinsics_state/absent_embedding`
+        # exactly as dead as it was before D-028 -- D-028 traded one dead weight for another.
+        # Draw a fresh PER-SAMPLE Bernoulli flag every call instead (the paper's own
+        # convention, OmniPoint Supplementary Section B: "geometric conditions ... enabled
+        # with a probability of 90% to preserve robustness under RGB-only inputs" --
+        # `--intrinsics-conditioning-prob` defaults to 0.9). This reuses the per-sample
+        # mixed-batch machinery `ConditioningInputEncoder`/`ConditioningStateEmbedding`
+        # already implement and `test_conditioning.py` already exercises (D-013): passing a
+        # non-None `intrinsics_present` flag makes `ConditioningInputEncoder._zero_absent_samples`
+        # zero out the ray-map channels for the samples drawn absent, and
+        # `ConditioningStateEmbedding` selects `absent_embedding` for exactly those same
+        # samples -- both signals still agree, so nothing new needs to happen here beyond
+        # generating the flag itself. See decisions.md D-029 for the direct gradient
+        # measurement (before: `absent_embedding` grad == 0.0 every step; after: nonzero on
+        # any batch/seed draw that includes at least one absent sample).
+        intrinsics_present = keras.random.uniform(
+            (keras.ops.shape(rgb)[0],), seed=self.seed_generator
+        ) < self.intrinsics_conditioning_prob
         outputs = self.omnipoint(
             rgb,
             intrinsics_ray_map=gt_ray,
@@ -454,7 +522,11 @@ def create_model(config: OmniPointTrainingConfig) -> Tuple[keras.Model, OmniPoin
         lambda_local=config.lambda_local,
         lambda_mask=config.lambda_mask,
     )
-    wrapper = OmniPointTrainingWrapper(omnipoint, combined_loss)
+    wrapper = OmniPointTrainingWrapper(
+        omnipoint, combined_loss,
+        intrinsics_conditioning_prob=config.intrinsics_conditioning_prob,
+        seed=config.seed,
+    )
     return omnipoint, wrapper
 
 
@@ -632,6 +704,15 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "this pipeline (see src/train/omnipoint/README.md)."
         ),
     )
+    model_group.add_argument(
+        "--intrinsics-conditioning-prob", type=float, default=0.9,
+        help=(
+            "Per-sample probability that a sample's intrinsics_present flag is drawn "
+            "True each training step (D-029). Matches the OmniPoint paper's own "
+            "Supplementary Section B conditioning-dropout convention (default 0.9). "
+            "Ignored unless --enable-conditioning is set."
+        ),
+    )
 
     loss_group = parser.add_argument_group("OmniPointCombinedLoss weights")
     loss_group.add_argument("--lambda-ray", type=float, default=1.0)
@@ -671,6 +752,7 @@ def _config_from_args(args: argparse.Namespace) -> OmniPointTrainingConfig:
         workers=args.workers,
         omnipoint_variant=args.omnipoint_variant,
         enable_conditioning=args.enable_conditioning,
+        intrinsics_conditioning_prob=args.intrinsics_conditioning_prob,
         lambda_ray=args.lambda_ray,
         lambda_metric=args.lambda_metric,
         lambda_normal=args.lambda_normal,

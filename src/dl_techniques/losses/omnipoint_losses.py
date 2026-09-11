@@ -110,8 +110,19 @@ def compute_optimal_scale(
     flattened) point clouds divided by the squared norm of the predicted point cloud.
 
     Args:
-        pred_affine_points: Predicted UNSCALED (affine, i.e. ``d_hat * r_hat``) point cloud,
-            shape ``(batch, ..., 3)``.
+        pred_affine_points: The unscaled point cloud to align against ``gt_points``. For
+            `PointDistanceLoss`/`MetricScaleLoss`/`OmniPointCombinedLoss`'s own scale-alignment
+            use, this MUST be constructed from the GROUND-TRUTH ray, i.e. ``d_hat * r_gt``
+            (`pred_distance` times `gt_ray`) -- **never** ``d_hat * r_hat`` (`pred_distance`
+            times the PREDICTED ray). Passing the predicted ray here leaks `pred_ray` into the
+            derived scale `s*` and therefore into `L_point`/`L_metric`, silently falsifying the
+            ray/distance decoupling this module's other losses depend on -- this was a real
+            defect (`decisions.md` D-026, "CRITICAL #1") that shipped and was fixed at this
+            function's one production call site; a docstring reading "affine, i.e. ``d_hat *
+            r_hat``" is the ghost of the pre-fix design and would reintroduce the same defect at
+            a NEW call site with no guard watching it (the existing regression test only covers
+            `OmniPointCombinedLoss`'s integrated path, not a hypothetical second caller of this
+            function). Shape ``(batch, ..., 3)`` either way.
         gt_points: Ground-truth metric point cloud, shape ``(batch, ..., 3)``, same leading
             shape as `pred_affine_points`.
         valid_mask: Optional tensor broadcastable to `pred_affine_points`'s shape minus the

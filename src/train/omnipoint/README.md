@@ -76,22 +76,32 @@ branch: `OmniPointTrainingWrapper.call()` never forwarded any conditioning tenso
 `OmniPoint`, so the 8 conditioning weights (`intrinsics_conv1/2`, `depth_conv1/2`, both
 present/absent state-embedding vectors) received exactly zero gradient every step,
 regardless of the flag (`decisions.md` D-025 CRITICAL #4). This is now fixed for the
-INTRINSICS half only (`decisions.md` D-028):
+INTRINSICS half only (`decisions.md` D-028, refined by D-029):
 
 - **Intrinsics conditioning IS wired and trained.** `data.py`'s own `gt_ray` — already
   `pinhole_ray_map(K, ...)` evaluated at full pixel resolution, per D-016 — is reused
-  (never re-derived) as the intrinsics ray map, and `intrinsics_present` is
-  unconditionally `True` for every sample, since a derived `K` (and therefore a ray map)
-  always exists in this pipeline for both KITTI and MegaDepth.
+  (never re-derived) as the intrinsics ray map. `intrinsics_present` is a fresh
+  PER-SAMPLE Bernoulli draw every step (`--intrinsics-conditioning-prob`, default `0.9`,
+  matching the paper's own Supplementary Section B conditioning-dropout convention) —
+  **not** unconditionally `True` as an earlier iteration of this fix (D-028) shipped: an
+  always-`True` flag fed `gt_ray` — the literal `L_ray` supervision target — into the
+  model as its own conditioning input on every step, making `L_ray` a trivially
+  satisfiable copy task and leaving `intrinsics_state/absent_embedding` permanently dead
+  (D-029). Randomizing per sample trains both the present and absent embeddings and keeps
+  `L_ray` a genuine RGB-only inference task for the samples drawn absent each step.
 - **Sparse-depth conditioning remains genuinely unwired, on purpose.** No sparse-depth
   data exists anywhere in this pipeline — neither the KITTI nor the MegaDepth loader
   synthesizes or supplies a sparse subsample (the paper's own approach: randomly
   subsampling 0.05-0.1% of GT depth pixels per sample) — so
-  `sparse_depth`/`sparse_depth_mask` are never passed to `OmniPoint`, and
-  `depth_conv1/2` plus the depth state-embedding vectors correctly still receive zero
-  gradient whenever `--enable-conditioning` is set. Building a sparse-depth synthesizer
-  is new-feature work, not a bug fix, and is out of scope here. A future flag adding real
-  sparse-depth data is the seam for that work, not this one.
+  `sparse_depth`/`sparse_depth_mask` are never passed to `OmniPoint`. What actually stays
+  at exactly zero gradient is narrower than "the modality": `depth_conv1/{kernel,bias}`,
+  `depth_conv2/kernel` (**not** its bias — a `linear`-activation conv's bias still trains
+  from an all-zero input, MEASURED `depth_conv2/bias` gradient 5.09) and
+  `depth_state/present_embedding` (the "depth is present" embedding; the paired
+  `absent_embedding` is exercised, since every sample's `sparse_depth_present` flag is
+  `False`). Building a sparse-depth synthesizer is new-feature work, not a bug fix, and is
+  out of scope here. A future flag adding real sparse-depth data is the seam for that
+  work, not this one.
 
 **Read `--enable-conditioning` as "train intrinsics conditioning"**, not "train all
 conditioning modalities" — the flag name does not distinguish the two, and this is the

@@ -301,3 +301,58 @@ class TestEnableConditioningGradientFlow:
                     f"is deliberately unwired -- no sparse-depth data exists in this "
                     f"pipeline, see decisions.md D-028), got {value}"
                 )
+
+    def test_present_and_absent_intrinsics_embeddings_both_receive_gradient(self, tmp_path):
+        """D-029 completion fix: `intrinsics_present` must be a genuine per-sample coin
+        flip, not the D-028 all-`True` hardwire -- so BOTH `intrinsics_state/present_
+        embedding` and `intrinsics_state/absent_embedding` must train, not just the
+        present half (D-028 left `absent_embedding` at exactly 0.0 gradient forever,
+        the exact same failure shape as the original CRITICAL #4, just moved).
+
+        `intrinsics_conditioning_prob=0.5` with a fixed seed over several forward passes
+        (the wrapper's `keras.random.SeedGenerator` advances its state each call, so
+        repeated calls draw NEW per-sample flags deterministically) guarantees both a
+        present-only-heavy and an absent-only-heavy draw appear within a small number of
+        calls -- this is a deterministic replay, not a flaky probabilistic assertion.
+        """
+        from tests.test_models.gradient_flow_oracle import gradient_report
+
+        wrapper, batch = self._build_wrapper_and_batch(tmp_path)
+        # Rebuild the wrapper with a 50/50 draw so a mixed outcome across a handful of
+        # calls is overwhelmingly likely (batch_size=2: P(both same value) = 0.5 per call).
+        wrapper = trainer.OmniPointTrainingWrapper(
+            wrapper.omnipoint, wrapper.combined_loss,
+            intrinsics_conditioning_prob=0.5, seed=1234,
+        )
+
+        saw_present_grad = False
+        saw_absent_grad = False
+        for _ in range(12):
+            report = gradient_report(
+                wrapper, batch, loss_fn=lambda outputs: keras.ops.sum(wrapper.losses),
+            )
+            present_vals = [
+                v for p, v in report.items() if "intrinsics_state/present_embedding" in p
+            ]
+            absent_vals = [
+                v for p, v in report.items() if "intrinsics_state/absent_embedding" in p
+            ]
+            assert present_vals and absent_vals, (
+                "intrinsics_state/{present,absent}_embedding not found -- rename drifted"
+            )
+            if any(v is not None and np.isfinite(v) and v > 0.0 for v in present_vals):
+                saw_present_grad = True
+            if any(v is not None and np.isfinite(v) and v > 0.0 for v in absent_vals):
+                saw_absent_grad = True
+            if saw_present_grad and saw_absent_grad:
+                break
+
+        assert saw_present_grad, (
+            "intrinsics_state/present_embedding never received a nonzero gradient across "
+            "12 randomized-flag draws -- the present branch should still train"
+        )
+        assert saw_absent_grad, (
+            "intrinsics_state/absent_embedding never received a nonzero gradient across "
+            "12 randomized-flag draws (D-029): this is exactly the D-028 regression -- "
+            "an all-True intrinsics_present flag leaves this weight permanently dead"
+        )
