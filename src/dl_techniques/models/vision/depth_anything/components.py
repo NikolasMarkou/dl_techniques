@@ -49,13 +49,13 @@ class DPTDecoder(keras.layers.Layer):
         Input [B, H, W, C]
               │
               ▼
-        ┌─────────────────────────────┐
-        │ per stage i in dims:        │
-        │  Conv2D(dims[i], 3x3, same) │
-        │  → BatchNorm(eps=1e-5)      │
-        │  → Activation               │
+        ┌──────────────────────────────┐
+        │ per stage i in dims:         │
+        │  Conv2D(dims[i], 3x3, same)  │
+        │  → BatchNorm(eps=1e-5)       │
+        │  → Activation                │
         │  → UpSampling2D(2x, bilinear)│  (only for the first
-        └──────────────┬──────────────┘   log2(upsample_factor) stages)
+        └──────────────┬───────────────┘   log2(upsample_factor) stages)
                        ▼
         ┌─────────────────────────────┐
         │ Conv2D(output_channels, 3x3)│

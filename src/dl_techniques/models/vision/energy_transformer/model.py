@@ -1,45 +1,27 @@
-"""
-Energy Transformer image models: a shared backbone plus masked-image-completion
-and classification heads, built on one recurrent energy-descent block.
+"""Energy Transformer image models: one shared backbone with a completion head
+and a classification head.
 
-A standard transformer stacks `L` distinct feedforward layers to get depth,
-with no scalar quantity the forward pass is known to improve. The Energy
-Transformer instead defines a single scalar energy `E` over the token states
-and runs the forward pass as `T` steps of gradient descent on it,
-`x <- x - alpha * dE/dg` with `g = EnergyLayerNorm(x)`, reusing one block's
-weights across all `T` steps. Depth becomes an inference-time knob (`T`)
-rather than a parameter count. The energy sums two terms: an attention
-energy `E_ATT` whose gradient is a token-mixing update letting an occluded
-token pull information from its neighbours, and a Hopfield associative-memory
-energy `E_HN` over a tied memory matrix that pulls each token toward the
-nearest stored pattern. Descending their sum both propagates evidence
-between tokens and snaps each token to a memorized prototype, which is what
-completing a corrupted input needs. Gradients are hand-derived in closed
-form with `keras.ops`, not autodiff (`keras.ops.grad` does not exist in
-Keras 3.8), so `energy()` is the specification and `update()` must match it.
+Defines :class:`EnergyTransformerBackbone` (patch embedding, mask token, learned
+positional embedding, one :class:`EnergyTransformer` block) and the two models
+that compose it: :class:`EnergyTransformerMIM` for masked image completion and
+:class:`EnergyTransformerClassifier` for logits. Depth here does not come from
+stacking distinct layers. The block defines a scalar energy over the token
+states and the forward pass is ``T`` steps of gradient descent on it,
 
-This module supplies the block's image-domain consumers: `EnergyTransformerBackbone`
-(patch embedding, optional learnable mask token, learned positional embedding,
-one `EnergyTransformer` block) feeding either `EnergyTransformerMIM` (LayerNorm
-plus an affine decoder to patch pixels, the paper's masked-image-completion
-model) or `EnergyTransformerClassifier` (LayerNorm, mean-pool, a `Dense`
-classifier head, warm-startable from an MIM checkpoint). Classification
-mean-pools the token states rather than reading a CLS token, since no CLS
-token exists in this backbone.
+    x <- x - alpha * dE/dg   with   g = EnergyLayerNorm(x)
 
-The MIM model trains through stock `model.compile(loss='mse')` plus
-`model.fit(ds)`: no `train_step`, `test_step` or `compute_loss` exists here.
-The occlusion mask reaches the loss as a Keras `sample_weight`, the third
-element of each `tf.data` batch, with `loss_weight = 1{i in S} * (N / n_loss)`
-so Keras' `sum_over_batch_size` reduction equals `mean_{i in S} MSE` exactly;
-`input_mask` is a strict subset of the loss set `S` (the paper's 90/10 rule),
-so the two masks are not interchangeable. `MaskTokenApply` is created and
-built by every backbone, including the classifier's (which never calls it),
-so the MIM and classifier trunks stay weight-identical and
-`load_weights_from_checkpoint(..., skip_prefixes=("decoder_",))` transfers
-the trunk 1:1. Both heads refuse a `return_energy=True` backbone: the energy
-trace always computes in at least float32 (it overflows fp16), and a
-default-policy head would autocast it back down and overflow to nan.
+reusing one block's weights at every step, so ``T`` is an inference-time knob.
+The energy sums an attention term, whose gradient lets an occluded token pull
+information from its neighbours, and a Hopfield term over a tied memory matrix
+that pulls each token toward a stored pattern. Four things a caller needs: the
+MIM model trains through stock ``compile(loss='mse')`` and ``fit``, with the
+occlusion mask arriving as a ``sample_weight`` in the batch rather than through
+any training step here; the classifier mean-pools, because this backbone has no
+CLS token; the mask token is created and built in both models, which keeps the
+trunks weight-identical for
+``load_weights_from_checkpoint(..., skip_prefixes=("decoder_",))``; and both
+heads reject a ``return_energy=True`` backbone, since the energy trace is
+float32 and a float16 head would overflow it.
 
 References:
     - Hoover et al., 2023. Energy Transformer. NeurIPS 2023 (§3, Table 4).
@@ -67,8 +49,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 
-# The ET block has NO factory home — direct import is the sanctioned path for this
-# feature (D-004 of plan_2026-07-13_57c9833e; G2). Do not route it through a factory.
+# The ET block has no factory home; direct import is the sanctioned path here
+# (D-004 of plan_2026-07-13_57c9833e). See decisions.md.
 from dl_techniques.layers.transformers.energy_transformer import EnergyTransformer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -79,16 +61,13 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 ETScale = Literal['tiny', 'small', 'base']
 HopfieldActivation = Literal['relu', 'softmax']
 
-# The stable sub-model name. `load_weights_from_checkpoint` matches layer BY NAME, so the
-# MIM model and the classifier MUST name their backbone identically or the warm-start
-# transfers zero layers.
+# `load_weights_from_checkpoint` matches layers by name, so the MIM model and the
+# classifier have to name their backbone identically for a warm start to transfer.
 BACKBONE_NAME = "et_backbone"
 
-# Scale configurations. All variants share the paper's Table-4 image defaults:
-# num_steps (T) = 12, step_size (alpha) = 0.1, beta = None (-> 1/sqrt(head_dim)),
-# attn_self = False (ET-Full), hopfield_activation = 'relu'. Note head_dim is FIXED at 64
-# across scales (it is NOT embed_dim // num_heads) — the ET attention has no value matrix,
-# so the head dimension is a free parameter.
+# Every variant shares the paper's Table-4 image defaults: num_steps 12, step_size 0.1,
+# beta None (1/sqrt(head_dim)), attn_self False (ET-Full), hopfield_activation 'relu'.
+# head_dim stays 64 at every scale; ET attention has no value matrix, so it is free.
 SCALE_CONFIGS: Dict[str, Dict[str, int]] = {
     'tiny':  {'embed_dim': 192, 'num_heads': 3,  'head_dim': 64, 'hopfield_dim': 768},
     'small': {'embed_dim': 384, 'num_heads': 6,  'head_dim': 64, 'hopfield_dim': 1536},
@@ -104,7 +83,14 @@ MODEL_VARIANTS: Dict[str, Dict[str, str]] = {
 
 
 def _resolve_scale(variant: str) -> str:
-    """Accept either a scale key (``'tiny'``) or a variant key (``'et_tiny'``)."""
+    """Accept either a scale key (``'tiny'``) or a variant key (``'et_tiny'``).
+
+    :param variant: A key of :data:`SCALE_CONFIGS` or of :data:`MODEL_VARIANTS`.
+    :type variant: str
+    :return: The scale key.
+    :rtype: str
+    :raises ValueError: If ``variant`` is in neither table; the message lists both.
+    """
     if variant in SCALE_CONFIGS:
         return variant
     if variant in MODEL_VARIANTS:
@@ -115,14 +101,22 @@ def _resolve_scale(variant: str) -> str:
     )
 
 
-# DECISION plan-2026-07-14T163315-29a4fef4/D-009: push a dtype policy onto a layer by walking its sub-layer tree here, never via `create_embedding_layer(..., dtype=...)`.
-# `create_embedding_layer` does not accept `dtype`, and `Layer.dtype_policy`'s setter does not recurse into sub-layers either. See decisions.md.
+# DECISION plan-2026-07-14T163315-29a4fef4/D-009: walk the sub-layer tree to set a policy;
+# the factory takes no `dtype` and the `dtype_policy` setter does not recurse. See decisions.md.
 def _apply_dtype_policy(layer: keras.layers.Layer, policy: Any) -> keras.layers.Layer:
-    """Force ``policy`` onto ``layer`` AND every sub-layer, before anything is built."""
+    """Set ``policy`` on ``layer`` and on every sub-layer, before anything is built.
+
+    :param layer: The layer to retag.
+    :type layer: keras.layers.Layer
+    :param policy: A dtype policy or policy name.
+    :type policy: Any
+    :return: The same layer.
+    :rtype: keras.layers.Layer
+    """
     if hasattr(layer, "_flatten_layers"):
         for sub in layer._flatten_layers(include_self=True):
             sub.dtype_policy = policy
-    else:  # pragma: no cover - defensive, keras always provides _flatten_layers
+    else:  # pragma: no cover
         layer.dtype_policy = policy
     return layer
 
@@ -132,29 +126,85 @@ def _apply_dtype_policy(layer: keras.layers.Layer, policy: Any) -> keras.layers.
 
 @register_dl_technique("dl_techniques.models.energy_transformer.model")
 class EnergyTransformerBackbone(keras.Model):
-    """Shared Energy Transformer trunk: patch-embed -> [mask token] -> pos-embed -> ET block.
+    """Embed patches, optionally replace masked tokens, and run the energy descent.
 
-    Gives the ``EnergyTransformer`` block a single, separately-checkpointable image
-    trunk that BOTH the masked-completion model and the classifier compose under the same name,
-    so a pretrained encoder transfers into the classifier layer-for-layer.
+    One separately-checkpointable image trunk that both the masked-completion model
+    and the classifier compose under the same name, so a pretrained encoder transfers
+    into the classifier layer for layer. Call it as ``backbone(image)`` or
+    ``backbone((image, input_mask))``; whether a mask is passed is a trace-time
+    structural fact, a Python ``if`` on the presence of a second tensor, not a runtime
+    choice on tensor values. ``MaskTokenApply`` is created and built either way, which
+    is what keeps the two trunks weight-identical. The descent sign lives in the block:
+    its ``update()`` returns ``-dE/dg`` and the block adds it.
 
-    Call signature: ``backbone(image)`` or ``backbone((image, input_mask))``. Passing the
-    mask is a TRACE-TIME structural choice (a Python ``if`` on whether the caller supplied a
-    second tensor), not a runtime ``ops.where`` on tensor values: the MIM model always passes
-    one, the classifier never does.
+    Architecture:
 
-    **``MaskTokenApply`` is ALWAYS created and ALWAYS built**, even for the classifier that
-    never calls it. That is deliberate (authoring guide §9): it is what makes the two trunks
-    weight-identical so the warm-start is complete. Do not "optimize" it away.
+    .. code-block:: text
 
-    Descent sign: the ET block's ``update()`` returns ``-dE/dg`` and the block adds it.
-    Nothing here re-derives or re-signs the descent — see the block's class docstring.
+        image [B, H, W, C]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ patch_embed         │
+        └─────────────────────┘
+                 │  [B, N, D]
+                 ▼
+        ┌─────────────────────┐
+        │ mask_token          │ ◄── input_mask [B, N] bool (input)
+        └─────────────────────┘
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ pos_embed           │  dropout pos_dropout_rate
+        └─────────────────────┘
+                 │  cast to the block's variable dtype
+                 ▼
+        ┌─────────────────────┐
+        │ et_block            │  T steps, weights reused
+        └─────────────────────┘
+                 │
+           ┌─────┴─────┐
+           ▼           ▼
+         tokens      tokens, energies
+         [B, N, D]   [B, T+1] float32
+         (default)   (return_energy)
+
+    mask_token is built in both models and called only when a mask arrives.
+
+    Dtype path:
+
+    .. code-block:: text
+
+        input at compute_dtype
+                      │
+                      ▼
+        cast to et_block.compute_dtype
+                      │
+                      ▼
+        et_block: float32 descent and energy
+                      │
+              ┌───────┴───────┐
+              ▼               ▼
+           tokens            energies
+           cast back         stay float32
+
+    Scales:
+
+    .. code-block:: text
+
+        scale   embed_dim  num_heads  head_dim  hopfield_dim
+        tiny    192        3          64        768
+        small   384        6          64        1536
+        base    768        12         64        3072
+
+    head_dim is 64 at every scale, not embed_dim // num_heads.
 
     :param input_shape: Image shape ``(height, width, channels)``. Defaults to ``(224,224,3)``.
     :type input_shape: Tuple[int, int, int]
     :param patch_size: Patch size; ``int`` for square patches or ``(h, w)``. Defaults to ``16``.
     :type patch_size: Union[int, Tuple[int, int]]
-    :param scale: One of ``'tiny'``, ``'small'``, ``'base'`` (see :data:`SCALE_CONFIGS`).
+    :param scale: One of ``'tiny'``, ``'small'``, ``'base'`` (see :data:`SCALE_CONFIGS`), or
+        the matching variant key.
     :type scale: ETScale
     :param embed_dim: Override the scale's token dimension ``D``. ``None`` -> from ``scale``.
     :type embed_dim: Optional[int]
@@ -164,37 +214,44 @@ class EnergyTransformerBackbone(keras.Model):
     :type head_dim: Optional[int]
     :param hopfield_dim: Override the scale's memory count ``K``. ``None`` -> from ``scale``.
     :type hopfield_dim: Optional[int]
-    :param num_steps: Descent steps ``T``. Backward memory is LINEAR in ``T``. Defaults to 12.
+    :param num_steps: Descent steps ``T``. Backward memory is linear in ``T``. Defaults to 12.
     :type num_steps: int
     :param step_size: Descent step ``alpha``. Defaults to ``0.1``.
     :type step_size: float
-    :param beta: Attention inverse temperature; ``None`` -> ``1/sqrt(head_dim)`` (resolved by
-        ``EnergyAttention``, not duplicated here).
+    :param beta: Attention inverse temperature; ``None`` -> ``1/sqrt(head_dim)``, resolved by
+        ``EnergyAttention``.
     :type beta: Optional[float]
     :param attn_self: ``False`` (default) is the paper's ET-Full: a token does not attend to
         itself.
     :type attn_self: bool
     :param hopfield_activation: ``'relu'`` (default) or ``'softmax'``.
     :type hopfield_activation: HopfieldActivation
-    :param hopfield_beta: Temperature of the ``'softmax'`` Hopfield branch. NOT ``beta``.
+    :param hopfield_beta: Temperature of the ``'softmax'`` Hopfield branch, separate from
+        ``beta``.
     :type hopfield_beta: float
     :param noise_std: eq.-27 Langevin noise std (training only). ``0.0`` (default) keeps the
         descent guarantee.
     :type noise_std: float
     :param norm_epsilon: ``epsilon`` of the block's inner ``EnergyLayerNorm``.
     :type norm_epsilon: float
-    :param pos_dropout_rate: Dropout after the positional embedding. Defaults to ``0.0``.
+    :param pos_dropout_rate: Dropout after the positional embedding, in ``[0, 1]``. Defaults
+        to ``0.0``.
     :type pos_dropout_rate: float
     :param return_energy: If ``True``, :meth:`call` returns ``(tokens, energies)`` with
         ``energies`` of shape ``(B, num_steps + 1)`` and dtype float32 even under
-        mixed_float16**. Used by the out-of-graph energy-trace probe; the TRAINING models are
+        mixed_float16. Used by the out-of-graph energy-trace probe; the training models are
         always built with ``False``.
     :type return_energy: bool
     :param seed: Seed for the ``noise_std`` RNG.
     :type seed: Optional[int]
+    :param name: Model name. Defaults to :data:`BACKBONE_NAME`, which the warm-start matches
+        on.
+    :type name: Optional[str]
+    :param **kwargs: Forwarded to :class:`keras.Model`.
 
-    :raises ValueError: If the image dims are not divisible by the patch dims, or any
-        dimension is non-positive, or ``scale`` is unknown.
+    :raises ValueError: If ``input_shape`` or ``patch_size`` has the wrong length, if any
+        image or patch dimension is non-positive, if the image dims are not divisible by the
+        patch dims, if ``pos_dropout_rate`` is outside ``[0, 1]``, or if ``scale`` is unknown.
 
     Input shape:
         ``(batch, H, W, C)``; or a 2-tuple ``[(batch, H, W, C), (batch, N)]`` where the second
@@ -230,7 +287,6 @@ class EnergyTransformerBackbone(keras.Model):
     ) -> None:
         super().__init__(name=name, **kwargs)
 
-        # ----- validate the image / patch geometry -----
         if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 3:
             raise ValueError(
                 f"input_shape must be a 3-tuple (height, width, channels), got {input_shape}"
@@ -264,11 +320,10 @@ class EnergyTransformerBackbone(keras.Model):
                 f"pos_dropout_rate must be in [0, 1], got {pos_dropout_rate}"
             )
 
-        # ----- store ALL configuration (serialization contract) -----
         self.input_shape_config = (img_h, img_w, img_c)
         self.patch_size = (patch_h, patch_w)
         self.scale = scale
-        # Resolved (never None) so get_config round-trips an explicit architecture.
+        # Resolved here, never None, so get_config round-trips an explicit architecture.
         self.embed_dim = int(embed_dim) if embed_dim is not None else cfg['embed_dim']
         self.num_heads = int(num_heads) if num_heads is not None else cfg['num_heads']
         self.head_dim = int(head_dim) if head_dim is not None else cfg['head_dim']
@@ -287,12 +342,9 @@ class EnergyTransformerBackbone(keras.Model):
         self.return_energy = bool(return_energy)
         self.seed = seed
 
-        # ----- derived -----
         self.num_patches = (img_h // patch_h) * (img_w // patch_w)
         self.patch_dim = patch_h * patch_w * img_c
 
-        # ----- CREATE all sub-layers in __init__ (unbuilt) -----
-        # `dtype=` is applied via _apply_dtype_policy, NOT through the factory (D-009).
         self.patch_embed = _apply_dtype_policy(
             create_embedding_layer(
                 'patch_2d',
@@ -303,8 +355,8 @@ class EnergyTransformerBackbone(keras.Model):
             self.dtype_policy,
         )
 
-        # I6 / guide §9: ALWAYS CREATE, CONDITIONALLY USE. The classifier never calls this,
-        # but it MUST own the weight or its trunk stops matching the MIM trunk.
+        # Created even for the classifier, which never calls it: owning the weight is
+        # what keeps the classifier trunk matching the MIM trunk.
         self.mask_token = MaskTokenApply(name="mask_token", dtype=self.dtype_policy)
 
         self.pos_embed = _apply_dtype_policy(
@@ -312,15 +364,15 @@ class EnergyTransformerBackbone(keras.Model):
                 'positional_learned',
                 max_seq_len=self.num_patches,
                 dim=self.embed_dim,
-                # NOTE: the registry key is `dropout_rate`. `dropout=` is silently dropped.
+                # The registry key is `dropout_rate`; `dropout=` is silently dropped.
                 dropout_rate=self.pos_dropout_rate,
                 name="pos_embed",
             ),
             self.dtype_policy,
         )
 
-        # DECISION plan-2026-07-14T163315-29a4fef4/D-011: build the ET block with `dtype=self.dtype_policy.variable_dtype`, never the bare `self.dtype_policy`.
-        # Under mixed_float16, EnergyLayerNorm's backward overflows fp16 and silently produces zero gradients; running the block at its variable dtype (float32) avoids it. See decisions.md.
+        # DECISION plan-2026-07-14T163315-29a4fef4/D-011: pass the variable dtype, not the
+        # policy; EnergyLayerNorm's backward zeroes gradients at fp16. See decisions.md.
         self.et_block = EnergyTransformer(
             embed_dim=self.embed_dim,
             num_heads=self.num_heads,
@@ -352,7 +404,14 @@ class EnergyTransformerBackbone(keras.Model):
     def _split_inputs(
             inputs: Any
     ) -> Tuple[Any, Optional[Any]]:
-        """Split ``image`` / ``(image, input_mask)``. Trace-time structural, not value-based."""
+        """Split ``image`` or ``(image, input_mask)`` into its two parts.
+
+        :param inputs: A tensor, or a 2-sequence of image and mask.
+        :type inputs: Any
+        :return: ``(image, input_mask)``, with ``None`` for a missing mask.
+        :rtype: Tuple[Any, Optional[Any]]
+        :raises ValueError: If ``inputs`` is a sequence of length other than 2.
+        """
         if isinstance(inputs, (tuple, list)):
             if len(inputs) != 2:
                 raise ValueError(
@@ -363,11 +422,15 @@ class EnergyTransformerBackbone(keras.Model):
         return inputs, None
 
     def build(self, input_shape: Any) -> None:
-        """Explicitly build EVERY sub-layer from stored config.
+        """Build every sub-layer from the stored config.
 
-        The shapes come from the CONFIG, never from ``input_shape``'s optional mask entry, so
-        ``mask_token`` is built identically whether or not the caller ever passes a mask
-        (I6). A lazily-built sub-layer silently drops its weights on a ``.keras`` round-trip.
+        The shapes come from the config, not from the optional mask entry of
+        ``input_shape``, so ``mask_token`` is built the same way whether or not a caller
+        ever passes a mask. A sub-layer left to build lazily loses its weights on a
+        ``.keras`` round-trip.
+
+        :param input_shape: Ignored for shape purposes; recorded by Keras.
+        :type input_shape: Any
         """
         if self.built:
             return
@@ -377,7 +440,7 @@ class EnergyTransformerBackbone(keras.Model):
         mask_shape = (None, self.num_patches)
 
         self.patch_embed.build(image_shape)
-        # ALWAYS built — even in the classifier, which never calls it.
+        # Built even in the classifier, which never calls it.
         self.mask_token.build([token_shape, mask_shape])
         self.pos_embed.build(token_shape)
         self.et_block.build(token_shape)
@@ -389,7 +452,7 @@ class EnergyTransformerBackbone(keras.Model):
             inputs: Any,
             training: Optional[bool] = None
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
-        """Forward pass.
+        """Embed the image, apply the mask token if given, and run the descent.
 
         :param inputs: ``image (B, H, W, C)``, or ``(image, input_mask (B, N) bool)``.
         :param training: Keras training flag.
@@ -399,26 +462,31 @@ class EnergyTransformerBackbone(keras.Model):
 
         x = self.patch_embed(image, training=training)
 
-        # Python `if` on a TRACE-TIME structural fact (did the caller pass a mask?), which is
-        # the sanctioned "ALWAYS CREATE / CONDITIONALLY USE" pattern — NOT a Python `if` on a
-        # tensor VALUE. The layer stays built either way.
+        # Structural test on whether the caller passed a mask, not on tensor values;
+        # the layer stays built either way.
         if input_mask is not None:
             x = self.mask_token([x, input_mask])
 
         x = self.pos_embed(x, training=training)
 
-        # D-011: the block computes in its VARIABLE dtype (float32 under mixed_float16), never
-        # in fp16 — its EnergyLayerNorm backward overflows fp16 under XLA and silently kills
-        # training. Both casts are no-ops under float32/float64. DO NOT REMOVE THEM.
+        # DECISION plan-2026-07-14T163315-29a4fef4/D-011: keep both casts; the block runs at
+        # its variable dtype because its norm backward overflows fp16. See decisions.md.
         x = keras.ops.cast(x, self.et_block.compute_dtype)
         outputs = self.et_block(x, training=training)
         if self.return_energy:
-            tokens, energies = outputs      # energies stay float32 (I5) — never cast down
+            # Energies stay float32; casting them down overflows to nan.
+            tokens, energies = outputs
             return keras.ops.cast(tokens, self.compute_dtype), energies
         return keras.ops.cast(outputs, self.compute_dtype)
 
     def compute_output_shape(self, input_shape: Any) -> Any:
-        """Output shape from stored config — valid UNBUILT."""
+        """Return the output shape from the stored config, valid before the model is built.
+
+        :param input_shape: An image shape, or a 2-sequence of image and mask shapes.
+        :type input_shape: Any
+        :return: The token shape, or the token and energy shapes with ``return_energy``.
+        :rtype: Any
+        """
         image_shape = (
             input_shape[0]
             if (isinstance(input_shape, (tuple, list))
@@ -434,6 +502,11 @@ class EnergyTransformerBackbone(keras.Model):
         return token_shape
 
     def get_config(self) -> Dict[str, Any]:
+        """Return every constructor argument, with the scale overrides resolved.
+
+        :return: The configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "input_shape": self.input_shape_config,
@@ -462,7 +535,14 @@ class EnergyTransformerBackbone(keras.Model):
 
 
 def _coerce_backbone(backbone: Any) -> EnergyTransformerBackbone:
-    """Accept a live backbone or its serialized config dict (the ``from_config`` path)."""
+    """Accept a live backbone or its serialized config dict.
+
+    :param backbone: A backbone instance or the dict ``from_config`` receives.
+    :type backbone: Any
+    :return: The backbone.
+    :rtype: EnergyTransformerBackbone
+    :raises TypeError: If ``backbone`` is neither, or deserializes to another type.
+    """
     if isinstance(backbone, EnergyTransformerBackbone):
         return backbone
     if isinstance(backbone, dict):
@@ -479,8 +559,8 @@ def _coerce_backbone(backbone: Any) -> EnergyTransformerBackbone:
     )
 
 
-# DECISION plan-2026-07-14T163315-29a4fef4/D-010: both heads refuse a `return_energy=True` backbone, never forward or silently ignore the trace.
-# `EnergyTransformer.energy()` is always at least float32; a default-policy head ingesting it under mixed_float16 autocasts it down and overflows to nan. See decisions.md.
+# DECISION plan-2026-07-14T163315-29a4fef4/D-010: both heads refuse a return_energy=True
+# backbone; the float32 trace autocast down in a fp16 head goes to nan. See decisions.md.
 def _reject_energy_backbone(backbone: EnergyTransformerBackbone, owner: str) -> None:
     if backbone.return_energy:
         raise ValueError(
@@ -492,24 +572,48 @@ def _reject_energy_backbone(backbone: EnergyTransformerBackbone, owner: str) -> 
 
 @register_dl_technique("dl_techniques.models.energy_transformer.model")
 class EnergyTransformerMIM(keras.Model):
-    """Masked-image-completion model: ET backbone -> LayerNorm -> affine ``Dense(P*P*C)``.
+    """Reconstruct patch pixels from the energy-descended tokens.
 
-    Implements the paper's §3 image model. Reconstructs raw (normalized) patch pixels for
-    EVERY token; the loss is restricted to the occluded set by the ``sample_weight`` carried
-    in the ``tf.data`` batch, NOT by anything in this class (H6: no ``train_step``).
+    The paper's §3 image model. Every token is decoded back to raw normalized patch
+    pixels; the loss is narrowed to the occluded set by the ``sample_weight`` carried in
+    the ``tf.data`` batch, so nothing in this class touches the loss. The decoder is a
+    single affine projection, which leaves the reconstruction quality to the energy
+    descent in the trunk. Head sub-layers all carry a ``decoder_`` prefix, so the
+    classifier's warm-start skips exactly them and transfers the rest.
 
-    The decoder is a SINGLE affine projection on purpose — the reconstruction quality is
-    supposed to come from the energy descent in the trunk, not from a deep decoder.
+    Architecture:
 
-    All head sub-layers are named with a ``decoder_`` prefix so the classifier's warm-start
-    (``skip_prefixes=("decoder_",)``) skips exactly them and transfers the rest.
+    .. code-block:: text
+
+        image [B, H, W, C] (+ mask [B, N])
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ et_backbone         │
+        └─────────────────────┘
+                 │  [B, N, D]
+                 ▼
+        ┌─────────────────────┐
+        │ decoder_norm        │  layernorm, eps 1e-6
+        └─────────────────────┘
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ decoder_proj        │  dense, no activation
+        └─────────────────────┘
+                 │
+                 ▼
+           [B, N, P*P*C]
 
     :param backbone: An :class:`EnergyTransformerBackbone` (must be named ``"et_backbone"``
         for the warm-start to match by name), or its serialized config dict.
     :type backbone: EnergyTransformerBackbone
-    :param kwargs: Standard ``keras.Model`` kwargs.
+    :param name: Model name.
+    :type name: Optional[str]
+    :param **kwargs: Standard ``keras.Model`` kwargs.
 
     :raises ValueError: If ``backbone.return_energy`` is ``True`` (see D-010).
+    :raises TypeError: If ``backbone`` is neither a backbone nor a config dict for one.
 
     Input shape:
         ``[(batch, H, W, C), (batch, N) bool]`` — image + occlusion mask. A bare
@@ -543,6 +647,11 @@ class EnergyTransformerMIM(keras.Model):
         )
 
     def build(self, input_shape: Any) -> None:
+        """Build the backbone and both decoder layers.
+
+        :param input_shape: Forwarded to the backbone; head shapes come from its config.
+        :type input_shape: Any
+        """
         if self.built:
             return
         self.backbone.build(input_shape)
@@ -556,21 +665,46 @@ class EnergyTransformerMIM(keras.Model):
             inputs: Any,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
+        """Run the trunk, then decode every token to patch pixels.
+
+        :param inputs: ``image (B, H, W, C)``, or ``(image, input_mask (B, N) bool)``.
+        :param training: Keras training flag.
+        :return: ``(B, N, patch_dim)`` reconstructed patches.
+        """
         tokens = self.backbone(inputs, training=training)
         x = self.decoder_norm(tokens, training=training)
         return self.decoder_proj(x, training=training)
 
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
+        """Return ``(batch, num_patches, patch_dim)``.
+
+        :param input_shape: An image shape, or image and mask shapes.
+        :type input_shape: Any
+        :return: The reconstruction shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
         token_shape = self.backbone.compute_output_shape(input_shape)
         return (token_shape[0], self.num_patches, self.patch_dim)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the config, with the backbone serialized inline.
+
+        :return: The configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({"backbone": serialize_keras_object(self.backbone)})
         return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "EnergyTransformerMIM":
+        """Rebuild from :meth:`get_config`, deserializing the backbone first.
+
+        :param config: The dictionary produced by :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: The rebuilt model.
+        :rtype: EnergyTransformerMIM
+        """
         config = dict(config)
         config["backbone"] = deserialize_keras_object(config["backbone"])
         return cls(**config)
@@ -581,29 +715,65 @@ class EnergyTransformerMIM(keras.Model):
 
 @register_dl_technique("dl_techniques.models.energy_transformer.model")
 class EnergyTransformerClassifier(keras.Model):
-    """Classifier: the SAME ET backbone -> LayerNorm -> mean-pool -> ``Dense(num_classes)``.
+    """Classify an image from the mean of its energy-descended tokens.
 
-    Demonstrates that the MIM-pretrained trunk transfers. The backbone is composed
-    under the identical name (``"et_backbone"``) and identical config path, so
-    ``load_weights_from_checkpoint(model, mim_ckpt, skip_prefixes=("decoder_",))`` moves the
-    whole trunk and nothing else.
+    Shows that the MIM-pretrained trunk transfers: the backbone is composed under the
+    same name and the same config path, so
+    ``load_weights_from_checkpoint(model, mim_ckpt, skip_prefixes=("decoder_",))`` moves
+    the whole trunk and nothing else. Pooling is a mean over tokens because this
+    backbone has no CLS token; adding one would make ``N = 197`` here against ``196`` in
+    the MIM model, change the positional-embedding table's shape and break that transfer
+    (D-004). The head emits logits, so compile with
+    ``SparseCategoricalCrossentropy(from_logits=True)``.
 
-    Mean-pools rather than reading a CLS token, since the ET block has no CLS concept and one would
-    make ``N = 197`` here versus ``196`` in the MIM model, changing the positional-embedding
-    table's shape and BREAKING the very transfer this model exists to show (D-004).
+    Architecture:
 
-    The head emits logits, with no softmax. Compile with
-    ``SparseCategoricalCrossentropy(from_logits=True)`` — the house convention.
+    .. code-block:: text
+
+        image [B, H, W, C]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ et_backbone         │
+        └─────────────────────┘
+                 │  [B, N, D]
+                 ▼
+        ┌─────────────────────┐
+        │ head_norm           │  layernorm, eps 1e-6
+        └─────────────────────┘
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ head_pool           │  mean over tokens
+        └─────────────────────┘
+                 │  [B, D]
+                 ▼
+        ┌─────────────────────┐
+        │ head_dropout        │  (rate may be 0.0)
+        └─────────────────────┘
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ head_dense          │
+        └─────────────────────┘
+                 │
+                 ▼
+           [B, num_classes] logits
 
     :param backbone: An :class:`EnergyTransformerBackbone` (named ``"et_backbone"``), or its
         serialized config dict.
     :type backbone: EnergyTransformerBackbone
     :param num_classes: Number of output classes. Must be positive.
     :type num_classes: int
-    :param dropout_rate: Dropout before the final Dense. Defaults to ``0.0``.
+    :param dropout_rate: Dropout before the final Dense, in ``[0, 1]``. Defaults to ``0.0``.
     :type dropout_rate: float
+    :param name: Model name.
+    :type name: Optional[str]
+    :param **kwargs: Standard ``keras.Model`` kwargs.
 
-    :raises ValueError: If ``num_classes <= 0`` or ``backbone.return_energy`` is ``True``.
+    :raises ValueError: If ``num_classes <= 0``, ``dropout_rate`` is outside ``[0, 1]``, or
+        ``backbone.return_energy`` is ``True``.
+    :raises TypeError: If ``backbone`` is neither a backbone nor a config dict for one.
 
     Input shape:
         ``(batch, H, W, C)``. (A ``(image, mask)`` pair is accepted but the classifier is not
@@ -637,15 +807,14 @@ class EnergyTransformerClassifier(keras.Model):
         self.num_patches = backbone.num_patches
         self.embed_dim = backbone.embed_dim
 
-        # `head_` prefix: distinct from `decoder_`, so it is never transferred.
+        # `head_` prefix, distinct from `decoder_`, so these are never transferred.
         self.head_norm = layers.LayerNormalization(
             epsilon=1e-6, name="head_norm", dtype=self.dtype_policy
         )
         self.head_pool = layers.GlobalAveragePooling1D(
             name="head_pool", dtype=self.dtype_policy
         )
-        # ALWAYS CREATE / CONDITIONALLY USE (guide §9): the Dropout exists at every rate so
-        # the layer structure does not depend on a numeric value.
+        # Created at every rate, so the layer structure does not depend on a number.
         self.head_dropout = layers.Dropout(
             self.dropout_rate, name="head_dropout", dtype=self.dtype_policy
         )
@@ -654,6 +823,11 @@ class EnergyTransformerClassifier(keras.Model):
         )
 
     def build(self, input_shape: Any) -> None:
+        """Build the backbone and the four head layers.
+
+        :param input_shape: Forwarded to the backbone; head shapes come from its config.
+        :type input_shape: Any
+        """
         if self.built:
             return
         self.backbone.build(input_shape)
@@ -670,17 +844,35 @@ class EnergyTransformerClassifier(keras.Model):
             inputs: Any,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
+        """Run the trunk, pool the tokens, and return class logits.
+
+        :param inputs: ``image (B, H, W, C)``.
+        :param training: Keras training flag.
+        :return: ``(B, num_classes)`` logits, with no softmax applied.
+        """
         tokens = self.backbone(inputs, training=training)
         x = self.head_norm(tokens, training=training)
         x = self.head_pool(x)
         x = self.head_dropout(x, training=training)
-        return self.head_dense(x)  # logits — no softmax
+        return self.head_dense(x)
 
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
+        """Return ``(batch, num_classes)``.
+
+        :param input_shape: An image shape, or image and mask shapes.
+        :type input_shape: Any
+        :return: The logits shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
         token_shape = self.backbone.compute_output_shape(input_shape)
         return (token_shape[0], self.num_classes)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the config, with the backbone serialized inline.
+
+        :return: The configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "backbone": serialize_keras_object(self.backbone),
@@ -691,6 +883,13 @@ class EnergyTransformerClassifier(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "EnergyTransformerClassifier":
+        """Rebuild from :meth:`get_config`, deserializing the backbone first.
+
+        :param config: The dictionary produced by :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: The rebuilt model.
+        :rtype: EnergyTransformerClassifier
+        """
         config = dict(config)
         config["backbone"] = deserialize_keras_object(config["backbone"])
         return cls(**config)
@@ -712,9 +911,10 @@ def create_energy_transformer_backbone(
     :param variant: ``'tiny'`` / ``'small'`` / ``'base'`` (or ``'et_tiny'`` ...).
     :param input_shape: ``(H, W, C)``.
     :param patch_size: ``int`` or ``(h, w)``.
-    :param overrides: Any :class:`EnergyTransformerBackbone` ctor kwarg (e.g. ``num_steps``,
+    :param **overrides: Any :class:`EnergyTransformerBackbone` ctor kwarg (e.g. ``num_steps``,
         ``return_energy``, ``noise_std``).
     :return: The backbone, named ``"et_backbone"``.
+    :raises ValueError: If ``variant`` is unknown, or the geometry does not divide.
     """
     return EnergyTransformerBackbone(
         input_shape=input_shape,
@@ -736,8 +936,10 @@ def create_energy_transformer_mim(
     :param variant: ``'tiny'`` / ``'small'`` / ``'base'`` (or ``'et_tiny'`` ...).
     :param input_shape: ``(H, W, C)``.
     :param patch_size: ``int`` or ``(h, w)``.
-    :param overrides: Backbone ctor kwargs (``num_steps``, ``step_size``, ``noise_std``, ...).
+    :param **overrides: Backbone ctor kwargs (``num_steps``, ``step_size``, ``noise_std``, ...).
     :return: An :class:`EnergyTransformerMIM` whose trunk is named ``"et_backbone"``.
+    :raises ValueError: If ``variant`` is unknown, the geometry does not divide, or
+        ``return_energy=True`` is passed through ``overrides``.
 
     Example:
         >>> model = create_energy_transformer_mim('tiny', (224, 224, 3), 16)
@@ -767,9 +969,12 @@ def create_energy_transformer_classifier(
     :param patch_size: ``int`` or ``(h, w)``.
     :param num_classes: Number of classes.
     :param dropout_rate: Dropout before the final Dense.
-    :param overrides: Backbone ctor kwargs.
+    :param **overrides: Backbone ctor kwargs.
     :return: An :class:`EnergyTransformerClassifier` whose trunk is named ``"et_backbone"``
         and is weight-identical to :func:`create_energy_transformer_mim`'s at the same config.
+    :raises ValueError: If ``variant`` is unknown, the geometry does not divide,
+        ``num_classes`` is not positive, or ``return_energy=True`` is passed through
+        ``overrides``.
 
     Example:
         >>> model = create_energy_transformer_classifier('tiny', (224, 224, 3), 16, 10)

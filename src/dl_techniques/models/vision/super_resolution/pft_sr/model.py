@@ -1,19 +1,15 @@
 """
 PFTSR performs single-image super-resolution with a chain of windowed
-transformer blocks and pixel-shuffle upsampling.
-
-Each block multiplies the previous block's attention map into its own raw
-attention scores before the softmax, so a token pair a lower layer ruled out
-stays suppressed rather than being recomputed from scratch. Windows keep
-attention cost linear in image size rather than quadratic, using the same
-window-and-shift scheme as Swin Transformer.
-
-The published method also skips attention for pairs the inherited map has
-ruled out. This implementation always runs dense attention: any
-``sparsity_mode`` other than ``'none'`` raises ``NotImplementedError`` at
-construction. Height and width must be divisible by ``window_size`` and must
-be statically known (no ``None`` dims), because the shifted-window mask is
-built once at build time.
+transformer blocks and pixel-shuffle upsampling. Each block multiplies the
+previous block's attention map into its own raw scores before the softmax, so
+a token pair a lower layer ruled out stays suppressed instead of being
+recomputed. Windows keep attention cost linear in image size, using the same
+window-and-shift scheme as Swin Transformer. The published method also skips
+attention for pairs the inherited map has ruled out; this implementation always
+runs dense attention, and any ``sparsity_mode`` other than ``'none'`` raises
+``NotImplementedError`` at construction. Height and width must be divisible by
+``window_size`` and must be statically known, with no ``None`` dims, because
+the shifted-window mask is built once at build time.
 
 References:
     - Long et al., 2025. Progressive Focused Transformer for Single Image
@@ -50,57 +46,94 @@ class PFTSR(keras.Model):
     """
     Progressive Focused Transformer for single image super-resolution.
 
-    A Keras port of Long et al.'s PFT-SR (CVPR 2025). It has not been
-    trained or benchmarked in this codebase, so no performance claim is made
-    for it here.
+    A Keras port of Long et al.'s PFT-SR (CVPR 2025). Shallow features from a
+    3x3 convolution pass through the PFT stages, which thread one attention map
+    through every block, and a long skip carries the shallow features around
+    the stages to the upsampler. The port has not been trained or benchmarked
+    in this codebase, so no performance claim is made for it here.
 
     Architecture:
 
     .. code-block:: text
 
-        x [B, H, W, C]
-          |
-          v
-        +----------------+
-        |  conv_first    |  3x3, shallow features
-        +----------------+
-          |----------------------------------+
-          v                                  |
-        +-----------------------------+      |
-        |  PFT block stages           |      |
-        |  (attention map carried     |      |
-        |   forward across stages)    |      |
-        +-----------------------------+      |
-          |                                  |
-          v                                  |
-        +------------------+                 |
-        |  conv_after_body |                 |
-        +------------------+                 |
-          |                                  |
-          v                                  |
-         (+) <-------------------------------+   long skip
-          |
-          v
-        +----------------+
-        |  upsample      |  pixelshuffle / pixelshuffledirect / nearest+conv
-        +----------------+
-          |
-          v
-        +----------------+
-        |  conv_last     |  3x3
-        +----------------+
-          |
-          v
-        output [B, H*scale, W*scale, C]
+              x [B, H, W, in_channels]
+                          │
+                          ▼
+                ┌───────────────────┐
+                │    conv_first     │
+                └───────────────────┘
+                          │ [B, H, W, embed_dim]
+            ┌─────────────┤
+            │             ▼
+            │ ┌───────────────────────┐
+            │ │   pft block stages    │
+            │ └───────────────────────┘
+            │             │
+            │             ▼
+            │   ┌───────────────────┐
+            │   │  conv_after_body  │
+            │   └───────────────────┘
+            │             │
+            └─────────────┤
+                          ▼
+                         add
+                          │
+                          ▼
+                ┌───────────────────┐
+                │     upsample      │
+                └───────────────────┘
+                          │
+                          ▼
+                ┌───────────────────┐
+                │     conv_last     │
+                └───────────────────┘
+                          │
+                          ▼
+        output [B, H*scale, W*scale, in_channels]
+
+    Attention map chaining:
+
+    .. code-block:: text
+
+                  x
+                  │
+                  ▼
+          ┌───────────────────────────┐
+          │     block 0: block(x)     │
+          └───────────────────────────┘
+                  │             │
+                  ▼             ▼
+                  x         attn_map
+                  │             │
+                  ▼             ▼
+          ┌───────────────────────────┐
+          │ block 1: block([x, attn]) │
+          └───────────────────────────┘
+                  │             │
+                  ▼             ▼
+                  x         attn_map
+
+    The map crosses stage boundaries; stages only group the blocks.
+
+    Upsamplers:
+
+    .. code-block:: text
+
+        upsampler           stages                       scale
+        pixelshuffle        conv, shuffle (twice at 4x)  2, 3, 4
+        pixelshuffledirect  conv, shuffle                unchecked
+        nearest+conv        (upsample 2x, conv) x log2   powers of two
 
     Named variants:
 
     .. code-block:: text
 
-        variant       embed_dim  num_blocks       heads  mlp_ratio  window
-        light         52         [2,4,6,6,6]      4      1.0        32
-        base          240        [4,4,4,6,6,6]    6      2.0        32
-        repo_medium   80         [6,6,6,8,8,8]    8      2.0        8
+        variant     embed_dim  num_blocks     heads  mlp_ratio  window
+        light       52         [2,4,6,6,6]    4      1.0        32
+        base        240        [4,4,4,6,6,6]  6      2.0        32
+        repo_medium 80         [6,6,6,8,8,8]  8      2.0        8
+
+    `window` is each variant's own `window_size`, not the constructor default.
 
     :param scale: Upsampling scale factor (2, 3, or 4).
     :type scale: int
@@ -108,7 +141,8 @@ class PFTSR(keras.Model):
     :type in_channels: int
     :param embed_dim: Embedding dimension.
     :type embed_dim: int
-    :param num_blocks: Number of PFT blocks in each stage.
+    :param num_blocks: Number of PFT blocks in each stage. ``None`` means
+        ``[4, 4, 4, 6, 6, 6]``.
     :type num_blocks: list[int]
     :param num_heads: Number of attention heads.
     :type num_heads: int
@@ -124,7 +158,8 @@ class PFTSR(keras.Model):
     :type attention_dropout_rate: float
     :param projection_dropout_rate: Dropout rate applied to output projections.
     :type projection_dropout_rate: float
-    :param drop_path_rate: Stochastic depth rate.
+    :param drop_path_rate: Stochastic depth rate. The per-block rates rise
+        linearly from 0 to this value across all blocks.
     :type drop_path_rate: float
     :param norm_type: Normalization type, ``'layer_norm'`` or ``'rms_norm'``.
     :type norm_type: str
@@ -134,39 +169,33 @@ class PFTSR(keras.Model):
         ``'pixelshuffledirect'``, or ``'nearest+conv'``.
     :type upsampler: str
     :param kwargs: Additional keyword arguments for the Keras ``Model`` base class.
+    :raises ValueError: At build time, if ``scale`` is not 2, 3 or 4 under
+        ``'pixelshuffle'``, or not a power of two under ``'nearest+conv'``.
 
     Input shape:
         4D tensor with shape: `(batch_size, height, width, in_channels)`.
-        Height and width should be divisible by window_size.
+        Height and width must be divisible by window_size.
 
     Output shape:
         4D tensor with shape: `(batch_size, height * scale, width * scale, in_channels)`.
 
     Example:
         >>> import keras
-        >>> # Create PFT-SR model for 4x super-resolution
         >>> model = PFTSR(scale=4, embed_dim=60, num_blocks=[4, 4, 4, 6, 6, 6])
-        >>>
-        >>> # Low-resolution input (48x48)
         >>> lr_image = keras.random.normal((1, 48, 48, 3))
-        >>>
-        >>> # Super-resolve to high-resolution (192x192)
         >>> sr_image = model(lr_image)
         >>> print(sr_image.shape)
         (1, 192, 192, 3)
         >>>
-        >>> # The paper's PFT_light config, spelled out explicitly
+        >>> # The paper's PFT_light config, spelled out. Its window_size of 32
+        >>> # needs a 64x64 input, since 48 is not divisible by 32.
         >>> model_light = PFTSR(scale=4, embed_dim=52, num_blocks=[2, 4, 6, 6, 6],
         ...                     num_heads=4, mlp_ratio=1.0, window_size=32)
-        >>> sr_image_light = model_light(lr_image)
+        >>> sr_image_light = model_light(keras.random.normal((1, 64, 64, 3)))
     """
 
-    # 'light' and 'base' mirror the paper's two released training configs;
-    # window_size=32 matches those published models, not the constructor default.
-    # 'repo_medium' has no published counterpart.
-    # DECISION plan-2026-08-23T091307-9a110062/D-463: keep window_size explicit per
-    # variant here; collapsing it to the constructor default silently changes the architecture.
-    # See decisions.md.
+    # DECISION plan-2026-08-23T091307-9a110062/D-463: window_size stays explicit
+    # per variant; the constructor default changes the architecture. See decisions.md.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         # PFT_light, 101_PFT_light_SRx2_scratch.yml network_g
         'light': {
@@ -184,9 +213,7 @@ class PFTSR(keras.Model):
             'mlp_ratio': 2.0,
             'window_size': 32,
         },
-        # Repo-original. Not in the paper, not in the official repo, not a rung
-        # above ``base``. Kept because it is a cheap mid-size model, not because
-        # anything published looks like it.
+        # Repo-original mid-size tier, with no published counterpart.
         'repo_medium': {
             'embed_dim': 80,
             'num_blocks': [6, 6, 6, 8, 8, 8],
@@ -214,6 +241,7 @@ class PFTSR(keras.Model):
             upsampler: Literal['pixelshuffle', 'pixelshuffledirect', 'nearest+conv'] = 'pixelshuffle',
             **kwargs
     ):
+        """Store the configuration and the per-block drop-path schedule."""
         super().__init__(**kwargs)
 
         if num_blocks is None:
@@ -234,11 +262,9 @@ class PFTSR(keras.Model):
         self.use_lepe = use_lepe
         self.upsampler = upsampler
 
-        # Calculate total number of blocks for stochastic depth
         self.total_blocks = sum(num_blocks)
 
-        # linear_drop_path_rates returns plain floats; a tensor-based linspace
-        # raised AttributeError under TF eager and left drop_path_rate > 0 dead.
+        # Plain floats, since a tensor linspace breaks under TF eager.
         self.dpr = linear_drop_path_rates(self.total_blocks, drop_path_rate)
 
     def build(self, input_shape):
@@ -246,8 +272,8 @@ class PFTSR(keras.Model):
         Build model layers.
 
         :param input_shape: Shape tuple of the input.
+        :raises ValueError: If ``scale`` is unsupported by the chosen upsampler.
         """
-        # 1. Shallow feature extraction
         self.conv_first = keras.layers.Conv2D(
             filters=self.embed_dim,
             kernel_size=3,
@@ -256,7 +282,6 @@ class PFTSR(keras.Model):
             name="conv_first"
         )
 
-        # 2. Deep feature extraction with PFT blocks
         self.stages = []
         block_idx = 0
 
@@ -264,7 +289,8 @@ class PFTSR(keras.Model):
             stage_blocks = []
 
             for block_idx_in_stage in range(num_blocks_in_stage):
-                # Alternate between regular and shifted window attention
+                # Even blocks use plain windows, odd blocks shifted ones, so a
+                # window boundary in one block sits mid-window in the next.
                 shift_size = 0 if (block_idx_in_stage % 2 == 0) else self.window_size // 2
 
                 block = PFTBlock(
@@ -286,7 +312,6 @@ class PFTSR(keras.Model):
 
             self.stages.append(stage_blocks)
 
-        # 3. Reconstruction
         self.conv_after_body = keras.layers.Conv2D(
             filters=self.embed_dim,
             kernel_size=3,
@@ -295,17 +320,13 @@ class PFTSR(keras.Model):
             name="conv_after_body"
         )
 
-        # 4. Upsampling
         if self.upsampler == 'pixelshuffle':
-            # Traditional upsampling with pixel shuffle
             self.upsample = self._build_pixelshuffle_upsampler()
         elif self.upsampler == 'pixelshuffledirect':
-            # Direct pixel shuffle
             self.upsample = self._build_pixelshuffledirect_upsampler()
-        else:  # nearest+conv
+        else:
             self.upsample = self._build_nearest_upsampler()
 
-        # 5. Final reconstruction
         self.conv_last = keras.layers.Conv2D(
             filters=self.in_channels,
             kernel_size=3,
@@ -315,7 +336,7 @@ class PFTSR(keras.Model):
         )
 
         # Force sublayers to build now: build_from_config reloads them unbuilt,
-        # and weight loading fails on layers "never built" without this step.
+        # and weight loading fails on layers "never built".
         if all(d is not None for d in input_shape[1:]):
             dummy = keras.ops.zeros((1,) + tuple(input_shape[1:]))
             self.call(dummy, training=False)
@@ -328,6 +349,7 @@ class PFTSR(keras.Model):
 
         :return: Sequential model for upsampling.
         :rtype: keras.Sequential
+        :raises ValueError: If ``scale`` is not 2, 3 or 4.
         """
         layers = []
 
@@ -341,14 +363,13 @@ class PFTSR(keras.Model):
                     name=f"upsample_conv"
                 )
             )
-            # DECISION plan_2026-06-15_39a31d4a/D-003: use PixelShuffle2D, not
-            # keras.ops.nn.depth_to_space (absent in Keras 3.8) or a Lambda wrapping it.
-            # See decisions.md.
+            # DECISION plan_2026-06-15_39a31d4a/D-003: PixelShuffle2D, not
+            # keras.ops.nn.depth_to_space, absent in Keras 3.8. See decisions.md.
             layers.append(
                 PixelShuffle2D(block_size=self.scale, name="pixel_shuffle")
             )
         elif self.scale == 4:
-            # 4x = 2x + 2x
+            # 4x runs as two 2x stages.
             layers.append(
                 keras.layers.Conv2D(
                     self.embed_dim * 4,
@@ -381,6 +402,9 @@ class PFTSR(keras.Model):
     def _build_pixelshuffledirect_upsampler(self) -> keras.Sequential:
         """
         Build direct pixel shuffle upsampler.
+
+        One convolution to ``embed_dim * scale ** 2`` channels and one shuffle,
+        for any ``scale``, with no validation of it.
 
         :return: Sequential model for upsampling.
         :rtype: keras.Sequential
@@ -456,18 +480,15 @@ class PFTSR(keras.Model):
         :return: Super-resolved high-resolution images.
         :rtype: keras.KerasTensor
         """
-        # 1. Shallow feature extraction
         x = self.conv_first(inputs)
         residual = x
 
-        # 2. Deep feature extraction with progressive focused attention
         prev_attn_map = None
 
         for stage_blocks in self.stages:
             for block in stage_blocks:
-                # DECISION plan_2026-06-15_39a31d4a/D-003: the first block gets a bare
-                # tensor (no prior map); later blocks get [x, prev_attn_map] as a list,
-                # never a tuple, or Keras' shape machinery misreads the input. See decisions.md.
+                # DECISION plan_2026-06-15_39a31d4a/D-003: the first block takes a bare
+                # tensor, later blocks a list, never a tuple. See decisions.md.
                 if prev_attn_map is None:
                     x, prev_attn_map = block(x, training=training)
                 else:
@@ -475,21 +496,20 @@ class PFTSR(keras.Model):
                         [x, prev_attn_map], training=training
                     )
 
-        # 3. Reconstruction
         x = self.conv_after_body(x)
-        # Global residual connection.
         x = x + residual
 
-        # 4. Upsampling
         x = self.upsample(x)
 
-        # 5. Final reconstruction
         output = self.conv_last(x)
 
         return output
 
     def get_config(self):
-        """Return model configuration."""
+        """Return model configuration.
+
+        :return: Dictionary containing all constructor arguments.
+        """
         config = super().get_config()
         config.update({
             "scale": self.scale,
@@ -531,15 +551,11 @@ def create_pft_sr(
         the dropout rates.
     :return: Configured :class:`PFTSR` instance.
     :rtype: PFTSR
+    :raises ValueError: If ``variant`` is not a known variant name.
 
     Example:
-        >>> # Create base model for 4x SR
         >>> model = create_pft_sr(scale=4, variant='base')
-        >>>
-        >>> # Create lightweight model for 2x SR
         >>> model_light = create_pft_sr(scale=2, variant='light')
-        >>>
-        >>> # Create the repo-original mid-size model for 4x SR
         >>> model_medium = create_pft_sr(scale=4, variant='repo_medium')
     """
     if variant not in PFTSR.MODEL_VARIANTS:
@@ -549,10 +565,11 @@ def create_pft_sr(
         )
 
     # DECISION plan-2026-08-19T163559-499b6f0e/D-118: copy the variant dict before
-    # updating with kwargs, or a caller's override mutates PFTSR.MODEL_VARIANTS itself.
-    # See decisions.md.
+    # updating with kwargs, or an override mutates MODEL_VARIANTS. See decisions.md.
     config = PFTSR.MODEL_VARIANTS[variant].copy()
     config['num_blocks'] = list(config['num_blocks'])
     config.update(kwargs)
 
     return PFTSR(scale=scale, **config)
+
+# ---------------------------------------------------------------------

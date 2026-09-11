@@ -106,6 +106,8 @@ from .decoupled_information_loss import (
 
 from .dino_loss import DINOLoss, iBOTPatchLoss, KoLeoLoss
 
+from .doc_scanner_flow_sequence_loss import DocScannerFlowSequenceLoss
+
 from .feature_alignment_loss import FeatureAlignmentLoss
 
 from .flow_matching_velocity_loss import FlowMatchingVelocityLoss
@@ -263,6 +265,8 @@ __all__ = [
     "DINOLoss",
     "iBOTPatchLoss",
     "KoLeoLoss",
+    # doc_scanner_flow_sequence_loss
+    "DocScannerFlowSequenceLoss",
     # feature_alignment_loss
     "FeatureAlignmentLoss",
     # flow_matching_velocity_loss

@@ -52,6 +52,40 @@ Data loading, generation, and preprocessing utilities for various domains.
   - `tasks.py` — the single `TASKS` table binding each task name to its prompt
     generator, supervised output-channel count, loss name and post-processing
     mode. Nothing else in the tree branches on a DocRes task string.
+- `document_rectification/` — DocScanner **dewarping** data utilities. A sibling
+  of `document_restoration/`, not part of it: that package owns DocRes's
+  photometric tasks (`(image, prompt, restored)`), this one owns geometric
+  ground truth (`(image, f_gt, mask)`). The shared piece — `dtsprompt`'s
+  `base_coordinate_grid` — is imported, not copied.
+  - `synthetic_warp.py` — the synthetic warped-page generator. **numpy + scipy
+    only at module scope**, same house rule as `dtsprompt.py`, plus `PIL`:
+    Pillow is declared only in the `data` extra, so the single file-touching
+    helper `load_rgb` imports it lazily. A suite guard enforces all three.
+    Its warp is a composition of **closed-form-invertible** primitives (shear
+    couplings, one homography, one fit affine), so the backward map `f_gt`
+    (rectified grid -> distorted pixel coords, channel 0 `x`) and the forward
+    map `g` are BOTH exact and neither is ever fitted. Read the module
+    docstring before changing the warp family: the usual "render the image by
+    gathering through the map you supervise on" recipe pins down the OPPOSITE
+    direction, and emitting it as `f_gt` is a silent inversion with no shape,
+    dtype, unit or range symptom.
+  - `uvdoc.py` — the UVDoc corpus reader and densifier, emitting the SAME
+    `(f_gt, g, mask)` contract as `synthetic_warp.py` (one shared assertion in
+    `tests/.../backward_map_convention.py` holds the two together). MEASURED
+    facts about the corpus, none of them assumed: every `.mat` is **MATLAB
+    v7.3, i.e. HDF5** (`scipy.io.loadmat` refuses it; `h5py` reads it and
+    returns every axis REVERSED); `grid2d` is an **89x61 control lattice**,
+    channel 0 `x`, valued in absolute pixels of the 488x712 distorted frame,
+    whose domain is the RECTIFIED page — so it is already the backward map and
+    needs densifying, not inverting; half of `UVDoc_final.zip`'s 182,492
+    members are `__MACOSX/` resource forks every listing must skip.
+    Densification is a **regular-grid** interpolating spline, not a TPS. The
+    forward map `g` IS fitted (`scipy.interpolate.griddata`, linear inside the
+    hull, nearest outside) and is **the one genuinely approximate step in the
+    whole port** — bounded, measured, and gated by a rejection path. numpy +
+    scipy at module scope; `h5py` and `Pillow` are `data`-extra only and are
+    imported inside the two functions that need them, which the same suite
+    guard enforces.
 - `time_series/` — Time series dataset framework:
   - `base.py` — Base dataset class, `config.py` — dataset configuration
   - `generator.py` — Data generators, `pipeline.py` — preprocessing pipelines

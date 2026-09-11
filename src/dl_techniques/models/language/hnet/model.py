@@ -1,56 +1,25 @@
 """H-Net: the assembled byte-level causal language model.
 
-This module is the top of the port. It is deliberately thin -- an embedding, the recursive
-backbone built in ``stage.py``, and a language-modelling head -- because every piece of
-architecture already lives one level down:
-
-.. code-block:: text
-
-    input_ids (B, L) int32
-          |
-    Embedding(256, d_model[0])          std = 1.0   <-- NOT 0.02
-          |
-    HNetStage(stage_idx=0)              the whole recursive hierarchy
-          |                             -> hidden (B, L, d_model[0])
-          |                             -> routing records, one per chunking level
-          |                                    |
-          |                                    +--> ratio_loss * alpha --> add_loss
-          |
-    lm_head                             Dense(256, no bias, std = 0.02)
-          |                             or, tied, hidden @ embeddings.T
-          v
-    logits (B, L, 256)
-
-Four things here are load-bearing and none of them has a shape symptom
----------------------------------------------------------------------
-
-1. **The embedding is initialised at ``stddev = 1.0``, the LM head at ``0.02``.** This
-   asymmetry is the reference's, stated in one place (``mixer_seq.py:55-62``): linears get
-   ``initializer_range``, embeddings get 1.0. Giving the embedding 0.02 shrinks every
-   input to the first stage by 50x and the model still trains -- badly, and with nothing
-   failing.
-2. **Residual-writing projections are depth-scaled PER STAGE**, ``0.02 / sqrt(n_k)`` where
-   ``n_k`` is the OUTSIDE-IN CUMULATIVE residual count at stage ``k``. See the
-   ``# DECISION`` anchor on :meth:`HNet._apply_depth_scaled_init`.
-3. **The ratio loss reaches the optimizer through ``add_loss``**, never through a custom
-   ``train_step``. Overriding ``train_step`` is a repository-wide invariant violation, and
-   under ``mixed_float16`` it silently discards the framework's own ``scale_loss``, i.e.
-   ``2**15`` of gradient magnitude.
-4. **``pretrained=True`` raises.** No H-Net checkpoint is distributed with this repository
-   and none is convertible from the reference (the RoPE pairing alone diverges, D-005), so
-   the alternative -- warning and returning random weights -- would let a caller publish
-   numbers from an untrained model.
-
-The reference spells the weight-tying flag ``tie_embeddings``; this port spells the
-constructor flag ``tie_word_embeddings``, the house spelling in three of the four models
-here that tie (decision D-006). The architecture dataclass keeps the reference's spelling,
-and the constructor flag defaults to it.
+Defines :class:`HNet`, which maps byte ids to next-token logits through an
+embedding, the recursive :class:`HNetStage` backbone, and a head that is either
+tied to the embedding table or its own Dense. Initialization is not one value:
+the embedding starts at stddev 1.0, every Linear at ``initializer_range``, and
+the projections that write into the residual stream are scaled per stage by
+``1 / sqrt(n_k)``, the outside-in cumulative residual count. The chunking ratio
+loss reaches the optimizer through ``add_loss``, so stock ``compile`` and
+``fit`` sum it in and scale it under ``mixed_float16``. Three things a caller
+needs: chunk caps are fixed per level, so ``max_chunks`` is a constructor
+argument with a derived default; the constructor flag is
+``tie_word_embeddings`` while the architecture dataclass keeps the reference's
+``tie_embeddings``, which the flag defaults to; and ``pretrained=True`` raises,
+because no H-Net checkpoint ships here.
 
 References:
     - Hwang et al., 2025. Dynamic Chunking for End-to-End Hierarchical Sequence
       Modeling. (https://arxiv.org/abs/2507.07955)
-    - Reference implementation: ``hnet/models/mixer_seq.py:22-62`` (the LM wrapper and its
-      init asymmetry) and ``hnet/models/hnet.py:121-147`` (the per-stage depth scaling).
+    - Reference implementation: ``hnet/models/mixer_seq.py:22-62`` (the LM wrapper
+      and its init asymmetry) and ``hnet/models/hnet.py:121-147`` (the per-stage
+      depth scaling).
 """
 
 import math
@@ -88,62 +57,38 @@ __all__ = [
     "default_max_chunks",
 ]
 
-# `MODEL_VARIANTS` is re-exported here, not redefined: the house shape puts the variant
-# table on the model module, and a second copy of a six-row cited table is a copy that
-# drifts. It is `config.MODEL_VARIANTS`, the same object.
+# Re-exported, not redefined: this is `config.MODEL_VARIANTS`, the same object.
 
-#: ``mixer_seq.py:60`` -- the embedding matrix is initialised at unit standard deviation,
-#: NOT at ``initializer_range``. The comment upstream reads "embeddings are initialized
-#: differently from linears" and this is the whole of it.
+#: Standard deviation for the embedding matrix, from ``mixer_seq.py:60``. Embeddings
+#: are initialised at 1.0 while Linears use :data:`INITIALIZER_RANGE`.
 EMBEDDING_INIT_STDDEV: float = 1.0
 
-#: ``mixer_seq.py:53`` -- the base standard deviation for every Linear, before the
+#: Base standard deviation for every Linear, from ``mixer_seq.py:53``, before the
 #: per-stage depth scaling is applied to the residual-writing ones.
 INITIALIZER_RANGE: float = 0.02
 
-#: The ratio-loss coefficient. One scalar for the whole hierarchy; the per-level targets
-#: are the ``target_ratios`` constructor argument.
-#:
-#: **This value is a choice of THIS PORT and not a transcription.** Unlike
-#: :data:`EMBEDDING_INIT_STDDEV` and :data:`INITIALIZER_RANGE` above, which cite
-#: ``mixer_seq.py``, it cites nothing because there is nothing to cite: the coefficient
-#: lives in the reference's training script, which is not part of the released
-#: repository, and ``grep -rn "0\.03"`` over the whole reference tree returns ZERO hits.
-#: ``0.03`` is the weight the paper reports for the load-balancing term, adopted here as
-#: a documented default. Same evidential position as
-#: :data:`~dl_techniques.models.language.hnet.losses.DEFAULT_TARGET_RATIO`, and disclosed
-#: the same way; see README section 5.7. Do not later cite it as reference-faithful.
-#: Pinned by ``test_model.py::TestRatioLossWiring`` -- value, provenance and effect.
+#: Coefficient on the summed ratio loss; the per-level targets are the
+#: ``target_ratios`` constructor argument. This is the weight the paper reports for
+#: the load-balancing term, adopted here as a default, not read from the reference code.
 RATIO_LOSS_ALPHA: float = 0.03
 
-#: The layer names that write INTO the residual stream, and therefore take the
-#: depth-scaled initializer. Upstream selects them by substring on the PyTorch module
-#: path (``"out_proj" in name or "fc2" in name``, ``hnet.py:127-129``); this port's
-#: equivalents are the Mamba-2 output projection (``out_proj``), the attention output
-#: projection (``w_o``, upstream's fused ``out_proj``) and the SwiGLU down projection
-#: (``down_proj``, upstream's ``fc2``). Every other Dense in a stack -- ``in_proj``,
-#: ``w_q``/``w_k``/``w_v``, ``gate_proj``, ``up_proj`` -- READS the residual stream and
-#: takes the unscaled :data:`INITIALIZER_RANGE`.
+#: Dense names that write into the residual stream and so take the depth-scaled
+#: initializer: the Mamba-2 output projection, the attention output projection and the
+#: SwiGLU down projection. Every other Dense reads the stream and takes the base range.
 RESIDUAL_WRITING_PROJECTIONS: Tuple[str, ...] = ("out_proj", "w_o", "down_proj")
 
+# ---------------------------------------------------------------------
 
 def default_max_chunks(num_stages: int, max_seq_len: int) -> Tuple[int, ...]:
     """Derive a chunk cap per chunking level by successive halving.
 
-    D-007 replaced the reference's data-dependent ``max(boundary_mask.sum(-1))`` with a
-    FIXED cap, which makes the cap a constructor argument that
-    :meth:`HNet.from_variant` must supply something for. The default derived here is
-    ``max_seq_len // 2`` at the first chunking level and half again at each level below
-    it, floored at 1.
-
-    The derivation, so the number is not a guess: the paper targets a compression of
-    roughly ``6x`` per stage and this port's ratio loss defaults to
-    :data:`~dl_techniques.models.language.hnet.losses.DEFAULT_TARGET_RATIO` = 6.0, so a
-    cap of ``2x`` compression carries a 3x margin over the target -- generous enough that
-    truncation is not the common case, while still removing three quarters of the inner
-    stage's compute at every level. It is a DEFAULT, not a property of the architecture:
-    a real training run should measure its realised boundary counts on its own corpus and
-    pass ``max_chunks`` explicitly.
+    The cap is ``max_seq_len // 2`` at the first chunking level and half again at
+    each level below it, floored at 1. That allows 2x compression per level, three
+    times looser than this port's ratio-loss target of
+    :data:`~dl_techniques.models.language.hnet.losses.DEFAULT_TARGET_RATIO` = 6.0, so
+    truncation stays uncommon while three quarters of the inner stage's compute is
+    removed at every level. These are defaults: a real training run should measure the
+    boundary counts it realises on its own corpus and pass ``max_chunks`` explicitly.
 
     :param num_stages: Total stages, innermost included. There are ``num_stages - 1``
         chunking levels.
@@ -160,10 +105,69 @@ def default_max_chunks(num_stages: int, max_seq_len: int) -> Tuple[int, ...]:
         caps.append(length)
     return tuple(caps)
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.hnet.model")
 class HNet(keras.Model):
     """Byte-level causal language model with hierarchical dynamic chunking.
+
+    An embedding feeds the recursive backbone, which returns the hidden states and
+    one routing record per chunking level. The records become the ratio loss, which
+    is contributed with ``add_loss`` rather than in a custom training step. The head
+    is a Dense, or, when tied, a matmul against the embedding table.
+
+    Architecture:
+
+    .. code-block:: text
+
+        input_ids [B, L] int32
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ embeddings          │  stddev 1.0
+        └─────────────────────┘
+                 │  [B, L, d_model[0]]
+                 ▼
+        ┌─────────────────────┐
+        │ backbone  HNetStage │  recursive hierarchy
+        └─────────────────────┘
+                 │  hidden [B, L, d_model[0]]
+                 ├──────────► routing records, one per level
+                 │                        │
+                 │                        ▼
+                 │            ratio_loss * alpha ──► add_loss
+                 ▼
+           ┌─────┴─────┐
+           ▼           ▼
+          tied       untied
+           │           │
+           ▼           ▼
+    hidden @ E^T     lm_head
+           │           │
+           └─────┬─────┘
+                 ▼
+           logits [B, L, vocab_size]
+
+    The tied path owns no weights; the untied path is a Dense with no bias.
+
+    Initializer scaling:
+
+    .. code-block:: text
+
+        Dense in an isotropic stack
+                  │
+          ┌───────┴───────┐
+          ▼               ▼
+       writes            reads
+       residual          residual
+       out_proj          in_proj, w_q, w_k, w_v
+       w_o               gate_proj, up_proj
+       down_proj
+          │               │
+          ▼               ▼
+     range / sqrt(n_k)   range
+
+    n_k is the outside-in cumulative residual count at stage k.
 
     :param arch_config: The parsed architecture -- layout, per-stage widths and per-stage
         attention/SSM knobs.
@@ -172,7 +176,8 @@ class HNet(keras.Model):
         ``len(max_chunks) == arch_config.num_stages - 1``. ``None`` derives them with
         :func:`default_max_chunks`.
     :type max_chunks: Optional[Sequence[int]]
-    :param max_seq_len: Largest position the attention RoPE tables cover.
+    :param max_seq_len: Largest position the attention RoPE tables cover, and the length
+        :func:`default_max_chunks` halves when ``max_chunks`` is ``None``.
     :type max_seq_len: int
     :param headdim: Mamba-2 SSM head width.
     :type headdim: int
@@ -185,15 +190,17 @@ class HNet(keras.Model):
         uses :data:`~dl_techniques.models.language.hnet.losses.DEFAULT_TARGET_RATIO`
         everywhere.
     :type target_ratios: Optional[Sequence[float]]
-    :param initializer_range: Base standard deviation for every Linear in the stacks.
+    :param initializer_range: Base standard deviation for every Linear in the stacks and
+        for an untied LM head.
     :type initializer_range: float
-    :param kwargs: Forwarded to :class:`keras.Model`.
+    :param **kwargs: Forwarded to :class:`keras.Model`.
 
     :raises TypeError: if ``arch_config`` is not an :class:`HNetArchConfig`.
     :raises ValueError: if ``max_chunks`` or ``target_ratios`` has the wrong length, if
-        ``ratio_loss_alpha`` or ``initializer_range`` is negative, or if a stack contains
+        ``ratio_loss_alpha`` or ``initializer_range`` is negative, if a stack contains
         no residual-writing projection to depth-scale (which would mean a sub-layer was
-        renamed out from under :data:`RESIDUAL_WRITING_PROJECTIONS`).
+        renamed out from under :data:`RESIDUAL_WRITING_PROJECTIONS`), or if a Dense in a
+        stack is already built when the depth-scaled init runs.
 
     Example:
         >>> from dl_techniques.models.language.hnet.config import HNetArchConfig, AttnSpec
@@ -209,13 +216,9 @@ class HNet(keras.Model):
         (2, 16, 256)
     """
 
-    #: The six shipped variants. This is the SAME object as
+    #: The six shipped variants. The same object as
     #: :data:`~dl_techniques.models.language.hnet.config.MODEL_VARIANTS`, aliased onto
-    #: the class rather than copied: the house shape reaches a model's variant table
-    #: through the class (``models/CLAUDE.md`` § House Model Module Shape), and
-    #: ``tests/test_models/test_package_api_contract.py`` resolves the table a
-    #: ``from_variant`` looks names up in off its owning class. A second literal table
-    #: here would be a second home for six cited rows, i.e. a copy that drifts.
+    #: the class so ``from_variant`` and the API tests reach the table through the class.
     MODEL_VARIANTS: Dict[str, HNetArchConfig] = MODEL_VARIANTS
 
     def __init__(
@@ -283,8 +286,7 @@ class HNet(keras.Model):
         self.vocab_size = arch_config.vocab_size
         self.d_embed = arch_config.d_model[0]
 
-        # `mixer_seq.py:38` -- the HNet backbone is a map (B, L, D0) -> (B, L, D0), so the
-        # embedding lives OUTSIDE it.
+        # The backbone maps (B, L, D0) to (B, L, D0), so the embedding sits outside it.
         self.embeddings = keras.layers.Embedding(
             input_dim=self.vocab_size,
             output_dim=self.d_embed,
@@ -303,9 +305,8 @@ class HNet(keras.Model):
             name="backbone",
         )
 
-        # A tied head owns no weights at all: the projection is written inline in `call`
-        # against the embedding table (D-006). Creating an unused Dense here would add a
-        # real, trained-and-discarded parameter block that no shape test would notice.
+        # A tied head owns no weights: `call` projects against the embedding table, so a
+        # Dense here would be a trained-and-discarded parameter block.
         self.lm_head: Optional[keras.layers.Dense] = None
         if not self.tie_word_embeddings:
             self.lm_head = keras.layers.Dense(
@@ -324,37 +325,19 @@ class HNet(keras.Model):
     # -----------------------------------------------------------------
 
     def _apply_depth_scaled_init(self) -> None:
-        """Give every Dense in the isotropic stacks the reference's initializer.
+        """Give every Dense in the isotropic stacks its initializer, scaled by depth.
 
-        Walks the stage chain outside-in. At stage ``k`` the stacks are the encoder and
-        decoder (or, at the innermost stage, the single main stack), and every Dense in
-        them is re-initialised: ``initializer_range / sqrt(n_k)`` for the residual-WRITING
+        Walks the stage chain outside-in. At each stage the stacks are the encoder and
+        the decoder, or the single main stack at the innermost stage, and every Dense in
+        them is re-initialised: ``initializer_range / sqrt(n_k)`` for the residual-writing
         projections named in :data:`RESIDUAL_WRITING_PROJECTIONS`, plain
-        ``initializer_range`` for every other one. Transcribed from
-        ``hnet/models/hnet.py:121-147``.
+        ``initializer_range`` for every other one. Follows ``hnet/models/hnet.py:121-147``.
 
         :raises ValueError: if a stack contains no residual-writing projection, or if a
             Dense has already been built when this runs.
         """
-        # DECISION plan-2026-09-09T042752-6d66ac56/D-021: the denominator is
-        # `n_residuals_by_stage(...)` -- the OUTSIDE-IN CUMULATIVE count, one per stage --
-        # and NOT the single hierarchy-wide `n_residuals(...)` total. Do NOT "simplify"
-        # this to one number for the whole model. MEASURED against `hnet.py:121-147`: the
-        # reference threads `parent_residuals` inward, so `hnet_1stage_L` scales by
-        # (8, 52) and `hnet_2stage_XL` by (8, 20, 74). The two definitions coincide ONLY
-        # at the innermost stage, which is exactly why a 1-stage config cannot tell them
-        # apart -- and why the guard for this is a TWO-stage one
-        # (test_model.py::TestDepthScaledInit::
-        # test_a_two_stage_model_scales_each_stage_by_its_own_cumulative_count).
-        # Using the total on a 2-stage model makes the outer sandwich's init
-        # sqrt(74 / 8) = 3.04x too small, with no shape symptom and no exception.
-        #
-        # The initializer is REPLACED before the variables exist rather than assigned
-        # after they do: an `.assign()` performed inside a parent-triggered `build()` is
-        # recorded by Keras' StatelessScope and DISCARDED (measured here: a nested model's
-        # post-build assign reverted to the initializer value while the same assign on a
-        # directly-built model stuck). Setting the initializer has no such failure mode.
-        # Rationale: decisions.md D-021.
+        # DECISION plan-2026-09-09T042752-6d66ac56/D-021: the denominator is the per-stage
+        # cumulative count; the hierarchy total makes stage 0 3.04x too small. See decisions.md.
         counts = n_residuals_by_stage(self.arch_config.stage_spec)
 
         stage = self.backbone
@@ -401,14 +384,14 @@ class HNet(keras.Model):
             writes_residual = sub.name in RESIDUAL_WRITING_PROJECTIONS
             stddev = scaled_stddev if writes_residual else self.initializer_range
             n_scaled += int(writes_residual)
+            # DECISION plan-2026-09-09T042752-6d66ac56/D-021: set the initializer before the
+            # variables exist; an assign inside a parent build() is discarded. See decisions.md.
             sub.kernel_initializer = keras.initializers.RandomNormal(
                 mean=0.0, stddev=stddev
             )
 
         if n_scaled == 0:
-            # A rename of `out_proj` / `w_o` / `down_proj` in any of the three upstream
-            # layers would otherwise silently leave the whole stack unscaled. A guard
-            # keyed on a name goes blind the moment the name moves, so it says so.
+            # A rename upstream would otherwise leave the whole stack unscaled in silence.
             raise ValueError(
                 f"stage {stage_idx}'s stack {stack.name!r} contains no Dense named one "
                 f"of {RESIDUAL_WRITING_PROJECTIONS}, so nothing would be depth-scaled. "
@@ -469,16 +452,13 @@ class HNet(keras.Model):
         )
 
         if routing_records:
-            # `add_loss`, never a custom `train_step`: stock `fit()` already sums
-            # `model.losses` into the compiled loss AND applies `scale_loss` under
-            # `mixed_float16`, which a hand-written training step silently skips.
+            # add_loss, not a custom train_step: stock fit() already sums model.losses and
+            # applies scale_loss under mixed_float16.
             ratio = total_ratio_loss(routing_records, self.target_ratios)
             alpha = keras.ops.cast(self.ratio_loss_alpha, ratio.dtype)
             self.add_loss(keras.ops.cast(alpha * ratio, "float32"))
 
         if self.tie_word_embeddings:
-            # `mixer_seq.py:51-53` via the house idiom (`gpt2.py:378-386`, D-006):
-            # logits = hidden @ embeddings.T
             embedding_weights = self.embeddings.embeddings
             return keras.ops.matmul(
                 hidden, keras.ops.transpose(keras.ops.cast(embedding_weights, hidden.dtype))
@@ -488,7 +468,9 @@ class HNet(keras.Model):
     def compute_output_shape(
             self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """:param input_shape: ``(batch, seq_len)``.
+        """Return the logits shape for a rank-2 input shape.
+
+        :param input_shape: ``(batch, seq_len)``.
         :type input_shape: Tuple[Optional[int], ...]
         :returns: ``(batch, seq_len, vocab_size)``.
         :rtype: Tuple[Optional[int], ...]
@@ -514,9 +496,8 @@ class HNet(keras.Model):
         :param pretrained: Must be ``False``. No H-Net weights are distributed with this
             repository.
         :type pretrained: bool
-        :param kwargs: Forwarded to :meth:`__init__` -- ``max_chunks``, ``max_seq_len``,
+        :param **kwargs: Forwarded to :meth:`__init__` -- ``max_chunks``, ``max_seq_len``,
             ``target_ratios`` and so on.
-        :type kwargs: Any
         :returns: The model, randomly initialised.
         :rtype: HNet
         :raises ValueError: if ``variant`` is not a known name; the message lists every
@@ -585,21 +566,23 @@ def create_hnet(
 ) -> HNet:
     """Create an H-Net from a shipped variant name.
 
-    Pure delegation to :meth:`HNet.from_variant` -- it holds no defaulting, no validation
-    and no construction logic of its own, so there is exactly one place where a variant
-    becomes a model.
+    Delegates to :meth:`HNet.from_variant` and holds no defaulting, validation or
+    construction logic of its own.
 
     :param variant: A key of
         :data:`~dl_techniques.models.language.hnet.config.MODEL_VARIANTS`.
     :type variant: str
     :param pretrained: Must be ``False``; see :meth:`HNet.from_variant`.
     :type pretrained: bool
-    :param kwargs: Forwarded to :meth:`HNet.from_variant`.
-    :type kwargs: Any
+    :param **kwargs: Forwarded to :meth:`HNet.from_variant`.
     :returns: The model.
     :rtype: HNet
+    :raises ValueError: if ``variant`` is not a known name.
+    :raises NotImplementedError: if ``pretrained`` is truthy.
 
     Example:
         >>> model = create_hnet("hnet_1stage_L", max_seq_len=1024)
     """
     return HNet.from_variant(variant, pretrained=pretrained, **kwargs)
+
+# ---------------------------------------------------------------------

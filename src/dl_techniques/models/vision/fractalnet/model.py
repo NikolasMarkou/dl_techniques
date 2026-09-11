@@ -1,23 +1,19 @@
-"""FractalNet: a very deep classifier built by recursive expansion, with no
-residual connection anywhere.
+"""
+FractalNet: a very deep classifier built by recursive expansion,
+with no residual connection anywhere.
 
-Builds :class:`FractalNet`, a Keras 3 functional model, and the
-``create_fractal_net`` convenience factory.
+This file builds :class:`FractalNet`, a Keras 3 functional model, and the
+``create_fractal_net`` factory that returns a compiled one. The expansion rule
+makes short paths from input to loss explicit:
 
-Residual connections are not the only way to make very deep networks
-trainable. FractalNet's expansion rule builds short paths from input to loss
-explicitly: ``f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]``, so a level-C
-fractal contains paths of length 1, 2, 4, ..., 2^(C-1) that all reach the
-same output. The long path gives capacity, the short path keeps it
-trainable, and the join over both substitutes for an identity shortcut.
-Drop-path regularizes by dropping each join input independently per sample,
-always keeping at least one survivor: a coin flip revives one path when
-both are dropped.
+    f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]
 
-Each fractal stage runs at constant resolution; downsampling happens
-between stages via max-pooling, since a stride inside a stage would
-desynchronize the short and long branches. The classification head emits
-raw logits, not probabilities.
+so a level-C fractal holds paths of length 1, 2, 4, ..., 2^(C-1) that all
+reach the same output, and the join over both stands in for an identity
+shortcut. Drop-path drops each join input independently per sample and always
+keeps one survivor, reviving one by coin flip when both are dropped. Each
+stage runs at constant resolution, with max-pooling between stages, and the
+classification head emits raw logits rather than probabilities.
 
 References:
     - Larsson et al., 2017. FractalNet: Ultra-Deep Neural Networks without
@@ -49,38 +45,92 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 class FractalNet(keras.Model):
     """FractalNet model, built with the Keras functional API.
 
-    Builds depth through recursive fractal expansion rather than residual
-    connections. The architecture is a sequence of stages, each a fractal
-    block whose branches double in depth stage by stage.
+    Depth comes from recursive fractal expansion rather than residual
+    connections. The model is a sequence of stages, each a fractal block whose
+    branches double in depth as the stage depth rises, followed by pooling. A
+    depth-1 fractal is a single ``ConvBlock``.
 
     Architecture:
 
     .. code-block:: text
 
-        image [B, H, W, C]
-            |
-        stage_0 .. stage_{N-1}   FractalBlock(depth_i) -> MaxPool(stride_i)
-            |
-        GlobalPooling            (avg or max)
-            |
-        Dropout(classifier_dropout_rate)          (optional)
-            |
-        Dense(num_classes)       raw logits        ('include_top' only)
-            |
-        [B, num_classes] or [B, filters[-1]]
+                 image [B, H, W, C]
+                          │
+                          ▼
+             ┌─────────────────────────┐
+             │  stage 0 .. stage N-1   │
+             └─────────────────────────┘
+                          │ [B, h, w, filters[-1]]
+                          ├─────────────────────────┐
+                          ▼                         │
+              global pool (avg or max)              │
+                          │                         │
+                          ▼                         │
+                 dropout (optional)                 │
+                          │                         │
+                          ▼                         │
+         ┌─────────────────────────────────┐        │
+         │  classifier (num_classes > 0)   │        │
+         └─────────────────────────────────┘        │
+                          │                         │
+                          ▼                         ▼
+                       logits                  feature map
+                  [B, num_classes]       [B, h, w, filters[-1]]
 
-    Fractal block, depth k:
+    The right branch is the ``include_top=False`` output, still 4D.
+
+    One stage:
 
     .. code-block:: text
 
-        z ---------------------------+
-            |                        |
-        depth-(k-1) fractal block    |
-            |                        |
-        depth-(k-1) fractal block    conv (ConvBlock)
-            |                        |
-            +----------- join -------+
-                (drop-path average, at least one survivor)
+                x [B, h, w, C_in]
+                        │
+                        ▼
+          ┌───────────────────────────┐
+          │    FractalBlock(depth)    │
+          └───────────────────────────┘
+                        │
+                        ▼
+            MaxPool(stride > 1 only)
+                        │
+                        ▼
+        [B, h/stride, w/stride, filters]
+
+    Fractal expansion, depth k:
+
+    .. code-block:: text
+
+                             z
+                             │
+                  ┌──────────┴──────────┐
+                  ▼                     ▼
+          ┌───────────────┐     ┌───────────────┐
+          │    f_{k-1}    │     │   ConvBlock   │
+          └───────────────┘     └───────────────┘
+                  │                     │
+                  ▼                     │
+          ┌───────────────┐             │
+          │    f_{k-1}    │             │
+          └───────────────┘             │
+                  │                     │
+                  └──────────┬──────────┘
+                             ▼
+                           join
+                             │
+                             ▼
+                          output
+
+    The join averages the surviving inputs, and drop-path keeps at least one.
+
+    Variants:
+
+    .. code-block:: text
+
+        variant   depths       filters
+        micro     [1, 2, 2]    [16, 32, 64]
+        small     [2, 3, 3]    [32, 64, 128]
+        medium    [3, 4, 4]    [64, 128, 256]
+        large     [4, 5, 5]    [96, 192, 384]
 
     :param num_classes: Integer, number of output classes for classification.
         Only used if include_top=True.
@@ -88,8 +138,8 @@ class FractalNet(keras.Model):
         Default is [2, 3, 3] for FractalNet-Small.
     :param filters: List of integers, number of filters for each stage.
         Default is [32, 64, 128] for FractalNet-Small.
-    :param strides: List of integers, strides for each stage downsampling.
-        Default is [2, 2, 2].
+    :param strides: List of integers, strides for each stage downsampling. A
+        stride of 1 skips that stage's pooling. Default is [2, 2, 2].
     :param drop_path_rate: Float, drop-path probability for regularization.
         Default is 0.15.
     :param dropout_rate: Float, dropout rate in conv blocks.
@@ -104,16 +154,25 @@ class FractalNet(keras.Model):
         Default is None.
     :param global_pool: String, global pooling type ("avg" or "max").
         Default is "avg".
-    :param classifier_dropout_rate: Float, dropout rate before final dense layer.
-        Default is 0.2.
+    :param classifier_dropout_rate: Float, dropout rate before final dense
+        layer. A value of 0 skips the dropout. Default is 0.2.
     :param include_top: Boolean, whether to include the classification head.
         Default is True.
-    :param input_shape: Tuple, input shape. If None and include_top=True,
-        uses (32, 32, 3) for CIFAR. Must be provided for other inputs.
-    :param **kwargs: Additional keyword arguments for the Model base class.
+    :param input_shape: Tuple, input shape of `(height, width, channels)`.
+        Default and `None` both give (32, 32, 3) for CIFAR.
+    :param kwargs: Additional keyword arguments for the Model base class.
 
-    :raises ValueError: If depths and filters have different lengths.
-    :raises ValueError: If invalid model configuration is provided.
+    :raises ValueError: If `depths`, `filters` and `strides` do not all have
+        the same length, if there is not at least one stage, if `input_shape`
+        is not 3D, or if `global_pool` is neither "avg" nor "max".
+
+    Input shape:
+        4D tensor with shape `(batch_size, height, width, channels)`, matching
+        `input_shape`.
+
+    Output shape:
+        `(batch_size, num_classes)` with `include_top=True`; otherwise the
+        last stage's 4D feature map.
 
     Example:
         >>> # Create FractalNet-Small for CIFAR-10
@@ -126,7 +185,6 @@ class FractalNet(keras.Model):
         >>> model = FractalNet.from_variant("small", num_classes=10)
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "micro": {"depths": [1, 2, 2], "filters": [16, 32, 64]},
         "small": {"depths": [2, 3, 3], "filters": [32, 64, 128]},
@@ -134,7 +192,6 @@ class FractalNet(keras.Model):
         "large": {"depths": [4, 5, 5], "filters": [96, 192, 384]},
     }
 
-    # Architecture constants
     DEFAULT_KERNEL_SIZE = 3
     DEFAULT_ACTIVATION = "relu"
     DEFAULT_INITIALIZER = "he_normal"
@@ -157,7 +214,7 @@ class FractalNet(keras.Model):
         input_shape: Tuple[int, ...] = (32, 32, 3),
         **kwargs
     ):
-        # Validate configuration
+        """Validate the configuration and build the functional graph."""
         if len(depths) != len(filters):
             raise ValueError(
                 f"Length of depths ({len(depths)}) must equal length of filters ({len(filters)})"
@@ -174,11 +231,9 @@ class FractalNet(keras.Model):
         if input_shape is None:
             input_shape = (32, 32, 3)
 
-        # Store configuration
         self.num_classes = num_classes
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: store as a list even
-        # though the default is a tuple, matching what `get_config` has always
-        # emitted. See decisions.md.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: store as lists even
+        # though the defaults are tuples, so get_config emits lists. See decisions.md.
         self.depths = list(depths)
         self.filters = list(filters)
         self.strides = list(strides)
@@ -193,7 +248,6 @@ class FractalNet(keras.Model):
         self.include_top = include_top
         self._input_shape = input_shape
 
-        # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
@@ -202,16 +256,13 @@ class FractalNet(keras.Model):
         if channels not in [1, 3]:
             logger.warning(f"Unusual number of channels: {channels}. FractalNet typically uses 1 or 3 channels")
 
-        # Store actual input shape components
         self.input_height = height
         self.input_width = width
         self.input_channels = channels
 
-        # Build the model using functional API
         inputs = keras.Input(shape=input_shape, name="input")
         outputs = self._build_model(inputs)
 
-        # Initialize the Model
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
         logger.info(
@@ -228,11 +279,9 @@ class FractalNet(keras.Model):
         """
         x = inputs
 
-        # Build fractal stages
         for stage_idx in range(len(self.depths)):
             x = self._build_fractal_stage(x, stage_idx)
 
-        # Build classification head if requested
         if self.include_top:
             x = self._build_classification_head(x)
 
@@ -254,10 +303,8 @@ class FractalNet(keras.Model):
         num_filters = self.filters[stage_idx]
         stride = self.strides[stage_idx]
 
-        # The fractal itself runs at constant resolution (stride 1): its deep
-        # branch applies the base block 2^(depth-1) times, so a stride inside
-        # it would desynchronize the deep and shallow branches. Downsampling
-        # happens between stages instead, via the pooling below.
+        # The fractal runs at stride 1: its deep branch applies the base block
+        # 2^(depth-1) times, and a stride inside would desynchronize the branches.
         conv_block = ConvBlock(
             filters=num_filters,
             kernel_size=self.DEFAULT_KERNEL_SIZE,
@@ -266,7 +313,7 @@ class FractalNet(keras.Model):
             normalization_type=self.normalization_type,
             activation_type=self.activation_type,
             dropout_rate=self.dropout_rate,
-            use_pooling=False,  # No pooling in fractal blocks
+            use_pooling=False,
             kernel_regularizer=self.kernel_regularizer,
             kernel_initializer=self.kernel_initializer,
         )
@@ -298,8 +345,9 @@ class FractalNet(keras.Model):
         :param x: Input feature tensor
 
         :return: Classification logits
+
+        :raises ValueError: If `global_pool` is neither "avg" nor "max"
         """
-        # Global pooling
         if self.global_pool == "avg":
             x = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")(x)
         elif self.global_pool == "max":
@@ -307,14 +355,12 @@ class FractalNet(keras.Model):
         else:
             raise ValueError(f"Unsupported global_pool: {self.global_pool}")
 
-        # Classifier dropout
         if self.classifier_dropout_rate > 0:
             x = keras.layers.Dropout(
                 self.classifier_dropout_rate,
                 name="classifier_dropout"
             )(x)
 
-        # Final classifier
         if self.num_classes > 0:
             x = keras.layers.Dense(
                 self.num_classes,
@@ -338,7 +384,8 @@ class FractalNet(keras.Model):
         :param variant: String, one of "micro", "small", "medium", "large"
         :param num_classes: Integer, number of output classes
         :param input_shape: Tuple, input shape. If None, uses (32, 32, 3)
-        :param **kwargs: Additional arguments passed to the constructor
+        :param kwargs: Additional arguments passed to the constructor, taking
+            precedence over the variant's own values
 
         :return: FractalNet model instance
 
@@ -359,8 +406,7 @@ class FractalNet(keras.Model):
             )
 
         # DECISION plan-2026-08-19T163559-499b6f0e/D-127: copy the preset before
-        # updating it with kwargs; updating the shared MODEL_VARIANTS dict in
-        # place would poison it for every later caller. See decisions.md.
+        # updating with kwargs, or an override poisons MODEL_VARIANTS. See decisions.md.
         config = cls.MODEL_VARIANTS[variant].copy()
         config.pop("description", None)
         config.update(kwargs)
@@ -411,7 +457,6 @@ class FractalNet(keras.Model):
 
         :return: FractalNet model instance
         """
-        # Deserialize initializers and regularizers
         if config.get("kernel_initializer"):
             config["kernel_initializer"] = keras.initializers.deserialize(
                 config["kernel_initializer"]
@@ -424,10 +469,12 @@ class FractalNet(keras.Model):
         return cls(**config)
 
     def summary(self, **kwargs):
-        """Print model summary with additional information."""
+        """Print the Keras summary, then log the fractal configuration.
+
+        :param kwargs: Forwarded to `keras.Model.summary`
+        """
         super().summary(**kwargs)
 
-        # Print additional model information
         total_blocks = sum(self.depths)
         logger.info(f"FractalNet configuration:")
         logger.info(f"  - Input shape: ({self.input_height}, {self.input_width}, {self.input_channels})")
@@ -460,15 +507,19 @@ def create_fractal_net(
     :param num_classes: Integer, number of output classes
     :param input_shape: Tuple, input shape. If None, uses (32, 32, 3)
     :param optimizer: String name or optimizer instance. Default is "adam"
-    :param learning_rate: Float, learning rate for optimizer. Default is 0.001
+    :param learning_rate: Float, learning rate applied when `optimizer` is a
+        string name. An optimizer instance keeps its own rate. Default is 0.001
     :param loss: String name or loss object. Defaults to
-        ``SparseCategoricalCrossentropy(from_logits=True)`` — the head emits
-        raw logits, so the string ``"sparse_categorical_crossentropy"``
-        (which is ``from_logits=False``) would silently mis-train.
+        ``SparseCategoricalCrossentropy(from_logits=True)``, since the head
+        emits raw logits and the string
+        ``"sparse_categorical_crossentropy"`` resolves to
+        ``from_logits=False``.
     :param metrics: List of metrics to track. Default is ["accuracy"]
-    :param **kwargs: Additional arguments passed to the model constructor
+    :param kwargs: Additional arguments passed to the model constructor
 
     :return: Compiled FractalNet model ready for training
+
+    :raises ValueError: If variant is not recognized
 
     Example:
         >>> # Create FractalNet-Small for CIFAR-10
@@ -484,15 +535,13 @@ def create_fractal_net(
         metrics = ["accuracy"]
 
     if loss is None:
-        # The head emits raw logits, not probabilities. The string
-        # "sparse_categorical_crossentropy" resolves to from_logits=False and
-        # would mis-train silently, so use the configured object instead.
+        # The head emits logits, and the string form of this loss would apply
+        # from_logits=False and mis-train silently.
         loss = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
     if input_shape is None:
         input_shape = (32, 32, 3)
 
-    # Create the model
     model = FractalNet.from_variant(
         variant=variant,
         num_classes=num_classes,
@@ -500,7 +549,6 @@ def create_fractal_net(
         **kwargs
     )
 
-    # Set up optimizer
     if isinstance(optimizer, str):
         optimizer_instance = keras.optimizers.get(optimizer)
         if hasattr(optimizer_instance, 'learning_rate'):
@@ -508,7 +556,6 @@ def create_fractal_net(
     else:
         optimizer_instance = optimizer
 
-    # Compile the model
     model.compile(
         optimizer=optimizer_instance,
         loss=loss,

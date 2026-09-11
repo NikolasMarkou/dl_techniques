@@ -105,6 +105,7 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/dit/train_dit.py", "TrainingConfig"),
     ("train/doc_res/common.py", "DocResTrainingConfig"),
     ("train/hnet/common.py", "HNetTrainingConfig"),
+    ("train/doc_scanner/common.py", "DocScannerTrainingConfig"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this

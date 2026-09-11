@@ -86,13 +86,13 @@ class GPT2(keras.Model):
                  │
                  ▼
             ┌───────────────────┐
-            │ TextDecoder        │  token + learned position embeds,
-            │ (causal, pre-norm) │  N decoder blocks, final LayerNorm
+            │ TextDecoder       │  token + learned position embeds,
+            │ (causal, pre-norm)│  N decoder blocks, final LayerNorm
             └───────────────────┘
                  │
                  ▼  last_hidden_state [B, S, D]
                  │
-          ┌──────┴──────┐
+          ┌──────┴───────┐
           │ tied         │ untied
           ▼              ▼
     logits = h @ E^T   lm_head(h)  (Dense, no bias)

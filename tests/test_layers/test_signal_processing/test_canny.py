@@ -165,8 +165,8 @@ class TestCannyLayer:
         gradients = tape.gradient(loss, tf_input)
 
         # The Canny edge detection algorithm uses many non-differentiable operations:
-        # - tf.nn.dilation2d for morphological operations
-        # - tf.while_loop for hysteresis tracking
+        # - directional max / max-pool morphological operations
+        # - a while_loop for hysteresis tracking
         # - Discrete thresholding operations
         # - Angle-based conditional operations
         # Therefore, gradients being None is EXPECTED behavior, not a failure.
@@ -272,20 +272,23 @@ class TestCannyLayer:
         output_f32 = layer(test_input_f32)
         assert output_f32.dtype == 'float32', "Float32 input should be preserved"
 
-        # Test with float64 - this might not be preserved due to internal TF operations
-        # The Canny layer uses tf.nn.dilation2d and other TF ops that may not support float64
+        # Test with float64 - this might not be preserved due to the layer's
+        # default compute dtype policy
+        # Keras autocasts floating inputs to the layer's compute dtype
+        # (float32 by default) before `call()` runs, independent of which ops
+        # the layer uses internally
         test_input_f64 = keras.ops.cast(
             keras.random.uniform((1, 64, 64, 1), maxval=255.0),
             dtype='float64'
         )
 
         output_f64 = layer(test_input_f64)
-        # Document the actual behavior - internal TF operations may force float32
-        # This is a limitation of using TensorFlow-specific operations
+        # Document the actual behavior - the default dtype policy may force float32
+        # This is a limitation of the layer's default dtype policy, not of its ops
         if output_f64.dtype != 'float64':
-            # This is expected due to tf.nn.dilation2d and other TF ops used internally
+            # This is expected under the layer's default (float32) dtype policy
             assert output_f64.dtype in ['float32'], (
-                f"float64 input converted to {output_f64.dtype} due to internal TF operations"
+                f"float64 input converted to {output_f64.dtype} under the default dtype policy"
             )
         else:
             assert output_f64.dtype == 'float64', "float64 should be preserved if supported"
@@ -374,12 +377,14 @@ class TestCannyLayer:
         # This breaks model serialization - needs to be fixed in the layer implementation
 
         # KNOWN ISSUE 2: Non-differentiable operations
-        # The layer uses tf.nn.dilation2d, tf.while_loop, and discrete operations
-        # This makes the layer non-differentiable, which is expected for edge detection
+        # The layer uses a directional max/max-pool, a while_loop, and discrete
+        # thresholding operations. This makes the layer non-differentiable,
+        # which is expected for edge detection
 
         # KNOWN ISSUE 3: Limited dtype support
-        # Internal TensorFlow operations may not support all dtypes (e.g., float64)
-        # This is a limitation of using TF-specific operations
+        # The layer's default (float32) compute dtype policy may not preserve
+        # all input dtypes (e.g., float64) -- a generic Keras autocast
+        # behavior, not specific to any op the layer uses internally
 
         # These issues should be documented in the layer's docstring
         assert True  # This test just serves as documentation

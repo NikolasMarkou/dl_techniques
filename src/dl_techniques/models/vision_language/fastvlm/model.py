@@ -53,30 +53,30 @@ class FastVLM(keras.Model):
         input [B, H, W, 3]
                │
                ▼
-        ┌─────────────────────┐
+        ┌──────────────────────┐
         │  ConvolutionalStem   │
         └──────────┬───────────┘  [B, H/4, W/4, embed_dims[0]]
-                    ▼
-        ┌─────────────────────┐
+                   ▼
+        ┌──────────────────────┐
         │  Stage 1: RepMixer   │  x depths[0]
         │  + downsample        │
         └──────────┬───────────┘  [B, H/8, W/8, embed_dims[1]]
-                    ▼
-        ┌─────────────────────┐
+                   ▼
+        ┌──────────────────────┐
         │  Stage 2: RepMixer   │  x depths[1]
         │  + downsample        │
         └──────────┬───────────┘  [B, H/16, W/16, embed_dims[2]]
-                    ▼
-        ┌─────────────────────┐
+                   ▼
+        ┌──────────────────────┐
         │  Stage 3: Attention  │  x depths[2], no downsample
-        └──────────┬───────────┘
+        └───────────┬──────────┘
                     │
           ┌─────────┴─────────┐
-          ▼ (include_top)      ▼ (include_top=False)
-        ┌───────────────┐   output [B, H/16, W/16, embed_dims[-1]]
+          ▼ (include_top)     ▼ (include_top=False)
+        ┌────────────────┐   output [B, H/16, W/16, embed_dims[-1]]
         │  GAP + Dense   │
         └───────┬────────┘
-                 ▼
+                ▼
         output [B, num_classes]
 
     Variants (``MODEL_VARIANTS``):
@@ -603,6 +603,7 @@ class FastVLM(keras.Model):
         if self.include_top and self.num_classes > 0:
             logger.info(f"  - Number of classes: {self.num_classes}")
 
+# ---------------------------------------------------------------------
 
 def create_fastvlm(
         variant: str = "base",
@@ -640,3 +641,5 @@ def create_fastvlm(
         input_shape=input_shape,
         **kwargs
     )
+
+# ---------------------------------------------------------------------

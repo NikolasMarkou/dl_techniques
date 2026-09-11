@@ -73,10 +73,10 @@ class HierarchicalReasoningModel(keras.Model):
             (carry, batch)
                  │
                  ▼
-            ┌─────────────────────────┐
+            ┌──────────────────────────┐
             │ HierarchicalReasoningCore│  h_cycles/l_cycles of z_l, z_h
             │ (rope | learned pos.)    │  updates; all but last cycle
-            └─────────────────────────┘  under stop_gradient
+            └──────────────────────────┘  under stop_gradient
                  │
                  ▼  z_h
                  │

@@ -76,34 +76,34 @@ class VAE(keras.Model):
         input [H, W, C]
               │
         ┌─────▼─────┐
-        │ stem conv  │
+        │ stem conv │
         └─────┬─────┘
               ▼
         ┌───────────────────────┐
-        │ encoder stage x depths │  downsample + residual blocks
+        │ encoder stage x depths│  downsample + residual blocks
         └─────────┬─────────────┘
-                   ▼
+                  ▼
         ┌────────────────────┐
-        │ global avg pool     │
+        │ global avg pool    │
         └─────────┬──────────┘
-                   ▼
+                  ▼
         ┌────────────────────┐      ┌────────────────────┐
-        │ z_mean [B, latent]  │      │ z_log_var head      │  shape/meaning
+        │ z_mean [B, latent] │      │ z_log_var head     │  shape/meaning
         └─────────┬──────────┘      └─────────┬──────────┘  depends on mode
-                   └───────────┬───────────────┘
-                               ▼
+                  └───────────┬───────────────┘
+                              ▼
                     ┌────────────────────┐
-                    │ sampling (reparam)  │  gaussian / hypersphere / vmf
+                    │ sampling (reparam) │  gaussian / hypersphere / vmf
                     └─────────┬──────────┘
-                               ▼
+                              ▼
                     ┌────────────────────┐
-                    │ decoder projection  │
+                    │ decoder projection │
                     └─────────┬──────────┘
-                               ▼
+                              ▼
         ┌───────────────────────┐
-        │ decoder stage x depths │  upsample + residual blocks
+        │ decoder stage x depths│  upsample + residual blocks
         └─────────┬─────────────┘
-                   ▼
+                  ▼
               reconstruction [H, W, C]
 
     Sampling modes:

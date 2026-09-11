@@ -1,4 +1,4 @@
-"""Image restoration — four model packages plus a literature survey.
+"""Image restoration — five model packages plus a literature survey.
 
 This subfamily groups the vision models whose task is recovering a clean image from a
 degraded one: denoising, deblurring, dehazing, low-light enhancement, and the all-in-one
@@ -8,6 +8,13 @@ variants that handle several degradations with one network.
 * ``doc_res/`` — DocRes, one Restormer backbone serving five document-restoration
   tasks. Its input is 6 channels (RGB plus a 3-channel classical-CV prompt), not 3;
   read its ``README.md`` before wiring it to an image pipeline.
+* ``doc_scanner/`` — DocScanner, document unwarping in two stages: a U2NET-P that
+  localizes the page and a RAFT-lineage refiner that emits a dense BACKWARD map. The two
+  stages are trained INDEPENDENTLY, so the composite ``DocScanner`` is an inference
+  assembly and cannot be trained end to end — the 0.5 mask threshold between them has no
+  gradient. Read its ``README.md`` §7 before training or before trusting the ``286.8``
+  calibration constant, which is carried for fidelity to the reference rather than
+  calibrated for a from-scratch model.
 * ``pw_fnet/`` — a 2-level U-Net with FFT token mixing and multi-scale supervision. Its
   name misattributes on two of three words; see ``models/CLAUDE.md`` § Names that
   misattribute before trusting it.

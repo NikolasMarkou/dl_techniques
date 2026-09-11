@@ -62,21 +62,21 @@ class RELGT(keras.Model):
         features, types, hops, times, adjacency
                         │
                         ▼
-        ┌───────────────────────────┐
+        ┌────────────────────────────┐
         │  RELGTTokenEncoder         │  five embeddings, summed
         │  [B, K, E] local tokens    │
-        └────────────┬───────────────┘
+        └─────────────┬──────────────┘
                       ▼
         ┌───────────────────────────┐
         │  TransformerBlock x N     │  local self-attn + centroid
         │  tokens in [B, K, E]      │  cross-attn, tokens chained
         │  out       (B, E) summary │
-        └────────────┬───────────────┘
-                      ▼
-        ┌───────────────────────────┐
+        └────────────┬──────────────┘
+                     ▼
+        ┌────────────────────────────┐
         │  Prediction head (FFN)     │
         └────────────┬───────────────┘
-                      ▼
+                     ▼
         output [B, output_dim]
 
     Variants (``MODEL_VARIANTS``, used by :func:`create_relgt_model`):

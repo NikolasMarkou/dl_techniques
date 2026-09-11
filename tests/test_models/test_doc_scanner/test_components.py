@@ -1,0 +1,2107 @@
+"""Value-level guards for ``doc_scanner``'s pure rectification primitives.
+
+Every assertion here is against a HAND-COMPUTED number or an explicit
+orientation, never against a shape. That is the whole point of the file. The
+defects this module is pointed at -- a half-pixel sampling offset, an ``(x, y)``
+vs ``(h, w)`` channel swap, a double-reversed meshgrid -- share one property:
+they are *shape-preserving*. A model built on any of them produces
+``(B, 288, 288, 2)`` finite float32 output, saves, reloads, and trains its loss
+down. It simply learns a transposed or half-pixel-shifted warp. This repo has a
+recorded incident where exactly this defect class (a single sign error in one
+``ops.roll``) survived 249 shape/config/serialization tests.
+
+Three design rules follow from that, and are enforced throughout:
+
+1. **Non-square fixtures.** A square fixture is structurally blind to an h/w
+   axis swap: both branches produce identical output. Where an axis could be
+   confused, the fixture is ``H=4, W=7``.
+2. **Hand-computed expectations, ``rtol=0``.** The 5x5 reference values below
+   are derived in the docstring that carries them, from the sampler's own
+   documented formula -- not read back from the implementation under test.
+3. **RED-proven.** Both critical guards were run against a deliberately wrong
+   implementation and observed to FAIL before being accepted; the observed
+   failures are recorded in this plan's ``decisions.md`` under D-009. A guard
+   that has never been seen red is not known to work.
+"""
+
+import keras
+import numpy as np
+import pytest
+import tensorflow as tf
+
+from dl_techniques.models.vision.image_restoration.doc_scanner.components import (
+    SPATIAL_DIVISOR,
+)
+from dl_techniques.models.vision.image_restoration.doc_scanner.warp import (
+    CONVEX_NEIGHBOURS,
+    convex_upsample,
+    coords_grid,
+    sample_at_pixel_coords,
+)
+
+# The repo convention for a value assertion: an explicit absolute tolerance and
+# NO relative component, so a near-zero expected value is not silently excused.
+ATOL = 1e-6
+
+
+def _ramp_5x5() -> np.ndarray:
+    """``(1, 5, 5, 2)``: channel 0 is the column index, channel 1 the row index.
+
+    Sampling this map at pixel ``(x, y)`` under a correct ``align_corners=True``
+    adapter returns exactly ``(x, y)`` -- bilinear interpolation of a linear
+    ramp is exact -- which is what makes the reference hand-computable on BOTH
+    axes at once.
+    """
+    rows, cols = np.meshgrid(np.arange(5.0), np.arange(5.0), indexing="ij")
+    return np.stack([cols, rows], axis=-1)[None].astype("float32")
+
+
+class TestAlignCornersAdapterAgainstAHandComputedReference:
+    """The 5x5 reference from plan Assumption A1 / findings F-14.
+
+    ``interpolate_grid`` is a half-pixel sampler: it computes internally
+    ``pix = coord * S + (S - 1) / 2``. At ``S = 5`` that is
+    ``pix = 5 * coord + 2``. The adapter therefore has to send an absolute
+    pixel index ``p`` to ``coord = (p - 2) / 5``, and the four probe points
+    below are hand-evaluated from that::
+
+        p = 0    -> coord = -0.4  -> pix = 5 * (-0.4) + 2 = 0.0
+        p = 1    -> coord = -0.2  -> pix = 5 * (-0.2) + 2 = 1.0
+        p = 2.5  -> coord =  0.1  -> pix = 5 * ( 0.1) + 2 = 2.5
+        p = 4    -> coord =  0.4  -> pix = 5 * ( 0.4) + 2 = 4.0
+
+    The contrast that matters: the *natural-looking* half-pixel adapter
+    ``coord = p / S - 0.5`` gives ``pix = p - 0.5``, i.e. ``{-0.5, 0.5, 2.0,
+    3.5}`` -- clamped and wrong at every probe but the first, and wrong by half
+    a pixel everywhere. Nothing but a reference like this one can see that.
+    """
+
+    PROBES = [0.0, 1.0, 2.5, 4.0]
+
+    @pytest.mark.parametrize("probe", PROBES)
+    def test_align_corners_adapter_reads_the_x_axis_at_the_exact_pixel(self, probe):
+        """``p -> p`` along x, for ``p`` in ``{0, 1, 2.5, 4}``."""
+        fmap = _ramp_5x5()
+        pix = np.array([[[[probe, 0.0]]]], dtype="float32")
+
+        out = keras.ops.convert_to_numpy(sample_at_pixel_coords(fmap, pix))
+
+        np.testing.assert_allclose(out[0, 0, 0, 0], probe, rtol=0, atol=ATOL)
+
+    @pytest.mark.parametrize("probe", PROBES)
+    def test_align_corners_adapter_reads_the_y_axis_at_the_exact_pixel(self, probe):
+        """``p -> p`` along y as well -- the swap must not lose one axis."""
+        fmap = _ramp_5x5()
+        pix = np.array([[[[0.0, probe]]]], dtype="float32")
+
+        out = keras.ops.convert_to_numpy(sample_at_pixel_coords(fmap, pix))
+
+        np.testing.assert_allclose(out[0, 0, 0, 1], probe, rtol=0, atol=ATOL)
+
+    def test_align_corners_adapter_interpolates_a_nonlinear_ramp_by_hand(self):
+        """A ramp alone pins only an affine adapter; this pins the LERP too.
+
+        Values ``[0, 1, 4, 9, 16]`` along x. At ``p = 2.5`` a 4-corner bilinear
+        read returns the midpoint of pixels 2 and 3, ``(4 + 9) / 2 = 6.5`` --
+        NOT ``2.5 ** 2 = 6.25``. Asserting 6.5 pins the interpolation kind as
+        well as the coordinate transform.
+        """
+        values = np.arange(5.0) ** 2
+        fmap = np.broadcast_to(values[None, None, :, None], (1, 5, 5, 1)).astype(
+            "float32"
+        )
+        pix = np.array([[[[2.5, 0.0]]]], dtype="float32")
+
+        out = keras.ops.convert_to_numpy(sample_at_pixel_coords(fmap, pix))
+
+        np.testing.assert_allclose(out[0, 0, 0, 0], 6.5, rtol=0, atol=ATOL)
+
+    @pytest.mark.parametrize(
+        "normalized, expected_pixel", [(-1.0, 0.0), (0.0, 2.0), (1.0, 4.0)]
+    )
+    def test_align_corners_adapter_composes_with_the_torch_normalization(
+        self, normalized, expected_pixel
+    ):
+        """End-to-end equivalence with upstream ``bilinear_sampler``.
+
+        Upstream (``model.py:12-13``) normalizes a pixel coordinate with
+        ``n = 2 * p / (S - 1) - 1`` and passes ``align_corners=True``. Inverting
+        it, ``p = (n + 1) / 2 * (S - 1)``, so at ``S = 5`` the torch-normalized
+        probes ``{-1, 0, 1}`` denote pixels ``{0, 2, 4}``. This test drives the
+        adapter through THAT composition, which is the property the port
+        actually needs -- the pixel-domain tests above are its two halves.
+        """
+        size = 5
+        pixel = (normalized + 1.0) / 2.0 * (size - 1)
+        assert pixel == expected_pixel
+
+        fmap = _ramp_5x5()
+        pix = np.array([[[[pixel, pixel]]]], dtype="float32")
+
+        out = keras.ops.convert_to_numpy(sample_at_pixel_coords(fmap, pix))
+
+        np.testing.assert_allclose(
+            out[0, 0, 0], [expected_pixel, expected_pixel], rtol=0, atol=ATOL
+        )
+
+    def test_align_corners_adapter_is_edge_clamped_not_zero_padded(self):
+        """``F.grid_sample``'s default padding is ``'zeros'``; ours clamps.
+
+        A DELIBERATE, MEASURED divergence from the reference -- the fifth, and
+        the only one that is exercised on every iteration of every forward
+        pass. See `decisions.md` D-056 and README section 7.5, row 5.
+
+        The earlier justification here -- "upstream never samples out of range
+        in its own forward path" -- was an unmeasured claim and is REFUTED: on
+        a freshly built ``docscanner-l`` at 288x288, 5.1%-7.3% of ``warpfea``
+        queries already fall outside the 36x36 feature map at iteration 0,
+        rising to 18.6%-32.2% by iteration 11 (seeds 0, 1, 2). The two samplers
+        therefore disagree on a large minority of queries; the divergence is
+        kept because zero-padding an out-of-domain query is not obviously more
+        correct than clamping it, and because changing it now would silently
+        alter the training signal.
+        """
+        fmap = _ramp_5x5()
+        pix = np.array([[[[-3.0, 9.0]]]], dtype="float32")
+
+        out = keras.ops.convert_to_numpy(sample_at_pixel_coords(fmap, pix))
+
+        np.testing.assert_allclose(out[0, 0, 0], [0.0, 4.0], rtol=0, atol=ATOL)
+
+
+class TestAlignCornersAdapterOnANonSquareMap:
+    """``H=4, W=7``. A square fixture cannot see an h/w swap at all."""
+
+    def test_align_corners_adapter_uses_each_axis_own_size(self):
+        """Each axis divides by ITS OWN extent, not by a shared one.
+
+        With ``H = 4`` and ``W = 7`` the two half-pixel offsets differ
+        (``1.5`` vs ``3.0``), so an implementation that reuses one size for
+        both axes -- inert at 288x288 -- reads the wrong pixel here.
+        """
+        height, width = 4, 7
+        rows, cols = np.meshgrid(
+            np.arange(float(height)), np.arange(float(width)), indexing="ij"
+        )
+        fmap = np.stack([cols, rows], axis=-1)[None].astype("float32")
+
+        pix = np.array([[[[6.0, 3.0], [0.0, 3.0], [6.0, 0.0]]]], dtype="float32")
+
+        out = keras.ops.convert_to_numpy(sample_at_pixel_coords(fmap, pix))
+
+        np.testing.assert_allclose(
+            out[0, 0], [[6.0, 3.0], [0.0, 3.0], [6.0, 0.0]], rtol=0, atol=ATOL
+        )
+
+    def test_align_corners_adapter_rejects_a_transposed_read(self):
+        """A swapped-channel adapter would read ``(3, 6)``, out of range on x.
+
+        On a ``4 x 7`` map the coordinate ``(x=6, y=3)`` is valid, but its
+        transpose ``(x=3, y=6)`` is not -- ``y=6`` clamps to ``3``. So the
+        transposed implementation returns ``(3, 3)`` where the correct one
+        returns ``(6, 3)``, and the two are distinguishable. At ``H == W`` they
+        would not be.
+        """
+        height, width = 4, 7
+        rows, cols = np.meshgrid(
+            np.arange(float(height)), np.arange(float(width)), indexing="ij"
+        )
+        fmap = np.stack([cols, rows], axis=-1)[None].astype("float32")
+        pix = np.array([[[[6.0, 3.0]]]], dtype="float32")
+
+        out = keras.ops.convert_to_numpy(sample_at_pixel_coords(fmap, pix))
+
+        assert out[0, 0, 0, 0] == pytest.approx(6.0, abs=ATOL)
+        assert out[0, 0, 0, 0] != pytest.approx(3.0, abs=ATOL)
+
+
+class TestCoordsGridChannelOrder:
+    """``coords_grid`` emits ``(x, y)``. Fixture is NON-SQUARE, deliberately."""
+
+    def test_channel_zero_is_x_and_channel_one_is_y(self):
+        """At ``(row=1, col=3)`` the value is ``(3, 1)``, not ``(1, 3)``.
+
+        This is the double-reverse guard (findings G-1). A port that applies
+        ``model.py:26-27``'s ``coords[::-1]`` on top of ``keras.ops.meshgrid``'s
+        already-``'xy'`` default emits ``(1, 3)`` here.
+        """
+        grid = keras.ops.convert_to_numpy(coords_grid(1, 4, 7))
+
+        assert grid.shape == (1, 4, 7, 2)
+        np.testing.assert_allclose(grid[0, 1, 3], [3.0, 1.0], rtol=0, atol=ATOL)
+
+    def test_the_x_channel_spans_the_width_and_the_y_channel_the_height(self):
+        """Ranges alone separate the two orders on a non-square field."""
+        grid = keras.ops.convert_to_numpy(coords_grid(1, 4, 7))
+
+        assert grid[..., 0].min() == 0.0 and grid[..., 0].max() == 6.0
+        assert grid[..., 1].min() == 0.0 and grid[..., 1].max() == 3.0
+
+    def test_the_field_is_tiled_identically_across_the_batch(self):
+        grid = keras.ops.convert_to_numpy(coords_grid(3, 4, 7))
+
+        assert grid.shape == (3, 4, 7, 2)
+        np.testing.assert_array_equal(grid[0], grid[1])
+        np.testing.assert_array_equal(grid[0], grid[2])
+
+    def test_a_symbolic_batch_size_is_accepted(self):
+        """The rectifier passes ``keras.ops.shape(x)[0]``, not a Python int."""
+        dummy = keras.ops.zeros((2, 4, 7, 3))
+        grid = coords_grid(keras.ops.shape(dummy)[0], 4, 7)
+
+        assert keras.ops.convert_to_numpy(grid).shape == (2, 4, 7, 2)
+
+
+class TestTheIdentityGridIsTheSamplersIdentity:
+    """``sample(fmap, coords_grid(...)) == fmap``, the composition guard.
+
+    This is the one test that would catch a coordinated error in BOTH functions
+    -- a channel-order mistake in ``coords_grid`` cancelled by the same mistake
+    in the adapter's swap. It is run non-square so the cancellation cannot hide.
+    """
+
+    def test_sampling_at_the_identity_grid_returns_the_feature_map(self):
+        rng = np.random.default_rng(0)
+        fmap = rng.standard_normal((2, 4, 7, 3)).astype("float32")
+
+        out = keras.ops.convert_to_numpy(
+            sample_at_pixel_coords(fmap, coords_grid(2, 4, 7))
+        )
+
+        np.testing.assert_allclose(out, fmap, rtol=0, atol=ATOL)
+
+    def test_a_pure_integer_shift_of_the_identity_grid_moves_content_one_column(self):
+        """Direction, not just magnitude: ``+1`` on x reads the column to the RIGHT.
+
+        A backward map is a *gather*: output pixel ``(x, y)`` takes its value
+        from input pixel ``map[y, x]``. So adding ``+1`` to the x channel makes
+        every output column show what its right-hand neighbour showed. A sign
+        error produces a shift of the same magnitude in the other direction and
+        is invisible to any test that only measures ``|shift|``.
+        """
+        rng = np.random.default_rng(1)
+        fmap = rng.standard_normal((1, 4, 7, 1)).astype("float32")
+
+        shift = np.zeros((1, 4, 7, 2), dtype="float32")
+        shift[..., 0] = 1.0
+        shifted = keras.ops.convert_to_numpy(
+            sample_at_pixel_coords(fmap, coords_grid(1, 4, 7) + shift)
+        )
+
+        np.testing.assert_allclose(
+            shifted[0, :, :6, 0], fmap[0, :, 1:, 0], rtol=0, atol=ATOL
+        )
+        # The last column has no right-hand neighbour: it clamps to itself.
+        np.testing.assert_allclose(
+            shifted[0, :, 6, 0], fmap[0, :, 6, 0], rtol=0, atol=ATOL
+        )
+
+
+class TestTheAdapterAtTheRefinementResolution:
+    """The stride the rectifier actually runs its loop at.
+
+    ``SPATIAL_DIVISOR`` is imported rather than written as ``8``: the divisor is
+    a transcribed upstream constant (``model.py:48-49``) and this file must move
+    with it, not pin a second copy of it.
+    """
+
+    def test_the_identity_holds_at_one_over_the_spatial_divisor(self):
+        """Same code, stride-8 extents -- the functions are stride-agnostic."""
+        height, width = 32, 56
+        low_h, low_w = height // SPATIAL_DIVISOR, width // SPATIAL_DIVISOR
+        assert (low_h, low_w) == (4, 7)
+
+        rng = np.random.default_rng(2)
+        fmap = rng.standard_normal((1, low_h, low_w, 5)).astype("float32")
+
+        out = keras.ops.convert_to_numpy(
+            sample_at_pixel_coords(fmap, coords_grid(1, low_h, low_w))
+        )
+
+        np.testing.assert_allclose(out, fmap, rtol=0, atol=ATOL)
+
+    def test_the_full_resolution_grid_spans_the_divisor_times_the_low_one(self):
+        """``coodslar`` and ``coords0`` differ only in extent (``model.py:47-49``)."""
+        low = keras.ops.convert_to_numpy(coords_grid(1, 4, 7))
+        full = keras.ops.convert_to_numpy(
+            coords_grid(1, 4 * SPATIAL_DIVISOR, 7 * SPATIAL_DIVISOR)
+        )
+
+        assert full[..., 0].max() == (7 * SPATIAL_DIVISOR) - 1
+        assert low[..., 0].max() == 7 - 1
+
+
+class TestGradientsReachTheCoordinates:
+    """The refinement loop trains THROUGH the sampler, not around it.
+
+    ``warpfea = sample_at_pixel_coords(fmap1, coords1)`` (``model.py:92``) is
+    inside the unrolled 12-iteration loop, so a sampler that is differentiable
+    only w.r.t. its VALUES would leave the coordinate branch of the graph
+    untrained -- and would still run, still produce finite output, and still
+    lower the loss through the value path. Nothing but a gradient assertion on
+    ``coords`` can see that.
+    """
+
+    def test_gradients_flow_to_the_pixel_coordinates(self):
+        rng = np.random.default_rng(3)
+        fmap = tf.constant(rng.standard_normal((1, 4, 7, 3)), dtype=tf.float32)
+        pix = tf.Variable(
+            keras.ops.convert_to_numpy(coords_grid(1, 4, 7)) + 0.25, dtype=tf.float32
+        )
+
+        with tf.GradientTape() as tape:
+            out = sample_at_pixel_coords(fmap, pix)
+            loss = tf.reduce_sum(out ** 2)
+
+        grad = tape.gradient(loss, pix)
+
+        assert grad is not None
+        grad = grad.numpy()
+        assert np.all(np.isfinite(grad))
+        assert np.abs(grad).max() > 0.0
+        # Both channels move: a swap-and-drop bug could leave one axis dead.
+        assert np.abs(grad[..., 0]).max() > 0.0
+        assert np.abs(grad[..., 1]).max() > 0.0
+
+    def test_gradients_are_finite_at_an_out_of_range_coordinate(self):
+        """Clamping must not produce NaN where a badly-initialised net wanders."""
+        rng = np.random.default_rng(4)
+        fmap = tf.constant(rng.standard_normal((1, 4, 7, 3)), dtype=tf.float32)
+        pix = tf.Variable(
+            np.full((1, 4, 7, 2), -50.0, dtype="float32"), dtype=tf.float32
+        )
+
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_sum(sample_at_pixel_coords(fmap, pix) ** 2)
+
+        grad = tape.gradient(loss, pix)
+
+        assert grad is not None
+        assert np.all(np.isfinite(grad.numpy()))
+
+
+
+# =====================================================================
+# convex_upsample
+# =====================================================================
+#
+# The 3x3 neighbour index `k` used throughout this section is the row-major
+# `(kh, kw)` index of `F.unfold`/`extract_patches`, so neighbour `k` of source
+# pixel `(h, w)` is the input pixel `(h + k // 3 - 1, w + k % 3 - 1)`:
+#
+#     k = 0 1 2      (dy, dx) = (-1,-1) (-1, 0) (-1,+1)
+#         3 4 5                 ( 0,-1) ( 0, 0) ( 0,+1)
+#         6 7 8                 (+1,-1) (+1, 0) (+1,+1)
+#
+# k = 4 is the centre. A guard that only exercises k = 4 cannot distinguish a
+# transposed 3x3 from a correct one, which is why every k is exercised below.
+
+_UP_H, _UP_W = 4, 7  # NON-SQUARE, deliberately -- see rule 1 in the module docstring.
+_MASK_CHANNELS = CONVEX_NEIGHBOURS * SPATIAL_DIVISOR * SPATIAL_DIVISOR
+_VERY_NEGATIVE = -1.0e4  # softmax of this against 0.0 is one-hot to ~1e-4343.
+
+
+def _neighbour_offset(k: int) -> tuple:
+    """``k`` -> ``(dy, dx)``, the row-major 3x3 offset. Written out, not derived
+    from the implementation under test."""
+    return ((-1, -1), (-1, 0), (-1, 1),
+            (0, -1), (0, 0), (0, 1),
+            (1, -1), (1, 0), (1, 1))[k]
+
+
+def _one_hot_mask(k: int) -> np.ndarray:
+    """A ``(1, H, W, 576)`` logit mask that selects neighbour ``k`` everywhere.
+
+    Built in the ``(neighbour, sub_row, sub_col)`` decomposition and then
+    flattened, so a wrongly-ordered reshape inside ``convex_upsample`` reads a
+    DIFFERENT neighbour per sub-pixel and smears the impulse.
+    """
+    logits = np.full(
+        (1, _UP_H, _UP_W, CONVEX_NEIGHBOURS, SPATIAL_DIVISOR, SPATIAL_DIVISOR),
+        _VERY_NEGATIVE,
+        dtype="float32",
+    )
+    logits[:, :, :, k, :, :] = 0.0
+    return logits.reshape(1, _UP_H, _UP_W, _MASK_CHANNELS)
+
+
+def _impulse_flow(row: int, col: int, channel: int = 0) -> np.ndarray:
+    flow = np.zeros((1, _UP_H, _UP_W, 2), dtype="float32")
+    flow[0, row, col, channel] = 1.0
+    return flow
+
+
+class TestConvexUpsampleNeighbourOrdering:
+    """The delta-impulse ordering guard: where does the mass LAND?
+
+    One non-zero neighbour weight at a known 3x3 offset must move the impulse
+    to exactly the destination block that offset predicts. This is the only
+    instrument that can see the two reshape orderings, both of which are
+    shape-preserving.
+    """
+
+    @pytest.mark.parametrize("k", list(range(CONVEX_NEIGHBOURS)))
+    def test_a_one_hot_neighbour_moves_the_impulse_by_that_offset(self, k):
+        src_row, src_col = 2, 3  # interior, so every one of the 9 offsets is in range.
+        out = np.array(
+            convex_upsample(_impulse_flow(src_row, src_col), _one_hot_mask(k))
+        )
+
+        assert out.shape == (
+            1,
+            _UP_H * SPATIAL_DIVISOR,
+            _UP_W * SPATIAL_DIVISOR,
+            2,
+        )
+
+        dy, dx = _neighbour_offset(k)
+        # Neighbour k of source (h, w) is input (h + dy, w + dx); the impulse at
+        # (src_row, src_col) is therefore READ by source pixel
+        # (src_row - dy, src_col - dx), whose whole 8x8 destination block lights up.
+        dst_h, dst_w = src_row - dy, src_col - dx
+
+        expected = np.zeros_like(out)
+        expected[
+            0,
+            dst_h * SPATIAL_DIVISOR : (dst_h + 1) * SPATIAL_DIVISOR,
+            dst_w * SPATIAL_DIVISOR : (dst_w + 1) * SPATIAL_DIVISOR,
+            0,
+        ] = float(SPATIAL_DIVISOR)
+
+        np.testing.assert_allclose(out, expected, rtol=0, atol=1e-3)
+
+    def test_the_centre_neighbour_is_a_plain_nearest_upsample(
+            self, golden_reference_device):
+        """k = 4 alone: a pure block-replicating 8x upsample of ``8 * flow``.
+
+        Pinned to the golden-reference device. This is the only probe in the
+        module whose expectation is an arbitrary float rather than 0 or a small
+        integer, and on an RTX 4070 with TF32 matmul enabled it reads
+        ``0.273438`` (= 35/128, a 10-bit mantissa) against a true ``0.273542``
+        -- a 3.3e-3 error that is precision, not ordering. Measured
+        2026-09-10 during step 4; the other arms are exact at any precision and
+        do not need the pin.
+        """
+        rng = np.random.default_rng(11)
+        flow = rng.standard_normal((1, _UP_H, _UP_W, 2)).astype("float32")
+
+        with keras.device(golden_reference_device):
+            out = np.array(convex_upsample(flow, _one_hot_mask(4)))
+        expected = np.repeat(
+            np.repeat(flow * SPATIAL_DIVISOR, SPATIAL_DIVISOR, axis=1),
+            SPATIAL_DIVISOR,
+            axis=2,
+        )
+
+        np.testing.assert_allclose(out, expected, rtol=0, atol=1e-3)
+
+    def test_an_offset_neighbour_reads_zero_across_the_border(self):
+        """``F.unfold(..., padding=1)`` is ZERO-padded, not edge-clamped.
+
+        Distinct from :func:`sample_at_pixel_coords`, which clamps. Selecting
+        the 'up' neighbour on the top row must therefore yield zeros.
+        """
+        flow = np.ones((1, _UP_H, _UP_W, 2), dtype="float32")
+        out = np.array(convex_upsample(flow, _one_hot_mask(1)))  # (dy, dx) = (-1, 0)
+
+        top_block = out[0, :SPATIAL_DIVISOR, :, :]
+        np.testing.assert_allclose(top_block, 0.0, rtol=0, atol=1e-3)
+        # ...and the row below it reads the (all-ones) row above, scaled by 8.
+        np.testing.assert_allclose(
+            out[0, SPATIAL_DIVISOR : 2 * SPATIAL_DIVISOR, :, :],
+            float(SPATIAL_DIVISOR),
+            rtol=0,
+            atol=1e-3,
+        )
+
+
+class TestConvexUpsampleSubPixelInterleave:
+    """Which of the two 8s is the sub-ROW and which is the sub-COLUMN.
+
+    Swapping them transposes every 8x8 block. Output shape, dtype and
+    finiteness are all identical, and at the square 288x288 training resolution
+    the swapped variant is not even out of range -- so only an ASYMMETRIC
+    sub-pixel probe can see it.
+    """
+
+    def test_one_sub_pixel_selecting_a_different_neighbour_lands_asymmetrically(self):
+        sub_row, sub_col = 1, 0  # asymmetric: (1, 0) and (0, 1) are distinguishable.
+
+        logits = np.full(
+            (1, _UP_H, _UP_W, CONVEX_NEIGHBOURS, SPATIAL_DIVISOR, SPATIAL_DIVISOR),
+            _VERY_NEGATIVE,
+            dtype="float32",
+        )
+        logits[:, :, :, 4, :, :] = 0.0  # everything selects the centre...
+        logits[:, :, :, 4, sub_row, sub_col] = _VERY_NEGATIVE
+        logits[:, :, :, 1, sub_row, sub_col] = 0.0  # ...except this one, which selects 'up'.
+        mask = logits.reshape(1, _UP_H, _UP_W, _MASK_CHANNELS)
+
+        src_row, src_col = 2, 3
+        out = np.array(convex_upsample(_impulse_flow(src_row, src_col), mask))
+
+        # The centre-selecting sub-pixels of block (2, 3) see the impulse...
+        centre_block = out[
+            0,
+            src_row * SPATIAL_DIVISOR : (src_row + 1) * SPATIAL_DIVISOR,
+            src_col * SPATIAL_DIVISOR : (src_col + 1) * SPATIAL_DIVISOR,
+            0,
+        ]
+        assert centre_block[0, 0] == pytest.approx(SPATIAL_DIVISOR, abs=1e-3)
+        # ...but the one deviant sub-pixel does not: it reads (src_row - 1, src_col).
+        assert centre_block[sub_row, sub_col] == pytest.approx(0.0, abs=1e-3)
+
+        # And the impulse reappears one BLOCK down, at sub-pixel (1, 0) of it --
+        # NOT at (0, 1), which is where a swapped interleave would put it.
+        below = out[
+            0,
+            (src_row + 1) * SPATIAL_DIVISOR : (src_row + 2) * SPATIAL_DIVISOR,
+            src_col * SPATIAL_DIVISOR : (src_col + 1) * SPATIAL_DIVISOR,
+            0,
+        ]
+        assert below[sub_row, sub_col] == pytest.approx(SPATIAL_DIVISOR, abs=1e-3)
+        assert below[sub_col, sub_row] == pytest.approx(0.0, abs=1e-3)
+
+
+class TestConvexUpsampleUniformMaskControl:
+    """With every logit equal, the operator degenerates to a known filter.
+
+    The expected value is computed independently in numpy -- an explicit
+    zero-padded 3x3 mean followed by a block-replicating 8x upsample -- never by
+    calling :func:`convex_upsample`.
+    """
+
+    @staticmethod
+    def _reference(flow: np.ndarray) -> np.ndarray:
+        scaled = flow * SPATIAL_DIVISOR
+        padded = np.pad(scaled, ((0, 0), (1, 1), (1, 1), (0, 0)))
+        mean = np.zeros_like(scaled)
+        for h in range(scaled.shape[1]):
+            for w in range(scaled.shape[2]):
+                mean[:, h, w, :] = padded[:, h : h + 3, w : w + 3, :].sum(
+                    axis=(1, 2)
+                ) / float(CONVEX_NEIGHBOURS)
+        return np.repeat(
+            np.repeat(mean, SPATIAL_DIVISOR, axis=1), SPATIAL_DIVISOR, axis=2
+        )
+
+    def test_a_uniform_mask_is_a_mean_filtered_nearest_upsample(self):
+        rng = np.random.default_rng(7)
+        flow = rng.standard_normal((2, _UP_H, _UP_W, 2)).astype("float32")
+        mask = np.full((2, _UP_H, _UP_W, _MASK_CHANNELS), 0.3, dtype="float32")
+
+        out = np.array(convex_upsample(flow, mask))
+
+        np.testing.assert_allclose(out, self._reference(flow), rtol=0, atol=1e-5)
+
+    def test_the_weights_are_convex_so_a_constant_field_is_attenuated_at_the_border(self):
+        """Non-negative and summing to one: a constant interior stays constant.
+
+        The border does NOT, because the padding is zero rather than reflective
+        -- so this also pins the padding mode against a uniform mask.
+        """
+        flow = np.full((1, _UP_H, _UP_W, 2), 0.5, dtype="float32")
+        mask = np.zeros((1, _UP_H, _UP_W, _MASK_CHANNELS), dtype="float32")
+
+        out = np.array(convex_upsample(flow, mask))
+
+        interior = out[
+            0, SPATIAL_DIVISOR : -SPATIAL_DIVISOR, SPATIAL_DIVISOR : -SPATIAL_DIVISOR, :
+        ]
+        np.testing.assert_allclose(
+            interior, 0.5 * SPATIAL_DIVISOR, rtol=0, atol=1e-5
+        )
+        # A corner sees only 4 of its 9 neighbours.
+        assert out[0, 0, 0, 0] == pytest.approx(
+            0.5 * SPATIAL_DIVISOR * 4.0 / CONVEX_NEIGHBOURS, abs=1e-5
+        )
+
+
+class TestConvexUpsampleTakesRawLogits:
+    """The ``0.25`` of ``update.py:104`` belongs to the mask head, not here."""
+
+    def test_scaling_the_logits_changes_the_output(self):
+        rng = np.random.default_rng(23)
+        flow = rng.standard_normal((1, _UP_H, _UP_W, 2)).astype("float32")
+        logits = rng.standard_normal(
+            (1, _UP_H, _UP_W, _MASK_CHANNELS)
+        ).astype("float32") * 4.0
+
+        sharp = np.array(convex_upsample(flow, logits))
+        soft = np.array(convex_upsample(flow, logits * 0.25))
+
+        # If this function silently applied (or absorbed) a scaling of its own,
+        # one of these would be a no-op. Softmax is not scale-invariant.
+        assert np.max(np.abs(sharp - soft)) > 1e-3
+
+
+class TestConvexUpsampleGradientsAndGraphSafety:
+
+    def test_gradients_reach_both_the_flow_and_the_mask(self):
+        rng = np.random.default_rng(5)
+        flow = tf.Variable(
+            rng.standard_normal((1, _UP_H, _UP_W, 2)).astype("float32")
+        )
+        mask = tf.Variable(
+            rng.standard_normal((1, _UP_H, _UP_W, _MASK_CHANNELS)).astype("float32")
+        )
+
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_sum(convex_upsample(flow, mask) ** 2)
+
+        g_flow, g_mask = tape.gradient(loss, [flow, mask])
+
+        assert g_flow is not None and g_mask is not None
+        assert np.all(np.isfinite(g_flow.numpy()))
+        assert np.all(np.isfinite(g_mask.numpy()))
+        # A non-trivial mask gradient is the real assertion: a `stop_gradient`
+        # or an argmax-style selection would leave this identically zero.
+        assert np.max(np.abs(g_mask.numpy())) > 0.0
+
+    def test_it_runs_under_a_traced_tf_function_with_an_unknown_batch(self):
+        """No Python branch on a symbolic value; the reshape must stay dynamic."""
+        traced = tf.function(
+            convex_upsample,
+            input_signature=[
+                tf.TensorSpec([None, _UP_H, _UP_W, 2], tf.float32),
+                tf.TensorSpec([None, _UP_H, _UP_W, _MASK_CHANNELS], tf.float32),
+            ],
+        )
+        out = traced(
+            tf.zeros((3, _UP_H, _UP_W, 2)),
+            tf.zeros((3, _UP_H, _UP_W, _MASK_CHANNELS)),
+        )
+        assert tuple(out.shape) == (
+            3,
+            _UP_H * SPATIAL_DIVISOR,
+            _UP_W * SPATIAL_DIVISOR,
+            2,
+        )
+
+
+# =====================================================================
+# The feature encoder: the 80-channel stem norm, the torch-exact stride-2
+# padding, the shortcut algebra, gradients and the round trip.
+#
+# Everything below is pointed at a defect class that a shape test cannot see:
+#
+# * `norm1` built at the reference's literal 64 instead of the 80 channels
+#   `conv1` actually emits (H-7 / F-02). Upstream this is INERT, because
+#   `nn.InstanceNorm2d` defaults to `affine=False` and never uses the argument;
+#   here the argument is the GROUP COUNT, so it either raises (64 does not
+#   divide 80) or -- for a divisor that does, like 16 -- silently normalizes in
+#   5-channel groups while every shape, dtype, gradient and serialization test
+#   stays green. Hence the guards below assert the group count AND the
+#   per-channel statistics, never just the output shape.
+# * a stride-2 convolution padded with Keras "same" instead of torch's
+#   symmetric `padding=k//2`. Identical output SHAPE, feature map shifted by one
+#   pixel (D-012).
+# =====================================================================
+
+from dl_techniques.models.vision.image_restoration.doc_scanner.components import (  # noqa: E402
+    INSTANCE_NORM_EPSILON,
+    _VARIANT_SPEC,
+    DocScannerFeatureEncoder,
+    DocScannerResidualBlock,
+    _instance_norm,
+)
+from ..gradient_flow_oracle import (  # noqa: E402
+    assert_gradients_reach_every_trainable_weight,
+)
+from ..roundtrip_instrument_oracle import (  # noqa: E402
+    assert_roundtrip_output_values,
+    assert_weights_restored_before_first_call,
+    measure_roundtrip,
+)
+
+_SPEC = _VARIANT_SPEC["docscanner-l"]
+_STEM_CHANNELS = _SPEC["encoder_stem_channels"]
+_STAGE_CHANNELS = _SPEC["encoder_stage_channels"]
+_FNET_OUTPUT_DIM = _SPEC["fnet_output_dim"]
+
+# The reference's literal, kept here ONLY so the guards can say what must not
+# be built. `extractor.py:90` / `:93`.
+_REFERENCE_NORM1_LITERAL = 64
+
+
+def _encoder() -> DocScannerFeatureEncoder:
+    """The encoder at the one shipped variant's widths. No literal enters here."""
+    return DocScannerFeatureEncoder(
+        stem_channels=_STEM_CHANNELS,
+        stage_channels=_STAGE_CHANNELS,
+        output_dim=_FNET_OUTPUT_DIM,
+    )
+
+
+def _built_encoder(height: int = 64, width: int = 48) -> DocScannerFeatureEncoder:
+    encoder = _encoder()
+    encoder.build((None, height, width, 3))
+    return encoder
+
+
+class TestTheStemNormIsEightyWideNotSixtyFour:
+    """H-7. The reference's ``InstanceNorm2d(64)`` is fed 80 channels.
+
+    ``extractor.py:93`` constructs the norm with 64; ``extractor.py:95``
+    constructs the convolution that feeds it with 80 outputs. Torch never
+    notices because ``affine=False`` allocates nothing. This port must use 80.
+    """
+
+    def test_the_group_count_is_the_stem_width_and_not_the_references_literal(self):
+        encoder = _built_encoder()
+        assert encoder.norm1.groups == _STEM_CHANNELS
+        assert encoder.norm1.groups != _REFERENCE_NORM1_LITERAL, (
+            "norm1 was built at the reference's 64. That literal is inert in "
+            "torch (affine=False allocates no parameters) but is the GROUP "
+            "COUNT here. See extractor.py:93 vs :95 and decisions.md D-011.")
+
+    def test_the_group_count_matches_what_the_stem_convolution_actually_emits(self):
+        """The two are read from the same place, so they cannot drift apart."""
+        encoder = _built_encoder()
+        assert encoder.conv1.filters == encoder.norm1.groups
+
+    def test_all_eighty_channels_are_normalized_independently(self):
+        """The numerical form of the same claim, for a divisor that DOES divide 80.
+
+        ``groups=16`` divides 80 and would raise nothing; it would normalize in
+        5-channel groups. Only a per-channel statistic can see that, so this is
+        the guard that survives when the crash-shaped one does not.
+        """
+        channels = _STEM_CHANNELS
+        rng = np.random.default_rng(0)
+        # Deliberately different per-channel mean and scale, so a grouped
+        # normalization CANNOT accidentally produce per-channel zero mean.
+        offsets = np.arange(channels, dtype="float32") * 3.0 - 40.0
+        scales = 1.0 + np.arange(channels, dtype="float32") * 0.25
+        sample = rng.standard_normal((2, 9, 7, channels)).astype("float32")
+        sample = sample * scales + offsets
+
+        norm = _instance_norm(channels, name="probe")
+        norm.build((None, 9, 7, channels))
+        out = np.asarray(keras.ops.convert_to_numpy(norm(sample)))
+
+        per_channel_mean = out.mean(axis=(1, 2))
+        per_channel_var = out.var(axis=(1, 2))
+        np.testing.assert_allclose(
+            per_channel_mean, np.zeros_like(per_channel_mean),
+            atol=1e-4, rtol=0,
+            err_msg="a channel was not normalized on its own; the group count "
+                    "does not equal the channel count")
+        np.testing.assert_allclose(
+            per_channel_var, np.ones_like(per_channel_var),
+            atol=1e-3, rtol=0,
+            err_msg="a channel's variance is not 1; channels are being pooled")
+
+    def test_the_norm_is_not_affine_matching_torchs_default(self):
+        """D-011. ``nn.InstanceNorm2d`` defaults to ``affine=False``.
+
+        Zero weights is the whole point: it is *why* the reference's 64 is inert
+        upstream. An affine port would be a divergence, so it is asserted, not
+        assumed.
+        """
+        encoder = _built_encoder()
+        assert len(encoder.norm1.weights) == 0
+        assert encoder.norm1.center is False
+        assert encoder.norm1.scale is False
+
+    def test_the_epsilon_is_torchs_and_not_the_keras_default(self):
+        """1e-5, not GroupNormalization's own 1e-3 -- a silent 100x."""
+        encoder = _built_encoder()
+        assert encoder.norm1.epsilon == INSTANCE_NORM_EPSILON
+        assert encoder.norm1.epsilon != 1e-3
+
+
+class TestTheStrideTwoPaddingIsTorchsAndNotKerasSame:
+    """D-012. Same output shape, one-pixel-shifted sampling grid.
+
+    A 7x7 stride-2 convolution with torch's ``padding=3`` samples input centres
+    at ``2j``. Keras/TF ``"same"`` splits its 5 pad columns as 2/3 and samples
+    ``2j + 1``. Both give ``ceil(H / 2)`` outputs, so no shape assertion can
+    tell them apart. These two tests are two-sided: an impulse at an even index
+    must be SEEN and an impulse at the neighbouring odd index must NOT be.
+    """
+
+    @staticmethod
+    def _centre_tap_stem(encoder: DocScannerFeatureEncoder) -> None:
+        """Make ``conv1`` a single tap at the kernel centre, bias 0."""
+        kernel = np.zeros(encoder.conv1.kernel.shape, dtype="float32")
+        kernel[3, 3, 0, 0] = 1.0
+        encoder.conv1.kernel.assign(kernel)
+        encoder.conv1.bias.assign(
+            np.zeros(encoder.conv1.bias.shape, dtype="float32"))
+
+    @pytest.mark.parametrize("row,col", [(2, 4), (4, 2), (6, 6)])
+    def test_the_stem_reads_an_impulse_at_an_even_index_into_half_that_index(
+            self, row, col):
+        encoder = _built_encoder(height=16, width=16)
+        self._centre_tap_stem(encoder)
+
+        impulse = np.zeros((1, 16, 16, 3), dtype="float32")
+        impulse[0, row, col, 0] = 1.0
+        out = np.asarray(keras.ops.convert_to_numpy(
+            encoder.conv1(encoder.pad1(impulse))))[0, :, :, 0]
+
+        assert out[row // 2, col // 2] == pytest.approx(1.0), (
+            "torch's padding=3 puts the kernel centre of output j on input 2j; "
+            "Keras 'same' puts it on 2j+1. See decisions.md D-012.")
+        assert out.sum() == pytest.approx(1.0)
+
+    @pytest.mark.parametrize("row,col", [(3, 5), (5, 3)])
+    def test_the_stem_does_not_see_an_impulse_at_an_odd_index(self, row, col):
+        """The other side of the same claim: under Keras 'same' THIS would fire."""
+        encoder = _built_encoder(height=16, width=16)
+        self._centre_tap_stem(encoder)
+
+        impulse = np.zeros((1, 16, 16, 3), dtype="float32")
+        impulse[0, row, col, 0] = 1.0
+        out = np.asarray(keras.ops.convert_to_numpy(
+            encoder.conv1(encoder.pad1(impulse))))[0, :, :, 0]
+
+        assert out.sum() == pytest.approx(0.0, abs=1e-6), (
+            "an odd-indexed impulse reached a stride-2 output centre; the "
+            "padding is Keras 'same', not torch's symmetric padding")
+
+    def test_the_residual_blocks_stride_two_conv_has_the_same_alignment(self):
+        """The 3x3 stride-2 branch conv, same claim, ``padding=1``."""
+        block = DocScannerResidualBlock(filters=4, stride=2)
+        block.build((None, 8, 8, 3))
+        kernel = np.zeros(block.conv1.kernel.shape, dtype="float32")
+        kernel[1, 1, 0, 0] = 1.0
+        block.conv1.kernel.assign(kernel)
+        block.conv1.bias.assign(np.zeros(block.conv1.bias.shape, dtype="float32"))
+
+        even = np.zeros((1, 8, 8, 3), dtype="float32")
+        even[0, 4, 2, 0] = 1.0
+        odd = np.zeros((1, 8, 8, 3), dtype="float32")
+        odd[0, 5, 3, 0] = 1.0
+
+        even_out = np.asarray(keras.ops.convert_to_numpy(
+            block.conv1(block.pad1(even))))[0, :, :, 0]
+        odd_out = np.asarray(keras.ops.convert_to_numpy(
+            block.conv1(block.pad1(odd))))[0, :, :, 0]
+
+        assert even_out[2, 1] == pytest.approx(1.0)
+        assert odd_out.sum() == pytest.approx(0.0, abs=1e-6)
+
+    def test_the_projection_shortcut_subsamples_the_even_indices(self):
+        """The 1x1 stride-2 shortcut must read input ``2j``, like torch's."""
+        block = DocScannerResidualBlock(filters=3, stride=2)
+        block.build((None, 7, 9, 3))
+        eye = np.zeros(block.downsample_conv.kernel.shape, dtype="float32")
+        for index in range(3):
+            eye[0, 0, index, index] = 1.0
+        block.downsample_conv.kernel.assign(eye)
+        block.downsample_conv.bias.assign(
+            np.zeros(block.downsample_conv.bias.shape, dtype="float32"))
+
+        rng = np.random.default_rng(3)
+        sample = rng.standard_normal((2, 7, 9, 3)).astype("float32")
+        out = np.asarray(keras.ops.convert_to_numpy(
+            block.downsample_conv(sample)))
+        np.testing.assert_allclose(out, sample[:, ::2, ::2, :], atol=0, rtol=0)
+
+
+class TestTheResidualBlockShortcut:
+    """``extractor.py:26-30, 36-39``: identity at stride 1, projection at stride 2."""
+
+    def test_a_stride_one_block_has_no_projection_at_all(self):
+        block = DocScannerResidualBlock(filters=8, stride=1)
+        assert block.downsample_conv is None
+        assert block.norm3 is None
+        assert block.pad1 is None, (
+            "stride 1 needs no explicit pad: Keras 'same' IS torch padding=1 "
+            "there. A pad layer here would shift the identity path.")
+
+    def test_a_stride_two_block_has_a_projection_and_its_own_norm(self):
+        block = DocScannerResidualBlock(filters=8, stride=2)
+        assert block.downsample_conv is not None
+        assert block.norm3 is not None
+
+    def test_the_stride_one_shortcut_is_the_RAW_input_not_a_projection(self):
+        """Zero the branch and the block must reduce to ``relu(x)`` exactly.
+
+        A projection shortcut -- even an accidentally-added one -- would put a
+        convolution and a normalization on this path, and the equality below
+        would fail by an amount no shape test could report.
+        """
+        block = DocScannerResidualBlock(filters=5, stride=1)
+        block.build((None, 6, 4, 5))
+        for conv in (block.conv1, block.conv2):
+            conv.kernel.assign(np.zeros(conv.kernel.shape, dtype="float32"))
+            conv.bias.assign(np.zeros(conv.bias.shape, dtype="float32"))
+
+        rng = np.random.default_rng(11)
+        sample = rng.standard_normal((2, 6, 4, 5)).astype("float32")
+        out = np.asarray(keras.ops.convert_to_numpy(block(sample)))
+        np.testing.assert_allclose(out, np.maximum(sample, 0.0), atol=0, rtol=0)
+
+    def test_a_stride_one_block_refuses_a_channel_change(self):
+        """The identity add is illegal there, and the reference never builds one."""
+        block = DocScannerResidualBlock(filters=8, stride=1)
+        with pytest.raises(ValueError, match="IDENTITY shortcut"):
+            block.build((None, 6, 6, 16))
+
+    def test_the_second_relu_is_inside_the_branch_before_the_add(self):
+        """``extractor.py:34,39``: ``relu(norm2(conv2(y)))`` and then ``relu(x + y)``.
+
+        The usual ResNet ordering adds the UN-activated branch. Under that
+        ordering the branch can be negative, so a strictly-negative input plus
+        a branch tuned to cancel it would leave 0; under the reference's
+        ordering the branch is already non-negative, so it cannot cancel and
+        the block's output is >= relu(x) everywhere.
+        """
+        block = DocScannerResidualBlock(filters=6, stride=1)
+        block.build((None, 5, 5, 6))
+        rng = np.random.default_rng(5)
+        sample = rng.standard_normal((3, 5, 5, 6)).astype("float32")
+        out = np.asarray(keras.ops.convert_to_numpy(block(sample)))
+        assert (out >= np.maximum(sample, 0.0) - 1e-5).all(), (
+            "the branch went negative before the add, so the second ReLU is "
+            "outside it; the reference applies one on the branch AND one after")
+
+
+class TestTheEncoderShapeLadder:
+    """Stem 2, stages 1/2/2 -- total stride 8, and 320 output channels."""
+
+    def test_a_square_288_input_lands_at_36_by_36_by_320(self):
+        encoder = _encoder()
+        out = encoder(np.zeros((2, 288, 288, 3), dtype="float32"))
+        assert tuple(out.shape) == (2, 36, 36, _FNET_OUTPUT_DIM)
+        assert 288 // SPATIAL_DIVISOR == 36
+
+    def test_a_non_square_input_keeps_height_and_width_distinct(self):
+        """288x224 -> 36x28. A square fixture cannot see an H/W transpose."""
+        encoder = _encoder()
+        out = encoder(np.zeros((2, 288, 224, 3), dtype="float32"))
+        assert tuple(out.shape) == (2, 36, 28, _FNET_OUTPUT_DIM)
+
+    def test_compute_output_shape_agrees_with_the_real_forward(self):
+        encoder = _encoder()
+        declared = encoder.compute_output_shape((None, 288, 224, 3))
+        out = encoder(np.zeros((2, 288, 224, 3), dtype="float32"))
+        assert declared[1:] == tuple(out.shape)[1:]
+
+    def test_the_stage_ladder_is_two_blocks_each_with_the_stride_on_the_first(self):
+        """``extractor.py:99-101, 115-118``."""
+        encoder = _encoder()
+        assert [block.filters for block in encoder.blocks] == [
+            _STAGE_CHANNELS[0], _STAGE_CHANNELS[0],
+            _STAGE_CHANNELS[1], _STAGE_CHANNELS[1],
+            _STAGE_CHANNELS[2], _STAGE_CHANNELS[2],
+        ]
+        assert [block.stride for block in encoder.blocks] == [1, 1, 2, 1, 2, 1]
+
+    def test_the_output_projection_carries_no_norm_and_no_activation(self):
+        """``extractor.py:104``, ``:131``: the 1x1 is bare.
+
+        The rectifier splits these 320 channels into a ``tanh`` hidden state and
+        a ``relu`` context; a ReLU here would half-rectify the hidden state
+        before ``tanh`` ever saw it. Negative outputs are the observable.
+        """
+        encoder = _encoder()
+        rng = np.random.default_rng(7)
+        out = np.asarray(keras.ops.convert_to_numpy(
+            encoder(rng.standard_normal((2, 64, 48, 3)).astype("float32"))))
+        assert (out < 0.0).any(), "the encoder output is non-negative; something " \
+                                  "rectifying was appended to the output 1x1"
+
+    def test_a_stage_count_that_breaks_the_stride_contract_is_refused(self):
+        """The rectifier upsamples by exactly SPATIAL_DIVISOR; the two must agree."""
+        with pytest.raises(ValueError, match="total stride"):
+            DocScannerFeatureEncoder(
+                stem_channels=_STEM_CHANNELS,
+                stage_channels=_STAGE_CHANNELS[:2],
+                output_dim=_FNET_OUTPUT_DIM,
+            )
+
+
+def _encoder_functional_model() -> keras.Model:
+    """The encoder wrapped so the shared model oracles can judge it."""
+    inputs = keras.Input(shape=(32, 24, 3))
+    return keras.Model(inputs, _encoder()(inputs), name="doc_scanner_fnet")
+
+
+def _encoder_inputs() -> np.ndarray:
+    return np.linspace(-1.0, 1.0, 2 * 32 * 24 * 3, dtype="float32").reshape(
+        (2, 32, 24, 3))
+
+
+class TestTheEncoderTrainsAndRoundTrips:
+    """The shared oracles, adopted rather than reimplemented."""
+
+    def test_every_trainable_weight_receives_a_live_gradient(self):
+        model = _encoder_functional_model()
+        assert_gradients_reach_every_trainable_weight(
+            model, _encoder_inputs(), training=True)
+
+    def test_the_saved_and_reloaded_encoder_reproduces_its_output_exactly(self):
+        report = measure_roundtrip(
+            _encoder_functional_model, _encoder_inputs, training=False)
+        assert report["self_max_delta"] == 0.0, (
+            "the encoder became non-deterministic; the exact bound below would "
+            "then be measuring that instead of the round trip")
+        assert_roundtrip_output_values(report, atol=0.0)
+
+    def test_the_weights_are_restored_before_the_reloaded_model_is_called(self):
+        report = measure_roundtrip(
+            _encoder_functional_model, _encoder_inputs, training=False)
+        assert report["call_count_before_weight_read"] == 0
+        assert_weights_restored_before_first_call(report, atol=0.0)
+
+    def test_the_encoder_config_round_trips_every_constructor_argument(self):
+        encoder = _encoder()
+        clone = DocScannerFeatureEncoder.from_config(encoder.get_config())
+        assert clone.stem_channels == encoder.stem_channels
+        assert tuple(clone.stage_channels) == tuple(encoder.stage_channels)
+        assert clone.output_dim == encoder.output_dim
+
+    def test_the_block_config_round_trips_every_constructor_argument(self):
+        block = DocScannerResidualBlock(filters=12, stride=2)
+        clone = DocScannerResidualBlock.from_config(block.get_config())
+        assert clone.filters == 12
+        assert clone.stride == 2
+
+    def test_it_runs_under_a_traced_tf_function_with_an_unknown_batch(self):
+        encoder = _encoder()
+        encoder.build((None, 32, 24, 3))
+        traced = tf.function(
+            lambda batch: encoder(batch),
+            input_signature=[tf.TensorSpec([None, 32, 24, 3], tf.float32)],
+        )
+        assert tuple(traced(tf.zeros((3, 32, 24, 3))).shape) == (
+            3, 4, 3, _FNET_OUTPUT_DIM)
+
+# =====================================================================
+# SepConvGRU -- the separable recurrent update core (step 5).
+#
+# Three orderings in this layer are SHAPE-PRESERVING when wrong, so every
+# guard below is a value-level or dependence-level assertion:
+#
+# * the two passes swapped (vertical first). The influence SUPPORT is
+#   identical either way -- a 5x5 box around the perturbed pixel -- so a
+#   support probe is structurally vacuous here and the guard has to compare
+#   VALUES against a composition built in the test.
+# * the (1, 5) and (5, 1) kernels swapped, i.e. the horizontal pass mixing
+#   height. Same shape, same parameter count.
+# * `q` convolved over `concat(h, x)` instead of `concat(r * h, x)`. That is
+#   still a working recurrent cell; it simply cannot forget.
+#
+# Fixtures are NON-SQUARE (H=4, W=7) throughout, because a square fixture
+# cannot separate the two spatial axes.
+# =====================================================================
+
+from dl_techniques.models.vision.image_restoration.doc_scanner.components import (  # noqa: E402
+    GRU_HORIZONTAL_KERNEL_SIZE,
+    GRU_VERTICAL_KERNEL_SIZE,
+    SepConvGRU,
+)
+
+_HIDDEN_DIM = _SPEC["hidden_dim"]
+_GRU_INPUT_DIM = _SPEC["gru_input_dim"]
+
+# Small stand-in widths for the value probes. The two differ so that a
+# hidden/context concatenation order mix-up cannot be silently shape-legal.
+_TEST_HIDDEN = 6
+_TEST_INPUT = 5
+
+# The non-square probe fixture, and the perturbed pixel inside it.
+_PROBE_H, _PROBE_W = 4, 7
+_PROBE_ROW, _PROBE_COL = 1, 3
+
+# `update.py:37-43`: a 5-tap 1-D kernel reaches two pixels either side.
+_GRU_KERNEL_REACH = 2
+
+# ONE GRU step reaches TWICE that far along its own axis, and this was measured
+# rather than predicted. `q = tanh(convq(cat([r * h, x])))` convolves over
+# `r * h`, and `r` is ITSELF a convolution output, so the two 5-taps COMPOSE:
+# a perturbation at column c moves the output as far as c +/- 4. The reach on
+# the orthogonal axis stays exactly 0, which is the part these guards are
+# pointed at. Predicting 2 here produced a RED at columns 0 and 6 with
+# magnitudes 0.035 and 0.152 -- real influence, not float noise.
+_GRU_STEP_REACH = 2 * _GRU_KERNEL_REACH
+
+
+def _gru(hidden: int = _TEST_HIDDEN, context: int = _TEST_INPUT) -> SepConvGRU:
+    return SepConvGRU(hidden_dim=hidden, input_dim=context)
+
+
+def _built_gru(
+        hidden: int = _TEST_HIDDEN,
+        context: int = _TEST_INPUT,
+        height: int = _PROBE_H,
+        width: int = _PROBE_W,
+) -> SepConvGRU:
+    gru = _gru(hidden, context)
+    gru.build([(None, height, width, hidden), (None, height, width, context)])
+    return gru
+
+
+def _probe_pair(seed: int) -> tuple:
+    """A ``(hidden_state, context)`` pair with structure on BOTH axes.
+
+    The context carries a bright COLUMN and the hidden state a bright ROW, so
+    the two spatial axes are not interchangeable in the fixture. A fixture
+    symmetric under transposition -- or merely square -- cannot tell the
+    horizontal pass from the vertical one.
+    """
+    rng = np.random.default_rng(seed)
+    hidden = rng.standard_normal(
+        (2, _PROBE_H, _PROBE_W, _TEST_HIDDEN)).astype("float32") * 0.1
+    context = rng.standard_normal(
+        (2, _PROBE_H, _PROBE_W, _TEST_INPUT)).astype("float32") * 0.1
+    hidden[:, _PROBE_ROW, :, :] += 1.0      # a bright ROW in the state
+    context[:, :, _PROBE_COL, :] += 1.0     # a bright COLUMN in the context
+    return hidden, context
+
+
+def _numpy(tensor) -> np.ndarray:
+    return np.asarray(keras.ops.convert_to_numpy(tensor))
+
+
+class TestTheGRUPreservesItsSpatialShapeAndHiddenWidth:
+    """Both passes are stride 1, so only the channel axis is decided here."""
+
+    def test_the_shipped_widths_at_the_rectifiers_own_resolution(self):
+        """(B, 36, 36, 160) + (B, 36, 36, 320) -> (B, 36, 36, 160).
+
+        36 is ``288 // SPATIAL_DIVISOR``, the resolution the refinement loop
+        actually runs at. The widths come from ``_VARIANT_SPEC``; no literal.
+        """
+        gru = _gru(_HIDDEN_DIM, _GRU_INPUT_DIM)
+        side = 288 // SPATIAL_DIVISOR
+        hidden = np.zeros((1, side, side, _HIDDEN_DIM), dtype="float32")
+        context = np.zeros((1, side, side, _GRU_INPUT_DIM), dtype="float32")
+        out = gru([hidden, context])
+        assert tuple(out.shape) == (1, side, side, _HIDDEN_DIM)
+        assert np.isfinite(_numpy(out)).all()
+
+    def test_a_non_square_input_keeps_its_own_height_and_width(self):
+        gru = _gru()
+        hidden, context = _probe_pair(seed=0)
+        out = gru([hidden, context])
+        assert tuple(out.shape) == (2, _PROBE_H, _PROBE_W, _TEST_HIDDEN)
+
+    def test_compute_output_shape_agrees_with_the_real_call(self):
+        gru = _built_gru()
+        declared = gru.compute_output_shape(
+            [(None, _PROBE_H, _PROBE_W, _TEST_HIDDEN),
+             (None, _PROBE_H, _PROBE_W, _TEST_INPUT)])
+        hidden, context = _probe_pair(seed=1)
+        assert declared[1:] == tuple(gru([hidden, context]).shape)[1:]
+
+    def test_every_convolution_reads_the_concatenated_width(self):
+        """``hidden_dim + input_dim`` in, ``hidden_dim`` out -- all six.
+
+        This is the width the dead-default trap (D-006/D-007) attacks: nothing
+        about the layer's SHAPE behaviour changes if the hidden width is 128
+        instead of 160, because the state simply carries a different width end
+        to end.
+        """
+        gru = _built_gru(_HIDDEN_DIM, _GRU_INPUT_DIM, height=6, width=5)
+        convs = (gru.convz1, gru.convr1, gru.convq1,
+                 gru.convz2, gru.convr2, gru.convq2)
+        assert len(convs) == 6
+        for conv in convs:
+            assert tuple(conv.kernel.shape)[2:] == (
+                _HIDDEN_DIM + _GRU_INPUT_DIM, _HIDDEN_DIM), conv.name
+
+    @pytest.mark.parametrize("bad_hidden,bad_input", [(0, 4), (4, 0), (-1, 4)])
+    def test_a_non_positive_width_is_refused(self, bad_hidden, bad_input):
+        with pytest.raises(ValueError, match="must be positive"):
+            SepConvGRU(hidden_dim=bad_hidden, input_dim=bad_input)
+
+    def test_a_channel_count_that_disagrees_with_the_declared_width_is_refused(self):
+        gru = _gru()
+        with pytest.raises(ValueError, match="hidden_state has"):
+            gru.build([(None, 4, 7, _TEST_HIDDEN + 1), (None, 4, 7, _TEST_INPUT)])
+        with pytest.raises(ValueError, match="inputs has"):
+            _gru().build([(None, 4, 7, _TEST_HIDDEN), (None, 4, 7, _TEST_INPUT + 1)])
+
+    def test_a_single_tensor_instead_of_the_pair_is_refused(self):
+        with pytest.raises(ValueError, match="two-element sequence"):
+            _gru().build([(None, 4, 7, _TEST_HIDDEN)])
+
+
+class TestTheStrideOnePaddingMatchesTorchsSymmetricPadding:
+    """D-012 does NOT apply here, and that is measured rather than asserted.
+
+    ``extractor.py``'s stride-2 convolutions needed explicit padding because
+    Keras ``"same"`` splits an odd total pad as ``0/1`` where torch pads
+    ``1/1``. These convolutions are STRIDE 1 with odd kernel extents, so the
+    required total pad is even and every split is symmetric -- ``"same"`` IS
+    torch's ``padding=(0, 2)`` / ``(2, 0)``, exactly. The two arms below
+    compare ``"same"`` against an explicitly, symmetrically pre-padded
+    ``"valid"`` convolution sharing the same weights, and require a difference
+    of exactly zero.
+    """
+
+    @pytest.mark.parametrize(
+        "kernel_size,pad", [
+            (GRU_HORIZONTAL_KERNEL_SIZE, ((0, 0), (_GRU_KERNEL_REACH, _GRU_KERNEL_REACH))),
+            (GRU_VERTICAL_KERNEL_SIZE, ((_GRU_KERNEL_REACH, _GRU_KERNEL_REACH), (0, 0))),
+        ])
+    def test_same_equals_an_explicit_symmetric_pad_plus_valid(
+            self, kernel_size, pad, golden_reference_device):
+        """Pinned to the golden-reference device.
+
+        The two arms feed convolutions of DIFFERENT input widths, so on an
+        RTX 4070 the backend picks different algorithms for them and TF32
+        rounding makes the exact-zero claim read ``4.6e-4`` -- precision, not a
+        pixel shift. Measured on GPU 2026-09-10 during step 5. The distinction
+        this test exists to make is O(1), not O(1e-4): the D-012 stride-2
+        mismatch it is modelled on moved a unit impulse to a different index
+        entirely. Pinning the device keeps the claim EXACT rather than
+        loosening a tolerance to within a factor of two of the defect it is
+        supposed to see.
+        """
+        rng = np.random.default_rng(11)
+        x = rng.standard_normal((1, _PROBE_H, _PROBE_W, 3)).astype("float32")
+        padded = np.pad(x, ((0, 0), pad[0], pad[1], (0, 0)))
+
+        with keras.device(golden_reference_device):
+            same = keras.layers.Conv2D(4, kernel_size, padding="same")
+            valid = keras.layers.Conv2D(4, kernel_size, padding="valid")
+            same.build(x.shape)
+            valid.build(padded.shape)
+            valid.set_weights(same.get_weights())
+
+            delta = np.abs(_numpy(same(x)) - _numpy(valid(padded))).max()
+
+        assert delta == 0.0
+
+
+class TestEachPassMixesAlongExactlyOneAxis:
+    """The ``(1, 5)`` pass moves information along WIDTH, ``(5, 1)`` along HEIGHT.
+
+    Measured as a DEPENDENCE, not as a support: with generic weights and
+    non-zero biases every output pixel is non-zero regardless, so "where is the
+    output non-zero" answers nothing. Perturbing exactly one input pixel and
+    asking which OUTPUT pixels moved answers it, and is blind to the bias.
+
+    Torch's ``(kH, kW)`` kernel ordering is Keras' ordering too, and the
+    channels-last layout moves the CHANNEL axis, not the spatial pair -- so the
+    tuples transfer verbatim. That reasoning is exactly what this test refuses
+    to take on trust: an axis swap is shape-preserving and parameter-count
+    preserving.
+    """
+
+    @staticmethod
+    def _influence_mask(convs) -> np.ndarray:
+        """Which output pixels move when input pixel ``(row, col)`` moves."""
+        gru = _built_gru()
+        hidden, context = _probe_pair(seed=3)
+        hidden, context = hidden[:1], context[:1]
+
+        perturbed = context.copy()
+        perturbed[0, _PROBE_ROW, _PROBE_COL, :] += 5.0
+
+        selected = [getattr(gru, name) for name in convs]
+        base = _numpy(SepConvGRU._gru_step(hidden, context, *selected))
+        moved = _numpy(SepConvGRU._gru_step(hidden, perturbed, *selected))
+        return np.abs(moved - base).max(axis=-1)[0] > 1e-6
+
+    def test_the_first_pass_spreads_along_width_only(self):
+        mask = self._influence_mask(("convz1", "convr1", "convq1"))
+        rows, cols = np.nonzero(mask)
+        assert set(rows.tolist()) == {_PROBE_ROW}, (
+            "the (1, 5) pass moved information ACROSS ROWS; its kernel is "
+            "acting on the height axis. See decisions.md D-014.")
+        assert set(cols.tolist()) == set(range(
+            max(0, _PROBE_COL - _GRU_STEP_REACH),
+            min(_PROBE_W, _PROBE_COL + _GRU_STEP_REACH + 1)))
+
+    def test_the_second_pass_spreads_along_height_only(self):
+        mask = self._influence_mask(("convz2", "convr2", "convq2"))
+        rows, cols = np.nonzero(mask)
+        assert set(cols.tolist()) == {_PROBE_COL}, (
+            "the (5, 1) pass moved information ACROSS COLUMNS; its kernel is "
+            "acting on the width axis. See decisions.md D-014.")
+        # The composed reach is 4 and the fixture is only 4 rows tall, so every
+        # row is inside it; the load-bearing arm is the column one above.
+        assert set(rows.tolist()) == set(range(
+            max(0, _PROBE_ROW - _GRU_STEP_REACH),
+            min(_PROBE_H, _PROBE_ROW + _GRU_STEP_REACH + 1)))
+
+    def test_the_two_passes_are_not_the_same_operator(self):
+        """A vacuity control: the two masks must actually differ."""
+        first = self._influence_mask(("convz1", "convr1", "convq1"))
+        second = self._influence_mask(("convz2", "convr2", "convq2"))
+        assert not np.array_equal(first, second)
+
+
+class TestThePassOrderIsHorizontalThenVertical:
+    """``update.py:46-59``: horizontal FIRST, and the vertical pass consumes
+    the state the horizontal pass just produced.
+
+    The influence SUPPORT is identical under a swap -- a 5x5 box either way --
+    which is why this guard compares values against a composition assembled in
+    the test. Two further arms keep it from being vacuous: the swapped
+    composition and the parallel (both-from-the-entry-state) composition must
+    each differ from the layer's real output by a stated margin. Without those,
+    a fixture that happened not to distinguish the orders would let the guard
+    pass for the wrong reason.
+    """
+
+    MIN_SEPARATION = 1e-3
+
+    @staticmethod
+    def _compositions():
+        gru = _built_gru()
+        hidden, context = _probe_pair(seed=5)
+        actual = _numpy(gru([hidden, context]))
+
+        horizontal = (gru.convz1, gru.convr1, gru.convq1)
+        vertical = (gru.convz2, gru.convr2, gru.convq2)
+
+        after_h = SepConvGRU._gru_step(hidden, context, *horizontal)
+        h_then_v = _numpy(SepConvGRU._gru_step(after_h, context, *vertical))
+
+        after_v = SepConvGRU._gru_step(hidden, context, *vertical)
+        v_then_h = _numpy(SepConvGRU._gru_step(after_v, context, *horizontal))
+
+        # The plausible wrong wiring: the vertical pass reading the ENTRY
+        # state instead of the one the horizontal pass just produced.
+        entry_fed_vertical = _numpy(after_v)
+        return actual, h_then_v, v_then_h, entry_fed_vertical
+
+    def test_the_layer_equals_the_vertical_pass_applied_to_the_horizontal_result(self):
+        actual, h_then_v, _, _ = self._compositions()
+        np.testing.assert_allclose(actual, h_then_v, rtol=0, atol=ATOL)
+
+    def test_the_swapped_order_produces_a_measurably_different_state(self):
+        """Non-vacuity: this fixture CAN tell the two orders apart."""
+        actual, _, v_then_h, _ = self._compositions()
+        assert np.abs(actual - v_then_h).max() > self.MIN_SEPARATION, (
+            "the fixture cannot distinguish the pass order, so the arm above "
+            "would pass under a swap. Give the two spatial axes different "
+            "structure. See decisions.md D-014.")
+
+    def test_the_second_pass_consumes_the_updated_state_not_the_entry_state(self):
+        """Non-vacuity for the SEQUENTIAL dependence specifically."""
+        actual, _, _, entry_fed_vertical = self._compositions()
+        assert np.abs(actual - entry_fed_vertical).max() > self.MIN_SEPARATION
+
+
+class TestTheCandidateIsConvolvedOverTheResetHiddenState:
+    """``update.py:49``: ``q = tanh(convq(cat([r * h, x])))``.
+
+    The reset gate is applied to ``h`` BEFORE the candidate convolution and
+    nowhere else. Feeding the raw ``h`` instead leaves a perfectly functional
+    gated cell -- same shape, same parameters, finite output, trainable -- that
+    has simply lost the ability to forget. The guard is two-sided: the layer
+    must equal the reset form and must NOT equal the raw form.
+    """
+
+    @staticmethod
+    def _forms():
+        gru = _built_gru()
+        hidden, context = _probe_pair(seed=7)
+
+        actual = _numpy(SepConvGRU._gru_step(
+            hidden, context, gru.convz1, gru.convr1, gru.convq1))
+
+        gate_input = keras.ops.concatenate([hidden, context], axis=-1)
+        z = keras.ops.sigmoid(gru.convz1(gate_input))
+        r = keras.ops.sigmoid(gru.convr1(gate_input))
+
+        with_reset = keras.ops.tanh(gru.convq1(keras.ops.concatenate(
+            [r * hidden, context], axis=-1)))
+        without_reset = keras.ops.tanh(gru.convq1(gate_input))
+
+        def blend(candidate):
+            return _numpy((1.0 - z) * hidden + z * candidate)
+
+        return actual, blend(with_reset), blend(without_reset)
+
+    def test_it_matches_the_reset_gated_candidate(self):
+        actual, with_reset, _ = self._forms()
+        np.testing.assert_allclose(actual, with_reset, rtol=0, atol=ATOL)
+
+    def test_it_does_not_match_the_raw_hidden_state_candidate(self):
+        actual, _, without_reset = self._forms()
+        assert np.abs(actual - without_reset).max() > 1e-3, (
+            "this fixture cannot see the reset gate -- r is saturated at 1 or "
+            "the hidden state is ~0, so the arm above would pass under the "
+            "mutation. See decisions.md D-014.")
+
+
+class TestTheUpdateGatePolarity:
+    """``h = (1 - z) * h + z * q``: ``z == 1`` TAKES the candidate.
+
+    An inverted convention is arithmetically respectable and trains fine, so
+    nothing but a forced-gate probe distinguishes them. ``z`` is driven to its
+    rails by zeroing both update-gate kernels and setting their biases, which
+    makes ``z`` a constant independent of the input.
+    """
+
+    RAIL = 30.0
+
+    @staticmethod
+    def _gru_with_forced_update_gate(bias_value: float) -> SepConvGRU:
+        gru = _built_gru()
+        for conv in (gru.convz1, gru.convz2):
+            conv.kernel.assign(keras.ops.zeros(conv.kernel.shape))
+            conv.bias.assign(keras.ops.full(conv.bias.shape, bias_value))
+        return gru
+
+    def test_a_saturated_gate_replaces_the_state_with_the_candidate(self):
+        gru = self._gru_with_forced_update_gate(self.RAIL)
+        hidden, context = _probe_pair(seed=9)
+        actual = _numpy(gru([hidden, context]))
+
+        # Both passes now output their own candidate outright, so the result is
+        # the SECOND pass' candidate evaluated on the first pass' candidate.
+        first = keras.ops.tanh(gru.convq1(keras.ops.concatenate(
+            [keras.ops.sigmoid(gru.convr1(keras.ops.concatenate(
+                [hidden, context], axis=-1))) * hidden, context], axis=-1)))
+        gate_input = keras.ops.concatenate([first, context], axis=-1)
+        second = keras.ops.tanh(gru.convq2(keras.ops.concatenate(
+            [keras.ops.sigmoid(gru.convr2(gate_input)) * first, context],
+            axis=-1)))
+
+        np.testing.assert_allclose(actual, _numpy(second), rtol=0, atol=1e-5)
+        assert np.abs(actual - hidden).max() > 1e-3, (
+            "the forced z=1 arm reproduced the ENTRY state, i.e. the gate "
+            "polarity is inverted. See decisions.md D-014.")
+
+    def test_a_closed_gate_returns_the_state_untouched(self):
+        gru = self._gru_with_forced_update_gate(-self.RAIL)
+        hidden, context = _probe_pair(seed=9)
+        actual = _numpy(gru([hidden, context]))
+        np.testing.assert_allclose(actual, hidden, rtol=0, atol=1e-5)
+
+
+def _gru_functional_model() -> keras.Model:
+    """The GRU wrapped so the shared model oracles can judge it."""
+    hidden = keras.Input(shape=(_PROBE_H, _PROBE_W, _TEST_HIDDEN), name="hidden")
+    context = keras.Input(shape=(_PROBE_H, _PROBE_W, _TEST_INPUT), name="context")
+    gru = SepConvGRU(hidden_dim=_TEST_HIDDEN, input_dim=_TEST_INPUT, name="gru")
+    return keras.Model([hidden, context], gru([hidden, context]),
+                       name="doc_scanner_sep_conv_gru")
+
+
+def _gru_inputs() -> list:
+    hidden, context = _probe_pair(seed=13)
+    return [hidden, context]
+
+
+class TestTheGRUTrainsAndRoundTrips:
+    """The shared oracles, adopted rather than reimplemented."""
+
+    def test_every_trainable_weight_receives_a_live_gradient(self):
+        assert_gradients_reach_every_trainable_weight(
+            _gru_functional_model(), _gru_inputs(), training=True)
+
+    def test_the_saved_and_reloaded_gru_reproduces_its_output_exactly(self):
+        report = measure_roundtrip(
+            _gru_functional_model, _gru_inputs, training=False)
+        assert report["self_max_delta"] == 0.0
+        assert_roundtrip_output_values(report, atol=0.0)
+
+    def test_the_weights_are_restored_before_the_reloaded_model_is_called(self):
+        report = measure_roundtrip(
+            _gru_functional_model, _gru_inputs, training=False)
+        assert report["call_count_before_weight_read"] == 0
+        assert_weights_restored_before_first_call(report, atol=0.0)
+
+    def test_the_config_round_trips_every_constructor_argument(self):
+        gru = _gru(_HIDDEN_DIM, _GRU_INPUT_DIM)
+        clone = SepConvGRU.from_config(gru.get_config())
+        assert clone.hidden_dim == _HIDDEN_DIM
+        assert clone.input_dim == _GRU_INPUT_DIM
+
+    def test_it_runs_under_a_traced_tf_function_with_an_unknown_batch(self):
+        gru = _built_gru()
+        traced = tf.function(
+            lambda h, x: gru([h, x]),
+            input_signature=[
+                tf.TensorSpec([None, _PROBE_H, _PROBE_W, _TEST_HIDDEN], tf.float32),
+                tf.TensorSpec([None, _PROBE_H, _PROBE_W, _TEST_INPUT], tf.float32),
+            ],
+        )
+        out = traced(tf.zeros((3, _PROBE_H, _PROBE_W, _TEST_HIDDEN)),
+                     tf.zeros((3, _PROBE_H, _PROBE_W, _TEST_INPUT)))
+        assert tuple(out.shape) == (3, _PROBE_H, _PROBE_W, _TEST_HIDDEN)
+
+
+# =====================================================================
+# The update block and its two heads: the motion encoder's raw-flow tail,
+# the flow head's ABSENT output activation, the 0.25 applied exactly once,
+# the context-then-motion concatenation, and the return ORDER.
+#
+# Every arm below is pointed at a defect that survives a shape test. The
+# fixtures are NON-SQUARE (H=4, W=7) and the stand-in widths are all
+# DISTINCT, so a swapped concatenation or a permuted return cannot hide
+# behind two equal numbers -- at the shipped variant `context_dim`,
+# `hidden_dim` and `motion_output_dim` are all 160, which is exactly the
+# condition that makes those mistakes shape-legal in production.
+# =====================================================================
+
+from dl_techniques.models.vision.image_restoration.doc_scanner.components import (  # noqa: E402
+    CONVEX_NEIGHBOURS,
+    FLOW_CHANNELS,
+    MASK_LOGIT_SCALE,
+    DocScannerMotionEncoder,
+    DocScannerUpdateBlock,
+    FlowHead,
+)
+
+# Stand-in widths for the value probes. Pairwise distinct on purpose.
+_UB_HIDDEN = 4          # the recurrent state `net`
+_UB_CONTEXT = 5         # `inp`
+_UB_MOTION_OUT = 6      # the motion encoder's output
+_UB_GRU_INPUT = _UB_CONTEXT + _UB_MOTION_OUT
+_UB_CORR_HIDDEN = 7
+_UB_CORR_OUT = 3
+_UB_FLOW_HIDDEN = 9
+_UB_FLOW_OUT = 8
+_UB_FLOW_HEAD_HIDDEN = 11
+_UB_MASK_HIDDEN = 10
+
+# Stands in for the encoder's `fnet_output_dim` (320). Nothing in the motion
+# encoder depends on the value -- `convc1` infers it -- so a small one is a
+# faithful stand-in rather than a weakening.
+_UB_WARPED_CHANNELS = 12
+
+_UB_B, _UB_H, _UB_W = 2, 4, 7
+
+# The shipped widths, read from the table rather than restated.
+_MOTION_OUTPUT_DIM = _SPEC["motion_output_dim"]
+_MOTION_CORR_HIDDEN = _SPEC["motion_corr_hidden"]
+_MOTION_CORR_OUT = _SPEC["motion_corr_out"]
+_MOTION_FLOW_HIDDEN = _SPEC["motion_flow_hidden"]
+_MOTION_FLOW_OUT = _SPEC["motion_flow_out"]
+_FLOW_HEAD_HIDDEN = _SPEC["flow_head_hidden"]
+_MASK_HEAD_HIDDEN = _SPEC["mask_head_hidden"]
+_MASK_OUTPUT_CHANNELS = _SPEC["mask_head_output_channels"]
+
+
+def _motion_encoder(output_dim: int = _UB_MOTION_OUT) -> DocScannerMotionEncoder:
+    return DocScannerMotionEncoder(
+        output_dim=output_dim,
+        corr_hidden=_UB_CORR_HIDDEN,
+        corr_out=_UB_CORR_OUT,
+        flow_hidden=_UB_FLOW_HIDDEN,
+        flow_out=_UB_FLOW_OUT,
+    )
+
+
+def _built_motion_encoder(
+        height: int = _UB_H, width: int = _UB_W) -> DocScannerMotionEncoder:
+    encoder = _motion_encoder()
+    encoder.build([
+        (None, height, width, FLOW_CHANNELS),
+        (None, height, width, _UB_WARPED_CHANNELS),
+    ])
+    return encoder
+
+
+def _update_block(**overrides) -> DocScannerUpdateBlock:
+    kwargs = dict(
+        hidden_dim=_UB_HIDDEN,
+        context_dim=_UB_CONTEXT,
+        gru_input_dim=_UB_GRU_INPUT,
+        motion_output_dim=_UB_MOTION_OUT,
+        motion_corr_hidden=_UB_CORR_HIDDEN,
+        motion_corr_out=_UB_CORR_OUT,
+        motion_flow_hidden=_UB_FLOW_HIDDEN,
+        motion_flow_out=_UB_FLOW_OUT,
+        flow_head_hidden=_UB_FLOW_HEAD_HIDDEN,
+        mask_hidden=_UB_MASK_HIDDEN,
+    )
+    kwargs.update(overrides)
+    return DocScannerUpdateBlock(**kwargs)
+
+
+def _update_block_input_shapes(
+        height: int = _UB_H, width: int = _UB_W) -> list:
+    return [
+        (None, height, width, _UB_HIDDEN),
+        (None, height, width, _UB_CONTEXT),
+        (None, height, width, _UB_WARPED_CHANNELS),
+        (None, height, width, FLOW_CHANNELS),
+    ]
+
+
+def _built_update_block(**overrides) -> DocScannerUpdateBlock:
+    block = _update_block(**overrides)
+    block.build(_update_block_input_shapes())
+    return block
+
+
+def _update_block_inputs(seed: int = 5) -> list:
+    """``[net, inp, warped_features, flow]``, all structured and signed.
+
+    The flow carries values of BOTH signs and of magnitude ~1, so a guard that
+    compares the motion encoder's tail against it can tell a raw copy from a
+    scaled or rectified one.
+    """
+    rng = np.random.default_rng(seed)
+    shape = (_UB_B, _UB_H, _UB_W)
+    return [
+        rng.standard_normal(shape + (_UB_HIDDEN,)).astype("float32"),
+        rng.standard_normal(shape + (_UB_CONTEXT,)).astype("float32"),
+        rng.standard_normal(shape + (_UB_WARPED_CHANNELS,)).astype("float32"),
+        (rng.standard_normal(shape + (FLOW_CHANNELS,)) * 2.0).astype("float32"),
+    ]
+
+
+class TestTheMotionEncoderShapeLadder:
+    """Both branches, the fusion, and the width the GRU's input depends on."""
+
+    def test_the_output_is_exactly_output_dim_wide_on_a_non_square_map(self):
+        encoder = _built_motion_encoder()
+        flow, warped = _update_block_inputs()[3], _update_block_inputs()[2]
+        out = encoder([flow, warped])
+        assert tuple(out.shape) == (_UB_B, _UB_H, _UB_W, _UB_MOTION_OUT)
+
+    def test_the_fusion_convolution_is_two_channels_narrower_than_the_output(self):
+        """``update.py:71``'s ``160-2``, written as a derivation."""
+        encoder = _motion_encoder()
+        assert encoder.fusion_channels == _UB_MOTION_OUT - FLOW_CHANNELS
+        assert encoder.conv.filters == _UB_MOTION_OUT - FLOW_CHANNELS
+
+    def test_each_branch_carries_the_width_its_upstream_line_declares(self):
+        encoder = _motion_encoder()
+        assert (encoder.convc1.filters, encoder.convc1.kernel_size) == (
+            _UB_CORR_HIDDEN, (1, 1))
+        assert (encoder.convc2.filters, encoder.convc2.kernel_size) == (
+            _UB_CORR_OUT, (3, 3))
+        assert (encoder.convf1.filters, encoder.convf1.kernel_size) == (
+            _UB_FLOW_HIDDEN, (7, 7))
+        assert (encoder.convf2.filters, encoder.convf2.kernel_size) == (
+            _UB_FLOW_OUT, (3, 3))
+
+    def test_the_shipped_widths_land_on_the_second_half_of_the_gru_input(self):
+        """``update.py:88``'s ``input_dim=160+160``, re-derived from the table."""
+        assert _MOTION_OUTPUT_DIM == _GRU_INPUT_DIM - _SPEC["context_dim"]
+        encoder = DocScannerMotionEncoder(
+            output_dim=_MOTION_OUTPUT_DIM,
+            corr_hidden=_MOTION_CORR_HIDDEN,
+            corr_out=_MOTION_CORR_OUT,
+            flow_hidden=_MOTION_FLOW_HIDDEN,
+            flow_out=_MOTION_FLOW_OUT,
+        )
+        assert encoder.fusion_channels == _HIDDEN_DIM - FLOW_CHANNELS
+        shapes = [(None, 4, 7, FLOW_CHANNELS),
+                  (None, 4, 7, _SPEC["fnet_output_dim"])]
+        encoder.build(shapes)
+        assert encoder.compute_output_shape(shapes)[-1] == _HIDDEN_DIM
+
+    def test_a_flow_that_is_not_two_channels_is_refused(self):
+        encoder = _motion_encoder()
+        with pytest.raises(ValueError, match="exactly 2 channels"):
+            encoder.build([
+                (None, _UB_H, _UB_W, 3),
+                (None, _UB_H, _UB_W, _UB_WARPED_CHANNELS),
+            ])
+
+    def test_an_output_dim_that_cannot_carry_the_flow_is_refused(self):
+        with pytest.raises(ValueError, match="must exceed FLOW_CHANNELS"):
+            _motion_encoder(output_dim=FLOW_CHANNELS)
+
+
+class TestTheMotionEncoderTailIsTheRawFlow:
+    """``update.py:81``: ``return torch.cat([out, flow], dim=1)``.
+
+    The last :data:`FLOW_CHANNELS` channels are the flow ITSELF -- not the
+    80-channel flow branch (which would be shape-breaking and therefore is not
+    the live hazard), and not a rescaled, normalised or rectified copy of it
+    (which is shape-preserving and therefore is). Those trailing two channels
+    are the update block's only un-convolved view of where the coordinate field
+    currently sits.
+    """
+
+    def test_the_last_two_channels_are_bit_identical_to_the_input_flow(self):
+        encoder = _built_motion_encoder()
+        _, _, warped, flow = _update_block_inputs()
+        out = _numpy(encoder([flow, warped]))
+        np.testing.assert_allclose(
+            out[..., -FLOW_CHANNELS:], flow, atol=0.0, rtol=0.0)
+
+    def test_the_tail_survives_a_flow_of_both_signs_and_large_magnitude(self):
+        """A rectified or squashed tail passes an all-positive fixture."""
+        encoder = _built_motion_encoder()
+        _, _, warped, _ = _update_block_inputs()
+        flow = np.stack(
+            [np.full((_UB_B, _UB_H, _UB_W), -37.5, dtype="float32"),
+             np.full((_UB_B, _UB_H, _UB_W), 12.25, dtype="float32")],
+            axis=-1,
+        )
+        out = _numpy(encoder([flow, warped]))
+        np.testing.assert_allclose(
+            out[..., -FLOW_CHANNELS:], flow, atol=0.0, rtol=0.0)
+
+    def test_the_head_of_the_output_is_not_itself_a_copy_of_the_flow(self):
+        """Guards the degenerate reading where the whole output is the flow."""
+        encoder = _built_motion_encoder()
+        _, _, warped, flow = _update_block_inputs()
+        out = _numpy(encoder([flow, warped]))
+        head = out[..., :-FLOW_CHANNELS]
+        assert head.shape[-1] == _UB_MOTION_OUT - FLOW_CHANNELS
+        assert not np.allclose(head[..., :FLOW_CHANNELS], flow)
+
+
+class TestTheFlowHeadHasNoOutputActivation:
+    """``update.py:14``: ``conv2(relu(conv1(x)))`` -- the ReLU is BETWEEN them.
+
+    The head emits a residual that is ADDED to a coordinate field
+    (``model.py:88``), so it must be able to be negative: a corner that has to
+    move left or up is unreachable otherwise. A ReLU or tanh appended here
+    leaves a model that trains and whose every shape, dtype and finiteness
+    check passes.
+    """
+
+    def _head(self) -> FlowHead:
+        head = FlowHead(hidden_dim=_UB_FLOW_HEAD_HIDDEN)
+        head.build((None, _UB_H, _UB_W, _UB_HIDDEN))
+        return head
+
+    def test_a_forced_negative_output_arrives_unclipped_and_unsquashed(self):
+        """Zero the last kernel and bias it to -1: the output must be -1.
+
+        A ReLU would give 0.0 and a tanh would give -0.7615941. The exact
+        comparison separates all three.
+        """
+        head = self._head()
+        kernel, bias = head.conv2.get_weights()
+        head.conv2.set_weights([
+            np.zeros_like(kernel),
+            np.full_like(bias, -1.0),
+        ])
+        net = np.zeros((_UB_B, _UB_H, _UB_W, _UB_HIDDEN), dtype="float32")
+        out = _numpy(head(net))
+        np.testing.assert_allclose(out, -1.0, atol=0.0, rtol=0.0)
+
+    def test_a_randomly_initialized_head_emits_values_of_both_signs(self):
+        """Independent of any weight surgery: a rectifier emits no negatives."""
+        head = self._head()
+        rng = np.random.default_rng(21)
+        net = rng.standard_normal(
+            (_UB_B, _UB_H, _UB_W, _UB_HIDDEN)).astype("float32")
+        out = _numpy(head(net))
+        assert (out < 0).any(), "no negative residual: an activation was added"
+        assert (out > 0).any()
+
+    def test_neither_convolution_carries_a_keras_activation(self):
+        head = self._head()
+        assert head.conv1.activation is keras.activations.linear
+        assert head.conv2.activation is keras.activations.linear
+
+    def test_the_head_emits_exactly_two_channels_at_the_shipped_hidden_width(self):
+        head = FlowHead(hidden_dim=_FLOW_HEAD_HIDDEN)
+        shape = (None, _UB_H, _UB_W, _HIDDEN_DIM)
+        head.build(shape)
+        assert head.conv1.filters == _FLOW_HEAD_HIDDEN
+        assert head.compute_output_shape(shape)[-1] == FLOW_CHANNELS
+
+    def test_the_config_round_trips_every_constructor_argument(self):
+        head = FlowHead(hidden_dim=_FLOW_HEAD_HIDDEN)
+        clone = FlowHead.from_config(head.get_config())
+        assert clone.hidden_dim == _FLOW_HEAD_HIDDEN
+
+
+class TestTheMaskScaleIsAppliedExactlyOnce:
+    """``update.py:104``: ``mask = .25 * self.mask(net)``, at the CALL SITE.
+
+    The mask is softmaxed over the 9-neighbour axis inside
+    ``convex_upsample``, so this factor is a softmax TEMPERATURE. Omitting it
+    sharpens every convex weight; applying it twice flattens them a further 4x.
+    Both are silent in shape, dtype and finiteness, and both leave a model that
+    trains.
+    """
+
+    def test_the_returned_mask_is_the_head_output_scaled_exactly_once(self):
+        block = _built_update_block()
+        inputs = _update_block_inputs()
+        net, mask, _ = block(inputs)
+        expected = MASK_LOGIT_SCALE * _numpy(block.mask_logits(net))
+        np.testing.assert_allclose(_numpy(mask), expected, atol=0.0, rtol=0.0)
+
+    def test_it_is_neither_unscaled_nor_scaled_twice(self):
+        block = _built_update_block()
+        inputs = _update_block_inputs()
+        net, mask, _ = block(inputs)
+        logits = _numpy(block.mask_logits(net))
+        mask = _numpy(mask)
+        assert not np.allclose(mask, logits), "the 0.25 was never applied"
+        assert not np.allclose(mask, MASK_LOGIT_SCALE ** 2 * logits), \
+            "the 0.25 was applied twice"
+
+    def test_the_scale_is_the_upstream_quarter(self):
+        assert MASK_LOGIT_SCALE == 0.25
+
+    def test_the_mask_head_emits_one_weight_per_neighbour_and_sub_pixel(self):
+        block = _built_update_block()
+        assert block.mask_output_channels == (
+            SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS)
+        assert block.mask_output_channels == _MASK_OUTPUT_CHANNELS
+        assert block.mask_conv1.filters == _UB_MASK_HIDDEN
+        assert block.mask_conv1.kernel_size == (3, 3)
+        assert block.mask_conv2.kernel_size == (1, 1)
+
+
+class TestTheGRUInputIsContextThenMotion:
+    """``update.py:98``: ``inp = torch.cat([inp, motion_features], dim=1)``.
+
+    At the shipped variant both halves are 160 wide, so swapping them is
+    perfectly shape-legal and merely permutes which learned filters see which
+    half -- a defect no shape, gradient or serialization test can reach. Here
+    the two widths differ, and the halves are recovered from the tensor the GRU
+    actually received.
+    """
+
+    def test_the_gru_receives_the_context_first_and_the_motion_second(self):
+        block = _built_update_block()
+        net_in, inp, warped, flow = _update_block_inputs()
+
+        captured = {}
+        original_call = block.gru.call
+
+        def spy(inputs, training=None):
+            captured["gru_input"] = inputs[1]
+            return original_call(inputs, training=training)
+
+        block.gru.call = spy
+        try:
+            block([net_in, inp, warped, flow])
+        finally:
+            block.gru.call = original_call
+
+        gru_input = _numpy(captured["gru_input"])
+        assert gru_input.shape[-1] == _UB_GRU_INPUT
+
+        motion = _numpy(block.motion_encoder([flow, warped]))
+        np.testing.assert_allclose(
+            gru_input[..., :_UB_CONTEXT], inp, atol=0.0, rtol=0.0)
+        np.testing.assert_allclose(
+            gru_input[..., _UB_CONTEXT:], motion, atol=0.0, rtol=0.0)
+
+    def test_the_raw_flow_is_visible_at_the_very_end_of_the_gru_input(self):
+        """The composition of the two claims above: the last 2 channels of the
+        GRU's input are the coordinate field itself."""
+        block = _built_update_block()
+        net_in, inp, warped, flow = _update_block_inputs()
+        motion = _numpy(block.motion_encoder([flow, warped]))
+        gru_input = np.concatenate([inp, motion], axis=-1)
+        np.testing.assert_allclose(
+            gru_input[..., -FLOW_CHANNELS:], flow, atol=0.0, rtol=0.0)
+
+
+class TestTheReturnOrderIsNetMaskDeltaFlow:
+    """``update.py:106``: ``return net, mask, delta_flow``.
+
+    All three are float tensors of the same spatial size. Their channel counts
+    happen to differ at every variant this port ships, but the caller unpacks
+    positionally, so the order is pinned BY VALUE here: element 2 must be the
+    flow head applied to element 0, and element 1 must be the scaled mask head
+    applied to the same element 0.
+    """
+
+    def test_the_three_channel_counts_are_pairwise_distinct(self):
+        """Recorded because it decides whether a shape test could ever see a
+        permutation -- it could, here, but only by luck of the widths."""
+        block = _built_update_block()
+        counts = {_UB_HIDDEN, block.mask_output_channels, FLOW_CHANNELS}
+        assert len(counts) == 3
+
+    def test_element_zero_is_the_updated_state_and_not_the_input_state(self):
+        block = _built_update_block()
+        inputs = _update_block_inputs()
+        net, _, _ = block(inputs)
+        assert tuple(net.shape) == (_UB_B, _UB_H, _UB_W, _UB_HIDDEN)
+        assert not np.allclose(_numpy(net), inputs[0])
+
+    def test_element_two_is_the_flow_head_applied_to_element_zero(self):
+        block = _built_update_block()
+        net, _, delta_flow = block(_update_block_inputs())
+        np.testing.assert_allclose(
+            _numpy(delta_flow), _numpy(block.flow_head(net)),
+            atol=0.0, rtol=0.0)
+
+    def test_element_one_is_the_scaled_mask_head_applied_to_element_zero(self):
+        block = _built_update_block()
+        net, mask, _ = block(_update_block_inputs())
+        np.testing.assert_allclose(
+            _numpy(mask),
+            MASK_LOGIT_SCALE * _numpy(block.mask_logits(net)),
+            atol=0.0, rtol=0.0)
+
+    def test_the_delta_flow_is_signed(self):
+        """The residual must reach both directions; see the flow-head guards."""
+        block = _built_update_block()
+        _, _, delta_flow = block(_update_block_inputs())
+        values = _numpy(delta_flow)
+        assert (values < 0).any() and (values > 0).any()
+
+
+class TestTheUpdateBlockShapeLadderAndContracts:
+    """Shapes on a non-square map, and the width contracts that must refuse."""
+
+    def test_the_three_output_shapes_on_a_non_square_map(self):
+        block = _built_update_block()
+        net, mask, delta_flow = block(_update_block_inputs())
+        assert tuple(net.shape) == (_UB_B, _UB_H, _UB_W, _UB_HIDDEN)
+        assert tuple(mask.shape) == (
+            _UB_B, _UB_H, _UB_W, SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS)
+        assert tuple(delta_flow.shape) == (_UB_B, _UB_H, _UB_W, FLOW_CHANNELS)
+
+    def test_compute_output_shape_agrees_with_the_tensors_call_returns(self):
+        block = _built_update_block()
+        declared = block.compute_output_shape(_update_block_input_shapes())
+        actual = block(_update_block_inputs())
+        for declared_shape, tensor in zip(declared, actual):
+            assert declared_shape[1:] == tuple(tensor.shape)[1:]
+
+    def test_the_shipped_widths_build_at_the_refinement_resolution(self):
+        """36 = 288 // SPATIAL_DIVISOR, the resolution the loop runs at."""
+        side = 288 // SPATIAL_DIVISOR
+        block = DocScannerUpdateBlock(
+            hidden_dim=_HIDDEN_DIM,
+            context_dim=_SPEC["context_dim"],
+            gru_input_dim=_GRU_INPUT_DIM,
+            motion_output_dim=_MOTION_OUTPUT_DIM,
+            motion_corr_hidden=_MOTION_CORR_HIDDEN,
+            motion_corr_out=_MOTION_CORR_OUT,
+            motion_flow_hidden=_MOTION_FLOW_HIDDEN,
+            motion_flow_out=_MOTION_FLOW_OUT,
+            flow_head_hidden=_FLOW_HEAD_HIDDEN,
+            mask_hidden=_MASK_HEAD_HIDDEN,
+        )
+        shapes = [
+            (None, side, side, _HIDDEN_DIM),
+            (None, side, side, _SPEC["context_dim"]),
+            (None, side, side, _FNET_OUTPUT_DIM),
+            (None, side, side, FLOW_CHANNELS),
+        ]
+        block.build(shapes)
+        net_shape, mask_shape, flow_shape = block.compute_output_shape(shapes)
+        assert net_shape[-1] == _HIDDEN_DIM
+        assert mask_shape[-1] == _MASK_OUTPUT_CHANNELS
+        assert flow_shape[-1] == FLOW_CHANNELS
+        assert block.gru.input_dim == _GRU_INPUT_DIM
+
+    def test_a_gru_input_width_that_is_not_the_sum_of_its_halves_is_refused(self):
+        """The composition assertion: the block builds that tensor itself."""
+        with pytest.raises(ValueError, match="must equal context_dim"):
+            _update_block(gru_input_dim=_UB_GRU_INPUT + 1)
+
+    def test_the_variant_table_itself_satisfies_the_composition(self):
+        assert _GRU_INPUT_DIM == _SPEC["context_dim"] + _MOTION_OUTPUT_DIM
+
+    def test_a_net_or_inp_of_the_wrong_width_is_refused_at_build(self):
+        block = _update_block()
+        shapes = _update_block_input_shapes()
+        with pytest.raises(ValueError, match="built for hidden_dim"):
+            block.build([(None, _UB_H, _UB_W, _UB_HIDDEN + 1)] + shapes[1:])
+
+        block = _update_block()
+        with pytest.raises(ValueError, match="built for context_dim"):
+            block.build(
+                [shapes[0], (None, _UB_H, _UB_W, _UB_CONTEXT + 1)] + shapes[2:])
+
+    def test_it_is_called_on_exactly_four_tensors(self):
+        block = _update_block()
+        with pytest.raises(ValueError, match="four-element sequence"):
+            block.build(_update_block_input_shapes()[:3])
+
+    def test_it_runs_under_a_traced_tf_function_with_an_unknown_batch(self):
+        block = _built_update_block()
+        traced = tf.function(
+            lambda n, i, w, f: block([n, i, w, f]),
+            input_signature=[
+                tf.TensorSpec([None, _UB_H, _UB_W, _UB_HIDDEN], tf.float32),
+                tf.TensorSpec([None, _UB_H, _UB_W, _UB_CONTEXT], tf.float32),
+                tf.TensorSpec(
+                    [None, _UB_H, _UB_W, _UB_WARPED_CHANNELS], tf.float32),
+                tf.TensorSpec([None, _UB_H, _UB_W, FLOW_CHANNELS], tf.float32),
+            ],
+        )
+        shape = (3, _UB_H, _UB_W)
+        net, mask, delta_flow = traced(
+            tf.zeros(shape + (_UB_HIDDEN,)),
+            tf.zeros(shape + (_UB_CONTEXT,)),
+            tf.zeros(shape + (_UB_WARPED_CHANNELS,)),
+            tf.zeros(shape + (FLOW_CHANNELS,)),
+        )
+        assert tuple(net.shape) == shape + (_UB_HIDDEN,)
+        assert tuple(mask.shape) == shape + (
+            SPATIAL_DIVISOR ** 2 * CONVEX_NEIGHBOURS,)
+        assert tuple(delta_flow.shape) == shape + (FLOW_CHANNELS,)
+
+
+def _update_block_functional_model() -> keras.Model:
+    """The update block wrapped so the shared model oracles can judge it."""
+    net = keras.Input(shape=(_UB_H, _UB_W, _UB_HIDDEN), name="net")
+    inp = keras.Input(shape=(_UB_H, _UB_W, _UB_CONTEXT), name="inp")
+    warped = keras.Input(
+        shape=(_UB_H, _UB_W, _UB_WARPED_CHANNELS), name="warped_features")
+    flow = keras.Input(shape=(_UB_H, _UB_W, FLOW_CHANNELS), name="flow")
+    block = _update_block(name="update_block")
+    return keras.Model(
+        [net, inp, warped, flow],
+        list(block([net, inp, warped, flow])),
+        name="doc_scanner_update_block",
+    )
+
+
+def _motion_encoder_functional_model() -> keras.Model:
+    flow = keras.Input(shape=(_UB_H, _UB_W, FLOW_CHANNELS), name="flow")
+    warped = keras.Input(
+        shape=(_UB_H, _UB_W, _UB_WARPED_CHANNELS), name="warped_features")
+    encoder = _motion_encoder()
+    encoder._name = "motion_encoder"
+    return keras.Model([flow, warped], encoder([flow, warped]),
+                       name="doc_scanner_motion_encoder")
+
+
+def _motion_encoder_inputs() -> list:
+    _, _, warped, flow = _update_block_inputs()
+    return [flow, warped]
+
+
+class TestTheUpdateBlockTrainsAndRoundTrips:
+    """The shared oracles, adopted rather than reimplemented."""
+
+    def test_every_trainable_weight_of_the_block_receives_a_live_gradient(self):
+        assert_gradients_reach_every_trainable_weight(
+            _update_block_functional_model(), _update_block_inputs(),
+            training=True)
+
+    def test_every_trainable_weight_of_the_motion_encoder_gets_a_gradient(self):
+        assert_gradients_reach_every_trainable_weight(
+            _motion_encoder_functional_model(), _motion_encoder_inputs(),
+            training=True)
+
+    def test_the_saved_and_reloaded_block_reproduces_its_output_exactly(self):
+        report = measure_roundtrip(
+            _update_block_functional_model, _update_block_inputs,
+            training=False)
+        assert report["self_max_delta"] == 0.0
+        assert_roundtrip_output_values(report, atol=0.0)
+
+    def test_the_weights_are_restored_before_the_reloaded_block_is_called(self):
+        report = measure_roundtrip(
+            _update_block_functional_model, _update_block_inputs,
+            training=False)
+        assert report["call_count_before_weight_read"] == 0
+        assert_weights_restored_before_first_call(report, atol=0.0)
+
+    def test_the_block_config_round_trips_every_constructor_argument(self):
+        block = _update_block()
+        clone = DocScannerUpdateBlock.from_config(block.get_config())
+        for field in (
+                "hidden_dim", "context_dim", "gru_input_dim",
+                "motion_output_dim", "motion_corr_hidden", "motion_corr_out",
+                "motion_flow_hidden", "motion_flow_out", "flow_head_hidden",
+                "mask_hidden",
+        ):
+            assert getattr(clone, field) == getattr(block, field), field
+
+    def test_the_motion_encoder_config_round_trips_every_constructor_argument(self):
+        encoder = _motion_encoder()
+        clone = DocScannerMotionEncoder.from_config(encoder.get_config())
+        for field in ("output_dim", "corr_hidden", "corr_out", "flow_hidden",
+                      "flow_out"):
+            assert getattr(clone, field) == getattr(encoder, field), field
+        assert clone.fusion_channels == encoder.fusion_channels

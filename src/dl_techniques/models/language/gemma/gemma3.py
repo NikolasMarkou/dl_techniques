@@ -91,8 +91,8 @@ class Gemma3(keras.Model):
                  │
                  ▼
             ┌────────────────────────────┐
-            │ Gemma3TransformerBlock x N  │  sandwich norm, per-layer
-            │ (sliding_window|full)       │  attention_type from layer_types
+            │ Gemma3TransformerBlock x N │  sandwich norm, per-layer
+            │ (sliding_window|full)      │  attention_type from layer_types
             └────────────────────────────┘
                  │
                  ▼

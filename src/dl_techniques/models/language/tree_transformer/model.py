@@ -1,29 +1,21 @@
 """
-Tree Transformer, a transformer encoder that induces a soft constituency
-tree and uses it to constrain its own attention.
+Tree Transformer: an encoder that induces a soft constituency tree and uses it to
+constrain its own attention.
 
-Standard self-attention scores every token pair independently, with
-nothing preferring "the old man" as a unit over "man who is". Tree
-Transformer instead computes, for each adjacent token pair, a break
-probability that a constituent boundary falls between them, and derives
-from those neighbor scores the probability that each span is a single
-constituent, via a dynamic-programming recurrence expressed as matrix
-products rather than enumerating spans. That span matrix multiplies the
-usual attention weights element-wise, so attention on a token pair the
-model believes straddles a boundary is attenuated, without ever being
-hard-masked. Each block passes its group probabilities to the next as a
-prior, so boundaries persist and constituents grow with depth; every
-block's break probabilities are collected and returned with shape
-`[batch, num_layers, seq_len, seq_len]`, the induced grammar.
-
-Each block is Pre-LN, ordering `GroupAttention -> TreeMHA -> FFN` with
-residual connections throughout. `lm_head` is always built as part of the
-foundation model; the pretraining script saves a separate encoder-only
-artifact for pure-encoder use. Four preset variants span tiny through
-large. No pretrained weights are distributed with this package;
-`pretrained=True` raises `NotImplementedError` rather than returning a
-random model with a download-failure warning. Pass a local `.keras` path
-to `pretrained` instead.
+Defines :class:`TreeTransformer` and the factories that build it. Standard
+self-attention scores every token pair on its own, with nothing preferring "the old
+man" as a unit over "man who is". Tree Transformer computes, for each adjacent token
+pair, the probability that a constituent boundary falls between them, then turns those
+neighbour scores into the probability that each span is one constituent through a
+dynamic-programming recurrence written as matrix products rather than an enumeration
+over spans. That span matrix multiplies the ordinary attention weights element-wise,
+so a pair the model reads as straddling a boundary is attenuated instead of
+hard-masked. Each block hands its group probabilities to the next as a prior, so
+boundaries persist and constituents grow with depth, and every block's break
+probabilities come back stacked as the induced grammar. Blocks are Pre-LN, ordered
+GroupAttention, TreeMHA, then FFN. ``lm_head`` is always built, and no pretrained
+weights ship with this package: ``pretrained=True`` raises ``NotImplementedError``,
+so pass a local ``.keras`` path instead.
 
 References:
     - Wang et al., 2019. Tree Transformer: Integrating Tree Structures into
@@ -55,8 +47,6 @@ from dl_techniques.layers.norms import (
 from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 from dl_techniques.utils.model_build import materialize_sublayers
 
-# ---------------------------------------------------------------------
-
 from .components import (  # noqa: F401
     PositionalEncoding,
     GroupAttention,
@@ -66,53 +56,91 @@ from .components import (  # noqa: F401
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
-# Main TreeTransformer Model
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.tree_transformer.model")
 class TreeTransformer(keras.Model):
-    """Tree Transformer model for grammar induction and language modeling.
+    """Encode tokens and induce break probabilities in the same forward pass.
 
-    This is a pure encoder implementation with pretrained weights support,
-    designed to produce contextual token representations alongside learned
-    syntactic structures (break probabilities). It separates the core transformer
-    architecture from any task-specific layers, making it highly flexible.
-
-    The model expects input as a dictionary containing 'input_ids'. It outputs a
-    dictionary containing 'last_hidden_state', 'logits' (from LM head), and
-    'break_probs' from all layers.
+    A pure encoder with no task-specific layers beyond the language-modelling head.
+    ``call`` accepts either a tensor of token ids or a dictionary with ``input_ids``
+    and an optional ``attention_mask``, and returns a dictionary with
+    ``last_hidden_state``, ``logits`` and the per-layer ``break_probs``.
 
     Architecture:
+
     .. code-block:: text
 
-        Input({"input_ids": [B, L]})
-               │
-               ▼
-        Embedding & PositionalEncoding
-               │
-               ▼
-        TreeTransformerBlock₁ (passes `group_prob` forward)
-               │
-               ▼
-              ...
-               │
-               ▼
-        TreeTransformerBlockₙ
-               │
-               ▼
-        Final LayerNorm ───► LM Head ───► "logits": [B, L, V]
-               │
-               ▼
-        Output Dictionary {
-            "last_hidden_state": [B, L, H],
-            "logits": [B, L, V],
-            "break_probs": [B, N, L, L]
-        }
+        {"input_ids": [B, L]}   (+ optional "attention_mask")
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ embedding         │  x sqrt(hidden_size)
+        └───────────────────┘
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ pos_encoding      │
+        └───────────────────┘
+                 │  [B, L, H]
+                 ▼
+        ┌───────────────────┐
+        │ block_0           │──► break_prob
+        └───────────────────┘
+                 │  group_prob carried forward
+                 ▼
+                ...
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ block_{n-1}       │──► break_prob
+        └───────────────────┘
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ final_norm        │──► "last_hidden_state"  [B, L, H]
+        └───────────────────┘
+                 │
+                 ▼
+        ┌───────────────────┐
+        │ lm_head           │──► "logits"  [B, L, V]
+        └───────────────────┘
+
+        every break_prob stacked ──► "break_probs"  [B, N, L, L]
+
+    Each block takes the previous block's group_prob as its prior; the first gets 0.
+
+    Mask:
+
+    .. code-block:: text
+
+        dict with "attention_mask"?
+                    │
+            ┌───────┴───────┐
+            ▼               ▼
+           yes              no
+        cast to int32   input_ids != pad_token_id
+            │               │
+            └───────┬───────┘
+                    ▼
+           expand_dims axis 1 ──► [B, 1, L]
+
+    Variants:
+
+    .. code-block:: text
+
+        variant  hidden  layers  heads  intermediate
+        tiny        128       4      4           512
+        small       256       6      4          1024
+        base        512      10      8          2048
+        large      1024      16     16          4096
+
+    base follows the original paper.
 
     :param vocab_size: Size of the vocabulary. Defaults to 30000.
     :type vocab_size: int
-    :param hidden_size: Dimensionality of encoder layers. Defaults to 512.
+    :param hidden_size: Dimensionality of encoder layers. Must be divisible by
+        ``num_heads``. Defaults to 512.
     :type hidden_size: int
     :param num_layers: Number of hidden transformer layers. Defaults to 10.
     :type num_layers: int
@@ -122,23 +150,26 @@ class TreeTransformer(keras.Model):
     :type intermediate_size: int
     :param hidden_act: Activation function in the encoder. Defaults to "gelu".
     :type hidden_act: str
-    :param hidden_dropout_rate: Dropout for embeddings/encoder. Defaults to 0.1.
+    :param hidden_dropout_rate: Dropout for embeddings/encoder, in [0, 1]. Defaults to 0.1.
     :type hidden_dropout_rate: float
-    :param attention_dropout_rate: Dropout for attention scores. Defaults to 0.1.
+    :param attention_dropout_rate: Dropout for attention scores, in [0, 1]. Defaults to 0.1.
     :type attention_dropout_rate: float
-    :param max_len: Maximum sequence length. Defaults to 256.
+    :param max_len: Maximum sequence length the positional encoding covers. Defaults to 256.
     :type max_len: int
     :param layer_norm_eps: Epsilon for normalization layers. Defaults to 1e-6.
     :type layer_norm_eps: float
-    :param pad_token_id: ID of the padding token. Defaults to 0.
+    :param pad_token_id: ID of the padding token, used to derive the mask when the
+        caller passes none. Defaults to 0.
     :type pad_token_id: int
     :param normalization_type: Type of normalization layer. Defaults to "layer_norm".
     :type normalization_type: str
     :param ffn_type: Type of feed-forward network. Defaults to "mlp".
     :type ffn_type: str
-    :param kwargs: Additional keyword arguments for the `keras.Model`.
+    :param **kwargs: Additional keyword arguments for the `keras.Model`.
 
-    :raises ValueError: If invalid configuration parameters are provided.
+    :raises ValueError: If ``vocab_size``, ``hidden_size``, ``num_layers`` or
+        ``num_heads`` is not positive, if ``hidden_size`` is not divisible by
+        ``num_heads``, or if either dropout rate falls outside [0, 1].
     """
 
     MODEL_VARIANTS = {
@@ -195,7 +226,10 @@ class TreeTransformer(keras.Model):
         ffn_type: FFNType = "mlp",
         **kwargs: Any,
     ) -> None:
-        """Initializes the TreeTransformer model instance."""
+        """Validate the configuration and create every sub-layer.
+
+        Arguments are documented on the class.
+        """
         super().__init__(**kwargs)
 
         self._validate_config(
@@ -221,7 +255,6 @@ class TreeTransformer(keras.Model):
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
 
-        # Create all sub-layers
         self._build_architecture()
         logger.info(
             f"Created Tree Transformer foundation model: {self.num_layers} layers, "
@@ -237,7 +270,11 @@ class TreeTransformer(keras.Model):
         hidden_dropout_rate: float,
         attention_dropout_rate: float,
     ) -> None:
-        """Validates model configuration parameters."""
+        """Check the size arguments and the two dropout rates.
+
+        :raises ValueError: If a size is not positive, ``hidden_size`` is not
+            divisible by ``num_heads``, or a dropout rate is outside [0, 1].
+        """
         if vocab_size <= 0:
             raise ValueError(
                 f"vocab_size must be positive, got {vocab_size}"
@@ -267,7 +304,7 @@ class TreeTransformer(keras.Model):
             )
 
     def _build_architecture(self) -> None:
-        """Builds all model components."""
+        """Create the embedding, positional encoding, blocks, final norm and LM head."""
         self.embedding = keras.layers.Embedding(
             self.vocab_size, self.hidden_size, name="embedding"
         )
@@ -304,7 +341,14 @@ class TreeTransformer(keras.Model):
     def compute_output_shape(
         self, input_shape: Any
     ) -> Dict[str, Any]:
-        """Computes the output shape of the layer."""
+        """Compute the shapes of all three outputs.
+
+        :param input_shape: A ``(batch, seq_len)`` shape, or a dict holding one under
+            ``'input_ids'``.
+        :type input_shape: Any
+        :return: Shapes for ``last_hidden_state``, ``logits`` and ``break_probs``.
+        :rtype: Dict[str, Any]
+        """
         if isinstance(input_shape, dict):
             input_shape = input_shape["input_ids"]
 
@@ -320,10 +364,9 @@ class TreeTransformer(keras.Model):
         """Materialize every sub-layer from ``input_shape``.
 
         Without this method TreeTransformer inherits ``Layer.build``, which marks the
-        model built while every sub-layer is still unbuilt -- Keras warns about
-        exactly that at ``layers/layer.py:393``. The shared helper traces
-        ``call()`` on symbolic inputs, so what gets built cannot drift from what
-        gets called.
+        model built while its sub-layers are still unbuilt, and Keras warns about it.
+        The shared helper traces ``call()`` on symbolic inputs, so what gets built
+        matches what gets called.
 
         :param input_shape: Shape (or nest of shapes) of the input to ``call``.
         """
@@ -337,7 +380,20 @@ class TreeTransformer(keras.Model):
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass of the TreeTransformer model."""
+        """Embed the ids, run every block, and return hidden states, logits and breaks.
+
+        :param inputs: Token ids ``(B, L)``, or a dictionary with ``'input_ids'`` and
+            optionally ``'attention_mask'``. Without a mask, one is derived from
+            ``input_ids != pad_token_id``.
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :param training: Whether the call runs in training mode.
+        :type training: Optional[bool]
+        :return: ``last_hidden_state`` ``(B, L, hidden_size)``, ``logits``
+            ``(B, L, vocab_size)`` and ``break_probs``
+            ``(B, num_layers, L, L)``.
+        :rtype: Dict[str, keras.KerasTensor]
+        :raises ValueError: If a dictionary input has no ``'input_ids'`` key.
+        """
         explicit_attention_mask = None
         if isinstance(inputs, dict):
             input_ids = inputs.get("input_ids")
@@ -345,10 +401,8 @@ class TreeTransformer(keras.Model):
                 raise ValueError(
                     "Dictionary input must contain 'input_ids' key"
                 )
-            # B-3 fix: honor an explicitly-provided attention_mask when the
-            # caller passes a dict (BERT-style API). When absent, fall back to
-            # deriving the mask from `input_ids != pad_token_id` so callers
-            # that only pass `input_ids` keep working unchanged.
+            # An explicit attention_mask wins, so a caller passing only input_ids
+            # still gets the pad-derived mask.
             explicit_attention_mask = inputs.get("attention_mask")
         else:
             input_ids = inputs
@@ -365,8 +419,7 @@ class TreeTransformer(keras.Model):
         x *= ops.cast(self.hidden_size, x.dtype) ** 0.5
         x = self.pos_encoding(x, training=training)
 
-        # Initialize group probability for the first layer as a scalar tensor.
-        # This must be a tensor, not a float, for Keras tracing to work correctly.
+        # A tensor, not a float, so Keras can trace the first block.
         group_prob: keras.KerasTensor = ops.convert_to_tensor(
             0.0, dtype=self.compute_dtype
         )
@@ -394,17 +447,17 @@ class TreeTransformer(keras.Model):
         skip_prefixes: Sequence[str] = (),
         strict: bool = False,
     ) -> None:
-        """Loads pretrained weights into the model from a ``.keras`` checkpoint.
+        """Load weights from a ``.keras`` checkpoint by layer name.
 
-        Uses :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`
-        which walks layers by name and calls ``set_weights`` when shapes match.
-
-        B-4 fix: replaces the previous ``self.load_weights(..., by_name=True)``
-        path which is broken on Keras 3.8 ``.keras`` files.
+        Uses :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
+        which walks layers by name and calls ``set_weights`` when shapes match. An
+        unbuilt model is first called on a dummy batch, since name matching needs the
+        layers to exist.
 
         :param weights_path: Path to a ``.keras`` checkpoint.
         :param skip_prefixes: Layer-name prefixes to skip during transfer.
         :param strict: If True, raise on any shape mismatch.
+        :raises FileNotFoundError: If ``weights_path`` does not exist.
         """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
@@ -429,8 +482,6 @@ class TreeTransformer(keras.Model):
         )
         logger.info(report.summary_string())
 
-    # No public pretrained weights exist for TreeTransformer, so this raises
-    # instead of falling back to random init; see the D-001 anchor in from_variant.
     @staticmethod
     def _download_weights(
         variant: str, dataset: str = "uncased", cache_dir: Optional[str] = None
@@ -458,14 +509,22 @@ class TreeTransformer(keras.Model):
         cache_dir: Optional[str] = None,
         **kwargs: Any,
     ) -> "TreeTransformer":
-        """Creates a TreeTransformer model from a predefined variant.
+        """Create a TreeTransformer from a predefined variant.
+
+        A download that fails with an I/O or value error logs a warning and leaves the
+        model randomly initialized; a missing local file or a failed transfer raises.
 
         :param variant: One of ``cls.MODEL_VARIANTS`` (e.g. ``"tiny"``, ``"small"``, ``"base"``, ``"large"``).
         :param pretrained: ``False`` (default) for random init. ``True`` to attempt downloading hosted weights — this currently raises :class:`NotImplementedError` because no public Tree Transformer weights are hosted. A string path is treated as a local ``.keras`` / ``.weights.h5`` file to load.
         :param weights_dataset: Dataset key for hosted weights (kept for API parity with BERT / DistilBERT / ResNet — currently unused since no public weights are hosted).
         :param cache_dir: Optional cache directory for downloaded weights.
-        :param kwargs: Forwarded to ``TreeTransformer.__init__``.
+        :param **kwargs: Forwarded to ``TreeTransformer.__init__``. A ``vocab_size``
+            other than :attr:`DEFAULT_VOCAB_SIZE` skips the embedding and LM head
+            during a pretrained transfer.
 
+        :return: The model, with weights loaded if a path was given.
+        :rtype: TreeTransformer
+        :raises ValueError: If ``variant`` is not a known name.
         :raises NotImplementedError: If ``pretrained=True``. Use ``pretrained="path/to/weights.keras"`` to load local weights.
         """
         if variant not in cls.MODEL_VARIANTS:
@@ -482,8 +541,9 @@ class TreeTransformer(keras.Model):
             if isinstance(pretrained, str):
                 load_weights_path = pretrained
             else:
-                # DECISION plan_2026-05-11_0a5779e8/D-001: catch only I/O errors here,
-                # not Exception, or NotImplementedError gets swallowed into a silent random-init. See decisions.md.
+                # DECISION plan_2026-05-11_0a5779e8/D-001: catch I/O errors only; a bare
+                # Exception swallows NotImplementedError into a silent random init.
+                # See decisions.md.
                 try:
                     load_weights_path = cls._download_weights(
                         variant, weights_dataset, cache_dir
@@ -506,9 +566,8 @@ class TreeTransformer(keras.Model):
         model = cls(**config)
         if load_weights_path:
             try:
-                # skip_mismatch (legacy local flag) controls whether vocab-dependent
-                # layers are excluded from transfer. Map to skip_prefixes for the
-                # new weight_transfer-based loader.
+                # The vocab-dependent layers are the ones a changed vocab_size
+                # invalidates, so they become the loader's skip prefixes.
                 skip_prefixes = (
                     ("embedding", "lm_head") if skip_mismatch else ()
                 )
@@ -523,7 +582,11 @@ class TreeTransformer(keras.Model):
         return model
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the model's configuration for serialization."""
+        """Return the model's configuration for serialization.
+
+        :return: Dict holding every constructor argument.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -546,11 +609,20 @@ class TreeTransformer(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "TreeTransformer":
-        """Creates a model instance from its configuration."""
+        """Create a model instance from its configuration.
+
+        :param config: Dict as returned by :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new model.
+        :rtype: TreeTransformer
+        """
         return cls(**config)
 
     def summary(self, **kwargs) -> None:
-        """Prints the model summary with additional configuration details."""
+        """Print the Keras summary, then log the architecture settings.
+
+        :param **kwargs: Forwarded to ``keras.Model.summary``.
+        """
         super().summary(**kwargs)
         logger.info("Tree Transformer Foundation Model Configuration:")
         logger.info(
@@ -575,20 +647,22 @@ def create_tree_transformer(
         cache_dir: Optional[str] = None,
         **kwargs: Any,
 ) -> "TreeTransformer":
-    """Convenience function to create Tree Transformer encoder models.
+    """Create a Tree Transformer encoder from a variant name.
 
-    Mirrors :func:`dl_techniques.models.vision.resnet.model.create_resnet` for consistency
-    across the model zoo: a thin module-level factory that delegates to
-    :meth:`TreeTransformer.from_variant`.
+    A thin module-level factory that delegates to
+    :meth:`TreeTransformer.from_variant`, mirroring
+    :func:`dl_techniques.models.vision.resnet.model.create_resnet`.
 
     :param variant: String, model variant ("tiny", "small", "base", "large").
     :param vocab_size: Optional integer; override the variant default vocabulary size. Passing a value different from :attr:`TreeTransformer.DEFAULT_VOCAB_SIZE` while ``pretrained=True`` will skip loading vocab-dependent layers (embeddings, LM head).
     :param pretrained: Boolean or string. If ``True``, attempts to load pretrained weights for the chosen ``weights_dataset`` (currently raises :class:`NotImplementedError` — no public Tree Transformer weights are hosted). If a string, treated as a path to a local ``.keras`` / ``.weights.h5`` file.
     :param weights_dataset: String, dataset key for pretrained weights (kept for API parity with other foundation models).
     :param cache_dir: Optional string, directory to cache downloaded weights.
-    :param kwargs: Additional arguments forwarded to ``TreeTransformer.__init__`` (e.g. ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``).
+    :param **kwargs: Additional arguments forwarded to ``TreeTransformer.__init__`` (e.g. ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``).
 
     :return: TreeTransformer encoder instance.
+    :raises ValueError: If ``variant`` is unknown, or a forwarded argument is invalid.
+    :raises NotImplementedError: If ``pretrained=True``.
 
     Example:
         >>> # Create a Tree Transformer base encoder with random init
@@ -625,7 +699,28 @@ def create_tree_transformer_with_head(
     encoder_config_overrides: Optional[Dict[str, Any]] = None,
     head_config_overrides: Optional[Dict[str, Any]] = None,
 ) -> keras.Model:
-    """Factory function to create a Tree Transformer model with a task-specific head.
+    """Build an end-to-end model: a Tree Transformer encoder plus a task head.
+
+    The functional model takes ``input_ids`` only, and the head receives only
+    ``hidden_states``; the encoder's ``logits`` and ``break_probs`` are not wired
+    through, and the head gets no attention mask.
+
+    .. code-block:: text
+
+        {"input_ids": [B, L]}
+                 │
+                 ▼
+        ┌───────────────────────┐
+        │ TreeTransformer       │
+        └───────────────────────┘
+                 │  last_hidden_state
+                 ▼
+        ┌───────────────────────┐
+        │ nlp task head         │
+        └───────────────────────┘
+                 │
+                 ▼
+            task outputs
 
     :param tree_transformer_variant: The Tree Transformer variant (e.g., "base").
     :type tree_transformer_variant: str
@@ -647,6 +742,8 @@ def create_tree_transformer_with_head(
     :type head_config_overrides: Optional[Dict[str, Any]]
     :return: A complete `keras.Model` ready for the specified task.
     :rtype: keras.Model
+    :raises ValueError: If the variant is unknown, or an override is invalid.
+    :raises NotImplementedError: If ``pretrained=True``.
     """
     encoder_config_overrides = encoder_config_overrides or {}
     head_config_overrides = head_config_overrides or {}
@@ -654,7 +751,6 @@ def create_tree_transformer_with_head(
         f"Creating TreeTransformer-{tree_transformer_variant} with a '{task_config.name}' head."
     )
 
-    # 1. Create the foundational TreeTransformer model
     tree_encoder = TreeTransformer.from_variant(
         tree_transformer_variant,
         pretrained=pretrained,
@@ -663,14 +759,12 @@ def create_tree_transformer_with_head(
         **encoder_config_overrides,
     )
 
-    # 2. Create the task-specific head
     task_head = create_nlp_head(
         task_config=task_config,
         input_dim=tree_encoder.hidden_size,
         **head_config_overrides,
     )
 
-    # 3. Define inputs and build the end-to-end model
     inputs = {
         "input_ids": keras.Input(
             shape=(None,), dtype="int32", name="input_ids"
@@ -678,7 +772,6 @@ def create_tree_transformer_with_head(
     }
     encoder_outputs = tree_encoder(inputs)
 
-    # Pass encoder outputs to the task head.
     head_inputs = {"hidden_states": encoder_outputs["last_hidden_state"]}
     task_outputs = task_head(head_inputs)
 
