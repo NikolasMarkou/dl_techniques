@@ -41,7 +41,7 @@ Key flags (`--help` is authoritative; this is a summary):
 | `--kitti-root` / `--megadepth-root` | Dataset roots, or `none` to skip a source. Defaults point at this machine's local copies under `/media/arxwn/data0_4tb/datasets/`. |
 | `--max-kitti-files` / `--max-megadepth-files` | Cap discovered pairs (smoke/dev runs). |
 | `--omnipoint-variant` | `OmniPoint.MODEL_VARIANTS` key (`omnipoint_base` / `omnipoint_large`). |
-| `--enable-conditioning` | Enables the optional intrinsics-ray-map / sparse-depth conditioning path (`OmniPoint`'s `enable_conditioning=True`). |
+| `--enable-conditioning` | Enables `OmniPoint`'s `enable_conditioning=True` path, but trains **intrinsics conditioning only** — see the section below. |
 | `--lambda-ray` / `--lambda-metric` / `--lambda-normal` / `--lambda-local` / `--lambda-mask` | `OmniPointCombinedLoss` term weights. |
 | `--smoke` | Tiny integration-smoke run — see above. |
 
@@ -69,6 +69,34 @@ standing training-script conventions.
   this README, without the model package's own `README.md`, should take away the same warning:
   nothing this trainer produces should be read as trained against calibrated ground truth.**
 
+## `--enable-conditioning` trains INTRINSICS conditioning only, not sparse-depth
+
+An earlier iteration of this trainer shipped `--enable-conditioning` as a genuinely dead
+branch: `OmniPointTrainingWrapper.call()` never forwarded any conditioning tensor to
+`OmniPoint`, so the 8 conditioning weights (`intrinsics_conv1/2`, `depth_conv1/2`, both
+present/absent state-embedding vectors) received exactly zero gradient every step,
+regardless of the flag (`decisions.md` D-025 CRITICAL #4). This is now fixed for the
+INTRINSICS half only (`decisions.md` D-028):
+
+- **Intrinsics conditioning IS wired and trained.** `data.py`'s own `gt_ray` — already
+  `pinhole_ray_map(K, ...)` evaluated at full pixel resolution, per D-016 — is reused
+  (never re-derived) as the intrinsics ray map, and `intrinsics_present` is
+  unconditionally `True` for every sample, since a derived `K` (and therefore a ray map)
+  always exists in this pipeline for both KITTI and MegaDepth.
+- **Sparse-depth conditioning remains genuinely unwired, on purpose.** No sparse-depth
+  data exists anywhere in this pipeline — neither the KITTI nor the MegaDepth loader
+  synthesizes or supplies a sparse subsample (the paper's own approach: randomly
+  subsampling 0.05-0.1% of GT depth pixels per sample) — so
+  `sparse_depth`/`sparse_depth_mask` are never passed to `OmniPoint`, and
+  `depth_conv1/2` plus the depth state-embedding vectors correctly still receive zero
+  gradient whenever `--enable-conditioning` is set. Building a sparse-depth synthesizer
+  is new-feature work, not a bug fix, and is out of scope here. A future flag adding real
+  sparse-depth data is the seam for that work, not this one.
+
+**Read `--enable-conditioning` as "train intrinsics conditioning"**, not "train all
+conditioning modalities" — the flag name does not distinguish the two, and this is the
+one place that gap is spelled out for a reader of only this file.
+
 ## The mask-as-validity-proxy simplification
 
 `MaskLoss`'s ground-truth target is each loader's own `valid_mask` (1.0 = a real, finite, nonzero
@@ -85,4 +113,5 @@ read a trained `MaskHead` output as a sky/foreground segmentation.
   camera-agnosticism caveat, output-resolution and loss-simplification limitations.
 - `decisions.md` in `plans/plan-2026-09-11T050223-1b47bcf6/` — D-006 (derived intrinsics),
   D-016 (planar-to-radial GT conversion), D-017 (mask proxy), D-018 (KITTI/MegaDepth mixing),
-  D-019 (MegaDepth scale), D-020/D-021 (training-wrapper loss routing and GT downsampling).
+  D-019 (MegaDepth scale), D-020/D-021 (training-wrapper loss routing and GT downsampling),
+  D-025 (the dead `--enable-conditioning` branch, as found) / D-028 (the intrinsics-only fix).

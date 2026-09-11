@@ -23,6 +23,18 @@ COPY per output slot rather than calling it once over the whole tuple (MEASURED 
     design -- it is a CLI-surface artifact of reusing the shared parser, not a config field
     (`OmniPointTrainingConfig` carries no `dataset` field for it to silently fail to reach).
 
+.. warning::
+    **`--enable-conditioning` trains INTRINSICS conditioning only, never sparse-depth
+    conditioning** (`decisions.md` D-028). `OmniPointTrainingWrapper.call()` derives the
+    per-sample intrinsics ray map from `data.py`'s own `gt_ray` (the same
+    `pinhole_ray_map(K, ...)` value, reused rather than re-derived) and feeds it to
+    `OmniPoint` every step, so the intrinsics-conditioning weights DO receive gradient
+    when this flag is set. Sparse-depth conditioning remains genuinely unwired: no
+    sparse-depth data exists anywhere in this pipeline (neither the KITTI nor the
+    MegaDepth loader synthesizes or supplies a sparse subsample), so
+    `sparse_depth`/`sparse_depth_mask` are never passed and those weights receive zero
+    gradient -- a documented, intentional limitation, not a silent defect.
+
 Usage::
 
     # Smoke run (tiny model/data, proves the pipeline runs end to end):
@@ -255,7 +267,30 @@ class OmniPointTrainingWrapper(keras.Model):
             reads it directly (supervision happens via `add_loss`).
         """
         rgb, y_true = inputs
-        outputs = self.omnipoint(rgb, training=training)
+        gt_ray = y_true[0]
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-028
+        # Do NOT leave `enable_conditioning=True` forwarding zero conditioning tensors --
+        # `data.py`'s own `gt_ray` (y_true[0]) IS the intrinsics ray map: both are
+        # `pinhole_ray_map(K, ...)` evaluated at the SAME full pixel resolution as `rgb`
+        # (D-016), so reusing it here is the DRY choice, not a second derivation. A derived
+        # K (and therefore a ray map) is ALWAYS available for every sample this pipeline
+        # emits (both KITTI and MegaDepth always compute K), so `intrinsics_present` is
+        # unconditionally all-True -- there is no "missing intrinsics" case in this data
+        # pipeline. Sparse-depth conditioning is DELIBERATELY left unwired: no sparse-depth
+        # data exists anywhere in this pipeline (neither loader synthesizes or provides a
+        # sparse subsample), so `sparse_depth`/`sparse_depth_mask` are never passed --
+        # passing zeros would be indistinguishable from "no signal" only by accident, and a
+        # future caller adding real sparse-depth data must not mistake this branch for
+        # already being wired. See decisions.md D-028 and
+        # `src/train/omnipoint/README.md` for the intrinsics-only scope this implies for
+        # `--enable-conditioning`.
+        intrinsics_present = keras.ops.ones((keras.ops.shape(rgb)[0],), dtype="bool")
+        outputs = self.omnipoint(
+            rgb,
+            intrinsics_ray_map=gt_ray,
+            intrinsics_present=intrinsics_present,
+            training=training,
+        )
         ray, distance, point, mask_logit, scale = outputs
         y_pred = (ray, distance, mask_logit, scale)
         y_true_grid = _downsample_gt_to_grid(
@@ -588,7 +623,14 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     model_group.add_argument(
         "--enable-conditioning", action="store_true",
-        help="Enable the optional intrinsics-ray-map / sparse-depth conditioning path.",
+        help=(
+            "Enable the optional geometric conditioning path (OmniPoint's "
+            "enable_conditioning=True). Trains INTRINSICS conditioning only: this "
+            "trainer derives a per-sample intrinsics ray map from data.py's own "
+            "gt_ray (D-028) and feeds it in every step. Sparse-depth conditioning "
+            "weights are NOT trained by this flag -- no sparse-depth data exists in "
+            "this pipeline (see src/train/omnipoint/README.md)."
+        ),
     )
 
     loss_group = parser.add_argument_group("OmniPointCombinedLoss weights")
