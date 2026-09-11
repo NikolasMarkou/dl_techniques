@@ -1,11 +1,15 @@
 """`OmniPoint`: a camera-agnostic-by-construction monocular metric point-cloud
-model -- ViT encoder, three per-feature heads, no conditioning input (yet).
+model -- ViT encoder, three per-feature heads, plus an OPTIONAL geometric
+conditioning path (intrinsics ray map + sparse depth).
 
-This is the plan's Step 4: the minimal forward pass. It builds the shared
-encoder and the three output heads (`heads.py`) over ONE shared feature map;
-it deliberately carries no intrinsics/sparse-depth conditioning path -- that
-is Step 5's `conditioning.py`, wired in as an additive step, not a rewrite of
-this module.
+Step 4 built the minimal forward pass: the shared encoder and the three
+output heads (`heads.py`) over ONE shared feature map, with no conditioning
+path. Step 5 (`conditioning.py`) adds an opt-in `enable_conditioning=True`
+path, wired in additively -- with `enable_conditioning=False` (the default,
+unchanged from Step 4), this model's behavior is bit-for-bit identical to
+before Step 5 existed. See `conditioning.py`'s module docstring for the
+fusion-point design (decisions.md D-013) and the mixed-batch per-sample-flag
+contract.
 
 Architecture:
 
@@ -93,6 +97,7 @@ from dl_techniques.models.vision.vit.model import ViT
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from .heads import RayDistanceHead, MaskHead, MetricScaleHead
+from .conditioning import ConditioningInputEncoder, ConditioningStateEmbedding
 
 # ---------------------------------------------------------------------
 
@@ -145,6 +150,30 @@ class OmniPoint(keras.Model):
         constructing a fresh, randomly initialized one; `None` (default)
         builds a fresh encoder lazily in `build()`.
     :type encoder: Optional[keras.Model]
+    :param enable_conditioning: If `True`, build the Step-5 conditioning path
+        (`conditioning.py`): the encoder's own `input_shape` channel count is
+        widened by `intrinsics_channels + depth_channels`, and `call()`
+        accepts the optional `intrinsics_ray_map`/`sparse_depth`/
+        `sparse_depth_mask` keyword arguments (see `call()`'s docstring).
+        Defaults to `False`, in which case this model behaves exactly as in
+        Step 4 (no conditioning path is built at all).
+    :type enable_conditioning: bool
+    :param intrinsics_channels: Fusion channels the intrinsics ray-map
+        encoder emits. Only used when `enable_conditioning` is `True`.
+    :type intrinsics_channels: int
+    :param depth_channels: Fusion channels the sparse-depth encoder emits.
+        Only used when `enable_conditioning` is `True`.
+    :type depth_channels: int
+    :param conditioning_hidden_channels: Hidden width of the conditioning
+        path's small `Conv2D` stacks. Only used when `enable_conditioning` is
+        `True`.
+    :type conditioning_hidden_channels: int
+    :param splat_kernel_size: `SparseDepthSplat`'s Gaussian window size. Only
+        used when `enable_conditioning` is `True`.
+    :type splat_kernel_size: Tuple[int, int]
+    :param splat_sigma: `SparseDepthSplat`'s Gaussian sigma. Only used when
+        `enable_conditioning` is `True`.
+    :type splat_sigma: float
     :param kwargs: Additional keyword arguments for the `Model` base class.
 
     :raises ValueError: If `vit_scale` is not a valid `ViT.SCALE_CONFIGS` key,
@@ -184,6 +213,12 @@ class OmniPoint(keras.Model):
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             epsilon: float = 1e-8,
             encoder: Optional[keras.Model] = None,
+            enable_conditioning: bool = False,
+            intrinsics_channels: int = 4,
+            depth_channels: int = 4,
+            conditioning_hidden_channels: int = 16,
+            splat_kernel_size: Tuple[int, int] = (9, 9),
+            splat_sigma: float = 2.0,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -214,11 +249,48 @@ class OmniPoint(keras.Model):
         self.grid_h = img_h // self.patch_size
         self.grid_w = img_w // self.patch_size
 
+        self.enable_conditioning = bool(enable_conditioning)
+        self.intrinsics_channels = int(intrinsics_channels)
+        self.depth_channels = int(depth_channels)
+        self.conditioning_hidden_channels = int(conditioning_hidden_channels)
+        self.splat_kernel_size = (int(splat_kernel_size[0]), int(splat_kernel_size[1]))
+        self.splat_sigma = float(splat_sigma)
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-013: the encoder's own
+        # input channel count is widened here, at __init__ time, not chosen
+        # per-call -- ViT's PatchEmbedding2D conv kernel shape is fixed at
+        # build time, so a call-time-varying channel count is not an option.
+        # Conditioning is therefore an __init__-time architectural choice
+        # (enable_conditioning=True/False), not a per-call one; a per-call
+        # absent modality still runs this same widened-channel encoder, fed
+        # zero-valued conditioning channels (see conditioning.py). See
+        # decisions.md.
+        self._encoder_input_channels = img_c + (
+            (self.intrinsics_channels + self.depth_channels)
+            if self.enable_conditioning else 0
+        )
+
         # If an encoder was supplied (typically by `from_config` after
         # deserialization), accept it directly so its saved topology/weights
         # survive the load, mirroring `DepthAnything.__init__`'s identical
         # convention. Otherwise `build()` creates one fresh.
         self.encoder: Optional[keras.Model] = encoder
+
+        self.conditioning_input_encoder: Optional[ConditioningInputEncoder] = None
+        self.conditioning_state_embedding: Optional[ConditioningStateEmbedding] = None
+        if self.enable_conditioning:
+            self.conditioning_input_encoder = ConditioningInputEncoder(
+                intrinsics_channels=self.intrinsics_channels,
+                depth_channels=self.depth_channels,
+                conv_hidden_channels=self.conditioning_hidden_channels,
+                splat_kernel_size=self.splat_kernel_size,
+                splat_sigma=self.splat_sigma,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name="conditioning_input_encoder",
+            )
+            self.conditioning_state_embedding = ConditioningStateEmbedding(
+                name="conditioning_state_embedding",
+            )
 
         # Heads -- pure functions of the config above, safe to construct
         # eagerly in `__init__` (mirrors `heads.py`'s own eager-sublayer
@@ -266,8 +338,9 @@ class OmniPoint(keras.Model):
         :type input_shape: Tuple[Optional[int], ...]
         """
         if self.encoder is None:
+            img_h, img_w, _ = self.image_shape
             self.encoder = ViT(
-                input_shape=self.image_shape,
+                input_shape=(img_h, img_w, self._encoder_input_channels),
                 scale=self.vit_scale,
                 patch_size=self.patch_size,
                 include_top=False,
@@ -294,12 +367,43 @@ class OmniPoint(keras.Model):
     def call(
             self,
             inputs: keras.KerasTensor,
+            intrinsics_ray_map: Optional[keras.KerasTensor] = None,
+            intrinsics_present: Optional[keras.KerasTensor] = None,
+            sparse_depth: Optional[keras.KerasTensor] = None,
+            sparse_depth_mask: Optional[keras.KerasTensor] = None,
+            sparse_depth_present: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None,
     ) -> OmniPointOutput:
         """Forward pass: encoder -> shared spatial map + CLS token -> heads.
 
+        Conditioning arguments are only meaningful when this instance was
+        built with ``enable_conditioning=True``; they are accepted (and
+        ignored) otherwise, matching Problem Statement invariant 4 -- the
+        model produces the same output shape/dtype whether or not intrinsics/
+        sparse depth are supplied. A Python ``None`` for
+        ``intrinsics_ray_map``/``sparse_depth`` means "absent for this whole
+        call"; a concrete per-sample ``*_present`` flag (``(B,)``) then
+        selects, WITHIN a call that does supply the tensor, which individual
+        samples actually carry valid data for that modality (see
+        ``conditioning.py``'s module docstring for the full contract).
+
         :param inputs: Input image batch, ``(B, H, W, 3)``.
         :type inputs: keras.KerasTensor
+        :param intrinsics_ray_map: Optional per-pixel unit ray map,
+            ``(B, H, W, 3)``. Ignored unless ``enable_conditioning=True``.
+        :type intrinsics_ray_map: Optional[keras.KerasTensor]
+        :param intrinsics_present: Optional per-sample flag, ``(B,)``.
+            Defaults to "all present" when ``intrinsics_ray_map`` is given.
+        :type intrinsics_present: Optional[keras.KerasTensor]
+        :param sparse_depth: Optional sparse depth values, ``(B, H, W, 1)``.
+            Ignored unless ``enable_conditioning=True``.
+        :type sparse_depth: Optional[keras.KerasTensor]
+        :param sparse_depth_mask: Required companion validity mask when
+            ``sparse_depth`` is given, ``(B, H, W, 1)``.
+        :type sparse_depth_mask: Optional[keras.KerasTensor]
+        :param sparse_depth_present: Optional per-sample flag, ``(B,)``.
+            Defaults to "all present" when ``sparse_depth`` is given.
+        :type sparse_depth_present: Optional[keras.KerasTensor]
         :param training: Whether the model runs in training or inference
             mode.
         :type training: Optional[bool]
@@ -307,7 +411,51 @@ class OmniPoint(keras.Model):
             this module's docstring for the exact contract.
         :rtype: OmniPointOutput
         """
-        sequence = self.encoder(inputs, training=training)
+        if self.enable_conditioning:
+            batch_size = keras.ops.shape(inputs)[0]
+
+            fused_inputs = self.conditioning_input_encoder(
+                inputs,
+                intrinsics_ray_map=intrinsics_ray_map,
+                intrinsics_present=intrinsics_present,
+                sparse_depth=sparse_depth,
+                sparse_depth_mask=sparse_depth_mask,
+                sparse_depth_present=sparse_depth_present,
+                training=training,
+            )
+            sequence = self.encoder(fused_inputs, training=training)
+
+            # Concrete per-sample flags for the post-encoder token-space
+            # stage: absent-for-the-whole-call (tensor is None) means every
+            # sample's flag is False; present-for-the-call but no explicit
+            # per-sample flag means every sample's flag is True.
+            if intrinsics_ray_map is None:
+                intrinsics_present_flags = keras.ops.zeros((batch_size,), dtype="bool")
+            elif intrinsics_present is None:
+                intrinsics_present_flags = keras.ops.ones((batch_size,), dtype="bool")
+            else:
+                intrinsics_present_flags = keras.ops.reshape(
+                    keras.ops.cast(intrinsics_present, "bool"), (-1,)
+                )
+
+            if sparse_depth is None:
+                sparse_depth_present_flags = keras.ops.zeros((batch_size,), dtype="bool")
+            elif sparse_depth_present is None:
+                sparse_depth_present_flags = keras.ops.ones((batch_size,), dtype="bool")
+            else:
+                sparse_depth_present_flags = keras.ops.reshape(
+                    keras.ops.cast(sparse_depth_present, "bool"), (-1,)
+                )
+
+            sequence = self.conditioning_state_embedding(
+                sequence,
+                intrinsics_present_flags,
+                sparse_depth_present_flags,
+                training=training,
+            )
+        else:
+            sequence = self.encoder(inputs, training=training)
+
         cls_token = sequence[:, 0, :]
         spatial = self._features_to_spatial(sequence)
 
@@ -341,6 +489,12 @@ class OmniPoint(keras.Model):
                 if self.encoder is not None
                 else None
             ),
+            "enable_conditioning": self.enable_conditioning,
+            "intrinsics_channels": self.intrinsics_channels,
+            "depth_channels": self.depth_channels,
+            "conditioning_hidden_channels": self.conditioning_hidden_channels,
+            "splat_kernel_size": self.splat_kernel_size,
+            "splat_sigma": self.splat_sigma,
         })
         return config
 
