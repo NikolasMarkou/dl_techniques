@@ -4164,6 +4164,18 @@ _CREATE_DELEGATION_WAIVERS = {
     ("models/vision/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its three `assert`s are gone (void under -O); they now run over all 3 sampling types at TestVAESamplingTypes::test_create_vae_output_shapes. The compile stays: documented contract",
     ("models/vision/vit/model.py", "create_vit"): "step 19 REPAIRED (D-078) -- all 8 duplicated `raise ValueError` branches deleted; ViT.__init__ was MEASURED to raise for every one. Only a derived log line remains",
     ("models/time_series/tirex/model.py", "create_tirex_by_variant"): "step 19 REPAIRED (D-078) -- the dummy numpy forward pass is now `model.build(...)`, measured byte-identical (same 47 weight paths, weight delta 0.0, forward delta 0.0). Both sites in the module",
+    # (g) plan-2026-09-11T050223-1b47bcf6/D-027 -- MEASURED, not assumed: `model.build(input_shape)`
+    # alone marks `built=True` but leaves `OmniPoint.encoder` (a `ViT`, itself a subclassed
+    # `keras.Model` with its own lazily-built sublayers) at 0 materialized weights -- the
+    # SAME shape as D-065's mobilenet_v1 finding ("build() only marks a subclassed model
+    # built without materializing sub-layer weights"). A dummy forward pass is therefore
+    # necessary, not incidental, for `create_omnipoint` to return a genuinely usable,
+    # fully-materialized model as its own docstring/tests promise (`test_create_omnipoint_builds_and_runs`
+    # asserts `model.built` AND runs a real forward pass on the result). Swapping the dummy
+    # call for a bare `model.build(...)` (the `create_tirex_by_variant` precedent above) was
+    # tried and rejected here specifically because it does NOT materialize the encoder's
+    # weights -- confirmed by direct measurement, not by symmetry with that precedent.
+    ("models/vision/omnipoint/model.py", "create_omnipoint"): "MEASURED 2026-09-11 (D-027): `model.build(image_shape)` alone leaves the ViT encoder's own sublayers at 0 weights (same D-065 shape); the dummy forward pass is load-bearing, not incidental logic, so it stays and this site is waived rather than stripped",
 }
 
 

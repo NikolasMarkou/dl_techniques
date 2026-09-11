@@ -360,6 +360,26 @@ class OmniPoint(keras.Model):
         _ = self.mask_head(dummy_spatial)
         _ = self.metric_scale_head(dummy_cls)
 
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-023 (extended, completion-fix
+        # step 4.1): D-023's original fix above only covered the 3 heads -- it never
+        # touched `conditioning_input_encoder`/`conditioning_state_embedding` (Step 5),
+        # so a `.keras` round-trip with `enable_conditioning=True` silently lost exactly
+        # those 2 layers' weights on reload (MEASURED: 8 of 212 weights mismatched --
+        # the review's CRITICAL #3). Force-build both here too, via the same
+        # dummy-forward-pass mechanism, whenever they exist -- they only exist at all
+        # when `enable_conditioning=True` (see `__init__`), so this is unconditional
+        # given existence, never gated on a second flag. See decisions.md.
+        if self.conditioning_input_encoder is not None:
+            img_h, img_w, img_c = self.image_shape
+            dummy_image = keras.ops.zeros((1, img_h, img_w, img_c))
+            _ = self.conditioning_input_encoder(dummy_image)
+        if self.conditioning_state_embedding is not None:
+            dummy_tokens = keras.ops.zeros(
+                (1, self.grid_h * self.grid_w + 1, self.embed_dim)
+            )
+            dummy_flag = keras.ops.zeros((1,), dtype="bool")
+            _ = self.conditioning_state_embedding(dummy_tokens, dummy_flag, dummy_flag)
+
     def _features_to_spatial(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Drop the CLS token and reshape ``(B, N+1, D)`` -> ``(B, h, w, D)``.
 

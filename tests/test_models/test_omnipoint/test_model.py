@@ -140,6 +140,70 @@ class TestOmniPoint:
                 keras.ops.convert_to_numpy(after),
             )
 
+    # DECISION plan-2026-09-11T050223-1b47bcf6/D-023 (extended, completion-fix
+    # step 4.1): the review's CRITICAL #3 found this exact gap -- the test above
+    # only exercised the default `enable_conditioning=False` model, so D-023's
+    # original heads-only build() fix silently left the 2 conditioning layers
+    # (`conditioning_input_encoder`, `conditioning_state_embedding`) 0-weight on
+    # `.keras` reload (8 of 212 weights re-randomized). This parametrized test
+    # covers BOTH values, including a weight-by-weight comparison (not just
+    # output comparison, which the review found insufficient on its own to
+    # prove no weight was silently swapped for a compatible-shaped random one).
+    # See decisions.md.
+    @pytest.mark.parametrize("enable_conditioning", [False, True])
+    def test_save_load_keras_round_trip_with_and_without_conditioning(
+            self, enable_conditioning, batch, tmp_path
+    ):
+        model = OmniPoint.from_variant(
+            "omnipoint_base",
+            image_shape=_TEST_IMAGE_SHAPE,
+            enable_conditioning=enable_conditioning,
+        )
+        outputs_before = model(batch)
+
+        save_path = os.path.join(
+            tmp_path, f"omnipoint_cond_{enable_conditioning}.keras"
+        )
+        model.save(save_path)
+        reloaded = keras.models.load_model(save_path)
+
+        outputs_after = reloaded(batch)
+        for before, after in zip(outputs_before, outputs_after):
+            np.testing.assert_array_equal(
+                keras.ops.convert_to_numpy(before),
+                keras.ops.convert_to_numpy(after),
+            )
+
+        # Weight-by-weight: every weight must survive the round trip exactly,
+        # not merely produce a matching forward pass (a compatible-shaped but
+        # differently-valued weight could coincidentally agree on one input).
+        # MEASURED: `keras.Variable.path` inconsistently includes the outer
+        # model's own name as a leading path segment depending on whether the
+        # model was freshly constructed-and-called or reloaded via
+        # `load_model` -- strip that one optional segment so the comparison
+        # is keyed on the sublayer-relative path both sides actually share.
+        def _relative_path(path: str, model_name: str) -> str:
+            parts = path.split("/")
+            if parts and parts[0] == model_name:
+                parts = parts[1:]
+            return "/".join(parts)
+
+        weights_before = {
+            _relative_path(w.path, model.name): keras.ops.convert_to_numpy(w)
+            for w in model.weights
+        }
+        weights_after = {
+            _relative_path(w.path, reloaded.name): keras.ops.convert_to_numpy(w)
+            for w in reloaded.weights
+        }
+        assert set(weights_before.keys()) == set(weights_after.keys())
+        mismatched = [
+            path
+            for path, value in weights_before.items()
+            if not np.array_equal(value, weights_after[path])
+        ]
+        assert not mismatched, f"weights lost on reload: {mismatched}"
+
     # ------------------------------------------------------------------
     # pretrained=True raise (Success Criterion 4)
     # ------------------------------------------------------------------
