@@ -301,10 +301,16 @@ class TestOmniPointCombinedLoss:
         combined = OmniPointCombinedLoss(**lambdas)
         total = np.array(combined(y_true, y_pred))
 
-        pred_affine_points = pred_ray * pred_distance
+        # NOTE: s* is aligned using `gt_ray * pred_distance`, NEVER `pred_ray` -- per D-026,
+        # the paper's own formula computes the "predicted affine-invariant point map" used for
+        # scale alignment from the GROUND-TRUTH ray, so a wrong predicted ray cannot leak into
+        # `s_star`/`L_point`. Only the normal/local-consistency terms below use `pred_ray`
+        # (via `pred_affine_points`), since those compare the model's own predicted geometry.
+        scale_alignment_points = gt_ray * pred_distance
         s_star = np.array(
-            compute_optimal_scale(pred_affine_points, gt_point, valid_mask=valid_mask)
+            compute_optimal_scale(scale_alignment_points, gt_point, valid_mask=valid_mask)
         )
+        pred_affine_points = pred_ray * pred_distance
 
         l_ray = np.array(RayDirectionLoss().call(gt_ray, pred_ray, valid_mask=valid_mask))
         gt_ray_distance = np.concatenate([gt_ray, gt_distance], axis=-1)
@@ -369,3 +375,69 @@ class TestOmniPointCombinedLoss:
         combined = OmniPointCombinedLoss()
         total = np.array(combined(y_true_tiny, y_pred))
         assert np.all(np.isfinite(total))
+
+    def test_L_point_and_s_star_are_invariant_to_pred_ray(self):
+        """D-026 (adversarial review CRITICAL #1): `s*`/`L_point` must not depend on `pred_ray`.
+
+        With `pred_distance == gt_distance` exactly (a perfectly correct predicted distance),
+        `s*` must be 1.0 and `L_point` must be 0.0 for EVERY deliberately-wrong `pred_ray`
+        swept below -- this is the paper's decoupling claim, exercised through the REAL
+        `OmniPointCombinedLoss.__call__` derivation path (not a hand-supplied `s_star`, unlike
+        `TestPointDistanceLoss.test_zero_loss_for_wrong_ray_but_correct_distance`, which only
+        proved `PointDistanceLoss` itself ignores `r_hat` when `s_star` is supplied externally).
+        """
+        batch, h, w = 1, 4, 4
+        rng = np.random.default_rng(7)
+
+        gt_ray = rng.normal(size=(batch, h, w, 3)).astype("float32")
+        gt_ray = gt_ray / np.linalg.norm(gt_ray, axis=-1, keepdims=True)
+        gt_distance = np.abs(rng.normal(size=(batch, h, w, 1)).astype("float32")) + 0.5
+        gt_point = gt_ray * gt_distance
+        gt_mask = np.ones((batch, h, w, 1), dtype="float32")
+        valid_mask = np.ones((batch, h, w, 1), dtype="float32")
+
+        # pred_distance is EXACTLY correct -- only pred_ray varies across the sweep.
+        pred_distance = gt_distance.copy()
+        pred_mask_logit = np.zeros((batch, h, w, 1), dtype="float32")
+        pred_scale = np.array([1.0], dtype="float32")
+
+        combined = OmniPointCombinedLoss()
+        y_true = (gt_ray, gt_distance, gt_point, gt_mask, valid_mask)
+
+        wrong_pred_rays = [
+            -gt_ray,  # exactly opposite
+            np.roll(gt_ray, shift=1, axis=-1),  # channel-permuted
+            rng.normal(size=(batch, h, w, 3)).astype("float32"),  # random, unnormalized
+            np.tile(np.array([0.0, 1.0, 0.0], dtype="float32"), (batch, h, w, 1)),  # constant
+        ]
+
+        for pred_ray in wrong_pred_rays:
+            scale_alignment_points = gt_ray * pred_distance
+            s_star = np.array(compute_optimal_scale(scale_alignment_points, gt_point))
+            np.testing.assert_allclose(s_star, 1.0, atol=1e-5, rtol=0)
+
+            gt_ray_distance = np.concatenate([gt_ray, gt_distance], axis=-1)
+            l_point = np.array(
+                PointDistanceLoss().call(
+                    gt_ray_distance, pred_distance, s_star=s_star, valid_mask=valid_mask,
+                )
+            )
+            np.testing.assert_allclose(l_point, 0.0, atol=1e-5, rtol=0)
+
+            y_pred = (pred_ray, pred_distance, pred_mask_logit, pred_scale)
+            # The combined loss's L_point contribution equals the total minus every term that
+            # legitimately depends on pred_ray (L_ray, L_normal, L_local) or is independent of
+            # it (L_metric, L_mask) -- recomputed directly here rather than assuming they are
+            # zero, since L_ray/L_normal/L_local DO vary with pred_ray by design.
+            total = np.array(combined(y_true, y_pred))
+            l_ray = np.array(
+                RayDirectionLoss().call(gt_ray, pred_ray, valid_mask=valid_mask)
+            )
+            l_metric = np.array(MetricScaleLoss().call(s_star, pred_scale))
+            l_mask = np.array(MaskLoss().call(gt_mask, pred_mask_logit))
+            pred_affine_points = pred_ray * pred_distance
+            pred_metric_points = pred_scale.reshape(-1, 1, 1, 1) * pred_affine_points
+            l_normal = np.array(NormalConsistencyLoss().call(gt_point, pred_metric_points))
+            l_local = np.array(LocalConsistencyLoss().call(gt_point, pred_metric_points))
+            expected_l_point = total - (l_ray + l_metric + l_normal + l_local + l_mask)
+            np.testing.assert_allclose(expected_l_point, 0.0, atol=1e-4, rtol=0)

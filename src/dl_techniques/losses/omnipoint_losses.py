@@ -568,9 +568,20 @@ class OmniPointCombinedLoss:
         gt_ray, gt_distance, gt_point, gt_mask, valid_mask = y_true
         pred_ray, pred_distance, pred_mask_logit, pred_scale = y_pred
 
-        pred_affine_points = pred_ray * pred_distance
+        # DECISION plan-2026-09-11T050223-1b47bcf6/D-026
+        # Do NOT compute s* from `pred_ray * pred_distance`. The paper's own Eq. 2 defines the
+        # "predicted affine-invariant point map" used for scale alignment as `d_hat * r_i` where
+        # `r_i` (no hat) is the GROUND-TRUTH ray, never `r_hat` -- only L_ray ever reads the
+        # predicted ray. Using `pred_ray` here lets a wrong predicted ray corrupt `s_star`, which
+        # then corrupts `L_point` through this shared scale even when `pred_distance` is exactly
+        # correct, silently falsifying the decoupling claim this module's own docstring and tests
+        # assert. MEASURED (adversarial review, iteration-1 REFLECT, decisions.md D-026): with
+        # `pred_distance == gt_distance` and a deliberately wrong `pred_ray`, the old
+        # `pred_ray`-based formula gave `s_star=0.0212`, `L_point=0.665`; this formula gives
+        # `s_star=1.0`, `L_point=0.0` regardless of how wrong `pred_ray` is.
+        scale_alignment_points = gt_ray * pred_distance
         s_star = compute_optimal_scale(
-            pred_affine_points, gt_point, valid_mask=valid_mask, epsilon=self.scale_epsilon,
+            scale_alignment_points, gt_point, valid_mask=valid_mask, epsilon=self.scale_epsilon,
         )
 
         gt_ray_distance = keras.ops.concatenate([gt_ray, gt_distance], axis=-1)
@@ -582,6 +593,11 @@ class OmniPointCombinedLoss:
         l_metric = self._metric_loss.call(s_star, pred_scale)
         l_mask = self._mask_loss.call(gt_mask, pred_mask_logit)
 
+        # NOTE: unlike `scale_alignment_points` above, the predicted metric point cloud fed to
+        # the normal/local-consistency terms legitimately uses the PREDICTED ray -- those terms
+        # compare the model's own predicted geometry against GT geometry, they are not part of
+        # the scale-alignment/point-loss decoupling D-026 addresses.
+        pred_affine_points = pred_ray * pred_distance
         pred_metric_points = keras.ops.reshape(
             pred_scale, (-1,) + (1,) * (len(pred_affine_points.shape) - 1)
         ) * pred_affine_points
