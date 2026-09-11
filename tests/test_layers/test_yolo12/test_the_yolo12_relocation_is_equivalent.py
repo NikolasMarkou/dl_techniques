@@ -90,6 +90,34 @@ _LIVE_REPO_PATH = "src/dl_techniques/layers/yolo12/yolo12_blocks.py"
 #: every later test in the session, so the dict is snapshotted and restored around the load.
 _LIVE_MODULE = "dl_techniques.layers.yolo12.yolo12_blocks"
 
+# DECISION plan-2026-09-11T143552-7e7a2ca8/D-002
+# The pinned blob (confirmed by `git show PINNED_BASE_COMMIT:_PINNED_REPO_PATH | grep '^class '`,
+# not assumed) defines exactly 6 classes: ConvBlock, AreaAttention, AttentionBlock, Bottleneck,
+# C3k2Block, A2C2fBlock. ConvBlock is decorated `legacy_alias=False` in the pinned source and so
+# never writes a `Custom>ConvBlock` key at all -- it is deliberately EXCLUDED here. The other 5
+# register with the default `legacy_alias=True` and each write `Custom>{name}` at class-definition
+# time (`keras_registration.py`'s `register_dl_technique`). If any of those 5 names is *already*
+# bound in `keras.saving.get_custom_objects()` to a class with a DIFFERENT `__module__` when this
+# fixture's `exec_module` runs -- e.g. the real, relocated `AreaAttention`
+# (`layers/attention/area_attention.py`) after `test_area_attention_block.py` has already imported
+# it in the same session -- `register_dl_technique` raises `AliasCollisionError` immediately, which
+# kills `exec_module` before the module object is ever returned. The existing snapshot/restore
+# below (`custom_objects.clear(); custom_objects.update(snapshot)` in `finally`) only repairs the
+# registry AFTER the fact; it cannot stop the raise that happens DURING `exec_module`. Do NOT
+# "simplify" this back to snapshot-restore-only -- that is the exact shape that regressed under
+# combined test-file run order. The fix is to pop these 5 names' `Custom>` keys OUT of the live
+# dict before `exec_module` runs (not out of `snapshot`, which stays a full untouched copy), so
+# `register_dl_technique` finds no existing entry and writes freely; the existing `finally` already
+# restores the pre-pop state for the whole dict, so no separate post-pop restore is needed here.
+# See decisions.md D-002.
+_PINNED_MODULE_LEGACY_ALIAS_CLASS_NAMES = (
+    "AreaAttention",
+    "AttentionBlock",
+    "Bottleneck",
+    "C3k2Block",
+    "A2C2fBlock",
+)
+
 
 def _repo_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[3]
@@ -144,8 +172,13 @@ def pinned(tmp_path_factory) -> Any:
     The module is given the spec name of the live module on purpose: the pinned classes'
     ``__module__`` then matches the live ones', so ``register_dl_technique``'s alias
     collision check treats the load as the same definition re-executed (which it is) instead
-    of raising. It is NOT inserted into ``sys.modules`` -- the pinned file is self-contained
-    and uses absolute imports only, so nothing needs to resolve it by name.
+    of raising -- but only for classes that STILL live under this module's path. Classes the
+    tree has since relocated (``AreaAttention`` now lives in
+    ``layers/attention/area_attention.py``) have a different ``__module__`` from the pinned
+    copy's, so this trick alone is not enough; see the D-002 anchor and the pre-``exec_module``
+    pop below for the rest of the fix. It is NOT inserted into ``sys.modules`` -- the pinned
+    file is self-contained and uses absolute imports only, so nothing needs to resolve it by
+    name.
 
     :param tmp_path_factory: pytest factory for the scratch directory.
     :return: the loaded module object.
@@ -159,6 +192,12 @@ def pinned(tmp_path_factory) -> Any:
 
     custom_objects = keras.saving.get_custom_objects()
     snapshot = dict(custom_objects)
+    # Pop the currently-live entries for the names the pinned module will re-register, so
+    # `register_dl_technique` sees no existing (different-`__module__`) claimant and does not
+    # raise `AliasCollisionError` mid-`exec_module`. See the D-002 anchor above the module-level
+    # `_PINNED_MODULE_LEGACY_ALIAS_CLASS_NAMES` constant this loop reads from.
+    for name in _PINNED_MODULE_LEGACY_ALIAS_CLASS_NAMES:
+        custom_objects.pop(f"Custom>{name}", None)
     try:
         spec.loader.exec_module(module)
     finally:
