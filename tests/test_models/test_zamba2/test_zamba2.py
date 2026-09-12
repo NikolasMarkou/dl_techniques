@@ -121,6 +121,34 @@ class TestLoRAAdapter:
         with pytest.raises(ValueError, match="occurrence_idx must be in"):
             layer(sample_input, occurrence_idx=-1)
 
+    def test_a_slices_are_independently_initialized(
+        self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor
+    ) -> None:
+        """Every occurrence's ``A`` slice must be a DIFFERENT draw at init.
+
+        A shared, seedless Keras 3 initializer instance reused directly
+        across a Python loop is stateless-deterministic and replays the
+        identical sample at every call of the same shape -- that regression
+        (``A[i] == A[j]`` for every ``i != j``, bit-identical) shipped once
+        and was only caught by an adversarial review (plan D-007); the
+        existing tests in this class only ever checked post-training
+        divergence, which ``B`` alone can supply even with ``A`` tied. This
+        guard checks ``A`` itself, at construction, before any training.
+        """
+        layer = LoRAAdapter(**layer_config)
+        layer.build(sample_input.shape)
+
+        a_numpy = keras.ops.convert_to_numpy(layer.a)
+        num_occurrences = layer_config["num_occurrences"]
+        assert num_occurrences >= 2, "fixture must exercise at least 2 occurrences"
+
+        for i in range(num_occurrences):
+            for j in range(i + 1, num_occurrences):
+                assert not np.array_equal(a_numpy[i], a_numpy[j]), (
+                    f"A[{i}] and A[{j}] are bit-identical at construction -- "
+                    "occurrences are not independently initialized"
+                )
+
     def test_different_occurrences_differ_after_training_step(
         self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor
     ) -> None:

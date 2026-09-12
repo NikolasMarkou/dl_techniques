@@ -146,8 +146,17 @@ class LoRAAdapter(keras.layers.Layer):
         3-D shape as if it were a convolution kernel's
         ``(receptive_field, fan_in, fan_out)``, which would read
         ``num_occurrences`` as a spatial extent and scale every slice
-        incorrectly. Initializing slice-by-slice instead makes the stacked
-        tensor equivalent to ``num_occurrences`` independent 2-D weights.
+        incorrectly. Each slice's initializer is also a fresh
+        :func:`dl_techniques.initializers.clone.clone_initializer` clone of
+        ``kernel_initializer``, not the same resolved instance reused across
+        the loop -- a shared seedless Keras 3 initializer instance is
+        stateless-deterministic and replays the identical sample at every
+        call of the same shape, which previously made every occurrence's
+        ``A`` slice bit-identical (measured: ``A[i] == A[j]`` for all
+        ``i != j``; see
+        ``plan-2026-09-12T075714-035fd488/D-007``). Initializing slice-by-slice
+        with independent clones makes the stacked tensor equivalent to
+        ``num_occurrences`` genuinely independent 2-D weights.
     """
 
     def __init__(
@@ -221,8 +230,22 @@ class LoRAAdapter(keras.layers.Layer):
             # Apply the 2-D initializer independently to every occurrence's
             # own (input_dim, rank) slice -- see the class Note on why the
             # stacked 3-D shape must not be handed to the initializer as-is.
+            #
+            # DECISION plan-2026-09-12T075714-035fd488/D-007
+            # A single initializer INSTANCE is stateless-deterministic: every
+            # call with the same shape replays the same underlying sample
+            # (dl_techniques.initializers.clone.clone_initializer module
+            # docstring, measured). Calling `a_initializer_fn` directly in
+            # this loop (the original implementation) therefore produced
+            # `num_occurrences` BIT-IDENTICAL slices, not independent ones --
+            # every occurrence read the same rank-`r` subspace of `x` at init
+            # (review-iter-1.md concern 3). Do NOT call `a_initializer_fn`
+            # directly here again -- clone a fresh initializer per slice so
+            # each occurrence draws its own sample.
             slices = [
-                a_initializer_fn(shape=(shape[1], shape[2]), dtype=dtype)
+                clone_initializer(a_initializer_fn)(
+                    shape=(shape[1], shape[2]), dtype=dtype
+                )
                 for _ in range(shape[0])
             ]
             return keras.ops.stack(slices, axis=0)
