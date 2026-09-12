@@ -20,7 +20,13 @@ is built. Pass ``pre_shifted=True`` when the batch already comes pre-shifted
 relative to ``input_ids``): ``train_step``/``test_step`` then use the
 batch's own ``(x, y)`` unchanged instead of shifting again, with
 ``loss_weights=None`` since the packed pipeline never emits an
-``attention_mask``.
+``attention_mask``. Pass ``loss_fn`` (a ``keras.losses.Loss`` instance) to
+fully replace the default cross-entropy computation -- e.g. a focal-loss
+or label-smoothed variant a trainer's config selects. When set,
+``compute_loss`` delegates entirely to ``loss_fn(y, y_pred,
+sample_weight=sample_weight)`` -- a single call, since a
+``keras.losses.Loss`` already implements its own reduction, so the class's
+own masked-mean logic is not stacked on top of it.
 
 References:
     - Bengio et al., 2003. A Neural Probabilistic Language Model. JMLR 3:1137-1155.
@@ -79,6 +85,16 @@ class CausalLanguageModel(keras.Model):
     target. ``loss_weights`` defaults to ``None`` under this flag, since the
     packed pipeline never emits an ``attention_mask`` (no padding by
     construction) -- there is nothing to derive a mask from.
+
+    Injectable loss: with ``loss_fn`` set to a ``keras.losses.Loss``
+    instance, ``compute_loss`` delegates to it entirely instead of the
+    default hardcoded ``SparseCategoricalCrossentropy`` -- one call,
+    ``loss_fn(y, y_pred, sample_weight=sample_weight)``, since the loss
+    object already implements its own reduction. This exists for callers
+    whose trainer configures a non-default loss family (e.g. a focal
+    variant, or a non-zero ``label_smoothing``) that the default CE cannot
+    reproduce. Defaults to ``None``, preserving the original hardcoded-CE
+    behavior exactly.
 
     The perplexity tracker averages ``exp(batch_loss)`` over batches, which by
     Jensen's inequality is an upper bound on corpus perplexity. Exponentiate
@@ -210,6 +226,16 @@ class CausalLanguageModel(keras.Model):
         of shifting it again via ``_prepare_inputs_and_labels``.
         ``loss_weights`` is then always ``None``. Defaults to False,
         preserving the original internal-shift contract.
+    :param loss_fn: An optional ``keras.losses.Loss`` instance that fully
+        replaces ``compute_loss``'s default hardcoded
+        ``SparseCategoricalCrossentropy`` computation. When set,
+        ``compute_loss`` returns ``loss_fn(y, y_pred,
+        sample_weight=sample_weight)`` directly -- a single call, since the
+        loss object already implements its own reduction; the class's own
+        masked-mean logic is not additionally applied. Defaults to ``None``,
+        preserving the original hardcoded-CE contract exactly. Intended for
+        a trainer whose config selects a non-default loss family (e.g. a
+        focal loss, or CE with ``label_smoothing`` set).
     :param verify_causality: Whether to probe the backbone for future leakage at
         build time. Defaults to True.
     :param causality_tolerance: Maximum tolerated absolute change at a past
@@ -234,6 +260,7 @@ class CausalLanguageModel(keras.Model):
         tie_weights: bool = True,
         skip_head: bool = False,
         pre_shifted: bool = False,
+        loss_fn: Optional[keras.losses.Loss] = None,
         verify_causality: bool = True,
         causality_tolerance: float = 0.0,
         **kwargs: Any,
@@ -248,6 +275,7 @@ class CausalLanguageModel(keras.Model):
         self.tie_weights = tie_weights
         self.skip_head = skip_head
         self.pre_shifted = pre_shifted
+        self.loss_fn = loss_fn
         self.verify_causality = verify_causality
         self.causality_tolerance = causality_tolerance
 
@@ -697,10 +725,21 @@ class CausalLanguageModel(keras.Model):
             plain mean over every position.
         :return: Scalar loss.
         """
-        loss_fn = keras.losses.SparseCategoricalCrossentropy(
+        # DECISION plan-2026-09-12T195532-422091c3/D-007: gemma/qwen already
+        # support --loss-type focal/label-smoothing via create_clm_loss_fn;
+        # the default hardcoded CE below cannot reproduce either, so do NOT
+        # migrate them onto this class without this injection point -- that
+        # would silently regress a working feature. See decisions.md D-007.
+        if self.loss_fn is not None:
+            # `keras.losses.Loss.__call__` already implements its own
+            # reduction -- a single call, not stacked with the masked-mean
+            # logic below, which would double-reduce.
+            return self.loss_fn(y, y_pred, sample_weight=sample_weight)
+
+        default_loss_fn = keras.losses.SparseCategoricalCrossentropy(
             from_logits=True, reduction="none"
         )
-        loss = loss_fn(y, y_pred)
+        loss = default_loss_fn(y, y_pred)
 
         if sample_weight is not None:
             sample_weight = ops.cast(sample_weight, dtype=loss.dtype)
@@ -724,6 +763,11 @@ class CausalLanguageModel(keras.Model):
                 "tie_weights": self.tie_weights,
                 "skip_head": self.skip_head,
                 "pre_shifted": self.pre_shifted,
+                "loss_fn": (
+                    keras.losses.serialize(self.loss_fn)
+                    if self.loss_fn is not None
+                    else None
+                ),
                 "verify_causality": self.verify_causality,
                 "causality_tolerance": self.causality_tolerance,
             }
@@ -739,6 +783,12 @@ class CausalLanguageModel(keras.Model):
         """
         backbone_config = config.pop("backbone")
         backbone = keras.saving.deserialize_keras_object(backbone_config)
-        return cls(backbone=backbone, **config)
+        loss_fn_config = config.pop("loss_fn", None)
+        loss_fn = (
+            keras.losses.deserialize(loss_fn_config)
+            if loss_fn_config is not None
+            else None
+        )
+        return cls(backbone=backbone, loss_fn=loss_fn, **config)
 
 # ---------------------------------------------------------------------

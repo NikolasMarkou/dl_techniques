@@ -801,5 +801,143 @@ class TestPreShifted:
         assert clm_model.pre_shifted is False
 
 
+@keras.saving.register_keras_serializable()
+class ScaledCELoss(keras.losses.Loss):
+    """A trivial ``keras.losses.Loss`` that scales plain CE by a known
+    constant -- distinguishable from the default CE by a fixed, predictable
+    ratio, so two models fed the identical batch can be told apart by more
+    than "the numbers differ somehow"."""
+
+    def __init__(self, scale=10.0, **kwargs):
+        super().__init__(**kwargs)
+        self.scale = scale
+        self._ce = keras.losses.SparseCategoricalCrossentropy(
+            from_logits=True, reduction="sum_over_batch_size"
+        )
+
+    def call(self, y_true, y_pred):
+        return self._ce(y_true, y_pred) * self.scale
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"scale": self.scale})
+        return config
+
+
+class TestLossFn:
+    """``loss_fn`` (D-007/step 2.5) fully replaces ``compute_loss``'s default
+    hardcoded cross-entropy when set, so gemma/qwen's ``--loss-type
+    focal``/``--label-smoothing`` config path -- neither of which the
+    default CE can reproduce -- survives migration onto
+    ``CausalLanguageModel``.
+
+    The RED-proof for this flag is not "the flag exists" but "the flag is
+    actually CONSULTED by `train_step`/`test_step`, not silently ignored" --
+    exactly the failure mode this step guards against (e.g. if `loss_fn`
+    were wired into `model.compile(loss=...)` instead, which `train_step`
+    never reads). `ScaledCELoss` multiplies CE by a KNOWN constant, so the
+    two models' losses on the identical batch must differ by exactly that
+    ratio, not merely "some amount".
+    """
+
+    def test_loss_fn_default_is_none(self, clm_model):
+        """The additive flag defaults None, matching prior behavior."""
+        assert clm_model.loss_fn is None
+
+    def test_loss_fn_is_actually_consulted_by_compute_loss(self, mock_backbone, sample_inputs):
+        """Two models, identical backbone/inputs, differing only by
+        `loss_fn` -- the injected loss must change the computed loss by
+        exactly its known scale factor, proving `compute_loss` reads
+        `self.loss_fn` rather than ignoring it or reading `compile(loss=...)`.
+        """
+        default_model = CausalLanguageModel(
+            backbone=mock_backbone, vocab_size=1000, verify_causality=False
+        )
+        scaled_backbone = MockCausalBackbone(hidden_size=64, vocab_size=1000)
+        scaled_model = CausalLanguageModel(
+            backbone=scaled_backbone,
+            vocab_size=1000,
+            loss_fn=ScaledCELoss(scale=10.0),
+            verify_causality=False,
+        )
+
+        # Same weights on both backbones, so both produce identical logits
+        # for the identical input -- any difference in the reported loss is
+        # attributable ONLY to `loss_fn`, not to a difference in `y_pred`.
+        _ = default_model(sample_inputs)
+        _ = scaled_model(sample_inputs)
+        scaled_backbone.set_weights(mock_backbone.get_weights())
+
+        x, y, mask = default_model._prepare_inputs_and_labels(sample_inputs)
+        default_logits = default_model._backbone_forward(x, training=False)
+        default_logits = default_model._apply_output_head(default_logits)
+        scaled_logits = scaled_model._backbone_forward(x, training=False)
+        scaled_logits = scaled_model._apply_output_head(scaled_logits)
+
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(default_logits),
+            ops.convert_to_numpy(scaled_logits),
+            atol=1e-5,
+            rtol=1e-5,
+        )
+
+        default_loss = float(
+            default_model.compute_loss(y=y, y_pred=default_logits, sample_weight=mask)
+        )
+        scaled_loss = float(
+            scaled_model.compute_loss(y=y, y_pred=scaled_logits, sample_weight=mask)
+        )
+
+        assert default_loss != pytest.approx(scaled_loss, rel=1e-3), (
+            "loss_fn must be CONSULTED by compute_loss -- identical logits "
+            "under a 10x-scaling injected loss must NOT produce the same "
+            "loss value as the default."
+        )
+        np.testing.assert_allclose(scaled_loss, default_loss * 10.0, rtol=1e-3)
+
+    def test_loss_fn_via_train_step_end_to_end(self, mock_backbone, sample_inputs):
+        """The same distinguishing check, but through `train_step` itself --
+        the actual call site gemma/qwen's migrated trainer will exercise."""
+        default_model = CausalLanguageModel(
+            backbone=mock_backbone, vocab_size=1000, verify_causality=False
+        )
+        scaled_backbone = MockCausalBackbone(hidden_size=64, vocab_size=1000)
+        scaled_model = CausalLanguageModel(
+            backbone=scaled_backbone,
+            vocab_size=1000,
+            loss_fn=ScaledCELoss(scale=10.0),
+            verify_causality=False,
+        )
+        default_model.compile(optimizer="adam")
+        scaled_model.compile(optimizer="adam")
+        _ = default_model(sample_inputs)
+        _ = scaled_model(sample_inputs)
+        scaled_backbone.set_weights(mock_backbone.get_weights())
+
+        default_loss = float(default_model.test_step(sample_inputs)["loss"])
+        scaled_loss = float(scaled_model.test_step(sample_inputs)["loss"])
+
+        np.testing.assert_allclose(scaled_loss, default_loss * 10.0, rtol=1e-3)
+
+    def test_loss_fn_survives_get_config_roundtrip(self, mock_backbone):
+        model = CausalLanguageModel(
+            backbone=mock_backbone,
+            vocab_size=1000,
+            loss_fn=ScaledCELoss(scale=3.0),
+            verify_causality=False,
+        )
+        config = model.get_config()
+        assert config["loss_fn"] is not None
+        model2 = CausalLanguageModel.from_config(config)
+        assert isinstance(model2.loss_fn, ScaledCELoss)
+        assert model2.loss_fn.scale == 3.0
+
+    def test_loss_fn_none_survives_get_config_roundtrip(self, clm_model):
+        config = clm_model.get_config()
+        assert config["loss_fn"] is None
+        model2 = CausalLanguageModel.from_config(config)
+        assert model2.loss_fn is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
