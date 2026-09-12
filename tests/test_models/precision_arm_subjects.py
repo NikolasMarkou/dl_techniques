@@ -338,7 +338,19 @@ def _b_gpt2():
                 max_seq_len=32)
 
 
-_sub("gpt2", _b_gpt2, lambda: _ids(64, 2, 16))
+# ``expected_compute_dtype="float32"``: MEASURED -- ``gpt2``'s tied LM head goes
+# through `dl_techniques.utils.tied_embeddings.tied_embedding_logits`, which
+# deliberately floors a narrower-than-float32 matmul result (mixed_float16's
+# natural float16) up to float32 for loss-facing numerical stability. This is a
+# RULING, following the `ideogram4` precedent below, not an exemption: the
+# assertion still runs, it just checks the documented dtype instead of the
+# charged default. ``dtype_exempt_outputs=(1,)``: ``call()`` returns
+# ``{"logits": ..., "last_hidden_state": ...}`` -- only ``logits`` (index 0) is
+# the pinned tied-embedding output; ``last_hidden_state`` (index 1) is the
+# decoder's own activation and correctly stays at the charged ``float16``
+# compute dtype, MEASURED. See `plan-2026-09-12T123331-28fd855f`'s decisions.md D-005.
+_sub("gpt2", _b_gpt2, lambda: _ids(64, 2, 16), expected_compute_dtype="float32",
+     dtype_exempt_outputs=(1,))
 
 
 def _b_gemma():
@@ -396,7 +408,16 @@ def _b_wave_field():
     return create_wave_field_llm("small", vocab_size=64)
 
 
-_sub("wave_field", _b_wave_field, lambda: _ids(64, 2, 16))
+# ``expected_compute_dtype="float32"``: MEASURED -- same reason as ``gpt2``
+# above, ``wave_field``'s tied LM head is unconditional (no untied path) and
+# goes through the same `tied_embedding_logits` float32 floor.
+# ``dtype_exempt_outputs=(1,)``: same shape as ``gpt2`` -- ``call()`` returns
+# ``{"logits": ..., "last_hidden_state": ...}``, and only ``logits`` (index 0)
+# is the pinned tied-embedding output; ``last_hidden_state`` correctly stays
+# at the charged ``float16`` compute dtype, MEASURED. See
+# `plan-2026-09-12T123331-28fd855f`'s decisions.md D-005.
+_sub("wave_field", _b_wave_field, lambda: _ids(64, 2, 16),
+     expected_compute_dtype="float32", dtype_exempt_outputs=(1,))
 
 
 def _b_masked_language_model():
@@ -610,12 +631,20 @@ def _b_nano_vlm():
     )
 
 
+# ``expected_compute_dtype="float32"``: MEASURED -- this subject's config
+# (`text_component_type` defaults to `'decoder'`, `use_shared_embedding`
+# defaults to `True`) reaches the tied branch in `NanoVLM.call()`
+# unconditionally, which as of the D-005 completion-fix goes through
+# `dl_techniques.utils.tied_embeddings.tied_embedding_logits` -- the same
+# float32 floor documented for ``gpt2``/``wave_field`` above. See
+# `plan-2026-09-12T123331-28fd855f`'s decisions.md D-005.
 _sub("nano_vlm", _b_nano_vlm,
      lambda: {"images": _f32(1, 32, 32, 3), "text_tokens": _ids(64, 1, 16)},
      # ``allowed_none_grads=1``: MEASURED IDENTICAL under float32 -- the same
      # single variable, ``shared_output_projection/kernel``, is ``None`` in
      # BOTH arms (fp16 normsum 2.867185e-01, float32 2.706649e-01).
-     allowed_none_grads=1)
+     allowed_none_grads=1,
+     expected_compute_dtype="float32")
 
 
 def _b_video_jepa():

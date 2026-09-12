@@ -516,3 +516,30 @@ class TestBlockInputRank:
             f"The blocks take (B, seq_len, D) natively — do not reintroduce "
             f"the caller-side expand_dims(axis=1)/squeeze(axis=1)."
         )
+
+
+class TestCliffordNetLMTiedLogitsDtype:
+    """`plan-2026-09-12T123331-28fd855f`'s D-005 completion-fix (task 6) wires
+    the tied branch through `tied_embedding_logits`, which floors a
+    narrower-than-float32 matmul result up to float32 for loss-facing
+    numerical stability. This class pins that under a real forward pass,
+    mirroring `tests/test_utils/test_tied_embeddings.py`'s
+    `TestMixedFloat16RealForwardPass`."""
+
+    def test_tied_logits_are_float32_under_mixed_float16(self, tiny_config):
+        previous = keras.mixed_precision.global_policy().name
+        try:
+            keras.mixed_precision.set_global_policy("mixed_float16")
+            model = CliffordNetLM(**tiny_config)
+            ids = _random_ids((2, 16), tiny_config["vocab_size"])
+
+            out = model(ids, training=False)
+            logits = out["logits"]
+
+            assert model.tie_word_embeddings is True
+            assert str(logits.dtype) == "<dtype: 'float32'>", (
+                f"expected float32 tied logits under mixed_float16, got "
+                f"{logits.dtype}"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)

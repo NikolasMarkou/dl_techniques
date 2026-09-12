@@ -152,6 +152,35 @@ def test_shared_embedding_is_really_tied():
     )
 
 
+def test_tied_logits_are_float32_under_mixed_float16():
+    """`plan-2026-09-12T123331-28fd855f`'s D-005 completion-fix (task 6) wires
+    both tied-embedding call sites (`call()` and `generate()`) through
+    `tied_embedding_logits`, which floors a narrower-than-float32 matmul
+    result up to float32 for loss-facing numerical stability -- the same
+    floor pinned for `gpt2`/`wave_field`/`cliffordnet` elsewhere. This is why
+    `nano_vlm` carries an `expected_compute_dtype="float32"` pin in
+    `tests/test_models/precision_arm_subjects.py`."""
+    previous = keras.mixed_precision.global_policy().name
+    try:
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        model = create_nanovlm(variant="mini", vocab_size=256)
+        assert model.use_shared_embedding is True
+        assert model.text_component_type == "decoder"
+
+        b, t = 2, 16
+        inputs = {
+            "images": np.random.rand(b, 224, 224, 3).astype("float32"),
+            "text_tokens": np.random.randint(0, 256, (b, t)).astype("int32"),
+        }
+        logits = model(inputs, training=False)
+
+        assert str(logits.dtype) == "<dtype: 'float32'>", (
+            f"expected float32 tied logits under mixed_float16, got {logits.dtype}"
+        )
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

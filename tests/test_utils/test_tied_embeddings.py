@@ -1,12 +1,16 @@
 """Contract for ``dl_techniques.utils.tied_embeddings.tied_embedding_logits``.
 
-The shared helper backing all 5 weight-tied LM-head sites in
-``models/language/`` (``gpt2``, ``hnet``, ``wave_field``, ``zamba2``,
-``masked_language_model``). See ``plans/plan-2026-09-12T123331-28fd855f``'s
+The shared helper backing the weight-tied LM-head sites in ``models/``
+(``gpt2``, ``hnet``, ``wave_field``, ``zamba2``, ``masked_language_model``,
+and -- as of the D-005 completion-fix -- ``vision/cliffordnet/lm.py`` and
+``vision_language/nano_vlm``). See ``plans/plan-2026-09-12T123331-28fd855f``'s
 ``decisions.md`` D-002 (why this helper exists), D-003 (the CRITICAL
-mixed-precision regression an adversarial review caught) and D-004 (the
+mixed-precision regression an adversarial review caught), D-004 (the
 real-measurement correction of D-003's own diagnosis: an operand cast is a
-no-op under ``AutocastScope``, and the RESULT must be cast instead).
+no-op under ``AutocastScope``, and the RESULT must be cast instead) and D-005
+(the unconditional result-cast broke 2 repo-wide precision-arm guards and
+silently downcast float64; the fix is a FLOOR semantic that only promotes a
+narrower-than-float32 result).
 
 The ``mixed_float16`` assertions below run a REAL ``model(x)`` forward pass
 through an actual Keras ``Model`` -- never a bare function call on
@@ -14,6 +18,12 @@ hand-built tensors -- because D-004 measured that a bare-tensor probe cannot
 see the ``AutocastScope`` effect that makes an operand-level cast a no-op in
 practice. A bare-tensor probe is exactly the instrument that led the earlier,
 now-superseded revision of this helper to the wrong fix.
+
+``TestRealModelForwardPass`` (D-005 task 4) goes one step further and
+forward-passes the ACTUAL ``HNet`` and ``CausalLanguageModel`` classes, not
+just the test-local ``_TiedLogitsModel`` stand-in above -- closing the gap
+pass-2 review concern 4 found: the "proven on all 5 sites" claim previously
+had no committed artifact reproducing it for any real model class.
 """
 
 import numpy as np
@@ -189,6 +199,137 @@ class TestMixedFloat16RealForwardPass:
         logits = model(input_ids)
 
         assert np.isfinite(keras.ops.convert_to_numpy(logits)).all()
+
+
+class TestFloat64Preserved:
+    """D-005: the floor semantic must NOT touch a float64 caller -- an
+    unconditional cast (D-004's original fix) silently downcasts float64 to
+    float32, a latent collision with this repo's `assert_float64_arm`
+    instrument (`precision_arm_oracle.py`), which is documented to catch
+    exactly a hard-coded float32 constant / cast island."""
+
+    def test_float64_input_stays_float64(self):
+        rng = np.random.default_rng(2)
+        hidden = keras.ops.convert_to_tensor(
+            rng.normal(size=(2, 5, 8)).astype(np.float64)
+        )
+        table = keras.ops.convert_to_tensor(
+            rng.normal(size=(32, 8)).astype(np.float64)
+        )
+
+        got = tied_embedding_logits(hidden, table)
+
+        dtype_name = getattr(got.dtype, "name", None) or str(got.dtype)
+        assert dtype_name == "float64", (
+            f"expected float64 to be preserved (floor semantic only promotes "
+            f"narrower-than-float32), got {got.dtype}"
+        )
+
+    def test_float64_with_bias_stays_float64(self):
+        rng = np.random.default_rng(3)
+        hidden = keras.ops.convert_to_tensor(
+            rng.normal(size=(2, 5, 8)).astype(np.float64)
+        )
+        table = keras.ops.convert_to_tensor(
+            rng.normal(size=(32, 8)).astype(np.float64)
+        )
+        bias = keras.ops.convert_to_tensor(rng.normal(size=(32,)).astype(np.float64))
+
+        got = tied_embedding_logits(hidden, table, bias=bias)
+
+        dtype_name = getattr(got.dtype, "name", None) or str(got.dtype)
+        assert dtype_name == "float64"
+
+
+class TestRealModelForwardPass:
+    """D-005 task 4: forward-pass the ACTUAL `HNet` and `CausalLanguageModel`
+    classes (not the test-local `_TiedLogitsModel` stand-in), closing the
+    pass-2 review concern that "proven on all 5 sites" had no committed
+    artifact reproducing the claim for any real model class.
+    """
+
+    def test_hnet_tied_branch_returns_float32_under_mixed_float16(
+        self, restore_global_policy
+    ):
+        from dl_techniques.models.language.hnet.config import (
+            AttnSpec, HNetArchConfig, SSMSpec,
+        )
+        from dl_techniques.models.language.hnet.model import HNet
+
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        arch_config = HNetArchConfig(
+            arch_layout=["m1", ["m1"], "m1"],
+            d_model=[16, 16],
+            d_intermediate=[0, 0],
+            vocab_size=32,
+            ssm_cfg=SSMSpec(d_conv=4, expand=2, d_state=8),
+            attn_cfg=AttnSpec(
+                num_heads=(2, 2), rotary_emb_dim=(4, 4), window_size=(-1, -1),
+            ),
+        )
+        # `tie_word_embeddings=True` passed explicitly: `arch_config.tie_embeddings`
+        # defaults to `False`, so the tied branch is not reached without it.
+        model = HNet(
+            arch_config=arch_config, tie_word_embeddings=True, max_seq_len=16,
+            headdim=16,
+        )
+        input_ids = keras.random.randint((2, 16), minval=0, maxval=32, dtype="int32")
+
+        logits = model(input_ids)
+        logits_tensor = logits["logits"] if isinstance(logits, dict) else logits
+
+        assert model.tie_word_embeddings is True
+        assert str(logits_tensor.dtype) == "<dtype: 'float32'>", (
+            f"expected float32 tied logits from a real HNet, got {logits_tensor.dtype}"
+        )
+
+    def test_clm_tied_branch_returns_float32_under_mixed_float16(
+        self, restore_global_policy
+    ):
+        from dl_techniques.models.language.masked_language_model.clm import (
+            CausalLanguageModel,
+        )
+
+        keras.mixed_precision.set_global_policy("mixed_float16")
+
+        class _MockCausalBackbone(keras.Model):
+            """Minimal causal-shaped backbone exposing `hidden_size` and a
+            `last_hidden_state` output, matching the repo's own
+            `tests/test_models/test_masked_language_model/test_clm.py`
+            `MockCausalBackbone` construction quirk: the embedding must be
+            built (reachable) before `CausalLanguageModel.build`'s
+            tie-resolution looks for it."""
+
+            def __init__(self, hidden_size=16, vocab_size=32, **kwargs):
+                super().__init__(**kwargs)
+                self.hidden_size = hidden_size
+                self.vocab_size = vocab_size
+                self.token_embeddings = keras.layers.Embedding(vocab_size, hidden_size)
+                self.dense = keras.layers.Dense(hidden_size)
+
+            def build(self, input_shape):
+                shape = input_shape["input_ids"] if isinstance(input_shape, dict) else input_shape
+                self.token_embeddings.build(shape)
+                self.dense.build((None, shape[-1], self.hidden_size))
+                super().build(input_shape)
+
+            def call(self, inputs, training=False):
+                x = self.token_embeddings(inputs["input_ids"])
+                x = self.dense(x)
+                return {"last_hidden_state": x}
+
+        backbone = _MockCausalBackbone(hidden_size=16, vocab_size=32)
+        model = CausalLanguageModel(backbone=backbone, vocab_size=32, tie_weights=True)
+        input_ids = keras.random.randint((2, 12), minval=0, maxval=32, dtype="int32")
+
+        outputs = model({"input_ids": input_ids})
+        logits_tensor = outputs["logits"] if isinstance(outputs, dict) else outputs
+
+        assert model.use_weight_tying is True
+        assert str(logits_tensor.dtype) == "<dtype: 'float32'>", (
+            f"expected float32 tied logits from a real CausalLanguageModel, "
+            f"got {logits_tensor.dtype}"
+        )
 
 
 class TestTheGuardIsProvenRed:

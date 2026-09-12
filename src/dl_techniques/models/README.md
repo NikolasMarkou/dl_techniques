@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **91 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **93 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (91 of 91 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (93 of 93 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -21,7 +21,7 @@ from dl_techniques.models import resnet                               # no - not
 ```
 
 Family-level re-exports were considered and rejected: `import dl_techniques.models.vision`
-would then eagerly construct all 35 vision packages — the whole Keras/TensorFlow import cost
+would then eagerly construct all 41 vision packages — the whole Keras/TensorFlow import cost
 of the family to reach one model — and it opens a circular-import surface between packages
 that share layers. The family `__init__.py` files carry a docstring listing their members and
 nothing else. `time_series/` is the single exception; it predates this layout, has 7 children
@@ -35,7 +35,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **39** | image backbones, detectors, segmenters, denoisers, generators |
+| [`vision/`](vision/) | **41** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 18 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **10** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
@@ -47,9 +47,9 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **90** | |
+| **Sum** | **93** | |
 
-### `vision/` (39)
+### `vision/` (41)
 
 | Package | |
 |---|---|
@@ -80,6 +80,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `lewm/` | latent-energy world model |
 | `masked_autoencoder/` | MAE |
 | `mobilenet/` | MobileNet V1, V2, V3, V4 |
+| `omnipoint/` | OmniPoint camera-agnostic monocular metric point-cloud model |
 | `resnet/` | ResNet architectures |
 | `squeezenet/` | SqueezeNet |
 | `super_resolution/pft_sr/` | PFT-SR progressive focused transformer |

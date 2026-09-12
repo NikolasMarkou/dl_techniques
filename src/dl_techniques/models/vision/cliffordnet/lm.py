@@ -46,6 +46,7 @@ from dl_techniques.layers.geometric.clifford_block import (
 )
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 
 # ---------------------------------------------------------------------------
 
@@ -374,11 +375,9 @@ class CliffordNetLM(keras.Model):
         if self.head_dropout is not None:
             x = self.head_dropout(x, training=training)
         if self.tie_word_embeddings:
-            logits = keras.ops.matmul(
-                x, keras.ops.transpose(self.token_embedding.embeddings),
+            logits = tied_embedding_logits(
+                x, self.token_embedding.embeddings, bias=self.output_bias,
             )
-            if self.output_bias is not None:
-                logits = logits + self.output_bias
         else:
             logits = self.output_proj(x)
 

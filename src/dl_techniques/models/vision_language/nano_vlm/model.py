@@ -52,6 +52,7 @@ from dl_techniques.layers.transformers.text_encoder import TextEncoder
 from dl_techniques.layers.fusion.multimodal_fusion import MultiModalFusion, FusionStrategy
 from dl_techniques.layers.transformers.vision_encoder import VisionEncoder, create_vision_encoder
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -533,12 +534,18 @@ class NanoVLM(keras.Model):
 
         # DECISION plan_2026-06-15_2a23a001/D-001: tie embeddings at call time via
         # matmul against the transposed embedding table, never by reassigning a built layer's weight. See decisions.md.
+        # DECISION plan-2026-09-12T123331-28fd855f/D-005: the matmul/transpose
+        # EXPRESSION is consolidated into the shared `tied_embedding_logits`
+        # helper (see decisions.md D-005 task 6); this does NOT contradict the
+        # D-001 anchor above -- the tie is still resolved at call time via a
+        # matmul against the transposed table, never by reassigning a built
+        # layer's weight. See decisions.md D-005.
         if (self.use_shared_embedding and
                 self.text_component_type == 'decoder' and
                 hasattr(self.text_component, 'word_embeddings')):
-            logits = ops.matmul(
+            logits = tied_embedding_logits(
                 combined_features,
-                ops.transpose(self.text_component.word_embeddings.embeddings)
+                self.text_component.word_embeddings.embeddings,
             )
         else:
             logits = self.output_projection(combined_features)
@@ -618,13 +625,14 @@ class NanoVLM(keras.Model):
             combined = ops.concatenate([vision_fused, text_fused], axis=1)
 
             # Get logits and sample next token
-            # Shared-embedding tie at call time (mirrors call(); see D-001 anchor above).
+            # Shared-embedding tie at call time (mirrors call(); see D-001 and
+            # D-005 anchors above).
             if (self.use_shared_embedding and
                     self.text_component_type == 'decoder' and
                     hasattr(self.text_component, 'word_embeddings')):
-                logits = ops.matmul(
+                logits = tied_embedding_logits(
                     combined,
-                    ops.transpose(self.text_component.word_embeddings.embeddings)
+                    self.text_component.word_embeddings.embeddings,
                 )
             else:
                 logits = self.output_projection(combined)

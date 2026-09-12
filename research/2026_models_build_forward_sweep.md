@@ -140,7 +140,7 @@ Each item is a candidate for a future dedicated fix plan. Grouped by likely root
 11. **jepa** — no top-level `keras.Model`; only `JEPAEncoder` / `JEPAPredictor` layers. *`models/jepa/encoder.py`.* — **STALE** (2026-08-14): there is no `models/jepa/` package; the correct path is `src/dl_techniques/models/vision/video_jepa/encoder.py`. Disposition and verdict unaffected. Fix hint: add a thin `keras.Model` wrapper / factory that assembles encoder+predictor (or document it as a sub-package of `video_jepa` and remove the smoke-test expectation). Disposition: `skip`, not `xfail`.
 
 ### Out-of-scope / separately-tracked (not counted in the 11 above)
-- **fftnet/SpectreHead** — triple-dead: `tf.signal.rfft(axis=)` TypeError + absent `ops.complex` (`models/vision/fftnet/components.py:746,754,775`). Dedicated plan; NOT exercised this sweep. fftnet vision path is healthy.
+- **fftnet/SpectreHead** — triple-dead: `tf.signal.rfft(axis=)` TypeError + absent `ops.complex` (was `models/fftnet/components.py:746,754,775` at the time of this sweep). Dedicated plan; NOT exercised this sweep. fftnet vision path is healthy. **STALE citation** (2026-09-12): `components.py` no longer exists — commit `a6b894da5` deleted it outright (9 dead classes including `SpectreHead`, zero non-test consumers); the current `models/vision/fftnet/` package holds only `model.py`, the healthy vision path this bullet already names. The historical finding stands; the file:line pointer does not.
 
 ---
 
