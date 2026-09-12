@@ -31,9 +31,10 @@ untrained BatchNorm makes an inference-mode fp16 arm measure the initializer
 rather than the dtype (D-065).
 """
 
+import keras
 import pytest
 
-from .precision_arm_oracle import assert_precision_arm
+from .precision_arm_oracle import assert_precision_arm, default_call
 from .precision_arm_subjects import CHARGED_PACKAGES, SUBJECTS, subject_names
 
 
@@ -61,3 +62,35 @@ def test_the_package_runs_under_mixed_float16(name):
     # edit that loosens the oracle cannot make this file silently trivial.
     assert reports["mixed_float16"]["model_policy"] == "mixed_float16"
     assert reports["float32"]["model_policy"] == "float32"
+
+
+# DECISION plan-2026-09-12T123331-28fd855f/D-006
+@pytest.mark.parametrize("name", ["gpt2", "wave_field"])
+def test_exempting_logits_still_charges_last_hidden_state(name):
+    """Regression guard for review pass 3's mutation probe (D-006).
+
+    The step-2.2 completion-fix registered ``dtype_exempt_outputs=(1,)`` for
+    ``gpt2``/``wave_field`` -- exempting index 1 (``last_hidden_state``, a
+    real float16 activation) instead of index 0 (``logits``, the
+    intentionally-float32 tied output). That inversion made the arm BLIND to
+    a cast-island on ``last_hidden_state``: forcing it to float32 left the
+    assertion GREEN. Step 2.3 inverted the exemption to index 0. This test
+    reproduces the exact mutation and requires it to go RED, so a future
+    edit cannot silently re-invert the index without failing here first.
+    """
+    build, make_inputs, kwargs = SUBJECTS[name]
+
+    def call_with_mutated_last_hidden_state(model, inputs, training):
+        outputs = default_call(model, inputs, training)
+        mutated = dict(outputs)
+        mutated["last_hidden_state"] = keras.ops.cast(
+            mutated["last_hidden_state"], "float32"
+        )
+        return mutated
+
+    mutated_kwargs = dict(kwargs)
+    mutated_kwargs["call_fn"] = call_with_mutated_last_hidden_state
+
+    with pytest.raises(AssertionError):
+        assert_precision_arm(build=build, make_inputs=make_inputs,
+                             **mutated_kwargs)

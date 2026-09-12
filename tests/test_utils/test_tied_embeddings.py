@@ -331,6 +331,53 @@ class TestRealModelForwardPass:
             f"got {logits_tensor.dtype}"
         )
 
+    def test_gpt2_tied_logits_are_float32_under_mixed_float16(
+        self, restore_global_policy
+    ):
+        """DECISION plan-2026-09-12T123331-28fd855f/D-006.
+
+        Closes the gap the step-2.3 exemption fix opens: `precision_arm`'s
+        ``dtype_exempt_outputs=(0,)`` for ``gpt2`` now SKIPS checking
+        ``logits`` dtype (it exempts the pinned tied output so
+        ``last_hidden_state`` stays charged), so the "logits are float32"
+        claim needs its own direct assertion here instead.
+        """
+        from dl_techniques.models.language.gpt2 import GPT2
+
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        model = GPT2(vocab_size=64, embed_dim=32, depth=1, num_heads=2,
+                    max_seq_len=32)
+        input_ids = keras.random.randint((2, 16), minval=0, maxval=64, dtype="int32")
+
+        outputs = model(input_ids)
+        logits_tensor = outputs["logits"] if isinstance(outputs, dict) else outputs
+
+        assert str(logits_tensor.dtype) == "<dtype: 'float32'>", (
+            f"expected float32 tied logits from a real GPT2, got {logits_tensor.dtype}"
+        )
+
+    def test_wave_field_tied_logits_are_float32_under_mixed_float16(
+        self, restore_global_policy
+    ):
+        """DECISION plan-2026-09-12T123331-28fd855f/D-006. Same reason as the
+        ``gpt2`` test above -- ``wave_field``'s precision-arm pin also
+        exempts ``logits`` (index 0), so this direct assertion is the only
+        committed artifact proving its tied output is float32.
+        """
+        from dl_techniques.models.language.wave_field import create_wave_field_llm
+
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        model = create_wave_field_llm("small", vocab_size=64)
+        input_ids = keras.random.randint((2, 16), minval=0, maxval=64, dtype="int32")
+
+        outputs = model(input_ids)
+        logits_tensor = outputs["logits"] if isinstance(outputs, dict) else outputs
+
+        assert str(logits_tensor.dtype) == "<dtype: 'float32'>", (
+            f"expected float32 tied logits from a real wave_field model, "
+            f"got {logits_tensor.dtype}"
+        )
+
 
 class TestTheGuardIsProvenRed:
     """Meta-test: proves `TestMixedFloat16RealForwardPass` actually

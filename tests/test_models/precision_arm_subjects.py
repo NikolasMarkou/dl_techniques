@@ -338,19 +338,26 @@ def _b_gpt2():
                 max_seq_len=32)
 
 
-# ``expected_compute_dtype="float32"``: MEASURED -- ``gpt2``'s tied LM head goes
-# through `dl_techniques.utils.tied_embeddings.tied_embedding_logits`, which
+# DECISION plan-2026-09-12T123331-28fd855f/D-006
+# ``dtype_exempt_outputs=(0,)``: ``call()`` returns
+# ``{"logits": ..., "last_hidden_state": ...}`` (index 0, index 1 respectively,
+# MEASURED dict-insertion order). ``logits`` (index 0) is the pinned
+# tied-embedding output -- it goes through
+# `dl_techniques.utils.tied_embeddings.tied_embedding_logits`, which
 # deliberately floors a narrower-than-float32 matmul result (mixed_float16's
-# natural float16) up to float32 for loss-facing numerical stability. This is a
-# RULING, following the `ideogram4` precedent below, not an exemption: the
-# assertion still runs, it just checks the documented dtype instead of the
-# charged default. ``dtype_exempt_outputs=(1,)``: ``call()`` returns
-# ``{"logits": ..., "last_hidden_state": ...}`` -- only ``logits`` (index 0) is
-# the pinned tied-embedding output; ``last_hidden_state`` (index 1) is the
-# decoder's own activation and correctly stays at the charged ``float16``
-# compute dtype, MEASURED. See `plan-2026-09-12T123331-28fd855f`'s decisions.md D-005.
-_sub("gpt2", _b_gpt2, lambda: _ids(64, 2, 16), expected_compute_dtype="float32",
-     dtype_exempt_outputs=(1,))
+# natural float16) up to float32 for loss-facing numerical stability -- so it
+# is EXCLUDED from the part-2 float-dtype check here (there is no
+# per-output expected-dtype map; see the oracle's ``dtype_exempt_outputs``
+# docstring) and is instead asserted float32 directly by
+# ``tests/test_utils/test_tied_embeddings.py::TestRealModelForwardPass``.
+# Do NOT exempt index 1 (``last_hidden_state``) instead and pin
+# ``expected_compute_dtype="float32"`` here -- that was the step-2.2 bug
+# (review pass 3 / D-006): it silently stopped charging the decoder's own
+# float16 activation, and a mutation probe forcing ``last_hidden_state`` to
+# float32 left this assertion GREEN. Leaving ``expected_compute_dtype`` at
+# its float16 default with only index 0 exempted keeps ``last_hidden_state``
+# charged, MEASURED. See decisions.md D-006.
+_sub("gpt2", _b_gpt2, lambda: _ids(64, 2, 16), dtype_exempt_outputs=(0,))
 
 
 def _b_gemma():
@@ -408,16 +415,19 @@ def _b_wave_field():
     return create_wave_field_llm("small", vocab_size=64)
 
 
-# ``expected_compute_dtype="float32"``: MEASURED -- same reason as ``gpt2``
-# above, ``wave_field``'s tied LM head is unconditional (no untied path) and
-# goes through the same `tied_embedding_logits` float32 floor.
-# ``dtype_exempt_outputs=(1,)``: same shape as ``gpt2`` -- ``call()`` returns
-# ``{"logits": ..., "last_hidden_state": ...}``, and only ``logits`` (index 0)
-# is the pinned tied-embedding output; ``last_hidden_state`` correctly stays
-# at the charged ``float16`` compute dtype, MEASURED. See
-# `plan-2026-09-12T123331-28fd855f`'s decisions.md D-005.
+# DECISION plan-2026-09-12T123331-28fd855f/D-006
+# ``dtype_exempt_outputs=(0,)``: same reason and shape as ``gpt2`` above --
+# ``wave_field``'s tied LM head is unconditional (no untied path) and goes
+# through the same `tied_embedding_logits` float32 floor. ``call()`` returns
+# ``{"logits": ..., "last_hidden_state": ...}``; only ``logits`` (index 0) is
+# exempted here (asserted float32 separately by
+# ``test_tied_embeddings.py::TestRealModelForwardPass``) and
+# ``last_hidden_state`` (index 1) stays charged at the float16 default. Do
+# NOT exempt index 1 with ``expected_compute_dtype="float32"`` instead -- see
+# the ``gpt2`` comment above for the step-2.2 bug this replaces. See
+# decisions.md D-006.
 _sub("wave_field", _b_wave_field, lambda: _ids(64, 2, 16),
-     expected_compute_dtype="float32", dtype_exempt_outputs=(1,))
+     dtype_exempt_outputs=(0,))
 
 
 def _b_masked_language_model():
