@@ -40,7 +40,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------

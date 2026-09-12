@@ -7,7 +7,7 @@ LM-head projection (`logits = hidden_states @ embedding_weights.T`, optionally
 `wave_field/model.py`, `zamba2/model.py` (unconditional there -- it has no
 untied path) and `masked_language_model/clm.py` (the one site with a learned
 bias). This module extracts the one expression that is genuinely identical
-across all five -- the matmul/transpose/cast -- into a single helper.
+across all five -- the matmul/transpose/float32-cast -- into a single helper.
 
 The surrounding tying-resolution control flow (eager `__init__`/`build`-time
 resolution at four sites vs. `clm.py`'s deferred `build()`/`call()`-time
@@ -27,6 +27,20 @@ import keras
 # (eager __init__/build-time at 4 sites vs. clm.py's deferred build()/call()
 # with a learned bias) differs enough that unifying it would be a leaky
 # abstraction. See decisions.md D-002.
+#
+# DECISION plan-2026-09-12T123331-28fd855f/D-004
+# WHAT NOT TO DO: do not cast either OPERAND (hidden_states or
+# embedding_weights) to try to control the output dtype under mixed
+# precision. D-003 assumed a float32 embedding table needs an explicit
+# operand cast to matmul against a float16 hidden state; D-004 measured
+# (real eager forward pass through a model's own `AutocastScope`, not an
+# isolated `ops.matmul` probe) that this premise is false in this repo's
+# Keras 3.8.0/TF 2.18 stack -- `AutocastScope` already autocasts the
+# embedding variable to the compute dtype at the point it is read inside
+# `call()`, so both operands are already float16 under `mixed_float16`
+# regardless of any operand-level cast. The only mechanism proven to
+# produce float32 real-call output is casting the matmul RESULT (below),
+# after the matmul, unconditionally. See decisions.md D-004.
 def tied_embedding_logits(
         hidden_states: keras.KerasTensor,
         embedding_weights: keras.KerasTensor,
@@ -35,13 +49,23 @@ def tied_embedding_logits(
 ) -> keras.KerasTensor:
     """Project hidden states to vocabulary logits through a tied embedding table.
 
-    Casts ``embedding_weights`` to ``hidden_states.dtype`` before the matmul.
-    This cast is a no-op at ``float32`` (the default dtype policy, same dtype
-    in and out) and load-bearing under ``mixed_float16``: the embedding table
-    is created at ``float32`` (Keras variables default to the layer's
-    variable dtype regardless of the compute dtype policy), and a
-    ``float32`` weight matrix cannot matmul against a ``float16`` hidden
-    state without an explicit cast.
+    Operand dtypes are used as-is -- neither ``hidden_states`` nor
+    ``embedding_weights`` is cast before the matmul. Under this repo's Keras
+    3.8.0/TF 2.18 stack, a real forward pass runs inside the calling layer's
+    ``AutocastScope``, which already autocasts the embedding variable to the
+    active compute dtype at the point it is read; an explicit operand cast
+    measures as a no-op there (see ``decisions.md`` D-004 for the real-model
+    measurement method -- an actual eager forward pass, not an isolated
+    ``keras.ops.matmul`` probe, which is what led an earlier revision of this
+    docstring to the wrong conclusion).
+
+    The matmul's RESULT is unconditionally cast to ``float32`` -- and any
+    ``bias`` is added after that cast -- so this function ALWAYS returns
+    ``float32`` logits regardless of the input dtype. This mirrors the
+    standard Keras mixed-precision convention of keeping loss-facing outputs
+    (softmax / cross-entropy inputs) in ``float32`` even when the rest of the
+    model runs its compute in a lower-precision policy, the same convention a
+    final ``Dense`` layer follows under a ``mixed_float16`` dtype policy.
 
     :param hidden_states: Backbone output, shape ``(batch, seq_len, hidden_size)``.
     :type hidden_states: keras.KerasTensor
@@ -50,13 +74,14 @@ def tied_embedding_logits(
     :type embedding_weights: keras.KerasTensor
     :param bias: Optional additive bias, broadcastable against the output
         logits shape ``(batch, seq_len, vocab_size)``. Not added when ``None``
-        (the default).
+        (the default). Added after the float32 cast, so it is safe under any
+        input dtype.
     :type bias: keras.KerasTensor, optional
-    :return: Logits of shape ``(batch, seq_len, vocab_size)``.
+    :return: Logits of shape ``(batch, seq_len, vocab_size)``, always ``float32``.
     :rtype: keras.KerasTensor
     """
-    embedding_weights = keras.ops.cast(embedding_weights, hidden_states.dtype)
     logits = keras.ops.matmul(hidden_states, keras.ops.transpose(embedding_weights))
+    logits = keras.ops.cast(logits, "float32")
     if bias is not None:
-        logits = logits + bias
+        logits = logits + keras.ops.cast(bias, "float32")
     return logits
