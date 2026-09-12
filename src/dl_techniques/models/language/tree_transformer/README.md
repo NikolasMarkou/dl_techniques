@@ -231,7 +231,6 @@ mlm = MaskedLanguageModel(
     encoder=encoder,
     vocab_size=100277,
     mask_token_id=100264,
-    pad_token_id=100266,
     mask_ratio=0.15,
 )
 
@@ -252,7 +251,7 @@ Use the `create_tree_transformer_with_head` factory to easily build a model for 
 ```python
 import keras
 from dl_techniques.models.language.tree_transformer import create_tree_transformer_with_head
-from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 
 # 1. Define the task configuration
 ner_config = NLPTaskConfig(
