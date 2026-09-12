@@ -48,6 +48,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_or_raise
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -378,9 +379,7 @@ class GPT2(keras.Model):
         if self.tie_word_embeddings:
             # Weight-tied LM head: logits = hidden_states @ embedding_weights.T
             embedding_weights = self.decoder.word_embeddings.embeddings
-            logits = ops.matmul(
-                hidden_states, ops.transpose(embedding_weights),
-            )
+            logits = tied_embedding_logits(hidden_states, embedding_weights)
         else:
             logits = self.lm_head(hidden_states)
 

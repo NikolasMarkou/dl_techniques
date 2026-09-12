@@ -35,6 +35,7 @@ from typing import Dict, Any, Optional, Union, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 
 # ---------------------------------------------------------------------
 
@@ -466,11 +467,9 @@ class CausalLanguageModel(keras.Model):
             self.build(hidden_states.shape)
 
         if self.use_weight_tying and self.embedding_weights is not None:
-            logits = ops.matmul(
-                hidden_states,
-                ops.transpose(self.embedding_weights)
+            logits = tied_embedding_logits(
+                hidden_states, self.embedding_weights, bias=self.output_bias
             )
-            logits = logits + self.output_bias
         else:
             logits = self.output_layer(hidden_states)
 

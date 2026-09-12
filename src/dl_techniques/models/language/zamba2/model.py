@@ -146,6 +146,7 @@ MODEL_VARIANTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.models.language.zamba2.layers import (
     Zamba2MambaBlock,
@@ -662,10 +663,7 @@ class Zamba2Model(keras.Model):
         hidden_states = self.final_norm(hidden_states, training=training)
 
         embedding_weights = self.embedding.weights[0]
-        logits = keras.ops.matmul(
-            hidden_states, keras.ops.transpose(embedding_weights)
-        )
-        return logits
+        return tied_embedding_logits(hidden_states, embedding_weights)
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]

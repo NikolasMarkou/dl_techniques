@@ -43,6 +43,7 @@ from dl_techniques.models.language.hnet.losses import (
 )
 from dl_techniques.models.language.hnet.stage import HNetStage
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 
 # ---------------------------------------------------------------------
 
@@ -464,9 +465,7 @@ class HNet(keras.Model):
 
         if self.tie_word_embeddings:
             embedding_weights = self.embeddings.embeddings
-            return keras.ops.matmul(
-                hidden, keras.ops.transpose(keras.ops.cast(embedding_weights, hidden.dtype))
-            )
+            return tied_embedding_logits(hidden, embedding_weights)
         return self.lm_head(hidden)
 
     def compute_output_shape(

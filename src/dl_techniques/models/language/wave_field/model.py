@@ -49,6 +49,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_or_raise
+from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.attention.wave_field_attention import (
     WaveFieldAttention,
@@ -703,7 +704,7 @@ class WaveFieldLLM(keras.Model):
 
         if self.tie_word_embeddings:
             embedding_weights = self.token_embeddings.embeddings
-            logits = ops.matmul(x, ops.transpose(embedding_weights))
+            logits = tied_embedding_logits(x, embedding_weights)
         else:
             logits = self.lm_head(x)
 
