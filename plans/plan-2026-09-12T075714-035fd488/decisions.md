@@ -106,6 +106,10 @@ are written explicitly in steps 2-4 rather than assumed.
 **Reasoning**: Getting this backwards would silently change the model's
 effective capacity with no shape-level signal (the exact §12.7 failure
 shape this plan's Pre-Mortem names).
+**Anchor-Refs**: `src/dl_techniques/models/language/zamba2/model.py:550`
+(the `# DECISION plan-2026-09-12T075714-035fd488/D-005` comment marking the
+per-`'m'`-position fresh-build vs. per-`'g'`-position round-robin-reuse
+split inside `Zamba2Model.__init__`).
 
 ## D-009 | EXECUTE iter-1/step-6.2 (completion fix) | 2026-09-12
 **Context**: `review-iter-1.md` concern 2 measured that no shipped
