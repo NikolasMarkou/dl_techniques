@@ -1193,19 +1193,35 @@ class TestZamba2Model:
         )
 
     def test_lora_deltas_differ_across_g_occurrences(
-        self, model_config: Dict[str, Any], sample_ids: keras.KerasTensor
+        self, sample_ids: keras.KerasTensor
     ) -> None:
-        """The decisive composition guard for invariant 2 (plan.md): capture
-        the per-'g'-position hidden-state delta attributable to the shared
-        MLP mem-block's LoRA-selected occurrence, and assert they are NOT
-        all equal. The Section 12.7 "stack reads only the last occurrence"
-        failure would collapse every occurrence's delta onto one, which a
-        shape-only or finiteness-only check cannot detect.
+        """The decisive composition guard for invariant 2 (plan.md).
+
+        review-iter-1.md concern 5 measured the ORIGINAL version of this
+        test as vacuous: its fixture had ``num_mem_blocks == count('g') ==
+        2``, so the two occurrences routed to two DIFFERENT physical blocks
+        (never to the same one at two occurrence indices), the model was
+        never trained, and ``LoRAAdapter.b`` is zero-init -- so the asserted
+        difference came entirely from the two blocks' distinct base
+        ``up_proj``/``down_proj`` weights, not from occurrence threading.
+        This version fixes all three: ONE physical block invoked at 2
+        occurrences (``num_mem_blocks=1``, 2 'g' entries), a warm-up
+        optimizer step so ``B`` moves off zero, THEN the decisive
+        assertion -- plus a monkeypatch RED-proof showing the assertion
+        actually fails if ``occurrence_idx`` is forced to 0 everywhere.
         """
+        model_config: Dict[str, Any] = {
+            "vocab_size": 37,
+            "hidden_size": 32,
+            "layer_mapping": ["m", "m", "g", "m", "m", "g"],
+            "num_mem_blocks": 1,  # ONE physical block, both 'g's route here
+            "num_heads": 4,
+            "max_seq_len": 16,
+            "d_state": 16,
+            "headdim": 8,
+        }
         model = Zamba2Model(**model_config)
         _ = model(sample_ids)  # build
-
-        hidden = keras.random.normal(shape=(2, 6, model_config["hidden_size"]))
 
         g_occurrences = [
             (ref_idx, occurrence_idx)
@@ -1213,45 +1229,78 @@ class TestZamba2Model:
             if kind == "g"
         ]
         assert len(g_occurrences) == 2
+        ref_idx_0, occ_0 = g_occurrences[0]
+        ref_idx_1, occ_1 = g_occurrences[1]
+        assert ref_idx_0 == ref_idx_1, (
+            "fixture must route both 'g' positions to the SAME physical "
+            "block -- num_mem_blocks=1 with 2 'g' entries guarantees this"
+        )
+        assert occ_0 != occ_1
 
-        mlp_block = model.mem_mlp_blocks[g_occurrences[0][0]]
-        # Both occurrences in this fixture route to DIFFERENT physical
-        # slots (num_mem_blocks == num 'g' occurrences == 2), so compare
-        # each slot's own LoRA delta at its own occurrence index.
-        outputs = []
-        for ref_idx, occurrence_idx in g_occurrences:
-            block = model.mem_mlp_blocks[ref_idx]
-            outputs.append(
-                keras.ops.convert_to_numpy(
-                    block(hidden, occurrence_idx=occurrence_idx)
-                )
+        # Warm-up: one optimizer step so LoRA's zero-init B actually moves.
+        optimizer = keras.optimizers.Adam(learning_rate=1e-1)
+        with tf.GradientTape() as tape:
+            logits = model(sample_ids, training=True)
+            loss = keras.ops.mean(keras.ops.square(logits))
+        grads = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(
+            (g, v) for g, v in zip(grads, model.trainable_variables) if g is not None
+        )
+
+        hidden = keras.random.normal(shape=(2, 6, model_config["hidden_size"]))
+        block = model.mem_mlp_blocks[ref_idx_0]
+
+        def _assert_occurrences_differ(occ_a: int, occ_b: int) -> None:
+            out_a = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occ_a))
+            out_b = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occ_b))
+            assert not np.allclose(out_a, out_b, rtol=0, atol=1e-5), (
+                f"occurrence_idx={occ_a} and occurrence_idx={occ_b} produced "
+                "identical MLP mem-block outputs on the same physical block "
+                "-- the LoRA delta is not actually varying per occurrence."
             )
 
-        assert not np.allclose(outputs[0], outputs[1], rtol=0, atol=1e-5), (
-            "Two different 'g' occurrences produced identical MLP mem-block "
-            "outputs -- the LoRA delta is not actually varying per occurrence "
-            "(the 'stack reads only the last block' failure shape)."
-        )
+        # The decisive guard: it passes on the REAL, distinct occurrence
+        # indices threaded by model.call() via self._position_info.
+        _assert_occurrences_differ(occ_0, occ_1)
+
+        # RED-proof: a hardcoded-occurrence_idx defect in `call()` would
+        # route every 'g' position through `self._position_info`'s stored
+        # occurrence index -- the same mechanism this guard reads. Force it
+        # to 0 everywhere (the exact degenerate shape of that defect) and
+        # confirm the SAME assertion now fails, proving this guard can
+        # actually see the failure it is named for, not just test-writer
+        # luck on these two particular occurrence indices.
+        original_position_info = model._position_info
+        try:
+            model._position_info = [
+                (kind, ref_idx, 0 if kind == "g" else occurrence_idx)
+                for kind, ref_idx, occurrence_idx in original_position_info
+            ]
+            with pytest.raises(AssertionError):
+                _assert_occurrences_differ(0, 0)
+        finally:
+            model._position_info = original_position_info
+
+        # Restore confirmed: the real assertion still passes afterwards.
+        _assert_occurrences_differ(occ_0, occ_1)
 
         # Same occurrence, same physical block, called twice -> identical
         # (no hidden per-call-order state leak).
-        ref_idx, occurrence_idx = g_occurrences[0]
-        block = model.mem_mlp_blocks[ref_idx]
-        repeat_a = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occurrence_idx))
-        repeat_b = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occurrence_idx))
+        repeat_a = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occ_0))
+        repeat_b = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occ_0))
         np.testing.assert_allclose(repeat_a, repeat_b, rtol=0, atol=0)
 
 
 class TestBuildLayerMapping:
     """Guards for the private :func:`_build_layer_mapping` helper that
     derives every shipped variant's ``layer_mapping`` from its
-    ``num_mamba_blocks``/``num_mem_blocks`` counts -- step 6's own "the two
-    counts cannot drift apart" contract."""
+    ``num_mamba_blocks``/``num_mem_block_occurrences`` counts -- step 6's own
+    "the two counts cannot drift apart" contract."""
 
     def test_counts_match_inputs(self) -> None:
         """The returned list has exactly the requested number of 'm' and 'g'
         entries, for every shipped variant's own (num_mamba, num_g) pair."""
-        for num_mamba, num_g in [(8, 2), (18, 6), (24, 8)]:
+        for num_mamba, num_g in [(8, 4), (18, 6), (24, 8)]:
             mapping = _build_layer_mapping(num_mamba, num_g)
             assert mapping.count("m") == num_mamba
             assert mapping.count("g") == num_g
@@ -1296,6 +1345,93 @@ class TestModelVariants:
         assert model.num_mem_blocks == config["num_mem_blocks"]
         logits_np = keras.ops.convert_to_numpy(logits)
         assert np.all(np.isfinite(logits_np))
+
+    @pytest.mark.parametrize("variant", list(MODEL_VARIANTS.keys()))
+    def test_occurrences_exceed_physical_blocks(self, variant: str) -> None:
+        """Every shipped variant's occurrence count must STRICTLY EXCEED
+        its physical mem-block count, so round-robin reuse actually
+        happens on the public factory path.
+
+        review-iter-1.md concern 2: ``from_variant`` used to pass
+        ``num_mem_blocks`` (the physical count) as the occurrence count to
+        ``_build_layer_mapping``, so ``count('g') == num_mem_blocks`` for
+        every variant and no physical block was ever invoked more than
+        once. This guard pins the fix: D-009's split table key.
+        """
+        config = MODEL_VARIANTS[variant]
+        num_mem_blocks = config["num_mem_blocks"]
+        num_mem_block_occurrences = config["num_mem_block_occurrences"]
+        assert num_mem_block_occurrences > num_mem_blocks, (
+            f"{variant}: num_mem_block_occurrences="
+            f"{num_mem_block_occurrences} must exceed num_mem_blocks="
+            f"{num_mem_blocks}, or this variant never reuses a physical "
+            "mem-block at more than one depth"
+        )
+
+    def test_shipped_variant_reuses_a_physical_block_at_two_depths(self) -> None:
+        """A REAL shipped variant (not a synthetic small test model) must
+        invoke the SAME physical mem-block instance at >=2 depths.
+
+        review-iter-1.md concern 2's blind spot: the only smoke run used
+        ``zamba2_mini`` before D-009, which had zero reuse; this guard
+        exercises the actual public factory path (``create_zamba2``) so a
+        future regression in ``from_variant``'s argument wiring is caught
+        here, not only in a hand-built ``Zamba2Model(...)`` fixture.
+        """
+        model = create_zamba2("zamba2_mini")
+
+        g_positions = [
+            (ref_idx, occurrence_idx)
+            for kind, ref_idx, occurrence_idx in model._position_info
+            if kind == "g"
+        ]
+        assert len(g_positions) == MODEL_VARIANTS["zamba2_mini"][
+            "num_mem_block_occurrences"
+        ]
+
+        ref_indices = [ref_idx for ref_idx, _ in g_positions]
+        # With num_mem_blocks=2 and 4 occurrences, round-robin visits each
+        # physical slot exactly twice -- some ref_idx must repeat.
+        assert len(set(ref_indices)) < len(ref_indices), (
+            "zamba2_mini's 4 'g' occurrences used 4 distinct physical "
+            "slots -- no round-robin reuse happened on the shipped variant"
+        )
+
+        repeated_ref_idx = max(set(ref_indices), key=ref_indices.count)
+        assert ref_indices.count(repeated_ref_idx) >= 2
+
+        # The SAME physical block instance, by object identity.
+        occurrences_at_repeated_slot = [
+            occurrence_idx
+            for ref_idx, occurrence_idx in g_positions
+            if ref_idx == repeated_ref_idx
+        ]
+        assert len(occurrences_at_repeated_slot) >= 2
+        attn_block = model.mem_attention_blocks[repeated_ref_idx]
+        mlp_block = model.mem_mlp_blocks[repeated_ref_idx]
+
+        ids = keras.random.randint((2, 6), 0, model.vocab_size, dtype="int32")
+        _ = model(ids)  # build every sub-layer
+
+        # Same object, called at >=2 depths: weight identity AND a live,
+        # distinct LoRA occurrence at each of those depths.
+        assert model.mem_attention_blocks[repeated_ref_idx] is attn_block
+        assert model.mem_mlp_blocks[repeated_ref_idx] is mlp_block
+
+        hidden = keras.random.normal(shape=(2, 6, model.hidden_size))
+        occ_a, occ_b = occurrences_at_repeated_slot[:2]
+        out_a = keras.ops.convert_to_numpy(
+            mlp_block(hidden, occurrence_idx=occ_a)
+        )
+        out_b = keras.ops.convert_to_numpy(
+            mlp_block(hidden, occurrence_idx=occ_b)
+        )
+        # Pre-training the LoRA delta is exactly zero at both occurrences
+        # (B is zero-init), so the base-path outputs agree -- this asserts
+        # reuse (the SAME instance answers for both occurrences), not yet
+        # per-occurrence divergence (covered by
+        # test_lora_deltas_differ_across_g_occurrences above).
+        np.testing.assert_allclose(out_a, out_b, rtol=0, atol=0)
 
     def test_unknown_variant_raises(self) -> None:
         """An unrecognized variant name raises ValueError naming the

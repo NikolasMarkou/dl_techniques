@@ -67,8 +67,21 @@ def _build_layer_mapping(num_mamba_blocks: int, num_shared_occurrences: int) -> 
 #: paper's own 2.7B/7B table (explicit non-goal, decisions.md D-002).
 #: Keyed by short variant name; each value is a kwargs dict accepted by
 #: :class:`Zamba2Model`'s constructor (minus ``layer_mapping``, which is
-#: derived below from ``num_mamba_blocks``/``num_mem_blocks`` so the two
-#: counts can never drift apart).
+#: derived below from ``num_mamba_blocks``/``num_mem_block_occurrences`` so
+#: the counts can never drift apart) plus the table-only
+#: ``num_mem_block_occurrences`` key, popped by :meth:`Zamba2Model.from_variant`
+#: before construction (see D-009).
+#:
+#: ``num_mem_blocks`` is the number of PHYSICAL shared attention+MLP
+#: mem-block pairs the model builds; ``num_mem_block_occurrences`` is the
+#: number of ``'g'`` positions in the derived ``layer_mapping`` -- i.e. how
+#: many times those physical blocks are INVOKED, round-robin, across the
+#: stack. Every shipped variant below has ``num_mem_block_occurrences``
+#: strictly greater than ``num_mem_blocks`` (2x here), so round-robin reuse
+#: actually happens on the public factory path; passing the same value for
+#: both (the original defect, D-009) means every physical block is invoked
+#: exactly once and the round-robin mechanism this package exists to
+#: implement is never exercised by any shipped variant.
 # DECISION plan-2026-09-12T075714-035fd488/D-008
 # WHAT NOT TO DO: do not bind this as a plain `Dict[str, Dict[str, Any]]`
 # literal again. `Zamba2Model.MODEL_VARIANTS = MODEL_VARIANTS` below is a
@@ -89,36 +102,40 @@ MODEL_VARIANTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
         "hidden_size": 256,
         "num_mamba_blocks": 8,
         "num_mem_blocks": 2,
+        "num_mem_block_occurrences": 4,
         "num_heads": 4,
         "max_seq_len": 512,
         "lora_rank": 4,
         "lora_alpha": 8.0,
-        "description": "Zamba2 mini: ~256-dim, 8 Mamba2 blocks, 2 mem-block "
-                        "occurrences -- fast tests/smoke runs.",
+        "description": "Zamba2 mini: ~256-dim, 8 Mamba2 blocks, 2 physical "
+                        "mem-blocks reused at 4 occurrences -- fast "
+                        "tests/smoke runs.",
     },
     "zamba2_small": {
         "vocab_size": DEFAULT_VOCAB_SIZE,
         "hidden_size": 512,
         "num_mamba_blocks": 18,
-        "num_mem_blocks": 6,
+        "num_mem_blocks": 3,
+        "num_mem_block_occurrences": 6,
         "num_heads": 8,
         "max_seq_len": 1024,
         "lora_rank": 8,
         "lora_alpha": 16.0,
-        "description": "Zamba2 small: ~512-dim, 18 Mamba2 blocks, 6 "
-                        "mem-block occurrences.",
+        "description": "Zamba2 small: ~512-dim, 18 Mamba2 blocks, 3 "
+                        "physical mem-blocks reused at 6 occurrences.",
     },
     "zamba2_base": {
         "vocab_size": DEFAULT_VOCAB_SIZE,
         "hidden_size": 768,
         "num_mamba_blocks": 24,
-        "num_mem_blocks": 8,
+        "num_mem_blocks": 4,
+        "num_mem_block_occurrences": 8,
         "num_heads": 12,
         "max_seq_len": 2048,
         "lora_rank": 16,
         "lora_alpha": 32.0,
-        "description": "Zamba2 base: ~768-dim, 24 Mamba2 blocks, 8 "
-                        "mem-block occurrences.",
+        "description": "Zamba2 base: ~768-dim, 24 Mamba2 blocks, 4 "
+                        "physical mem-blocks reused at 8 occurrences.",
     },
     }
 )
@@ -686,11 +703,21 @@ class Zamba2Model(keras.Model):
         ``'zamba2_small'``, ``'zamba2_base'``).
 
         ``layer_mapping`` is derived from the variant's ``num_mamba_blocks``/
-        ``num_mem_blocks`` entries via :func:`_build_layer_mapping` rather
-        than stored literally in the table, so the two counts can never
+        ``num_mem_block_occurrences`` entries via :func:`_build_layer_mapping`
+        rather than stored literally in the table, so the counts can never
         drift out of sync with the list's actual composition. Pass
         ``layer_mapping=...`` in ``overrides`` to bypass this derivation and
         supply an explicit mapping instead.
+
+        ``num_mem_block_occurrences`` (the number of ``'g'`` positions to
+        place) is a table-only key, popped here and never forwarded to
+        :meth:`__init__` -- the constructor's own ``num_mem_blocks`` is the
+        number of PHYSICAL shared blocks, a different, smaller number (see
+        the module-level :data:`MODEL_VARIANTS` docstring comment and
+        decisions.md D-009). Passing ``num_mem_blocks`` itself as the
+        occurrence count, as an earlier revision of this method did, makes
+        every physical block invoked exactly once and defeats round-robin
+        reuse entirely.
 
         :param variant: A key of :data:`MODEL_VARIANTS`.
         :type variant: str
@@ -718,12 +745,22 @@ class Zamba2Model(keras.Model):
 
         config = dict(cls.MODEL_VARIANTS[variant])
         config.pop("description", None)
+        # DECISION plan-2026-09-12T075714-035fd488/D-009
+        # WHAT NOT TO DO: do not pass `num_mem_blocks` (the PHYSICAL block
+        # count) to `_build_layer_mapping` as the occurrence count again.
+        # That was the original defect -- it made `count('g') ==
+        # num_mem_blocks` for every shipped variant, so each physical block
+        # was invoked exactly once and the round-robin reuse this package
+        # exists to implement was never exercised by any public factory
+        # call (review-iter-1.md concern 2). `num_mem_block_occurrences` is
+        # the table-only key carrying the occurrence count; it is popped
+        # here and never forwarded to `cls(**config)`. See decisions.md D-009.
+        num_mem_block_occurrences = config.pop("num_mem_block_occurrences")
 
         if "layer_mapping" not in overrides:
             num_mamba_blocks = config.pop("num_mamba_blocks")
-            num_mem_blocks = config["num_mem_blocks"]
             config["layer_mapping"] = _build_layer_mapping(
-                num_mamba_blocks, num_mem_blocks
+                num_mamba_blocks, num_mem_block_occurrences
             )
         else:
             config.pop("num_mamba_blocks", None)

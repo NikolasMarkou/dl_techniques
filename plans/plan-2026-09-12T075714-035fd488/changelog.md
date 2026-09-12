@@ -37,3 +37,6 @@
 2026-09-12T12:00:00Z | iter-1/step-1.1 | uncommitted | plans/plan-2026-09-12T075714-035fd488/decisions.md | EDIT(+28,-0) | radius:MED(3) | D-007 | record D-007 LoRA A-slice independence fix
 2026-09-12T12:15:00Z | iter-1/step-6.1 | uncommitted | src/dl_techniques/models/language/zamba2/model.py | EDIT(+22,-2) | radius:MED(4) | D-008 | wrap module-level MODEL_VARIANTS in MappingProxyType to clear mutable-default guard
 2026-09-12T12:15:00Z | iter-1/step-6.1 | uncommitted | plans/plan-2026-09-12T075714-035fd488/decisions.md | EDIT(+27,-0) | radius:MED(3) | D-008 | record D-008 MappingProxyType fix
+2026-09-12T13:00:00Z | iter-1/step-6.2 | uncommitted | src/dl_techniques/models/language/zamba2/model.py | EDIT(+50,-15) | radius:MED(3) | D-009 | split MODEL_VARIANTS into physical num_mem_blocks vs table-only num_mem_block_occurrences so round-robin reuse actually happens
+2026-09-12T13:00:00Z | iter-1/step-6.2 | uncommitted | tests/test_models/test_zamba2/test_zamba2.py | EDIT(+160,-42) | radius:MED(5) | D-009 | rewrite vacuous LoRA-differs guard with warm-up+RED-proof; add occurrence>physical-block guards for every variant and a real-variant reuse guard
+2026-09-12T13:00:00Z | iter-1/step-6.2 | uncommitted | plans/plan-2026-09-12T075714-035fd488/decisions.md | EDIT(+38,-0) | radius:LOW(2) | D-009 | record D-009 occurrence/physical-block split

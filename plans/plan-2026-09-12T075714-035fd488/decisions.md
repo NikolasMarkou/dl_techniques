@@ -107,6 +107,46 @@ are written explicitly in steps 2-4 rather than assumed.
 effective capacity with no shape-level signal (the exact §12.7 failure
 shape this plan's Pre-Mortem names).
 
+## D-009 | EXECUTE iter-1/step-6.2 (completion fix) | 2026-09-12
+**Context**: `review-iter-1.md` concern 2 measured that no shipped
+`MODEL_VARIANTS` entry ever reuses a physical mem-block at more than one
+depth: `Zamba2Model.from_variant` called
+`_build_layer_mapping(num_mamba_blocks, config["num_mem_blocks"])`, passing
+the PHYSICAL block count as the OCCURRENCE count, so `count('g') ==
+num_mem_blocks` for every variant (`zamba2_mini` 2/2, `zamba2_small` 6/6,
+`zamba2_base` 8/8 -- reuse-per-block exactly 1.00 everywhere). Every
+physical block was invoked exactly once on the only path any caller
+(`create_zamba2`, the trainer, the one smoke run) actually exercises, which
+defeats the architecture's defining mechanic even though the underlying
+`Zamba2Model.__init__`/round-robin machinery (step 5) was already proven
+correct in isolation.
+**Decision**: Split the table into two distinct keys -- `num_mem_blocks`
+(physical block count, forwarded to the constructor unchanged) and a new,
+table-only `num_mem_block_occurrences` (the `'g'`-count, popped by
+`from_variant` and fed to `_build_layer_mapping`, never forwarded to
+`cls(**config)`). Re-sized all three shipped variants so
+`num_mem_block_occurrences` is exactly 2x `num_mem_blocks` (mini 2->4, small
+3->6 physical->occurrences, base 4->8), i.e. every shipped variant now
+round-robins each physical block across exactly 2 depths.
+**Trade-off**: `num_mem_blocks` for `zamba2_small`/`zamba2_base` is now
+smaller than originally shipped (6->3, 8->4 physical blocks) **at the cost
+of** a small reduction in total shared-block parameter count at those two
+variants (the occurrence count, and therefore the per-occurrence LoRA
+parameter count, is unchanged) -- accepted because the alternative (keeping
+physical counts fixed and only raising occurrences) would have changed
+`layer_mapping` depth/density rather than fixing the reuse ratio, and
+because decisions.md D-002's own original framing described "2/6/8" as
+occurrence counts in the first place, which is what they now are again.
+**Reasoning**: The fix must live in the variant table, not in
+`_build_layer_mapping` itself (which already takes an occurrence-count
+parameter correctly named `num_shared_occurrences`) or in `__init__` (which
+already accepts occurrences > num_mem_blocks correctly) -- `from_variant`'s
+argument-passing was the single wrong wire, re-derived directly from the
+reviewer's own recommendation.
+**Anchor-Refs**: `src/dl_techniques/models/language/zamba2/model.py` (the
+`# DECISION plan-2026-09-12T075714-035fd488/D-009` comment inside
+`Zamba2Model.from_variant`).
+
 ## D-008 | EXECUTE iter-1/step-6.1 (completion fix) | 2026-09-12
 **Context**: `review-iter-1.md` concern 1 measured
 `tests/test_models/test_package_api_contract.py::TestNoMutableDefaults::test_no_mutable_default_anywhere`
