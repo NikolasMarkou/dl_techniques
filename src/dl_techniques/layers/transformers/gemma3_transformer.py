@@ -35,6 +35,10 @@ References:
 import keras
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.activations import gelu_tanh
 from dl_techniques.layers.attention import create_attention_layer

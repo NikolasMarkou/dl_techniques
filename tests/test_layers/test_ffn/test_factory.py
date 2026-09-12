@@ -1429,6 +1429,14 @@ def _b_xlstm_blocks():
     return b.ffn
 
 
+def _b_models_hnet_components():
+    from dl_techniques.models.language.hnet.components import build_mlp
+    # Both call sites: the `d_intermediate=0` derive branch (discarded) and the
+    # `d_intermediate>0` honoured branch (returned).
+    build_mlp(d_model=64)
+    return build_mlp(d_model=64, d_intermediate=256)
+
+
 def _b_adaln_zero():
     from dl_techniques.layers.transformers.adaln_zero import (
         AdaLNZeroConditionalBlock,
@@ -1634,6 +1642,7 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/vision_language/sam/sam3/vitdet.py": _b_models_sam3_vitdet,
     "models/time_series/prism/model.py": _b_models_prism,
     "models/language/tree_transformer/components.py": _b_models_tree_transformer,
+    "models/language/hnet/components.py": _b_models_hnet_components,
 }
 
 

@@ -68,7 +68,7 @@ import pytest
 from dl_techniques.losses.ddpm_hybrid_loss import DDPMHybridLoss
 from dl_techniques.models.vision.dit.model import DiT
 
-from ...numerics import reassociation_atol
+from ...numerics import matmul_precision_atol, reassociation_atol
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,
     assert_value_knob_changes_output,
@@ -434,6 +434,21 @@ class TestUnderEveryDtypePolicy:
 class TestJitCompileAgreesWithEager:
     """``jit_compile=True`` must be the same model, not merely a fast one."""
 
+    # DECISION plan-2026-09-11T160509-2e1049ac/D-001
+    # `reassociation_atol` alone assumes true float32 matmul (see its own docstring);
+    # on this GPU (TF32 on by default) that bound is physically unattainable --
+    # MEASURED predict delta 8.890e-03 vs bound 1.162e-04 (~76.5x over), fit delta
+    # 2.041e-4 vs bound 1.008e-4 (~2.0x over). The `tf32_disabled` fixture used by
+    # sibling suites (`test_linear_attention.py:55`) is NOT the fix here: it lives in
+    # `tests/test_layers/conftest.py` and is unreachable from `tests/test_models/`
+    # (`fixture 'tf32_disabled' not found` -- confirmed live, not assumed). Composing
+    # `matmul_precision_atol` instead -- MEASURING the active device's matmul unit
+    # roundoff rather than requiring a specific regime -- is the same pattern already
+    # used inside `tests/test_models/` at `test_hnet/test_components.py:1027` and
+    # `tests/test_layers/test_dynamic_chunking/test_routing_module.py:131`, and is the
+    # plan's own pre-committed fallback (decisions.md D-001). Do NOT hand-widen the
+    # literal atol -- `tests/numerics.py` forbids that pattern outright, and
+    # `MATMUL_ULP_ALLOWANCE` is pinned.
     @staticmethod
     def _tolerance(scale: float) -> float:
         """Derived from the contraction lengths on the compared path.
@@ -444,14 +459,20 @@ class TestJitCompileAgreesWithEager:
         the attention softmax over ``num_patches`` tokens and the MLP's
         ``mlp_ratio * hidden_size`` -- applied ``depth + 2`` times (the block
         stack, the patch projection and the read-out).
+
+        The two terms bound different mechanisms -- reordering true float32
+        arithmetic versus doing the arithmetic in a narrower matmul format -- and the
+        caller takes the maximum so neither regime loosens the other (see
+        :func:`~tests.numerics.matmul_precision_atol`).
         """
         hidden = TINY["hidden_size"]
         tokens = (TINY["input_size"] // TINY["patch_size"]) ** 2
-        return reassociation_atol(
+        reassociation = reassociation_atol(
             reduction_lengths=(hidden, tokens, int(TINY["mlp_ratio"] * hidden)),
             num_steps=TINY["depth"] + 2,
             scale=scale,
         )
+        return max(reassociation, matmul_precision_atol(scale))
 
     def _compiled(self, jit: bool):
         model = activate(built_model(seed=0))

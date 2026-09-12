@@ -22,6 +22,10 @@ References:
 import keras
 from typing import Optional, Tuple, Literal, Union, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from ..ffn.factory import create_ffn_layer
 from ..norms import create_normalization_layer
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
@@ -32,6 +36,8 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 NormalizationType = Literal[
     'layer_norm', 'rms_norm', 'zero_centered_rms_norm',
     'band_rms', 'adaptive_band_rms', 'dynamic_tanh'
@@ -41,6 +47,7 @@ FFNType = Literal[
     'differential', 'residual', 'orthoglu'
 ]
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.transformers.progressive_focused_transformer")
 class PFTBlock(keras.layers.Layer):
@@ -502,3 +509,5 @@ class PFTBlock(keras.layers.Layer):
         attn_map_shape = (attn_batch, self._num_heads, window_area, window_area)
 
         return output_shape, attn_map_shape
+
+# ---------------------------------------------------------------------

@@ -27,11 +27,16 @@ import keras
 from keras import ops, initializers, regularizers
 from typing import Optional, Any, Tuple, Union, Dict, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from ..ffn import FFNType
 from ..norms import NormalizationType
 from .transformer import TransformerLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.transformers.eomt_transformer")
 class EomtTransformer(keras.layers.Layer):
@@ -429,3 +434,5 @@ class EomtTransformer(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------
