@@ -213,10 +213,49 @@ Validated at construction: `vocab_size > 0`, `0 < mask_ratio <= 1`,
 `initializer_range > 0`, `0 <= mlm_head_dropout_rate < 1`.
 
 `CausalLanguageModel(backbone, vocab_size, initializer_range=0.02, tie_weights=True,
-verify_causality=True, causality_tolerance=0.0)`. Its causality probe runs two forward
+verify_causality=True, causality_tolerance=0.0, skip_head=False, pre_shifted=False,
+loss_fn=None)`. Its causality probe runs two forward
 passes over ids differing at one position and raises `ValueError` if any earlier position
 moved, so a bidirectional backbone fails loudly instead of training to a spectacular,
 meaningless loss.
+
+### 6.1 `CausalLanguageModel`'s production consumers
+
+`CausalLanguageModel` shipped with zero production consumers; `gemma`, `qwen`, and `mamba`
+(Mamba2) now train through it, via three additive constructor flags added for exactly this
+purpose (`plans/plan-2026-09-12T195532-422091c3`, D-001/D-007/D-004):
+
+| Flag | Purpose | Used by |
+|---|---|---|
+| `skip_head` | The backbone already bakes its own head and returns logits directly as a plain tensor (no `hidden_size`, no `last_hidden_state` dict) | gemma, qwen (both `True`); mamba (`False` -- Mamba2 is genuinely headless) |
+| `pre_shifted` | The dataset already shifted `(input_ids, labels)` upstream (e.g. `preprocess_clm_packed_dataset`'s `chunk[:-1]`/`chunk[1:]`), so `train_step`/`test_step` must not shift again | gemma, qwen, mamba (all `True`) |
+| `loss_fn` | An injectable `keras.losses.Loss` that fully replaces the default hardcoded cross-entropy, for a trainer configuring a non-default loss family (e.g. focal loss / label smoothing) `compute_loss`'s own CE cannot reproduce | gemma, qwen, mamba (all pass `create_clm_loss_fn(config)`) |
+
+**hnet is explicitly excluded** from this consolidation: it fails the backbone contract on
+four independent axes -- no `hidden_size` (it has `d_embed`), no dict output with
+`last_hidden_state` (a plain `(B, L, vocab_size)` tensor), a `call(inputs,
+padding_mask=None, training=None)` signature incompatible with the dict-input convention,
+and an `add_loss`-based auxiliary boundary-ratio loss that `compute_loss`'s full override
+would silently DROP rather than aggregate (never reads `self.losses`). No partial migration
+that drops that auxiliary signal is attempted.
+
+**gpt2, wave_field, and zamba2 are explicitly deferred** to a future plan, even though their
+dict-output-with-`last_hidden_state` shape is arguably closer to `CausalLanguageModel`'s
+original headless-backbone contract than gemma/qwen/mamba's plain-tensor output: all three
+are established production trainers with real checkpoints/history and their own
+CLI-contract and run-artifact test suites (unlike gemma/qwen/mamba, created in this same
+plan-lineage with no external consumers), their `hidden_size` attribute presence was never
+confirmed, and a wrapper-shape change to an established trainer carries more risk than to a
+newly-created one.
+
+**Trade-off accepted by this consolidation**: `CausalLanguageModel`'s `train_step`/
+`test_step` are a hand-written `tf.GradientTape` loop -- a pre-existing, already-registered
+exception to the repo's "no custom `train_step`" convention (`plans/SYSTEM.md`
+Invariants), previously with zero production consumers. Gaining 2-3 real consumers
+(gemma, qwen, and mamba as a stretch) widens that exception's footprint and locks
+gemma/qwen/mamba's CLM training path to the TensorFlow backend for as long as they use this
+class -- a cost accepted explicitly (no existing coverage exercises a non-TF backend for any
+of these trainers today) rather than absorbed silently.
 
 ---
 

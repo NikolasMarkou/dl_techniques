@@ -30,6 +30,15 @@ injectable ``loss_fn``) rather than stock ``compile(loss=...)``, since
 ``train_step``/``test_step`` are overridden by that class, not by this
 module.
 
+``config.tie_word_embeddings`` genuinely ties or unties the output head:
+D-008 found this migration initially made the flag inert (``Mamba2`` stores
+its embedding layer as ``self.embedding``, matching none of
+``CausalLanguageModel._locate_embedding_weights``'s name-based fallbacks, so
+tying silently fell back to an untied ``Dense`` regardless of the flag), and
+D-009 fixed it by adding ``Mamba2.get_embedding_matrix()`` (the lookup
+chain's FIRST check) rather than leaving it as documented debt -- see
+``plans/plan-2026-09-12T195532-422091c3/decisions.md`` D-008/D-009.
+
 **No ``ClmPretrainConfig``/``load_train_val_datasets`` reuse.** That
 wrapper wraps every label tensor as ``{"logits": y}`` because its four
 DICT-output callers (GPT-2, wave_field, cliffordnet) already bake an LM
@@ -658,6 +667,15 @@ def build_datasets(
 # plan-2026-09-12T195532-422091c3 for the full supersession framing, and
 # plans/ANCHORS.md's "Retired anchors" section (to be updated at this plan's
 # CLOSE) for the mechanical retirement record.
+#
+# D-008/D-009 FOLLOW-UP: the migration above initially left
+# `config.tie_word_embeddings` inert (D-008 reported it, did not fix it --
+# `Mamba2`'s embedding layer is named `self.embedding`, matching none of
+# `CausalLanguageModel._locate_embedding_weights`'s name-based fallbacks).
+# D-009 (same plan) closed that gap additively via
+# `Mamba2.get_embedding_matrix()` (see mamba_v2.py); genuine weight tying is
+# restored as of that commit, not merely documented as a known gap. See
+# decisions.md D-008/D-009.
 def build_optimizer(
         config: Mamba2TrainingConfig,
         steps_per_epoch: int,
