@@ -1,0 +1,296 @@
+"""ModernBERT Pre-training Script with Masked Language Modeling.
+
+Pre-trains a ModernBERT encoder using MLM on a text dataset (IMDB reviews by
+default). Saves both the full MLM model and the encoder separately for
+downstream fine-tuning.
+
+Cloned from ``train.distilbert.pretrain``, itself cloned from
+``train.bert.pretrain``'s Pattern-3 MLM shape (same ``MaskedLanguageModel``
+wrapper, same ``train.common.nlp`` helpers). Unlike DistilBERT, ModernBERT
+does NOT share ``BertEmbeddings`` with bert/fnet/distilbert -- it builds its
+own RoPE-based ``ModernBertEmbeddings`` internally (see
+``dl_techniques.models.language.modern_bert.model``) -- but this is
+invisible to the trainer: ``ModernBERT`` still exposes ``hidden_size`` and
+``call()`` still returns ``{"last_hidden_state": ...}``, so
+``MaskedLanguageModel`` wraps it exactly like any other encoder. No
+teacher-student distillation loss (not applicable to ModernBERT either).
+Following the bert/fnet/tree_transformer/distilbert non-harmonization
+precedent (``src/train/CLAUDE.md`` "bert / fnet / tree_transformer drifts,
+deliberately not harmonized"), this file does not import from
+``train.bert.pretrain`` or ``train.distilbert.pretrain`` -- small per-model
+config drift is expected, not technical debt.
+
+Default variant is "tiny" (hidden_size=256, 4 layers) -- the SMALLEST
+variant in ``ModernBERT.MODEL_VARIANTS``. "base" (152.7M params) and
+"large" (399.6M params) are documented to raise ``ResourceExhaustedError``
+on constrained hardware
+(``tests/test_models/test_modern_bert/test_the_shipped_variants_can_run.py``
+:6-7) and must never be this trainer's default.
+"""
+
+import argparse
+import os
+
+import keras
+import tensorflow as tf
+from typing import Optional, Tuple
+
+from train.common import setup_gpu, set_seeds
+from train.common.config_io import save_config_json
+from train.common.nlp import (
+    create_tokenizer,
+    load_text_dataset,
+    preprocess_mlm_dataset,
+    create_warmup_lr_schedule,
+    create_nlp_callbacks,
+    evaluate_mlm_model,
+)
+
+from dl_techniques.models.language.modern_bert import ModernBERT
+from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------
+
+
+class ModernBertTrainingConfig:
+    """Configuration for ModernBERT MLM pre-training."""
+
+    # Model. "tiny" is the smallest shipped variant -- never default to
+    # "base"/"large" (documented ResourceExhaustedError risk, see module
+    # docstring).
+    modern_bert_variant: str = "tiny"
+    vocab_size: int = 100277  # Tiktoken cl100k_base
+    max_seq_length: int = 128
+
+    # Tokenizer (Tiktoken cl100k_base) -- ModernBERT has no token-type
+    # embeddings requirement in the trainer's own MLM masking logic, but the
+    # tokenizer still needs CLS/SEP/PAD/MASK ids to decide which positions
+    # are eligible for masking (special_token_ids below), same convention as
+    # bert/fnet/distilbert.
+    encoding_name: str = "cl100k_base"
+    cls_token_id: int = 100264
+    sep_token_id: int = 100265
+    pad_token_id: int = 100266
+    mask_token_id: int = 100267
+
+    # Training
+    batch_size: int = 32
+    num_epochs: int = 3
+    learning_rate: float = 5e-4
+    warmup_ratio: float = 0.1
+    weight_decay: float = 0.01
+
+    # MLM
+    mask_ratio: float = 0.15
+    random_token_ratio: float = 0.1
+    unchanged_ratio: float = 0.1
+
+    # Paths
+    save_dir: str = "results/modern_bert_pretrain"
+
+    # Data
+    dataset_name: str = "imdb_reviews"
+    max_samples: Optional[int] = 10000
+
+    # Analysis
+    run_epoch_analysis: bool = True
+    analysis_start_epoch: int = 1
+    analysis_epoch_frequency: int = 5
+
+
+# ---------------------------------------------------------------------
+# Model Creation
+# ---------------------------------------------------------------------
+
+
+def create_modern_bert_mlm_model(config: ModernBertTrainingConfig) -> MaskedLanguageModel:
+    """Create ModernBERT encoder wrapped in MaskedLanguageModel."""
+    logger.info(f"Creating ModernBERT-{config.modern_bert_variant.upper()} encoder...")
+    encoder = ModernBERT.from_variant(
+        variant=config.modern_bert_variant,
+        vocab_size=config.vocab_size,
+        max_position_embeddings=config.max_seq_length,
+        hidden_dropout_rate=0.1,
+        attention_probs_dropout_rate=0.1,
+    )
+
+    special_token_ids = [
+        config.cls_token_id, config.sep_token_id,
+        config.pad_token_id, config.mask_token_id,
+    ]
+    mlm_model = MaskedLanguageModel(
+        encoder=encoder,
+        vocab_size=config.vocab_size,
+        mask_ratio=config.mask_ratio,
+        mask_token_id=config.mask_token_id,
+        random_token_ratio=config.random_token_ratio,
+        unchanged_ratio=config.unchanged_ratio,
+        special_token_ids=special_token_ids,
+        mlm_head_activation="gelu",
+        initializer_range=0.02,
+        mlm_head_dropout_rate=0.1,
+        layer_norm_eps=1e-12,
+    )
+
+    # Build to count parameters. ModernBERT has no token_type_ids input
+    # requirement from the trainer's side, so the dummy batch is input_ids +
+    # attention_mask only, same as DistilBERT.
+    dummy = {k: tf.ones((1, config.max_seq_length), dtype=tf.int32)
+             for k in ('input_ids', 'attention_mask')}
+    _ = mlm_model(dummy, training=False)
+
+    enc_p, total_p = encoder.count_params(), mlm_model.count_params()
+    logger.info(f"MLM model: {total_p:,} params ({enc_p:,} encoder + {total_p - enc_p:,} head)")
+    return mlm_model
+
+
+# ---------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------
+
+
+def compile_model(mlm_model: MaskedLanguageModel, config: ModernBertTrainingConfig, steps_per_epoch: int):
+    """Compile MLM model with AdamW and warmup schedule.
+
+    Raw ``keras.optimizers.AdamW`` (no ``jit_compile``), matching
+    ``train.bert.pretrain.compile_model``'s own convention exactly (via the
+    same convention ``train.distilbert.pretrain`` already followed) --
+    ``optimizer_builder()`` is not used here because the bert precedent this
+    file clones does not use it either.
+    """
+    lr_schedule = create_warmup_lr_schedule(
+        config.learning_rate, config.num_epochs, steps_per_epoch, config.warmup_ratio,
+    )
+    optimizer = keras.optimizers.AdamW(
+        learning_rate=lr_schedule, weight_decay=config.weight_decay, clipnorm=1.0,
+    )
+    mlm_model.compile(optimizer=optimizer)
+    logger.info(f"Compiled: AdamW, peak_lr={config.learning_rate}, wd={config.weight_decay}")
+
+
+def train_modern_bert_mlm(config: ModernBertTrainingConfig) -> Tuple[MaskedLanguageModel, keras.callbacks.History]:
+    """Run ModernBERT MLM pre-training."""
+    logger.info("=" * 60)
+    logger.info("ModernBERT MLM Pre-training with Tiktoken")
+    logger.info("=" * 60)
+
+    set_seeds(42)
+    os.makedirs(config.save_dir, exist_ok=True)
+
+    preprocessor = create_tokenizer(
+        config.encoding_name, config.max_seq_length,
+        config.cls_token_id, config.sep_token_id,
+        config.pad_token_id, config.mask_token_id,
+    )
+    train_dataset = preprocess_mlm_dataset(
+        load_text_dataset(config.dataset_name, "train", config.max_samples),
+        preprocessor, config.max_seq_length, config.batch_size,
+    )
+    val_dataset = preprocess_mlm_dataset(
+        load_text_dataset(config.dataset_name, "test", config.max_samples),
+        preprocessor, config.max_seq_length, config.batch_size,
+    )
+
+    steps_per_epoch = config.max_samples // config.batch_size if config.max_samples else 1000
+    mlm_model = create_modern_bert_mlm_model(config)
+    compile_model(mlm_model, config, steps_per_epoch)
+    callbacks, results_dir = create_nlp_callbacks(
+        model_name=f"ModernBERT-{config.modern_bert_variant}",
+        results_dir_prefix="modern_bert_pretrain",
+        include_analyzer=config.run_epoch_analysis,
+        analyzer_epoch_frequency=config.analysis_epoch_frequency,
+        analyzer_start_epoch=config.analysis_start_epoch,
+    )
+    # `train.bert.pretrain` (the file this script clones, via
+    # train.distilbert.pretrain) does not write a config.json at all; the
+    # zamba2/gemma/qwen CLM trainers earlier in this plan do
+    # (`save_config_json(config, results_dir, "config.json")`), and this
+    # plan's own Success Criteria #2 requires it of every new trainer
+    # regardless of which exemplar's shape it otherwise follows.
+    save_config_json(config, results_dir, "config.json")
+
+    logger.info("Starting training...")
+    history = mlm_model.fit(
+        train_dataset, epochs=config.num_epochs,
+        callbacks=callbacks, validation_data=val_dataset, verbose=1,
+    )
+    logger.info("Training completed!")
+
+    # Save full MLM model and encoder separately
+    final_path = os.path.join(config.save_dir, "modern_bert_mlm_final_best.keras")
+    mlm_model.save(final_path)
+    encoder_path = os.path.join(config.save_dir, "pretrained_modern_bert_encoder_best.keras")
+    mlm_model.encoder.save(encoder_path)
+
+    # Summary
+    best_epoch = tf.argmin(history.history['val_loss']).numpy()
+    logger.info(
+        f"Best epoch: {best_epoch + 1} "
+        f"(val_loss: {history.history['val_loss'][best_epoch]:.4f}, "
+        f"val_acc: {history.history['val_accuracy'][best_epoch]:.4f})"
+    )
+    logger.info(f"Models saved to: {config.save_dir}")
+    return mlm_model, history
+
+
+# ---------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------
+
+
+# Bound as a plain ALIAS, not a wrapper `def`, matching train.bert.pretrain's
+# own convention for the same shared helper (D-010 in the bert history), and
+# train.distilbert.pretrain's re-adoption of it.
+evaluate_model = evaluate_mlm_model
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
+
+
+def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
+    """Parse CLI arguments. Called first by ``main`` so ``--help`` never
+    touches the GPU, data, or model."""
+    parser = argparse.ArgumentParser(description="ModernBERT MLM Pre-training")
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
+    parser.add_argument('--variant', type=str, default='tiny', help='ModernBERT variant')
+    parser.add_argument('--epochs', type=int, default=3, help='Training epochs')
+    parser.add_argument('--batch-size', type=int, default=32, help='Batch size')
+    parser.add_argument('--max-samples', type=int, default=10000, help='Max training samples')
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list] = None) -> None:
+    """Main entry point for ModernBERT MLM pre-training."""
+    args = parse_arguments(argv)
+
+    setup_gpu(gpu_id=args.gpu)
+
+    config = ModernBertTrainingConfig()
+    config.modern_bert_variant = args.variant
+    config.num_epochs = args.epochs
+    config.batch_size = args.batch_size
+    config.max_samples = args.max_samples
+
+    logger.info(f"Config: variant={config.modern_bert_variant}, epochs={config.num_epochs}, "
+                f"batch_size={config.batch_size}, lr={config.learning_rate}, "
+                f"max_samples={config.max_samples}")
+
+    mlm_model, history = train_modern_bert_mlm(config)
+
+    preprocessor = create_tokenizer(
+        config.encoding_name, config.max_seq_length,
+        config.cls_token_id, config.sep_token_id,
+        config.pad_token_id, config.mask_token_id,
+    )
+    evaluate_model(mlm_model, preprocessor)
+
+    logger.info(f"Pre-training complete! Encoder: {config.save_dir}/pretrained_modern_bert_encoder_best.keras")
+
+
+if __name__ == "__main__":
+    main()
