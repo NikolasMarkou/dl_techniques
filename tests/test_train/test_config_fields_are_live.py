@@ -111,6 +111,7 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/qwen/common.py", "Qwen3TrainingConfig"),
     ("train/distilbert/pretrain.py", "DistilBertTrainingConfig"),
     ("train/modern_bert/pretrain.py", "ModernBertTrainingConfig"),
+    ("train/mini_vec2vec/train_mini_vec2vec.py", "MiniVec2VecTrainingConfig"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
