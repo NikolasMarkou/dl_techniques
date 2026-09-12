@@ -7,7 +7,8 @@ primitives (``Mamba2ResidualBlock``, the attention factory, ``RMSNorm``,
 ``RotaryPositionEmbedding``). Classes are added incrementally; see
 ``plans/plan-2026-09-12T075714-035fd488/plan.md`` Steps 1-4 for the build
 order. :class:`LoRAAdapter` (step 1), :class:`Zamba2SharedAttentionBlock`
-(step 2) and :class:`Zamba2SharedMLPBlock` (step 3) exist so far.
+(step 2), :class:`Zamba2SharedMLPBlock` (step 3) and :class:`Zamba2MambaBlock`
+(step 4) exist so far.
 
 References:
     - Glorioso, P. et al., 2024. Zamba2: A Compact and Fast Hybrid Model.
@@ -30,6 +31,7 @@ from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
 from dl_techniques.layers.attention.factory import create_attention_layer
+from dl_techniques.models.language.mamba.components_v2 import Mamba2ResidualBlock
 
 # ---------------------------------------------------------------------
 
@@ -1021,4 +1023,295 @@ class Zamba2SharedMLPBlock(keras.layers.Layer):
         )
         return config
 
+
 # ---------------------------------------------------------------------
+
+
+@register_dl_technique("dl_techniques.models.zamba2.mamba_block")
+class Zamba2MambaBlock(keras.layers.Layer):
+    """
+    Zamba2's per-depth Mamba2 mixer: a fresh, independently-weighted
+    instance at every ``'m'`` position -- never shared.
+
+    A thin adapter that translates Zamba2's own constructor vocabulary
+    (``d_model``/``d_state``/``d_conv``/``expand``/``headdim``) onto the
+    existing :class:`~dl_techniques.models.language.mamba.components_v2.Mamba2ResidualBlock`,
+    which already supplies the pre-norm RMSNorm and the selective-scan
+    mixer; this class reimplements none of that and owns exactly one
+    sub-layer. It differs from :class:`Zamba2SharedAttentionBlock` and
+    :class:`Zamba2SharedMLPBlock` in the one property that matters for
+    Zamba2's parameter-sharing topology (``decisions.md`` D-005): the
+    decoder builds one new ``Zamba2MambaBlock`` per ``'m'`` position, so no
+    two instances ever share a weight tensor -- the opposite invariant from
+    the two mem-block classes, which are built ``num_mem_blocks`` times
+    total and reused round-robin across many more depth positions.
+
+    ``Mamba2ResidualBlock.call`` returns ``(mamba_output, new_residual)``
+    without adding them -- it leaves the residual open so a *chain* of
+    ``Mamba2ResidualBlock`` instances can close it only at the chain's end.
+    This wrapper is not part of such a chain: Zamba2 interleaves Mamba2
+    mixers with mem-blocks that each already return a closed
+    ``hidden_state``, so this wrapper calls the inner block with
+    ``residual=None`` (making ``new_residual`` exactly the input
+    ``hidden_state``) and closes the residual itself before returning,
+    giving the same closed ``hidden_state -> hidden_state`` call contract
+    as :class:`Zamba2SharedAttentionBlock`/:class:`Zamba2SharedMLPBlock` so
+    the decoder stack (step 5) can call every ``'m'``/``'g'`` position
+    uniformly.
+
+    Architecture:
+
+    .. code-block:: text
+
+        hidden_state [B, S, d_model]
+               │
+               ▼  Mamba2ResidualBlock(hidden_state, residual=None)
+               │     (internally: pre-norm RMSNorm -> Mamba2Layer scan)
+        ┌──────┴──────────────┐
+        ▼                     ▼
+    mamba_output         new_residual
+    [B, S, d_model]      (== hidden_state, residual was None)
+        └─────────(+)────────┘
+                    │
+                    ▼
+             [B, S, d_model]
+
+    :param d_model: Dimensionality of the decoder's hidden state, forwarded
+        to :class:`Mamba2ResidualBlock` as its own ``d_model``. Must be
+        positive.
+    :type d_model: int
+    :param d_state: Dimensionality of the SSM latent state. Forwarded
+        as-is. Defaults to 128 (matches ``Mamba2ResidualBlock``'s default).
+    :type d_state: int
+    :param d_conv: Kernel size of the causal 1D convolution. Forwarded
+        as-is. Defaults to 4.
+    :type d_conv: int
+    :param expand: Expansion factor for the internal dimension. Forwarded
+        as-is. Defaults to 2.
+    :type expand: int
+    :param headdim: Dimensionality of each SSM head. Forwarded as-is.
+        Defaults to 64.
+    :type headdim: int
+    :param d_ssm: Number of dims the SSM runs on; the rest use a gated MLP.
+        When ``None`` (the default) it resolves to ``d_model * expand``,
+        the same default ``Mamba2Layer`` applies internally -- resolved
+        here because ``Mamba2ResidualBlock`` itself has no default for this
+        argument (confirmed against ``components_v2.py``). Must be
+        divisible by ``headdim`` (enforced by the wrapped ``Mamba2Layer``).
+    :type d_ssm: Optional[int]
+    :param ngroups: Forwarded to ``Mamba2ResidualBlock``. Defaults to 1.
+    :type ngroups: int
+    :param norm_epsilon: Epsilon for ``Mamba2ResidualBlock``'s internal
+        pre-norm. Defaults to 1e-5.
+    :type norm_epsilon: float
+    :param rmsnorm: If True, ``Mamba2ResidualBlock``'s pre-norm is an
+        :class:`RMSNorm`; forwarded as-is. Defaults to True.
+    :type rmsnorm: bool
+    :param norm_before_gate: Forwarded to ``Mamba2ResidualBlock``. Defaults
+        to False.
+    :type norm_before_gate: bool
+    :param dt_min: Forwarded to ``Mamba2ResidualBlock``. Defaults to 0.001.
+    :type dt_min: float
+    :param dt_max: Forwarded to ``Mamba2ResidualBlock``. Defaults to 0.1.
+    :type dt_max: float
+    :param dt_init_floor: Forwarded to ``Mamba2ResidualBlock``. Defaults to
+        1e-4.
+    :type dt_init_floor: float
+    :param bias: Forwarded to ``Mamba2ResidualBlock``. Defaults to False.
+    :type bias: bool
+    :param conv_bias: Forwarded to ``Mamba2ResidualBlock``. Defaults to
+        True.
+    :type conv_bias: bool
+    :param kwargs: Extra arguments for ``keras.layers.Layer``.
+    :type kwargs: Any
+
+    :ivar d_model: The stored hidden width.
+    :vartype d_model: int
+    :ivar d_ssm: The resolved SSM width (never ``None``, unlike the
+        constructor argument).
+    :vartype d_ssm: int
+    :ivar mamba_block: The owned, independently-weighted
+        :class:`Mamba2ResidualBlock`.
+    :vartype mamba_block: Mamba2ResidualBlock
+
+    :raises ValueError: If ``d_model`` is not positive.
+    :raises ValueError: If the resolved ``d_ssm`` is not divisible by
+        ``headdim`` (raised by the wrapped ``Mamba2Layer``).
+
+    Input shape:
+        ``hidden_state``: ``(batch_size, seq_len, d_model)``.
+
+    Output shape:
+        ``(batch_size, seq_len, d_model)``, matching ``hidden_state``.
+
+    Example:
+        .. code-block:: python
+
+            # Every 'm' position in the decoder builds its OWN instance --
+            # never reuse one Zamba2MambaBlock at two depths.
+            block_at_depth_0 = Zamba2MambaBlock(d_model=256)
+            block_at_depth_2 = Zamba2MambaBlock(d_model=256)
+            h = keras.random.normal((2, 32, 256))
+            out_0 = block_at_depth_0(h)
+            out_2 = block_at_depth_2(h)
+
+    Note:
+        Do not make this block's ``mamba_block`` a shared sub-layer across
+        depths, and do not route it through the mem-block round-robin
+        machinery in :class:`Zamba2SharedAttentionBlock`/
+        :class:`Zamba2SharedMLPBlock`. ``decisions.md`` D-005 is explicit
+        that Mamba2 mixers are the *non-shared* half of Zamba2's topology;
+        sharing them would silently change the model's effective capacity
+        with no shape-level signal.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_state: int = 128,
+        d_conv: int = 4,
+        expand: int = 2,
+        headdim: int = 64,
+        d_ssm: Optional[int] = None,
+        ngroups: int = 1,
+        norm_epsilon: float = 1e-5,
+        rmsnorm: bool = True,
+        norm_before_gate: bool = False,
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init_floor: float = 1e-4,
+        bias: bool = False,
+        conv_bias: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Validate ``d_model``, resolve ``d_ssm``, and create the owned
+        :class:`Mamba2ResidualBlock` (unbuilt).
+
+        :raises ValueError: If ``d_model`` is not positive.
+        """
+        super().__init__(**kwargs)
+
+        if d_model <= 0:
+            raise ValueError(f"d_model must be positive, got {d_model}")
+
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.expand = expand
+        self.headdim = headdim
+        self._d_ssm_arg = d_ssm
+        self.d_ssm = d_model * expand if d_ssm is None else d_ssm
+        self.ngroups = ngroups
+        self.norm_epsilon = norm_epsilon
+        self.rmsnorm = rmsnorm
+        self.norm_before_gate = norm_before_gate
+        self.dt_min = dt_min
+        self.dt_max = dt_max
+        self.dt_init_floor = dt_init_floor
+        self.bias = bias
+        self.conv_bias = conv_bias
+
+        self.mamba_block = Mamba2ResidualBlock(
+            d_model=self.d_model,
+            d_state=self.d_state,
+            d_conv=self.d_conv,
+            expand=self.expand,
+            headdim=self.headdim,
+            d_ssm=self.d_ssm,
+            norm_epsilon=self.norm_epsilon,
+            rmsnorm=self.rmsnorm,
+            norm_before_gate=self.norm_before_gate,
+            ngroups=self.ngroups,
+            dt_min=self.dt_min,
+            dt_max=self.dt_max,
+            dt_init_floor=self.dt_init_floor,
+            bias=self.bias,
+            conv_bias=self.conv_bias,
+            name="mamba_block",
+        )
+
+        logger.info(
+            f"Initialized Zamba2MambaBlock with d_model={d_model}, "
+            f"d_state={d_state}, expand={expand}, headdim={headdim}, "
+            f"d_ssm={self.d_ssm}"
+        )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the owned :class:`Mamba2ResidualBlock` against the input shape.
+
+        :param input_shape: Shape of ``hidden_state``, ``(batch, seq_len,
+            d_model)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
+        if self.built:
+            return
+
+        self.mamba_block.build(input_shape)
+        super().build(input_shape)
+
+    def call(
+        self,
+        hidden_state: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """
+        Run the Mamba2 mixer and close the residual this wrapper opened.
+
+        :param hidden_state: Running decoder hidden state, shape ``(batch,
+            seq_len, d_model)``.
+        :type hidden_state: keras.KerasTensor
+        :param training: Whether in training mode, forwarded to the owned
+            ``Mamba2ResidualBlock``.
+        :type training: Optional[bool]
+        :return: Output of shape ``(batch, seq_len, d_model)``.
+        :rtype: keras.KerasTensor
+        """
+        mamba_output, new_residual = self.mamba_block(
+            hidden_state, residual=None, training=training
+        )
+        return mamba_output + new_residual
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
+
+        :param input_shape: Shape of ``hidden_state``, ``(batch, seq_len,
+            d_model)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Unchanged from ``hidden_state``'s shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get layer configuration for serialization.
+
+        :return: Dictionary containing every constructor argument.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update(
+            {
+                "d_model": self.d_model,
+                "d_state": self.d_state,
+                "d_conv": self.d_conv,
+                "expand": self.expand,
+                "headdim": self.headdim,
+                "d_ssm": self._d_ssm_arg,
+                "ngroups": self.ngroups,
+                "norm_epsilon": self.norm_epsilon,
+                "rmsnorm": self.rmsnorm,
+                "norm_before_gate": self.norm_before_gate,
+                "dt_min": self.dt_min,
+                "dt_max": self.dt_max,
+                "dt_init_floor": self.dt_init_floor,
+                "bias": self.bias,
+                "conv_bias": self.conv_bias,
+            }
+        )
+        return config

@@ -4,7 +4,7 @@ Grows incrementally alongside ``src/dl_techniques/models/language/zamba2/``;
 see ``plans/plan-2026-09-12T075714-035fd488/plan.md`` for the build order.
 Step 1 covers :class:`LoRAAdapter`; step 2 adds
 :class:`Zamba2SharedAttentionBlock`; step 3 adds
-:class:`Zamba2SharedMLPBlock`.
+:class:`Zamba2SharedMLPBlock`; step 4 adds :class:`Zamba2MambaBlock`.
 """
 
 import os
@@ -18,6 +18,7 @@ import keras
 
 from dl_techniques.models.language.zamba2.layers import (
     LoRAAdapter,
+    Zamba2MambaBlock,
     Zamba2SharedAttentionBlock,
     Zamba2SharedMLPBlock,
 )
@@ -635,6 +636,196 @@ class TestZamba2SharedMLPBlock:
             block = Zamba2SharedMLPBlock(**block_config)
             hidden = keras.ops.cast(sample_input, block.compute_dtype)
             output = block(hidden, occurrence_idx=0)
+            output_numpy = keras.ops.convert_to_numpy(output)
+            assert np.isfinite(output_numpy).all(), f"NaN/Inf under {dtype_policy}"
+        finally:
+            keras.mixed_precision.set_global_policy(original_policy)
+
+
+class TestZamba2MambaBlock:
+    """Comprehensive test suite for the Zamba2MambaBlock layer."""
+
+    @pytest.fixture
+    def block_config(self) -> Dict[str, Any]:
+        """Small configuration for testing -- the selective scan is an
+        exact ``while_loop``, so keep ``seq_len`` short."""
+        return {
+            "d_model": 32,
+            "d_state": 16,
+            "d_conv": 4,
+            "expand": 2,
+            "headdim": 8,
+        }
+
+    @pytest.fixture
+    def sample_input(self) -> keras.KerasTensor:
+        """Sample 3D hidden-state input."""
+        return keras.random.normal(shape=(2, 6, 32))
+
+    def test_initialization(self, block_config: Dict[str, Any]) -> None:
+        """Initialization stores every param, resolves ``d_ssm``, and owns
+        exactly one ``Mamba2ResidualBlock`` sub-layer (unbuilt)."""
+        block = Zamba2MambaBlock(**block_config)
+
+        assert block.d_model == block_config["d_model"]
+        assert block.d_state == block_config["d_state"]
+        assert block.d_conv == block_config["d_conv"]
+        assert block.expand == block_config["expand"]
+        assert block.headdim == block_config["headdim"]
+        assert block.d_ssm == block_config["d_model"] * block_config["expand"]
+        assert not block.built
+        from dl_techniques.models.language.mamba.components_v2 import Mamba2ResidualBlock
+        assert isinstance(block.mamba_block, Mamba2ResidualBlock)
+
+    def test_edge_cases(self) -> None:
+        """``d_model`` must be validated; an indivisible ``d_ssm``/``headdim``
+        pair must raise from the wrapped ``Mamba2Layer``."""
+        with pytest.raises(ValueError, match="d_model must be positive"):
+            Zamba2MambaBlock(d_model=0)
+
+        with pytest.raises(ValueError, match="d_ssm"):
+            Zamba2MambaBlock(d_model=32, expand=2, headdim=9)
+
+    def test_forward_pass_shape_and_finiteness(
+        self, block_config: Dict[str, Any], sample_input: keras.KerasTensor
+    ) -> None:
+        """Output shape matches the input's shape and contains no NaN/Inf."""
+        block = Zamba2MambaBlock(**block_config)
+        output = block(sample_input)
+
+        assert output.shape == sample_input.shape
+        output_numpy = keras.ops.convert_to_numpy(output)
+        assert np.isfinite(output_numpy).all()
+        assert block.built
+
+    def test_two_instances_do_not_share_weight_objects(
+        self, block_config: Dict[str, Any], sample_input: keras.KerasTensor
+    ) -> None:
+        """Negative twin of the mem-block sharing guards (``decisions.md``
+        D-005): two ``Zamba2MambaBlock`` instances built at different stack
+        positions must NOT share any weight ``Variable`` object, and their
+        values must differ after independent random initialization."""
+        block_a = Zamba2MambaBlock(**block_config)
+        block_b = Zamba2MambaBlock(**block_config)
+
+        _ = block_a(sample_input)
+        _ = block_b(sample_input)
+
+        weights_a = list(block_a.weights)
+        weights_b = list(block_b.weights)
+
+        assert len(weights_a) == len(weights_b)
+        assert len(weights_a) > 0
+        for w_a, w_b in zip(weights_a, weights_b):
+            assert w_a is not w_b, (
+                "Two independently-built Zamba2MambaBlock instances must "
+                "never share a weight Variable object"
+            )
+
+        any_differs = any(
+            not np.allclose(
+                keras.ops.convert_to_numpy(w_a), keras.ops.convert_to_numpy(w_b)
+            )
+            for w_a, w_b in zip(weights_a, weights_b)
+        )
+        assert any_differs, (
+            "Two independently-built Zamba2MambaBlock instances must not "
+            "coincidentally initialize to identical weight values"
+        )
+
+    def test_gradient_flow(
+        self, block_config: Dict[str, Any], sample_input: keras.KerasTensor
+    ) -> None:
+        """Gradients reach every trainable weight of the owned
+        ``Mamba2ResidualBlock``."""
+        block = Zamba2MambaBlock(**block_config)
+
+        with tf.GradientTape() as tape:
+            output = block(sample_input)
+            loss = keras.ops.mean(keras.ops.square(output))
+        grads = tape.gradient(loss, block.trainable_variables)
+
+        assert len(grads) == len(block.trainable_variables)
+        assert len(grads) > 0
+        for grad, variable in zip(grads, block.trainable_variables):
+            assert grad is not None, f"No gradient for {variable.name}"
+
+    def test_serialization_cycle(
+        self, block_config: Dict[str, Any], sample_input: keras.KerasTensor
+    ) -> None:
+        """Full .keras serialization cycle with prediction comparison."""
+        inputs = keras.Input(shape=sample_input.shape[1:])
+        layer = Zamba2MambaBlock(**block_config)
+        outputs = layer(inputs)
+        model = keras.Model(inputs, outputs)
+
+        original_prediction = model(sample_input)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "test_model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(sample_input)
+
+            reloaded_layer = next(
+                lyr for lyr in loaded_model.layers if isinstance(lyr, Zamba2MambaBlock)
+            )
+            assert reloaded_layer.d_model == block_config["d_model"]
+            assert reloaded_layer.d_ssm == layer.d_ssm
+
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
+                rtol=0, atol=1e-5,
+                err_msg="Predictions differ after serialization",
+            )
+
+    def test_config_completeness(self, block_config: Dict[str, Any]) -> None:
+        """get_config() must contain every __init__ param."""
+        layer = Zamba2MambaBlock(**block_config)
+        config = layer.get_config()
+
+        required_keys = {
+            "d_model", "d_state", "d_conv", "expand", "headdim", "d_ssm",
+            "ngroups", "norm_epsilon", "rmsnorm", "norm_before_gate",
+            "dt_min", "dt_max", "dt_init_floor", "bias", "conv_bias",
+        }
+        for key in required_keys:
+            assert key in config, f"Missing {key} in get_config()"
+
+        assert config["d_model"] == block_config["d_model"]
+        assert config["d_state"] == block_config["d_state"]
+        assert config["d_conv"] == block_config["d_conv"]
+        assert config["expand"] == block_config["expand"]
+        assert config["headdim"] == block_config["headdim"]
+        # d_ssm was not given explicitly, so get_config() round-trips the
+        # ORIGINAL None, not the resolved value (mirrors Zamba2SharedMLPBlock's
+        # hidden_dim convention).
+        assert config["d_ssm"] is None
+
+    def test_d_ssm_round_trips_when_given_explicitly(self) -> None:
+        """An explicitly-given ``d_ssm`` round-trips through ``get_config()``
+        unresolved, matching ``Zamba2SharedMLPBlock.hidden_dim``'s convention."""
+        layer = Zamba2MambaBlock(d_model=32, expand=2, headdim=8, d_ssm=48)
+        assert layer.d_ssm == 48
+        config = layer.get_config()
+        assert config["d_ssm"] == 48
+
+    @pytest.mark.parametrize("dtype_policy", ["float32", "mixed_float16"])
+    def test_mixed_float16_no_nan(
+        self,
+        block_config: Dict[str, Any],
+        sample_input: keras.KerasTensor,
+        dtype_policy: str,
+    ) -> None:
+        """The Mamba2 scan must not produce NaN/Inf under ``mixed_float16``."""
+        original_policy = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy(dtype_policy)
+            block = Zamba2MambaBlock(**block_config)
+            hidden = keras.ops.cast(sample_input, block.compute_dtype)
+            output = block(hidden)
             output_numpy = keras.ops.convert_to_numpy(output)
             assert np.isfinite(output_numpy).all(), f"NaN/Inf under {dtype_policy}"
         finally:
