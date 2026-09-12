@@ -40,3 +40,4 @@
 2026-09-12T13:00:00Z | iter-1/step-6.2 | uncommitted | src/dl_techniques/models/language/zamba2/model.py | EDIT(+50,-15) | radius:MED(3) | D-009 | split MODEL_VARIANTS into physical num_mem_blocks vs table-only num_mem_block_occurrences so round-robin reuse actually happens
 2026-09-12T13:00:00Z | iter-1/step-6.2 | uncommitted | tests/test_models/test_zamba2/test_zamba2.py | EDIT(+160,-42) | radius:MED(5) | D-009 | rewrite vacuous LoRA-differs guard with warm-up+RED-proof; add occurrence>physical-block guards for every variant and a real-variant reuse guard
 2026-09-12T13:00:00Z | iter-1/step-6.2 | uncommitted | plans/plan-2026-09-12T075714-035fd488/decisions.md | EDIT(+38,-0) | radius:LOW(2) | D-009 | record D-009 occurrence/physical-block split
+2026-09-12T13:05:00Z | iter-1/step-6.2 | uncommitted | plans/plan-2026-09-12T075714-035fd488/progress.md | EDIT(+45,-4) | radius:LOW(2) | - | record all 3 completion fixes and final regression result
