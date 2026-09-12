@@ -107,6 +107,38 @@ are written explicitly in steps 2-4 rather than assumed.
 effective capacity with no shape-level signal (the exact §12.7 failure
 shape this plan's Pre-Mortem names).
 
+## D-008 | EXECUTE iter-1/step-6.1 (completion fix) | 2026-09-12
+**Context**: `review-iter-1.md` concern 1 measured
+`tests/test_models/test_package_api_contract.py::TestNoMutableDefaults::test_no_mutable_default_anywhere`
+RED at HEAD: the module-level `MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {...}`
+plus the class-level alias `Zamba2Model.MODEL_VARIANTS = MODEL_VARIANTS` is
+exactly the "S3: class attribute aliasing a module-level mutable binding"
+shape that guard's own `_sweep_mutable_defaults` flags (the comment at
+`model.py:651-654` justified the alias by citing `hnet`'s identical-looking
+line, but `hnet`'s alias escapes because `HNet.MODEL_VARIANTS` lives in a
+separate `config.py` whose values are immutable dataclass instances with
+tuple fields, not because of the "matches hnet" framing itself).
+**Decision**: Wrap the module-level `MODEL_VARIANTS` table in
+`types.MappingProxyType(...)`, the same remedy `fastvit/model.py`'s
+`MCI_VARIANTS`/`FastVitImageEncoder.MODEL_VARIANTS` alias already uses
+(D-079 in a prior plan) — the guard's AST sweep only flags a module binding
+whose value is a literal `{...}`/`[...]`/`dict()`/`list()` call, and
+`MappingProxyType(...)` is none of those, so the class-level alias no
+longer resolves to a flagged binding.
+**Trade-off**: Zero behavioural change to any existing caller (`dict(...)`,
+`.keys()`, `in`, subscript access on a `Mapping` all work identically to a
+plain `dict`) **at the cost of** the inner per-variant dicts remaining
+plain, mutable `dict` objects — accepted because the guard's own docstring
+states the S3 shape is about the OUTER class-attribute alias, and the repo's
+own precedent (`fastvit`'s `MCI_VARIANTS`) wraps only the outer level too.
+**Reasoning**: Moving the table into a sibling `config.py` (the `hnet`-style
+fix) would have been a larger, unrequested restructuring for a single
+three-line guard failure; the in-place `MappingProxyType` wrap is the
+smaller, already-precedented fix for this exact alias shape.
+**Anchor-Refs**: `src/dl_techniques/models/language/zamba2/model.py` (the
+`# DECISION plan-2026-09-12T075714-035fd488/D-008` comment immediately
+above the `MODEL_VARIANTS` module-level binding).
+
 ## D-007 | EXECUTE iter-1/step-1.1 (completion fix) | 2026-09-12
 **Context**: `review-iter-1.md` concern 3 measured `LoRAAdapter.build()`'s
 `_a_initializer` calling one resolved `keras.initializers.Initializer`

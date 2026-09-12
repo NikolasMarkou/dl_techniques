@@ -35,3 +35,5 @@
 2026-09-12T12:00:00Z | iter-1/step-1.1 | uncommitted | src/dl_techniques/models/language/zamba2/layers.py | EDIT(+19,-5) | radius:MED(4) | D-007 | fix LoRA A-slice init to clone per occurrence, not replay
 2026-09-12T12:00:00Z | iter-1/step-1.1 | uncommitted | tests/test_models/test_zamba2/test_zamba2.py | EDIT(+26,-0) | radius:MED(4) | D-007 | add A[i]!=A[j] construction-time independence guard
 2026-09-12T12:00:00Z | iter-1/step-1.1 | uncommitted | plans/plan-2026-09-12T075714-035fd488/decisions.md | EDIT(+28,-0) | radius:MED(3) | D-007 | record D-007 LoRA A-slice independence fix
+2026-09-12T12:15:00Z | iter-1/step-6.1 | uncommitted | src/dl_techniques/models/language/zamba2/model.py | EDIT(+22,-2) | radius:MED(4) | D-008 | wrap module-level MODEL_VARIANTS in MappingProxyType to clear mutable-default guard
+2026-09-12T12:15:00Z | iter-1/step-6.1 | uncommitted | plans/plan-2026-09-12T075714-035fd488/decisions.md | EDIT(+27,-0) | radius:MED(3) | D-008 | record D-008 MappingProxyType fix

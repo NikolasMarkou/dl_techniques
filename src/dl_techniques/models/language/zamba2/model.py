@@ -17,7 +17,8 @@ References:
       (https://arxiv.org/abs/2411.15242)
 """
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from types import MappingProxyType
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import keras
 
@@ -68,7 +69,21 @@ def _build_layer_mapping(num_mamba_blocks: int, num_shared_occurrences: int) -> 
 #: :class:`Zamba2Model`'s constructor (minus ``layer_mapping``, which is
 #: derived below from ``num_mamba_blocks``/``num_mem_blocks`` so the two
 #: counts can never drift apart).
-MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+# DECISION plan-2026-09-12T075714-035fd488/D-008
+# WHAT NOT TO DO: do not bind this as a plain `Dict[str, Dict[str, Any]]`
+# literal again. `Zamba2Model.MODEL_VARIANTS = MODEL_VARIANTS` below is a
+# class-attribute ALIAS of this module-level object (matching `hnet`'s
+# `HNet.MODEL_VARIANTS` convention) -- a plain dict there is the exact "class
+# attribute aliasing a module-level mutable" shape
+# `tests/test_models/test_package_api_contract.py::TestNoMutableDefaults`
+# forbids (review-iter-1.md concern 1; that guard's own docstring records the
+# waiver set as EMPTY). `MappingProxyType` closes it the same way
+# `fastvit/model.py`'s `MCI_VARIANTS`/`FastVitImageEncoder.MODEL_VARIANTS`
+# alias does (D-079) -- wrapping the OUTER dict is sufficient; the guard's
+# AST sweep only flags a literal `{...}`/`[...]`/`dict()`/`list()` binding,
+# and a `MappingProxyType(...)` call is not one. See decisions.md D-008.
+MODEL_VARIANTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
+    {
     "zamba2_mini": {
         "vocab_size": DEFAULT_VOCAB_SIZE,
         "hidden_size": 256,
@@ -105,7 +120,8 @@ MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "description": "Zamba2 base: ~768-dim, 24 Mamba2 blocks, 8 "
                         "mem-block occurrences.",
     },
-}
+    }
+)
 
 # ---------------------------------------------------------------------
 # local imports
@@ -651,8 +667,13 @@ class Zamba2Model(keras.Model):
     #: Re-exported, not redefined: the module-level :data:`MODEL_VARIANTS`,
     #: aliased onto the class so ``from_variant``/``create_zamba2`` and the
     #: API-contract tests can reach the table through the class, matching
-    #: ``hnet``'s ``HNet.MODEL_VARIANTS`` convention.
-    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = MODEL_VARIANTS
+    #: ``hnet``'s ``HNet.MODEL_VARIANTS`` convention. The module-level table
+    #: is a ``MappingProxyType`` (not a plain dict), which is the real
+    #: remedy this alias relies on -- see D-008, and contrast the stale
+    #: claim this comment used to make (the review's concern 12: "matching
+    #: hnet's convention" is not itself what keeps the alias off the
+    #: mutable-default guard; the proxy is).
+    MODEL_VARIANTS: Mapping[str, Mapping[str, Any]] = MODEL_VARIANTS
 
     @classmethod
     def from_variant(
