@@ -301,6 +301,22 @@ class Mamba2(keras.Model):
 
         return {"last_hidden_state": last_hidden_state}
 
+    @property
+    def hidden_size(self) -> int:
+        """Alias for :attr:`d_model`, for callers expecting the common name.
+
+        Additive only: ``d_model`` is not renamed or removed, and this is not
+        a constructor argument, so ``get_config``/``from_config`` are
+        unaffected. See
+        ``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel``,
+        whose ``__init__`` requires a ``hidden_size`` attribute on any
+        backbone built with ``skip_head=False``.
+
+        :return: :attr:`d_model`.
+        :rtype: int
+        """
+        return self.d_model
+
     @classmethod
     def from_variant(cls, variant: str, vocab_size: int, **kwargs: Any) -> "Mamba2":
         """Create a Mamba-2 model from a variant or alias name.

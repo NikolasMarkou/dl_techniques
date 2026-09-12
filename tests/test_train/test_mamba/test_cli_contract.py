@@ -13,11 +13,11 @@ the same two things that file exists to catch:
    flag per field group is driven through the REAL parser and asserted to
    land on the REAL config object, including the defaults path.
 
-Plus one cheap, fast build check (not a training run): ``build_causal_lm_model``
-constructs a real, tiny ``Mamba2`` + LM head at ``d_model=8, num_layers=1,
-d_state=4`` and a two-token vocabulary -- proving Mamba-2's D-004 "no baked
-head" wrapper actually produces a model, without running ``fit()`` or
-touching a dataset/GPU.
+Plus one cheap, fast build check (not a training run): ``build_model``
+constructs a real, tiny ``Mamba2`` backbone wrapped in ``CausalLanguageModel``
+-- proving the (post plan-2026-09-12T195532-422091c3, D-004-superseding)
+headless-backbone wiring actually produces a model, without running
+``fit()`` or touching a dataset/GPU.
 
 Nothing here trains, allocates a GPU, reads the Wikipedia cache, or writes
 into the repo-root ``results/``.
@@ -161,21 +161,26 @@ def test_gpu_is_the_only_non_config_dest() -> None:
 # ---------------------------------------------------------------------
 
 
-def test_build_causal_lm_model_constructs_at_a_tiny_size() -> None:
-    """D-004's local LM-head wrapper actually produces a real model.
+def test_build_model_constructs_at_a_tiny_size() -> None:
+    """``build_model`` wraps a headless ``Mamba2`` in ``CausalLanguageModel``.
 
     ``d_model=64, num_layers=1, d_state=8`` and ``vocab_size=17`` are chosen
-    purely for construction speed -- this is not a training run, it only
-    proves the functional wrapper (``input_ids -> Mamba2 ->
-    last_hidden_state -> tied head -> logits``) builds and reports the
-    expected output shape. ``d_model=64`` (not smaller) is required by
-    ``Mamba2Layer``'s own constraint that ``d_ssm`` (``d_model * expand``,
-    ``expand`` defaults to 2) be divisible by ``headdim`` (defaults to 64)
-    -- ``Mamba2TrainingConfig.variant_overrides`` does not expose
-    ``expand``/``headdim`` to shrink further.
+    purely for construction speed -- this is not a training run.
+    ``d_model=64`` (not smaller) is required by ``Mamba2Layer``'s own
+    constraint that ``d_ssm`` (``d_model * expand``, ``expand`` defaults to
+    2) be divisible by ``headdim`` (defaults to 64) --
+    ``Mamba2TrainingConfig.variant_overrides`` does not expose
+    ``expand``/``headdim`` to shrink further. Unlike Gemma3/Qwen3
+    (``skip_head=True``, D-001), Mamba2 is genuinely headless, so this is
+    the one candidate where ``CausalLanguageModel`` builds its OWN output
+    head (D-004, superseding the retired local ``build_causal_lm_model``
+    wrapper) -- proven here by construction succeeding and ``.compiled``
+    being true, not by an ``.output_shape`` on a Functional model (this is a
+    subclassed model, same as gemma/qwen post-migration).
     """
     config = Mamba2TrainingConfig(
         variant=DEFAULT_VARIANT, d_model=64, num_layers=1, d_state=8,
     )
-    model = mamba_common.build_causal_lm_model(config, vocab_size=17)
-    assert model.output_shape == (None, None, 17)
+    model = mamba_common.build_model(config, steps_per_epoch=1, vocab_size=17)
+    assert model.compiled
+    assert model.vocab_size == 17

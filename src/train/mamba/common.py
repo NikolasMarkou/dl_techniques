@@ -11,23 +11,35 @@ single-wiring-site + ``build_datasets``/``build_optimizer``/``build_model``/
 ``train``), which is the more current convention for a new Pattern-3/6
 trainer per ``src/train/CLAUDE.md``.
 
-Two things this module deliberately does NOT do, for the same reasons
-``zamba2/common.py`` gives:
+**CLM-head consolidation onto ``CausalLanguageModel``: DONE** (see
+``plans/plan-2026-09-12T195532-422091c3/decisions.md`` D-004, which
+SUPERSEDES the mechanism chosen by ``plan-2026-09-12T173329-e20362c4``'s own
+D-004). ``build_model`` wraps a bare ``Mamba2.from_variant(...)`` --
+genuinely headless, ``call()`` returns only ``{"last_hidden_state": ...}``
+-- in
+``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel(
+skip_head=False, pre_shifted=True, verify_causality=True)``. This replaces
+the local ``build_causal_lm_model`` functional wrapper this module used to
+define, once ``CausalLanguageModel`` gained a ``pre_shifted`` flag (so it no
+longer double-shifts against ``preprocess_clm_packed_dataset``'s own
+pre-shift) and ``Mamba2`` gained a ``hidden_size`` property alias for
+``d_model`` (``CausalLanguageModel.__init__`` requires the attribute).
+Mamba-2 still has no auxiliary loss -- the next-token cross-entropy reaches
+the optimizer through ``CausalLanguageModel.compute_loss`` (via its
+injectable ``loss_fn``) rather than stock ``compile(loss=...)``, since
+``train_step``/``test_step`` are overridden by that class, not by this
+module.
 
-* **No custom ``train_step``.** Mamba-2 has no auxiliary loss; the
-  next-token cross-entropy reaches the optimizer through stock
-  ``compile()``/``fit()`` alone.
-* **No ``ClmPretrainConfig``/``load_train_val_datasets`` reuse.** That
-  wrapper wraps every label tensor as ``{"logits": y}`` because its four
-  DICT-output callers (GPT-2, wave_field, cliffordnet) already bake an LM
-  head into their own ``call()`` and return ``{"logits": ...}`` directly.
-  ``Mamba2.call`` returns a dict too, but only ``{"last_hidden_state":
-  ...}`` -- the package ships no CLM head at all (unlike ``mamba_v1``'s
-  ``create_mamba_with_head``, which has no v2 counterpart). Wrapping THAT
-  dict as ``{"logits": y}`` would still leave the model with no head to
-  produce a "logits" output in the first place. See the
-  ``build_causal_lm_model`` docstring below for the head this module adds
-  and why, and decisions.md D-004.
+**No ``ClmPretrainConfig``/``load_train_val_datasets`` reuse.** That
+wrapper wraps every label tensor as ``{"logits": y}`` because its four
+DICT-output callers (GPT-2, wave_field, cliffordnet) already bake an LM
+head into their own ``call()`` and return ``{"logits": ...}`` directly.
+``Mamba2.call`` returns a dict too, but only ``{"last_hidden_state":
+...}`` -- the package ships no CLM head at all (unlike ``mamba_v1``'s
+``create_mamba_with_head``, which has no v2 counterpart). Wrapping THAT
+dict as ``{"logits": y}`` would still leave the model with no head to
+produce a "logits" output in the first place; ``CausalLanguageModel``
+supplies that head now instead.
 
 Public surface:
     * :data:`VARIANT_NAMES` -- the shipped :data:`Mamba2.MODEL_VARIANTS` keys
@@ -38,12 +50,11 @@ Public surface:
     * :func:`config_from_args` -- namespace -> config, the ONE wiring site.
     * :func:`build_datasets` -- the Wikipedia packed-CLM pipeline (identical
       shape to zamba2's).
-    * :func:`build_causal_lm_model` -- wraps a fresh :class:`Mamba2` backbone
-      with a weight-tied LM head, producing a PLAIN TENSOR of logits (not a
-      dict), matching what the packed-CLM dataset and
-      ``create_clm_loss_fn`` both expect.
     * :func:`build_optimizer` / :func:`build_model` -- AdamW through
-      ``optimizer_builder``, compiled with the shared CLM loss + metrics.
+      ``optimizer_builder``; ``build_model`` wraps a fresh :class:`Mamba2`
+      backbone in ``CausalLanguageModel``, which owns its own loss/metric
+      tracking (``loss_fn=create_clm_loss_fn(config)``) -- ``compile()``
+      passes only the optimizer.
     * :func:`train` -- stock ``fit()``.
 """
 
@@ -62,17 +73,16 @@ from dl_techniques.datasets.nlp import (
     load_wikipedia_train_val,
 )
 from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
+from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
 )
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from train.common import create_callbacks, set_seeds
 from train.common.clm_pretrain import create_clm_loss_fn
 from train.common.config_io import save_config_json
 from train.common.nlp import (
-    build_clm_metrics,
     create_tokenizer,
     estimate_clm_steps_per_epoch,
     preprocess_clm_packed_dataset,
@@ -87,7 +97,6 @@ __all__ = [
     "WEIGHT_DECAY_EXCLUDED",
     "Mamba2TrainingConfig",
     "add_common_arguments",
-    "build_causal_lm_model",
     "build_datasets",
     "build_model",
     "build_optimizer",
@@ -635,51 +644,20 @@ def build_datasets(
 # `create_clm_loss_fn` already expect -- the same shape zamba2's own
 # backbone (which bakes its head in natively) already produces. See
 # decisions.md D-004.
-def build_causal_lm_model(
-        config: Mamba2TrainingConfig,
-        vocab_size: int,
-) -> keras.Model:
-    """Wrap a fresh :class:`Mamba2` backbone with an LM head.
-
-    Builds a small functional model: ``input_ids -> Mamba2 ->
-    last_hidden_state -> (tied or untied) head -> logits``. The head is tied
-    to the backbone's token-embedding matrix by default
-    (``config.tie_word_embeddings``), reusing
-    :func:`~dl_techniques.utils.tied_embeddings.tied_embedding_logits` --
-    the same expression GPT-2/Zamba2/wave_field/hnet use for their own
-    (already-baked-in) heads.
-
-    :param config: The run config; reads ``variant``, ``variant_overrides``
-        (``d_model``/``num_layers``/``d_state``) and ``tie_word_embeddings``.
-    :type config: Mamba2TrainingConfig
-    :param vocab_size: The live tokenizer's vocab size (:func:`build_datasets`'s
-        fourth return value).
-    :type vocab_size: int
-    :returns: The uncompiled functional model, output shape
-        ``(batch, seq_len, vocab_size)``.
-    :rtype: keras.Model
-    """
-    backbone = Mamba2.from_variant(
-        config.variant, vocab_size=vocab_size, **config.variant_overrides
-    )
-    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
-    hidden_states = backbone(input_ids)["last_hidden_state"]
-
-    if config.tie_word_embeddings:
-        embedding_weights = backbone.embedding.embeddings
-        logits = tied_embedding_logits(hidden_states, embedding_weights)
-    else:
-        logits = keras.layers.Dense(
-            vocab_size, use_bias=False, name="lm_head"
-        )(hidden_states)
-
-    model = keras.Model(
-        inputs=input_ids, outputs=logits, name=f"mamba2_{config.variant}_causal_lm"
-    )
-    model.backbone = backbone
-    return model
-
-
+#
+# ADDENDUM 2026-09-12, plan-2026-09-12T195532-422091c3/D-004: SUPERSEDED.
+# Both blockers named above are now fixed -- `CausalLanguageModel` gained
+# `pre_shifted=True` (no more double-shift against
+# `preprocess_clm_packed_dataset`'s own pre-shift) and `Mamba2` gained a
+# `hidden_size` property alias for `d_model`. The `build_causal_lm_model`
+# function this comment originally anchored has been REMOVED;
+# `build_model` below wraps `Mamba2` in `CausalLanguageModel(skip_head=False,
+# pre_shifted=True, verify_causality=True)` instead. This does not mean the
+# original decision above was wrong when written -- it correctly diagnosed
+# both blockers at the time. See decisions.md D-004 of
+# plan-2026-09-12T195532-422091c3 for the full supersession framing, and
+# plans/ANCHORS.md's "Retired anchors" section (to be updated at this plan's
+# CLOSE) for the mechanical retirement record.
 def build_optimizer(
         config: Mamba2TrainingConfig,
         steps_per_epoch: int,
@@ -729,7 +707,7 @@ def build_model(
         config: Mamba2TrainingConfig,
         steps_per_epoch: int,
         vocab_size: int,
-) -> keras.Model:
+) -> CausalLanguageModel:
     """Create and compile the Mamba-2 causal-LM model for one run.
 
     :param config: The run config.
@@ -741,15 +719,47 @@ def build_model(
         explicit override so the model's embedding/head always match the
         encoding actually used to pack the corpus.
     :type vocab_size: int
-    :returns: The compiled model.
-    :rtype: keras.Model
+    :returns: The compiled model, a
+        :class:`~dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel`
+        wrapping a bare :class:`Mamba2` backbone. ``skip_head=False`` since
+        ``Mamba2`` is genuinely headless (``call()`` returns only
+        ``{"last_hidden_state": ...}``) -- unlike gemma/qwen's ``skip_head=True``
+        migration, this class builds its OWN weight-tied (or untied, per
+        ``config.tie_word_embeddings``) output head. ``pre_shifted=True``
+        matches ``preprocess_clm_packed_dataset``'s own pre-shifted
+        ``(input_ids, labels)`` tuples. ``compile()`` receives only the
+        optimizer: the class tracks its own loss/accuracy/perplexity,
+        reading ``loss_fn`` internally rather than a compiled ``loss=``.
+    :rtype: CausalLanguageModel
     """
-    model = build_causal_lm_model(config, vocab_size)
-    model.compile(
-        optimizer=build_optimizer(config, steps_per_epoch),
-        loss=create_clm_loss_fn(config),
-        metrics=build_clm_metrics(config.encoding_name),
+    backbone = Mamba2.from_variant(
+        config.variant, vocab_size=vocab_size, **config.variant_overrides
     )
+    model = CausalLanguageModel(
+        backbone=backbone,
+        vocab_size=vocab_size,
+        tie_weights=config.tie_word_embeddings,
+        skip_head=False,
+        pre_shifted=True,
+        loss_fn=create_clm_loss_fn(config),
+        verify_causality=True,
+    )
+    model.compile(optimizer=build_optimizer(config, steps_per_epoch))
+    # DECISION plan-2026-09-12T195532-422091c3/D-008: `skip_head=False` routes
+    # `call()` through `_apply_output_head`, whose OWN lazy
+    # `self.build(hidden_states.shape)` call (embedding-weights resolution,
+    # output-head construction, the causality probe) is the FIRST build
+    # trigger for this model -- unlike gemma/qwen's `skip_head=True`, which
+    # never reaches `_apply_output_head` at all. Without this eager call,
+    # that lazy build's first invocation happens inside `fit()`'s traced
+    # `train_step` `tf.function`, where the causality probe's
+    # `ops.convert_to_numpy` raises `NotImplementedError` on a symbolic
+    # tensor (measured, not hypothetical). One dummy forward pass here
+    # resolves the head and runs the probe eagerly, before `fit()` ever
+    # traces `train_step`. Do NOT remove this call or move head resolution
+    # back inside `train_step`/`test_step` without re-proving the trace
+    # boundary; see decisions.md D-008.
+    model(tf.zeros((1, 2), dtype="int32"), training=False)
     return model
 
 
