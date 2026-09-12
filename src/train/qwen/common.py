@@ -31,18 +31,13 @@ logits, shape ``(batch, seq_len, vocab_size)`` with the default
 stated in the module docstring: "the LM head is an independent bias-free
 ``Dense``... With ``return_dict=False`` (the default) the model returns
 logits"). So this module needs no ``build_causal_lm_model``-style wrapper:
-:func:`build_model` calls ``Qwen3.from_variant`` directly. See
-``plans/plan-2026-09-12T173329-e20362c4/decisions.md`` D-005 (queues the
-CLM-head consolidation onto ``CausalLanguageModel`` for iter-2, out of scope
-here -- Qwen3 keeps its baked-in head unchanged).
+``Qwen3.from_variant`` is constructed exactly as before and then wrapped in
+``CausalLanguageModel`` -- see the module docstring's "Public surface"
+section below for the full consolidation status.
 
-Two things this module deliberately does NOT do, for the same reasons
-``zamba2/common.py`` / ``gemma/common.py`` give:
+One thing this module deliberately does NOT do, for the same reason
+``zamba2/common.py`` gives:
 
-* **No custom ``train_step``.** Qwen3 has no auxiliary loss (its MoE gating
-  is a plain linear router with no load-balancing loss wired into
-  ``TransformerLayer``); the next-token cross-entropy reaches the optimizer
-  through stock ``compile()``/``fit()`` alone.
 * **No ``ClmPretrainConfig``/``load_train_val_datasets`` reuse.** That
   wrapper wraps every label tensor as ``{"logits": y}`` because its four
   DICT-output callers already bake an LM head into their own ``call()`` and
@@ -62,6 +57,17 @@ for how a ``--num-layers`` override resets ``moe_layers`` to the model's own
 default (``[]``, dense) rather than raising ``ValueError`` on an
 out-of-range index.
 
+See ``plans/plan-2026-09-12T173329-e20362c4/decisions.md`` D-005 (queued the
+CLM-head consolidation onto ``CausalLanguageModel`` for iter-2). **That
+consolidation is now DONE**: :func:`build_model` wraps ``Qwen3.from_variant``
+in ``CausalLanguageModel(skip_head=True, pre_shifted=True,
+loss_fn=create_clm_loss_fn(config))`` -- see
+``plans/plan-2026-09-12T195532-422091c3/decisions.md`` D-001 (the
+``skip_head``/``pre_shifted`` design) and D-007 (the ``loss_fn`` injection
+that preserves ``--loss-type focal``/``--label-smoothing`` through the
+wrap), respecting this module's own D-001 scope boundary (plain ``Qwen3``
+only -- no ``Qwen3Next``/embedding-reranker import).
+
 Public surface:
     * :data:`VARIANT_NAMES` -- the shipped :data:`Qwen3.MODEL_VARIANTS` keys.
     * :class:`Qwen3TrainingConfig` -- the run knobs. Every field is
@@ -71,7 +77,8 @@ Public surface:
     * :func:`build_datasets` -- the Wikipedia packed-CLM pipeline (identical
       shape to zamba2's/mamba's/gemma's).
     * :func:`build_optimizer` / :func:`build_model` -- AdamW through
-      ``optimizer_builder``, compiled with the shared CLM loss + metrics.
+      ``optimizer_builder``; the model is a ``CausalLanguageModel`` wrapping
+      ``Qwen3.from_variant`` with ``loss_fn=create_clm_loss_fn(config)``.
     * :func:`train` -- stock ``fit()``.
 """
 
@@ -89,6 +96,9 @@ from dl_techniques.datasets.nlp import (
     DEFAULT_WIKIPEDIA_CONFIG,
     load_wikipedia_train_val,
 )
+from dl_techniques.models.language.masked_language_model.clm import (
+    CausalLanguageModel,
+)
 from dl_techniques.models.language.qwen.qwen3 import Qwen3
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
@@ -99,7 +109,6 @@ from train.common import create_callbacks, set_seeds
 from train.common.clm_pretrain import create_clm_loss_fn
 from train.common.config_io import save_config_json
 from train.common.nlp import (
-    build_clm_metrics,
     create_tokenizer,
     estimate_clm_steps_per_epoch,
     preprocess_clm_packed_dataset,
@@ -702,14 +711,24 @@ def build_model(
         config: Qwen3TrainingConfig,
         steps_per_epoch: int,
         vocab_size: int,
-) -> Qwen3:
+) -> CausalLanguageModel:
     """Create and compile the Qwen3 causal-LM model for one run.
 
-    Qwen3 already bakes its own LM head (see the module docstring), so this
-    is a direct ``Qwen3.from_variant`` call, exactly like
-    ``gemma/common.py``'s ``build_model`` calling ``Gemma3.from_variant``
-    directly -- no local head-wrapper is needed (unlike
-    ``mamba/common.py``'s ``build_causal_lm_model``, D-004).
+    Qwen3 already bakes its own LM head and returns a plain logits tensor
+    (see the module docstring), so ``Qwen3.from_variant`` is constructed
+    exactly as before (plain ``Qwen3`` only -- this module's D-001 scope
+    boundary; no ``Qwen3Next``/embedding-reranker import) and then wrapped
+    in ``CausalLanguageModel``: ``skip_head=True`` (the backbone's own
+    output IS the logits, no head/weight-tying is built), ``pre_shifted=True``
+    (the packed-CLM pipeline already yields shifted ``(x, y)`` pairs, so no
+    internal shift is applied), and ``loss_fn=create_clm_loss_fn(config)``
+    (preserves ``--loss-type focal``/``--label-smoothing`` exactly as before
+    -- see ``plans/plan-2026-09-12T195532-422091c3/decisions.md`` D-007;
+    ``CausalLanguageModel.compute_loss`` would otherwise silently regress
+    that config surface to a hardcoded plain CE). ``compile()`` needs no
+    ``loss=``/``metrics=``: ``CausalLanguageModel`` computes and tracks its
+    own ``loss``/``accuracy``/``perplexity``, reading ``self.loss_fn``
+    internally for the actual cross-entropy computation.
 
     :param config: The run config.
     :type config: Qwen3TrainingConfig
@@ -722,19 +741,23 @@ def build_model(
         variant table's own ``vocab_size``.
     :type vocab_size: int
     :returns: The compiled model.
-    :rtype: Qwen3
+    :rtype: CausalLanguageModel
     """
-    model = Qwen3.from_variant(
+    qwen3_model = Qwen3.from_variant(
         config.variant,
         vocab_size=vocab_size,
         max_seq_len=config.max_seq_length,
         **config.variant_overrides,
     )
-    model.compile(
-        optimizer=build_optimizer(config, steps_per_epoch),
-        loss=create_clm_loss_fn(config),
-        metrics=build_clm_metrics(config.encoding_name),
+    model = CausalLanguageModel(
+        backbone=qwen3_model,
+        vocab_size=vocab_size,
+        skip_head=True,
+        pre_shifted=True,
+        loss_fn=create_clm_loss_fn(config),
+        verify_causality=True,
     )
+    model.compile(optimizer=build_optimizer(config, steps_per_epoch))
     return model
 
 
@@ -743,13 +766,13 @@ def build_model(
 # ---------------------------------------------------------------------
 
 
-def train(config: Qwen3TrainingConfig) -> Tuple[Qwen3, Any, str]:
+def train(config: Qwen3TrainingConfig) -> Tuple[CausalLanguageModel, Any, str]:
     """Pretrain Qwen3 on Wikipedia with stock ``fit()``.
 
     :param config: The run config.
     :type config: Qwen3TrainingConfig
     :returns: ``(model, history, results_dir)``.
-    :rtype: Tuple[Qwen3, Any, str]
+    :rtype: Tuple[CausalLanguageModel, Any, str]
     """
     set_seeds(config.seed)
 
