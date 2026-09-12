@@ -4,12 +4,13 @@ Grows incrementally alongside ``src/dl_techniques/models/language/zamba2/``;
 see ``plans/plan-2026-09-12T075714-035fd488/plan.md`` for the build order.
 Step 1 covers :class:`LoRAAdapter`; step 2 adds
 :class:`Zamba2SharedAttentionBlock`; step 3 adds
-:class:`Zamba2SharedMLPBlock`; step 4 adds :class:`Zamba2MambaBlock`.
+:class:`Zamba2SharedMLPBlock`; step 4 adds :class:`Zamba2MambaBlock`; step 5
+adds :class:`Zamba2Model`, the full decoder-stack assembly.
 """
 
 import os
 import tempfile
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 import pytest
@@ -22,6 +23,9 @@ from dl_techniques.models.language.zamba2.layers import (
     Zamba2SharedAttentionBlock,
     Zamba2SharedMLPBlock,
 )
+from dl_techniques.models.language.zamba2.model import Zamba2Model
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 
 
 class TestLoRAAdapter:
@@ -830,6 +834,379 @@ class TestZamba2MambaBlock:
             assert np.isfinite(output_numpy).all(), f"NaN/Inf under {dtype_policy}"
         finally:
             keras.mixed_precision.set_global_policy(original_policy)
+
+
+class TestZamba2Model:
+    """Comprehensive test suite for :class:`Zamba2Model`, the full decoder
+    stack assembled from steps 1-4's building blocks."""
+
+    @pytest.fixture
+    def model_config(self) -> Dict[str, Any]:
+        """Small configuration: 6 depth positions, 2 'g' occurrences, 2
+        physical mem-block slots (so the two 'g' positions use DIFFERENT
+        slots -- the round-robin-repeat case is covered by a dedicated
+        test/fixture below)."""
+        return {
+            "vocab_size": 37,
+            "hidden_size": 32,
+            "layer_mapping": ["m", "m", "g", "m", "m", "g"],
+            "num_mem_blocks": 2,
+            "num_heads": 4,
+            "max_seq_len": 16,
+            "d_state": 16,
+            "headdim": 8,
+        }
+
+    @pytest.fixture
+    def sample_ids(self) -> keras.KerasTensor:
+        """Sample batch of token ids, seq_len short enough for the Mamba2
+        scan's exact ``while_loop``."""
+        return keras.random.randint((2, 6), 0, 37, dtype="int32")
+
+    def test_initialization(self, model_config: Dict[str, Any]) -> None:
+        """Initialization validates config, builds 4 Zamba2MambaBlock
+        instances (one per 'm'), 2 physical mem-block pairs, and resolves 2
+        LoRA occurrences (one per 'g')."""
+        model = Zamba2Model(**model_config)
+
+        assert model.vocab_size == model_config["vocab_size"]
+        assert model.hidden_size == model_config["hidden_size"]
+        assert model.layer_mapping == model_config["layer_mapping"]
+        assert len(model.mamba_blocks) == 4
+        assert len(model.mem_attention_blocks) == 2
+        assert len(model.mem_mlp_blocks) == 2
+        assert model._num_occurrences == 2
+        assert not model.built
+
+    def test_edge_cases(self) -> None:
+        """Invalid configuration must raise before any sub-layer is built."""
+        with pytest.raises(ValueError, match="vocab_size must be positive"):
+            Zamba2Model(vocab_size=0, hidden_size=32, layer_mapping=["m"], num_mem_blocks=1)
+        with pytest.raises(ValueError, match="hidden_size must be positive"):
+            Zamba2Model(vocab_size=10, hidden_size=0, layer_mapping=["m"], num_mem_blocks=1)
+        with pytest.raises(ValueError, match="num_mem_blocks must be positive"):
+            Zamba2Model(vocab_size=10, hidden_size=32, layer_mapping=["m"], num_mem_blocks=0)
+        with pytest.raises(ValueError, match="divisible by"):
+            Zamba2Model(
+                vocab_size=10, hidden_size=32, layer_mapping=["m"],
+                num_mem_blocks=1, num_heads=5,
+            )
+        with pytest.raises(ValueError, match="non-empty"):
+            Zamba2Model(vocab_size=10, hidden_size=32, layer_mapping=[], num_mem_blocks=1)
+        with pytest.raises(ValueError, match="'m' or 'g'"):
+            Zamba2Model(
+                vocab_size=10, hidden_size=32, layer_mapping=["m", "x"],
+                num_mem_blocks=1,
+            )
+
+    def test_zero_g_positions_builds_and_runs(self) -> None:
+        """Edge case (plan.md Problem Statement): a pure-Mamba2 stack with
+        zero 'g' entries must still build and run -- the shared-block
+        machinery must not assume at least one occurrence exists."""
+        model = Zamba2Model(
+            vocab_size=20,
+            hidden_size=16,
+            layer_mapping=["m", "m", "m"],
+            num_mem_blocks=2,
+            num_heads=4,
+            max_seq_len=8,
+            d_state=8,
+            headdim=4,
+        )
+        ids = keras.random.randint((2, 5), 0, 20, dtype="int32")
+        output = model(ids)
+
+        assert output.shape == (2, 5, 20)
+        assert np.isfinite(keras.ops.convert_to_numpy(output)).all()
+        assert model._num_occurrences == 1  # max(0, 1), never zero
+
+    def test_forward_pass_shape_and_finiteness(
+        self, model_config: Dict[str, Any], sample_ids: keras.KerasTensor
+    ) -> None:
+        """Output shape is (batch, seq_len, vocab_size) and contains no
+        NaN/Inf."""
+        model = Zamba2Model(**model_config)
+        output = model(sample_ids)
+
+        assert output.shape == (
+            sample_ids.shape[0], sample_ids.shape[1], model_config["vocab_size"]
+        )
+        output_numpy = keras.ops.convert_to_numpy(output)
+        assert np.isfinite(output_numpy).all()
+        assert model.built
+
+    def test_pretrained_true_raises_not_implemented_error(
+        self, model_config: Dict[str, Any]
+    ) -> None:
+        """No pretrained Zamba2 checkpoint exists anywhere; ``pretrained=True``
+        must raise rather than silently returning a random-init model."""
+        with pytest.raises(NotImplementedError, match="[Nn]o pretrained"):
+            Zamba2Model(**model_config, pretrained=True)
+
+    def test_pretrained_false_is_the_default_and_builds_normally(
+        self, model_config: Dict[str, Any], sample_ids: keras.KerasTensor
+    ) -> None:
+        """``pretrained=False`` (the default) builds and runs normally."""
+        model = Zamba2Model(**model_config, pretrained=False)
+        output = model(sample_ids)
+        assert np.isfinite(keras.ops.convert_to_numpy(output)).all()
+
+    def test_gradient_flow_reaches_every_trainable_weight(
+        self, model_config: Dict[str, Any], sample_ids: keras.KerasTensor
+    ) -> None:
+        """Decisive composition guard: a real backward pass through the
+        WHOLE assembled model must reach every trainable weight -- the
+        embedding, every Zamba2MambaBlock, every shared mem-block's base
+        weights, AND every LoRA A/B pair actually exercised by
+        ``layer_mapping`` (both 'g' occurrences here). A dead weight here
+        is exactly the v2 guide Section 12.7 "stack reads only the last
+        block" failure the plan's Pre-Mortem names.
+
+        Every ``LoRAAdapter.b`` is zero-initialized (standard LoRA init), so
+        the chain rule through ``delta = (x @ A) @ B`` routes an exactly-zero
+        gradient back onto ``A`` at construction -- mathematically correct,
+        not a defect (see ``TestLoRAAdapter.test_gradients_flow_to_every_exercised_occurrence``'s
+        identical note). This test takes one optimizer warmup step first, as
+        that test does, to move every exercised ``B`` away from zero before
+        asserting gradient flow.
+        """
+        model = Zamba2Model(**model_config)
+        _ = model(sample_ids)  # a subclassed keras.Model is unbuilt until its first call
+
+        optimizer = keras.optimizers.Adam(learning_rate=1e-1)
+        with tf.GradientTape() as warmup_tape:
+            warmup_output = model(sample_ids, training=True)
+            warmup_loss = keras.ops.mean(keras.ops.square(warmup_output))
+        warmup_grads = warmup_tape.gradient(warmup_loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(warmup_grads, model.trainable_variables))
+
+        report = assert_gradients_reach_every_trainable_weight(model, sample_ids)
+
+        assert len(report) == len(model.trainable_weights)
+        assert len(report) > 0
+
+    def test_serialization_cycle(
+        self, model_config: Dict[str, Any], sample_ids: keras.KerasTensor
+    ) -> None:
+        """Full .keras serialization cycle with value-level (rtol=0)
+        prediction comparison."""
+        model = Zamba2Model(**model_config)
+        original_prediction = model(sample_ids)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "zamba2_model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(sample_ids)
+
+            assert loaded_model.layer_mapping == model_config["layer_mapping"]
+            assert loaded_model.num_mem_blocks == model_config["num_mem_blocks"]
+
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
+                rtol=0, atol=1e-5,
+                err_msg="Predictions differ after serialization",
+            )
+
+    def test_config_completeness(self, model_config: Dict[str, Any]) -> None:
+        """get_config() must contain every __init__ param needed to rebuild
+        an architecturally-identical model."""
+        model = Zamba2Model(**model_config)
+        config = model.get_config()
+
+        required_keys = {
+            "vocab_size", "hidden_size", "layer_mapping", "num_mem_blocks",
+            "num_heads", "max_seq_len", "rope_theta", "rope_percentage",
+            "attention_dropout_rate", "mem_block_norm_epsilon",
+            "mlp_hidden_dim", "ffn_expansion_factor", "ffn_multiple_of",
+            "lora_rank", "lora_alpha", "d_state", "d_conv", "expand",
+            "headdim", "d_ssm", "ngroups", "mamba_norm_epsilon",
+            "mamba_rmsnorm", "norm_before_gate", "dt_min", "dt_max",
+            "dt_init_floor", "mamba_bias", "conv_bias", "use_bias",
+            "kernel_initializer", "embeddings_initializer",
+            "final_norm_epsilon",
+        }
+        for key in required_keys:
+            assert key in config, f"Missing {key} in get_config()"
+
+        assert config["layer_mapping"] == model_config["layer_mapping"]
+        assert config["num_mem_blocks"] == model_config["num_mem_blocks"]
+        assert config["vocab_size"] == model_config["vocab_size"]
+
+        rebuilt = Zamba2Model.from_config(config)
+        assert rebuilt.layer_mapping == model.layer_mapping
+        assert rebuilt.num_mem_blocks == model.num_mem_blocks
+
+    def test_causal_mask_is_honoured_at_the_model_level(
+        self, model_config: Dict[str, Any]
+    ) -> None:
+        """Three-armed future-leak probe (v2 guide Section 12.1) run through
+        the WHOLE model, not just one attention block: perturbing a future
+        token must not change an earlier position's logits, perturbing the
+        CURRENT token must change its own logits (anti-vacuity -- rules out
+        a mask that blocks everything), and perturbing a PAST token must
+        change a later position's logits (confirms the earlier position is
+        actually read, not just unreadable by the future)."""
+        model = Zamba2Model(**model_config)
+        seq_len = 6
+        base_ids = keras.random.randint((1, seq_len), 0, model_config["vocab_size"], dtype="int32")
+        base_ids_numpy = keras.ops.convert_to_numpy(base_ids)
+
+        earlier_position = 1
+        current_position = 2
+        future_position = 4
+
+        def run(ids_numpy: np.ndarray) -> np.ndarray:
+            ids = keras.ops.convert_to_tensor(ids_numpy, dtype="int32")
+            return keras.ops.convert_to_numpy(model(ids))
+
+        base_output = run(base_ids_numpy)
+
+        # Arm 1: perturb a FUTURE token -> earlier position's logits unchanged.
+        future_perturbed = base_ids_numpy.copy()
+        future_perturbed[0, future_position] = (
+            future_perturbed[0, future_position] + 1
+        ) % model_config["vocab_size"]
+        future_output = run(future_perturbed)
+        np.testing.assert_allclose(
+            base_output[:, earlier_position, :],
+            future_output[:, earlier_position, :],
+            rtol=0, atol=1e-5,
+            err_msg="A future-token perturbation leaked into an earlier position's logits",
+        )
+
+        # Arm 2: perturb the CURRENT token -> its own logits DO change.
+        current_perturbed = base_ids_numpy.copy()
+        current_perturbed[0, current_position] = (
+            current_perturbed[0, current_position] + 1
+        ) % model_config["vocab_size"]
+        current_output = run(current_perturbed)
+        assert not np.allclose(
+            base_output[:, current_position, :],
+            current_output[:, current_position, :],
+            rtol=0, atol=1e-5,
+        ), "Perturbing a position's own token must change its own logits"
+
+        # Arm 3: perturb a PAST token -> a LATER position's logits DO change.
+        past_perturbed = base_ids_numpy.copy()
+        past_perturbed[0, earlier_position] = (
+            past_perturbed[0, earlier_position] + 1
+        ) % model_config["vocab_size"]
+        past_output = run(past_perturbed)
+        assert not np.allclose(
+            base_output[:, future_position, :],
+            past_output[:, future_position, :],
+            rtol=0, atol=1e-5,
+        ), "A past-token perturbation must reach a later position's logits"
+
+    def test_shared_mem_blocks_round_robin_repeat_with_fewer_physical_blocks(
+        self,
+    ) -> None:
+        """Decisive weight-identity guard at the MODEL level: when
+        ``num_mem_blocks`` is smaller than the number of 'g' occurrences,
+        the round-robin must make two different depth positions literally
+        invoke the SAME physical :class:`Zamba2SharedAttentionBlock`/
+        :class:`Zamba2SharedMLPBlock` instance (``is``-identity on the
+        underlying Variable objects), not merely an equal-valued copy."""
+        model = Zamba2Model(
+            vocab_size=20,
+            hidden_size=16,
+            layer_mapping=["m", "g", "m", "g", "m", "g"],  # 3 'g' occurrences
+            num_mem_blocks=2,  # occurrences 0 and 2 both land on slot 0
+            num_heads=4,
+            max_seq_len=8,
+            d_state=8,
+            headdim=4,
+        )
+
+        g_positions = [
+            (ref_idx, occurrence_idx)
+            for kind, ref_idx, occurrence_idx in model._position_info
+            if kind == "g"
+        ]
+        assert [ref_idx for ref_idx, _ in g_positions] == [0, 1, 0]
+        assert [occ for _, occ in g_positions] == [0, 1, 2]
+
+        # Occurrences 0 and 2 route to physical slot 0 -- same instances.
+        first_slot, second_slot = g_positions[0][0], g_positions[2][0]
+        assert first_slot == second_slot
+        assert (
+            model.mem_attention_blocks[first_slot]
+            is model.mem_attention_blocks[second_slot]
+        )
+        assert model.mem_mlp_blocks[first_slot] is model.mem_mlp_blocks[second_slot]
+
+        # Occurrence 1 routes to a DIFFERENT physical slot.
+        assert model.mem_attention_blocks[0] is not model.mem_attention_blocks[1]
+        assert model.mem_mlp_blocks[0] is not model.mem_mlp_blocks[1]
+
+        # Run the model once, then confirm the shared instance still holds
+        # the same Variable objects after a real call (not just pre-build).
+        ids = keras.random.randint((2, 5), 0, 20, dtype="int32")
+        _ = model(ids)
+        attn_weights_slot_0 = list(model.mem_attention_blocks[0].weights)
+        mlp_weights_slot_0 = list(model.mem_mlp_blocks[0].weights)
+        assert len(attn_weights_slot_0) > 0
+        assert len(mlp_weights_slot_0) > 0
+        # Re-fetch through the SAME index used by both depth positions
+        # (first_slot == second_slot == 0) -- identical object both times.
+        assert all(
+            w is other
+            for w, other in zip(
+                attn_weights_slot_0, model.mem_attention_blocks[first_slot].weights
+            )
+        )
+
+    def test_lora_deltas_differ_across_g_occurrences(
+        self, model_config: Dict[str, Any], sample_ids: keras.KerasTensor
+    ) -> None:
+        """The decisive composition guard for invariant 2 (plan.md): capture
+        the per-'g'-position hidden-state delta attributable to the shared
+        MLP mem-block's LoRA-selected occurrence, and assert they are NOT
+        all equal. The Section 12.7 "stack reads only the last occurrence"
+        failure would collapse every occurrence's delta onto one, which a
+        shape-only or finiteness-only check cannot detect.
+        """
+        model = Zamba2Model(**model_config)
+        _ = model(sample_ids)  # build
+
+        hidden = keras.random.normal(shape=(2, 6, model_config["hidden_size"]))
+
+        g_occurrences = [
+            (ref_idx, occurrence_idx)
+            for kind, ref_idx, occurrence_idx in model._position_info
+            if kind == "g"
+        ]
+        assert len(g_occurrences) == 2
+
+        mlp_block = model.mem_mlp_blocks[g_occurrences[0][0]]
+        # Both occurrences in this fixture route to DIFFERENT physical
+        # slots (num_mem_blocks == num 'g' occurrences == 2), so compare
+        # each slot's own LoRA delta at its own occurrence index.
+        outputs = []
+        for ref_idx, occurrence_idx in g_occurrences:
+            block = model.mem_mlp_blocks[ref_idx]
+            outputs.append(
+                keras.ops.convert_to_numpy(
+                    block(hidden, occurrence_idx=occurrence_idx)
+                )
+            )
+
+        assert not np.allclose(outputs[0], outputs[1], rtol=0, atol=1e-5), (
+            "Two different 'g' occurrences produced identical MLP mem-block "
+            "outputs -- the LoRA delta is not actually varying per occurrence "
+            "(the 'stack reads only the last block' failure shape)."
+        )
+
+        # Same occurrence, same physical block, called twice -> identical
+        # (no hidden per-call-order state leak).
+        ref_idx, occurrence_idx = g_occurrences[0]
+        block = model.mem_mlp_blocks[ref_idx]
+        repeat_a = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occurrence_idx))
+        repeat_b = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occurrence_idx))
+        np.testing.assert_allclose(repeat_a, repeat_b, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
