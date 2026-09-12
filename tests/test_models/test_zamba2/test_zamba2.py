@@ -3,7 +3,8 @@
 Grows incrementally alongside ``src/dl_techniques/models/language/zamba2/``;
 see ``plans/plan-2026-09-12T075714-035fd488/plan.md`` for the build order.
 Step 1 covers :class:`LoRAAdapter`; step 2 adds
-:class:`Zamba2SharedAttentionBlock`.
+:class:`Zamba2SharedAttentionBlock`; step 3 adds
+:class:`Zamba2SharedMLPBlock`.
 """
 
 import os
@@ -18,6 +19,7 @@ import keras
 from dl_techniques.models.language.zamba2.layers import (
     LoRAAdapter,
     Zamba2SharedAttentionBlock,
+    Zamba2SharedMLPBlock,
 )
 
 
@@ -440,6 +442,199 @@ class TestZamba2SharedAttentionBlock:
             hidden = keras.ops.cast(sample_inputs["hidden_state"], block.compute_dtype)
             embedding = keras.ops.cast(sample_inputs["original_embedding"], block.compute_dtype)
             output = block(hidden, embedding)
+            output_numpy = keras.ops.convert_to_numpy(output)
+            assert np.isfinite(output_numpy).all(), f"NaN/Inf under {dtype_policy}"
+        finally:
+            keras.mixed_precision.set_global_policy(original_policy)
+
+
+class TestZamba2SharedMLPBlock:
+    """Comprehensive test suite for the Zamba2SharedMLPBlock layer."""
+
+    @pytest.fixture
+    def block_config(self) -> Dict[str, Any]:
+        """Standard configuration for testing."""
+        return {
+            "d_model": 32,
+            "num_occurrences": 3,
+            "hidden_dim": 64,
+            "lora_rank": 4,
+            "lora_alpha": 8.0,
+        }
+
+    @pytest.fixture
+    def sample_input(self) -> keras.KerasTensor:
+        """Sample 3D hidden-state input."""
+        return keras.random.normal(shape=(2, 12, 32))
+
+    def test_initialization(self, block_config: Dict[str, Any]) -> None:
+        """Test layer initialization stores all params and builds sub-layers."""
+        block = Zamba2SharedMLPBlock(**block_config)
+
+        assert block.d_model == block_config["d_model"]
+        assert block.num_occurrences == block_config["num_occurrences"]
+        assert block.hidden_dim == block_config["hidden_dim"]
+        assert not block.built
+        assert isinstance(block.norm, keras.layers.Layer)
+        assert isinstance(block.gate_proj, keras.layers.Dense)
+        assert isinstance(block.up_proj, keras.layers.Dense)
+        assert isinstance(block.lora, LoRAAdapter)
+        assert isinstance(block.down_proj, keras.layers.Dense)
+        assert block.lora.num_occurrences == block_config["num_occurrences"]
+        assert block.lora.output_dim == block_config["hidden_dim"]
+
+    def test_edge_cases(self) -> None:
+        """Every positional hyperparameter must be validated."""
+        with pytest.raises(ValueError, match="d_model must be positive"):
+            Zamba2SharedMLPBlock(d_model=0, num_occurrences=2)
+
+        with pytest.raises(ValueError, match="num_occurrences must be positive"):
+            Zamba2SharedMLPBlock(d_model=32, num_occurrences=0)
+
+        with pytest.raises(ValueError, match="hidden_dim must be positive"):
+            Zamba2SharedMLPBlock(d_model=32, num_occurrences=2, hidden_dim=0)
+
+        with pytest.raises(ValueError, match="ffn_expansion_factor must be positive"):
+            Zamba2SharedMLPBlock(d_model=32, num_occurrences=2, ffn_expansion_factor=0)
+
+        with pytest.raises(ValueError, match="ffn_multiple_of must be positive"):
+            Zamba2SharedMLPBlock(d_model=32, num_occurrences=2, ffn_multiple_of=0)
+
+        with pytest.raises(ValueError, match="lora_rank must be positive"):
+            Zamba2SharedMLPBlock(d_model=32, num_occurrences=2, lora_rank=0)
+
+        with pytest.raises(ValueError, match="lora_alpha must be positive"):
+            Zamba2SharedMLPBlock(d_model=32, num_occurrences=2, lora_alpha=0.0)
+
+        with pytest.raises(ValueError, match="norm_epsilon must be positive"):
+            Zamba2SharedMLPBlock(d_model=32, num_occurrences=2, norm_epsilon=0.0)
+
+    def test_forward_pass_shape_and_finiteness(
+        self, block_config: Dict[str, Any], sample_input: keras.KerasTensor
+    ) -> None:
+        """Output shape matches the input's shape and contains no NaN/Inf."""
+        block = Zamba2SharedMLPBlock(**block_config)
+        output = block(sample_input, occurrence_idx=0)
+
+        assert output.shape == sample_input.shape
+        output_numpy = keras.ops.convert_to_numpy(output)
+        assert np.isfinite(output_numpy).all()
+        assert block.built
+
+    def test_same_instance_called_twice_shares_weight_objects(
+        self, block_config: Dict[str, Any], sample_input: keras.KerasTensor
+    ) -> None:
+        """The same block instance, called at two different depths (here,
+        twice with the same ``occurrence_idx``), shares identical weight
+        ``Variable`` objects (``is``-level identity).
+
+        See ``test_lora_differs_per_occurrence.py`` for the decisive guard
+        that this identity holds EVEN ACROSS two different occurrence
+        indices, while the LoRA delta itself still diverges.
+        """
+        block = Zamba2SharedMLPBlock(**block_config)
+
+        _ = block(sample_input, occurrence_idx=0)
+        weights_at_first_call = list(block.weights)
+
+        _ = block(sample_input, occurrence_idx=0)
+        weights_at_second_call = list(block.weights)
+
+        assert len(weights_at_first_call) == len(weights_at_second_call)
+        for w1, w2 in zip(weights_at_first_call, weights_at_second_call):
+            assert w1 is w2, "Calling the same instance twice must not create new weights"
+
+    def test_gradient_flow(
+        self, block_config: Dict[str, Any], sample_input: keras.KerasTensor
+    ) -> None:
+        """Gradients reach every trainable weight, including the owned
+        LoRAAdapter's ``A``/``B`` for the exercised occurrence."""
+        block = Zamba2SharedMLPBlock(**block_config)
+
+        with tf.GradientTape() as tape:
+            output = block(sample_input, occurrence_idx=0)
+            loss = keras.ops.mean(keras.ops.square(output))
+        grads = tape.gradient(loss, block.trainable_variables)
+
+        assert len(grads) == len(block.trainable_variables)
+        assert len(grads) > 0
+        for grad, variable in zip(grads, block.trainable_variables):
+            assert grad is not None, f"No gradient for {variable.name}"
+
+    def test_serialization_cycle(
+        self, block_config: Dict[str, Any], sample_input: keras.KerasTensor
+    ) -> None:
+        """Full .keras serialization cycle with prediction comparison."""
+        inputs = keras.Input(shape=sample_input.shape[1:])
+        layer = Zamba2SharedMLPBlock(**block_config)
+        outputs = layer(inputs, occurrence_idx=1)
+        model = keras.Model(inputs, outputs)
+
+        original_prediction = model(sample_input)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "test_model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(sample_input)
+
+            reloaded_layer = next(
+                lyr for lyr in loaded_model.layers if isinstance(lyr, Zamba2SharedMLPBlock)
+            )
+            assert reloaded_layer.d_model == block_config["d_model"]
+            assert reloaded_layer.num_occurrences == block_config["num_occurrences"]
+            assert reloaded_layer.hidden_dim == block_config["hidden_dim"]
+
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
+                rtol=0, atol=1e-5,
+                err_msg="Predictions differ after serialization",
+            )
+
+    def test_config_completeness(self, block_config: Dict[str, Any]) -> None:
+        """get_config() must contain every __init__ param."""
+        layer = Zamba2SharedMLPBlock(**block_config)
+        config = layer.get_config()
+
+        required_keys = {
+            "d_model", "num_occurrences", "hidden_dim", "ffn_expansion_factor",
+            "ffn_multiple_of", "lora_rank", "lora_alpha", "norm_epsilon",
+            "use_bias", "kernel_initializer",
+        }
+        for key in required_keys:
+            assert key in config, f"Missing {key} in get_config()"
+
+        assert config["d_model"] == block_config["d_model"]
+        assert config["num_occurrences"] == block_config["num_occurrences"]
+        assert config["hidden_dim"] == block_config["hidden_dim"]
+        assert config["lora_rank"] == block_config["lora_rank"]
+        assert config["lora_alpha"] == block_config["lora_alpha"]
+
+    def test_hidden_dim_derived_when_not_given(self) -> None:
+        """``hidden_dim=None`` derives via the 2/3 rule, matching
+        ``SwiGLUFFN``'s own arithmetic."""
+        block = Zamba2SharedMLPBlock(d_model=768, num_occurrences=2)
+        raw = int(768 * 4 * 2 / 3)
+        expected = 256 * ((raw + 256 - 1) // 256)
+        assert block.hidden_dim == expected
+
+    @pytest.mark.parametrize("dtype_policy", ["float32", "mixed_float16"])
+    def test_mixed_float16_no_nan(
+        self,
+        block_config: Dict[str, Any],
+        sample_input: keras.KerasTensor,
+        dtype_policy: str,
+    ) -> None:
+        """The gated-SiLU + additive-LoRA path must not produce NaN/Inf
+        under ``mixed_float16``."""
+        original_policy = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy(dtype_policy)
+            block = Zamba2SharedMLPBlock(**block_config)
+            hidden = keras.ops.cast(sample_input, block.compute_dtype)
+            output = block(hidden, occurrence_idx=0)
             output_numpy = keras.ops.convert_to_numpy(output)
             assert np.isfinite(output_numpy).all(), f"NaN/Inf under {dtype_policy}"
         finally:
