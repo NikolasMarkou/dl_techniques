@@ -109,6 +109,7 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/mamba/common.py", "Mamba2TrainingConfig"),
     ("train/gemma/common.py", "Gemma3TrainingConfig"),
     ("train/qwen/common.py", "Qwen3TrainingConfig"),
+    ("train/distilbert/pretrain.py", "DistilBertTrainingConfig"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
