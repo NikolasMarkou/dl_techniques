@@ -24,9 +24,14 @@ References:
 import keras
 from typing import Optional, Any, Dict, Tuple, Union, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from ..attention.perceiver_attention import PerceiverAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.transformers.perceiver_transformer")
 class PerceiverTransformerLayer(keras.layers.Layer):
@@ -339,3 +344,5 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

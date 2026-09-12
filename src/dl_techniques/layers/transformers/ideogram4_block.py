@@ -19,12 +19,17 @@ SiLU activation; neither applies its own.
 import keras
 from typing import Any, Dict, Optional, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
 from dl_techniques.layers.attention.ideogram4_attention import Ideogram4Attention
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.transformers.ideogram4_block")
 class Ideogram4TransformerBlock(keras.layers.Layer):

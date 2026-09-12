@@ -24,9 +24,14 @@ This is a Keras 3 port of diffusers' `AdaLayerNormZero` /
 import keras
 from typing import Any, Dict, List, Optional, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 def _unpack_pair_shape(
     input_shape: Any,
