@@ -93,7 +93,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `vq_vae_rotation/` | VQ-VAE with rotation-based codebook updates |
 | `yolo12/` | YOLOv12 detection |
 
-### `language/` (18)
+### `language/` (19)
 
 | Package | |
 |---|---|
@@ -115,6 +115,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `tiny_recursive_model/` | tiny recursive model |
 | `tree_transformer/` | Tree Transformer |
 | `wave_field/` | wave-field LLM |
+| `zamba2/` | Zamba2 — hybrid Mamba2 + shared-attention SSM/Transformer LM; per-depth `mamba/` Mamba2 blocks interleave with a small number of **shared** attention+MLP mem-blocks reused at multiple depths, each reuse carrying its own per-occurrence LoRA delta. No pretrained weights |
 
 Packages here are filed by input modality — token sequences — which is not a claim that
 `mamba`, `fnet` or `fftnet` is only a language model.
