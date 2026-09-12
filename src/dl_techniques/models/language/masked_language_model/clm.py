@@ -14,7 +14,13 @@ a ``hidden_size`` attribute and return a mapping containing
 so this model runs on the TensorFlow backend only. Pass ``skip_head=True``
 for a backbone that already bakes its own head and returns logits directly
 as a plain tensor; ``hidden_size`` is then not required and no output head
-is built.
+is built. Pass ``pre_shifted=True`` when the batch already comes pre-shifted
+(e.g. from ``preprocess_clm_packed_dataset``, which yields
+``(input_ids, labels)`` tuples with ``labels`` shifted by one position
+relative to ``input_ids``): ``train_step``/``test_step`` then use the
+batch's own ``(x, y)`` unchanged instead of shifting again, with
+``loss_weights=None`` since the packed pipeline never emits an
+``attention_mask``.
 
 References:
     - Bengio et al., 2003. A Neural Probabilistic Language Model. JMLR 3:1137-1155.
@@ -60,6 +66,19 @@ class CausalLanguageModel(keras.Model):
     Causality: the backbone has to be causal. ``build`` checks it with a
     future-leak probe and raises ``ValueError`` if a past position moves when a
     future token changes. Pass ``verify_causality=False`` to skip the check.
+
+    Pre-shifted batches: with ``pre_shifted=True``, ``train_step``/``test_step``
+    skip ``_prepare_inputs_and_labels`` entirely and unpack ``data`` via
+    ``keras.utils.unpack_x_y_sample_weight`` instead -- the unpacked ``x`` is
+    used AS the model input and the unpacked ``y`` AS the labels, with no
+    further shift applied. This is the contract
+    ``preprocess_clm_packed_dataset`` already produces: ``(input_ids, labels)``
+    tuples where ``labels = input_ids`` shifted by one position, computed once
+    upstream of this class. Applying the internal shift on top would shift
+    the batch a second time, training every position against the WRONG
+    target. ``loss_weights`` defaults to ``None`` under this flag, since the
+    packed pipeline never emits an ``attention_mask`` (no padding by
+    construction) -- there is nothing to derive a mask from.
 
     The perplexity tracker averages ``exp(batch_loss)`` over batches, which by
     Jensen's inequality is an upper bound on corpus perplexity. Exponentiate
@@ -185,6 +204,12 @@ class CausalLanguageModel(keras.Model):
         mapping) and no output head, weight tying, or ``hidden_size`` check
         is performed. Defaults to False, preserving the original
         headless-backbone contract.
+    :param pre_shifted: When True, ``train_step``/``test_step`` treat ``data``
+        as an already-shifted ``(x, y)`` pair (unpacked via
+        ``keras.utils.unpack_x_y_sample_weight``) and use it unchanged instead
+        of shifting it again via ``_prepare_inputs_and_labels``.
+        ``loss_weights`` is then always ``None``. Defaults to False,
+        preserving the original internal-shift contract.
     :param verify_causality: Whether to probe the backbone for future leakage at
         build time. Defaults to True.
     :param causality_tolerance: Maximum tolerated absolute change at a past
@@ -208,6 +233,7 @@ class CausalLanguageModel(keras.Model):
         initializer_range: float = 0.02,
         tie_weights: bool = True,
         skip_head: bool = False,
+        pre_shifted: bool = False,
         verify_causality: bool = True,
         causality_tolerance: float = 0.0,
         **kwargs: Any,
@@ -221,6 +247,7 @@ class CausalLanguageModel(keras.Model):
         self.initializer_range = initializer_range
         self.tie_weights = tie_weights
         self.skip_head = skip_head
+        self.pre_shifted = pre_shifted
         self.verify_causality = verify_causality
         self.causality_tolerance = causality_tolerance
 
@@ -560,6 +587,48 @@ class CausalLanguageModel(keras.Model):
 
         return x_inputs, y_labels, loss_weights
 
+    def _unpack_batch(
+        self, data: Union[Dict[str, keras.KerasTensor], Tuple]
+    ) -> Tuple[
+        Union[Dict[str, keras.KerasTensor], keras.KerasTensor],
+        keras.KerasTensor,
+        Optional[keras.KerasTensor],
+    ]:
+        """Resolve one batch into ``(x_inputs, y_labels, loss_weights)``.
+
+        Shared by ``train_step`` and ``test_step`` so the ``pre_shifted``
+        branch is written once, not twice.
+
+        With ``pre_shifted=False`` (the original contract), ``data`` is
+        unpacked for its ``inputs`` mapping only -- any ``y``/sample weight
+        Keras also unpacked is ignored, since the labels come from
+        ``_prepare_inputs_and_labels``'s internal shift instead.
+
+        With ``pre_shifted=True``, ``data`` is unpacked into ``(x, y)`` via
+        ``keras.utils.unpack_x_y_sample_weight`` and returned AS GIVEN, with
+        no further shift: ``x`` is already the shifted model input and ``y``
+        is already the shifted labels (the contract
+        ``preprocess_clm_packed_dataset`` produces upstream). Applying
+        ``_prepare_inputs_and_labels`` on top here would shift a second time.
+        ``loss_weights`` is always ``None`` under this flag, since the packed
+        pipeline never emits an ``attention_mask``.
+
+        :param data: A batch of inputs, or a tuple Keras unpacks into inputs,
+            targets and sample weights.
+        :return: ``(x_inputs, y_labels, loss_weights)``, ready for the
+            backbone and ``compute_loss``.
+        """
+        if self.pre_shifted:
+            x_inputs, y_labels, _ = keras.utils.unpack_x_y_sample_weight(data)
+            return x_inputs, y_labels, None
+
+        if isinstance(data, tuple):
+            inputs, _, _ = keras.utils.unpack_x_y_sample_weight(data)
+        else:
+            inputs = data
+
+        return self._prepare_inputs_and_labels(inputs)
+
     def train_step(
         self, data: Union[Dict[str, keras.KerasTensor], Tuple]
     ) -> Dict[str, keras.KerasTensor]:
@@ -570,12 +639,7 @@ class CausalLanguageModel(keras.Model):
             come from the shift.
         :return: Mapping from metric name to current value.
         """
-        if isinstance(data, tuple):
-            inputs, _, _ = keras.utils.unpack_x_y_sample_weight(data)
-        else:
-            inputs = data
-
-        x_inputs, y_labels, loss_weights = self._prepare_inputs_and_labels(inputs)
+        x_inputs, y_labels, loss_weights = self._unpack_batch(data)
 
         with tf.GradientTape() as tape:
             sequence_output = self._backbone_forward(x_inputs, training=True)
@@ -604,12 +668,7 @@ class CausalLanguageModel(keras.Model):
             targets and sample weights. Targets are ignored.
         :return: Mapping from metric name to current value.
         """
-        if isinstance(data, tuple):
-            inputs, _, _ = keras.utils.unpack_x_y_sample_weight(data)
-        else:
-            inputs = data
-
-        x_inputs, y_labels, loss_weights = self._prepare_inputs_and_labels(inputs)
+        x_inputs, y_labels, loss_weights = self._unpack_batch(data)
 
         sequence_output = self._backbone_forward(x_inputs, training=False)
         logits = sequence_output if self.skip_head else self._apply_output_head(sequence_output)
@@ -664,6 +723,7 @@ class CausalLanguageModel(keras.Model):
                 "initializer_range": self.initializer_range,
                 "tie_weights": self.tie_weights,
                 "skip_head": self.skip_head,
+                "pre_shifted": self.pre_shifted,
                 "verify_causality": self.verify_causality,
                 "causality_tolerance": self.causality_tolerance,
             }

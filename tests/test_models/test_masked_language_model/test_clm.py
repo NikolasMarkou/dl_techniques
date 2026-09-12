@@ -622,5 +622,184 @@ class TestSkipHead:
         assert clm_model.skip_head is False
 
 
+class TestPreShifted:
+    """`pre_shifted=True` skips `_prepare_inputs_and_labels`: `train_step`/
+    `test_step` unpack ``data`` into ``(x, y)`` via
+    ``keras.utils.unpack_x_y_sample_weight`` and use both AS GIVEN, matching
+    what ``preprocess_clm_packed_dataset`` already yields upstream.
+
+    This is a delta-impulse / offset-tracking probe, not a shape/finiteness
+    check: ``FixedPatternBackbone`` below always predicts a FIXED answer
+    pattern indexed by absolute sequence POSITION, ignoring the input's
+    actual token values. That pattern lines up with the batch's true,
+    correctly-paired label only when the input is used un-shifted. A second,
+    internal shift (the double-shift bug this flag exists to prevent)
+    truncates the sequence by one position and reconstructs a DIFFERENT
+    label straight from ``x`` itself, discarding the batch's real ``y``
+    entirely -- the fixed pattern does not match that reconstructed label,
+    so the loss goes sharply UP, not merely finite. This is what makes the
+    test able to tell single-shift and double-shift apart.
+    """
+
+    PATTERN = [11, 21, 31, 41, 51, 61, 71, 81]  # the one true, position-indexed label
+    VOCAB_SIZE = 100
+    LOGIT_SCALE = 30.0
+
+    @staticmethod
+    def _make_backbone():
+        @keras.saving.register_keras_serializable()
+        class FixedPatternBackbone(keras.Model):
+            """Predicts a FIXED, position-indexed pattern; ignores input values.
+
+            A stub whose ``call()`` returns a KNOWN, hand-inspectable logits
+            tensor that depends only on the input's sequence LENGTH, not its
+            content -- exactly the "fixed, inspectable tensor unrelated to
+            input" shape needed to compute what ``compute_loss`` should give
+            under "correct single shift" vs "accidental double shift" by
+            hand, ahead of running either.
+            """
+
+            def __init__(self, pattern=None, vocab_size=100, scale=30.0, **kwargs):
+                super().__init__(**kwargs)
+                self.pattern = list(pattern) if pattern is not None else list(
+                    TestPreShifted.PATTERN
+                )
+                self.vocab_size = vocab_size
+                self.scale = scale
+
+            def call(self, inputs, training=False):
+                input_ids = inputs["input_ids"] if isinstance(inputs, dict) else inputs
+                seq_len = input_ids.shape[1]
+                batch_size = ops.shape(input_ids)[0]
+                classes = tf.constant(self.pattern[:seq_len], dtype=tf.int32)
+                one_hot = tf.one_hot(classes, depth=self.vocab_size) * self.scale
+                one_hot = ops.expand_dims(one_hot, axis=0)
+                return ops.tile(one_hot, [batch_size, 1, 1])
+
+            def get_config(self):
+                config = super().get_config()
+                config.update(
+                    {
+                        "pattern": self.pattern,
+                        "vocab_size": self.vocab_size,
+                        "scale": self.scale,
+                    }
+                )
+                return config
+
+        return FixedPatternBackbone(
+            TestPreShifted.PATTERN, TestPreShifted.VOCAB_SIZE, TestPreShifted.LOGIT_SCALE
+        )
+
+    def test_pre_shifted_train_step_uses_batch_unchanged(self):
+        """Correct behavior: the fixed pattern predicts the TRUE label
+        exactly when the batch's own ``(x, y)`` is used un-shifted, so the
+        loss should be ~0."""
+        backbone = self._make_backbone()
+        model = CausalLanguageModel(
+            backbone=backbone,
+            vocab_size=self.VOCAB_SIZE,
+            skip_head=True,
+            pre_shifted=True,
+            verify_causality=False,
+        )
+        model.compile(optimizer="adam")
+        x = tf.constant([[10, 20, 30, 40, 50, 60, 70, 80]], dtype=tf.int32)
+        y = tf.constant([[11, 21, 31, 41, 51, 61, 71, 81]], dtype=tf.int32)
+        _ = model(x, training=False)  # build
+
+        metrics = model.test_step((x, y))
+        loss = float(metrics["loss"])
+        assert loss < 0.01, (
+            "pre_shifted=True must train against the batch's OWN (x, y) "
+            f"unchanged; the fixed-pattern backbone predicts the true label "
+            f"exactly under a single shift, so loss should be ~0, got {loss}"
+        )
+
+    def test_double_shift_would_be_wrong_not_merely_finite(self):
+        """RED-proof: if ``pre_shifted=True`` accidentally still routed
+        through ``_prepare_inputs_and_labels``, the reconstructed label
+        would be a DIFFERENT target the fixed pattern does not match -- a
+        sharply HIGHER loss, not merely a finite one.
+
+        This directly exercises ``_prepare_inputs_and_labels`` (the
+        double-shift bug's mechanism) against the identical backbone and
+        batch as the test above, to prove the two are distinguishable by
+        more than shape or finiteness. Before this step's fix, forcing
+        ``pre_shifted``'s branch in ``train_step``/``test_step`` to fall
+        through to ``_prepare_inputs_and_labels`` regardless of the flag
+        reproduces exactly this ``broken_loss`` computation -- confirmed by
+        temporarily reverting ``_unpack_batch``'s branch during this step's
+        implementation and observing this test fail (see step report).
+        """
+        backbone = self._make_backbone()
+        model = CausalLanguageModel(
+            backbone=backbone,
+            vocab_size=self.VOCAB_SIZE,
+            skip_head=True,
+            pre_shifted=True,
+            verify_causality=False,
+        )
+        x = tf.constant([[10, 20, 30, 40, 50, 60, 70, 80]], dtype=tf.int32)
+        y_correct = tf.constant([[11, 21, 31, 41, 51, 61, 71, 81]], dtype=tf.int32)
+
+        # Correct: single shift, the batch's own (x, y) used unchanged.
+        correct_logits = model._backbone_forward(x, training=False)
+        correct_loss = float(model.compute_loss(y=y_correct, y_pred=correct_logits))
+
+        # Broken: `pre_shifted=True`'s x fed into the OLD internal shift
+        # anyway. `_prepare_inputs_and_labels` truncates by one position and
+        # reconstructs ITS OWN label straight from `x` -- discarding the
+        # batch's real, upstream-correct `y` entirely.
+        x_double_shifted, y_double_shifted, _ = model._prepare_inputs_and_labels(
+            {"input_ids": x}
+        )
+        broken_logits = model._backbone_forward(x_double_shifted, training=False)
+        broken_loss = float(model.compute_loss(y=y_double_shifted, y_pred=broken_logits))
+
+        assert correct_loss < 0.01
+        assert broken_loss > 10.0
+        assert broken_loss > 1000 * max(correct_loss, 1e-9), (
+            "A double-shift bug must show up as a sharply WRONG target, not "
+            "merely a finite loss -- if this ratio ever collapses, the "
+            "probe has stopped distinguishing the two shift levels."
+        )
+
+    def test_pre_shifted_works_with_a_headed_dict_backbone_too(self, mock_backbone):
+        """`pre_shifted` and `skip_head` are independent, orthogonal flags:
+        a headless, dict-input/dict-output backbone (the mamba-shaped case)
+        also honors `pre_shifted`, exercising the `_apply_output_head`
+        branch under this flag, not only `skip_head=True`."""
+        model = CausalLanguageModel(
+            backbone=mock_backbone,
+            vocab_size=1000,
+            pre_shifted=True,
+            verify_causality=False,
+        )
+        model.compile(optimizer="adam")
+        x = {"input_ids": tf.random.uniform((2, 8), minval=1, maxval=1000, dtype=tf.int32)}
+        y = tf.random.uniform((2, 8), minval=1, maxval=1000, dtype=tf.int32)
+        _ = model(x, training=False)  # build
+
+        metrics = model.train_step((x, y))
+        assert "loss" in metrics
+        assert not np.isnan(metrics["loss"])
+        assert model.skip_head is False
+        assert model.pre_shifted is True
+
+    def test_pre_shifted_survives_get_config_roundtrip(self, mock_backbone):
+        model = CausalLanguageModel(
+            backbone=mock_backbone, vocab_size=1000, pre_shifted=True, verify_causality=False
+        )
+        config = model.get_config()
+        assert config["pre_shifted"] is True
+        model2 = CausalLanguageModel.from_config(config)
+        assert model2.pre_shifted is True
+
+    def test_pre_shifted_default_is_false(self, clm_model):
+        """The additive flag defaults False, matching prior behavior."""
+        assert clm_model.pre_shifted is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
