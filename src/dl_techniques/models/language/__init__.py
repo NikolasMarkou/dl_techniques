@@ -18,6 +18,7 @@
 - `tiny_recursive_model/` — tiny recursive model
 - `tree_transformer/` — Tree Transformer
 - `wave_field/` — wave-field LLM
+- `zamba2/` — Zamba2 (hybrid Mamba2 + shared-attention SSM/Transformer LM)
 
 Import from the leaf package, not from here — this family package carries no re-exports
 by design (the reasoning is written out in `models/vision/__init__.py`):

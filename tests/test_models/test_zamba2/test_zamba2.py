@@ -23,7 +23,12 @@ from dl_techniques.models.language.zamba2.layers import (
     Zamba2SharedAttentionBlock,
     Zamba2SharedMLPBlock,
 )
-from dl_techniques.models.language.zamba2.model import Zamba2Model
+from dl_techniques.models.language.zamba2.model import (
+    MODEL_VARIANTS,
+    Zamba2Model,
+    _build_layer_mapping,
+    create_zamba2,
+)
 
 from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 
@@ -1207,6 +1212,124 @@ class TestZamba2Model:
         repeat_a = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occurrence_idx))
         repeat_b = keras.ops.convert_to_numpy(block(hidden, occurrence_idx=occurrence_idx))
         np.testing.assert_allclose(repeat_a, repeat_b, rtol=0, atol=0)
+
+
+class TestBuildLayerMapping:
+    """Guards for the private :func:`_build_layer_mapping` helper that
+    derives every shipped variant's ``layer_mapping`` from its
+    ``num_mamba_blocks``/``num_mem_blocks`` counts -- step 6's own "the two
+    counts cannot drift apart" contract."""
+
+    def test_counts_match_inputs(self) -> None:
+        """The returned list has exactly the requested number of 'm' and 'g'
+        entries, for every shipped variant's own (num_mamba, num_g) pair."""
+        for num_mamba, num_g in [(8, 2), (18, 6), (24, 8)]:
+            mapping = _build_layer_mapping(num_mamba, num_g)
+            assert mapping.count("m") == num_mamba
+            assert mapping.count("g") == num_g
+            assert len(mapping) == num_mamba + num_g
+
+    def test_g_entries_are_spread_out_not_clustered(self) -> None:
+        """'g' entries are evenly distributed rather than all trailing or
+        all leading -- no two 'g' entries are adjacent for a mapping with
+        more than one 'm' between occurrences."""
+        mapping = _build_layer_mapping(8, 2)
+        g_positions = [i for i, token in enumerate(mapping) if token == "g"]
+        assert len(g_positions) == 2
+        assert g_positions[1] - g_positions[0] > 1
+
+    def test_single_occurrence_places_g_last(self) -> None:
+        """A single shared occurrence places its one 'g' after all 'm'
+        entries (the degenerate, zero-round-robin case)."""
+        mapping = _build_layer_mapping(5, 1)
+        assert mapping == ["m", "m", "m", "m", "m", "g"]
+
+
+class TestModelVariants:
+    """Guards for :data:`MODEL_VARIANTS`, :meth:`Zamba2Model.from_variant`
+    and the top-level :func:`create_zamba2` factory -- step 6's catalogue
+    registration pass."""
+
+    @pytest.mark.parametrize("variant", list(MODEL_VARIANTS.keys()))
+    def test_every_variant_builds_and_forwards(self, variant: str) -> None:
+        """Every shipped variant builds a Zamba2Model and runs one forward
+        pass whose output shape matches the variant's own declared
+        hidden_size/vocab_size (a per-cell check -- LESSONS.md: 'one
+        defective cell is a family')."""
+        model = create_zamba2(variant)
+        config = MODEL_VARIANTS[variant]
+
+        seq_len = 6
+        ids = keras.random.randint((2, seq_len), 0, config["vocab_size"], dtype="int32")
+        logits = model(ids)
+
+        assert logits.shape == (2, seq_len, config["vocab_size"])
+        assert model.hidden_size == config["hidden_size"]
+        assert model.num_mem_blocks == config["num_mem_blocks"]
+        logits_np = keras.ops.convert_to_numpy(logits)
+        assert np.all(np.isfinite(logits_np))
+
+    def test_unknown_variant_raises(self) -> None:
+        """An unrecognized variant name raises ValueError naming the
+        available variants, never silently falling back to a default."""
+        with pytest.raises(ValueError, match="Unknown variant"):
+            create_zamba2("zamba2_does_not_exist")
+
+    def test_pretrained_true_raises_not_implemented(self) -> None:
+        """create_zamba2(variant=..., pretrained=True) raises
+        NotImplementedError naming the reason -- no Zamba2 checkpoint is
+        distributed with dl_techniques (decisions.md D-004)."""
+        with pytest.raises(NotImplementedError, match="pretrained"):
+            create_zamba2("zamba2_mini", pretrained=True)
+
+        with pytest.raises(NotImplementedError, match="pretrained"):
+            Zamba2Model.from_variant("zamba2_mini", pretrained=True)
+
+    def test_variant_override_is_applied(self) -> None:
+        """A keyword override on create_zamba2 takes precedence over the
+        variant table's own value."""
+        model = create_zamba2("zamba2_mini", vocab_size=53)
+        assert model.vocab_size == 53
+
+    def test_get_config_round_trip_at_two_variants(self) -> None:
+        """get_config()/from_config() round-trips exactly, value-for-value
+        (not just shape-for-shape), at two distinct variants -- catching a
+        variant-table-only defect a single-variant round trip would miss."""
+        for variant in ("zamba2_mini", "zamba2_small"):
+            model = create_zamba2(variant)
+            config = model.get_config()
+            restored = Zamba2Model.from_config(config)
+            restored_config = restored.get_config()
+
+            assert config.keys() == restored_config.keys()
+            for key, value in config.items():
+                assert restored_config[key] == value, (
+                    f"variant={variant!r} key={key!r}: "
+                    f"{value!r} != {restored_config[key]!r}"
+                )
+
+    def test_full_model_serialization_round_trip(self, tmp_path) -> None:
+        """Saving and reloading a full, variant-built Zamba2Model reproduces
+        its output bit-for-bit on the same input (not just the get_config
+        contract exercised above)."""
+        model = create_zamba2("zamba2_mini")
+        ids = keras.random.randint((2, 6), 0, model.vocab_size, dtype="int32")
+        before = keras.ops.convert_to_numpy(model(ids, training=False))
+
+        save_path = os.path.join(str(tmp_path), "zamba2_mini_demo.keras")
+        model.save(save_path)
+        restored = keras.models.load_model(save_path)
+        after = keras.ops.convert_to_numpy(restored(ids, training=False))
+
+        np.testing.assert_allclose(before, after, rtol=0, atol=0)
+
+    def test_registry_key_resolves(self) -> None:
+        """The model class resolves through the repo's registration
+        mechanism, not a bare keras.saving.register_keras_serializable
+        name."""
+        registered_name = keras.saving.get_registered_name(Zamba2Model)
+        resolved = keras.saving.get_registered_object(registered_name)
+        assert resolved is Zamba2Model
 
 
 if __name__ == "__main__":

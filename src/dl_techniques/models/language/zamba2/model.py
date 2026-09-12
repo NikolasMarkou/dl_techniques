@@ -22,6 +22,92 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import keras
 
 # ---------------------------------------------------------------------
+# variant tables
+# ---------------------------------------------------------------------
+
+#: Default vocabulary size -- Tiktoken ``cl100k_base``, matching this repo's
+#: other subword-tokenized LMs (``gpt2``, ``colbert``).
+DEFAULT_VOCAB_SIZE: int = 100277
+
+
+def _build_layer_mapping(num_mamba_blocks: int, num_shared_occurrences: int) -> List[str]:
+    """
+    Build a ``'m'``/``'g'`` token list: mostly ``'m'`` with ``'g'`` inserted
+    at evenly-spaced intervals, matching Zamba2's own ``layer_mapping``
+    convention (predominantly Mamba2 blocks, a small number of shared
+    attention+MLP mem-block invocations sprinkled through the stack) scaled
+    down from the original config's roughly-every-6th-position density to
+    this repo's smaller variant depths.
+
+    :param num_mamba_blocks: Total number of ``'m'`` entries to place.
+    :type num_mamba_blocks: int
+    :param num_shared_occurrences: Total number of ``'g'`` entries to place,
+        evenly distributed among the ``'m'`` entries.
+    :type num_shared_occurrences: int
+    :return: A list of length ``num_mamba_blocks + num_shared_occurrences``.
+    :rtype: List[str]
+    """
+    group_size = max(num_mamba_blocks // num_shared_occurrences, 1)
+    mapping: List[str] = []
+    m_remaining = num_mamba_blocks
+    for i in range(num_shared_occurrences):
+        is_last = i == num_shared_occurrences - 1
+        take = m_remaining if is_last else min(group_size, m_remaining)
+        mapping.extend(["m"] * take)
+        mapping.append("g")
+        m_remaining -= take
+    # Any leftover 'm' entries (only possible if num_shared_occurrences
+    # exceeds num_mamba_blocks) are appended unsplit.
+    mapping.extend(["m"] * m_remaining)
+    return mapping
+
+
+#: Public variant registry: repo-scale (mini/small/base), not the Zamba2
+#: paper's own 2.7B/7B table (explicit non-goal, decisions.md D-002).
+#: Keyed by short variant name; each value is a kwargs dict accepted by
+#: :class:`Zamba2Model`'s constructor (minus ``layer_mapping``, which is
+#: derived below from ``num_mamba_blocks``/``num_mem_blocks`` so the two
+#: counts can never drift apart).
+MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+    "zamba2_mini": {
+        "vocab_size": DEFAULT_VOCAB_SIZE,
+        "hidden_size": 256,
+        "num_mamba_blocks": 8,
+        "num_mem_blocks": 2,
+        "num_heads": 4,
+        "max_seq_len": 512,
+        "lora_rank": 4,
+        "lora_alpha": 8.0,
+        "description": "Zamba2 mini: ~256-dim, 8 Mamba2 blocks, 2 mem-block "
+                        "occurrences -- fast tests/smoke runs.",
+    },
+    "zamba2_small": {
+        "vocab_size": DEFAULT_VOCAB_SIZE,
+        "hidden_size": 512,
+        "num_mamba_blocks": 18,
+        "num_mem_blocks": 6,
+        "num_heads": 8,
+        "max_seq_len": 1024,
+        "lora_rank": 8,
+        "lora_alpha": 16.0,
+        "description": "Zamba2 small: ~512-dim, 18 Mamba2 blocks, 6 "
+                        "mem-block occurrences.",
+    },
+    "zamba2_base": {
+        "vocab_size": DEFAULT_VOCAB_SIZE,
+        "hidden_size": 768,
+        "num_mamba_blocks": 24,
+        "num_mem_blocks": 8,
+        "num_heads": 12,
+        "max_seq_len": 2048,
+        "lora_rank": 16,
+        "lora_alpha": 32.0,
+        "description": "Zamba2 base: ~768-dim, 24 Mamba2 blocks, 8 "
+                        "mem-block occurrences.",
+    },
+}
+
+# ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
@@ -562,6 +648,68 @@ class Zamba2Model(keras.Model):
         batch_size, seq_len = input_shape[0], input_shape[1]
         return (batch_size, seq_len, self.vocab_size)
 
+    #: Re-exported, not redefined: the module-level :data:`MODEL_VARIANTS`,
+    #: aliased onto the class so ``from_variant``/``create_zamba2`` and the
+    #: API-contract tests can reach the table through the class, matching
+    #: ``hnet``'s ``HNet.MODEL_VARIANTS`` convention.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = MODEL_VARIANTS
+
+    @classmethod
+    def from_variant(
+        cls,
+        variant: str,
+        **overrides: Any,
+    ) -> "Zamba2Model":
+        """
+        Build one of the shipped :data:`MODEL_VARIANTS` (``'zamba2_mini'``,
+        ``'zamba2_small'``, ``'zamba2_base'``).
+
+        ``layer_mapping`` is derived from the variant's ``num_mamba_blocks``/
+        ``num_mem_blocks`` entries via :func:`_build_layer_mapping` rather
+        than stored literally in the table, so the two counts can never
+        drift out of sync with the list's actual composition. Pass
+        ``layer_mapping=...`` in ``overrides`` to bypass this derivation and
+        supply an explicit mapping instead.
+
+        :param variant: A key of :data:`MODEL_VARIANTS`.
+        :type variant: str
+        :param overrides: Override or extend any variant parameter,
+            including ``pretrained`` (which :meth:`__init__` raises
+            ``NotImplementedError`` for when True -- no Zamba2 checkpoint is
+            distributed with ``dl_techniques``).
+        :type overrides: Any
+        :return: The constructed model.
+        :rtype: Zamba2Model
+        :raises ValueError: If ``variant`` is not a recognized key.
+        :raises NotImplementedError: If ``pretrained=True`` is passed in
+            ``overrides``.
+
+        Example:
+            .. code-block:: python
+
+                model = Zamba2Model.from_variant("zamba2_mini")
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant {variant!r}. "
+                f"Available: {list(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        config = dict(cls.MODEL_VARIANTS[variant])
+        config.pop("description", None)
+
+        if "layer_mapping" not in overrides:
+            num_mamba_blocks = config.pop("num_mamba_blocks")
+            num_mem_blocks = config["num_mem_blocks"]
+            config["layer_mapping"] = _build_layer_mapping(
+                num_mamba_blocks, num_mem_blocks
+            )
+        else:
+            config.pop("num_mamba_blocks", None)
+
+        config.update(overrides)
+        return cls(**config)
+
     def get_config(self) -> Dict[str, Any]:
         """
         Get model configuration for serialization.
@@ -612,3 +760,45 @@ class Zamba2Model(keras.Model):
             }
         )
         return config
+
+
+# ---------------------------------------------------------------------
+# factory
+# ---------------------------------------------------------------------
+
+
+def create_zamba2(
+    variant: str = "zamba2_small",
+    pretrained: bool = False,
+    **overrides: Any,
+) -> Zamba2Model:
+    """
+    Create a Zamba2 model from a shipped :data:`MODEL_VARIANTS` name.
+
+    Delegates to :meth:`Zamba2Model.from_variant` and holds no defaulting,
+    validation, or construction logic of its own (matching ``create_hnet``'s
+    pure-delegation shape).
+
+    :param variant: A key of :data:`MODEL_VARIANTS` --  ``'zamba2_mini'``,
+        ``'zamba2_small'`` (default), or ``'zamba2_base'``.
+    :type variant: str
+    :param pretrained: If ``True``, raises ``NotImplementedError`` -- no
+        pretrained Zamba2 checkpoint is distributed with ``dl_techniques``
+        (decisions.md D-004). Must be ``False`` (the default).
+    :type pretrained: bool
+    :param overrides: Forwarded to :meth:`Zamba2Model.from_variant`,
+        overriding any variant parameter.
+    :type overrides: Any
+    :return: The constructed model.
+    :rtype: Zamba2Model
+    :raises ValueError: If ``variant`` is not a recognized key.
+    :raises NotImplementedError: If ``pretrained`` is True.
+
+    Example:
+        .. code-block:: python
+
+            model = create_zamba2("zamba2_mini")
+            input_ids = keras.random.randint((2, 32), 0, 100277, dtype="int32")
+            logits = model(input_ids)
+    """
+    return Zamba2Model.from_variant(variant, pretrained=pretrained, **overrides)
