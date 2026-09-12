@@ -1512,7 +1512,7 @@ def _b_models_dino_v2():
 
 
 def _b_models_fftnet():
-    from dl_techniques.models.language.fftnet.model import FFTNetBlock
+    from dl_techniques.models.vision.fftnet.model import FFTNetBlock
     b = FFTNetBlock(embed_dim=16)
     b.build((None, 8, 16))
     return b.ffn
@@ -1629,7 +1629,7 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "layers/transformers/transformer.py": _b_transformer,
     "layers/transformers/transformer_decoder.py": _b_transformer_decoder,
     "models/vision/dino/dino_v2.py": _b_models_dino_v2,
-    "models/language/fftnet/model.py": _b_models_fftnet,
+    "models/vision/fftnet/model.py": _b_models_fftnet,
     "layers/transformers/gemma3_transformer.py": _b_models_gemma,
     "models/neural_computer/nam/cell.py": _b_models_nam,
     "models/vision/image_restoration/pw_fnet/model.py": _b_models_pw_fnet,

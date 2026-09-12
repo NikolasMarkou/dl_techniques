@@ -4149,7 +4149,7 @@ _CREATE_DELEGATION_WAIVERS = {
     ("models/vision/dino/dino_v1.py", "create_dino_teacher_student_pair"): "ROUTE step 19 -- builds a teacher/student PAIR and syncs them; returns a tuple, not a model",
     ("models/vision/beit/model.py", "create_beit_mim"): "ROUTE step 19 -- composite: backbone + MIM head",
     ("models/vision/beit/model.py", "create_beit_classifier"): "ROUTE step 19 -- composite: backbone + classification head",
-    ("models/language/fftnet/model.py", "create_fftnet_classifier"): "ROUTE step 19 -- delegates to a sibling create_* , not to from_variant",
+    ("models/vision/fftnet/model.py", "create_fftnet_classifier"): "ROUTE step 19 -- delegates to a sibling create_* , not to from_variant",
     # (e) Bypasses from_variant entirely though the module defines one.
     ("models/vision/beit/model.py", "create_beit_backbone"): "ROUTE step 19 -- constructs BeitModel(...) directly, bypassing BeitModel.from_variant",
     ("models/vision/fastvit/model.py", "create_fastvit_image_encoder"): "ROUTE step 19 -- constructs FastVitImageEncoder(...) directly",

@@ -49,7 +49,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`tabular/`](tabular/) | 1 | tabular-data models |
 | **Sum** | **90** | |
 
-### `vision/` (38)
+### `vision/` (39)
 
 | Package | |
 |---|---|
@@ -68,6 +68,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `dit/` | DiT, the class-conditional latent Diffusion Transformer of Peebles & Xie: adaLN-Zero blocks over VAE latents, the twelve published variants, and the DDPM sampler (ancestral + DDIM, respacing, classifier-free guidance) |
 | `energy_transformer/` | Energy Transformer — masked image completion, plus classifier |
 | `fastvit/` | FastViT MCi image backbone, the assembled tower over `layers/fastvit/` |
+| `fftnet/` | FFTNet — adaptive spectral filtering ViT-shaped patch encoder (`image_size`/`patch_size` in, `last_hidden_state`/`cls_token`/`patch_features` dict out, no `vocab_size`); moved here from `models/language/` |
 | `fractalnet/` | FractalNet |
 | `image_restoration/darkir/` | DarkIR low-light restoration |
 | `image_restoration/doc_res/` | DocRes — one Restormer backbone for five document tasks; the task is carried by 3 classical-CV prompt channels stacked onto RGB, so the input is 6 channels and nothing in the network is task-conditioned |
@@ -93,7 +94,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `vq_vae_rotation/` | VQ-VAE with rotation-based codebook updates |
 | `yolo12/` | YOLOv12 detection |
 
-### `language/` (19)
+### `language/` (18)
 
 | Package | |
 |---|---|
@@ -101,7 +102,6 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `byte_latent_transformer/` | Byte Latent Transformer (BLT) |
 | `colbert/` | ColBERT v1/v2, late-interaction retrieval |
 | `distilbert/` | DistilBERT |
-| `fftnet/` | FFTNet |
 | `fnet/` | FNet, Fourier token mixing |
 | `gemma/` | Gemma LLM |
 | `gpt2/` | GPT-2 architecture |
@@ -118,7 +118,9 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `zamba2/` | Zamba2 — hybrid Mamba2 + shared-attention SSM/Transformer LM; per-depth `mamba/` Mamba2 blocks interleave with a small number of **shared** attention+MLP mem-blocks reused at multiple depths, each reuse carrying its own per-occurrence LoRA delta. No pretrained weights |
 
 Packages here are filed by input modality — token sequences — which is not a claim that
-`mamba`, `fnet` or `fftnet` is only a language model.
+`mamba` or `fnet` is only a language model. (`fftnet` was filed here for the same
+historical reason before this table; it has since moved to `vision/`, where its actual
+image-patch input modality now matches its filing.)
 
 ### `vision_language/` (10)
 

@@ -1028,7 +1028,7 @@ _extra("doc_res", _b_doc_res, lambda: _f32(1, 32, 32, 6))
 
 
 def _b_fftnet():
-    from dl_techniques.models.language.fftnet.model import create_fftnet
+    from dl_techniques.models.vision.fftnet.model import create_fftnet
     return create_fftnet("tiny", image_size=32, patch_size=16)
 
 
