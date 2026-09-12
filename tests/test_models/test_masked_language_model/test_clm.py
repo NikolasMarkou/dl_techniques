@@ -514,5 +514,113 @@ class TestBackboneCausalityGuard:
         assert model.get_config()["verify_causality"] is False
 
 
+class TestSkipHead:
+    """`skip_head=True` wraps a backbone that already bakes its own head and
+    returns vocabulary logits directly -- no ``hidden_size`` requirement, no
+    ``last_hidden_state`` dict-indexing, no tied/untied head construction.
+
+    Uses a REAL headed backbone (`Qwen3`, tiny-sized), not a mock, per
+    plan.md step 1's testing requirement.
+    """
+
+    @staticmethod
+    def _tiny_qwen3():
+        from dl_techniques.models.language.qwen.qwen3 import Qwen3
+
+        return Qwen3(
+            vocab_size=48,
+            hidden_size=16,
+            num_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            max_seq_len=16,
+        )
+
+    def test_skip_head_output_matches_backbone_raw_logits(self):
+        """`call()`'s output IS the backbone's own logits, unmodified."""
+        backbone = self._tiny_qwen3()
+        model = CausalLanguageModel(
+            backbone=backbone, vocab_size=48, skip_head=True, verify_causality=False
+        )
+        input_ids = tf.random.uniform((2, 8), minval=0, maxval=48, dtype=tf.int32)
+        wrapped_out = model({"input_ids": input_ids}, training=False)
+        raw_out = backbone(input_ids, training=False)
+
+        assert wrapped_out.shape == raw_out.shape == (2, 8, 48)
+        assert wrapped_out.dtype == raw_out.dtype
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(wrapped_out),
+            ops.convert_to_numpy(raw_out),
+            atol=1e-6,
+            rtol=0,
+        )
+
+    def test_skip_head_creates_no_head_state(self):
+        """No `output_bias`/`output_layer`/`embedding_weights` populated."""
+        backbone = self._tiny_qwen3()
+        model = CausalLanguageModel(
+            backbone=backbone, vocab_size=48, skip_head=True, verify_causality=False
+        )
+        input_ids = tf.random.uniform((2, 8), minval=0, maxval=48, dtype=tf.int32)
+        _ = model({"input_ids": input_ids}, training=False)
+
+        assert model.output_bias is None
+        assert model.output_layer is None
+        assert model.embedding_weights is None
+        assert model.use_weight_tying is False
+        assert model.hidden_size is None
+
+    def test_skip_head_does_not_require_hidden_size(self):
+        """The `hasattr(backbone, "hidden_size")` check is not enforced.
+
+        A backbone-stand-in that deliberately lacks `hidden_size` (unlike
+        `Qwen3`, which does have it) constructs cleanly under `skip_head=True`
+        and scores correctly -- proof the check would not matter even if
+        `hidden_size` were absent.
+        """
+
+        @keras.saving.register_keras_serializable()
+        class HeadedBackboneNoHiddenSize(keras.Model):
+            """Bakes its own head; deliberately has no `hidden_size`."""
+
+            def __init__(self, vocab_size=48, **kwargs):
+                super().__init__(**kwargs)
+                self.vocab_size = vocab_size
+                self.embed = keras.layers.Embedding(vocab_size, 16)
+                self.head = keras.layers.Dense(vocab_size)
+
+            def call(self, inputs, training=False):
+                input_ids = inputs["input_ids"] if isinstance(inputs, dict) else inputs
+                return self.head(self.embed(input_ids))
+
+            def get_config(self):
+                config = super().get_config()
+                config.update({"vocab_size": self.vocab_size})
+                return config
+
+        assert not hasattr(HeadedBackboneNoHiddenSize(), "hidden_size")
+
+        backbone = HeadedBackboneNoHiddenSize(vocab_size=48)
+        model = CausalLanguageModel(
+            backbone=backbone, vocab_size=48, skip_head=True, verify_causality=False
+        )
+        input_ids = tf.random.uniform((2, 8), minval=0, maxval=48, dtype=tf.int32)
+        out = model({"input_ids": input_ids}, training=False)
+        assert out.shape == (2, 8, 48)
+
+    def test_skip_head_survives_get_config_roundtrip(self, mock_backbone):
+        model = CausalLanguageModel(
+            backbone=mock_backbone, vocab_size=1000, skip_head=True, verify_causality=False
+        )
+        config = model.get_config()
+        assert config["skip_head"] is True
+        model2 = CausalLanguageModel.from_config(config)
+        assert model2.skip_head is True
+
+    def test_skip_head_default_is_false(self, clm_model):
+        """The additive flag defaults False, matching prior behavior."""
+        assert clm_model.skip_head is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

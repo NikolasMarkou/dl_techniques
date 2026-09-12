@@ -11,7 +11,10 @@ hidden state is unchanged. A bidirectional backbone raises ``ValueError``
 there rather than training toward a collapsed loss. The backbone must expose
 a ``hidden_size`` attribute and return a mapping containing
 ``last_hidden_state``, and ``train_step`` uses ``tf.GradientTape`` directly,
-so this model runs on the TensorFlow backend only.
+so this model runs on the TensorFlow backend only. Pass ``skip_head=True``
+for a backbone that already bakes its own head and returns logits directly
+as a plain tensor; ``hidden_size`` is then not required and no output head
+is built.
 
 References:
     - Bengio et al., 2003. A Neural Probabilistic Language Model. JMLR 3:1137-1155.
@@ -167,20 +170,29 @@ class CausalLanguageModel(keras.Model):
 
     No match leaves the head untied and logs a warning.
 
-    :param backbone: An instance of a Keras model that acts as the decoder. It
-        must expose ``hidden_size`` and return a mapping containing
-        ``last_hidden_state``.
+    :param backbone: An instance of a Keras model that acts as the decoder. By
+        default (``skip_head=False``) it must expose ``hidden_size`` and
+        return a mapping containing ``last_hidden_state``. With
+        ``skip_head=True`` it may instead be a backbone that already bakes
+        its own head, returning vocabulary logits directly from ``call()``
+        as a plain tensor -- ``hidden_size`` is then not required.
     :param vocab_size: The size of the vocabulary.
     :param initializer_range: Standard deviation for weight initialization.
-    :param tie_weights: Whether to tie the output layer weights. Defaults to True.
+    :param tie_weights: Whether to tie the output layer weights. Defaults to
+        True. Ignored when ``skip_head`` is True, since no head is built.
+    :param skip_head: When True, the backbone is assumed to already produce
+        vocabulary logits (a plain tensor, not a ``last_hidden_state``
+        mapping) and no output head, weight tying, or ``hidden_size`` check
+        is performed. Defaults to False, preserving the original
+        headless-backbone contract.
     :param verify_causality: Whether to probe the backbone for future leakage at
         build time. Defaults to True.
     :param causality_tolerance: Maximum tolerated absolute change at a past
         position. Defaults to 0.0, since a masked contribution is exactly zero
         and any movement is leakage.
     :raises ValueError: If ``vocab_size`` or ``initializer_range`` is not
-        positive, if the backbone has no ``hidden_size`` attribute, or if the
-        causality probe finds leakage.
+        positive, if ``skip_head`` is False and the backbone has no
+        ``hidden_size`` attribute, or if the causality probe finds leakage.
 
     :ivar backbone: The wrapped decoder, saved and reused for fine-tuning.
     :ivar loss_tracker: Tracker behind the reported ``loss`` metric.
@@ -195,6 +207,7 @@ class CausalLanguageModel(keras.Model):
         vocab_size: int,
         initializer_range: float = 0.02,
         tie_weights: bool = True,
+        skip_head: bool = False,
         verify_causality: bool = True,
         causality_tolerance: float = 0.0,
         **kwargs: Any,
@@ -207,21 +220,29 @@ class CausalLanguageModel(keras.Model):
         self.vocab_size = vocab_size
         self.initializer_range = initializer_range
         self.tie_weights = tie_weights
+        self.skip_head = skip_head
         self.verify_causality = verify_causality
         self.causality_tolerance = causality_tolerance
 
-        # The head width follows the backbone, so the contract is checked here.
-        if not hasattr(self.backbone, "hidden_size"):
+        # The head width follows the backbone, so the contract is checked
+        # here -- but only when a head is actually built: `skip_head=True`
+        # backbones already bake their own head and never need `hidden_size`.
+        if not self.skip_head and not hasattr(self.backbone, "hidden_size"):
             raise ValueError("The provided backbone must have a 'hidden_size' attribute.")
-        self.hidden_size = self.backbone.hidden_size
+        self.hidden_size = self.backbone.hidden_size if not self.skip_head else None
 
         # Both are resolved in `build`, once tying is settled.
         self.embedding_weights = None
         self.output_bias = None
 
-        # An untied head is created now, so `load_model` has a layer to restore
-        # weights into; the tied branch resolves in `build`.
-        if not self.tie_weights:
+        # `skip_head=True` builds no head-related state at all: the backbone's
+        # own output IS the logits. Otherwise an untied head is created now,
+        # so `load_model` has a layer to restore weights into; the tied
+        # branch resolves in `build`.
+        if self.skip_head:
+            self.use_weight_tying = False
+            self.output_layer = None
+        elif not self.tie_weights:
             self.use_weight_tying = False
             self.output_layer = keras.layers.Dense(
                 self.vocab_size,
@@ -334,7 +355,10 @@ class CausalLanguageModel(keras.Model):
                     "load."
                 )
 
-        if self.tie_weights:
+        # `skip_head=True` builds no output head at all: the backbone's own
+        # output IS the logits, so the tie/untie resolution below is skipped
+        # entirely (no `output_bias`/`output_layer`/`embedding_weights`).
+        if not self.skip_head and self.tie_weights:
             self.embedding_weights = self._locate_embedding_weights()
 
             if self.embedding_weights is not None:
@@ -373,6 +397,33 @@ class CausalLanguageModel(keras.Model):
         if self.verify_causality:
             self._verify_backbone_causality()
 
+    # DECISION plan-2026-09-12T195532-422091c3/D-005: one shared helper for
+    # the skip_head dict-vs-tensor branch, not the conditional repeated at 3
+    # call sites (`call`, `train_step`/`test_step`, the causality probe). See
+    # decisions.md D-005.
+    def _backbone_forward(
+        self,
+        inputs: Union[Dict[str, keras.KerasTensor], keras.KerasTensor],
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Run the backbone once and return its output as a plain tensor.
+
+        With ``skip_head=False`` (the original contract) the backbone
+        returns a mapping and this extracts ``last_hidden_state``. With
+        ``skip_head=True`` the backbone already bakes its own head and
+        returns vocabulary logits directly from ``call()``, so its return
+        value is passed straight through with no dict-indexing.
+
+        :param inputs: Backbone inputs.
+        :param training: Whether to run the backbone in training mode.
+        :return: The backbone's hidden states, or its logits directly when
+            ``skip_head`` is True.
+        """
+        backbone_outputs = self.backbone(inputs, training=training)
+        if self.skip_head:
+            return backbone_outputs
+        return backbone_outputs["last_hidden_state"]
+
     def _verify_backbone_causality(
         self, seq_len: int = 8, batch_size: int = 2
     ) -> None:
@@ -403,12 +454,12 @@ class CausalLanguageModel(keras.Model):
                 axis=1,
             )
             mask = ops.ones((batch_size, seq_len), dtype="int32")
-            base = self.backbone(
+            base = self._backbone_forward(
                 {"input_ids": ids, "attention_mask": mask}, training=False
-            )["last_hidden_state"]
-            moved = self.backbone(
+            )
+            moved = self._backbone_forward(
                 {"input_ids": perturbed, "attention_mask": mask}, training=False
-            )["last_hidden_state"]
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Could not run the causality probe on the backbone "
@@ -449,10 +500,10 @@ class CausalLanguageModel(keras.Model):
         :param training: Whether to run in training mode. Defaults to False.
         :return: Logits of shape (batch, seq_len, vocab_size).
         """
-        backbone_outputs = self.backbone(inputs, training=training)
-        sequence_output = backbone_outputs["last_hidden_state"]
-        logits = self._apply_output_head(sequence_output)
-        return logits
+        sequence_output = self._backbone_forward(inputs, training=training)
+        if self.skip_head:
+            return sequence_output
+        return self._apply_output_head(sequence_output)
 
     def _apply_output_head(self, hidden_states: keras.KerasTensor) -> keras.KerasTensor:
         """Projects hidden states to vocabulary logits.
@@ -527,9 +578,8 @@ class CausalLanguageModel(keras.Model):
         x_inputs, y_labels, loss_weights = self._prepare_inputs_and_labels(inputs)
 
         with tf.GradientTape() as tape:
-            backbone_outputs = self.backbone(x_inputs, training=True)
-            sequence_output = backbone_outputs["last_hidden_state"]
-            logits = self._apply_output_head(sequence_output)
+            sequence_output = self._backbone_forward(x_inputs, training=True)
+            logits = sequence_output if self.skip_head else self._apply_output_head(sequence_output)
             loss = self.compute_loss(y=y_labels, y_pred=logits, sample_weight=loss_weights)
             # DECISION plan-2026-08-19T163559-499b6f0e/D-036: scale_loss runs inside
             # the tape; skipping it shrinks every mixed_float16 update. See decisions.md.
@@ -561,9 +611,8 @@ class CausalLanguageModel(keras.Model):
 
         x_inputs, y_labels, loss_weights = self._prepare_inputs_and_labels(inputs)
 
-        backbone_outputs = self.backbone(x_inputs, training=False)
-        sequence_output = backbone_outputs["last_hidden_state"]
-        logits = self._apply_output_head(sequence_output)
+        sequence_output = self._backbone_forward(x_inputs, training=False)
+        logits = sequence_output if self.skip_head else self._apply_output_head(sequence_output)
         loss = self.compute_loss(y=y_labels, y_pred=logits, sample_weight=loss_weights)
 
         self.loss_tracker.update_state(loss)
@@ -614,6 +663,7 @@ class CausalLanguageModel(keras.Model):
                 "vocab_size": self.vocab_size,
                 "initializer_range": self.initializer_range,
                 "tie_weights": self.tie_weights,
+                "skip_head": self.skip_head,
                 "verify_causality": self.verify_causality,
                 "causality_tolerance": self.causality_tolerance,
             }
