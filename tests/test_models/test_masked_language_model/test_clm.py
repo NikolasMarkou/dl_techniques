@@ -757,6 +757,135 @@ class TestSkipHead:
         assert clm_model.skip_head is False
 
 
+class DictOutputBackbone(keras.Model):
+    """Stub shaped like GPT2/WaveFieldLLM: `call()` returns a mapping with
+    a `logits` key and a DIFFERENT `last_hidden_state` key, both plain
+    tensors with recorded, checkable values."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logits_value = None
+        self.hidden_value = None
+
+    def call(self, inputs, training=False):
+        input_ids = inputs["input_ids"] if isinstance(inputs, dict) else inputs
+        batch = ops.shape(input_ids)[0]
+        seq_len = ops.shape(input_ids)[1]
+        # Two distinguishable constants, broadcast to the input shape.
+        logits = ops.ones((batch, seq_len, 4), dtype="float32") * 7.0
+        last_hidden_state = ops.ones((batch, seq_len, 4), dtype="float32") * -3.0
+        self.logits_value = logits
+        self.hidden_value = last_hidden_state
+        return {"logits": logits, "last_hidden_state": last_hidden_state}
+
+    def get_config(self):
+        return super().get_config()
+
+
+class TestOutputKey:
+    """`output_key` extracts a named tensor from a dict-output `skip_head`
+    backbone (GPT2/WaveFieldLLM's shape) instead of treating the raw output
+    as the logits directly."""
+
+    def test_output_key_extracts_the_named_tensor(self):
+        backbone = DictOutputBackbone()
+        model = CausalLanguageModel(
+            backbone=backbone,
+            vocab_size=4,
+            skip_head=True,
+            output_key="logits",
+            verify_causality=False,
+        )
+        input_ids = tf.random.uniform((2, 5), minval=0, maxval=4, dtype=tf.int32)
+        out = model({"input_ids": input_ids}, training=False)
+
+        # Value-identity check against the stub's own recorded logits --
+        # not a shape/finiteness check, and not the (different) hidden state.
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(out),
+            ops.convert_to_numpy(backbone.logits_value),
+            atol=1e-6,
+            rtol=0,
+        )
+        assert not np.allclose(
+            ops.convert_to_numpy(out), ops.convert_to_numpy(backbone.hidden_value)
+        )
+
+    def test_output_key_wrong_key_raises_clear_value_error(self):
+        backbone = DictOutputBackbone()
+        model = CausalLanguageModel(
+            backbone=backbone,
+            vocab_size=4,
+            skip_head=True,
+            output_key="nonexistent_key",
+            verify_causality=False,
+        )
+        input_ids = tf.random.uniform((2, 5), minval=0, maxval=4, dtype=tf.int32)
+
+        with pytest.raises(ValueError) as excinfo:
+            model({"input_ids": input_ids}, training=False)
+
+        message = str(excinfo.value)
+        assert "nonexistent_key" in message
+        assert "logits" in message
+        assert "last_hidden_state" in message
+
+    def test_output_key_none_bare_tensor_backbone_unaffected(self):
+        """`output_key=None` (default) with a BARE-TENSOR `skip_head=True`
+        backbone (mamba/gemma/qwen's shape) is unaffected -- no regression."""
+        backbone = self.__class__._tiny_qwen3()
+        model = CausalLanguageModel(
+            backbone=backbone, vocab_size=48, skip_head=True, verify_causality=False
+        )
+        assert model.output_key is None
+        input_ids = tf.random.uniform((2, 8), minval=0, maxval=48, dtype=tf.int32)
+        wrapped_out = model({"input_ids": input_ids}, training=False)
+        raw_out = backbone(input_ids, training=False)
+
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(wrapped_out),
+            ops.convert_to_numpy(raw_out),
+            atol=1e-6,
+            rtol=0,
+        )
+
+    @staticmethod
+    def _tiny_qwen3():
+        from dl_techniques.models.language.qwen.qwen3 import Qwen3
+
+        return Qwen3(
+            vocab_size=48,
+            hidden_size=16,
+            num_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            max_seq_len=16,
+        )
+
+    def test_output_key_default_is_none(self, clm_model):
+        assert clm_model.output_key is None
+
+    def test_output_key_survives_get_config_roundtrip(self):
+        backbone = DictOutputBackbone()
+        model = CausalLanguageModel(
+            backbone=backbone,
+            vocab_size=4,
+            skip_head=True,
+            output_key="logits",
+            verify_causality=False,
+        )
+        config = model.get_config()
+        assert config["output_key"] == "logits"
+        model2 = CausalLanguageModel.from_config(config)
+        assert model2.output_key == "logits"
+
+    def test_output_key_none_survives_get_config_roundtrip(self, clm_model):
+        config = clm_model.get_config()
+        assert config["output_key"] is None
+        model2 = CausalLanguageModel.from_config(config)
+        assert model2.output_key is None
+
+
 class TestPreShifted:
     """`pre_shifted=True` skips `_prepare_inputs_and_labels`: `train_step`/
     `test_step` unpack ``data`` into ``(x, y)`` via

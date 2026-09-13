@@ -14,7 +14,10 @@ a ``hidden_size`` attribute and return a mapping containing
 so this model runs on the TensorFlow backend only. Pass ``skip_head=True``
 for a backbone that already bakes its own head and returns logits directly
 as a plain tensor; ``hidden_size`` is then not required and no output head
-is built. Pass ``pre_shifted=True`` when the batch already comes pre-shifted
+is built. For a ``skip_head=True`` backbone that instead returns a mapping
+(e.g. GPT2/WaveFieldLLM's ``{"logits": ..., "last_hidden_state": ...}``),
+also pass ``output_key`` naming which entry holds the logits. Pass
+``pre_shifted=True`` when the batch already comes pre-shifted
 (e.g. from ``preprocess_clm_packed_dataset``, which yields
 ``(input_ids, labels)`` tuples with ``labels`` shifted by one position
 relative to ``input_ids``): ``train_step``/``test_step`` then use the
@@ -224,10 +227,11 @@ class CausalLanguageModel(keras.Model):
     :param tie_weights: Whether to tie the output layer weights. Defaults to
         True. Ignored when ``skip_head`` is True, since no head is built.
     :param skip_head: When True, the backbone is assumed to already produce
-        vocabulary logits (a plain tensor, not a ``last_hidden_state``
-        mapping) and no output head, weight tying, or ``hidden_size`` check
-        is performed. Defaults to False, preserving the original
-        headless-backbone contract.
+        vocabulary logits (a plain tensor by default, not a
+        ``last_hidden_state`` mapping -- see ``output_key`` for a
+        dict-output variant) and no output head, weight tying, or
+        ``hidden_size`` check is performed. Defaults to False, preserving
+        the original headless-backbone contract.
     :param pre_shifted: When True, ``train_step``/``test_step`` treat ``data``
         as an already-shifted ``(x, y)`` pair (unpacked via
         ``keras.utils.unpack_x_y_sample_weight``) and use it unchanged instead
@@ -262,9 +266,21 @@ class CausalLanguageModel(keras.Model):
         then looks honored but the probe never actually ran. Set this to
         ``True`` for a plain-tensor-only backbone so the probe genuinely
         executes instead of silently degrading.
+    :param output_key: Only meaningful when ``skip_head=True``. When set,
+        the backbone's raw ``call()`` output is expected to be a mapping
+        (e.g. GPT2/WaveFieldLLM's ``{"logits": ..., "last_hidden_state":
+        ...}``), and ``backbone_outputs[output_key]`` is extracted as the
+        logits instead of treating the raw output as the logits tensor
+        directly. A missing key raises ``ValueError`` naming the requested
+        key and the keys actually present, rather than propagating a bare
+        ``KeyError`` or silently returning the whole mapping. Defaults to
+        ``None``, which preserves the original ``skip_head=True`` contract
+        exactly: the backbone's raw output IS the logits, a plain tensor
+        (gemma/qwen/mamba's shape). Ignored when ``skip_head=False``.
     :raises ValueError: If ``vocab_size`` or ``initializer_range`` is not
         positive, if ``skip_head`` is False and the backbone has no
-        ``hidden_size`` attribute, or if the causality probe finds leakage.
+        ``hidden_size`` attribute, if the causality probe finds leakage, or
+        if ``output_key`` is set but is not a key of the backbone's output.
 
     :ivar backbone: The wrapped decoder, saved and reused for fine-tuning.
     :ivar loss_tracker: Tracker behind the reported ``loss`` metric.
@@ -285,6 +301,7 @@ class CausalLanguageModel(keras.Model):
         verify_causality: bool = True,
         causality_tolerance: float = 0.0,
         causality_probe_plain_tensor: bool = False,
+        output_key: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the CausalLanguageModel."""
@@ -301,6 +318,7 @@ class CausalLanguageModel(keras.Model):
         self.verify_causality = verify_causality
         self.causality_tolerance = causality_tolerance
         self.causality_probe_plain_tensor = causality_probe_plain_tensor
+        self.output_key = output_key
 
         # The head width follows the backbone, so the contract is checked
         # here -- but only when a head is actually built: `skip_head=True`
@@ -488,18 +506,35 @@ class CausalLanguageModel(keras.Model):
 
         With ``skip_head=False`` (the original contract) the backbone
         returns a mapping and this extracts ``last_hidden_state``. With
-        ``skip_head=True`` the backbone already bakes its own head and
-        returns vocabulary logits directly from ``call()``, so its return
-        value is passed straight through with no dict-indexing.
+        ``skip_head=True`` and ``output_key=None`` (the default) the
+        backbone already bakes its own head and returns vocabulary logits
+        directly from ``call()`` as a plain tensor, so its return value is
+        passed straight through with no dict-indexing. With
+        ``skip_head=True`` and ``output_key`` set, the backbone instead
+        returns a mapping (e.g. GPT2/WaveFieldLLM's
+        ``{"logits": ..., "last_hidden_state": ...}``) and the named key is
+        extracted as the logits.
 
         :param inputs: Backbone inputs.
         :param training: Whether to run the backbone in training mode.
         :return: The backbone's hidden states, or its logits directly when
-            ``skip_head`` is True.
+            ``skip_head`` is True and ``output_key`` is unset, or
+            ``backbone_outputs[output_key]`` when both are set.
+        :raises ValueError: If ``output_key`` is set but is not a key of the
+            backbone's (mapping) output.
         """
         backbone_outputs = self.backbone(inputs, training=training)
         if self.skip_head:
-            return backbone_outputs
+            if self.output_key is None:
+                return backbone_outputs
+            try:
+                return backbone_outputs[self.output_key]
+            except KeyError:
+                raise ValueError(
+                    f"output_key={self.output_key!r} was not found in the "
+                    "backbone's output. Available keys: "
+                    f"{sorted(backbone_outputs.keys())}."
+                ) from None
         return backbone_outputs["last_hidden_state"]
 
     def _verify_backbone_causality(
@@ -815,6 +850,7 @@ class CausalLanguageModel(keras.Model):
                 "verify_causality": self.verify_causality,
                 "causality_tolerance": self.causality_tolerance,
                 "causality_probe_plain_tensor": self.causality_probe_plain_tensor,
+                "output_key": self.output_key,
             }
         )
         return config
