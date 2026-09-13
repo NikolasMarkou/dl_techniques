@@ -11,9 +11,15 @@ Pattern-3/6 trainer per ``src/train/CLAUDE.md``.
 
 Two things this module deliberately does NOT do:
 
-* **No custom ``train_step``.** Zamba2 has no auxiliary loss (unlike H-Net's
-  boundary-ratio loss); the next-token cross-entropy reaches the optimizer
-  through stock ``compile()``/``fit()`` alone.
+* **No custom ``train_step`` authored here.** ``build_model`` wraps
+  ``Zamba2Model`` in ``CausalLanguageModel`` (``skip_head=True,
+  pre_shifted=True, causality_probe_plain_tensor=True``,
+  plan-2026-09-13T052422-19022ba2 step 4), which owns the
+  ``tf.GradientTape``-based ``train_step``/``test_step`` and the injected
+  ``loss_fn=create_clm_loss_fn(config)``; ``compile()`` here receives only
+  the optimizer. Zamba2 has no auxiliary loss (unlike H-Net's boundary-ratio
+  loss, confirmed by a zero-hit ``self.add_loss`` grep of this package), so
+  ``aggregate_backbone_losses`` stays at its default ``False``.
 * **No ``ClmPretrainConfig``/``load_train_val_datasets`` reuse.**
   ``train.common.clm_pretrain``'s wrapper layer wraps every label tensor as
   ``{"logits": y}`` for the four DICT-output trainers that share it (GPT-2,
@@ -37,7 +43,8 @@ Public surface:
     * :func:`config_from_args` -- namespace -> config, the ONE wiring site.
     * :func:`build_datasets` -- the Wikipedia packed-CLM pipeline.
     * :func:`build_optimizer` / :func:`build_model` -- AdamW through
-      ``optimizer_builder``, compiled with the shared CLM loss + metrics.
+      ``optimizer_builder``; ``build_model`` wraps the backbone in
+      ``CausalLanguageModel``, which owns its own loss/metric tracking.
     * :func:`train` -- stock ``fit()``.
 """
 
@@ -55,8 +62,8 @@ from dl_techniques.datasets.nlp import (
     DEFAULT_WIKIPEDIA_CONFIG,
     load_wikipedia_train_val,
 )
+from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.models.language.zamba2 import MODEL_VARIANTS, create_zamba2
-from dl_techniques.models.language.zamba2.model import Zamba2Model
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
@@ -66,7 +73,6 @@ from train.common import create_callbacks, set_seeds
 from train.common.clm_pretrain import create_clm_loss_fn
 from train.common.config_io import save_config_json
 from train.common.nlp import (
-    build_clm_metrics,
     create_tokenizer,
     estimate_clm_steps_per_epoch,
     preprocess_clm_packed_dataset,
@@ -594,8 +600,8 @@ def build_model(
         config: Zamba2TrainingConfig,
         steps_per_epoch: int,
         vocab_size: int,
-) -> Zamba2Model:
-    """Create and compile the Zamba2 model for one run.
+) -> CausalLanguageModel:
+    """Create and compile the Zamba2 causal-LM model for one run.
 
     :param config: The run config.
     :type config: Zamba2TrainingConfig
@@ -607,19 +613,51 @@ def build_model(
         encoding actually used to pack the corpus, rather than trusting the
         variant table's own ``DEFAULT_VOCAB_SIZE``.
     :type vocab_size: int
-    :returns: The compiled model.
-    :rtype: Zamba2Model
+    :returns: The compiled model, a
+        :class:`~dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel`
+        wrapping a bare :class:`Zamba2Model` backbone. ``skip_head=True``
+        since ``Zamba2Model.call()`` already bakes its own tied head and
+        returns logits directly as a plain tensor -- no second,
+        differently-initialized head is built. ``pre_shifted=True`` matches
+        ``preprocess_clm_packed_dataset``'s own pre-shifted
+        ``(input_ids, labels)`` tuples. ``causality_probe_plain_tensor=True``
+        because ``Zamba2Model.call(self, input_ids, training=None)`` accepts
+        only a plain positional tensor, never the
+        ``{"input_ids": ..., "attention_mask": ...}`` dict shape the probe
+        defaults to (see
+        ``CausalLanguageModel``'s ``causality_probe_plain_tensor`` docstring,
+        plan-2026-09-13T052422-19022ba2/D-003). ``compile()`` receives only
+        the optimizer: the class tracks its own loss/accuracy/perplexity,
+        reading ``loss_fn`` internally rather than a compiled ``loss=``.
+    :rtype: CausalLanguageModel
     """
-    model = create_zamba2(
+    backbone = create_zamba2(
         variant=config.variant,
         vocab_size=vocab_size,
         max_seq_len=config.max_seq_length,
     )
-    model.compile(
-        optimizer=build_optimizer(config, steps_per_epoch),
-        loss=create_clm_loss_fn(config),
-        metrics=build_clm_metrics(config.encoding_name),
+    model = CausalLanguageModel(
+        backbone=backbone,
+        vocab_size=vocab_size,
+        skip_head=True,
+        pre_shifted=True,
+        loss_fn=create_clm_loss_fn(config),
+        causality_probe_plain_tensor=True,
+        verify_causality=True,
     )
+    model.compile(optimizer=build_optimizer(config, steps_per_epoch))
+    # DECISION plan-2026-09-13T052422-19022ba2/D-004 (zamba2 migration): mamba's
+    # D-008 eager-dummy-forward pattern, reused here because it is NOT specific
+    # to skip_head=False. `skip_head=True` still routes `build()`'s causality
+    # probe (`_verify_backbone_causality`) through `_backbone_forward`, whose
+    # `ops.convert_to_numpy` call raises `NotImplementedError` on a symbolic
+    # tensor if the first build happens inside `fit()`'s traced `train_step`
+    # `tf.function` rather than eagerly. Zamba2 had NO dummy-forward call at
+    # all before this migration -- unlike Mamba2/gemma/qwen, whose migrations
+    # each added one. Do NOT remove this call; see decisions.md D-008 (prior
+    # plan-2026-09-12T195532-422091c3) for the measured trace-boundary crash
+    # this avoids.
+    model(tf.zeros((1, 2), dtype="int32"), training=False)
     return model
 
 
@@ -628,13 +666,13 @@ def build_model(
 # ---------------------------------------------------------------------
 
 
-def train(config: Zamba2TrainingConfig) -> Tuple[Zamba2Model, Any, str]:
+def train(config: Zamba2TrainingConfig) -> Tuple[CausalLanguageModel, Any, str]:
     """Pretrain Zamba2 on Wikipedia with stock ``fit()``.
 
     :param config: The run config.
     :type config: Zamba2TrainingConfig
     :returns: ``(model, history, results_dir)``.
-    :rtype: Tuple[Zamba2Model, Any, str]
+    :rtype: Tuple[CausalLanguageModel, Any, str]
     """
     set_seeds(config.seed)
 

@@ -107,6 +107,7 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/hnet/common.py", "HNetTrainingConfig"),
     ("train/doc_scanner/common.py", "DocScannerTrainingConfig"),
     ("train/mamba/common.py", "Mamba2TrainingConfig"),
+    ("train/zamba2/common.py", "Zamba2TrainingConfig"),
     ("train/gemma/common.py", "Gemma3TrainingConfig"),
     ("train/qwen/common.py", "Qwen3TrainingConfig"),
     ("train/distilbert/pretrain.py", "DistilBertTrainingConfig"),
