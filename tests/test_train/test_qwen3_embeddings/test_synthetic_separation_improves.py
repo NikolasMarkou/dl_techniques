@@ -121,6 +121,10 @@ def test_reranker_separation_gap_grows_after_training() -> None:
     # undertraining signature plan-2026-09-13T073704-245ab5d5/D-014's own
     # prose already flagged. See decisions.md D-011, D-013, and D-016 of this
     # plan (plan-2026-09-13T120637-288bad33).
+    #
+    # DECISION plan-2026-09-13T120637-288bad33/D-016: softens D-011's root-cause
+    # claim -- epoch budget is the leading UNTESTED confound, not a proven
+    # architectural limit. See decisions.md D-016.
     config = TrainingConfig(
         hidden_size=32, num_layers=1, num_heads=4, intermediate_size=64,
         reranker_maxlen=48, query_maxlen=8, doc_maxlen=16, batch_size=8,
