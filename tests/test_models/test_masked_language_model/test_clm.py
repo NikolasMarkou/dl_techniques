@@ -5,6 +5,8 @@ Tests for Causal Language Model (CLM) Pre-training Framework
 Comprehensive tests for the CausalLanguageModel class.
 """
 
+import logging
+
 import keras
 from keras import ops
 import numpy as np
@@ -512,6 +514,139 @@ class TestBackboneCausalityGuard:
             backbone=mock_backbone, vocab_size=1000, verify_causality=False
         )
         assert model.get_config()["verify_causality"] is False
+
+
+@keras.saving.register_keras_serializable()
+class PlainTensorOnlyBackbone(keras.Model):
+    """A backbone shaped like Zamba2Model/HNet: ``call()`` takes ONLY a plain
+    positional ``input_ids`` tensor, never a dict. Feeding it the
+    ``{"input_ids": ..., "attention_mask": ...}`` dict the causality probe
+    hardcodes by default crashes inside ``self.token_embeddings(input_ids)``,
+    since ``Embedding`` expects an integer tensor, not a mapping -- exactly
+    the plain-tensor-only shape this step's fix targets (step 1 / D-003).
+    """
+
+    def __init__(self, hidden_size=64, vocab_size=1000, bidirectional=False, **kwargs):
+        super().__init__(**kwargs)
+        self.hidden_size = hidden_size
+        self.vocab_size = vocab_size
+        self.bidirectional = bidirectional
+        self.token_embeddings = keras.layers.Embedding(vocab_size, hidden_size)
+        self.dense = keras.layers.Dense(hidden_size)
+
+    def call(self, input_ids, training=False):
+        x = self.token_embeddings(input_ids)
+        if self.bidirectional:
+            # Mixes every position into every other -- the future-leak the
+            # probe must catch.
+            pooled = ops.mean(x, axis=1, keepdims=True)
+            x = self.dense(x + pooled)
+        else:
+            x = self.dense(x)
+        return {"last_hidden_state": x}
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "hidden_size": self.hidden_size,
+                "vocab_size": self.vocab_size,
+                "bidirectional": self.bidirectional,
+            }
+        )
+        return config
+
+
+class TestCausalityProbePlainTensor:
+    """``causality_probe_plain_tensor`` (step 1 / D-003) fixes
+    ``_verify_backbone_causality``'s hardcoded dict-input convention for a
+    backbone whose ``call()`` accepts only a plain positional tensor (e.g.
+    Zamba2Model, HNet).
+    """
+
+    COULD_NOT_RUN = "could not run the causality probe"
+
+    def test_probe_actually_runs_and_accepts_a_causal_plain_tensor_backbone(self, caplog):
+        """RED-proof A (new case): ``causality_probe_plain_tensor=True``
+        against a causal plain-tensor-only backbone -- the probe must
+        genuinely execute (no "could not run" warning) and must NOT raise,
+        since this backbone is causal."""
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            model = CausalLanguageModel(
+                backbone=PlainTensorOnlyBackbone(
+                    hidden_size=64, vocab_size=1000, bidirectional=False
+                ),
+                vocab_size=1000,
+                causality_probe_plain_tensor=True,
+            )
+            input_ids = tf.random.uniform((2, 8), minval=0, maxval=1000, dtype=tf.int32)
+            out = model(input_ids, training=False)  # triggers build() -> probe
+
+        assert self.COULD_NOT_RUN not in caplog.text.lower()
+        assert out.shape == (2, 8, 1000)
+
+    def test_probe_actually_runs_and_rejects_a_bidirectional_plain_tensor_backbone(
+        self, caplog
+    ):
+        """RED-proof A (new case), continued: the SAME flag against a
+        deliberately bidirectional plain-tensor-only backbone must raise
+        ``ValueError`` -- proof the probe is genuinely comparing hidden
+        states, not merely "not crashing"."""
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            model = CausalLanguageModel(
+                backbone=PlainTensorOnlyBackbone(
+                    hidden_size=64, vocab_size=1000, bidirectional=True
+                ),
+                vocab_size=1000,
+                causality_probe_plain_tensor=True,
+            )
+            input_ids = tf.random.uniform((2, 8), minval=0, maxval=1000, dtype=tf.int32)
+            with pytest.raises(ValueError, match="NOT causal"):
+                model(input_ids, training=False)
+
+        assert self.COULD_NOT_RUN not in caplog.text.lower()
+
+    def test_probe_default_silently_skips_a_plain_tensor_only_backbone(self, caplog):
+        """RED-proof B (regression guard): the SAME stub backbone (causal
+        variant), but with ``causality_probe_plain_tensor=False`` (the
+        default) -- documents TODAY's silent-degrade behavior precisely: the
+        hardcoded dict probe crashes inside the backbone's own
+        ``token_embeddings`` call, is swallowed by
+        ``_verify_backbone_causality``'s broad ``try/except``, emits the
+        "could not run" warning, and does NOT raise -- even though this
+        backbone is, in fact, causal and would have passed had the probe
+        actually run. A future accidental change to this default must fail
+        THIS test, not just the opposite (fixed) case above.
+        """
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            model = CausalLanguageModel(
+                backbone=PlainTensorOnlyBackbone(
+                    hidden_size=64, vocab_size=1000, bidirectional=False
+                ),
+                vocab_size=1000,
+                causality_probe_plain_tensor=False,
+            )
+            input_ids = tf.random.uniform((2, 8), minval=0, maxval=1000, dtype=tf.int32)
+            out = model(input_ids, training=False)  # must NOT raise
+
+        assert self.COULD_NOT_RUN in caplog.text.lower()
+        assert out.shape == (2, 8, 1000)
+
+    def test_causality_probe_plain_tensor_default_is_false(self, clm_model):
+        """The additive flag defaults False, matching prior behavior."""
+        assert clm_model.causality_probe_plain_tensor is False
+
+    def test_causality_probe_plain_tensor_survives_get_config_roundtrip(self, mock_backbone):
+        model = CausalLanguageModel(
+            backbone=mock_backbone,
+            vocab_size=1000,
+            causality_probe_plain_tensor=True,
+            verify_causality=False,
+        )
+        config = model.get_config()
+        assert config["causality_probe_plain_tensor"] is True
+        model2 = CausalLanguageModel.from_config(config)
+        assert model2.causality_probe_plain_tensor is True
 
 
 class TestSkipHead:

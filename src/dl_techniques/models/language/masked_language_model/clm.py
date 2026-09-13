@@ -72,6 +72,14 @@ class CausalLanguageModel(keras.Model):
     Causality: the backbone has to be causal. ``build`` checks it with a
     future-leak probe and raises ``ValueError`` if a past position moves when a
     future token changes. Pass ``verify_causality=False`` to skip the check.
+    The probe's own backbone call defaults to the ``{"input_ids": ...,
+    "attention_mask": ...}`` dict shape gemma/qwen/mamba/GPT2/WaveFieldLLM
+    all accept; pass ``causality_probe_plain_tensor=True`` for a backbone
+    whose ``call()`` takes only a plain positional tensor (e.g. Zamba2Model,
+    HNet) -- without it, the probe crashes inside its own ``try/except`` and
+    silently degrades to a "could not run the causality probe" warning,
+    leaving ``verify_causality=True`` looking honored while nothing was
+    actually checked.
 
     Pre-shifted batches: with ``pre_shifted=True``, ``train_step``/``test_step``
     skip ``_prepare_inputs_and_labels`` entirely and unpack ``data`` via
@@ -241,6 +249,19 @@ class CausalLanguageModel(keras.Model):
     :param causality_tolerance: Maximum tolerated absolute change at a past
         position. Defaults to 0.0, since a masked contribution is exactly zero
         and any movement is leakage.
+    :param causality_probe_plain_tensor: When True, the causality probe
+        (``_verify_backbone_causality``) calls the backbone with a plain
+        ``ids`` tensor -- no ``{"input_ids": ..., "attention_mask": ...}``
+        dict -- for a backbone whose ``call()`` accepts only a positional
+        tensor (e.g. Zamba2Model, HNet). Defaults to ``False``, which
+        preserves the original hardcoded dict-probe call exactly: a
+        dict-accepting backbone (gemma/qwen/mamba/GPT2/WaveFieldLLM) is
+        probed as before, and a plain-tensor-only backbone crashes inside the
+        probe's own ``try/except``, which logs a "could not run the
+        causality probe" warning and returns -- ``verify_causality=True``
+        then looks honored but the probe never actually ran. Set this to
+        ``True`` for a plain-tensor-only backbone so the probe genuinely
+        executes instead of silently degrading.
     :raises ValueError: If ``vocab_size`` or ``initializer_range`` is not
         positive, if ``skip_head`` is False and the backbone has no
         ``hidden_size`` attribute, or if the causality probe finds leakage.
@@ -263,6 +284,7 @@ class CausalLanguageModel(keras.Model):
         loss_fn: Optional[keras.losses.Loss] = None,
         verify_causality: bool = True,
         causality_tolerance: float = 0.0,
+        causality_probe_plain_tensor: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the CausalLanguageModel."""
@@ -278,6 +300,7 @@ class CausalLanguageModel(keras.Model):
         self.loss_fn = loss_fn
         self.verify_causality = verify_causality
         self.causality_tolerance = causality_tolerance
+        self.causality_probe_plain_tensor = causality_probe_plain_tensor
 
         # The head width follows the backbone, so the contract is checked
         # here -- but only when a head is actually built: `skip_head=True`
@@ -490,6 +513,23 @@ class CausalLanguageModel(keras.Model):
         bidirectional one moves it. A probe that cannot run at all warns and
         returns.
 
+        With ``causality_probe_plain_tensor=False`` (the default) the probe
+        calls the backbone with the ``{"input_ids": ..., "attention_mask":
+        ...}`` dict shape gemma/qwen/mamba/GPT2/WaveFieldLLM all accept. With
+        ``causality_probe_plain_tensor=True``, ``ids``/``perturbed`` are
+        passed directly as plain tensors -- no dict, no ``attention_mask`` --
+        for a backbone whose ``call()`` takes only a positional tensor (e.g.
+        Zamba2Model, HNet), which would otherwise crash inside the dict
+        probe and silently degrade to the "could not run" warning below.
+
+        # DECISION plan-2026-09-13T052422-19022ba2/D-003: the dict probe call
+        # is hardcoded and crashes for a plain-tensor-only backbone
+        # (Zamba2Model, HNet); do NOT auto-detect via
+        # inspect.signature(backbone.call) instead of this explicit flag --
+        # a Union[Tensor, Dict] type hint is not reliably present on every
+        # backbone, so introspection would silently reproduce the exact
+        # failure this fix exists to close. See decisions.md D-003.
+
         :param seq_len: Probe sequence length.
         :param batch_size: Probe batch size.
         :raises ValueError: If any position before ``t`` moves by more than
@@ -508,13 +548,17 @@ class CausalLanguageModel(keras.Model):
                 ],
                 axis=1,
             )
-            mask = ops.ones((batch_size, seq_len), dtype="int32")
-            base = self._backbone_forward(
-                {"input_ids": ids, "attention_mask": mask}, training=False
-            )
-            moved = self._backbone_forward(
-                {"input_ids": perturbed, "attention_mask": mask}, training=False
-            )
+            if self.causality_probe_plain_tensor:
+                base = self._backbone_forward(ids, training=False)
+                moved = self._backbone_forward(perturbed, training=False)
+            else:
+                mask = ops.ones((batch_size, seq_len), dtype="int32")
+                base = self._backbone_forward(
+                    {"input_ids": ids, "attention_mask": mask}, training=False
+                )
+                moved = self._backbone_forward(
+                    {"input_ids": perturbed, "attention_mask": mask}, training=False
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Could not run the causality probe on the backbone "
@@ -770,6 +814,7 @@ class CausalLanguageModel(keras.Model):
                 ),
                 "verify_causality": self.verify_causality,
                 "causality_tolerance": self.causality_tolerance,
+                "causality_probe_plain_tensor": self.causality_probe_plain_tensor,
             }
         )
         return config
