@@ -429,7 +429,17 @@ class Mamba2Layer(keras.layers.Layer):
         # A stays negative, so the recurrence decays instead of growing.
         A = -keras.ops.exp(keras.ops.cast(self.A_log, "float32"))
 
-        y_ssm = self._ssm_scan(x, dt, A, B, C)
+        # Trade recompute FLOPs for memory: defer retention of every per-step
+        # scan intermediate until backward instead of keeping all of them live.
+        if keras.backend.backend() == "tensorflow":
+            import tensorflow as tf
+            scan_fn = tf.recompute_grad(self._ssm_scan)
+        else:
+            scan_fn = self._ssm_scan
+        # tf.recompute_grad's custom_gradient wrapper only supports keyword
+        # arguments in eager mode, so call positionally to also work under
+        # symbolic/graph tracing (e.g. building a Functional model).
+        y_ssm = scan_fn(x, dt, A, B, C)
 
         y_ssm = y_ssm + keras.ops.einsum("blhp,h->blhp", x, self.D)
         y_ssm = keras.ops.reshape(y_ssm, (batch, seqlen, self.d_ssm))
