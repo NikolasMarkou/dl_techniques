@@ -480,6 +480,25 @@ class HNet(keras.Model):
         """
         return (input_shape[0], input_shape[1], self.vocab_size)
 
+    @property
+    def hidden_size(self) -> int:
+        """Alias for :attr:`d_embed`, for callers expecting the common name.
+
+        Additive only: ``d_embed`` is not renamed or removed, and this is not
+        a constructor argument, so ``get_config``/``from_config`` are
+        unaffected. Mirrors ``Mamba2Model.hidden_size``'s alias of
+        ``d_model``. Non-blocking for
+        ``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel``,
+        whose ``__init__`` only requires ``hidden_size`` when built with
+        ``skip_head=False`` -- HNet already bakes its own head, so it is
+        always wrapped with ``skip_head=True`` -- but adds attribute-surface
+        parity with every other migrated backbone.
+
+        :returns: :attr:`d_embed`.
+        :rtype: int
+        """
+        return self.d_embed
+
     # -----------------------------------------------------------------
     # variants
     # -----------------------------------------------------------------

@@ -9,10 +9,24 @@ packer, an encoder or a steps-per-epoch estimator -- all four live in
 
 Two things this module deliberately does NOT do:
 
-* **No custom ``train_step``.** The ratio loss reaches the optimizer through
-  ``HNet.call``'s ``add_loss`` (``model.py:461-466``); stock ``fit()`` already
-  sums ``model.losses`` into the compiled loss. A hand-written training step
-  would also silently skip ``scale_loss`` under ``mixed_float16``.
+* **No trainer-local custom ``train_step``.** The ratio loss reaches the
+  optimizer through ``HNet.call``'s ``add_loss`` (``model.py:461-466``).
+  ``build_model`` wraps ``HNet`` in
+  ``dl_techniques.models.language.masked_language_model.CausalLanguageModel``
+  with ``aggregate_backbone_losses=True``, so the wrapper's own (already
+  ``scale_loss``-aware) ``train_step``/``test_step`` add
+  ``sum(self.backbone.losses)`` to the cross-entropy scalar right after
+  ``compute_loss`` returns -- the SAME aggregated value is both
+  backpropagated and reported (``clm.py`` D-002,
+  plan-2026-09-13T052422-19022ba2). This is the single place the ratio term
+  enters the trained scalar; the compiled/injected loss stays CE-only, never
+  double-counting it. Before this migration HNet was trained directly via
+  stock ``fit()``, which sums ``model.losses`` automatically -- writing a
+  SECOND, hand-rolled ``train_step`` in THIS module on top of that would
+  still be redundant/wrong, which is what this bullet originally warned
+  against; the warning now applies to `common.py` itself, not to the wrapper,
+  since `CausalLanguageModel` is the one hand-rolled step in this pipeline
+  and it already accounts for ``scale_loss`` under ``mixed_float16``.
 * **No per-stage learning-rate multipliers.** The reference attaches an
   ``_optim["lr_multiplier"]`` attribute per parameter (``hnet.py:150-159``,
   ``mixer_seq.py:64-76``) which ``hnet/utils/train.py:group_params`` later
@@ -67,6 +81,9 @@ from dl_techniques.models.language.hnet.config import (
 )
 from dl_techniques.models.language.hnet.losses import DEFAULT_TARGET_RATIO
 from dl_techniques.models.language.hnet.model import RATIO_LOSS_ALPHA, HNet
+from dl_techniques.models.language.masked_language_model.clm import (
+    CausalLanguageModel,
+)
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
@@ -698,24 +715,46 @@ def build_optimizer(
 def build_model(
         config: HNetTrainingConfig,
         steps_per_epoch: int,
-) -> HNet:
+) -> CausalLanguageModel:
     """Create and compile the H-Net for one run.
 
-    The compiled loss is the next-byte cross-entropy alone. The auxiliary
-    boundary-ratio loss is NOT added here: ``HNet.call`` contributes it through
-    ``add_loss``, and stock ``fit()`` sums ``model.losses`` into the total. Any
-    attempt to add it a second time at compile time would double-count it.
+    The trained loss is the next-byte cross-entropy plus the auxiliary
+    boundary-ratio term, aggregated exactly once: ``HNet`` is wrapped in
+    :class:`~dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel`
+    with ``aggregate_backbone_losses=True``, which is now the SINGLE place
+    the ratio term (contributed through ``HNet.call``'s ``add_loss``) enters
+    the trained scalar -- ``compile()`` receives only the optimizer, so there
+    is no second, compiled/injected loss that could double-count it.
+    ``skip_head=True`` since ``HNet.call`` already bakes its own tied/untied
+    head and returns logits directly as a plain tensor -- no second,
+    differently-initialized head is built. ``pre_shifted=True`` matches
+    ``build_byte_datasets``'s own pre-shifted ``(input_ids, labels)`` tuples.
+    ``causality_probe_plain_tensor=True`` because ``HNet.call(self, inputs,
+    padding_mask=None, training=None)`` accepts only a plain positional
+    tensor, never the ``{"input_ids": ..., "attention_mask": ...}`` dict
+    shape the probe defaults to (see ``CausalLanguageModel``'s
+    ``causality_probe_plain_tensor`` docstring, D-003).
+
+    ``loss_fn`` is deliberately left at its default (plain
+    ``SparseCategoricalCrossentropy(from_logits=True)``, computed by
+    ``compute_loss``'s own hardcoded branch): unlike gpt2/zamba2/wave_field,
+    :class:`HNetTrainingConfig` carries no ``loss_type``/``focal_gamma``/
+    ``label_smoothing`` fields for :func:`train.common.clm_pretrain.create_clm_loss_fn`
+    to read, so calling it here would raise ``AttributeError`` rather than
+    select a loss family -- there is no existing feature to preserve. This
+    reproduces the pre-migration ``model.compile(loss=SparseCategoricalCrossentropy(from_logits=True))``
+    computation exactly (see decisions.md D-010).
 
     :param config: The run config.
     :type config: HNetTrainingConfig
     :param steps_per_epoch: Steps in one epoch, for the decay horizon.
     :type steps_per_epoch: int
-    :returns: The compiled model.
-    :rtype: HNet
+    :returns: The compiled model, wrapping a bare :class:`HNet` backbone.
+    :rtype: CausalLanguageModel
     """
     arch = config.arch_config
     n_levels = arch.num_stages - 1
-    model = HNet(
+    backbone = HNet(
         arch_config=arch,
         max_chunks=config.max_chunks,
         max_seq_len=config.seq_len,
@@ -723,10 +762,39 @@ def build_model(
         ratio_loss_alpha=config.ratio_loss_alpha,
         target_ratios=(config.target_ratio,) * n_levels,
     )
-    model.compile(
-        optimizer=build_optimizer(config, steps_per_epoch),
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    # DECISION plan-2026-09-13T052422-19022ba2/D-010: no `loss_fn=` here,
+    # unlike gpt2/zamba2/wave_field's `loss_fn=create_clm_loss_fn(config)`.
+    # `HNetTrainingConfig` has no `loss_type`/`focal_gamma`/`label_smoothing`
+    # fields (`grep` confirms zero hits) -- calling `create_clm_loss_fn`
+    # against it raises `AttributeError`, not a loss-family selection. Do NOT
+    # add those fields here to "match" the other three trainers: that is a
+    # real feature addition outside this step's scope. Leaving `loss_fn`
+    # unset falls through to `compute_loss`'s own hardcoded
+    # `SparseCategoricalCrossentropy(from_logits=True)` branch, reproducing
+    # HNet's pre-migration `compile(loss=...)` exactly. See decisions.md D-010.
+    model = CausalLanguageModel(
+        backbone=backbone,
+        vocab_size=arch.vocab_size,
+        skip_head=True,
+        pre_shifted=True,
+        aggregate_backbone_losses=True,
+        causality_probe_plain_tensor=True,
+        verify_causality=True,
     )
+    model.compile(optimizer=build_optimizer(config, steps_per_epoch))
+    # DECISION plan-2026-09-13T052422-19022ba2/D-011: the eager dummy-forward
+    # call every other migration (mamba D-008, zamba2 D-004) places directly
+    # in build_model() is placed in train() instead, deliberately -- NOT
+    # copy-paste drift. build_model() is also the constructor
+    # `test_the_choice_builds_a_model` (test_cli_contract.py) drives across
+    # ALL SIX real reference variants (d_model=1024, 22+ layers) specifically
+    # to prove constructibility WITHOUT calling the model, by that test's own
+    # documented design ("calling them would cost minutes and gigabytes to
+    # prove a construction claim"). An unconditional eager call here would
+    # force full weight allocation plus two causality-probe forward passes
+    # for every one of those six variants on every call to build_model(),
+    # silently reintroducing the exact cost that test exists to avoid. See
+    # decisions.md D-011.
     return model
 
 
@@ -735,18 +803,27 @@ def build_model(
 # ---------------------------------------------------------------------
 
 
-def train(config: HNetTrainingConfig) -> Tuple[HNet, Any, str]:
+def train(config: HNetTrainingConfig) -> Tuple[CausalLanguageModel, Any, str]:
     """Pretrain H-Net on Wikipedia bytes with stock ``fit()``.
 
     :param config: The run config.
     :type config: HNetTrainingConfig
     :returns: ``(model, history, results_dir)``.
-    :rtype: Tuple[HNet, Any, str]
+    :rtype: Tuple[CausalLanguageModel, Any, str]
     """
     set_seeds(config.seed)
 
     train_ds, val_ds, steps_per_epoch = build_datasets(config)
     model = build_model(config, steps_per_epoch)
+    # DECISION plan-2026-09-13T052422-19022ba2/D-011: the eager dummy-forward
+    # call lives HERE, not in build_model() -- see build_model's own D-011
+    # comment for why. `train()` is the actual pretraining entry point
+    # (`train_hnet.py:main` calls it directly), so this is where the
+    # causality probe and head resolution must run eagerly, before `fit()`'s
+    # traced train_step ever runs -- `_verify_backbone_causality`'s
+    # `ops.convert_to_numpy` call raises `NotImplementedError` on a symbolic
+    # tensor otherwise. Do NOT remove this call; see decisions.md D-011.
+    model(tf.zeros((1, 2), dtype="int32"), training=False)
 
     callbacks, results_dir = create_callbacks(
         model_name=config.arch_variant,

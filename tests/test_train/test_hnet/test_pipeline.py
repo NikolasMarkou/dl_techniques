@@ -3,10 +3,17 @@
 What each group of tests exists to catch, and why the twin arms are there:
 
 * **The ratio loss must reach the optimizer.** ``HNet.call`` contributes it
-  through ``add_loss`` and stock ``fit()`` sums ``model.losses``. A test that
-  only asserts ``model.losses`` is non-empty passes against a model that adds a
-  CONSTANT ZERO, so the value is asserted non-zero AND an ``alpha = 0.0`` twin
-  is asserted to read exactly zero. Neither arm passes alone.
+  through ``add_loss``, and ``build_model`` wraps ``HNet`` in
+  ``CausalLanguageModel(aggregate_backbone_losses=True)``, whose own
+  hand-rolled ``train_step``/``test_step`` add ``sum(self.backbone.losses)``
+  to the trained scalar (``clm.py`` D-002,
+  plan-2026-09-13T052422-19022ba2). Reading ``model.losses`` on the OUTER
+  wrapper still works: ``Layer.losses`` structurally aggregates a nested
+  sublayer's ``add_loss`` regardless of which object's ``call()`` was
+  invoked. A test that only asserts ``model.losses`` is non-empty passes
+  against a model that adds a CONSTANT ZERO, so the value is asserted
+  non-zero AND an ``alpha = 0.0`` twin is asserted to read exactly zero.
+  Neither arm passes alone.
 * **Every CLI flag must reach the field it names.** A flag ``config_from_args``
   forgets to forward is a knob that silently does nothing -- the recurring
   defect class ``tests/test_train/test_config_fields_are_live.py`` was written
@@ -42,6 +49,9 @@ import tensorflow as tf
 from dl_techniques.datasets.byte_lm import BYTE_VOCAB_SIZE
 from dl_techniques.models.language.hnet.config import MODEL_VARIANTS
 from dl_techniques.models.language.hnet.model import RATIO_LOSS_ALPHA, HNet
+from dl_techniques.models.language.masked_language_model.clm import (
+    CausalLanguageModel,
+)
 from train.common import resolve_monitor_mode
 from train.hnet import common as hnet_common
 from train.hnet.common import (
@@ -490,10 +500,30 @@ class TestOptimizer:
 
 class TestCompileAndCallbacks:
     def test_the_compiled_loss_is_a_from_logits_sparse_crossentropy(self):
+        """``build_model`` no longer compiles a ``loss=``: the wrapper computes
+        its own (``CausalLanguageModel.compute_loss``'s default hardcoded
+        branch, since ``loss_fn`` is left unset -- see D-010,
+        plan-2026-09-13T052422-19022ba2), and ``compile()`` receives only the
+        optimizer. ``model.loss`` is therefore ``None`` by construction; the
+        claim this test exists to pin -- that the TRAINED loss is a
+        from-logits sparse categorical cross-entropy, matching what
+        ``HNet``'s own pre-migration ``model.compile(loss=...)`` computed --
+        is instead checked numerically against a hand-built reference loss on
+        a real batch.
+        """
         model = build_model(tiny_config(), steps_per_epoch=2)
-        loss = model.loss
-        assert isinstance(loss, keras.losses.SparseCategoricalCrossentropy)
-        assert loss.get_config()["from_logits"] is True
+        assert model.loss is None
+        assert model.loss_fn is None
+
+        inputs, labels = one_batch(tiny_config())
+        logits = model(inputs, training=False)
+        expected = keras.losses.SparseCategoricalCrossentropy(from_logits=True)(
+            labels, logits
+        )
+        actual = model.compute_loss(y=labels, y_pred=logits)
+        np.testing.assert_allclose(
+            float(actual), float(expected), atol=1e-6, rtol=0
+        )
 
     def test_resolve_monitor_mode_maps_val_loss_to_min(self):
         assert resolve_monitor_mode(TRAIN_MONITOR) == "min"
@@ -551,7 +581,8 @@ class TestCompileAndCallbacks:
         assert results_dir.startswith(str(tmp_path))
         assert (tmp_path / "..").exists()
         assert "loss" in history.history
-        assert isinstance(model, HNet)
+        assert isinstance(model, CausalLanguageModel)
+        assert isinstance(model.backbone, HNet)
 
         run_dir = tmp_path / results_dir.split("/")[-1]
         assert (run_dir / "config.json").is_file()

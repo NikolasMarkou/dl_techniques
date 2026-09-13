@@ -73,6 +73,9 @@ from typing import Any, Dict, List, Set, Tuple
 import pytest
 
 from dl_techniques.models.language.hnet.model import HNet
+from dl_techniques.models.language.masked_language_model.clm import (
+    CausalLanguageModel,
+)
 from train.hnet import common
 from train.hnet import train_hnet as trainer
 from train.hnet.common import ARCH_VARIANTS, HNetTrainingConfig, get_arch_config
@@ -324,13 +327,21 @@ class TestEveryAdvertisedArchVariantConstructs:
         config = config_from_argv(["--arch-variant", variant])
         model = common.build_model(config, steps_per_epoch=1)
 
-        assert isinstance(model, HNet)
-        assert model.arch_config == get_arch_config(variant), (
+        assert isinstance(model, CausalLanguageModel)
+        assert isinstance(model.backbone, HNet)
+        assert model.backbone.arch_config == get_arch_config(variant), (
             f"--arch-variant {variant!r} built a model whose architecture is "
             "not the one that name resolves to"
         )
         assert model.optimizer is not None, (
             f"--arch-variant {variant!r} produced an uncompiled model"
+        )
+        assert not model.built, (
+            "build_model() must not force a forward pass through the "
+            "backbone: the six real reference variants (d_model=1024, "
+            "22+ layers) are constructed here specifically to prove "
+            "constructibility without paying for a real call -- see "
+            "build_model's own D-011 comment, plan-2026-09-13T052422-19022ba2"
         )
 
     def test_the_parser_advertises_exactly_the_constructible_set(self):
