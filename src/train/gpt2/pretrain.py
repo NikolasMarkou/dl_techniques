@@ -24,7 +24,7 @@ import os
 import glob
 import argparse
 from dataclasses import dataclass
-from typing import Callable, Tuple
+from typing import Callable, Tuple, Union
 
 import keras
 import numpy as np
@@ -42,8 +42,6 @@ from train.common.nlp import (
     create_tokenizer,
     create_warmup_lr_schedule,
     create_nlp_callbacks,
-    build_clm_metrics,
-    prepare_dict_keyed_compile,
     augment_probe_results,
 )
 from train.common.clm_pretrain import (
@@ -56,6 +54,7 @@ from train.common.clm_pretrain import (
     make_clm_steps_per_epoch,
 )
 from dl_techniques.models.language.gpt2 import GPT2
+from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 
@@ -114,8 +113,14 @@ class TrainingConfig(ClmPretrainConfig):
 
 def load_model_from_checkpoint(
     path: str,
-) -> Tuple[GPT2, int]:
+) -> Tuple[Union[GPT2, CausalLanguageModel], int]:
     """Load a GPT-2 model from a ``.keras`` checkpoint.
+
+    A checkpoint saved before this trainer migrated onto
+    ``CausalLanguageModel`` deserializes as a bare ``GPT2``; one saved after
+    deserializes as the ``CausalLanguageModel`` wrapper. Both support
+    ``fit()``/``count_params()``, which is all this trainer calls on the
+    return value.
 
     :param path: Path to the checkpoint file.
     :return: ``(model, step)`` — the loaded model and the training step
@@ -137,8 +142,17 @@ def load_model_from_checkpoint(
     return model, step
 
 
-def create_gpt2_model(config: TrainingConfig) -> GPT2:
-    """Create and build a GPT-2 model from the training configuration."""
+def create_gpt2_model(config: TrainingConfig) -> CausalLanguageModel:
+    """Create and build a GPT-2 model, wrapped in ``CausalLanguageModel``.
+
+    GPT2's own ``call()`` already bakes its tied/untied head and returns a
+    dict (``{"logits": ..., "last_hidden_state": ...}``), so the wrapper is
+    constructed with ``skip_head=True, output_key="logits"`` -- GPT2's
+    already-correct head is reused unchanged, never rebuilt. ``pre_shifted=
+    True`` matches ``preprocess_clm_dataset``'s ``(input_ids, labels)``
+    packed-CLM contract. See ``masked_language_model/clm.py`` module
+    docstring for the full flag contract.
+    """
     logger.info(f"Creating GPT-2-{config.model_variant.upper()}...")
 
     # Build variant kwargs, only overriding if explicitly set
@@ -154,9 +168,22 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
     if config.num_heads is not None:
         variant_kwargs["num_heads"] = config.num_heads
 
-    model = GPT2.from_variant(config.model_variant, **variant_kwargs)
+    gpt2_model = GPT2.from_variant(config.model_variant, **variant_kwargs)
 
-    # Build with a dummy forward pass to initialize weights
+    model = CausalLanguageModel(
+        backbone=gpt2_model,
+        vocab_size=config.vocab_size,
+        skip_head=True,
+        output_key="logits",
+        pre_shifted=True,
+        loss_fn=create_loss_fn(config),
+        verify_causality=True,
+    )
+
+    # Build with a dummy forward pass on the WRAPPER (not the bare backbone):
+    # forces head resolution and runs the causality probe eagerly, before
+    # `fit()` traces `train_step` (same lazy-build-in-traced-train_step
+    # reason mamba/zamba2 needed this -- D-008 of the prior plan).
     dummy = np.random.randint(
         0, config.vocab_size,
         size=(1, config.max_seq_length - 1),
@@ -173,26 +200,32 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
 
 
 def compile_model(
-    model: GPT2,
+    model: CausalLanguageModel,
     config: TrainingConfig,
     steps_per_epoch: int,
 ) -> None:
-    """Compile GPT-2 with AdamW, warmup + cosine decay, and CLM loss."""
+    """Compile GPT-2 with AdamW, warmup + cosine decay.
+
+    No ``loss=``/``metrics=`` is passed: ``CausalLanguageModel`` computes and
+    reports its own ``loss``/``accuracy``/``perplexity`` via its hand-rolled
+    ``train_step``/``test_step`` (the ``loss_fn=create_loss_fn(config)``
+    passed at construction in ``create_gpt2_model`` is what selects
+    ce/focal/label-smoothing) -- a compiled ``loss=``/``metrics=`` here would
+    be unused dead configuration, matching zamba2's already-migrated
+    convention.
+    """
     lr_schedule = create_warmup_lr_schedule(
         config.learning_rate,
         config.num_epochs,
         steps_per_epoch,
         config.warmup_ratio,
     )
-    prepare_dict_keyed_compile(model)
     model.compile(
         optimizer=keras.optimizers.AdamW(
             learning_rate=lr_schedule,
             weight_decay=config.weight_decay,
             clipnorm=1.0,
         ),
-        loss={"logits": create_loss_fn(config)},
-        metrics={"logits": build_clm_metrics(config.encoding_name)},
     )
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
@@ -202,15 +235,16 @@ def compile_model(
 
 def train_gpt2(
     config: TrainingConfig,
-    model_factory: Callable[[TrainingConfig], GPT2] = create_gpt2_model,
-) -> Tuple[GPT2, keras.callbacks.History]:
+    model_factory: Callable[[TrainingConfig], CausalLanguageModel] = create_gpt2_model,
+) -> Tuple[CausalLanguageModel, keras.callbacks.History]:
     """Run GPT-2 CLM pre-training.
 
     :param config: Training configuration.
-    :param model_factory: Callable that builds a fresh GPT-2 model from the
-        config. Defaults to :func:`create_gpt2_model`. Override to inject
-        post-construction wrapping (e.g. SO regularization). Not used when
-        resuming from a checkpoint.
+    :param model_factory: Callable that builds a fresh, ``CausalLanguageModel``-
+        wrapped GPT-2 model from the config. Defaults to
+        :func:`create_gpt2_model`. Override to inject post-construction
+        wrapping (e.g. SO regularization). Not used when resuming from a
+        checkpoint.
     :return: Trained model and training history.
     """
     logger.info("=" * 60)
@@ -273,10 +307,14 @@ def train_gpt2(
     # Generation probes — run before each checkpoint to track quality.
     # Common GenerationProbeCallback owns suppression/sampling/decode; the
     # closure supplies ONLY the next-position logits vector from the unpadded
-    # ctx (variable-length, no padding; dict output keyed "logits"; divide-mode
-    # rep penalty). ctx_length=511 matches the former hardcoded `ids[-511:]`.
+    # ctx (variable-length, no padding; divide-mode rep penalty).
+    # ctx_length=511 matches the former hardcoded `ids[-511:]`.
+    # `model` is now the CausalLanguageModel wrapper: `output_key="logits"`
+    # already extracts the tensor inside `_backbone_forward`, so `call()`
+    # returns the logits tensor directly (no `["logits"]` indexing) -- see
+    # `masked_language_model/clm.py:_backbone_forward`.
     probe_cb = GenerationProbeCallback(
-        logits_fn=lambda ctx: model(ctx, training=False)["logits"][0, -1, :].numpy(),
+        logits_fn=lambda ctx: model(ctx, training=False)[0, -1, :].numpy(),
         repetition_penalty_mode="divide",
         ctx_length=511,
         probe_every_steps=config.checkpoint_every_steps,
