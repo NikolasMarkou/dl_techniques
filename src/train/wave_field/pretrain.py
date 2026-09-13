@@ -23,7 +23,7 @@ import os
 import glob
 import argparse
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, Union
 
 import keras
 import numpy as np
@@ -41,8 +41,6 @@ from train.common.nlp import (
     create_tokenizer,
     create_warmup_lr_schedule,
     create_nlp_callbacks,
-    build_clm_metrics,
-    prepare_dict_keyed_compile,
     augment_probe_results,
 )
 from train.common.clm_pretrain import (
@@ -64,6 +62,7 @@ from dl_techniques.layers.attention.wave_field_attention import (
 from dl_techniques.initializers.identity_plus_noise import (
     IdentityPlusNoise,
 )
+from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 
@@ -130,8 +129,17 @@ class TrainingConfig(ClmPretrainConfig):
 # ---------------------------------------------------------------------
 
 
-def load_model_from_checkpoint(path: str) -> Tuple[WaveFieldLLM, int]:
-    """Load a WaveFieldLLM model from a ``.keras`` checkpoint."""
+def load_model_from_checkpoint(
+    path: str,
+) -> Tuple[Union[WaveFieldLLM, CausalLanguageModel], int]:
+    """Load a WaveFieldLLM model from a ``.keras`` checkpoint.
+
+    A checkpoint saved before this trainer migrated onto
+    ``CausalLanguageModel`` deserializes as a bare ``WaveFieldLLM``; one saved
+    after deserializes as the ``CausalLanguageModel`` wrapper. Both support
+    ``fit()``/``count_params()``, which is all this trainer calls on the
+    return value.
+    """
     logger.info(f"Resuming from checkpoint: {path}")
     model = keras.models.load_model(
         path,
@@ -163,8 +171,18 @@ def load_model_from_checkpoint(path: str) -> Tuple[WaveFieldLLM, int]:
     return model, step
 
 
-def create_wave_field_llm_model(config: TrainingConfig) -> WaveFieldLLM:
-    """Create and build a WaveFieldLLM model from the training configuration."""
+def create_wave_field_llm_model(config: TrainingConfig) -> CausalLanguageModel:
+    """Create and build a WaveFieldLLM model, wrapped in ``CausalLanguageModel``.
+
+    WaveFieldLLM's own ``call()`` already bakes its tied/untied head and
+    returns a dict (``{"logits": ..., "last_hidden_state": ...}``), so the
+    wrapper is constructed with ``skip_head=True, output_key="logits"`` --
+    WaveFieldLLM's already-correct head is reused unchanged, never rebuilt.
+    ``pre_shifted=True`` matches ``preprocess_clm_dataset``'s
+    ``(input_ids, labels)`` packed-CLM contract. See
+    ``masked_language_model/clm.py`` module docstring for the full flag
+    contract.
+    """
     logger.info(f"Creating WaveFieldLLM-{config.model_variant.upper()}...")
 
     variant_kwargs = dict(
@@ -181,9 +199,45 @@ def create_wave_field_llm_model(config: TrainingConfig) -> WaveFieldLLM:
     if config.field_size is not None:
         variant_kwargs["field_size"] = config.field_size
 
-    model = WaveFieldLLM.from_variant(config.model_variant, **variant_kwargs)
+    wave_field_model = WaveFieldLLM.from_variant(config.model_variant, **variant_kwargs)
 
-    # Build with a dummy forward pass to initialize weights.
+    # DECISION plan-2026-09-13T052422-19022ba2/D-008: causality_tolerance=0.0
+    # (the CausalLanguageModel default) raises HERE for every WaveFieldLLM
+    # configuration this step tried, including field_size=2*max_seq_len --
+    # the model's own docstring's measured "clean" ratio. WaveFieldAttention's
+    # FFT damped-wave convolution is causal on the field grid, not exactly on
+    # tokens: its own docstring (layers/attention/wave_field_attention.py)
+    # and the model docstring above both document an irreducible float32
+    # noise floor even at a "clean" ratio, distinct from a genuine leak by
+    # ~2-3 orders of magnitude. Measured with THIS probe's own methodology
+    # (batch=2, seq_len=8, past-position hidden-state delta) before choosing
+    # this value: the tiny variant's default ratio (field_size=1024,
+    # max_seq_len=512, the model docstring's ratio=2.00 "clean" row) gives
+    # 1.19e-06; the model docstring's own documented ratio=0.50 "leaks" row
+    # (field_size=16, max_seq_len=32) gives 4.53e-04 under the identical
+    # probe -- a ~380x separation. 1e-5 sits about 8x above the measured
+    # clean floor and ~45x below the measured leak, so a genuine leak still
+    # raises.
+    # WHAT NOT TO DO: do not silently pass verify_causality=False instead --
+    # that would stop checking a real leak at OTHER (field_size, max_seq_len)
+    # pairs a future config change might select, per the model docstring's
+    # own warning that leak is non-monotone in the ratio and must be
+    # re-measured after any change to either value. See decisions.md D-008.
+    model = CausalLanguageModel(
+        backbone=wave_field_model,
+        vocab_size=config.vocab_size,
+        skip_head=True,
+        output_key="logits",
+        pre_shifted=True,
+        loss_fn=create_loss_fn(config),
+        verify_causality=True,
+        causality_tolerance=1e-5,
+    )
+
+    # Build with a dummy forward pass on the WRAPPER (not the bare backbone):
+    # forces head resolution and runs the causality probe eagerly, before
+    # `fit()` traces `train_step` (same lazy-build-in-traced-train_step
+    # reason mamba/zamba2/gpt2 needed this -- D-008 of the prior plan).
     dummy = np.random.randint(
         0, config.vocab_size,
         size=(1, max(1, config.max_seq_length - 1)),
@@ -200,25 +254,32 @@ def create_wave_field_llm_model(config: TrainingConfig) -> WaveFieldLLM:
 
 
 def compile_model(
-    model: WaveFieldLLM,
+    model: CausalLanguageModel,
     config: TrainingConfig,
     steps_per_epoch: int,
 ) -> None:
+    """Compile WaveFieldLLM with AdamW, warmup + cosine decay.
+
+    No ``loss=``/``metrics=`` is passed: ``CausalLanguageModel`` computes and
+    reports its own ``loss``/``accuracy``/``perplexity`` via its hand-rolled
+    ``train_step``/``test_step`` (the ``loss_fn=create_loss_fn(config)``
+    passed at construction in ``create_wave_field_llm_model`` is what selects
+    ce/focal/label-smoothing) -- a compiled ``loss=``/``metrics=`` here would
+    be unused dead configuration, matching gpt2/zamba2's already-migrated
+    convention.
+    """
     lr_schedule = create_warmup_lr_schedule(
         config.learning_rate,
         config.num_epochs,
         steps_per_epoch,
         config.warmup_ratio,
     )
-    prepare_dict_keyed_compile(model)
     model.compile(
         optimizer=keras.optimizers.AdamW(
             learning_rate=lr_schedule,
             weight_decay=config.weight_decay,
             clipnorm=1.0,
         ),
-        loss={"logits": create_loss_fn(config)},
-        metrics={"logits": build_clm_metrics(config.encoding_name)},
     )
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
@@ -228,8 +289,8 @@ def compile_model(
 
 def train_wave_field_llm(
     config: TrainingConfig,
-    model_factory: Callable[[TrainingConfig], WaveFieldLLM] = create_wave_field_llm_model,
-) -> Tuple[WaveFieldLLM, keras.callbacks.History]:
+    model_factory: Callable[[TrainingConfig], CausalLanguageModel] = create_wave_field_llm_model,
+) -> Tuple[CausalLanguageModel, keras.callbacks.History]:
     """Run WaveFieldLLM CLM pre-training."""
     logger.info("=" * 60)
     logger.info("WaveFieldLLM Causal LM Pre-training")
@@ -285,11 +346,15 @@ def train_wave_field_llm(
     # next token. For the smoke variant (max_seq_len=32) this means 31.
     # Common GenerationProbeCallback owns suppression/sampling/decode; the
     # closure supplies ONLY the next-position logits vector from the unpadded
-    # ctx (variable-length, no padding; dict output keyed "logits"; divide-mode
-    # rep penalty). Copy B's old `context_window=` maps to `ctx_length=`.
+    # ctx (variable-length, no padding; divide-mode rep penalty). Copy B's old
+    # `context_window=` maps to `ctx_length=`.
+    # `model` is now the CausalLanguageModel wrapper: `output_key="logits"`
+    # already extracts the tensor inside `_backbone_forward`, so `call()`
+    # returns the logits tensor directly (no `["logits"]` indexing) -- see
+    # `masked_language_model/clm.py:_backbone_forward`.
     probe_ctx = max(1, config.max_seq_length - 1)
     probe_cb = GenerationProbeCallback(
-        logits_fn=lambda ctx: model(ctx, training=False)["logits"][0, -1, :].numpy(),
+        logits_fn=lambda ctx: model(ctx, training=False)[0, -1, :].numpy(),
         repetition_penalty_mode="divide",
         ctx_length=probe_ctx,
         probe_every_steps=config.checkpoint_every_steps,
