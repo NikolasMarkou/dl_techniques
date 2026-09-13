@@ -814,6 +814,14 @@ def build_model(
     # reworded/deleted) as the historical record of why it was ABSENT before;
     # see decisions.md D-008 of the later plan for the reversal's reasoning
     # and the CE-numerical-equivalence measurement backing it.
+    #
+    # DECISION plan-2026-09-13T120637-288bad33/D-012 (addendum, 2026-09-13): the
+    # SUPERSEDED block above cites "decisions.md D-008 of the later plan" in
+    # prose only -- it carries no scannable `# DECISION` token itself, so
+    # validate-plan.mjs's anchor scan cannot find it. This block is a dated
+    # addendum making that reference scannable; it does not change, revert,
+    # or supersede the SUPERSEDED block's own content, which remains the
+    # historical record verbatim. See decisions.md D-012 of THIS plan.
     model = CausalLanguageModel(
         backbone=backbone,
         vocab_size=arch.vocab_size,

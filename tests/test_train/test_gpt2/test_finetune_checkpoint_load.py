@@ -27,6 +27,13 @@ exercises the REAL path end-to-end for both checkpoint shapes:
 
 Both fixtures use a `"tiny"` GPT2 variant with a tiny vocab/seq length so the
 whole module runs in seconds, not minutes.
+
+Scope note (plan-2026-09-13T120637-288bad33/D-014, 2026-09-13): this module
+is the real save/load/compile/fit round trip -- it deliberately does NOT
+check `config.json`/`training_history.json` content. For that
+persistence/control-flow guard (which deliberately stubs the loader instead),
+see `test_run_artifacts.py`. The two files are permanently complementary, not
+redundant -- see decisions.md D-014 of the above plan.
 """
 
 import keras
