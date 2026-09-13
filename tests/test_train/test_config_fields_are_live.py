@@ -111,6 +111,7 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/zamba2/common.py", "Zamba2TrainingConfig"),
     ("train/gemma/common.py", "Gemma3TrainingConfig"),
     ("train/qwen/common.py", "Qwen3TrainingConfig"),
+    ("train/qwen3_next/common.py", "Qwen3NextTrainingConfig"),
     ("train/distilbert/pretrain.py", "DistilBertTrainingConfig"),
     ("train/modern_bert/pretrain.py", "ModernBertTrainingConfig"),
     ("train/mini_vec2vec/train_mini_vec2vec.py", "MiniVec2VecTrainingConfig"),
