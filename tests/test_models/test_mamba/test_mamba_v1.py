@@ -1155,5 +1155,62 @@ class TestMambaComparison:
         assert params_4 > params_2
 
 
+class TestMambaCausalLanguageModelSurface:
+    """Test the two additive members `CausalLanguageModel` needs from a backbone.
+
+    Mirrors `Mamba2`'s D-009 fix (plan-2026-09-12T195532-422091c3), ported here as
+    D-012 (plan-2026-09-13T073704-245ab5d5) -- see the `# DECISION` anchor at
+    `mamba_v1.py`'s `get_embedding_matrix` for the mechanism.
+    """
+
+    def test_hidden_size_aliases_d_model(self):
+        """`hidden_size` must read back exactly `d_model`, before and after build."""
+        model = Mamba(vocab_size=1000, d_model=256, num_layers=2, d_state=8)
+        assert model.hidden_size == 256
+        assert model.hidden_size == model.d_model
+
+        input_ids = keras.ops.zeros((1, 8), dtype="int32")
+        _ = model({"input_ids": input_ids}, training=False)
+        assert model.hidden_size == 256
+
+    def test_get_embedding_matrix_shape_and_identity(self):
+        """The returned matrix must be `(vocab_size, d_model)` and the real embedding weight."""
+        model = Mamba(vocab_size=500, d_model=128, num_layers=2, d_state=8)
+
+        matrix = model.get_embedding_matrix()
+        assert tuple(matrix.shape) == (500, 128)
+        # Must be the actual `embedding.embeddings` weight, not a copy -- so
+        # mutating one is reflected in the other (this is what makes it usable
+        # for external weight tying).
+        assert matrix is model.embedding.embeddings
+
+    def test_get_embedding_matrix_before_call_builds_the_embedding(self):
+        """Calling before any forward pass must still return a real, built matrix.
+
+        `Mamba.build()` (via `materialize_sublayers`) already builds `self.embedding`
+        as a side effect, so this exercises that path rather than the defensive
+        `if not self.embedding.built` guard directly -- both must produce the same
+        observable result: a built embedding layer with the right shape.
+        """
+        model = Mamba(vocab_size=200, d_model=64, num_layers=1, d_state=4)
+        assert not model.embedding.built
+
+        matrix = model.get_embedding_matrix()
+        assert model.embedding.built
+        assert tuple(matrix.shape) == (200, 64)
+
+    def test_get_embedding_matrix_matches_embedding_lookup(self):
+        """The returned matrix must be numerically the same table `call()` indexes into."""
+        model = Mamba(vocab_size=100, d_model=32, num_layers=1, d_state=4)
+        input_ids = keras.ops.array([[3, 7, 42]], dtype="int32")
+        _ = model({"input_ids": input_ids}, training=False)
+
+        matrix = keras.ops.convert_to_numpy(model.get_embedding_matrix())
+        direct = keras.ops.convert_to_numpy(model.embedding(input_ids))
+        expected = matrix[keras.ops.convert_to_numpy(input_ids)]
+
+        np.testing.assert_allclose(direct, expected, rtol=1e-6, atol=1e-6)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

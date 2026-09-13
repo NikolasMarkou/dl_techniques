@@ -1,76 +1,60 @@
-"""Shared building blocks for the Mamba-2 Pattern-3 (subword CLM) trainer.
+"""Shared building blocks for the Mamba-1 Pattern-3 (subword CLM) trainer.
 
-Mamba-2 (``dl_techniques.models.language.mamba.mamba_v2.Mamba2``, the D-002
-choice of the two live architectures in the package -- see
-``plans/plan-2026-09-12T173329-e20362c4/decisions.md`` D-002) is a standard
-subword causal LM, so this module follows the Pattern-3 shape
-(``src/train/CLAUDE.md``, exemplar ``src/train/bert/pretrain.py``), the same
-as ``src/train/zamba2/common.py`` -- and deliberately mirrors THAT module's
-structure (config dataclass + argparse + ``config_from_args``
-single-wiring-site + ``build_datasets``/``build_optimizer``/``build_model``/
-``train``), which is the more current convention for a new Pattern-3/6
-trainer per ``src/train/CLAUDE.md``.
+Mamba-1 (``dl_techniques.models.language.mamba.mamba_v1.Mamba``) is
+architecturally identical in shape to Mamba-2 for this purpose: a headless
+encoder whose ``call()`` returns ``{"last_hidden_state": ...}`` only, storing
+its embedding under ``self.embedding``. It has NO separate CLM-head
+counterpart to route through -- ``create_mamba_with_head`` (also in
+``mamba_v1.py``) bakes a POOLED task head (classification/regression via
+``pooling_type='last'``), which is architecturally wrong for next-token CLM
+pretraining (every position needs to be scored, not just the last); it is
+irrelevant here. So this module is a near-verbatim clone of
+``train.mamba.common`` (the Mamba-2 trainer), substituting ``Mamba`` for
+``Mamba2`` throughout -- see
+``plans/plan-2026-09-13T073704-245ab5d5/decisions.md`` D-002/D-012.
 
-**CLM-head consolidation onto ``CausalLanguageModel``: DONE** (see
-``plans/plan-2026-09-12T195532-422091c3/decisions.md`` D-004, which
-SUPERSEDES the mechanism chosen by ``plan-2026-09-12T173329-e20362c4``'s own
-D-004). ``build_model`` wraps a bare ``Mamba2.from_variant(...)`` --
-genuinely headless, ``call()`` returns only ``{"last_hidden_state": ...}``
--- in
-``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel(
-skip_head=False, pre_shifted=True, verify_causality=True)``. This replaces
-the local ``build_causal_lm_model`` functional wrapper this module used to
-define, once ``CausalLanguageModel`` gained a ``pre_shifted`` flag (so it no
-longer double-shifts against ``preprocess_clm_packed_dataset``'s own
-pre-shift) and ``Mamba2`` gained a ``hidden_size`` property alias for
-``d_model`` (``CausalLanguageModel.__init__`` requires the attribute).
-Mamba-2 still has no auxiliary loss -- the next-token cross-entropy reaches
-the optimizer through ``CausalLanguageModel.compute_loss`` (via its
-injectable ``loss_fn``) rather than stock ``compile(loss=...)``, since
-``train_step``/``test_step`` are overridden by that class, not by this
-module.
+Two additive backbone fixes were required before this module could exist,
+mirroring D-008/D-009 of ``plan-2026-09-12T195532-422091c3`` (the Mamba-2
+fixes): ``Mamba`` gained a ``hidden_size`` property alias for ``d_model``
+(``CausalLanguageModel.__init__`` requires the attribute when
+``skip_head=False``), and a ``get_embedding_matrix()`` method (the weight-
+tying lookup chain's FIRST check) so ``config.tie_word_embeddings=True``
+genuinely ties rather than silently falling back to an untied ``Dense``. See
+``mamba_v1.py``'s ``# DECISION plan-2026-09-13T073704-245ab5d5/D-012``
+anchor for the mechanism, and this plan's ``decisions.md`` D-012 for the
+verification (both members read against ``mamba_v2.py``'s already-proven
+implementation before porting).
 
-``config.tie_word_embeddings`` genuinely ties or unties the output head:
-D-008 found this migration initially made the flag inert (``Mamba2`` stores
-its embedding layer as ``self.embedding``, matching none of
-``CausalLanguageModel._locate_embedding_weights``'s name-based fallbacks, so
-tying silently fell back to an untied ``Dense`` regardless of the flag), and
-D-009 fixed it by adding ``Mamba2.get_embedding_matrix()`` (the lookup
-chain's FIRST check) rather than leaving it as documented debt -- see
-``plans/plan-2026-09-12T195532-422091c3/decisions.md`` D-008/D-009.
+``Mamba.MODEL_VARIANTS`` already lists ``"base"`` as a first-class key (no
+separate ``VARIANT_ALIASES`` dict the way ``Mamba2`` has one) -- confirmed by
+reading ``mamba_v1.py`` directly, per
+``findings/mamba-v1-trainer-requirements.md``. :data:`VARIANT_NAMES` is
+therefore ``tuple(Mamba.MODEL_VARIANTS)`` with no alias union needed.
 
-**No ``ClmPretrainConfig``/``load_train_val_datasets`` reuse.** That
-wrapper wraps every label tensor as ``{"logits": y}`` because its four
-DICT-output callers (GPT-2, wave_field, cliffordnet) already bake an LM
-head into their own ``call()`` and return ``{"logits": ...}`` directly.
-``Mamba2.call`` returns a dict too, but only ``{"last_hidden_state":
-...}`` -- the package ships no CLM head at all (unlike ``mamba_v1``'s
-``create_mamba_with_head``, which has no v2 counterpart). Wrapping THAT
-dict as ``{"logits": y}`` would still leave the model with no head to
-produce a "logits" output in the first place; ``CausalLanguageModel``
-supplies that head now instead.
+**A distinct results-dir prefix.** ``Mamba`` and ``Mamba2`` share the SAME
+variant-name set (``130m``, ``370m``, etc.), so if this module reused the
+bare ``RESULTS_DIR_PREFIX = "mamba"`` from ``train.mamba.common``, a v1 run
+and a v2 run at the same variant name would land in ``results/`` directories
+distinguished only by timestamp -- a human skimming ``results/`` could not
+tell them apart without opening ``config.json``. :data:`RESULTS_DIR_PREFIX_V1`
+is ``"mamba_v1"`` instead (matching the ``"mamba2"``-style prefix convention
+``train.zamba2.common`` already uses, which is NOT bare ``"zamba"``).
 
-ADDENDUM 2026-09-13, plan-2026-09-13T073704-245ab5d5/D-012: the
-"``create_mamba_with_head``, which has no v2 counterpart" aside above is
-still accurate as written (``create_mamba_with_head`` remains v1-only, and
-this module still does not route through it for the reason given above) --
-but ``mamba_v1`` now DOES have its own CLM trainer, in ``common_v1.py`` +
-``train_mamba_v1.py`` in this same package, built the same way this module
-is (a bare ``Mamba`` backbone wrapped in ``CausalLanguageModel``, NOT
-through ``create_mamba_with_head``). See ``common_v1.py``'s module docstring
-and this plan's ``decisions.md`` D-012.
+No ``ClmPretrainConfig``/``load_train_val_datasets`` reuse, for the identical
+reason ``train.mamba.common`` documents: ``Mamba`` ships no CLM head of its
+own, so ``CausalLanguageModel`` supplies it instead of wrapping an
+already-headed ``{"logits": ...}`` output.
 
 Public surface:
-    * :data:`VARIANT_NAMES` -- the shipped :data:`Mamba2.MODEL_VARIANTS` keys
-      plus their aliases.
-    * :class:`Mamba2TrainingConfig` -- the run knobs. Every field is
+    * :data:`VARIANT_NAMES` -- the shipped :data:`Mamba.MODEL_VARIANTS` keys.
+    * :class:`MambaV1TrainingConfig` -- the run knobs. Every field is
       consumed by something other than the config dump.
     * :func:`add_common_arguments` -- the shared CLI flags.
     * :func:`config_from_args` -- namespace -> config, the ONE wiring site.
     * :func:`build_datasets` -- the Wikipedia packed-CLM pipeline (identical
-      shape to zamba2's).
+      shape to Mamba-2's and zamba2's).
     * :func:`build_optimizer` / :func:`build_model` -- AdamW through
-      ``optimizer_builder``; ``build_model`` wraps a fresh :class:`Mamba2`
+      ``optimizer_builder``; ``build_model`` wraps a fresh :class:`Mamba`
       backbone in ``CausalLanguageModel``, which owns its own loss/metric
       tracking (``loss_fn=create_clm_loss_fn(config)``) -- ``compile()``
       passes only the optimizer.
@@ -91,7 +75,7 @@ from dl_techniques.datasets.nlp import (
     DEFAULT_WIKIPEDIA_CONFIG,
     load_wikipedia_train_val,
 )
-from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
+from dl_techniques.models.language.mamba.mamba_v1 import Mamba
 from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
@@ -110,11 +94,11 @@ from train.common.run_io import save_training_history_json
 
 __all__ = [
     "DEFAULT_VARIANT",
-    "RESULTS_DIR_PREFIX",
+    "RESULTS_DIR_PREFIX_V1",
     "TRAIN_MONITOR",
     "VARIANT_NAMES",
     "WEIGHT_DECAY_EXCLUDED",
-    "Mamba2TrainingConfig",
+    "MambaV1TrainingConfig",
     "add_common_arguments",
     "build_datasets",
     "build_model",
@@ -128,8 +112,11 @@ __all__ = [
 # Constants
 # ---------------------------------------------------------------------
 
-RESULTS_DIR_PREFIX: str = "mamba"
-"""Prefix of the timestamped run directory under ``--output-dir``."""
+RESULTS_DIR_PREFIX_V1: str = "mamba_v1"
+"""Prefix of the timestamped run directory under ``--output-dir``. Distinct
+from Mamba-2's bare ``"mamba"`` (``train.mamba.common.RESULTS_DIR_PREFIX``)
+to avoid a ``results/`` collision at a shared variant name -- see the module
+docstring."""
 
 TRAIN_MONITOR: str = "val_loss"
 """The monitored metric. Its direction is resolved by
@@ -145,12 +132,12 @@ DEFAULT_VARIANT: str = "130m"
 """Default ``--variant`` -- the smallest shipped size (also aliased
 ``"base"``), for fast iteration."""
 
-VARIANT_NAMES: Tuple[str, ...] = tuple(Mamba2.MODEL_VARIANTS) + tuple(
-    Mamba2.VARIANT_ALIASES
-)
-"""Every ``--variant`` choice: the five :data:`Mamba2.MODEL_VARIANTS` keys
-plus the three :data:`Mamba2.VARIANT_ALIASES` (``"base"``, ``"1.4b"``,
-``"2.8b"``), in declaration order."""
+VARIANT_NAMES: Tuple[str, ...] = tuple(Mamba.MODEL_VARIANTS)
+"""Every ``--variant`` choice: the :data:`Mamba.MODEL_VARIANTS` keys.
+Unlike Mamba-2, ``Mamba`` (v1) has no separate ``VARIANT_ALIASES`` dict --
+``"base"`` is already a first-class key in ``MODEL_VARIANTS`` -- so no alias
+union is needed here (confirmed by reading ``mamba_v1.py`` directly, per
+``findings/mamba-v1-trainer-requirements.md``)."""
 
 
 def variant_names() -> Tuple[str, ...]:
@@ -166,8 +153,8 @@ def variant_names() -> Tuple[str, ...]:
 
 
 @dataclass
-class Mamba2TrainingConfig:
-    """Knobs for one Mamba-2 pretraining run.
+class MambaV1TrainingConfig:
+    """Knobs for one Mamba-1 pretraining run.
 
     Every annotated field is read by something other than the config dump
     (``save_config_json``/``asdict`` serialize the whole config, which
@@ -192,11 +179,10 @@ class Mamba2TrainingConfig:
     :param num_layers: Overrides the variant's block count, same override
         semantics as ``d_model``.
     :param d_state: Overrides the variant's SSM state width, forwarded to
-        every :class:`Mamba2ResidualBlock`.
+        every ``MambaResidualBlock``.
     :param tie_word_embeddings: If ``True`` (the default) the LM head reuses
         the token-embedding matrix (``logits = h @ E^T``); if ``False`` an
-        independent, untied ``Dense`` projection is used instead. See
-        :func:`build_causal_lm_model`.
+        independent, untied ``Dense`` projection is used instead.
     :param learning_rate: Peak learning rate, reached at the end of warmup.
     :param final_learning_rate: Cosine floor.
     :param weight_decay: Decoupled AdamW weight decay. Applied by the
@@ -360,7 +346,7 @@ class Mamba2TrainingConfig:
     def variant_overrides(self) -> Dict[str, int]:
         """:returns: The non-``None`` architecture overrides
             (``d_model``/``num_layers``/``d_state``) as a kwargs dict for
-            :meth:`Mamba2.from_variant`.
+            :meth:`Mamba.from_variant`.
         :rtype: Dict[str, int]
         """
         overrides: Dict[str, int] = {}
@@ -374,7 +360,7 @@ class Mamba2TrainingConfig:
 
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Register the shared Mamba-2 training flags.
+    """Register the shared Mamba-1 training flags.
 
     ``--gpu`` is deliberately NOT here: it is consumed by ``setup_gpu`` in
     ``main()`` and is not a config field.
@@ -389,12 +375,12 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     :returns: The same parser, for chaining.
     :rtype: argparse.ArgumentParser
     """
-    defaults = Mamba2TrainingConfig()
+    defaults = MambaV1TrainingConfig()
 
     parser.add_argument(
         "--variant", type=str, default=defaults.variant,
         choices=list(variant_names()),
-        help="Mamba-2 model size to train.",
+        help="Mamba-1 model size to train.",
     )
     parser.add_argument(
         "--dataset-root", type=str, default=defaults.dataset_root,
@@ -513,19 +499,19 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     return parser
 
 
-def config_from_args(args: argparse.Namespace) -> Mamba2TrainingConfig:
+def config_from_args(args: argparse.Namespace) -> MambaV1TrainingConfig:
     """Build a config from a parsed namespace.
 
     The ONE wiring site between :func:`add_common_arguments` and
-    :class:`Mamba2TrainingConfig`. A flag that does not arrive here silently
+    :class:`MambaV1TrainingConfig`. A flag that does not arrive here silently
     does nothing.
 
     :param args: A namespace produced by a parser carrying the common flags.
     :type args: argparse.Namespace
     :returns: The config.
-    :rtype: Mamba2TrainingConfig
+    :rtype: MambaV1TrainingConfig
     """
-    return Mamba2TrainingConfig(
+    return MambaV1TrainingConfig(
         variant=args.variant,
         dataset_root=args.dataset_root,
         wikipedia_config=args.wikipedia_config,
@@ -564,14 +550,15 @@ def config_from_args(args: argparse.Namespace) -> Mamba2TrainingConfig:
 
 
 def build_datasets(
-        config: Mamba2TrainingConfig,
+        config: MambaV1TrainingConfig,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, int, int]:
     """Build the Wikipedia packed-CLM pipeline, the step budget, and vocab_size.
 
-    Identical shape to ``train.zamba2.common.build_datasets``.
+    Identical shape to ``train.mamba.common.build_datasets`` (Mamba-2) and
+    ``train.zamba2.common.build_datasets``.
 
     :param config: The run config.
-    :type config: Mamba2TrainingConfig
+    :type config: MambaV1TrainingConfig
     :returns: ``(train_ds, val_ds, steps_per_epoch, vocab_size)``. ``vocab_size``
         is read off the live tokenizer (:attr:`TiktokenPreprocessor.vocab_size`)
         rather than hardcoded, so the model's embedding/head always match the
@@ -604,7 +591,7 @@ def build_datasets(
         override=config.steps_per_epoch,
     )
     logger.info(
-        f"Mamba2 corpus: {n_train} train / {n_val} val articles; "
+        f"Mamba (v1) corpus: {n_train} train / {n_val} val articles; "
         f"steps_per_epoch={steps_per_epoch}, vocab_size={preprocessor.vocab_size}"
     )
 
@@ -638,56 +625,8 @@ def build_datasets(
 # ---------------------------------------------------------------------
 
 
-# DECISION plan-2026-09-12T173329-e20362c4/D-004: `Mamba2` is a pure encoder
-# -- `call()` returns only `{"last_hidden_state": ...}`, with no CLM head
-# (unlike `mamba_v1.create_mamba_with_head`, which has no v2 counterpart, and
-# unlike GPT-2/Zamba2/wave_field, which already bake a head into their own
-# `call()`). Do NOT reuse `dl_techniques.models.language.masked_language_
-# model.clm.CausalLanguageModel` here even though its docstring looks like an
-# exact fit ("wraps a decoder backbone... projects hidden states to
-# vocabulary logits... requires `last_hidden_state`"): that class performs
-# its OWN internal input/label shift inside `train_step`/`test_step` (see its
-# `_prepare_inputs_and_labels`), on a dict `{"input_ids": ..., "attention_
-# mask": ...}` input. `preprocess_clm_packed_dataset` (used here, matching
-# zamba2's own pipeline) ALREADY performs that shift when it builds the
-# packed dataset (`chunk[:-1]`/`chunk[1:]`) and yields plain-tensor
-# `(input_ids, labels)` pairs, not a dict. Wiring `CausalLanguageModel` on
-# top of an already-shifted dataset would shift twice, silently training the
-# model to predict two tokens ahead instead of one -- and would also require
-# a `hidden_size` attribute this class expects but `Mamba2` does not declare
-# (it has `d_model` instead). A functional wrapper below (`build_causal_lm_
-# model`) instead reuses ONLY the shared low-level `tied_embedding_logits`
-# helper (the actual duplicated matmul this repo already extracted, per
-# `dl_techniques/utils/tied_embeddings.py`'s own docstring), and produces a
-# PLAIN TENSOR of logits matching what the packed dataset and
-# `create_clm_loss_fn` already expect -- the same shape zamba2's own
-# backbone (which bakes its head in natively) already produces. See
-# decisions.md D-004.
-#
-# ADDENDUM 2026-09-12, plan-2026-09-12T195532-422091c3/D-004: SUPERSEDED.
-# Both blockers named above are now fixed -- `CausalLanguageModel` gained
-# `pre_shifted=True` (no more double-shift against
-# `preprocess_clm_packed_dataset`'s own pre-shift) and `Mamba2` gained a
-# `hidden_size` property alias for `d_model`. The `build_causal_lm_model`
-# function this comment originally anchored has been REMOVED;
-# `build_model` below wraps `Mamba2` in `CausalLanguageModel(skip_head=False,
-# pre_shifted=True, verify_causality=True)` instead. This does not mean the
-# original decision above was wrong when written -- it correctly diagnosed
-# both blockers at the time. See decisions.md D-004 of
-# plan-2026-09-12T195532-422091c3 for the full supersession framing, and
-# plans/ANCHORS.md's "Retired anchors" section (to be updated at this plan's
-# CLOSE) for the mechanical retirement record.
-#
-# D-008/D-009 FOLLOW-UP: the migration above initially left
-# `config.tie_word_embeddings` inert (D-008 reported it, did not fix it --
-# `Mamba2`'s embedding layer is named `self.embedding`, matching none of
-# `CausalLanguageModel._locate_embedding_weights`'s name-based fallbacks).
-# D-009 (same plan) closed that gap additively via
-# `Mamba2.get_embedding_matrix()` (see mamba_v2.py); genuine weight tying is
-# restored as of that commit, not merely documented as a known gap. See
-# decisions.md D-008/D-009.
 def build_optimizer(
-        config: Mamba2TrainingConfig,
+        config: MambaV1TrainingConfig,
         steps_per_epoch: int,
 ) -> keras.optimizers.Optimizer:
     """AdamW on a warmup + cosine-decay schedule, through ``optimizer_builder``.
@@ -698,7 +637,7 @@ def build_optimizer(
     (``src/train/CLAUDE.md``).
 
     :param config: The run config.
-    :type config: Mamba2TrainingConfig
+    :type config: MambaV1TrainingConfig
     :param steps_per_epoch: Steps in one epoch, for the decay horizon.
     :type steps_per_epoch: int
     :returns: The optimizer.
@@ -732,14 +671,14 @@ def build_optimizer(
 
 
 def build_model(
-        config: Mamba2TrainingConfig,
+        config: MambaV1TrainingConfig,
         steps_per_epoch: int,
         vocab_size: int,
 ) -> CausalLanguageModel:
-    """Create and compile the Mamba-2 causal-LM model for one run.
+    """Create and compile the Mamba-1 causal-LM model for one run.
 
     :param config: The run config.
-    :type config: Mamba2TrainingConfig
+    :type config: MambaV1TrainingConfig
     :param steps_per_epoch: Steps in one epoch, for the decay horizon.
     :type steps_per_epoch: int
     :param vocab_size: The live tokenizer's vocab size
@@ -749,18 +688,18 @@ def build_model(
     :type vocab_size: int
     :returns: The compiled model, a
         :class:`~dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel`
-        wrapping a bare :class:`Mamba2` backbone. ``skip_head=False`` since
-        ``Mamba2`` is genuinely headless (``call()`` returns only
-        ``{"last_hidden_state": ...}``) -- unlike gemma/qwen's ``skip_head=True``
-        migration, this class builds its OWN weight-tied (or untied, per
-        ``config.tie_word_embeddings``) output head. ``pre_shifted=True``
-        matches ``preprocess_clm_packed_dataset``'s own pre-shifted
+        wrapping a bare :class:`Mamba` backbone. ``skip_head=False`` since
+        ``Mamba`` is genuinely headless (``call()`` returns only
+        ``{"last_hidden_state": ...}``) -- this class builds its OWN
+        weight-tied (or untied, per ``config.tie_word_embeddings``) output
+        head. ``pre_shifted=True`` matches
+        ``preprocess_clm_packed_dataset``'s own pre-shifted
         ``(input_ids, labels)`` tuples. ``compile()`` receives only the
         optimizer: the class tracks its own loss/accuracy/perplexity,
         reading ``loss_fn`` internally rather than a compiled ``loss=``.
     :rtype: CausalLanguageModel
     """
-    backbone = Mamba2.from_variant(
+    backbone = Mamba.from_variant(
         config.variant, vocab_size=vocab_size, **config.variant_overrides
     )
     model = CausalLanguageModel(
@@ -773,20 +712,16 @@ def build_model(
         verify_causality=True,
     )
     model.compile(optimizer=build_optimizer(config, steps_per_epoch))
-    # DECISION plan-2026-09-12T195532-422091c3/D-008: `skip_head=False` routes
-    # `call()` through `_apply_output_head`, whose OWN lazy
-    # `self.build(hidden_states.shape)` call (embedding-weights resolution,
-    # output-head construction, the causality probe) is the FIRST build
-    # trigger for this model -- unlike gemma/qwen's `skip_head=True`, which
-    # never reaches `_apply_output_head` at all. Without this eager call,
-    # that lazy build's first invocation happens inside `fit()`'s traced
-    # `train_step` `tf.function`, where the causality probe's
-    # `ops.convert_to_numpy` raises `NotImplementedError` on a symbolic
-    # tensor (measured, not hypothetical). One dummy forward pass here
-    # resolves the head and runs the probe eagerly, before `fit()` ever
-    # traces `train_step`. Do NOT remove this call or move head resolution
-    # back inside `train_step`/`test_step` without re-proving the trace
-    # boundary; see decisions.md D-008.
+    # Same reasoning as `train.mamba.common.build_model`'s D-008 comment
+    # (plan-2026-09-12T195532-422091c3): `skip_head=False` routes `call()`
+    # through `_apply_output_head`, whose OWN lazy `self.build(...)` call
+    # (embedding-weights resolution, output-head construction, the
+    # causality probe) is the FIRST build trigger for this model. Without
+    # this eager call, that lazy build's first invocation happens inside
+    # `fit()`'s traced `train_step` `tf.function`, where the causality
+    # probe's `ops.convert_to_numpy` raises `NotImplementedError` on a
+    # symbolic tensor. One dummy forward pass here resolves the head and
+    # runs the probe eagerly, before `fit()` ever traces `train_step`.
     model(tf.zeros((1, 2), dtype="int32"), training=False)
     return model
 
@@ -796,11 +731,11 @@ def build_model(
 # ---------------------------------------------------------------------
 
 
-def train(config: Mamba2TrainingConfig) -> Tuple[keras.Model, Any, str]:
-    """Pretrain Mamba-2 on Wikipedia with stock ``fit()``.
+def train(config: MambaV1TrainingConfig) -> Tuple[keras.Model, Any, str]:
+    """Pretrain Mamba-1 on Wikipedia with stock ``fit()``.
 
     :param config: The run config.
-    :type config: Mamba2TrainingConfig
+    :type config: MambaV1TrainingConfig
     :returns: ``(model, history, results_dir)``.
     :rtype: Tuple[keras.Model, Any, str]
     """
@@ -812,10 +747,10 @@ def train(config: Mamba2TrainingConfig) -> Tuple[keras.Model, Any, str]:
     # Calling `create_callbacks` directly rather than `train.common.nlp
     # .create_nlp_callbacks`: the latter has no `output_root` parameter, so
     # it could never honour `--output-dir` -- same reasoning as
-    # zamba2/common.py's `train`.
+    # `train.mamba.common.train` (Mamba-2) and zamba2/common.py's `train`.
     callbacks, results_dir = create_callbacks(
         model_name=config.variant,
-        results_dir_prefix=RESULTS_DIR_PREFIX,
+        results_dir_prefix=RESULTS_DIR_PREFIX_V1,
         output_root=config.output_dir,
         monitor=TRAIN_MONITOR,
         patience=config.patience,

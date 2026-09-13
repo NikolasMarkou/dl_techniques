@@ -356,6 +356,56 @@ class Mamba(keras.Model):
 
         return {"last_hidden_state": last_hidden_state}
 
+    @property
+    def hidden_size(self) -> int:
+        """Alias for :attr:`d_model`, for callers expecting the common name.
+
+        Additive only: ``d_model`` is not renamed or removed, and this is not
+        a constructor argument, so ``get_config``/``from_config`` are
+        unaffected. Mirrors
+        ``dl_techniques.models.language.mamba.mamba_v2.Mamba2.hidden_size``
+        (plan-2026-09-12T195532-422091c3/D-009). See
+        ``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel``,
+        whose ``__init__`` requires a ``hidden_size`` attribute on any
+        backbone built with ``skip_head=False``.
+
+        :return: :attr:`d_model`.
+        :rtype: int
+        """
+        return self.d_model
+
+    # DECISION plan-2026-09-13T073704-245ab5d5/D-012: this method exists for the
+    # same reason plan-2026-09-12T195532-422091c3/D-009 added it to Mamba2 --
+    # CausalLanguageModel._locate_embedding_weights's name-based fallbacks
+    # (token_embeddings, embeddings.word_embeddings, embeddings) all miss this
+    # model's `embedding` attribute name, which would silently make
+    # tie_word_embeddings inert. Do not rename/remove `embedding` instead of
+    # adding this method -- that would be a wider, riskier change for the same
+    # fix. See decisions.md.
+    def get_embedding_matrix(self) -> keras.KerasTensor:
+        """Return the token-embedding weight matrix, for external weight tying.
+
+        Additive only: :attr:`embedding` itself is untouched, this is not a
+        constructor argument, so ``get_config``/``from_config`` are unaffected. See
+        ``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel``,
+        whose ``_locate_embedding_weights`` checks for this method FIRST, before
+        falling back to name-based lookups that do not match this model's
+        ``embedding`` attribute name.
+
+        :return: The ``(vocab_size, d_model)`` embedding weight matrix.
+        :rtype: keras.KerasTensor
+        """
+        # `CausalLanguageModel.build` calls `self.backbone.build(input_shape)`
+        # then immediately reads this method, before `call()` has ever run --
+        # `Mamba` defines a `build()` override (via `materialize_sublayers`),
+        # which traces `call()` on symbolic inputs and DOES build `self.embedding`
+        # as a side effect. Guard anyway for direct calls before `build()` has
+        # run; `Embedding.build` is a no-op guarded by `self.built` and does not
+        # depend on `input_shape`'s value.
+        if not self.embedding.built:
+            self.embedding.build(None)
+        return self.embedding.embeddings
+
     @classmethod
     def from_variant(
         cls,
