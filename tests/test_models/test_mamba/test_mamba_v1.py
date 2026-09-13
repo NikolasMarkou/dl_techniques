@@ -21,13 +21,17 @@ import tensorflow as tf
 import tempfile
 import os
 from typing import Dict, Any
+from unittest import mock
 
 from dl_techniques.models.language.mamba import Mamba
+from dl_techniques.models.language.mamba.components import MambaLayer
 
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,
     assert_value_knob_changes_output,
 )
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+from tests.numerics import reassociation_atol
 
 
 class TestMambaModelInitialization:
@@ -1210,6 +1214,181 @@ class TestMambaCausalLanguageModelSurface:
         expected = matrix[keras.ops.convert_to_numpy(input_ids)]
 
         np.testing.assert_allclose(direct, expected, rtol=1e-6, atol=1e-6)
+
+
+class TestMambaLayerCheckpointedScanGradients:
+    """`MambaLayer.call()` wraps `self._selective_scan` in `tf.recompute_grad`
+    (plan-2026-09-13T165751-bc5433cb, step 2, D-001) to trade recompute FLOPs
+    for backward-pass memory. This class is the direct verification of
+    Assumption A1: that `tf.recompute_grad` propagates gradients correctly to
+    every trainable weight, not just to the scan's explicit tensor arguments,
+    and that the wrap changes only backward-pass memory/compute, never any
+    computed value.
+
+    Shapes here are deliberately tiny (CPU-feasible, no GPU needed) -- this
+    class asserts correctness, not the memory reduction, which step 5 measures
+    separately on GPU1.
+    """
+
+    def _build_layer_and_input(self):
+        """A small, built `MambaLayer` and a fixed input, for CPU-only tests."""
+        layer = MambaLayer(d_model=8, d_state=4, d_conv=2, expand=2, dt_rank=2)
+        x = keras.ops.convert_to_tensor(
+            np.random.default_rng(0).standard_normal((2, 6, 8)).astype("float32")
+        )
+        # First call builds the layer's weights.
+        layer(x, training=True)
+        return layer, x
+
+    def _tape_gradients(self, layer, x):
+        """One `GradientTape` step: gradients w.r.t. every trainable weight."""
+        with tf.GradientTape() as tape:
+            y = layer(x, training=True)
+            loss = keras.ops.mean(keras.ops.square(y))
+        return tape.gradient(loss, layer.trainable_weights)
+
+    def test_checkpointed_and_noncheckpointed_gradients_agree_per_weight(self):
+        """Checkpointed gradients (current `call()`) must match the gradients
+        `tf.recompute_grad` would otherwise have replaced, for EVERY trainable
+        weight EXCEPT `D` -- not just an aggregate loss scalar. `D` is excluded
+        here and asserted separately (see
+        `test_D_gradient_is_doubled_under_recompute_grad`): it is a genuine,
+        measured, isolated discrepancy (D-002 in decisions.md), not a floating-
+        point-tolerance question this loop's derived `atol` could absorb.
+
+        The non-checkpointed gradient set is obtained by monkeypatching
+        `tensorflow.recompute_grad` to an identity passthrough
+        (`lambda fn: fn`), rather than calling `self._selective_scan` directly:
+        `call()` decides `scan_fn` internally (backend-guarded), so patching
+        the module-level `tf.recompute_grad` the wrap actually calls is the
+        only way to exercise the SAME `call()` code path with the wrap
+        neutralized, instead of hand-duplicating `call()`'s pre/post-scan
+        tensor plumbing in the test (which would drift from `call()` and
+        assert against a stand-in, not the real code).
+        """
+        layer, x = self._build_layer_and_input()
+        seq_len = int(x.shape[1])
+
+        checkpointed_grads = self._tape_gradients(layer, x)
+        with mock.patch("tensorflow.recompute_grad", lambda fn: fn):
+            noncheckpointed_grads = self._tape_gradients(layer, x)
+
+        weights = layer.trainable_weights
+        assert len(checkpointed_grads) == len(weights)
+        assert len(noncheckpointed_grads) == len(weights)
+
+        checked_any = False
+        for w, g_ckpt, g_plain in zip(weights, checkpointed_grads, noncheckpointed_grads):
+            if w.path.endswith("/D"):
+                continue  # D-002: measured, isolated, asserted separately below.
+
+            assert g_ckpt is not None, f"{w.path}: checkpointed gradient is None"
+            assert g_plain is not None, f"{w.path}: non-checkpointed gradient is None"
+
+            g_ckpt_np = keras.ops.convert_to_numpy(g_ckpt)
+            g_plain_np = keras.ops.convert_to_numpy(g_plain)
+
+            # Dominant per-step reduction in `_selective_scan` is the
+            # state-axis contraction in `einsum("bdn,bn->bd", h, C[:, :, t])`,
+            # applied once per sequence step (the while_loop's recurrence
+            # depth) -- so reduction_lengths=[d_state], num_steps=seq_len,
+            # mirroring the `test_mdta.py` per-op-chain convention.
+            scale = float(max(np.abs(g_ckpt_np).max(), np.abs(g_plain_np).max()))
+            atol = reassociation_atol([layer.d_state], seq_len, scale=scale)
+
+            np.testing.assert_allclose(
+                g_ckpt_np,
+                g_plain_np,
+                atol=atol,
+                rtol=0,
+                err_msg=f"gradient mismatch for weight {w.path}",
+            )
+            checked_any = True
+
+        assert checked_any, "no non-`D` trainable weight was found to compare"
+
+    # DECISION plan-2026-09-13T165751-bc5433cb/D-002: MEASURED, isolated
+    # falsification of plan Assumption A1 for this one weight -- `self.D` is
+    # passed as a bare `Variable` (not a derived tensor) into the
+    # `tf.recompute_grad`-wrapped `_selective_scan`, and its checkpointed
+    # gradient is exactly 2x the non-checkpointed one (ratio 2.0 to 7
+    # significant figures, two independent seeds; every other trainable
+    # weight is bit-identical -- see the sweep above and decisions.md D-002).
+    # xfail(strict=True): this must XPASS-fail loudly if `D`'s handling in
+    # `components.py::MambaLayer.call()` is ever fixed, so the fix is required
+    # to update this pin rather than silently leaving it stale.
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "D-002 (plan-2026-09-13T165751-bc5433cb): MambaLayer.D is a bare "
+            "Variable passed into the tf.recompute_grad-wrapped "
+            "_selective_scan; its checkpointed gradient is measured at "
+            "exactly 2x the non-checkpointed one. See decisions.md D-002."
+        ),
+    )
+    def test_D_gradient_is_doubled_under_recompute_grad(self):
+        """Pins the D-002 defect: `D`'s gradient SHOULD equal the
+        non-checkpointed one (this assertion is what a fix must make pass),
+        and today it measurably does not.
+        """
+        layer, x = self._build_layer_and_input()
+        seq_len = int(x.shape[1])
+
+        checkpointed_grads = self._tape_gradients(layer, x)
+        with mock.patch("tensorflow.recompute_grad", lambda fn: fn):
+            noncheckpointed_grads = self._tape_gradients(layer, x)
+
+        d_index = [w.path for w in layer.trainable_weights].index(
+            next(w.path for w in layer.trainable_weights if w.path.endswith("/D"))
+        )
+        g_ckpt_np = keras.ops.convert_to_numpy(checkpointed_grads[d_index])
+        g_plain_np = keras.ops.convert_to_numpy(noncheckpointed_grads[d_index])
+
+        scale = float(max(np.abs(g_ckpt_np).max(), np.abs(g_plain_np).max()))
+        atol = reassociation_atol([layer.d_state], seq_len, scale=scale)
+
+        np.testing.assert_allclose(
+            g_ckpt_np,
+            g_plain_np,
+            atol=atol,
+            rtol=0,
+            err_msg="gradient mismatch for weight D",
+        )
+
+    def test_gradient_flow_oracle_passes_with_the_wrap_in_place(self):
+        """RED-proof: the wrap must not silently disconnect any weight from
+        the backward graph. Runs the shared oracle against the checkpointed
+        (current, shipped) `call()` path AND, for symmetry, against the
+        non-checkpointed path -- both must reach every trainable weight.
+        """
+        layer, x = self._build_layer_and_input()
+
+        assert_gradients_reach_every_trainable_weight(layer, x, training=True)
+
+        with mock.patch("tensorflow.recompute_grad", lambda fn: fn):
+            assert_gradients_reach_every_trainable_weight(layer, x, training=True)
+
+    def test_forward_pass_bit_identical_with_and_without_gradient_tape(self):
+        """The wrap only changes backward-pass behavior: `tf.recompute_grad`'s
+        wrapped function degrades to a normal forward call whenever no tape is
+        watching. A plain forward pass (no tape) must therefore be
+        bit-identical to a forward pass made inside a `GradientTape` context,
+        for the checkpointed (current, shipped) `call()`.
+        """
+        layer, x = self._build_layer_and_input()
+
+        y_no_tape = layer(x, training=False)
+
+        with tf.GradientTape():
+            y_with_tape = layer(x, training=False)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y_no_tape),
+            keras.ops.convert_to_numpy(y_with_tape),
+            atol=0,
+            rtol=0,
+            err_msg="forward output changed depending on GradientTape presence",
+        )
 
 
 if __name__ == "__main__":

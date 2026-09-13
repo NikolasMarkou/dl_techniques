@@ -601,6 +601,14 @@ class MambaLayer(keras.layers.Layer):
         # tf.recompute_grad's custom_gradient wrapper only supports keyword
         # arguments in eager mode, so call positionally to also work under
         # symbolic/graph tracing (e.g. building a Functional model).
+        # DECISION plan-2026-09-13T165751-bc5433cb/D-002: `self.D` is the bare
+        # `Variable`, not a value derived from it by an op (contrast `A`, which
+        # is `-exp(cast(A_log, ...))`) -- MEASURED: this makes its checkpointed
+        # gradient exactly 2x the non-checkpointed one (every other argument's
+        # gradient is bit-identical). Known, disclosed, not yet fixed here; see
+        # decisions.md and the xfail-pinned test in test_mamba_v1.py. Do not
+        # "fix" by reflexively wrapping every argument in `convert_to_tensor`
+        # without re-measuring -- only `D` is a bare Variable at this call site.
         y = scan_fn(x_conv_transposed, delta, A, B, C, self.D, z)
 
         y = keras.ops.transpose(y, (0, 2, 1))
