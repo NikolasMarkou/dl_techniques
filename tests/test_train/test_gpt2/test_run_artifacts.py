@@ -12,16 +12,19 @@ the measured failure mode of this adoption -- `train.gpt2.finetune`'s
 `save_config_json` falls back to `vars(config)` and writes 0 keys. See
 `# DECISION plan-2026-08-13T091555-230c101d/D-012` in `src/train/gpt2/finetune.py`.
 
-Scope note (plan-2026-09-13T120637-288bad33/D-014, 2026-09-13): this module
-does NOT test real checkpoint loading, by design -- every fixture here runs
-through `_trainer_run_harness.py`'s stubbed loader (`load_pretrained_model`
-is monkeypatched to return a stub for the finetune fixtures; the pretrain
-fixtures never call a loader at all). It only guards config/history
-persistence. For real checkpoint-load coverage (current
-`CausalLanguageModel`-wrapped shape and legacy bare-`GPT2` shape, both fit end
-to end), see `test_finetune_checkpoint_load.py`. The two files are not
-redundant and should not be consolidated -- see decisions.md D-014 of the
-above plan for the full disjoint-coverage analysis.
+# DECISION plan-2026-09-13T120637-288bad33/D-014: this module is a
+# persistence/control-flow guard, permanently complementary to
+# test_finetune_checkpoint_load.py, not redundant with it -- do not
+# consolidate the two.
+# (2026-09-13) This module does NOT test real checkpoint loading, by design
+# -- every fixture here runs through `_trainer_run_harness.py`'s stubbed
+# loader (`load_pretrained_model` is monkeypatched to return a stub for the
+# finetune fixtures; the pretrain fixtures never call a loader at all). It
+# only guards config/history persistence. For real checkpoint-load coverage
+# (current `CausalLanguageModel`-wrapped shape and legacy bare-`GPT2` shape,
+# both fit end to end), see `test_finetune_checkpoint_load.py`. The two files
+# are not redundant and should not be consolidated -- see decisions.md D-014
+# of the above plan for the full disjoint-coverage analysis.
 """
 
 import json

@@ -104,15 +104,23 @@ def test_reranker_separation_gap_grows_after_training() -> None:
     #
     # DECISION plan-2026-09-13T120637-288bad33/D-013 (addendum, 2026-09-13): the
     # module docstring above and this pinned-seed comment both discuss the
-    # seed=2 pin and D-014's investigation in prose only -- neither carries a
-    # scannable `# DECISION` token, so validate-plan.mjs's anchor scan cannot
-    # find them. This block makes that reference scannable. A follow-up
-    # investigation (this plan's D-011) re-tested seeds 0-4 across two
-    # alternative config axes (lower learning_rate, nway=4) and found NEITHER
-    # meets a strict all-5-seed robustness bar -- nway=4 came closest (4/5
-    # pass) but seed 4 still missed the +0.02 threshold by 0.0106. The
-    # seed=2 pin here remains the correct, disclosed choice; no config change
-    # was adopted. See decisions.md D-011 and D-013 of this plan (plan-2026-09-13T120637-288bad33).
+    # seed=2 pin and plan-2026-09-13T073704-245ab5d5/D-014's investigation in
+    # prose only -- neither carries a scannable `# DECISION` token, so
+    # validate-plan.mjs's anchor scan cannot find them. This block makes that
+    # reference scannable. A follow-up investigation (this plan's D-011)
+    # re-tested seeds 0-4 across two alternative config axes (lower
+    # learning_rate, nway=4) and found NEITHER meets a strict all-5-seed
+    # robustness bar -- nway=4 came closest (4/5 pass) but seed 4 still
+    # missed the +0.02 threshold by 0.0106. The seed=2 pin here remains the
+    # correct, disclosed choice; no config change was adopted. Per this
+    # plan's D-016 amendment, D-011's root cause is deliberately NOT claimed
+    # as a fundamental architectural limit -- only that the two axes actually
+    # tried (learning_rate, nway) both failed the all-5-seed bar; an
+    # increased epoch budget remains the leading UNTESTED confound, since
+    # seeds 1/3/4's small under-margin positive deltas match the
+    # undertraining signature plan-2026-09-13T073704-245ab5d5/D-014's own
+    # prose already flagged. See decisions.md D-011, D-013, and D-016 of this
+    # plan (plan-2026-09-13T120637-288bad33).
     config = TrainingConfig(
         hidden_size=32, num_layers=1, num_heads=4, intermediate_size=64,
         reranker_maxlen=48, query_maxlen=8, doc_maxlen=16, batch_size=8,
