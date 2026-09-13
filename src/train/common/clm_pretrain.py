@@ -273,14 +273,34 @@ def load_train_val_datasets(
     config: Any,
     preprocessor,
     data_seed: int,
+    wrap_for_dict_output: bool = True,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, Optional[int]]:
-    """Load, preprocess, and wrap train/val datasets for the dict-output model.
+    """Load, preprocess, and (optionally) wrap train/val datasets with a dict label.
+
+    Two output modes, selected by ``wrap_for_dict_output``:
+
+    - ``True`` (default): wraps labels as ``(x, {"logits": y})``, matching a
+      dict-output model (e.g. a bare ``GPT2``/``WaveFieldLLM`` that is not wrapped
+      in ``CausalLanguageModel``, or is wrapped with ``pre_shifted=False``). This is
+      ``cliffordnet/train_cliffordnet_nlp.py``'s only, unchanged, path.
+    - ``False``: returns the raw ``(x, y)`` plain-tensor-pair datasets, unwrapped.
+      Required for a ``CausalLanguageModel(skip_head=True, output_key=..., pre_shifted=True)``
+      consumer, whose ``call()`` returns a plain tensor and whose ``pre_shifted=True``
+      passes ``y`` straight through unwrapped into the loss -- a dict-keyed label there
+      raises ``TypeError: Expected any non-tensor type, but got a tensor instead`` inside
+      ``MaskedCausalLMLoss.call`` (see D-011 in this plan lineage's decisions.md).
 
     Args:
         config: Trainer config; reads ``dataset_source`` plus whatever the selected
             branch's loader needs.
         preprocessor: The ``TiktokenPreprocessor`` used to tokenize/chunk.
         data_seed: Holdout-split seed. REQUIRED -- see the D-009 anchor above.
+        wrap_for_dict_output: Whether to wrap labels as ``(x, {"logits": y})``.
+            Defaults to ``True``, preserving the exact prior behavior for every
+            caller that does not pass this argument explicitly (currently only
+            ``cliffordnet/train_cliffordnet_nlp.py``). Pass ``False`` for a
+            ``CausalLanguageModel(pre_shifted=True)`` consumer (``gpt2``,
+            ``wave_field``).
 
     Returns:
         ``(train_ds, val_ds, n_train_articles)``. The article count is the post-filter
@@ -302,6 +322,9 @@ def load_train_val_datasets(
             f"Unknown dataset_source: {config.dataset_source!r}. "
             f"Use 'tfds' or 'huggingface'."
         )
+
+    if not wrap_for_dict_output:
+        return train_ds, val_ds, n_train_articles
 
     # Wrap labels for dict-output model: (x, y) -> (x, {"logits": y})
     wrap = lambda ds: ds.map(

@@ -275,7 +275,7 @@ def train_gpt2(
 
     # Data
     train_dataset, val_dataset, n_train_articles = load_train_val_datasets(
-        config, preprocessor, data_seed=data_seed,
+        config, preprocessor, data_seed=data_seed, wrap_for_dict_output=False,
     )
 
     # Model — resume from checkpoint or create fresh

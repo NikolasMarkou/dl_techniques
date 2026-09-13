@@ -315,7 +315,7 @@ def train_wave_field_llm(
     data_seed = config.seed + initial_step
 
     train_dataset, val_dataset, n_train_articles = load_train_val_datasets(
-        config, preprocessor, data_seed=data_seed,
+        config, preprocessor, data_seed=data_seed, wrap_for_dict_output=False,
     )
 
     steps_per_epoch = _make_steps_per_epoch(config, n_train_articles)
