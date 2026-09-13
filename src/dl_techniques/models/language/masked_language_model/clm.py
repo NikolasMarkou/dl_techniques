@@ -29,7 +29,17 @@ or label-smoothed variant a trainer's config selects. When set,
 ``compute_loss`` delegates entirely to ``loss_fn(y, y_pred,
 sample_weight=sample_weight)`` -- a single call, since a
 ``keras.losses.Loss`` already implements its own reduction, so the class's
-own masked-mean logic is not stacked on top of it.
+own masked-mean logic is not stacked on top of it. Pass
+``aggregate_backbone_losses=True`` for a backbone that calls
+``self.add_loss(...)`` inside its own ``call()`` (e.g. HNet's boundary-ratio
+auxiliary term): ``train_step``/``test_step`` then add
+``sum(self.backbone.losses)`` to the cross-entropy/``loss_fn`` scalar right
+after ``compute_loss`` returns, before that scalar is used for gradients or
+reported to the loss tracker -- so the same aggregated value is both
+backpropagated and tracked. A no-op when the backbone contributes zero
+losses for a batch (default HNet inference-mode call, or any backbone with
+no ``add_loss`` call), since the aggregation is guarded on
+``self.backbone.losses`` truthiness, not just the flag.
 
 References:
     - Bengio et al., 2003. A Neural Probabilistic Language Model. JMLR 3:1137-1155.
@@ -248,6 +258,19 @@ class CausalLanguageModel(keras.Model):
         preserving the original hardcoded-CE contract exactly. Intended for
         a trainer whose config selects a non-default loss family (e.g. a
         focal loss, or CE with ``label_smoothing`` set).
+    :param aggregate_backbone_losses: When True, ``train_step``/``test_step``
+        add ``sum(self.backbone.losses)`` to the loss returned by
+        ``compute_loss``, immediately after it is computed and before that
+        value is used for gradients (``scale_loss``) or reported
+        (``loss_tracker``) -- so the same aggregated scalar is both
+        backpropagated and tracked. This is for a backbone that calls
+        ``self.add_loss(...)`` inside its own ``call()`` (e.g. HNet's
+        boundary-ratio auxiliary term), whose contribution ``compute_loss``
+        itself never reads. Defaults to ``False``, preserving the original
+        contract exactly. The aggregation is additionally guarded on
+        ``self.backbone.losses`` being non-empty, so a backbone that
+        contributes no losses for a batch (or never calls ``add_loss`` at
+        all) is a true no-op even when this flag is ``True``.
     :param verify_causality: Whether to probe the backbone for future leakage at
         build time. Defaults to True.
     :param causality_tolerance: Maximum tolerated absolute change at a past
@@ -298,6 +321,7 @@ class CausalLanguageModel(keras.Model):
         skip_head: bool = False,
         pre_shifted: bool = False,
         loss_fn: Optional[keras.losses.Loss] = None,
+        aggregate_backbone_losses: bool = False,
         verify_causality: bool = True,
         causality_tolerance: float = 0.0,
         causality_probe_plain_tensor: bool = False,
@@ -315,6 +339,7 @@ class CausalLanguageModel(keras.Model):
         self.skip_head = skip_head
         self.pre_shifted = pre_shifted
         self.loss_fn = loss_fn
+        self.aggregate_backbone_losses = aggregate_backbone_losses
         self.verify_causality = verify_causality
         self.causality_tolerance = causality_tolerance
         self.causality_probe_plain_tensor = causality_probe_plain_tensor
@@ -752,6 +777,14 @@ class CausalLanguageModel(keras.Model):
             sequence_output = self._backbone_forward(x_inputs, training=True)
             logits = sequence_output if self.skip_head else self._apply_output_head(sequence_output)
             loss = self.compute_loss(y=y_labels, y_pred=logits, sample_weight=loss_weights)
+            # DECISION plan-2026-09-13T052422-19022ba2/D-002: aggregate a
+            # backbone's own add_loss contribution (e.g. HNet's boundary-ratio
+            # term) into the SAME scalar used for both gradients and the loss
+            # tracker -- never two different values. Guarded on
+            # self.backbone.losses truthiness, not just the flag, so a
+            # backbone with no add_loss call is a true no-op. See decisions.md D-002.
+            if self.aggregate_backbone_losses and self.backbone.losses:
+                loss = loss + ops.sum(self.backbone.losses)
             # DECISION plan-2026-08-19T163559-499b6f0e/D-036: scale_loss runs inside
             # the tape; skipping it shrinks every mixed_float16 update. See decisions.md.
             scaled_loss = self.optimizer.scale_loss(loss)
@@ -780,6 +813,11 @@ class CausalLanguageModel(keras.Model):
         sequence_output = self._backbone_forward(x_inputs, training=False)
         logits = sequence_output if self.skip_head else self._apply_output_head(sequence_output)
         loss = self.compute_loss(y=y_labels, y_pred=logits, sample_weight=loss_weights)
+        # DECISION plan-2026-09-13T052422-19022ba2/D-002: same aggregation as
+        # train_step, applied here so the reported test/eval loss also
+        # reflects the backbone's own add_loss contribution. See decisions.md D-002.
+        if self.aggregate_backbone_losses and self.backbone.losses:
+            loss = loss + ops.sum(self.backbone.losses)
 
         self.loss_tracker.update_state(loss)
         self.acc_metric.update_state(y_true=y_labels, y_pred=logits, sample_weight=loss_weights)
@@ -847,6 +885,7 @@ class CausalLanguageModel(keras.Model):
                     if self.loss_fn is not None
                     else None
                 ),
+                "aggregate_backbone_losses": self.aggregate_backbone_losses,
                 "verify_causality": self.verify_causality,
                 "causality_tolerance": self.causality_tolerance,
                 "causality_probe_plain_tensor": self.causality_probe_plain_tensor,

@@ -1203,5 +1203,169 @@ class TestLossFn:
         assert model2.loss_fn is None
 
 
+class AddLossBackbone(keras.Model):
+    """Stub shaped like HNet: a bare-tensor `skip_head=True` backbone that
+    also calls `self.add_loss(...)` inside its own `call()` -- a KNOWN,
+    fixed scalar so the aggregation delta can be checked EXACTLY."""
+
+    def __init__(self, vocab_size=4, add_loss_value=None, **kwargs):
+        super().__init__(**kwargs)
+        self.vocab_size = vocab_size
+        self.add_loss_value = add_loss_value
+        # A trainable scalar so `train_step`'s tape has a real variable to
+        # differentiate against -- a backbone with zero trainable variables
+        # would make `optimizer.apply_gradients` receive an empty
+        # grads_and_vars, which is a test-harness artifact, not something
+        # the aggregation logic itself needs to tolerate.
+        self.scale = self.add_weight(
+            name="scale", shape=(), initializer="ones", trainable=True
+        )
+
+    def call(self, inputs, training=False):
+        input_ids = inputs["input_ids"] if isinstance(inputs, dict) else inputs
+        batch = ops.shape(input_ids)[0]
+        seq_len = ops.shape(input_ids)[1]
+        logits = ops.ones((batch, seq_len, self.vocab_size), dtype="float32") * self.scale
+        if self.add_loss_value is not None:
+            self.add_loss(ops.convert_to_tensor(self.add_loss_value, dtype="float32"))
+        return logits
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"vocab_size": self.vocab_size})
+        return config
+
+
+class TestAggregateBackboneLosses:
+    """`aggregate_backbone_losses` (D-002) adds `sum(self.backbone.losses)`
+    to the trained/reported loss right after `compute_loss`, for a backbone
+    that calls `self.add_loss(...)` inside its own `call()` (HNet's
+    boundary-ratio term). The RED-proof is a precise numeric delta, not
+    "loss changed" -- and a separate no-add_loss backbone must be a true,
+    bit-identical no-op.
+    """
+
+    def test_aggregate_backbone_losses_default_is_false(self, clm_model):
+        assert clm_model.aggregate_backbone_losses is False
+
+    def test_aggregate_true_adds_exactly_the_backbone_term(self):
+        """Two models, identical backbone class/weights/inputs, differing
+        ONLY by `aggregate_backbone_losses` -- the reported test_step loss
+        must differ by EXACTLY 0.37, atol=1e-6 rtol=0."""
+        input_ids = tf.random.uniform((2, 5), minval=0, maxval=4, dtype=tf.int32)
+        batch = {"input_ids": input_ids}
+
+        backbone_off = AddLossBackbone(vocab_size=4, add_loss_value=0.37)
+        model_off = CausalLanguageModel(
+            backbone=backbone_off,
+            vocab_size=4,
+            skip_head=True,
+            aggregate_backbone_losses=False,
+            verify_causality=False,
+        )
+        model_off.compile(optimizer="adam")
+
+        backbone_on = AddLossBackbone(vocab_size=4, add_loss_value=0.37)
+        model_on = CausalLanguageModel(
+            backbone=backbone_on,
+            vocab_size=4,
+            skip_head=True,
+            aggregate_backbone_losses=True,
+            verify_causality=False,
+        )
+        model_on.compile(optimizer="adam")
+
+        loss_off = float(model_off.test_step(batch)["loss"])
+        loss_on = float(model_on.test_step(batch)["loss"])
+
+        np.testing.assert_allclose(loss_on - loss_off, 0.37, atol=1e-6, rtol=0)
+
+    def test_aggregate_true_adds_exactly_the_backbone_term_via_train_step(self):
+        """Same distinguishing check, but through `train_step` -- the value
+        actually differentiated and tracked, not merely `compute_loss`'s
+        return value in isolation."""
+        input_ids = tf.random.uniform((2, 5), minval=0, maxval=4, dtype=tf.int32)
+        batch = {"input_ids": input_ids}
+
+        backbone_off = AddLossBackbone(vocab_size=4, add_loss_value=0.37)
+        model_off = CausalLanguageModel(
+            backbone=backbone_off,
+            vocab_size=4,
+            skip_head=True,
+            aggregate_backbone_losses=False,
+            verify_causality=False,
+        )
+        model_off.compile(optimizer="adam")
+
+        backbone_on = AddLossBackbone(vocab_size=4, add_loss_value=0.37)
+        model_on = CausalLanguageModel(
+            backbone=backbone_on,
+            vocab_size=4,
+            skip_head=True,
+            aggregate_backbone_losses=True,
+            verify_causality=False,
+        )
+        model_on.compile(optimizer="adam")
+
+        loss_off = float(model_off.train_step(batch)["loss"])
+        loss_on = float(model_on.train_step(batch)["loss"])
+
+        np.testing.assert_allclose(loss_on - loss_off, 0.37, atol=1e-6, rtol=0)
+
+    def test_aggregate_true_is_a_true_noop_when_backbone_adds_no_loss(self):
+        """A SEPARATE backbone with NO `add_loss` call: `aggregate_backbone_
+        losses=True` must produce a BIT-IDENTICAL loss to `=False` -- the
+        empty-`self.backbone.losses` guard must not itself perturb the
+        value (e.g. via a stray `ops.sum([])` shape/dtype surprise)."""
+        input_ids = tf.random.uniform((2, 5), minval=0, maxval=4, dtype=tf.int32)
+        batch = {"input_ids": input_ids}
+
+        backbone_off = AddLossBackbone(vocab_size=4, add_loss_value=None)
+        model_off = CausalLanguageModel(
+            backbone=backbone_off,
+            vocab_size=4,
+            skip_head=True,
+            aggregate_backbone_losses=False,
+            verify_causality=False,
+        )
+        model_off.compile(optimizer="adam")
+
+        backbone_on = AddLossBackbone(vocab_size=4, add_loss_value=None)
+        model_on = CausalLanguageModel(
+            backbone=backbone_on,
+            vocab_size=4,
+            skip_head=True,
+            aggregate_backbone_losses=True,
+            verify_causality=False,
+        )
+        model_on.compile(optimizer="adam")
+
+        loss_off = float(model_off.test_step(batch)["loss"])
+        loss_on = float(model_on.test_step(batch)["loss"])
+
+        assert backbone_on.losses == []
+        np.testing.assert_allclose(loss_on, loss_off, atol=0.0, rtol=0)
+
+    def test_aggregate_backbone_losses_survives_get_config_roundtrip(self):
+        backbone = AddLossBackbone(vocab_size=4, add_loss_value=0.37)
+        model = CausalLanguageModel(
+            backbone=backbone,
+            vocab_size=4,
+            skip_head=True,
+            aggregate_backbone_losses=True,
+            verify_causality=False,
+        )
+        config = model.get_config()
+        assert config["aggregate_backbone_losses"] is True
+        model2 = CausalLanguageModel.from_config(config)
+        assert model2.aggregate_backbone_losses is True
+
+    def test_aggregate_backbone_losses_false_survives_get_config_roundtrip(self, clm_model):
+        config = clm_model.get_config()
+        assert config["aggregate_backbone_losses"] is False
+        model2 = CausalLanguageModel.from_config(config)
+        assert model2.aggregate_backbone_losses is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
