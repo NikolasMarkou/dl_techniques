@@ -3,7 +3,7 @@
 Three entry points, zero coverage of this contract before this module:
 ``train.gpt2.pretrain``, ``train.gpt2.pretrain_so`` and ``train.gpt2.finetune``.
 All three hand-map argparse destinations onto config fields one line at a time
--- 26, 31 and 14 assignments respectively -- and a dropped line is invisible:
+-- 26, 31 and 17 assignments respectively -- and a dropped line is invisible:
 ``--help`` still advertises the flag, the parser still accepts it, the run still
 starts, and the config silently keeps its default.
 
@@ -151,6 +151,9 @@ _FINETUNE_HF_ROWS: Tuple[Row, ...] = (
     Row(("--learning-rate",), ("--learning-rate", "2.5e-6"), "learning_rate", 2.5e-6),
     Row(("--freeze-embeddings",), ("--freeze-embeddings",), "freeze_embeddings", True),
     Row(("--freeze-n-layers",), ("--freeze-n-layers", "6"), "freeze_n_layers", 6),
+    Row(("--loss-type",), ("--loss-type", "focal"), "loss_type", "focal"),
+    Row(("--focal-gamma",), ("--focal-gamma", "2.5"), "focal_gamma", 2.5),
+    Row(("--label-smoothing",), ("--label-smoothing", "0.15"), "label_smoothing", 0.15),
     Row(("--hf-dataset",), (), "hf_dataset_path", "wikitext-probe"),
     Row(("--hf-config",), ("--hf-config", "probe-v1"), "hf_dataset_name", "probe-v1"),
     Row(

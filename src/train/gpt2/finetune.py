@@ -51,14 +51,13 @@ from train.common.nlp import (
     create_warmup_lr_schedule,
     create_nlp_callbacks,
     estimate_clm_steps_per_epoch,
-    build_clm_metrics,
-    prepare_dict_keyed_compile,
 )
+from train.common.clm_pretrain import create_clm_loss_fn
 
 from dl_techniques.datasets.nlp import load_hf_text_dataset
-from dl_techniques.models.language.gpt2 import GPT2
+from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.utils.logger import logger
-from dl_techniques.losses import MaskedCausalLMLoss
+from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 
 
 # ---------------------------------------------------------------------
@@ -109,6 +108,14 @@ class FinetuneConfig:
     # Freezing
     freeze_embeddings: bool = False
     freeze_n_layers: int = 0  # Freeze first N transformer layers
+
+    # Loss: "ce" (MaskedCausalLMLoss, default) or "focal" (FocalCausalLMLoss).
+    # Applied via create_clm_loss_fn(config), matching pretrain.py's own
+    # flags -- fine-tuning is free to select a different loss family than
+    # whatever the checkpoint was pre-trained with.
+    loss_type: str = "ce"
+    focal_gamma: float = 1.0
+    label_smoothing: float = 0.0
 
     # Paths
     save_dir: str = "results/gpt2_finetune"
@@ -186,6 +193,15 @@ def load_finetune_datasets(
     else:
         raise ValueError(f"Unknown data_source: {config.data_source!r}")
 
+    # `preprocess_clm_dataset` already yields pre-shifted `(input_ids, labels)`
+    # pairs -- exactly the `pre_shifted=True` contract `CausalLanguageModel`
+    # expects (see `masked_language_model/clm.py` module docstring). No label
+    # wrapping is applied: a `CausalLanguageModel`'s `call()` returns a plain
+    # logits tensor (`skip_head=True, output_key="logits"` only names which
+    # key to pull OUT of the backbone's own dict output; `CausalLanguageModel`
+    # itself never re-wraps that tensor), so a dict-keyed `{"logits": y}`
+    # label here would mismatch `_unpack_batch`'s pre_shifted branch, which
+    # treats `y` AS the label tensor with no further unwrapping.
     train_ds = preprocess_clm_dataset(
         train_raw, preprocessor,
         config.max_seq_length, config.batch_size,
@@ -193,16 +209,6 @@ def load_finetune_datasets(
     val_ds = preprocess_clm_dataset(
         val_raw, preprocessor,
         config.max_seq_length, config.batch_size,
-    )
-
-    # Wrap labels for dict output
-    train_ds = train_ds.map(
-        lambda x, y: (x, {"logits": y}),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    val_ds = val_ds.map(
-        lambda x, y: (x, {"logits": y}),
-        num_parallel_calls=tf.data.AUTOTUNE,
     )
     return train_ds, val_ds
 
@@ -270,46 +276,112 @@ def _load_text_files_train_val(
 # ---------------------------------------------------------------------
 
 
-def load_pretrained_model(config: FinetuneConfig) -> GPT2:
-    """Load pre-trained GPT-2 model and optionally freeze layers."""
+def load_pretrained_model(config: FinetuneConfig) -> CausalLanguageModel:
+    """Load a pre-trained GPT-2 checkpoint, wrapped in ``CausalLanguageModel``.
+
+    A checkpoint saved by the current (``CausalLanguageModel``-wrapped)
+    ``pretrain.py`` deserializes as a ``CausalLanguageModel`` directly. A
+    **legacy** checkpoint, saved before that migration, deserializes as a
+    bare ``GPT2`` and is wrapped here on the fly so the rest of this module
+    (freeze-layer walk, ``compile_model``, ``train_step``) only ever handles
+    one shape. This mirrors the disjunction
+    ``gpt2/pretrain.py:load_model_from_checkpoint`` already documents for its
+    own ``--resume`` path.
+
+    Either way, ``loss_fn`` is (re)set from THIS config's
+    ``loss_type``/``focal_gamma``/``label_smoothing`` — fine-tuning is free
+    to select a different loss family than whatever the checkpoint was
+    pre-trained with, matching ``pretrain.py``'s own CLI-selected loss
+    rather than silently keeping the pretrain-time choice frozen.
+    """
     logger.info(f"Loading pre-trained model from: {config.pretrained_path}")
     model = keras.models.load_model(
         config.pretrained_path,
-        custom_objects={"MaskedCausalLMLoss": MaskedCausalLMLoss},
+        custom_objects={
+            "MaskedCausalLMLoss": MaskedCausalLMLoss,
+            "FocalCausalLMLoss": FocalCausalLMLoss,
+            "CausalLanguageModel": CausalLanguageModel,
+        },
     )
-    total_p = model.count_params()
+
+    if isinstance(model, CausalLanguageModel):
+        clm_model = model
+    else:
+        logger.info(
+            "Loaded a legacy (pre-CausalLanguageModel) bare GPT2 checkpoint; "
+            "wrapping it now."
+        )
+        clm_model = CausalLanguageModel(
+            backbone=model,
+            vocab_size=model.vocab_size,
+            skip_head=True,
+            output_key="logits",
+            pre_shifted=True,
+        )
+        # A freshly constructed wrapper is unbuilt until its first forward
+        # pass -- `count_params()`/`trainable_weights` below raise on an
+        # unbuilt model. `create_gpt2_model` (pretrain.py) forces this the
+        # same way for a fresh model; a loaded-then-wrapped one needs it too.
+        dummy = np.random.randint(
+            0, model.vocab_size, size=(1, config.max_seq_length - 1)
+        ).astype("int32")
+        clm_model(dummy, training=False)
+
+    clm_model.loss_fn = create_clm_loss_fn(config)
+
+    total_p = clm_model.count_params()
     logger.info(f"Loaded GPT-2: {total_p:,} parameters")
 
-    # Freeze embeddings
+    # Freeze embeddings/transformer layers. GPT2's own top-level `.layers`
+    # is a single `[decoder]` entry (its `TextDecoder` sublayer bundles the
+    # embeddings and the per-block stack), so neither `clm_model.layers`
+    # (`[backbone]`, one opaque layer under the wrapper) nor
+    # `clm_model.backbone.layers` (`[decoder]`, one opaque layer under the
+    # bare backbone) ever matches "embedding"/"transformer"/"block" --
+    # MEASURED: this freeze logic was already a no-op for a bare GPT2 before
+    # this fix, independent of the CausalLanguageModel migration. A
+    # recursive walk is required to reach the actual named sublayers
+    # (`word_embeddings`, `positional_embeddings`, `decoder_layer_<i>`).
+    backbone_sublayers = list(
+        clm_model.backbone._flatten_layers(include_self=False, recursive=True)
+    )
     if config.freeze_embeddings:
-        for layer in model.layers:
+        for layer in backbone_sublayers:
             if "embedding" in layer.name.lower():
                 layer.trainable = False
                 logger.info(f"Froze layer: {layer.name}")
 
-    # Freeze first N transformer layers
     if config.freeze_n_layers > 0:
         frozen = 0
-        for layer in model.layers:
-            if "transformer" in layer.name.lower() or "block" in layer.name.lower():
+        for layer in backbone_sublayers:
+            name = layer.name.lower()
+            if "transformer" in name or "block" in name or "decoder_layer" in name:
                 if frozen < config.freeze_n_layers:
                     layer.trainable = False
                     frozen += 1
                     logger.info(f"Froze layer: {layer.name}")
 
     trainable = sum(
-        int(np.prod(w.shape)) for w in model.trainable_weights
+        int(np.prod(w.shape)) for w in clm_model.trainable_weights
     )
     logger.info(f"Trainable parameters: {trainable:,} / {total_p:,}")
-    return model
+    return clm_model
 
 
 def compile_model(
-    model: GPT2,
+    model: CausalLanguageModel,
     config: FinetuneConfig,
     steps_per_epoch: int,
 ) -> None:
-    """Compile GPT-2 for fine-tuning with lower LR."""
+    """Compile GPT-2 for fine-tuning with lower LR.
+
+    No ``loss=``/``metrics=`` is passed: ``CausalLanguageModel`` computes and
+    reports its own ``loss``/``accuracy``/``perplexity`` via its hand-rolled
+    ``train_step``/``test_step`` (``load_pretrained_model`` already set
+    ``model.loss_fn`` from this config) -- matching ``pretrain.py``'s own
+    ``compile_model``, a compiled ``loss=``/``metrics=`` here would be unused
+    dead configuration.
+    """
     lr_schedule = create_warmup_lr_schedule(
         config.learning_rate,
         config.num_epochs,
@@ -321,12 +393,7 @@ def compile_model(
         weight_decay=config.weight_decay,
         clipnorm=1.0,
     )
-    prepare_dict_keyed_compile(model)
-    model.compile(
-        optimizer=optimizer,
-        loss={"logits": MaskedCausalLMLoss()},
-        metrics={"logits": build_clm_metrics(config.encoding_name)},
-    )
+    model.compile(optimizer=optimizer)
     logger.info(
         f"Compiled for fine-tuning: AdamW, peak_lr={config.learning_rate}, "
         f"wd={config.weight_decay}"
@@ -335,7 +402,7 @@ def compile_model(
 
 def finetune_gpt2(
     config: FinetuneConfig,
-) -> Tuple[GPT2, keras.callbacks.History]:
+) -> Tuple[CausalLanguageModel, keras.callbacks.History]:
     """Run GPT-2 domain fine-tuning."""
     logger.info("=" * 60)
     logger.info("GPT-2 Domain Fine-tuning (CLM)")
@@ -459,6 +526,21 @@ def main() -> None:
         help="Freeze first N transformer layers",
     )
 
+    # Loss — matches pretrain.py's flags; fine-tuning may select a different
+    # loss family than the checkpoint was pre-trained with.
+    parser.add_argument(
+        "--loss-type", type=str, default="ce",
+        choices=["ce", "focal"],
+        help="'ce' (MaskedCausalLMLoss) or 'focal' (FocalCausalLMLoss)",
+    )
+    parser.add_argument(
+        "--focal-gamma", type=float, default=1.0,
+        help="Focal loss gamma (only if --loss-type focal)",
+    )
+    parser.add_argument(
+        "--label-smoothing", type=float, default=0.0,
+    )
+
     # Data source
     data_group = parser.add_mutually_exclusive_group(required=True)
     data_group.add_argument(
@@ -509,6 +591,9 @@ def main() -> None:
     config.learning_rate = args.learning_rate
     config.freeze_embeddings = args.freeze_embeddings
     config.freeze_n_layers = args.freeze_n_layers
+    config.loss_type = args.loss_type
+    config.focal_gamma = args.focal_gamma
+    config.label_smoothing = args.label_smoothing
     config.save_dir = args.save_dir
     config.steps_per_epoch = args.steps_per_epoch
     config.seed = args.seed
