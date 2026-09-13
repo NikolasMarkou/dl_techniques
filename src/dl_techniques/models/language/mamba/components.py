@@ -591,15 +591,17 @@ class MambaLayer(keras.layers.Layer):
 
         x_conv_transposed = keras.ops.transpose(x_conv, (0, 2, 1))
 
-        y = self._selective_scan(
-            u=x_conv_transposed,
-            delta=delta,
-            A=A,
-            B=B,
-            C=C,
-            D=self.D,
-            z=z
-        )
+        # Trade recompute FLOPs for memory: defer retention of every per-step
+        # scan intermediate until backward instead of keeping all of them live.
+        if keras.backend.backend() == "tensorflow":
+            import tensorflow as tf
+            scan_fn = tf.recompute_grad(self._selective_scan)
+        else:
+            scan_fn = self._selective_scan
+        # tf.recompute_grad's custom_gradient wrapper only supports keyword
+        # arguments in eager mode, so call positionally to also work under
+        # symbolic/graph tracing (e.g. building a Functional model).
+        y = scan_fn(x_conv_transposed, delta, A, B, C, self.D, z)
 
         y = keras.ops.transpose(y, (0, 2, 1))
         output = self.out_proj(y, training=training)
