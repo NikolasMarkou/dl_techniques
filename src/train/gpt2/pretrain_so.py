@@ -32,6 +32,7 @@ References:
 """
 
 import keras
+import tensorflow as tf
 import argparse
 from dataclasses import dataclass
 
@@ -144,10 +145,33 @@ def wrap_model_with_so(
 
     original_train_step = model.train_step
 
+    # DECISION plan-2026-09-13T073704-245ab5d5/D-010: do NOT compute so_loss
+    # after calling original_train_step and only fold it into the reported
+    # dict. original_train_step (CausalLanguageModel.train_step) already
+    # runs its own tf.GradientTape and calls optimizer.apply_gradients(...)
+    # before returning -- by the time this closure sees the result, the
+    # optimizer step is over. Adding so_loss to result["loss"] at that point
+    # only inflates the LOGGED number; it can never influence a trained
+    # weight, no matter how large it reads. MEASURED (two independently-
+    # built, identically-seeded models, fresh un-stepped optimizers, an
+    # identically-perturbed non-orthonormal kernel): a bare train_step vs an
+    # SO-"wrapped" train_step of the old shape differed by exactly the same
+    # ~4e-6 as two bare train_steps run against each other (pure GPU
+    # nondeterminism noise) -- proving the old so_loss contributed zero
+    # gradient signal. The fix below runs a SECOND, SO-only gradient tape
+    # over just the collected kernels and applies those gradients with a
+    # second optimizer.apply_gradients call, so the penalty reaches the
+    # actual weights every step. See decisions.md D-010.
     def train_step_with_so(data):
         result = original_train_step(data)
-        # Compute SO penalty and add to reported loss
-        so_loss = sum(regularizer(w) for w in kernels)
+        with tf.GradientTape() as so_tape:
+            so_loss = sum(regularizer(w) for w in kernels)
+        so_gradients = so_tape.gradient(so_loss, kernels)
+        grads_and_vars = [
+            (g, w) for g, w in zip(so_gradients, kernels) if g is not None
+        ]
+        if grads_and_vars:
+            model.optimizer.apply_gradients(grads_and_vars)
         result["loss"] = result["loss"] + so_loss
         result["so_loss"] = so_loss
         return result
