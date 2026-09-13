@@ -47,6 +47,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.datasets.byte_lm import BYTE_VOCAB_SIZE
+from dl_techniques.losses import MaskedCausalLMLoss
 from dl_techniques.models.language.hnet.config import MODEL_VARIANTS
 from dl_techniques.models.language.hnet.model import RATIO_LOSS_ALPHA, HNet
 from dl_techniques.models.language.masked_language_model.clm import (
@@ -284,6 +285,9 @@ PROBE_VALUES: Dict[str, Any] = {
     "weight_decay": 0.07,
     "warmup_ratio": 0.11,
     "gradient_clip_norm": 2.5,
+    "loss_type": "focal",
+    "focal_gamma": 2.0,
+    "label_smoothing": 0.1,
     "headdim": 32,
     "ratio_loss_alpha": 0.09,
     "target_ratio": 4.5,
@@ -501,19 +505,24 @@ class TestOptimizer:
 class TestCompileAndCallbacks:
     def test_the_compiled_loss_is_a_from_logits_sparse_crossentropy(self):
         """``build_model`` no longer compiles a ``loss=``: the wrapper computes
-        its own (``CausalLanguageModel.compute_loss``'s default hardcoded
-        branch, since ``loss_fn`` is left unset -- see D-010,
-        plan-2026-09-13T052422-19022ba2), and ``compile()`` receives only the
-        optimizer. ``model.loss`` is therefore ``None`` by construction; the
-        claim this test exists to pin -- that the TRAINED loss is a
-        from-logits sparse categorical cross-entropy, matching what
-        ``HNet``'s own pre-migration ``model.compile(loss=...)`` computed --
-        is instead checked numerically against a hand-built reference loss on
-        a real batch.
+        its own loss via the injected ``loss_fn``, and ``compile()`` receives
+        only the optimizer. ``model.loss`` is therefore ``None`` by
+        construction. Since plan-2026-09-13T073704-245ab5d5/D-008 superseded
+        D-010 (plan-2026-09-13T052422-19022ba2), ``build_model`` wires
+        ``loss_fn=create_clm_loss_fn(config)``, so at CE defaults
+        (``loss_type="ce"``) ``model.loss_fn`` is a live
+        ``MaskedCausalLMLoss`` instance, not ``None``. The claim this test
+        exists to pin -- that the TRAINED loss at CE defaults matches what
+        ``HNet``'s own pre-migration ``model.compile(loss=SparseCategoricalCrossentropy(from_logits=True))``
+        computed -- is checked numerically: ``MaskedCausalLMLoss``'s
+        ``ignore_index=-1`` default never fires against byte labels in
+        ``[0, 256)``, so its masked-mean CE reduces to the same plain mean CE
+        (MEASURED equal to float32 precision, see D-008).
         """
         model = build_model(tiny_config(), steps_per_epoch=2)
         assert model.loss is None
-        assert model.loss_fn is None
+        assert model.loss_fn is not None
+        assert isinstance(model.loss_fn, MaskedCausalLMLoss)
 
         inputs, labels = one_batch(tiny_config())
         logits = model(inputs, training=False)

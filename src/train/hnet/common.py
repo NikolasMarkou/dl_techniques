@@ -49,7 +49,9 @@ Public surface:
     * :func:`config_from_args` -- namespace -> config, the ONE wiring site.
     * :func:`build_datasets` -- the tf.data byte pipeline.
     * :func:`build_optimizer` / :func:`build_model` -- AdamW through
-      ``optimizer_builder``, compiled with a from-logits sparse CE.
+      ``optimizer_builder``; the loss is ``ce``/``focal``-selectable through
+      :func:`~train.common.clm_pretrain.create_clm_loss_fn` (see
+      ``decisions.md`` D-008, plan-2026-09-13T073704-245ab5d5).
     * :func:`train` -- stock ``fit()``.
 """
 
@@ -90,6 +92,7 @@ from dl_techniques.optimization import (
 )
 from dl_techniques.utils.logger import logger
 from train.common import create_callbacks, set_seeds
+from train.common.clm_pretrain import create_clm_loss_fn
 from train.common.config_io import save_config_json
 from train.common.run_io import save_training_history_json
 
@@ -242,6 +245,13 @@ class HNetTrainingConfig:
     :param gradient_clip_norm: Per-variable gradient-norm clip, or ``0`` to
         disable. Passed to ``optimizer_builder`` under its OWN key name; see
         :func:`build_optimizer`.
+    :param loss_type: ``"ce"`` (:class:`~dl_techniques.losses.MaskedCausalLMLoss`)
+        or ``"focal"`` (:class:`~dl_techniques.losses.FocalCausalLMLoss`), read
+        by :func:`~train.common.clm_pretrain.create_clm_loss_fn`.
+    :param focal_gamma: Focal-loss gamma; only consumed when
+        ``loss_type == "focal"``.
+    :param label_smoothing: Label smoothing in ``[0, 1)``, forwarded to the
+        CLM loss.
     :param headdim: Mamba-2 head dimension. Must divide ``expand * d_model`` of
         every stage, which is why the dev layout cannot simply take the 64 the
         reference variants use.
@@ -277,6 +287,10 @@ class HNetTrainingConfig:
     weight_decay: float = 0.1
     warmup_ratio: float = 0.02
     gradient_clip_norm: float = 1.0
+
+    loss_type: str = "ce"
+    focal_gamma: float = 1.0
+    label_smoothing: float = 0.0
 
     headdim: int = 64
     ratio_loss_alpha: float = RATIO_LOSS_ALPHA
@@ -353,6 +367,14 @@ class HNetTrainingConfig:
             raise ValueError(
                 f"gradient_clip_norm must be non-negative (0 disables it), got "
                 f"{self.gradient_clip_norm}"
+            )
+        if self.loss_type not in ("ce", "focal"):
+            raise ValueError(
+                f"loss_type must be 'ce' or 'focal', got {self.loss_type!r}"
+            )
+        if not 0.0 <= self.label_smoothing < 1.0:
+            raise ValueError(
+                f"label_smoothing must be in [0, 1), got {self.label_smoothing}"
             )
         if self.ratio_loss_alpha < 0.0:
             raise ValueError(
@@ -475,6 +497,19 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         help="Per-variable gradient-norm clip; 0 disables clipping.",
     )
     parser.add_argument(
+        "--loss-type", type=str, default=defaults.loss_type,
+        choices=["ce", "focal"],
+        help="'ce' (MaskedCausalLMLoss) or 'focal' (FocalCausalLMLoss).",
+    )
+    parser.add_argument(
+        "--focal-gamma", type=float, default=defaults.focal_gamma,
+        help="Focal loss gamma (only used when --loss-type focal).",
+    )
+    parser.add_argument(
+        "--label-smoothing", type=float, default=defaults.label_smoothing,
+        help="Label smoothing in [0, 1).",
+    )
+    parser.add_argument(
         "--headdim", type=int, default=defaults.headdim,
         help="Mamba-2 head dimension.",
     )
@@ -555,6 +590,9 @@ def config_from_args(args: argparse.Namespace) -> HNetTrainingConfig:
         weight_decay=args.weight_decay,
         warmup_ratio=args.warmup_ratio,
         gradient_clip_norm=args.gradient_clip_norm,
+        loss_type=args.loss_type,
+        focal_gamma=args.focal_gamma,
+        label_smoothing=args.label_smoothing,
         headdim=args.headdim,
         ratio_loss_alpha=args.ratio_loss_alpha,
         target_ratio=args.target_ratio,
@@ -735,15 +773,9 @@ def build_model(
     shape the probe defaults to (see ``CausalLanguageModel``'s
     ``causality_probe_plain_tensor`` docstring, D-003).
 
-    ``loss_fn`` is deliberately left at its default (plain
-    ``SparseCategoricalCrossentropy(from_logits=True)``, computed by
-    ``compute_loss``'s own hardcoded branch): unlike gpt2/zamba2/wave_field,
-    :class:`HNetTrainingConfig` carries no ``loss_type``/``focal_gamma``/
-    ``label_smoothing`` fields for :func:`train.common.clm_pretrain.create_clm_loss_fn`
-    to read, so calling it here would raise ``AttributeError`` rather than
-    select a loss family -- there is no existing feature to preserve. This
-    reproduces the pre-migration ``model.compile(loss=SparseCategoricalCrossentropy(from_logits=True))``
-    computation exactly (see decisions.md D-010).
+    ``loss_fn=create_clm_loss_fn(config)`` selects the same ``ce``/``focal``
+    loss family gpt2/zamba2/wave_field already do -- see D-010's supersession
+    note below.
 
     :param config: The run config.
     :type config: HNetTrainingConfig
@@ -772,11 +804,22 @@ def build_model(
     # unset falls through to `compute_loss`'s own hardcoded
     # `SparseCategoricalCrossentropy(from_logits=True)` branch, reproducing
     # HNet's pre-migration `compile(loss=...)` exactly. See decisions.md D-010.
+    #
+    # SUPERSEDED 2026-09-13 (plan-2026-09-13T073704-245ab5d5/D-008): this
+    # decision is REVERSED. `HNetTrainingConfig` now DOES carry
+    # `loss_type`/`focal_gamma`/`label_smoothing` (added by this later plan),
+    # so `create_clm_loss_fn(config)` no longer raises `AttributeError` --
+    # the objection above no longer holds, and `loss_fn=` is wired below like
+    # every other CLM trainer. The original text above is kept verbatim (never
+    # reworded/deleted) as the historical record of why it was ABSENT before;
+    # see decisions.md D-008 of the later plan for the reversal's reasoning
+    # and the CE-numerical-equivalence measurement backing it.
     model = CausalLanguageModel(
         backbone=backbone,
         vocab_size=arch.vocab_size,
         skip_head=True,
         pre_shifted=True,
+        loss_fn=create_clm_loss_fn(config),
         aggregate_backbone_losses=True,
         causality_probe_plain_tensor=True,
         verify_causality=True,
