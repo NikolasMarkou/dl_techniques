@@ -326,6 +326,16 @@ class Mamba2Layer(keras.layers.Layer):
         :param C: Output map of shape ``(batch, seq_len, ngroups, d_state)``.
         :return: Tensor of shape ``(batch, seq_len, nheads, headdim)`` in the
             compute dtype.
+
+        .. note::
+           This method's call site in ``call()`` (not this method's body) wraps it in
+           ``tf.recompute_grad`` to trade recompute FLOPs for memory. MEASURED on a
+           12GB GPU at ``variant="130m"``: the ceiling is unchanged post-fix --
+           batch=1 at ``seq_len=128`` is still the largest that fits (v2 is ~4x
+           heavier per layer than v1, so recompute alone doesn't reach even
+           batch=2 here). See
+           `plans/plan-2026-09-13T165751-bc5433cb/decisions.md` D-005 for the full
+           measurement and the recommended follow-up plan for v2.
         """
         batch_size, seq_len, nheads, headdim = keras.ops.shape(x)
 
@@ -431,6 +441,15 @@ class Mamba2Layer(keras.layers.Layer):
 
         # Trade recompute FLOPs for memory: defer retention of every per-step
         # scan intermediate until backward instead of keeping all of them live.
+        # DECISION plan-2026-09-13T165751-bc5433cb/D-005: MEASURED post-fix
+        # ceiling on a 12GB GPU (variant="130m"): batch=1 at seq_len=128 is
+        # still the largest that fits -- unchanged from pre-fix. v2 is ~4x
+        # heavier per layer than v1, so this wrap's benefit, while real, is not
+        # enough on its own to reach batch=8 parity. This is a disclosed,
+        # in-scope outcome, not a defect -- see decisions.md D-001/D-004/D-005.
+        # Reaching v1-parity for v2 needs chunking the full-sequence SSM
+        # precompute, explicitly OUT of this plan's scope; do not attempt that
+        # rewrite here.
         if keras.backend.backend() == "tensorflow":
             import tensorflow as tf
             scan_fn = tf.recompute_grad(self._ssm_scan)

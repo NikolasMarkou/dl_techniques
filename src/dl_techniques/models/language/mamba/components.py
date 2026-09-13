@@ -459,6 +459,16 @@ class MambaLayer(keras.layers.Layer):
         :type z: keras.KerasTensor
         :return: Output tensor, shape (batch, d_inner, seq_len).
         :rtype: keras.KerasTensor
+
+        .. note::
+           This method's call site in ``call()`` (not this method's body) wraps it in
+           ``tf.recompute_grad`` to trade recompute FLOPs for memory: the backward pass
+           re-executes this scan instead of retaining every per-step intermediate for
+           all 24 stacked layers at once. MEASURED on a 12GB GPU at
+           ``variant="130m"``: batch<=4 at ``seq_len=128`` now fits (was batch<=2
+           pre-fix); batch=8 still exceeds the 12GB budget. See
+           `plans/plan-2026-09-13T165751-bc5433cb/decisions.md` D-005 for the full
+           measurement and the recommended v2 follow-up.
         """
         batch_size, d_inner, seq_len = keras.ops.shape(u)
 
@@ -593,6 +603,14 @@ class MambaLayer(keras.layers.Layer):
 
         # Trade recompute FLOPs for memory: defer retention of every per-step
         # scan intermediate until backward instead of keeping all of them live.
+        # DECISION plan-2026-09-13T165751-bc5433cb/D-005: MEASURED post-fix ceiling
+        # on a 12GB GPU (variant="130m"): batch<=4 at seq_len=128 fits (was
+        # batch<=2 pre-fix, a genuine 2x improvement); batch=8 still OOMs (13.79
+        # GiB attempted, ~21% less than pre-fix's 17.52 GiB, but still over the
+        # ~9.9 GiB effective budget). See decisions.md D-001/D-004/D-005 for the
+        # full measurement. Do not remove this wrap chasing batch=8 without
+        # re-measuring first -- the mechanism is real (see the batch=4 flip),
+        # just insufficient alone at batch=8 for this variant.
         if keras.backend.backend() == "tensorflow":
             import tensorflow as tf
             scan_fn = tf.recompute_grad(self._selective_scan)
