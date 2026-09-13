@@ -1250,11 +1250,13 @@ class TestMambaLayerCheckpointedScanGradients:
     def test_checkpointed_and_noncheckpointed_gradients_agree_per_weight(self):
         """Checkpointed gradients (current `call()`) must match the gradients
         `tf.recompute_grad` would otherwise have replaced, for EVERY trainable
-        weight EXCEPT `D` -- not just an aggregate loss scalar. `D` is excluded
-        here and asserted separately (see
-        `test_D_gradient_is_doubled_under_recompute_grad`): it is a genuine,
-        measured, isolated discrepancy (D-002 in decisions.md), not a floating-
-        point-tolerance question this loop's derived `atol` could absorb.
+        weight -- not just an aggregate loss scalar. This includes `D`: D-002
+        (decisions.md) found `D`'s checkpointed gradient at exactly 2x the
+        non-checkpointed one, because `D` crossed the `tf.recompute_grad`
+        boundary as a bare `Variable` rather than a derived tensor; D-003
+        fixed the call site to pass `keras.ops.convert_to_tensor(self.D)`
+        instead, so `D` is now asserted here like every other weight, with no
+        special-cased exclusion.
 
         The non-checkpointed gradient set is obtained by monkeypatching
         `tensorflow.recompute_grad` to an identity passthrough
@@ -1279,9 +1281,6 @@ class TestMambaLayerCheckpointedScanGradients:
 
         checked_any = False
         for w, g_ckpt, g_plain in zip(weights, checkpointed_grads, noncheckpointed_grads):
-            if w.path.endswith("/D"):
-                continue  # D-002: measured, isolated, asserted separately below.
-
             assert g_ckpt is not None, f"{w.path}: checkpointed gradient is None"
             assert g_plain is not None, f"{w.path}: non-checkpointed gradient is None"
 
@@ -1306,54 +1305,6 @@ class TestMambaLayerCheckpointedScanGradients:
             checked_any = True
 
         assert checked_any, "no non-`D` trainable weight was found to compare"
-
-    # DECISION plan-2026-09-13T165751-bc5433cb/D-002: MEASURED, isolated
-    # falsification of plan Assumption A1 for this one weight -- `self.D` is
-    # passed as a bare `Variable` (not a derived tensor) into the
-    # `tf.recompute_grad`-wrapped `_selective_scan`, and its checkpointed
-    # gradient is exactly 2x the non-checkpointed one (ratio 2.0 to 7
-    # significant figures, two independent seeds; every other trainable
-    # weight is bit-identical -- see the sweep above and decisions.md D-002).
-    # xfail(strict=True): this must XPASS-fail loudly if `D`'s handling in
-    # `components.py::MambaLayer.call()` is ever fixed, so the fix is required
-    # to update this pin rather than silently leaving it stale.
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "D-002 (plan-2026-09-13T165751-bc5433cb): MambaLayer.D is a bare "
-            "Variable passed into the tf.recompute_grad-wrapped "
-            "_selective_scan; its checkpointed gradient is measured at "
-            "exactly 2x the non-checkpointed one. See decisions.md D-002."
-        ),
-    )
-    def test_D_gradient_is_doubled_under_recompute_grad(self):
-        """Pins the D-002 defect: `D`'s gradient SHOULD equal the
-        non-checkpointed one (this assertion is what a fix must make pass),
-        and today it measurably does not.
-        """
-        layer, x = self._build_layer_and_input()
-        seq_len = int(x.shape[1])
-
-        checkpointed_grads = self._tape_gradients(layer, x)
-        with mock.patch("tensorflow.recompute_grad", lambda fn: fn):
-            noncheckpointed_grads = self._tape_gradients(layer, x)
-
-        d_index = [w.path for w in layer.trainable_weights].index(
-            next(w.path for w in layer.trainable_weights if w.path.endswith("/D"))
-        )
-        g_ckpt_np = keras.ops.convert_to_numpy(checkpointed_grads[d_index])
-        g_plain_np = keras.ops.convert_to_numpy(noncheckpointed_grads[d_index])
-
-        scale = float(max(np.abs(g_ckpt_np).max(), np.abs(g_plain_np).max()))
-        atol = reassociation_atol([layer.d_state], seq_len, scale=scale)
-
-        np.testing.assert_allclose(
-            g_ckpt_np,
-            g_plain_np,
-            atol=atol,
-            rtol=0,
-            err_msg="gradient mismatch for weight D",
-        )
 
     def test_gradient_flow_oracle_passes_with_the_wrap_in_place(self):
         """RED-proof: the wrap must not silently disconnect any weight from

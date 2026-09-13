@@ -596,20 +596,34 @@ class MambaLayer(keras.layers.Layer):
         if keras.backend.backend() == "tensorflow":
             import tensorflow as tf
             scan_fn = tf.recompute_grad(self._selective_scan)
+            # DECISION plan-2026-09-13T165751-bc5433cb/D-003 (supersedes the
+            # D-002 comment formerly at this line): `self.D` was the
+            # bare `Variable`, not a value derived from it by an op (contrast
+            # `A`, which is `-exp(cast(A_log, ...))`) -- MEASURED: this made
+            # its checkpointed gradient exactly 2x the non-checkpointed one
+            # (every other argument's gradient was bit-identical). The first
+            # fix attempt, `keras.ops.convert_to_tensor(self.D)`, did NOT
+            # resolve it: MEASURED that `keras.ops.convert_to_tensor` is a
+            # no-op for anything `tf.is_tensor()` already accepts, and
+            # `tf.is_tensor()` returns True for a `tf.Variable` itself, so it
+            # returned the same Variable object unchanged. FIXED with
+            # `tf.convert_to_tensor`, which does NOT special-case
+            # `tf.is_tensor` and always materializes a real `EagerTensor`/
+            # symbolic `Tensor` distinct from the Variable, so no raw
+            # trainable `Variable` object crosses the `tf.recompute_grad`
+            # boundary -- matching every other argument at this call site.
+            # Do not "fix" by reflexively wrapping every argument, or by
+            # reverting to `keras.ops.convert_to_tensor` -- only `D` was a
+            # bare Variable at this call site, and only the raw `tf.*` call
+            # actually converts it.
+            scan_D = tf.convert_to_tensor(self.D)
         else:
             scan_fn = self._selective_scan
+            scan_D = self.D
         # tf.recompute_grad's custom_gradient wrapper only supports keyword
         # arguments in eager mode, so call positionally to also work under
         # symbolic/graph tracing (e.g. building a Functional model).
-        # DECISION plan-2026-09-13T165751-bc5433cb/D-002: `self.D` is the bare
-        # `Variable`, not a value derived from it by an op (contrast `A`, which
-        # is `-exp(cast(A_log, ...))`) -- MEASURED: this makes its checkpointed
-        # gradient exactly 2x the non-checkpointed one (every other argument's
-        # gradient is bit-identical). Known, disclosed, not yet fixed here; see
-        # decisions.md and the xfail-pinned test in test_mamba_v1.py. Do not
-        # "fix" by reflexively wrapping every argument in `convert_to_tensor`
-        # without re-measuring -- only `D` is a bare Variable at this call site.
-        y = scan_fn(x_conv_transposed, delta, A, B, C, self.D, z)
+        y = scan_fn(x_conv_transposed, delta, A, B, C, scan_D, z)
 
         y = keras.ops.transpose(y, (0, 2, 1))
         output = self.out_proj(y, training=training)
