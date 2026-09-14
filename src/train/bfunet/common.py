@@ -1152,7 +1152,7 @@ class BFUnetTrainingConfig:
     # Data
     train_image_dirs: List[str] = field(
         default_factory=lambda: [
-            "/media/arxwn/data0_4tb/datasets/COCO/train2017",
+            "/media/arxwn/data0_4tb/datasets/coco_2017/train2017",
             "/media/arxwn/data0_4tb/datasets/div2k/train",
         ]
     )
@@ -1383,9 +1383,12 @@ class BFUnetTrainingConfig:
                 f"tanh, sigmoid, mish, swish) break the degree-1 homogeneity "
                 f"D(a*x) = a*D(x) that the bias-free denoisers rely on."
             )
-        if self.depth is not None and self.depth < 2:
+        # DECISION plan-2026-09-14T075146-6b083728/D-003: mirrors the relaxed floor
+        # in models/vision/convunext/model.py::create_convunext. Do not restore
+        # `depth < 2` here without also reverting that guard -- see decisions.md D-003.
+        if self.depth is not None and self.depth < 1:
             raise ValueError(
-                f"depth must be >= 2, got {self.depth}"
+                f"depth must be >= 1, got {self.depth}"
             )
         if self.blocks_per_level is not None and self.blocks_per_level < 1:
             raise ValueError(
@@ -2728,7 +2731,7 @@ def add_common_arguments(parser) -> None:
                              "Default 2.0 doubles per level.")
     parser.add_argument("--depth", type=int, default=None,
                         help="Override the variant's number of U-Net levels; "
-                             "None = use variant preset (>=2).")
+                             "None = use variant preset (>=1).")
     parser.add_argument("--blocks-per-level", type=int, default=None,
                         dest="blocks_per_level",
                         help="Blocks per U-Net level; "

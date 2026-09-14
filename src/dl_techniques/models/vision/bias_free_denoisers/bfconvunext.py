@@ -207,3 +207,5 @@ def create_convunext_variant(
         use_bias=False,
         **kwargs
     )
+
+# ---------------------------------------------------------------------

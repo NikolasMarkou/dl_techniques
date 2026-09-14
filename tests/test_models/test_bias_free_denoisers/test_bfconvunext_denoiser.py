@@ -173,7 +173,17 @@ class TestCreateConvUNextDenoiser:
 
     def test_invalid_depth(self, input_shape) -> None:
         with pytest.raises(ValueError, match="depth"):
-            create_convunext_denoiser(input_shape=input_shape, depth=1)
+            create_convunext_denoiser(input_shape=input_shape, depth=0)
+
+    def test_depth_1_builds(self, input_shape) -> None:
+        """depth=1 is the minimal 1-level U-Net, not an error -- see the
+        floor-relaxation trace in models/vision/convunext/model.py's `depth`
+        docstring (one encoder level, one downsample into the bottleneck, one
+        decoder level/skip)."""
+        model = create_convunext_denoiser(input_shape=input_shape, depth=1)
+        x = np.random.rand(1, *input_shape).astype(np.float32)
+        y = model(x)
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(y)))
 
     def test_invalid_initial_filters(self, input_shape) -> None:
         with pytest.raises(ValueError, match="initial_filters"):

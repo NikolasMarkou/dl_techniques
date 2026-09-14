@@ -1139,7 +1139,7 @@ class TestCreateConvUNextInstantiation:
             f"{sorted({type(b).__name__ for b in blocks})}")
 
     @pytest.mark.parametrize('kwargs,exc,match', [
-        (dict(depth=1), ValueError, 'depth'),
+        (dict(depth=0), ValueError, 'depth'),
         (dict(initial_filters=0), ValueError, 'initial_filters'),
         (dict(filter_multiplier=0.5), ValueError, 'filter_multiplier'),
         (dict(blocks_per_level=0), ValueError, 'blocks_per_level'),
@@ -1152,6 +1152,21 @@ class TestCreateConvUNextInstantiation:
     def test_invalid_arguments_raise(self, kwargs, exc, match) -> None:
         with pytest.raises(exc, match=match):
             create_convunext(**_cfg(**kwargs))
+
+    @pytest.mark.parametrize('use_bias', [True, False])
+    def test_depth_1_builds_the_minimal_unet(self, use_bias: bool) -> None:
+        """``depth=1`` is the degenerate-but-valid minimal U-Net: one encoder
+        level, one downsample straight into the bottleneck, one decoder level
+        with its single skip connection. No ``encoder_downsample_N`` junction
+        exists (the level-0 junction IS ``bottleneck_downsample``) -- covered
+        by ``_assert_is_a_convunext_graph``'s ``range(depth - 1)`` loop.
+        """
+        model = create_convunext(use_bias=use_bias, **_cfg(depth=1))
+        assert isinstance(model, keras.Model)
+        assert model.output_shape == (None, 16, 16, 3)
+        _assert_is_a_convunext_graph(model, depth=1, blocks_per_level=1)
+        with pytest.raises(ValueError):
+            model.get_layer(name='encoder_downsample_0')
 
 
 # ---------------------------------------------------------------------

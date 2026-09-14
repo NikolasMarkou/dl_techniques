@@ -912,8 +912,11 @@ def create_convunext(
         read the bias-free section above before treating ``False`` as a
         homogeneity guarantee.
     :type use_bias: bool
-    :param depth: Depth of the U-Net (number of downsampling levels). Must be >= 2.
-        Defaults to 4.
+    :param depth: Depth of the U-Net (number of downsampling levels). Must be >= 1.
+        ``depth=1`` builds the minimal U-Net: one encoder level, one downsample into
+        the bottleneck, one decoder level with its single skip connection; deep
+        supervision (which supervises levels below the top) then degenerates to zero
+        extra outputs, not an error. Defaults to 4.
     :type depth: int
     :param initial_filters: Number of filters at the first level. Defaults to 64.
     :type initial_filters: int
@@ -1186,7 +1189,7 @@ def create_convunext(
           ``bottleneck`` output.
 
     :rtype: keras.Model
-    :raises ValueError: If ``depth < 2``, ``initial_filters`` is non-positive,
+    :raises ValueError: If ``depth < 1``, ``initial_filters`` is non-positive,
         ``filter_multiplier < 1``, ``blocks_per_level`` is non-positive,
         ``high_freq_blocks`` or ``bottleneck_attention_blocks`` is negative,
         ``bottleneck_attention_heads < 1`` with attention enabled,
@@ -1220,8 +1223,14 @@ def create_convunext(
     if not isinstance(input_shape, tuple) or len(input_shape) != 3:
         raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
 
-    if depth < 2:
-        raise ValueError(f"depth must be at least 2, got {depth}")
+    # DECISION plan-2026-09-14T075146-6b083728/D-003: floor is 1, not 2. depth=1 is
+    # a mechanically valid minimal U-Net (one encoder level, one downsample into the
+    # bottleneck, one decoder level/skip; deep supervision degenerates to zero extra
+    # outputs, not an error) -- traced every depth-dependent line in this function
+    # before relaxing the guard. Do NOT restore `depth < 2` without re-deriving that
+    # trace; see decisions.md D-003 for the full line-by-line argument.
+    if depth < 1:
+        raise ValueError(f"depth must be at least 1, got {depth}")
 
     if initial_filters <= 0:
         raise ValueError(f"initial_filters must be positive, got {initial_filters}")
