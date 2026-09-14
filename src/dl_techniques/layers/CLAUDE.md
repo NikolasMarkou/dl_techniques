@@ -36,7 +36,7 @@ see § Naming traps.
 | `fusion/` | — | Multimodal fusion layer |
 | `tokenizers/` | — | BPE tokenizer |
 | `complex/` | — | Complex-valued (complex-number) layers, one class per module: `base.py` (the concrete registered `ComplexLayer` base — the shared Rayleigh-magnitude/uniform-phase weight init, `get_config`/`from_config`, and the two pinned-dead knobs `epsilon` and `kernel_initializer`), `complex_conv2d.py`, `complex_dense.py`, `complex_relu.py`, `complex_average_pooling2d.py`, `complex_global_average_pooling2d.py`, `complex_dropout.py`. Each registers under its OWN module path (`dl_techniques.layers.complex.<module>`); the old single multi-class module they were split out of no longer exists and has no shim. Raw-TF backend only (`keras.ops` 3.8 has no complex constructor) |
-| `conv_blocks/` | — | Convolutional building blocks: bias-free Conv1D/2D, ConvNeXt v1/v2, depthwise separable (learnable `DepthwiseSeparableBlock`, plus `GaborDepthwiseSeparableBlock` — a frozen Gabor depthwise bank followed by a learnable 1x1 projection, bias-free and positively homogeneous at defaults), dynamic Conv2D, inverted residual, MobileOne, RepMixer, ResPath, universal inverted bottleneck, plus the shared `SqueezeExcitation` gate and `MatchChannels` skip helper |
+| `conv_blocks/` | — | Convolutional building blocks: bias-free Conv1D/2D, ConvNeXt v1/v2, depthwise separable (learnable `DepthwiseSeparableBlock`, plus `GaborDepthwiseSeparableBlock` — a frozen Gabor depthwise bank followed by a learnable 1x1 projection, bias-free and positively homogeneous at defaults), dynamic Conv2D, inverted residual, MobileOne, RepMixer, ResPath, universal inverted bottleneck, `conv_block.py`/`basic_block.py`/`bottleneck_block.py` (`ConvBlock`/`BasicBlock`/`BottleneckBlock`, relocated from `layers/` root), plus the shared `SqueezeExcitation` gate and `MatchChannels` skip helper |
 | `signal_processing/` | — | Classical/fixed signal and image primitives: Canny, CLAHE, Gaussian filter/pyramid, Laplacian filter family, Haar wavelet decomposition, shearlet transform, FFT/IFFT, strong (color-jitter + CutMix) augmentation |
 | `pooling/` | — | Spatial/channel layout changes with ~0 learned params: blur pool, pixel shuffle/unshuffle, patch merging, global sum pool, U-Net downsample-and-skip junction |
 | `structured_linear/` | — | Alternative parameterizations to a dense weight matrix: BitLinear (1.58-bit), MPS/tensor-train, OrthoBlock, orthogonal butterfly, random Fourier features, rigid simplex, KANvolution |
@@ -79,7 +79,7 @@ dispatch facade and per-domain factories. **`heads/CLAUDE.md` owns it** — read
 
 ### Standalone layers (top-level files)
 
-`ls src/dl_techniques/layers/*.py` is the authoritative list. As of this reorg, 13 files remain at
+`ls src/dl_techniques/layers/*.py` is the authoritative list. As of this reorg, 14 files remain at
 `layers/` root — each a single-architecture or general-utility layer with no sibling file in scope
 for a subpackage (see D-005: a 1-file subpackage adds a directory for zero organizational gain):
 
@@ -87,6 +87,7 @@ for a subpackage (see D-005: a 1-file subpackage adds a directory for zero organ
 |---|---|
 | `anchor_generator.py` | `AnchorGenerator` — precomputed multi-scale detection anchor/center grid |
 | `capsules.py` | `PrimaryCapsule`, `RoutingCapsule`, `CapsuleBlock` — capsule layers with dynamic routing |
+| `dense_block.py` | `DenseBlock` — factory-driven Dense + norm + activation + dropout block |
 | `eomt_mask.py` | `EomtMask` — query-token class+mask segmentation head for Encoder-only Mask Transformer |
 | `fnet_encoder_block.py` | `FNetEncoderBlock` — full FNet encoder block (Fourier token mixing + FFN) |
 | `fractal_block.py` | `FractalBlock` — recursive FractalNet block |
@@ -95,8 +96,8 @@ for a subpackage (see D-005: a 1-file subpackage adds a directory for zero organ
 | `modality_projection.py` | `ModalityProjection` — pixel-shuffle + dense projection of vision tokens into a language embedding space |
 | `mothnet_blocks.py` | `AntennalLobeLayer`, `MushroomBodyLayer`, `HebbianReadoutLayer` — insect-olfaction-inspired few-shot feature cascade |
 | `one_hot_encoding.py` | `OneHotEncoding` — in-graph multi-column one-hot encoder |
+| `residual_dense_block.py` | `ResidualDenseBlock` — `DenseBlock` with a residual (skip) connection |
 | `spatial_layer.py` | `SpatialLayer` (+ `coordinate_grid`, `interpolate_grid`) — CoordConv-style coordinate grid + bilinear grid sampling |
-| `standard_blocks.py` | `ConvBlock`, `DenseBlock`, `ResidualDenseBlock`, `BasicBlock`, `BottleneckBlock` — generic factory-driven building blocks; `ConvBlock` is a heavily-reused shared asset (attention/, transformers/, resnet, fractalnet, yolo12) |
 | `thera_heat_field.py` | `ThermalActivation`, `HeatField` — THERA neural heat field for anti-aliased arbitrary-scale super-resolution |
 
 ### Naming traps
