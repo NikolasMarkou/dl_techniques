@@ -32,6 +32,7 @@ from dl_techniques.layers.norms import (
     NormalizationType,
 )
 from dl_techniques.utils.dtype_policy import mask_sentinel
+from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -352,11 +353,10 @@ class GroupAttention(keras.layers.Layer):
         adj_mask = ops.logical_or(adj_mask_upper, adj_mask_lower)
 
         # Padding positions drop out of the band, so nothing leaks through them.
-        padding_mask = ops.cast(ops.squeeze(mask, axis=1), "bool")
-        padding_mask_2d = ops.logical_and(
-            ops.expand_dims(padding_mask, axis=2),
-            ops.expand_dims(padding_mask, axis=1),
-        )
+        keep_1d = ops.cast(ops.squeeze(mask, axis=1), "bool")            # (B, S), True=real
+        pad_1d = ops.logical_not(keep_1d)                                 # True=pad
+        suppress_2d = MaskFactory.create_padding_mask(pad_1d, dtype="bool")  # True=either side pad
+        padding_mask_2d = ops.logical_not(suppress_2d)                   # True=both real
         final_adj_mask = ops.logical_and(adj_mask, padding_mask_2d)
 
         context_norm = self.norm(context, training=training)
