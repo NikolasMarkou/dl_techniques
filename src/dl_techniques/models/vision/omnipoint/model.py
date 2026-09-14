@@ -1,96 +1,36 @@
-"""`OmniPoint`: a camera-agnostic-by-construction monocular metric point-cloud
-model -- ViT encoder, three per-feature heads, plus an OPTIONAL geometric
-conditioning path (intrinsics ray map + sparse depth).
+"""Camera-agnostic monocular metric point-cloud model.
 
-Step 4 built the minimal forward pass: the shared encoder and the three
-output heads (`heads.py`) over ONE shared feature map, with no conditioning
-path. Step 5 (`conditioning.py`) adds an opt-in `enable_conditioning=True`
-path, wired in additively -- with `enable_conditioning=False` (the default,
-unchanged from Step 4), this model's behavior is bit-for-bit identical to
-before Step 5 existed. See `conditioning.py`'s module docstring for the
-fusion-point design (decisions.md D-013) and the mixed-batch per-sample-flag
-contract.
+``OmniPoint`` pairs a ViT encoder with three heads: a ray/distance head and a
+mask head over the patch-grid feature map, and a metric-scale head over the
+encoder's CLS token. The CLS token is read directly as the metric token instead
+of global-average-pooling the patch tokens, since the encoder already computes
+it. An optional conditioning path widens the encoder's input channel count at
+construction time so an intrinsics ray map and sparse depth can be fused in;
+with ``enable_conditioning=False``, the default, none of it is built.
 
-Architecture:
-
-.. code-block:: text
-
-    Input [B, H, W, 3]
-          |
-          v
-    +--------------------------------+
-    | encoder: ViT (patch_size,      |
-    | include_top=False,             |
-    | pooling=None)                  |
-    +---------------+----------------+
-                    |  [B, N+1, D] (CLS-prefixed patch sequence)
-        +-----------+-----------+
-        |                       |
-        v                       v
-    cls_token = seq[:, 0]   _features_to_spatial:
-        |                   drop CLS, reshape -> [B, h, w, D]
-        |                       |
-        v                 +-----+-----+
-    MetricScaleHead        |           |
-    (pooled MLP)           v           v
-        |            RayDistanceHead  MaskHead
-        |            (DPTDecoder x4   (DPTDecoder x1
-        |             + combinator)    logits)
-        v                  |           |
-      scale        (ray, distance,   mask_logit
-                     point)
-                        |
-                        v
-       Output: (ray, distance, point, mask_logit, scale)
-
-Backbone choice (decisions.md D-009, resolved before this file was written):
-plain `ViT`, not `DINOv2VisionTransformer`. `ViT.from_variant(..., include_top=False,
-pooling=None)` returns the full LayerNorm-ed patch sequence `(B, N+1, D)`,
-CLS token at index 0 (`vit/model.py` docstring, lines 298-302) -- this module
-reads that CLS token directly as the "metric token" for `MetricScaleHead`,
-rather than global-average-pooling the patch tokens. This is the MORE
-faithful and CHEAPER choice than GAP: `ViT`'s CLS token already accumulates a
-whole-image summary through attention (`vit/model.py` module docstring), so
-no extra pooling op or extra supervision signal is needed to make it
-meaningful, and it costs zero extra compute since the encoder already
-computes it.
-
-Per-pixel output resolution -- a documented simplification, not a bug: this
-repository's `DPTDecoder` only accepts a power-of-2 `upsample_factor`
-(`depth_anything/components.py`'s own validation), but `ViT.from_variant`
-here uses `patch_size=14` (the paper's ViT-L/14 convention, D-009), and 14 is
-not a power of 2. Rather than force a mismatched upsample factor or silently
-switch to a power-of-2 patch size the task did not ask for, this module keeps
-`upsample_factor=1`: both heads' outputs sit at the encoder's native
-`(H // patch_size, W // patch_size)` patch-grid resolution, not full pixel
-resolution (see the `# DECISION ... D-011` anchor in `__init__` below).
-Upsampling to full image resolution, if ever needed, is a downstream/
-visualization concern layered on top of this model, not a change to it.
-
-Output order (needed verbatim by Step 5's conditioning wiring and Step 9's
-training script): `call()` returns the 5-tuple
-``(ray, distance, point, mask_logit, scale)``. This does NOT exactly match
-`OmniPointCombinedLoss.__call__`'s documented `y_pred` convention -- a 4-tuple
-``(pred_ray, pred_distance, pred_mask_logit, pred_scale)`` with no `point`
-entry, since that loss recomputes the affine point itself
-(`pred_ray * pred_distance`) internally. Step 9 must therefore select indices
-``(0, 1, 3, 4)`` from this model's output tuple before calling the combined
-loss, or drop `point` from `call()`'s public output at that time -- recorded
-here rather than silently reconciled, per this plan's Pre-Mortem #3.
+``call()`` returns the 5-tuple ``(ray, distance, point, mask_logit, scale)``.
+``OmniPointCombinedLoss`` takes a 4-tuple without ``point``, which it recomputes
+itself, so a training loop selects indices ``(0, 1, 3, 4)``. Both dense heads
+run at ``upsample_factor=1``, so their outputs sit at the patch-grid resolution
+``(H // patch_size, W // patch_size)`` rather than full pixel resolution:
+``patch_size`` defaults to 14, and ``DPTDecoder`` only upsamples by a power of
+2. No pretrained weights ship with this model.
 
 References:
-    - Ye et al., OmniPoint: Universal Monocular Metric Pointcloud from Any
-      Camera. (paper summary supplied to this plan; no public arXiv id
-      captured in EXPLORE)
+    - Ye et al. OmniPoint: Universal Monocular Metric Pointcloud from Any
+      Camera.
     - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers
       for Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
     - Ranftl et al., 2021. Vision Transformers for Dense Prediction (DPT).
       (https://arxiv.org/abs/2103.13413)
 """
 
+import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
-import keras
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.vit.model import ViT
@@ -111,80 +51,139 @@ OmniPointOutput = Tuple[
 
 # ---------------------------------------------------------------------
 
-
 @register_dl_technique("dl_techniques.models.omnipoint.model")
 class OmniPoint(keras.Model):
-    """ViT encoder + ray/distance/mask/scale heads, no conditioning input.
+    """Predict rays, distance, a validity mask and a metric scale from an image.
 
-    See this module's docstring for the architecture diagram, the backbone
-    choice, the per-pixel-resolution simplification and the exact output
-    tuple order.
+    A ViT encoder produces a CLS-prefixed patch sequence. The CLS row feeds
+    :class:`MetricScaleHead`; the remaining tokens are reshaped to a patch grid
+    and feed :class:`RayDistanceHead` and :class:`MaskHead`. When
+    ``enable_conditioning=True``, an intrinsics ray map and sparse depth are
+    encoded into extra input channels before the encoder, and a token-space
+    embedding marks which samples actually carried each modality.
 
-    :param image_shape: Input image shape ``(height, width, channels)``. Must
-        be divisible by ``patch_size`` on both spatial axes (`ViT`'s own
-        constraint).
+    Architecture:
+
+    .. code-block:: text
+
+                         input [B, H, W, C]
+                                │
+                  ┌─────────────┴───────────────┐
+                  ▼                             ▼
+             enable_conditioning             otherwise
+        ┌───────────────────┐           ┌───────────────────┐
+        │ ConditioningInput │           │ pass through      │
+        │  Encoder          │           │                   │
+        └─────────┬─────────┘           └─────────┬─────────┘
+        [B, H, W, C+ic+dc]                  [B, H, W, C]
+                  └─────────────┬───────────────┘
+                                ▼
+                  ┌───────────────────────────────┐
+                  │ ViT encoder                   │
+                  │  no top, no pooling           │
+                  └───────────────┬───────────────┘
+                   [B, N+1, D], CLS at index 0
+                                ▼
+                  ┌───────────────────────────────┐
+                  │ ConditioningStateEmbedding    │
+                  │  (enable_conditioning only)   │
+                  └───────────────┬───────────────┘
+                                ▼
+                  ┌───────────────────────────────┐
+                  │ split sequence                │
+                  │  cls = seq[:, 0]              │
+                  │  spatial = reshape(seq[:, 1:])│
+                  └───────────────┬───────────────┘
+          ┌─────────────────────┬─┴─────────────────┐
+          ▼                     ▼                   ▼
+       from cls            from spatial        from spatial
+      ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+      │ MetricScaleHead│  │ RayDistanceHead│  │ MaskHead       │
+      └───────┬────────┘  └───────┬────────┘  └───────┬────────┘
+              ▼                   ▼                   ▼
+          scale [B]      ray, distance, point     mask_logit
+
+    ``call()`` returns them in the order
+    ``(ray, distance, point, mask_logit, scale)``.
+
+    Conditioning present-flags, resolved per modality inside ``call()``:
+
+    .. code-block:: text
+
+        tensor        *_present arg   resolved per-sample flags
+        ──────────    ─────────────   ─────────────────────────
+        None          any             all False
+        given         None            all True
+        given         given           cast to bool, flattened
+
+    Variants:
+
+    .. code-block:: text
+
+        variant            vit_scale
+        ───────────────    ─────────
+        omnipoint_base     base
+        omnipoint_large    large
+
+    :param image_shape: Input image shape ``(height, width, channels)``. Both
+        spatial axes must be divisible by ``patch_size``.
     :type image_shape: Tuple[int, int, int]
-    :param vit_scale: `ViT`'s `SCALE_CONFIGS` key (``"base"``, ``"large"``,
-        ...).
+    :param vit_scale: Key into ``ViT.SCALE_CONFIGS`` (``"base"``, ``"large"``,
+        and so on).
     :type vit_scale: str
-    :param patch_size: Square ViT patch size. Defaults to 14 (ViT-L/14
-        convention).
+    :param patch_size: Square ViT patch size. Defaults to 14.
     :type patch_size: int
-    :param decoder_dims: Channel dims per `DPTDecoder` stage, shared by both
-        `RayDistanceHead` and `MaskHead`.
+    :param decoder_dims: Channel dimensions per ``DPTDecoder`` stage, shared by
+        :class:`RayDistanceHead` and :class:`MaskHead`. ``None`` gives
+        ``[256, 128, 64, 32]``.
     :type decoder_dims: Optional[list]
-    :param metric_hidden_dim: Hidden width of `MetricScaleHead`'s MLP.
+    :param metric_hidden_dim: Hidden width of :class:`MetricScaleHead`'s MLP.
     :type metric_hidden_dim: int
-    :param kernel_initializer: Initializer for every head conv/dense kernel
-        (does not affect the encoder, which uses `ViT`'s own reference
-        initializer).
+    :param kernel_initializer: Initializer for every head and conditioning
+        kernel. The encoder uses ``ViT``'s own initializer.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for every head
-        conv/dense kernel.
+    :param kernel_regularizer: Optional regularizer for those same kernels.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param epsilon: Floor shared by `RayDistanceHead`'s combinator and
-        `MetricScaleHead`'s scale activation.
+    :param epsilon: Floor shared by :class:`RayDistanceHead`'s combinator and
+        :class:`MetricScaleHead`'s scale activation.
     :type epsilon: float
-    :param encoder: A pre-built `ViT` encoder. Supplied by `from_config` so a
-        deserialized archive keeps its saved topology/weights instead of
-        constructing a fresh, randomly initialized one; `None` (default)
-        builds a fresh encoder lazily in `build()`.
+    :param encoder: A pre-built ``ViT`` encoder, supplied by ``from_config`` so
+        a deserialized archive keeps its saved topology and weights. ``None``
+        (default) builds a fresh encoder in ``build()``.
     :type encoder: Optional[keras.Model]
-    :param enable_conditioning: If `True`, build the Step-5 conditioning path
-        (`conditioning.py`): the encoder's own `input_shape` channel count is
-        widened by `intrinsics_channels + depth_channels`, and `call()`
-        accepts the optional `intrinsics_ray_map`/`sparse_depth`/
-        `sparse_depth_mask` keyword arguments (see `call()`'s docstring).
-        Defaults to `False`, in which case this model behaves exactly as in
-        Step 4 (no conditioning path is built at all).
+    :param enable_conditioning: Build the conditioning path. The encoder's input
+        channel count is widened by ``intrinsics_channels + depth_channels``,
+        and ``call()`` reads its conditioning keyword arguments. Defaults to
+        ``False``, which builds no conditioning layers at all.
     :type enable_conditioning: bool
-    :param intrinsics_channels: Fusion channels the intrinsics ray-map
-        encoder emits. Only used when `enable_conditioning` is `True`.
+    :param intrinsics_channels: Fusion channels emitted by the intrinsics
+        ray-map encoder. Read only when ``enable_conditioning`` is ``True``.
     :type intrinsics_channels: int
-    :param depth_channels: Fusion channels the sparse-depth encoder emits.
-        Only used when `enable_conditioning` is `True`.
+    :param depth_channels: Fusion channels emitted by the sparse-depth encoder.
+        Read only when ``enable_conditioning`` is ``True``.
     :type depth_channels: int
-    :param conditioning_hidden_channels: Hidden width of the conditioning
-        path's small `Conv2D` stacks. Only used when `enable_conditioning` is
-        `True`.
+    :param conditioning_hidden_channels: Hidden width of the conditioning path's
+        ``Conv2D`` stacks. Read only when ``enable_conditioning`` is ``True``.
     :type conditioning_hidden_channels: int
-    :param splat_kernel_size: `SparseDepthSplat`'s Gaussian window size. Only
-        used when `enable_conditioning` is `True`.
+    :param splat_kernel_size: ``SparseDepthSplat``'s Gaussian window size. Read
+        only when ``enable_conditioning`` is ``True``.
     :type splat_kernel_size: Tuple[int, int]
-    :param splat_sigma: `SparseDepthSplat`'s Gaussian sigma. Only used when
-        `enable_conditioning` is `True`.
+    :param splat_sigma: ``SparseDepthSplat``'s Gaussian sigma. Read only when
+        ``enable_conditioning`` is ``True``.
     :type splat_sigma: float
-    :param kwargs: Additional keyword arguments for the `Model` base class.
+    :param kwargs: Additional ``Model`` base-class arguments.
 
-    :raises ValueError: If `vit_scale` is not a valid `ViT.SCALE_CONFIGS` key,
-        or if `image_shape` is not divisible by `patch_size`.
+    :raises ValueError: If ``vit_scale`` is not a key of ``ViT.SCALE_CONFIGS``,
+        or if ``image_shape`` is not divisible by ``patch_size``.
 
     Input shape:
-        4D tensor ``(batch_size, height, width, 3)``.
+        4D tensor ``(batch_size, height, width, channels)``, matching
+        ``image_shape``.
 
     Output shape:
-        5-tuple ``(ray, distance, point, mask_logit, scale)`` -- see this
-        module's docstring for exact per-entry shapes.
+        5-tuple ``(ray, distance, point, mask_logit, scale)`` with shapes
+        ``(B, h, w, 3)``, ``(B, h, w, 1)``, ``(B, h, w, 3)``, ``(B, h, w, 1)``
+        and ``(B,)``, where ``h`` and ``w`` are the patch grid.
 
     Example:
         .. code-block:: python
@@ -194,9 +193,7 @@ class OmniPoint(keras.Model):
             ray, distance, point, mask_logit, scale = model(x)
     """
 
-    #: Public-name registry: variant name -> constructor-kwarg dict, following
-    #: `ViT`'s own "thin wrapper over a scale table" pattern
-    #: (`vit/model.py:371-373`).
+    #: Variant name to constructor-kwarg dict.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "omnipoint_base": {"vit_scale": "base"},
         "omnipoint_large": {"vit_scale": "large"},
@@ -255,24 +252,15 @@ class OmniPoint(keras.Model):
         self.conditioning_hidden_channels = int(conditioning_hidden_channels)
         self.splat_kernel_size = (int(splat_kernel_size[0]), int(splat_kernel_size[1]))
         self.splat_sigma = float(splat_sigma)
-        # DECISION plan-2026-09-11T050223-1b47bcf6/D-013: the encoder's own
-        # input channel count is widened here, at __init__ time, not chosen
-        # per-call -- ViT's PatchEmbedding2D conv kernel shape is fixed at
-        # build time, so a call-time-varying channel count is not an option.
-        # Conditioning is therefore an __init__-time architectural choice
-        # (enable_conditioning=True/False), not a per-call one; a per-call
-        # absent modality still runs this same widened-channel encoder, fed
-        # zero-valued conditioning channels (see conditioning.py). See
-        # decisions.md.
+        # DECISION D-013: widen the encoder's input channels here, at __init__
+        # time; the patch-embedding kernel shape is fixed at build. decisions.md.
         self._encoder_input_channels = img_c + (
             (self.intrinsics_channels + self.depth_channels)
             if self.enable_conditioning else 0
         )
 
-        # If an encoder was supplied (typically by `from_config` after
-        # deserialization), accept it directly so its saved topology/weights
-        # survive the load, mirroring `DepthAnything.__init__`'s identical
-        # convention. Otherwise `build()` creates one fresh.
+        # A supplied encoder comes from from_config, and keeps the saved
+        # topology and weights instead of being rebuilt fresh.
         self.encoder: Optional[keras.Model] = encoder
 
         self.conditioning_input_encoder: Optional[ConditioningInputEncoder] = None
@@ -292,16 +280,8 @@ class OmniPoint(keras.Model):
                 name="conditioning_state_embedding",
             )
 
-        # Heads -- pure functions of the config above, safe to construct
-        # eagerly in `__init__` (mirrors `heads.py`'s own eager-sublayer
-        # style; none of them need `input_shape` to be constructed, only to
-        # be called).
-        # DECISION plan-2026-09-11T050223-1b47bcf6/D-011: upsample_factor=1 on
-        # both dense heads. patch_size=14 is not a power of 2, and DPTDecoder
-        # only accepts a power-of-2 upsample_factor -- do not "round" this to
-        # 8 or 16 to get closer to full resolution; that produces an output
-        # grid that no longer corresponds to the input pixel grid at all. See
-        # decisions.md.
+        # DECISION D-011: upsample_factor=1 on both dense heads; patch_size 14
+        # is not a power of 2 and DPTDecoder needs one. See decisions.md.
         self.ray_distance_head = RayDistanceHead(
             dims=self.decoder_dims,
             upsample_factor=1,
@@ -332,7 +312,7 @@ class OmniPoint(keras.Model):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the ViT encoder if one was not supplied via `from_config`.
+        """Build the encoder if none was supplied, then force-build every head.
 
         :param input_shape: Shape of the input image tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -348,27 +328,16 @@ class OmniPoint(keras.Model):
                 name=f"encoder_vit_{self.vit_scale}",
             )
         super().build(input_shape)
-        # DECISION plan-2026-09-11T050223-1b47bcf6/D-023: force-build every head via a
-        # dummy forward pass here, not lazily at first real `call()`. `.keras` reload runs
-        # `build_from_config` -> `build()` only, never `call()`; a lazily-built head is
-        # still 0-weight afterward, so saved head weights have nowhere to land and the
-        # first post-reload `call()` silently re-randomizes them (D-124's identical defect
-        # in `DPTDecoder`, one layer up the call stack). See decisions.md.
+        # DECISION D-023: force-build the heads with a dummy pass here; a .keras
+        # reload runs build() but never call(), so lazy heads lose their weights.
         dummy_spatial = keras.ops.zeros((1, self.grid_h, self.grid_w, self.embed_dim))
         dummy_cls = keras.ops.zeros((1, self.embed_dim))
         _ = self.ray_distance_head(dummy_spatial)
         _ = self.mask_head(dummy_spatial)
         _ = self.metric_scale_head(dummy_cls)
 
-        # DECISION plan-2026-09-11T050223-1b47bcf6/D-023 (extended, completion-fix
-        # step 4.1): D-023's original fix above only covered the 3 heads -- it never
-        # touched `conditioning_input_encoder`/`conditioning_state_embedding` (Step 5),
-        # so a `.keras` round-trip with `enable_conditioning=True` silently lost exactly
-        # those 2 layers' weights on reload (MEASURED: 8 of 212 weights mismatched --
-        # the review's CRITICAL #3). Force-build both here too, via the same
-        # dummy-forward-pass mechanism, whenever they exist -- they only exist at all
-        # when `enable_conditioning=True` (see `__init__`), so this is unconditional
-        # given existence, never gated on a second flag. See decisions.md.
+        # DECISION D-023: the conditioning layers need the same force-build;
+        # without it a round-trip lost 8 of 212 weights. See decisions.md.
         if self.conditioning_input_encoder is not None:
             img_h, img_w, img_c = self.image_shape
             dummy_image = keras.ops.zeros((1, img_h, img_w, img_c))
@@ -381,11 +350,7 @@ class OmniPoint(keras.Model):
             _ = self.conditioning_state_embedding(dummy_tokens, dummy_flag, dummy_flag)
 
     def _features_to_spatial(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Drop the CLS token and reshape ``(B, N+1, D)`` -> ``(B, h, w, D)``.
-
-        Copies `DepthAnything._features_to_spatial`'s exact CLS-drop/reshape
-        pattern (`depth_anything/model.py:449-460`) rather than re-deriving
-        it, per `findings/model-house-patterns.md`'s explicit recommendation.
+        """Drop the CLS token and reshape ``(B, N+1, D)`` to ``(B, h, w, D)``.
 
         :param x: Encoder output sequence, ``(B, N+1, D)``.
         :type x: keras.KerasTensor
@@ -405,41 +370,34 @@ class OmniPoint(keras.Model):
             sparse_depth_present: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None,
     ) -> OmniPointOutput:
-        """Forward pass: encoder -> shared spatial map + CLS token -> heads.
+        """Run the encoder, split its output, and apply the three heads.
 
-        Conditioning arguments are only meaningful when this instance was
-        built with ``enable_conditioning=True``; they are accepted (and
-        ignored) otherwise, matching Problem Statement invariant 4 -- the
-        model produces the same output shape/dtype whether or not intrinsics/
-        sparse depth are supplied. A Python ``None`` for
-        ``intrinsics_ray_map``/``sparse_depth`` means "absent for this whole
-        call"; a concrete per-sample ``*_present`` flag (``(B,)``) then
-        selects, WITHIN a call that does supply the tensor, which individual
-        samples actually carry valid data for that modality (see
-        ``conditioning.py``'s module docstring for the full contract).
+        The conditioning arguments are read only when this instance was built
+        with ``enable_conditioning=True``; otherwise they are accepted and
+        ignored, so the output shapes and dtypes do not depend on them. A
+        ``None`` tensor means the modality is absent for the whole call, while a
+        per-sample ``*_present`` flag selects which samples inside a call carry
+        valid data.
 
-        :param inputs: Input image batch, ``(B, H, W, 3)``.
+        :param inputs: Input image batch, ``(B, H, W, C)``.
         :type inputs: keras.KerasTensor
         :param intrinsics_ray_map: Optional per-pixel unit ray map,
-            ``(B, H, W, 3)``. Ignored unless ``enable_conditioning=True``.
+            ``(B, H, W, 3)``.
         :type intrinsics_ray_map: Optional[keras.KerasTensor]
-        :param intrinsics_present: Optional per-sample flag, ``(B,)``.
-            Defaults to "all present" when ``intrinsics_ray_map`` is given.
+        :param intrinsics_present: Optional per-sample flag, ``(B,)``. Defaults
+            to all-present when ``intrinsics_ray_map`` is given.
         :type intrinsics_present: Optional[keras.KerasTensor]
         :param sparse_depth: Optional sparse depth values, ``(B, H, W, 1)``.
-            Ignored unless ``enable_conditioning=True``.
         :type sparse_depth: Optional[keras.KerasTensor]
-        :param sparse_depth_mask: Required companion validity mask when
+        :param sparse_depth_mask: Companion validity mask, required when
             ``sparse_depth`` is given, ``(B, H, W, 1)``.
         :type sparse_depth_mask: Optional[keras.KerasTensor]
         :param sparse_depth_present: Optional per-sample flag, ``(B,)``.
-            Defaults to "all present" when ``sparse_depth`` is given.
+            Defaults to all-present when ``sparse_depth`` is given.
         :type sparse_depth_present: Optional[keras.KerasTensor]
-        :param training: Whether the model runs in training or inference
-            mode.
+        :param training: Whether the model runs in training or inference mode.
         :type training: Optional[bool]
-        :return: 5-tuple ``(ray, distance, point, mask_logit, scale)`` -- see
-            this module's docstring for the exact contract.
+        :return: 5-tuple ``(ray, distance, point, mask_logit, scale)``.
         :rtype: OmniPointOutput
         """
         if self.enable_conditioning:
@@ -456,10 +414,8 @@ class OmniPoint(keras.Model):
             )
             sequence = self.encoder(fused_inputs, training=training)
 
-            # Concrete per-sample flags for the post-encoder token-space
-            # stage: absent-for-the-whole-call (tensor is None) means every
-            # sample's flag is False; present-for-the-call but no explicit
-            # per-sample flag means every sample's flag is True.
+            # An absent tensor makes every sample's flag False; a present tensor
+            # with no explicit flag makes every sample's flag True.
             if intrinsics_ray_map is None:
                 intrinsics_present_flags = keras.ops.zeros((batch_size,), dtype="bool")
             elif intrinsics_present is None:
@@ -499,10 +455,9 @@ class OmniPoint(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Return the model configuration for serialization.
 
-        :return: The base `Model` config plus every constructor argument. The
-            encoder sub-Model is serialized so a `.keras` archive round-trips
-            both its topology and its weights, mirroring
-            `DepthAnything.get_config`'s identical convention.
+        :return: The base ``Model`` config plus every constructor argument. The
+            encoder sub-model is serialized, so a ``.keras`` archive round-trips
+            both its topology and its weights.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -535,7 +490,7 @@ class OmniPoint(keras.Model):
 
         :param config: Dictionary containing the model configuration.
         :type config: Dict[str, Any]
-        :return: An `OmniPoint` model instance.
+        :return: An ``OmniPoint`` model instance.
         :rtype: OmniPoint
         """
         cfg = dict(config)
@@ -559,22 +514,21 @@ class OmniPoint(keras.Model):
             pretrained: bool = False,
             **kwargs: Any,
     ) -> "OmniPoint":
-        """Create an `OmniPoint` model from a predefined variant.
+        """Create an ``OmniPoint`` model from a predefined variant.
 
-        :param variant: One of `MODEL_VARIANTS` (``"omnipoint_base"``,
+        :param variant: One of ``MODEL_VARIANTS`` (``"omnipoint_base"``,
             ``"omnipoint_large"``).
         :type variant: str
-        :param pretrained: Must stay `False`. No pretrained OmniPoint weights
-            (or pretrained weights for either candidate backbone, `ViT` or
-            `DINOv2VisionTransformer`) are distributed with `dl_techniques`.
+        :param pretrained: Must stay ``False``. No pretrained OmniPoint weights
+            are distributed, and none exist for the ViT backbone either.
         :type pretrained: bool
-        :param kwargs: Passthrough to the constructor, overriding the
-            variant's own defaults.
+        :param kwargs: Passthrough to the constructor, overriding the variant's
+            own defaults.
         :type kwargs: Any
-        :return: A configured `OmniPoint` instance.
+        :return: A configured ``OmniPoint`` instance.
         :rtype: OmniPoint
-        :raises ValueError: If `variant` is not recognized.
-        :raises NotImplementedError: If `pretrained` is `True`.
+        :raises ValueError: If ``variant`` is not recognized.
+        :raises NotImplementedError: If ``pretrained`` is ``True``.
         """
         if pretrained:
             raise NotImplementedError(
@@ -592,27 +546,17 @@ class OmniPoint(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-127 (`ResNet.from_variant`'s
-        # own precedent, restated here): `.copy()` the preset before splatting
-        # kwargs on top -- splatting the shared dict directly would let
-        # `config.update(kwargs)` permanently poison `MODEL_VARIANTS[variant]`
-        # for every future caller. See decisions.md.
+        # DECISION D-127: copy the preset before updating it; splatting the
+        # shared dict would poison MODEL_VARIANTS for later callers.
         config = cls.MODEL_VARIANTS[variant].copy()
         config.update(kwargs)
 
         logger.info(f"Creating OmniPoint model variant '{variant}'")
         return cls(**config)
 
-# ---------------------------------------------------------------------
-
-#: Module-level alias of `OmniPoint.MODEL_VARIANTS`, so
-#: `from dl_techniques.models.vision.omnipoint import MODEL_VARIANTS` works
-#: without reaching through the class. The class attribute remains the single
-#: source of truth; this is a read-only alias, not a second copy to keep in
-#: sync.
+#: Read-only alias of OmniPoint.MODEL_VARIANTS, so the name can be imported
+#: directly from the package. The class attribute stays the source of truth.
 MODEL_VARIANTS: Dict[str, Dict[str, Any]] = OmniPoint.MODEL_VARIANTS
-
-# ---------------------------------------------------------------------
 
 
 def create_omnipoint(
@@ -620,15 +564,15 @@ def create_omnipoint(
         image_shape: Tuple[int, int, int] = (224, 224, 3),
         **kwargs: Any,
 ) -> OmniPoint:
-    """Create and build an `OmniPoint` model instance.
+    """Create an ``OmniPoint`` model and build it with one dummy forward pass.
 
-    :param variant: One of `OmniPoint.MODEL_VARIANTS`.
+    :param variant: One of ``OmniPoint.MODEL_VARIANTS``.
     :type variant: str
     :param image_shape: Input image shape ``(height, width, channels)``.
     :type image_shape: Tuple[int, int, int]
-    :param kwargs: Passthrough to `OmniPoint.from_variant`.
+    :param kwargs: Passthrough to ``OmniPoint.from_variant``.
     :type kwargs: Any
-    :return: A built `OmniPoint` model instance.
+    :return: A built ``OmniPoint`` model instance.
     :rtype: OmniPoint
 
     Example:

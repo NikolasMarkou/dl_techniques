@@ -1,38 +1,31 @@
-"""OmniPoint's three per-encoder-feature output heads.
+"""Output heads for OmniPoint.
 
-Conceptual Overview:
-    All three heads read the SAME encoder spatial feature map (or, for
-    :class:`MetricScaleHead`, the same encoder CLS token) -- Step 4 builds no
-    conditioning input, so this module's only job is turning one shared
-    feature tensor into OmniPoint's per-pixel ray/distance/mask predictions
-    and its single per-sample metric scale.
+Three heads read one shared encoder output. ``RayDistanceHead`` and ``MaskHead``
+each wrap a single
+:class:`~dl_techniques.models.vision.depth_anything.components.DPTDecoder` over
+the spatial feature map, with head-specific ``output_channels`` and
+``output_activation``. ``MetricScaleHead`` is a small MLP over one pooled token,
+because ``DPTDecoder`` preserves the spatial axes and cannot produce a pooled
+scalar.
 
-    :class:`RayDistanceHead` and :class:`MaskHead` each wrap exactly one
-    :class:`~dl_techniques.models.vision.depth_anything.components.DPTDecoder`
-    instance -- the repo's existing per-pixel dense-prediction head, reused
-    with head-specific ``output_channels``/``output_activation`` rather than
-    reimplemented (``findings/model-house-patterns.md`` #2). Only
-    :class:`MetricScaleHead` is new work: `DPTDecoder` is spatial-preserving
-    and cannot express a pooled global scalar.
+Two output activations are fixed by ``losses/omnipoint_losses.py`` rather than
+chosen here. ``MaskHead`` emits linear logits, because ``MaskLoss`` wraps
+``BinaryCrossentropy(from_logits=True)`` and a sigmoid here would be applied
+twice. ``MetricScaleHead`` emits a positive scale rather than a log-scale value,
+because ``MetricScaleLoss`` takes the log of its ``y_pred`` itself.
+``RayDistanceHead``'s decoder is linear for the same kind of reason:
+``RayPointCombinator`` owns the normalization and the positivity.
 
-    Output-activation choices are dictated by ``losses/omnipoint_losses.py``,
-    not chosen independently here:
-
-    - ``MaskHead`` emits **linear logits**, matching
-      ``MaskLoss``'s ``keras.losses.BinaryCrossentropy(from_logits=True)``
-      (`omnipoint_losses.py:325`). Passing ``sigmoid`` here would double-apply
-      the sigmoid inside that loss's BCE term.
-    - ``MetricScaleHead`` emits a **positive scale** (`softplus`), not a
-      log-scale value: ``MetricScaleLoss.call`` takes ``log()`` of its
-      ``y_pred`` argument directly (`omnipoint_losses.py:302`,
-      ``log_s_hat = keras.ops.log(keras.ops.maximum(y_pred, eps))``), so the
-      loss owns the log-space transform and the head must hand it a positive,
-      non-log value.
+Both dense heads take ``upsample_factor``, which ``DPTDecoder`` requires to be a
+power of 2.
 """
 
+import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
-import keras
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.models.vision.depth_anything.components import DPTDecoder
 from dl_techniques.layers.geometric.ray_point_combinator import RayPointCombinator
@@ -40,32 +33,60 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-
 @register_dl_technique("dl_techniques.models.omnipoint.heads.ray_distance_head")
 class RayDistanceHead(keras.layers.Layer):
-    """Per-pixel ray direction + radial distance head.
+    """Predict a unit ray, a positive distance and their product per pixel.
 
-    Composes one `DPTDecoder` (4 raw channels: 3 for the unnormalized ray, 1
-    for the unnormalized distance, both ``output_activation="linear"`` since
-    :class:`~dl_techniques.layers.geometric.ray_point_combinator.RayPointCombinator`
-    owns the normalize/positive-activation step, not this decoder) with that
-    combinator, so the head's own output is already unit-norm/positive by
-    construction (Problem Statement invariants 1-2 of
-    `models/vision/omnipoint/` plan.md).
+    One ``DPTDecoder`` emits 4 linear channels: 3 for the unnormalized ray and
+    1 for the unnormalized distance. ``RayPointCombinator`` then normalizes the
+    ray, makes the distance positive, and multiplies them, so the head's own
+    outputs are unit-norm and positive without any caller-side correction.
 
-    :param dims: Channel dimension per `DPTDecoder` stage.
+    Architecture:
+
+    .. code-block:: text
+
+                  features [B, H, W, C]
+                            ▼
+            ┌───────────────────────────────┐
+            │ DPTDecoder                    │
+            │  4 channels, linear           │
+            └───────────────┬───────────────┘
+                     [B, H', W', 4]
+                            ▼
+            ┌───────────────────────────────┐
+            │ split at channel 3            │
+            └──────┬─────────────────┬──────┘
+                   ▼                 ▼
+                raw_ray          raw_distance
+                   └────────┬────────┘
+                            ▼
+            ┌───────────────────────────────┐
+            │ RayPointCombinator            │
+            │  unit ray, positive distance  │
+            └───────────────┬───────────────┘
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+           unit_ray      distance       point
+          [B,H',W',3]   [B,H',W',1]   [B,H',W',3]
+
+    H' and W' are the input size times ``upsample_factor``.
+
+    :param dims: Channel dimension per ``DPTDecoder`` stage. ``None`` gives
+        ``[256, 128, 64, 32]``.
     :type dims: Optional[list]
     :param upsample_factor: Total bilinear upsampling factor forwarded to
-        `DPTDecoder`. Must be a power of 2.
+        ``DPTDecoder``. Must be a power of 2. Defaults to ``1``.
     :type upsample_factor: int
-    :param kernel_initializer: Initializer for every `DPTDecoder` conv kernel.
+    :param kernel_initializer: Initializer for every ``DPTDecoder`` conv
+        kernel. Defaults to ``"he_normal"``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer for every conv kernel.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param epsilon: Floor forwarded to `RayPointCombinator` (ray-norm and
-        distance-activation guard).
+    :param epsilon: Floor forwarded to ``RayPointCombinator``, guarding both
+        the ray norm and the distance activation. Defaults to ``1e-8``.
     :type epsilon: float
-    :param kwargs: Additional keyword arguments for the `Layer` base class.
+    :param kwargs: Additional ``Layer`` base-class arguments.
 
     Input shape:
         4D tensor ``(batch_size, height, width, channels)``, the encoder's
@@ -74,7 +95,7 @@ class RayDistanceHead(keras.layers.Layer):
     Output shape:
         3-tuple ``(unit_ray, positive_distance, point)``, each
         ``(batch_size, height * upsample_factor, width * upsample_factor, C)``
-        with ``C=3`` for ``unit_ray``/``point`` and ``C=1`` for
+        with ``C=3`` for ``unit_ray`` and ``point`` and ``C=1`` for
         ``positive_distance``.
 
     Example:
@@ -119,11 +140,11 @@ class RayDistanceHead(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None,
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
-        """Decode raw ray/distance logits, then normalize/combine them.
+        """Decode the raw ray and distance channels, then combine them.
 
         :param inputs: Encoder spatial feature map, ``(B, H, W, C)``.
         :type inputs: keras.KerasTensor
-        :param training: Forwarded to the inner `DPTDecoder`.
+        :param training: Forwarded to the inner ``DPTDecoder``.
         :type training: Optional[bool]
         :return: ``(unit_ray, positive_distance, point)``.
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
@@ -135,7 +156,7 @@ class RayDistanceHead(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
-        :return: The base `Layer` config plus every constructor argument.
+        :return: The base ``Layer`` config plus every constructor argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -151,21 +172,39 @@ class RayDistanceHead(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.omnipoint.heads.mask_head")
 class MaskHead(keras.layers.Layer):
-    """Per-pixel sky/validity mask head: one `DPTDecoder`, linear logits.
+    """Predict a per-pixel sky and validity mask as linear logits.
 
-    Emits linear (unbounded) logits, matching `MaskLoss`'s
-    ``BinaryCrossentropy(from_logits=True)`` -- see this module's docstring.
+    One ``DPTDecoder`` emits a single unbounded channel. The sigmoid lives in
+    ``MaskLoss``, which wraps ``BinaryCrossentropy(from_logits=True)``, so a
+    caller that wants probabilities applies one itself.
 
-    :param dims: Channel dimension per `DPTDecoder` stage.
+    Architecture:
+
+    .. code-block:: text
+
+                  features [B, H, W, C]
+                            ▼
+            ┌───────────────────────────────┐
+            │ DPTDecoder                    │
+            │  1 channel, linear            │
+            └───────────────┬───────────────┘
+                            ▼
+                mask_logit [B, H', W', 1]
+
+    H' and W' are the input size times ``upsample_factor``.
+
+    :param dims: Channel dimension per ``DPTDecoder`` stage. ``None`` gives
+        ``[256, 128, 64, 32]``.
     :type dims: Optional[list]
     :param upsample_factor: Total bilinear upsampling factor. Must be a power
-        of 2.
+        of 2. Defaults to ``1``.
     :type upsample_factor: int
-    :param kernel_initializer: Initializer for every conv kernel.
+    :param kernel_initializer: Initializer for every conv kernel. Defaults to
+        ``"he_normal"``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer for every conv kernel.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param kwargs: Additional keyword arguments for the `Layer` base class.
+    :param kwargs: Additional ``Layer`` base-class arguments.
 
     Input shape:
         4D tensor ``(batch_size, height, width, channels)``.
@@ -192,9 +231,8 @@ class MaskHead(keras.layers.Layer):
         self.decoder = DPTDecoder(
             dims=self.dims,
             output_channels=1,
-            # DECISION plan-2026-09-11T050223-1b47bcf6/D-010: linear logits, not sigmoid.
-            # MaskLoss wraps BinaryCrossentropy(from_logits=True); a sigmoid here would
-            # double-apply the squash inside that loss's own BCE term. See decisions.md.
+            # DECISION D-010: linear logits, not sigmoid; MaskLoss wraps
+            # BinaryCrossentropy(from_logits=True). See decisions.md.
             output_activation="linear",
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -211,7 +249,7 @@ class MaskHead(keras.layers.Layer):
 
         :param inputs: Encoder spatial feature map, ``(B, H, W, C)``.
         :type inputs: keras.KerasTensor
-        :param training: Forwarded to the inner `DPTDecoder`.
+        :param training: Forwarded to the inner ``DPTDecoder``.
         :type training: Optional[bool]
         :return: Mask logits, ``(B, H*upsample_factor, W*upsample_factor, 1)``.
         :rtype: keras.KerasTensor
@@ -221,7 +259,7 @@ class MaskHead(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
-        :return: The base `Layer` config plus every constructor argument.
+        :return: The base ``Layer`` config plus every constructor argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -236,32 +274,52 @@ class MaskHead(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.omnipoint.heads.metric_scale_head")
 class MetricScaleHead(keras.layers.Layer):
-    """Global per-sample metric scale head: a 2-layer MLP over a pooled token.
+    """Predict one strictly positive metric scale per sample.
 
-    `DPTDecoder` is spatial-preserving and cannot express a pooled scalar
-    (`findings/model-house-patterns.md` #2), so this is new work: a small
-    ``Dense(hidden, relu) -> Dense(1, softplus)`` MLP over whatever single
-    ``(B, D)`` "metric token" the caller supplies -- see
-    `model.py`'s module docstring for which token that is and why.
+    A two-layer MLP over whichever single ``(B, D)`` pooled token the caller
+    supplies. The output is the scale itself, not its logarithm, because
+    ``MetricScaleLoss`` takes the log of its ``y_pred``. ``softplus`` gives
+    positivity and ``epsilon`` keeps the result away from exact zero.
 
-    Output activation is `softplus`, giving a strictly positive scale, NOT a
-    log-scale value -- see this module's docstring for why (`MetricScaleLoss`
-    takes the log itself).
+    Architecture:
 
-    :param hidden_dim: Width of the hidden `Dense` layer.
+    .. code-block:: text
+
+                   metric token [B, D]
+                            ▼
+            ┌───────────────────────────────┐
+            │ Dense(hidden_dim), relu       │
+            └───────────────┬───────────────┘
+                            ▼
+            ┌───────────────────────────────┐
+            │ Dense(1), linear              │
+            └───────────────┬───────────────┘
+                            ▼
+            ┌───────────────────────────────┐
+            │ max(softplus(x), epsilon)     │
+            └───────────────┬───────────────┘
+                            ▼
+            ┌───────────────────────────────┐
+            │ squeeze last axis             │
+            └───────────────┬───────────────┘
+                            ▼
+              scale [B], strictly positive
+
+    :param hidden_dim: Width of the hidden ``Dense`` layer. Defaults to
+        ``256``.
     :type hidden_dim: int
-    :param kernel_initializer: Initializer for both `Dense` kernels.
+    :param kernel_initializer: Initializer for both ``Dense`` kernels. Defaults
+        to ``"he_normal"``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for both `Dense` kernels.
+    :param kernel_regularizer: Optional regularizer for both ``Dense`` kernels.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param epsilon: Floor added under the `softplus` output so the scale never
-        underflows to exact ``0.0`` in float32 (mirrors
-        `RayPointCombinator`'s own distance-activation floor).
+    :param epsilon: Lower bound applied to the ``softplus`` output, so the
+        scale never reaches exact ``0.0`` in float32. Defaults to ``1e-8``.
     :type epsilon: float
-    :param kwargs: Additional keyword arguments for the `Layer` base class.
+    :param kwargs: Additional ``Layer`` base-class arguments.
 
     Input shape:
-        2D tensor ``(batch_size, embed_dim)``, a pooled/CLS token.
+        2D tensor ``(batch_size, embed_dim)``, a pooled or CLS token.
 
     Output shape:
         1D tensor ``(batch_size,)``, strictly positive.
@@ -288,10 +346,8 @@ class MetricScaleHead(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name="metric_scale_hidden",
         )
-        # Linear projection to a scalar; softplus + epsilon floor applied
-        # explicitly in `call()` (not as the Dense activation) so the floor is
-        # visible at the one call site that needs it, mirroring
-        # RayPointCombinator's own explicit-floor style.
+        # Linear here; softplus and the epsilon floor are applied in call(), so
+        # the floor stays visible at the one site that needs it.
         self.projection = keras.layers.Dense(
             1,
             activation="linear",
@@ -309,7 +365,7 @@ class MetricScaleHead(keras.layers.Layer):
 
         :param inputs: Pooled metric token, ``(B, D)``.
         :type inputs: keras.KerasTensor
-        :param training: Forwarded to the inner `Dense` layers.
+        :param training: Forwarded to the inner ``Dense`` layers.
         :type training: Optional[bool]
         :return: Positive scale, ``(B,)``.
         :rtype: keras.KerasTensor
@@ -324,7 +380,7 @@ class MetricScaleHead(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
-        :return: The base `Layer` config plus every constructor argument.
+        :return: The base ``Layer`` config plus every constructor argument.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()

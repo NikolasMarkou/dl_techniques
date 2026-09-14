@@ -73,10 +73,10 @@ Pre-normalization is the critical change from classic BERT:
 
 ```
 Input
-  ├─► Residual Path 1 ──────────────────────────────┐
+  ├─► Residual Path 1 ────────────────────────────────┐
   └─► LayerNorm ──► Attention (Local/Global) ──► Add ◄┘
   │
-  ├─► Residual Path 2 ──────────────────────────────┐
+  ├─► Residual Path 2 ─────────────────────────────────┐
   └─► LayerNorm ──► GeGLU FFN ──► Dropout ──────► Add ◄┘
   │
   ▼

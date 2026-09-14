@@ -50,7 +50,7 @@ class SHGCNModel(keras.Model):
 
             features [N, D_in]      adjacency [N, N]
                   │                        │
-                  ▼                        │
+                  ▼                        ▼
             ┌──────────────┐               │
             │ sHGCN layer 1├───────────────┤
             └──────┬───────┘               │

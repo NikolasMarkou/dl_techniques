@@ -73,7 +73,7 @@ class GraphEnergyTransformerBackbone(keras.Model):
         node_features [B, N, F]   adjacency, node_mask, pe (optional)
                 │
                 ▼
-        ┌───────────────┐
+        ┌────────────────┐
         │ node_proj      │
         │ [B, N, D]      │
         └───────┬────────┘
@@ -83,7 +83,7 @@ class GraphEnergyTransformerBackbone(keras.Model):
         (prepend cls_token)     (optional, 'use_cls'; N -> N+1)
                 │
                 ▼
-        ┌───────────────┐
+        ┌────────────────┐
         │ ET block x     │  call(): num_blocks, fed adjacency + node_mask
         │ num_blocks     │  descend_capture(): blocks[0] only, manual T steps
         └───────┬────────┘

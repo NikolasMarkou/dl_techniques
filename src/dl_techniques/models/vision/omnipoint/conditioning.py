@@ -1,50 +1,30 @@
-"""OmniPoint's optional geometric conditioning: intrinsics ray-map + sparse
-depth, wired into the ViT input stage.
+"""Optional geometric conditioning for OmniPoint.
 
-Fusion-point decision (decisions.md D-013, a genuine architectural fork -- see
-that entry for the full trade-off):
-    `OmniPoint`'s encoder is a plain `ViT` (D-009) whose `call()` only accepts
-    a raw pixel image -- it has no separate entry point for an already
-    patchified token sequence, so injecting conditioning "at the token level"
-    would mean re-implementing `ViT`'s own patch embedding here, duplicating
-    logic that already exists and works. The least invasive path that needs
-    NO change to `ViT` itself is: encode each conditioning signal into a
-    small number of extra full-resolution channels, then concatenate them
-    onto the RGB image BEFORE it enters the encoder. `OmniPoint` widens the
-    encoder's own `input_shape` channel count accordingly (`ViT`'s
-    `input_shape` is a generic ``(H, W, C)`` -- `PatchEmbedding2D`'s conv
-    kernel is built from whatever `C` it is given, so this needs no change to
-    `ViT`/`PatchEmbedding2D` either).
+``ConditioningInputEncoder`` encodes an intrinsics ray map and a sparse depth
+pair into a handful of full-resolution channels and concatenates them onto the
+RGB image, so conditioning enters before the ViT rather than at the token level.
+That leaves ``ViT`` and its patch embedding untouched: the encoder's
+``input_shape`` simply carries a wider channel count.
+``ConditioningStateEmbedding`` runs after the encoder instead, because the
+present/absent indicator it adds operates on a token sequence, which does not
+exist until the encoder has run. Every conditioning computation therefore sits
+in exactly one of two stages, pixel-space or token-space.
 
-    `StateIndicatorEmbedding` (per-sample present/absent) operates on a TOKEN
-    SEQUENCE, not a per-pixel map, so it cannot run at the same pre-encoder
-    point as the channel concatenation above -- there is no token sequence
-    yet. It is instead applied to the encoder's own output sequence
-    ``(B, N+1, D)``, immediately after the encoder call and before the
-    per-pixel/per-sample heads read it. This keeps every conditioning
-    computation in exactly one of two well-defined stages: pre-encoder
-    (pixel-space fusion) or post-encoder (token-space state embedding), never
-    both mixed, and requires no surgery on `ViT`'s internals in either stage.
-
-Mixed-batch / per-sample-flag contract (Problem Statement edge case):
-    A single `OmniPoint.call()` invocation is necessarily a whole-batch
-    decision about which OPTIONAL TENSORS are supplied at all (a Python
-    ``None`` vs a concrete tensor) -- that is a `call()`-signature-level
-    choice, not a per-sample one. Within a batch that DOES supply a
-    conditioning tensor, an explicit per-sample boolean flag
-    (``intrinsics_present`` / ``sparse_depth_present``, each ``(B,)``) then
-    marks which samples in that batch actually carry valid data for that
-    modality. Samples flagged absent have their conditioning channels forced
-    to exactly zero before pixel-space fusion (`ConditioningInputEncoder`)
-    and get the ``absent_embedding`` vector at the token-space stage
-    (`ConditioningStateEmbedding`) -- both signals agree, so the ONLY way a
-    sample's prediction can depend on this modality is if that sample's own
-    flag says it is present.
+A ``None`` tensor means the modality is absent for the whole batch. Within a
+batch that does supply a tensor, a per-sample boolean flag ``(B,)`` marks which
+samples carry valid data: those flagged absent have their conditioning channels
+zeroed before fusion and receive the absent embedding at the token stage, so a
+sample's prediction can depend on a modality only when its own flag marks that
+modality present. ``sparse_depth_mask`` is required whenever ``sparse_depth``
+is given.
 """
 
+import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
-import keras
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.layers.embedding.state_indicator_embedding import (
     StateIndicatorEmbedding,
@@ -54,41 +34,81 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-
 @register_dl_technique("dl_techniques.models.omnipoint.conditioning.input_encoder")
 class ConditioningInputEncoder(keras.layers.Layer):
-    """Pre-encoder pixel-space fusion: RGB + intrinsics + sparse-depth.
+    """Fuse an RGB image with intrinsics and sparse-depth channels.
 
-    Encodes an intrinsics ray map (already-computed per-pixel unit rays,
-    ``(B, H, W, 3)`` -- see ``utils/camera_models.py``) and a sparse depth
-    pair (``(sparse_depth, validity_mask)``, each ``(B, H, W, 1)``, densified
-    internally via :class:`~dl_techniques.layers.geometric.sparse_depth_splat.SparseDepthSplat`)
-    each through a small `Conv2D` stack into a handful of full-resolution
-    feature channels, then concatenates ``[image, intrinsics_features,
-    depth_features]`` along the channel axis.
+    The intrinsics ray map goes through a small ``Conv2D`` stack. The sparse
+    depth pair is densified by
+    :class:`~dl_techniques.layers.geometric.sparse_depth_splat.SparseDepthSplat`
+    into a depth map and a confidence map, which go through a second stack. Both
+    results are concatenated onto the image along the channel axis. Either
+    modality may be absent for the whole batch or for individual samples.
 
-    Either conditioning signal may be entirely absent for the whole batch
-    (pass ``None``); when present, an explicit per-sample boolean flag zeros
-    that sample's contribution before it is concatenated (see this module's
-    docstring, "Mixed-batch / per-sample-flag contract").
+    Architecture:
 
-    :param intrinsics_channels: Number of fusion channels the intrinsics
-        ray-map encoder emits.
+    .. code-block:: text
+
+        image [B,H,W,C]  intrinsics_ray_map   sparse_depth + mask
+              │                   │                     │
+              │          ┌───────────────────┐ ┌───────────────────┐
+              │          │ None -> all zeros │ │ None -> all zeros │
+              │          │ flag -> zero rows │ │ flag -> zero rows │
+              │          └─────────┬─────────┘ └─────────┬─────────┘
+              │                    │                     ▼
+              │                    │           ┌───────────────────┐
+              │                    │           │ SparseDepthSplat  │
+              │                    │           │  dense+confidence │
+              │                    │           └─────────┬─────────┘
+              │                    ▼                     ▼
+              │          ┌───────────────────┐ ┌───────────────────┐
+              │          │ Conv2D hidden relu│ │ Conv2D hidden relu│
+              │          │ Conv2D out linear │ │ Conv2D out linear │
+              │          └─────────┬─────────┘ └─────────┬─────────┘
+              │               [B,H,W,ic]            [B,H,W,dc]
+              ▼                    ▼                     ▼
+        ┌─────────────────────────────────────────────────────────┐
+        │ concatenate along the channel axis                      │
+        └────────────────────────────┬────────────────────────────┘
+                                     ▼
+                      fused [B, H, W, C+ic+dc]
+
+    Absence handling, per modality:
+
+    .. code-block:: text
+
+        tensor        *_present     effect
+        ──────────    ──────────    ─────────────────────────────
+        None          any           channels are all zero
+        given         None          every sample contributes
+        given         given         flagged-absent samples zeroed
+
+    :param intrinsics_channels: Fusion channels emitted by the intrinsics
+        encoder. Defaults to ``4``.
     :type intrinsics_channels: int
-    :param depth_channels: Number of fusion channels the sparse-depth encoder
-        emits.
+    :param depth_channels: Fusion channels emitted by the sparse-depth encoder.
+        Defaults to ``4``.
     :type depth_channels: int
-    :param conv_hidden_channels: Hidden width of both small `Conv2D` stacks.
+    :param conv_hidden_channels: Hidden width of both ``Conv2D`` stacks.
+        Defaults to ``16``.
     :type conv_hidden_channels: int
-    :param splat_kernel_size: Forwarded to `SparseDepthSplat`.
+    :param splat_kernel_size: Forwarded to ``SparseDepthSplat``. Defaults to
+        ``(9, 9)``.
     :type splat_kernel_size: Tuple[int, int]
-    :param splat_sigma: Forwarded to `SparseDepthSplat`.
+    :param splat_sigma: Forwarded to ``SparseDepthSplat``. Defaults to ``2.0``.
     :type splat_sigma: float
-    :param kernel_initializer: Initializer for every conv kernel.
+    :param kernel_initializer: Initializer for every conv kernel. Defaults to
+        ``"he_normal"``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer for every conv kernel.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+    :param kwargs: Additional ``Layer`` base-class arguments.
+
+    Input shape:
+        ``image``: 4D ``(batch_size, height, width, image_channels)``.
+        ``intrinsics_ray_map``: 4D ``(batch_size, height, width, 3)``.
+        ``sparse_depth`` and ``sparse_depth_mask``: 4D
+        ``(batch_size, height, width, 1)``.
 
     Output shape:
         4D tensor ``(batch_size, height, width, image_channels +
@@ -146,28 +166,19 @@ class ConditioningInputEncoder(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple) -> None:
-        """Eagerly build every sublayer, independent of the runtime branch.
+        """Build every sublayer, whichever modalities a later call supplies.
 
-        `call()` conditionally skips `self.splat` when `sparse_depth` is
-        `None` for a whole batch. Left to Keras 3's default auto-build, that
-        branch would leave `self.splat` (and transitively its two
-        `GaussianFilter` sublayers) unbuilt whenever a test/caller happens to
-        never supply sparse depth, which Keras reports as "unbuilt state" on
-        THIS layer once it is otherwise marked built. Building every
-        sublayer here with a channel-count-only dummy shape (none of these
-        convs need a real spatial resolution to build their kernel) avoids
-        that regardless of which conditioning signals a given call supplies.
+        The convs need only a channel count, not a spatial size, so each is
+        built from a dummy shape here. ``self.splat`` runs only when sparse
+        depth is given, so leaving it to auto-build would leave it unbuilt for
+        callers that never supply that modality.
 
-        :param input_shape: Shape of the ``image`` argument (the input this
-            layer is invoked on first, positionally).
+        :param input_shape: Shape of the ``image`` argument, which is the first
+            positional input this layer is invoked on.
         :type input_shape: tuple
         """
-        # DECISION plan-2026-09-11T050223-1b47bcf6/D-015: build every
-        # sublayer HERE, unconditionally -- `self.splat` is only CALLED when
-        # sparse_depth is supplied, but its weights must still exist
-        # regardless, or Keras 3 reports "unbuilt state" on this layer (an
-        # `error::UserWarning`-promoted hard failure) whenever a test/caller
-        # happens to never supply that modality. See decisions.md.
+        # DECISION D-015: build every sublayer here, unconditionally; an unbuilt
+        # self.splat makes Keras 3 report unbuilt state. See decisions.md.
         self.intrinsics_conv1.build((None, None, None, 3))
         self.intrinsics_conv2.build((None, None, None, self.conv_hidden_channels))
         self.depth_conv1.build((None, None, None, 2))
@@ -180,12 +191,12 @@ class ConditioningInputEncoder(keras.layers.Layer):
             tensor: keras.KerasTensor,
             present: Optional[keras.KerasTensor],
     ) -> keras.KerasTensor:
-        """Multiply out samples whose per-sample flag marks them absent.
+        """Zero the samples whose per-sample flag marks them absent.
 
         :param tensor: A per-sample tensor, ``(B, ...)``.
         :type tensor: keras.KerasTensor
-        :param present: Optional boolean/0-1 flag, ``(B,)`` or ``(B, 1)``.
-            ``None`` means "all present" (no-op).
+        :param present: Optional boolean or 0-1 flag, ``(B,)`` or ``(B, 1)``.
+            ``None`` leaves the tensor unchanged.
         :type present: Optional[keras.KerasTensor]
         :return: ``tensor``, unchanged where ``present`` is truthy and zeroed
             where it is not.
@@ -194,7 +205,7 @@ class ConditioningInputEncoder(keras.layers.Layer):
         if present is None:
             return tensor
         present = keras.ops.cast(present, tensor.dtype)
-        # Reshape (B,) or (B, 1) -> (B, 1, 1, 1) to broadcast against (B, H, W, C).
+        # Reshape to (B, 1, 1, 1) so it broadcasts against (B, H, W, C).
         present = keras.ops.reshape(present, (-1, 1, 1, 1))
         return tensor * present
 
@@ -208,26 +219,24 @@ class ConditioningInputEncoder(keras.layers.Layer):
             sparse_depth_present: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Fuse the RGB image with the (optional) conditioning signals.
+        """Fuse the RGB image with the optional conditioning signals.
 
         :param image: RGB image batch, ``(B, H, W, image_channels)``.
         :type image: keras.KerasTensor
         :param intrinsics_ray_map: Optional per-pixel unit ray map,
             ``(B, H, W, 3)``. ``None`` means absent for the whole batch.
         :type intrinsics_ray_map: Optional[keras.KerasTensor]
-        :param intrinsics_present: Optional per-sample flag, ``(B,)``.
-            Defaults to "all present" when ``intrinsics_ray_map`` is given and
-            this is omitted.
+        :param intrinsics_present: Optional per-sample flag, ``(B,)``. Omitting
+            it treats every sample as present.
         :type intrinsics_present: Optional[keras.KerasTensor]
         :param sparse_depth: Optional sparse depth values, ``(B, H, W, 1)``.
             ``None`` means absent for the whole batch.
         :type sparse_depth: Optional[keras.KerasTensor]
-        :param sparse_depth_mask: Required companion validity mask when
+        :param sparse_depth_mask: Companion validity mask, required when
             ``sparse_depth`` is given, ``(B, H, W, 1)``.
         :type sparse_depth_mask: Optional[keras.KerasTensor]
         :param sparse_depth_present: Optional per-sample flag, ``(B,)``.
-            Defaults to "all present" when ``sparse_depth`` is given and this
-            is omitted.
+            Omitting it treats every sample as present.
         :type sparse_depth_present: Optional[keras.KerasTensor]
         :param training: Forwarded to every inner sublayer.
         :type training: Optional[bool]
@@ -298,16 +307,35 @@ class ConditioningInputEncoder(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.omnipoint.conditioning.state_embedding")
 class ConditioningStateEmbedding(keras.layers.Layer):
-    """Post-encoder token-space fusion: two `StateIndicatorEmbedding` calls.
+    """Add present and absent indicators for both modalities to a token sequence.
 
-    Adds the intrinsics present/absent embedding, then the sparse-depth
-    present/absent embedding, to the encoder's own output token sequence.
-    See this module's docstring, "Mixed-batch / per-sample-flag contract".
+    Two :class:`StateIndicatorEmbedding` layers run in turn, one per modality.
+    Each selects a learned vector according to the sample's flag and adds it to
+    every token of that sample, so the encoder's output carries which modalities
+    the sample actually had.
 
-    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+    Architecture:
+
+    .. code-block:: text
+
+                  tokens [B, N, D]
+                            ▼
+            ┌───────────────────────────┐
+            │ StateIndicatorEmbedding   │ ◄── intrinsics_present
+            └─────────────┬─────────────┘
+                          ▼
+            ┌───────────────────────────┐
+            │ StateIndicatorEmbedding   │ ◄── sparse_depth_present
+            └─────────────┬─────────────┘
+                          ▼
+                  tokens [B, N, D]
+
+    :param kwargs: Additional ``Layer`` base-class arguments.
 
     Input shape:
         ``tokens``: 3D ``(batch_size, sequence_length, dim)``.
+        ``intrinsics_present`` and ``sparse_depth_present``: 1D
+        ``(batch_size,)``.
 
     Output shape:
         3D tensor, same shape as ``tokens``.
@@ -325,7 +353,7 @@ class ConditioningStateEmbedding(keras.layers.Layer):
             sparse_depth_present: keras.KerasTensor,
             training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Add both present/absent embeddings to ``tokens``.
+        """Add both present and absent embeddings to ``tokens``.
 
         :param tokens: Encoder output sequence, ``(B, N, D)``.
         :type tokens: keras.KerasTensor
@@ -345,8 +373,8 @@ class ConditioningStateEmbedding(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
-        :return: The base ``Layer`` config (this layer has no extra
-            constructor arguments of its own).
+        :return: The base ``Layer`` config; this layer adds no constructor
+            arguments of its own.
         :rtype: dict
         """
         return super().get_config()

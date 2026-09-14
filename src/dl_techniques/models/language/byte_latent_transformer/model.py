@@ -60,7 +60,7 @@ class ByteLatentTransformer(keras.Model):
         bytes [B, S] ──► EntropyModel ──► DynamicPatcher ──► patch_ids [B, S]
               │                                                    │
               ▼                                                    │
-        LocalEncoder ◄──────────────────────────────────────────────
+        LocalEncoder ◄─────────────────────────────────────────────┘
               │  patches [B, P, global_dim]
               ▼
         GlobalTransformer
