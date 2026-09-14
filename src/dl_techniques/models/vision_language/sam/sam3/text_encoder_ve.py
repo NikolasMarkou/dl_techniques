@@ -25,7 +25,7 @@ References:
 """
 
 import keras
-from keras import layers, ops
+from keras import layers
 from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -33,6 +33,7 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.layers.transformers.text_encoder import TextEncoder
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -167,29 +168,6 @@ class Sam3TextEncoder(keras.layers.Layer):
         self.resizer.build(tuple(input_shape) + (self.width,))
         super().build(input_shape)
 
-    def causal_keep_mask(
-            self, batch_size: Any, seq_len: Any
-    ) -> keras.KerasTensor:
-        """Build the lower-triangular boolean KEEP mask.
-
-        ``mask[b, q, k]`` is ``True`` exactly when query position ``q`` may
-        attend key position ``k``, i.e. when ``k <= q``. This is a KEEP
-        predicate, not the additive ``-inf`` form the reference uses; the
-        wrapped attention path consumes keep predicates.
-
-        :param batch_size: Batch size (a tensor scalar is fine).
-        :type batch_size: Any
-        :param seq_len: Sequence length (a tensor scalar is fine).
-        :type seq_len: Any
-        :return: Boolean mask ``(batch, seq, seq)``.
-        :rtype: keras.KerasTensor
-        """
-        positions = ops.arange(seq_len)
-        keep = ops.expand_dims(positions, -1) >= ops.expand_dims(positions, 0)
-        return ops.broadcast_to(
-            ops.expand_dims(keep, axis=0), (batch_size, seq_len, seq_len)
-        )
-
     def call(
             self, inputs: keras.KerasTensor, training: Optional[bool] = None,
     ) -> keras.KerasTensor:
@@ -202,8 +180,7 @@ class Sam3TextEncoder(keras.layers.Layer):
         :return: Per-token features ``(batch, seq, d_model)``.
         :rtype: keras.KerasTensor
         """
-        shape = ops.shape(inputs)
-        mask = self.causal_keep_mask(shape[0], shape[1])
+        mask = create_causal_attend_mask(inputs)
         features = self.encoder(inputs, attention_mask=mask, training=training)
         return self.resizer(features, training=training)
 
