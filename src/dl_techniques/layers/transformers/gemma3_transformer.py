@@ -43,6 +43,7 @@ from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.activations import gelu_tanh
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.utils.masking import create_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -340,15 +341,13 @@ class Gemma3TransformerBlock(keras.layers.Layer):
         :return: Boolean mask of shape ``(seq_len, seq_len)``, ``True`` = suppress.
         :rtype: keras.KerasTensor
         """
-        i = keras.ops.arange(seq_len)[:, None]
-        j = keras.ops.arange(seq_len)
-        causal_mask = j > i
-
         if self.attention_type == "sliding_window":
-            far_past_mask = (i - j) >= self.sliding_window_size
-            return keras.ops.logical_or(causal_mask, far_past_mask)
+            return create_mask(
+                'sliding_window', seq_len=seq_len,
+                window_size=self.sliding_window_size, dtype='bool',
+            )
         # 'full_attention'
-        return causal_mask
+        return create_mask('causal', seq_len=seq_len, dtype='bool')
 
     def call(
         self,
