@@ -67,7 +67,7 @@ class StrongAugmentation(keras.layers.Layer):
         │  Color Jitter                    │
         │  brightness: I * alpha           │
         │  contrast: (I-mu)*beta + mu      │
-        │  clip to input_value_range        │
+        │  clip to input_value_range       │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
