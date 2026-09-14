@@ -20,6 +20,7 @@ import keras
 import tensorflow as tf
 import tempfile
 import os
+import functools
 from typing import Dict, Any
 from unittest import mock
 
@@ -1340,6 +1341,188 @@ class TestMambaLayerCheckpointedScanGradients:
             rtol=0,
             err_msg="forward output changed depending on GradientTape presence",
         )
+
+
+def _old_formula_selective_scan(self, u, delta, A, B, C, D, z):
+    """Reference reimplementation of the pre-D-003 ``_selective_scan``: the
+    full-sequence ``deltaA``/``deltaB_u`` precompute this plan's Step 2
+    replaced, before any code was moved into the ``while_loop`` body.
+
+    This performs the IDENTICAL arithmetic in the IDENTICAL order to the
+    shipped chunked scan -- only WHERE ``deltaA``/``deltaB_u`` are computed
+    changed (precomputed as full ``(batch, d_inner, seq_len, d_state)``
+    tensors here, vs. sliced per-timestep in the shipped version) -- so no
+    floating-point reassociation is introduced and forward/gradient agreement
+    is expected to be bit-exact, not merely close. See
+    `plans/plan-2026-09-14T042205-a11f6af3/decisions.md` D-003 for the
+    measured (bit-exact, max_abs_diff=0.0) outcome this reproduces as a
+    permanent test.
+
+    :param self: The owning `MambaLayer` (bound via `functools.partial` when
+        this function is patched in as the instance's `_selective_scan`).
+    :param u: Input tensor after convolution, shape (batch, d_inner, seq_len).
+    :param delta: Step size delta, shape (batch, d_inner, seq_len).
+    :param A: State transition matrix, shape (d_inner, d_state).
+    :param B: Input matrix, shape (batch, d_state, seq_len).
+    :param C: Output matrix, shape (batch, d_state, seq_len).
+    :param D: Skip connection parameter, shape (d_inner,).
+    :param z: Gating tensor, shape (batch, d_inner, seq_len).
+    :return: Output tensor, shape (batch, d_inner, seq_len).
+    """
+    seq_len = int(u.shape[-1])
+
+    # DECISION plan-2026-09-14T042205-a11f6af3/D-003: mirrors D-044's dtype
+    # discipline (scan runs in variable_dtype) exactly as the shipped scan
+    # does -- see decisions.md.
+    scan_dtype = self.variable_dtype
+    u = keras.ops.cast(u, scan_dtype)
+    delta = keras.ops.cast(delta, scan_dtype)
+    A = keras.ops.cast(A, scan_dtype)
+    B = keras.ops.cast(B, scan_dtype)
+    C = keras.ops.cast(C, scan_dtype)
+    D = keras.ops.cast(D, scan_dtype)
+
+    # The pre-D-003 full-sequence precompute (the form Step 2 eliminated).
+    deltaA = keras.ops.exp(keras.ops.einsum("bdl,dn->bdln", delta, A))
+    deltaB_u = keras.ops.einsum("bdl,bnl,bdl->bdln", delta, B, u)
+
+    batch_size, d_inner = int(u.shape[0]), int(u.shape[1])
+    h = keras.ops.zeros((batch_size, d_inner, self.d_state), dtype=scan_dtype)
+    ys = []
+    for t in range(seq_len):
+        h = deltaA[:, :, t] * h + deltaB_u[:, :, t]
+        y_t = keras.ops.einsum("bdn,bn->bd", h, C[:, :, t])
+        ys.append(y_t)
+    y = keras.ops.stack(ys, axis=-1)  # (batch, d_inner, seq_len)
+
+    y = y + keras.ops.expand_dims(keras.ops.expand_dims(D, 0), -1) * u
+    y = keras.ops.cast(y, self.compute_dtype)
+    return y * self.activation(z)
+
+
+class TestMambaLayerChunkedScanForwardAndGradientNumerics:
+    """Step 3 of `plan-2026-09-14T042205-a11f6af3`: the chunked
+    `_selective_scan` (D-003, Step 2) must be numerically identical -- both
+    forward and gradient -- to the pre-chunking full-sequence-precompute form
+    it replaced. Step 2's own verification (bit-exact, ``max_abs_diff=0.0``,
+    against a real `MambaLayer`'s actual sublayer outputs) was a standalone,
+    uncommitted scratchpad script; this class is the permanent, committed
+    re-verification the plan requires, using the same "drive real sublayers,
+    compare both scan forms" approach rather than toy tensors.
+    """
+
+    def _build_layer_and_input(self):
+        """A small, built `MambaLayer` and a fixed input, for CPU-only tests."""
+        layer = MambaLayer(d_model=8, d_state=4, d_conv=2, expand=2, dt_rank=2)
+        x = keras.ops.convert_to_tensor(
+            np.random.default_rng(1).standard_normal((2, 6, 8)).astype("float32")
+        )
+        # First call builds the layer's weights.
+        layer(x, training=True)
+        return layer, x
+
+    def test_forward_pass_matches_old_precompute_formula_exactly(self):
+        """Forward output must match the old precompute formula BIT-EXACTLY
+        (``atol=0``, ``rtol=0``) on a real layer's real sublayer outputs --
+        the same class of comparison as Step 2's own independent scratchpad
+        verification. Asserting exact equality (rather than a derived
+        tolerance) is justified because both forms compute the identical
+        einsums in the identical order; only the LOCATION (precomputed vs.
+        per-step-sliced) differs, so no reduction is reassociated.
+        """
+        layer, x = self._build_layer_and_input()
+
+        y_chunked = layer(x, training=True)
+
+        with mock.patch.object(
+            layer,
+            "_selective_scan",
+            functools.partial(_old_formula_selective_scan, layer),
+        ):
+            y_old = layer(x, training=True)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y_chunked),
+            keras.ops.convert_to_numpy(y_old),
+            atol=0,
+            rtol=0,
+            err_msg="chunked scan forward output diverges from the old precompute formula",
+        )
+
+    def test_gradients_match_old_precompute_formula_per_weight(self):
+        """Gradients w.r.t. EVERY trainable weight must agree between the
+        chunked scan and the old precompute formula -- not just an aggregate
+        loss scalar. Per-weight granularity is this plan lineage's own
+        established convention (D-002/D-003's `self.D` gradient-doubling
+        defect was only caught this way, not by an aggregate loss gradient).
+
+        Unlike the forward pass (bit-exact, see above), a clean re-run showed
+        gradients disagree at float32-reassociation scale (measured: max
+        absolute violation 1.14e-13, max relative 1.87e-06) -- not the
+        forward computation itself, but `tf.recompute_grad`'s backward
+        re-execution of `_selective_scan` visits the einsum contractions in a
+        different order than autodiff's direct backward graph would, per the
+        exact reassociation mechanism `reassociation_atol` (`tests/numerics.py`)
+        exists to bound. Asserting `atol=0` here would fail on this noise, not
+        on a real defect -- so this test uses the derived bound, matching
+        `TestMambaLayerCheckpointedScanGradients` above, rather than a
+        hand-pasted tolerance.
+        """
+        layer, x = self._build_layer_and_input()
+        seq_len = int(x.shape[1])
+
+        with tf.GradientTape() as tape:
+            y = layer(x, training=True)
+            loss = keras.ops.mean(keras.ops.square(y))
+        chunked_grads = tape.gradient(loss, layer.trainable_weights)
+
+        with mock.patch.object(
+            layer,
+            "_selective_scan",
+            functools.partial(_old_formula_selective_scan, layer),
+        ):
+            with tf.GradientTape() as tape:
+                y = layer(x, training=True)
+                loss = keras.ops.mean(keras.ops.square(y))
+            old_grads = tape.gradient(loss, layer.trainable_weights)
+
+        weights = layer.trainable_weights
+        assert len(chunked_grads) == len(weights)
+        assert len(old_grads) == len(weights)
+
+        checked_any = False
+        for w, g_chunked, g_old in zip(weights, chunked_grads, old_grads):
+            assert g_chunked is not None, f"{w.path}: chunked-scan gradient is None"
+            assert g_old is not None, f"{w.path}: old-formula gradient is None"
+
+            g_chunked_np = keras.ops.convert_to_numpy(g_chunked)
+            g_old_np = keras.ops.convert_to_numpy(g_old)
+
+            # Same per-op-chain convention as
+            # `TestMambaLayerCheckpointedScanGradients`: the dominant per-step
+            # reduction is the state-axis contraction in
+            # `einsum("bdn,bn->bd", h, C[:, :, t])`, applied once per
+            # sequence step.
+            scale = float(max(np.abs(g_chunked_np).max(), np.abs(g_old_np).max()))
+            atol = reassociation_atol([layer.d_state], seq_len, scale=scale)
+
+            np.testing.assert_allclose(
+                g_chunked_np,
+                g_old_np,
+                atol=atol,
+                rtol=0,
+                err_msg=f"gradient mismatch for weight {w.path}",
+            )
+            checked_any = True
+
+        assert checked_any, "no trainable weight was found to compare"
+
+    def test_gradient_flow_oracle_passes_with_the_chunked_scan(self):
+        """RED-proof: the chunked scan must not silently disconnect any
+        trainable weight from the backward graph.
+        """
+        layer, x = self._build_layer_and_input()
+        assert_gradients_reach_every_trainable_weight(layer, x, training=True)
 
 
 if __name__ == "__main__":
