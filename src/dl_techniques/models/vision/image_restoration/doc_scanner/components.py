@@ -420,8 +420,8 @@ class DocScannerResidualBlock(keras.layers.Layer):
        ``extractor.py:33-39`` reads ``y = relu(norm2(conv2(y)))`` and then
        ``return relu(x + y)``. That is not the usual ResNet ordering (which
        adds the un-activated branch), and it is why
-       :class:`~dl_techniques.layers.standard_blocks.BasicBlock` is not reused
-       here -- see the class-level note in
+       :class:`~dl_techniques.layers.conv_blocks.basic_block.BasicBlock` is not
+       reused here -- see the class-level note in
        :class:`DocScannerFeatureEncoder`.
     2. **The shortcut is an identity ONLY when ``stride == 1``**, and the
        reference then also requires ``C_in == filters``, because it adds the
@@ -642,7 +642,7 @@ class DocScannerFeatureEncoder(keras.layers.Layer):
     would half-rectify the hidden state before ``tanh`` ever saw it.
 
     Why this is not
-    :class:`~dl_techniques.layers.standard_blocks.BasicBlock`
+    :class:`~dl_techniques.layers.conv_blocks.basic_block.BasicBlock`
     ---------------------------------------------------------
     ``BasicBlock`` is close -- two 3x3 convs, an optional 1x1 projection, an
     add -- but it differs on three points that all matter here, and the first

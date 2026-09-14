@@ -102,6 +102,9 @@ class BottleneckBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.normalization_type = normalization_type
         # DECISION plan_2026-05-18_6776f8ba/D-003 (parallel to BasicBlock above).
+        # [plan-2026-09-14T165315-47f9d575/D-006] locator: BasicBlock now lives
+        # in basic_block.py, not "above" in this file (relocated from the
+        # shared standard_blocks.py). Appended, not reworded.
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
         self.activation_type = activation_type
         self.expansion = 4  # Bottleneck expansion factor

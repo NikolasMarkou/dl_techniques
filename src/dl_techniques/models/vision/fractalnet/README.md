@@ -206,7 +206,7 @@ print(predictions.shape)  # (16, 10)
 | `FractalNet` | `dl_techniques.models.vision.fractalnet.model` | The Keras `Model` that assembles the fractal stages and the head. |
 | `create_fractal_net` | `dl_techniques.models.vision.fractalnet.model` | Builds a variant **and compiles it**. Use this unless you want to compile yourself. |
 | `FractalBlock` | `dl_techniques.layers.fractal_block` | The recursive block. Drop-path lives in its `_join`. |
-| `ConvBlock` | `dl_techniques.layers.standard_blocks` | The base-case unit at the leaves. |
+| `ConvBlock` | `dl_techniques.layers.conv_blocks.conv_block` | The base-case unit at the leaves. |
 
 ### Key constructor arguments
 

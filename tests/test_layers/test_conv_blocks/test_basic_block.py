@@ -16,6 +16,12 @@ import tensorflow as tf
 
 from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
 
+# The XLA-vs-eager tolerance below was derived CPU-only; on a TF32-capable GPU
+# the tensor-core matmul path misses it by ~50x (measured, review-iter-1.md
+# concern 1). Opt into the module-scoped disable/restore fixture rather than
+# widening the tolerance.
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
+
 B = 2
 
 

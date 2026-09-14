@@ -17,7 +17,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from ..norms import create_normalization_layer
-from ..activations import create_activation_layer, resolve_activation_layer
+from ..activations import resolve_activation_layer
 from ..activations.factory import ACTIVATION_REGISTRY
 from dl_techniques.utils.keras_registration import register_dl_technique
 
