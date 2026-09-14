@@ -22,9 +22,14 @@ import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import layers, initializers, regularizers, activations
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 def resolve_num_groups(group_size: int, in_channels: int) -> int:
     """Resolve timm's ``num_groups(group_size, in_chs)`` mapping.
@@ -53,7 +58,7 @@ def resolve_num_groups(group_size: int, in_channels: int) -> int:
         )
     return in_channels // group_size
 
-
+# ---------------------------------------------------------------------
 # DECISION plan-2026-08-13T183738-24486492/D-007: norm_epsilon and padding_mode
 # default to Keras' own behaviour (1e-3, asymmetric 'same'), not the MobileOne/FastViT
 # reference (1e-5, symmetric k//2) -- fastvlm depends on the current defaults. See decisions.md.
@@ -61,6 +66,7 @@ def resolve_num_groups(group_size: int, in_channels: int) -> int:
 #: and the FastViT blocks.
 PADDING_MODES = ('keras_same', 'reference')
 
+# ---------------------------------------------------------------------
 
 def resolve_conv_padding(
         kernel_size: int,
@@ -104,6 +110,7 @@ def resolve_conv_padding(
         return kernel_size // 2, 'valid'
     return 0, padding
 
+# ---------------------------------------------------------------------
 
 def conv_output_size(
         size: Optional[int],
@@ -137,6 +144,7 @@ def conv_output_size(
         return (size + stride - 1) // stride
     return (size + 2 * pad - kernel_size) // stride + 1
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.conv_blocks.mobile_one_block")
 class MobileOneBlock(keras.layers.Layer):
@@ -621,3 +629,5 @@ class MobileOneBlock(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

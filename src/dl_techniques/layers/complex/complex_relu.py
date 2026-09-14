@@ -47,7 +47,7 @@ class ComplexReLU(keras.layers.Layer):
         │ split: real, imag         │
         │ relu each independently   │
         └─────────────┬─────────────┘
-                       ▼
+                      ▼
         Output [..., D] (complex)
 
     Example:

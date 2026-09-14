@@ -20,15 +20,15 @@ Architecture:
 
         ┌────────────────────────────────────────────┐
         │  Input (batch, T, H, W, C)                 │
-        └──────────────────┬───────────────────────────┘
+        └──────────────────┬─────────────────────────┘
                            ▼
         ┌────────────────────────────────────────────┐
         │  Conv3D(filters=embed_dim,                 │
-        │         kernel=(tubelet, P_h, P_w),         │
-        │         stride=(tubelet, P_h, P_w),         │
-        │         padding="valid")                    │
-        │  → (batch, T/tubelet, H/P_h, W/P_w, D)      │
-        └──────────────────┬───────────────────────────┘
+        │         kernel=(tubelet, P_h, P_w),        │
+        │         stride=(tubelet, P_h, P_w),        │
+        │         padding="valid")                   │
+        │  → (batch, T/tubelet, H/P_h, W/P_w, D)     │
+        └──────────────────┬─────────────────────────┘
                            │
              flatten=False │ flatten=True (default)
              ┌─────────────┴─────────────┐

@@ -50,7 +50,7 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         │ split: real, imag          │
         │ avg-pool each independently│
         └─────────────┬──────────────┘
-                       ▼
+                      ▼
         Output [B, H', W', C] (complex)
 
     :param pool_size: Height and width of the pooling window. Defaults to

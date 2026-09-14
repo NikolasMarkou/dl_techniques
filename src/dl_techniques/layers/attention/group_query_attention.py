@@ -104,7 +104,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         │    Q [B, num_heads,    S, d_h]                  │  │
         │    K [B, num_kv_heads, S, d_h]                  │  │
         └───────┬─────────────────────┬───────────────────┘  │
-                │                     │                      │
+                ▼                     ▼                      │
         ┌─────────────────────────────────────────────────┐  │
         │  optional RoPE(Q), RoPE(K)                      │  │
         │  optional q_norm(Q), k_norm(K)                  │  │

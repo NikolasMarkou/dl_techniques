@@ -17,10 +17,15 @@ References:
 import keras
 from typing import Dict, Optional, Tuple, Union, Callable, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.conv_blocks.squeeze_excitation")
 class SqueezeExcitation(keras.layers.Layer):
@@ -294,3 +299,5 @@ class SqueezeExcitation(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

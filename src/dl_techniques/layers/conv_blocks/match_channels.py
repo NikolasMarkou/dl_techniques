@@ -16,6 +16,11 @@ bias-free, scale-homogeneous invariant the surrounding network has.
 
 import keras
 from typing import Any, Dict, Optional, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

@@ -1420,7 +1420,7 @@ class LocalDecoder(keras.layers.Layer):
         │ positional embedding     │        │
         └──────────────────────────┘        │
               │ [B, S, D_l]                 │
-              ▼                             │
+              ▼                             ▼
         ┌──────────────────────────────────────────┐
         │ x N:                                     │
         │   transformer layer ◄── causal mask      │

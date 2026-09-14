@@ -1,30 +1,21 @@
-"""H-Net's routing module: learned adjacent-token boundary detection.
+"""Routing module for H-Net dynamic chunking.
 
-``RoutingModule`` is the first of H-Net's three dynamic-chunking layers. It reads
-a full-resolution sequence ``(B, L, D)`` and decides, for every position, whether
-a new chunk begins there. The decision is a cosine dissimilarity between two
-learned projections of *adjacent* hidden states::
+``RoutingModule`` reads a full-resolution sequence ``(B, L, D)`` and decides, for
+every position, whether a new chunk begins there. It scores a position by the
+cosine dissimilarity between two learned projections of adjacent hidden states,
 
     p_{t+1} = clip((1 - cos(q(h_t), k(h_{t+1}))) / 2, 0, 1)
 
 so a position whose predecessor points in a different direction gets a high
-boundary probability. Position 0 is forced to ``p = 1.0``: every sequence starts
-a chunk. Both projections are initialised to the identity, which makes the layer
-compute *raw* adjacent cosine similarity at step 0 and lets it learn away from
-that as training proceeds.
+boundary probability. Both projections start at the identity, so an untrained
+layer computes raw adjacent cosine similarity. Position 0 is forced to
+``p = 1.0``, and the hard decision is the strict comparison ``p > 0.5``.
 
-The layer is a faithful port of the padded/masked branch of
-``RoutingModule.forward`` in the reference implementation
-(``hnet/modules/dc.py:69-138``, vendored for the test suite under
-``tests/test_layers/test_dynamic_chunking/_reference/``). The packed
-(``cu_seqlens``) branch and the ``inference_params`` cache path are deliberately
-not ported -- see the plan decision D-007 recorded in
-``plans/plan-2026-09-09T042752-6d66ac56/decisions.md``.
-
-Only ``selected_probs`` is differentiable with respect to the projections; the
-boolean ``boundary_mask`` is a hard decision with no gradient, and the downstream
-stack recovers a gradient path through the straight-through residual gate and
-through the ratio loss, not through the mask.
+Only the padded branch of the reference implementation is ported; the packed
+``cu_seqlens`` branch and the ``inference_params`` cache path are absent. The
+last axis of the input must equal ``d_model``. Of the three outputs, only
+``selected_probs`` carries a gradient back to the projections; the boolean
+``boundary_mask`` is a hard decision with no gradient.
 
 References:
     - Hwang et al., 2025. Dynamic Chunking for End-to-End Hierarchical Sequence
@@ -41,58 +32,85 @@ import keras
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
-#: ``torch.nn.functional.normalize`` default epsilon (``dc.py:88-89``). The
-#: denominator is ``max(||x||_2, eps)``, NOT ``||x||_2 + eps`` -- the clamp form
-#: sends an all-zero row (which a padding mask produces) to exactly zero rather
-#: than to NaN.
+#: Denominator floor used by ``torch.nn.functional.normalize`` (dc.py:88-89).
+#: The clamp form max(||x||, eps) maps an all-zero row to zero, not to NaN.
 NORMALIZE_EPS = 1e-12
 
-#: ``PAD_PROB`` -- the forced boundary probability of position 0 (``dc.py:95-96``).
+#: Forced boundary probability of position 0 (dc.py:95-96).
 FORCED_FIRST_BOUNDARY_PROB = 1.0
-
 
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.dynamic_chunking.routing_module")
 class RoutingModule(keras.layers.Layer):
-    """Boundary-detection head of H-Net's dynamic chunking.
+    """Detect chunk boundaries from the similarity of adjacent hidden states.
+
+    The layer projects each position and its successor through two separate
+    weight matrices, normalizes both, and turns their cosine similarity into a
+    boundary probability. Position 0 is prepended at probability 1.0 so every
+    row starts a chunk. The probability feeds three outputs: the two-class
+    distribution, the hard boolean mask, and the probability of whichever class
+    won.
 
     Architecture:
 
     .. code-block:: text
 
-        hidden_states (B, L, D)          mask (B, L)
-              |                                |
-              +---------------+                |
-              |               |                |
-        h[:, :-1]          h[:, 1:]            |
-              |               |                |
-          q_proj (D->D)   k_proj (D->D)        |
-          identity init   identity init        |
-              |               |                |
-          L2 normalize    L2 normalize         |
-              \\             /                 |
-               cosine similarity (B, L-1)      |
-                      |                        |
-             p = clip((1 - cos)/2, 0, 1)       |
-                      |                        |
-            left-pad position 0 with 1.0       |
-                      |                        |
-                  p  (B, L)                    |
-                 /        \\                   |
-       [1-p, p] (B,L,2)   p > 0.5 ------- logical_and
-                 |                             |
-          boundary_prob             boundary_mask (B, L)
-                 |
-          selected_probs (B, L, 1) = p where boundary else 1-p
+                 hidden_states [B, L, D]
+                                │
+                   ┌────────────┴────────────┐
+                   ▼                         ▼
+         ┌───────────────────┐     ┌───────────────────┐
+         │ q_proj(h[:, :-1]) │     │ k_proj(h[:, 1:])  │
+         │ identity init     │     │ identity init     │
+         └─────────┬─────────┘     └─────────┬─────────┘
+                   │                         │
+         ┌───────────────────┐     ┌───────────────────┐
+         │ L2 normalize      │     │ L2 normalize      │
+         └─────────┬─────────┘     └─────────┬─────────┘
+                   └────────────┬────────────┘
+                                ▼
+                      ┌───────────────────┐
+                      │ cosine similarity │
+                      └─────────┬─────────┘
+                             [B, L-1]
+                                ▼
+                      ┌───────────────────┐
+                      │ p = (1 - cos) / 2 │
+                      │  clipped to [0, 1]│
+                      └─────────┬─────────┘
+                                ▼
+                      ┌───────────────────┐
+                      │ prepend 1.0 at    │
+                      │  position 0       │
+                      └─────────┬─────────┘
+                             p [B, L]
+                                │
+                   ┌────────────┴────────────┐
+                   ▼                         ▼
+         ┌───────────────────┐     ┌───────────────────┐
+         │ stack [1-p, p]    │     │ p > 0.5           │
+         └─────────┬─────────┘     └─────────┬─────────┘
+                   ▼                         │
+        boundary_prob [B, L, 2]              │
+                                    is_boundary [B, L]
+                                             │
+                                   ┌─────────┴──────────┐
+                                   ▼                    ▼
+                          ┌────────────────┐   ┌────────────────┐
+                          │ and mask       │   │ where(p, 1 - p)│
+                          │ (optional)     │   │                │
+                          └───────┬────────┘   └───────┬────────┘
+                                  ▼                    ▼
+                 boundary_mask [B, L] selected_probs [B, L, 1]
 
-    The threshold is **strictly** ``p > 0.5``. The reference takes
-    ``argmax([1 - p, p])`` (``dc.py:104-106``) and ``argmax`` resolves a tie to
-    the first index, so a position at exactly ``p = 0.5`` is NOT a boundary. That
-    tie is reachable bit-exactly -- any two orthogonal adjacent hidden states
-    give ``cos = 0`` and hence ``p = 0.5``.
+    ``mask`` enters only at the ``and``, so the other two outputs are unmasked.
+
+    The threshold is the strict ``p > 0.5``. The reference takes
+    ``argmax([1 - p, p])`` (``dc.py:104-106``), which resolves a tie to the first
+    index, so a position at exactly ``p = 0.5`` is not a boundary. That tie is
+    reachable bit-exactly: any two orthogonal adjacent hidden states give
+    ``cos = 0`` and hence ``p = 0.5``.
 
     :param d_model: Hidden width ``D``. Both projections are ``(D, D)``, and the
         last axis of the input must equal it.
@@ -121,12 +139,8 @@ class RoutingModule(keras.layers.Layer):
 
         self.d_model = d_model
 
-        # The identity initialisation is load-bearing, not cosmetic: it makes the
-        # untrained layer compute raw adjacent cosine similarity, which is the
-        # signal the whole chunking mechanism bootstraps from (`dc.py:53-59`,
-        # where the reference copies `torch.eye(d_model)` into both weights and
-        # flags them `_no_reinit`). It is expressed as an INITIALIZER rather than
-        # as a post-build `.assign()` on purpose -- see the note in `build`.
+        # Identity init makes the untrained layer compute raw adjacent cosine
+        # similarity (dc.py:53-59). Use an initializer, not a post-build assign.
         self.q_proj = keras.layers.Dense(
             d_model,
             use_bias=False,
@@ -143,13 +157,11 @@ class RoutingModule(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Materialize both projections.
 
-        The identity weights are produced by ``keras.initializers.Identity``, so
-        there is nothing to assign here. Writing them with ``.assign()`` after
-        ``add_weight``/``build`` would be silently discarded whenever this layer
-        is first reached from a parent's ``call()``: Keras 3 runs that build pass
-        inside a ``StatelessScope``, which records the assignment and throws it
-        away, leaving the projections at their initializer value in every real
-        model while every direct-``build`` unit test still passes.
+        The identity weights come from ``keras.initializers.Identity``, so there
+        is nothing to assign here. An ``.assign()`` after ``add_weight`` or
+        ``build`` would be discarded whenever this layer is first reached from a
+        parent's ``call()``, because Keras 3 runs that build pass inside a
+        ``StatelessScope`` that records the write and drops it.
 
         :param input_shape: Shape of ``hidden_states``, ``(B, L, D)``.
         :type input_shape: tuple
@@ -177,9 +189,9 @@ class RoutingModule(keras.layers.Layer):
         """L2-normalize along the last axis with PyTorch's clamped denominator.
 
         ``torch.nn.functional.normalize`` divides by ``max(||x||_2, eps)``. The
-        clamp, rather than an added epsilon, is what maps an all-zero row to
-        exactly zero instead of to NaN, and padded positions do produce all-zero
-        rows once an upstream layer masks them.
+        clamp, rather than an added epsilon, maps an all-zero row to exactly
+        zero instead of to NaN, and padded positions do produce all-zero rows
+        once an upstream layer masks them.
 
         :param x: Tensor whose last axis is normalized.
         :type x: keras.KerasTensor
@@ -202,29 +214,27 @@ class RoutingModule(keras.layers.Layer):
 
         :param hidden_states: ``(B, L, D)`` full-resolution hidden states.
         :type hidden_states: keras.KerasTensor
-        :param mask: ``(B, L)`` validity mask, ``True``/nonzero = a real token.
-            Padded positions are forced to non-boundary. ``None`` means every
-            position is valid.
+        :param mask: ``(B, L)`` validity mask, where ``True`` or nonzero marks a
+            real token. Padded positions are forced to non-boundary. ``None``
+            means every position is valid.
         :type mask: keras.KerasTensor or None
-        :param training: Unused -- this layer has no training-mode behaviour. It
-            is accepted so the layer composes with parents that pass it through.
+        :param training: Unused. Accepted so the layer composes with parents
+            that pass it through.
         :type training: bool or None
         :return: ``(boundary_prob (B, L, 2), boundary_mask (B, L) bool,
             selected_probs (B, L, 1))``.
         :rtype: tuple
         """
-        del training  # no dropout, no norm statistics: nothing is mode-dependent
+        del training
 
-        # dc.py:86-90 -- q reads h_t, k reads h_{t+1}. The direction is the whole
-        # meaning of the layer and a mirrored version of it is bit-identical
-        # under the identity init, so it is guarded by a NON-identity-projection
-        # test rather than by a parity test alone.
+        # q reads h_t, k reads h_{t+1} (dc.py:86-90). Swapping them is
+        # bit-identical under the identity init; a non-identity test guards it.
         q_proj = self._normalize(self.q_proj(hidden_states[:, :-1]))
         k_proj = self._normalize(self.k_proj(hidden_states[:, 1:]))
-        cos_sim = keras.ops.sum(q_proj * k_proj, axis=-1)  # (B, L-1)
+        cos_sim = keras.ops.sum(q_proj * k_proj, axis=-1)
 
-        # dc.py:92 -- a no-op absent precision issues, kept because precision
-        # issues are exactly what it is there for.
+        # Keeps (1 - cos) / 2 inside [0, 1] when rounding pushes it out
+        # (dc.py:92).
         one = keras.ops.cast(1.0, cos_sim.dtype)
         two = keras.ops.cast(2.0, cos_sim.dtype)
         boundary_prob = keras.ops.clip(
@@ -233,47 +243,33 @@ class RoutingModule(keras.layers.Layer):
             one,
         )
 
-        # dc.py:95-96 -- position 0 of every row is forced to PAD_PROB = 1.0.
+        # Position 0 of every row is forced to 1.0 (dc.py:95-96).
         batch_size = keras.ops.shape(hidden_states)[0]
         pad = keras.ops.full(
             (batch_size, 1),
             FORCED_FIRST_BOUNDARY_PROB,
             dtype=boundary_prob.dtype,
         )
-        boundary_prob = keras.ops.concatenate([pad, boundary_prob], axis=1)  # (B, L)
+        boundary_prob = keras.ops.concatenate([pad, boundary_prob], axis=1)
 
-        # dc.py:102 -- the 2-class distribution [1 - p, p].
+        # The 2-class distribution [1 - p, p] (dc.py:102).
         boundary_prob_2class = keras.ops.stack(
             [one - boundary_prob, boundary_prob], axis=-1
-        )  # (B, L, 2)
+        )
 
-        # DECISION plan-2026-09-09T042752-6d66ac56/D-012: the hard decision is
-        # written as the STRICT comparison `p > 0.5`, not as
-        # `keras.ops.argmax(boundary_prob_2class, axis=-1)`, even though the
-        # reference is literally an argmax (`dc.py:104-106`). Do NOT "restore
-        # fidelity" by swapping in argmax, and do NOT relax this to `>=`:
-        #   * `tf.math.argmax` documents that "in case of ties the identity of
-        #     the return value is not guaranteed", so the tie behaviour this
-        #     layer depends on is not a promise the backend makes -- whereas
-        #     `p > 0.5` breaks the tie low by construction, on every backend;
-        #   * `p >= 0.5` is a DIFFERENT layer. `argmax([1-p, p])` returns the
-        #     first maximal index, so exactly `p = 0.5` is NOT a boundary, and
-        #     `p = 0.5` is reachable bit-exactly whenever two adjacent hidden
-        #     states are orthogonal (`cos = 0`).
-        # `p > 0.5` and `p > 1 - p` agree everywhere under round-to-nearest, so
-        # this is the argmax's realised predicate, not an approximation of it.
+        # DECISION D-012: keep the strict p > 0.5; argmax tie behaviour is
+        # backend-defined and p >= 0.5 is a different layer. See decisions.md.
         half = keras.ops.cast(0.5, boundary_prob.dtype)
-        is_boundary = keras.ops.greater(boundary_prob, half)  # (B, L) bool
+        is_boundary = keras.ops.greater(boundary_prob, half)
 
-        # dc.py:130-132 -- the probability of whichever class WON, gathered from
-        # the UNMASKED decision: a padded position still reports its own winning
-        # class even though its boundary_mask entry is about to be forced False.
+        # The probability of the winning class, read before masking, so a padded
+        # position still reports its own winner (dc.py:130-132).
         selected_probs = keras.ops.expand_dims(
             keras.ops.where(is_boundary, boundary_prob, one - boundary_prob),
             axis=-1,
-        )  # (B, L, 1)
+        )
 
-        # dc.py:107-109 -- no invalid token may be selected.
+        # No invalid token may be selected (dc.py:107-109).
         boundary_mask = is_boundary
         if mask is not None:
             boundary_mask = keras.ops.logical_and(
@@ -285,7 +281,7 @@ class RoutingModule(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], ...]:
-        """Shapes of the three outputs, from stored config alone.
+        """Return the shapes of the three outputs.
 
         :param input_shape: ``(B, L, D)``.
         :type input_shape: tuple
@@ -308,3 +304,5 @@ class RoutingModule(keras.layers.Layer):
         config = super().get_config()
         config.update({"d_model": self.d_model})
         return config
+
+# ---------------------------------------------------------------------

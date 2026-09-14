@@ -49,13 +49,13 @@ class ComplexDense(ComplexLayer):
         ┌───────────────────────────┐
         │ split: real, imag         │
         └─────────────┬─────────────┘
-                       ▼
+                      ▼
         ┌────────────────────────────┐
         │ 4 real matmuls             │
         │  real_out = re@Wre - im@Wim│
         │  imag_out = re@Wim + im@Wre│
         └─────────────┬──────────────┘
-                       ▼
+                      ▼
         combine + bias, complex(real_out, imag_out)
                        │
                        ▼

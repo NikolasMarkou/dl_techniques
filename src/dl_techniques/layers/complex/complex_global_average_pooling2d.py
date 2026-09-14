@@ -49,7 +49,7 @@ class ComplexGlobalAveragePooling2D(keras.layers.Layer):
         │ split: real, imag         │
         │ mean over axes [1, 2]     │
         └─────────────┬─────────────┘
-                       ▼
+                      ▼
         Output [B, C] (complex), or [B, 1, 1, C] if keepdims
 
     :param keepdims: If ``False`` (default), the output has shape

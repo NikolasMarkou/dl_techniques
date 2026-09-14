@@ -16,9 +16,14 @@ References:
 import keras
 from typing import  Optional, Dict, Any, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .universal_inverted_bottleneck import UniversalInvertedBottleneck
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.conv_blocks.inverted_residual_block")
 class InvertedResidualBlock(UniversalInvertedBottleneck):
@@ -179,3 +184,5 @@ class InvertedResidualBlock(UniversalInvertedBottleneck):
         )
 
         return config
+
+# ---------------------------------------------------------------------

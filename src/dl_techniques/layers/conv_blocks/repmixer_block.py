@@ -22,6 +22,10 @@ References:
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -31,6 +35,7 @@ from dl_techniques.utils.activation_serialization import (
 from .mobile_one_block import MobileOneBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.conv_blocks.repmixer_block")
 class RepMixerBlock(keras.layers.Layer):
@@ -502,3 +507,4 @@ class ConvolutionalStem(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------

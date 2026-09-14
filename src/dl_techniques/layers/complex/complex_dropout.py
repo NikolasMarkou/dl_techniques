@@ -51,7 +51,7 @@ class ComplexDropout(keras.layers.Layer):
         │ mask = Dropout(ones_like) │
         │ output = input * mask     │
         └─────────────┬─────────────┘
-                       ▼
+                      ▼
         Output [..., D] (complex)
 
     :param rate: Fraction of the input units to drop, in ``[0, 1)``.

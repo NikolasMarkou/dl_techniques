@@ -193,3 +193,5 @@ def batched_gather(
 
     flat = keras.ops.reshape(params, [-1, dim(params, -1)])  # (B*L, D)
     return keras.ops.take(flat, flat_indices, axis=0)  # (B, W, D)
+
+# ---------------------------------------------------------------------

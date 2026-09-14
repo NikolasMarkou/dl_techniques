@@ -53,7 +53,7 @@ class ComplexConv2D(ComplexLayer):
         ┌───────────────────────────┐
         │ split: real, imag         │
         └─────────────┬─────────────┘
-                       ▼
+                      ▼
         ┌───────────────────────────┐
         │ 4 real convolutions       │
         │  real_out = conv(re,Kre)  │
@@ -61,7 +61,7 @@ class ComplexConv2D(ComplexLayer):
         │  imag_out = conv(re,Kim)  │
         │           + conv(im,Kre)  │
         └─────────────┬─────────────┘
-                       ▼
+                      ▼
         combine + bias, complex(real_out, imag_out)
                        │
                        ▼

@@ -19,6 +19,10 @@ import keras
 from typing import Tuple, Optional, Any, Dict, Union
 from keras import ops, layers, initializers, regularizers
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
 from dl_techniques.layers.activations import create_activation_layer, ActivationType
 from dl_techniques.utils.activation_serialization import (
@@ -27,6 +31,7 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.conv_blocks.universal_inverted_bottleneck")
 class UniversalInvertedBottleneck(keras.layers.Layer):
@@ -579,3 +584,5 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 regularizers.serialize(self.depthwise_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------
