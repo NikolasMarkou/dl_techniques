@@ -189,3 +189,36 @@ retroactively fail Step 1's STOP-IF #1 gate (which tested the auto-vs-off RATIO,
 re-fusion) — but it is a partial, real-scale confirmation that the "XLA-fusion-immune" reasoning in
 `findings/v1-chunking-design.md` was optimistic in degree (chunking reduces, but does not fully
 eliminate, XLA's tendency to materialize sequence-shaped intermediates under `jit_compile="auto"`).
+
+## Step 5 raw result | EXECUTE | 2026-09-14
+
+Confirmed the current file list under `tests/test_models/test_mamba/` before running anything
+(`ls`): exactly the 10 files plan.md names — `test_build_and_reload.py`, `test_components.py`,
+`test_dt_proj_survives_stateless_build.py`, `test_head_pooling.py`, `test_mamba2_forwarded_knobs.py`,
+`test_mamba2_group_routing.py`, `test_mamba_v1.py`, `test_mamba_v2.py`,
+`test_norm_before_gate_is_reachable.py`, `test_norm_identity_and_build_idempotence.py` (plus
+`__init__.py`) — nothing missing, nothing extra, no assumption needed.
+
+Ran `CUDA_VISIBLE_DEVICES="" .venv/bin/python -m pytest tests/test_models/test_mamba/ -vvv` (CPU
+only, per this step's own command, not GPU-gated). Result: **194 passed, 1 warning (unrelated
+`distutils` deprecation notice), 0 failed, in 128.30s**, exit code 0. This includes both new test
+classes added by Step 3 (`TestMambaLayerChunkedScanForwardAndGradientNumerics`'s 3 tests, and the
+pre-existing `TestMambaLayerCheckpointedScanGradients`'s 3 tests) alongside the full pre-existing
+v1/v2/norm/build-idempotence/export suites — zero regressions anywhere in the package, not just in
+the file directly touched by chunking.
+
+Re-confirmed (not just trusted from plan.md) the zamba2/hnet zero-dependency assumption via
+`grep -n "Mamba" src/dl_techniques/models/language/zamba2/layers.py
+src/dl_techniques/models/language/hnet/components.py`: every match in both files is either a
+docstring/comment prose reference to "Mamba-2"/"Mamba2" or an actual import/usage of
+`Mamba2Layer`/`Mamba2ResidualBlock` from `mamba.components_v2` — zero occurrences of the bare
+`MambaLayer` class name or any import from `mamba.components` (v1) in either file. This MATCHES
+plan.md's assertion exactly (Success Criteria row 7, Verification Strategy row 7): the plan's
+scoping assumption holds, no scope-drift finding to escalate, and the reduced regression scope for
+zamba2/hnet (no separate suite re-run required) stands as originally reasoned in Step 5's own text
+and this plan's Assumptions section.
+
+No code changes were made in this step (confirmed: `git status` shows no changes under `src/` or
+`tests/`). No surprises beyond the ones already recorded in Steps 1 and 4's raw-data sections above;
+this step's own result is a clean, unsurprising confirmation of both the regression scope and the
+v1-only import-graph boundary.

@@ -10,8 +10,12 @@
 
 - [x] Step 4 (commit `e172f7cbe`, plan-dir only, no production code touched): full-scale measurement at variant="130m". New ceiling batch=5 (was batch=4); batch=8 target NOT reached. Batch=4 peak 9.497->7.7695 GiB (18.19% saved); batch=8 attempted-alloc 14.8->9.8715 GiB (33.30% smaller, still OOMs). Pre-Mortem STOP-IF #2 FIRES (measured saving ~3x Step 1's slope-sweep prediction) — in the positive direction, not "no improvement". Escalated to REFLECT/orchestrator per plan's own instruction not to chase a bigger number with further code changes in this step.
 
+- [x] Step 5 (plan-dir only, no production/test code changed): full `tests/test_models/test_mamba/`
+  suite run (all 10 files confirmed via `ls` first) — 194 passed, 0 failed. Re-confirmed via grep
+  that zamba2/hnet reference only `Mamba2Layer`/`Mamba2ResidualBlock` (v2), zero `MambaLayer` (v1)
+  references — matches plan.md's assertion, no scope-drift found.
+
 ## In Progress
-- [ ] Step 5: regression check (v1-only scope)
 - [ ] Step 6: document final outcome, name v2's d_state as deferred follow-up
 
 ## Blocked
