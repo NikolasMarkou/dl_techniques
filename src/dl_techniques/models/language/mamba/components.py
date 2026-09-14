@@ -469,6 +469,16 @@ class MambaLayer(keras.layers.Layer):
            pre-fix); batch=8 still exceeds the 12GB budget. See
            `plans/plan-2026-09-13T165751-bc5433cb/decisions.md` D-005 for the full
            measurement and the recommended v2 follow-up.
+
+        .. note::
+           ``deltaA``/``deltaB_u`` are computed per-timestep inside the
+           ``while_loop`` body, sliced from ``delta``/``u``/``B`` exactly as
+           ``C`` already was, rather than precomputed as full
+           ``(batch, d_inner, seq_len, d_state)`` tensors before the loop starts.
+           This eliminates two large forward-only tensors per layer, additive to
+           the ``tf.recompute_grad`` wrap above. See
+           `plans/plan-2026-09-14T042205-a11f6af3/decisions.md` D-003 for the
+           measured outcome.
         """
         batch_size, d_inner, seq_len = keras.ops.shape(u)
 
@@ -483,16 +493,6 @@ class MambaLayer(keras.layers.Layer):
         D = keras.ops.cast(D, scan_dtype)
         # z stays at compute dtype, since the gate applies after the result is
         # cast back down.
-
-        # A_bar = exp(delta * A), one value per channel, state and step.
-        deltaA = keras.ops.exp(
-            keras.ops.einsum("bdl,dn->bdln", delta, A)
-        )
-
-        # B_bar * u = delta * B * u.
-        deltaB_u = keras.ops.einsum(
-            "bdl,bnl,bdl->bdln", delta, B, u
-        )
 
         h = keras.ops.zeros(
             (batch_size, d_inner, self.d_state),
@@ -515,7 +515,27 @@ class MambaLayer(keras.layers.Layer):
         def body(t: keras.KerasTensor, h: keras.KerasTensor,
                 ys: keras.KerasTensor) -> Tuple[keras.KerasTensor, ...]:
             """Advance the state one step and store ``y_t`` in ``ys``."""
-            h = deltaA[:, :, t] * h + deltaB_u[:, :, t]
+            # DECISION plan-2026-09-14T042205-a11f6af3/D-003: deltaA_t/deltaB_u_t
+            # are computed here per-timestep, sliced from the already-cast
+            # delta/u/B (D-044 dtype discipline), instead of slicing two
+            # full-sequence (batch, d_inner, seq_len, d_state) precomputed
+            # tensors. Do not reintroduce the full-sequence precompute -- see
+            # decisions.md D-003 for the measured GPU memory outcome.
+            delta_t = delta[:, :, t]  # (batch, d_inner)
+            u_t = u[:, :, t]          # (batch, d_inner)
+            B_t = B[:, :, t]          # (batch, d_state)
+
+            # A_bar_t = exp(delta_t * A), one value per channel and state.
+            deltaA_t = keras.ops.exp(
+                keras.ops.einsum("bd,dn->bdn", delta_t, A)
+            )
+
+            # B_bar_t * u_t = delta_t * B_t * u_t.
+            deltaB_u_t = keras.ops.einsum(
+                "bd,bn,bd->bdn", delta_t, B_t, u_t
+            )
+
+            h = deltaA_t * h + deltaB_u_t
 
             y_t = keras.ops.einsum("bdn,bn->bd", h, C[:, :, t])
 

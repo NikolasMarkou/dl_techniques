@@ -4,3 +4,4 @@
 *See references/blast-radius.md for radius scoring. Decision-ref optional — `-` means no `# DECISION` anchor governs this edit.*
 2026-09-14T05:00:16Z | iter-1/step-1 | uncommitted | plans/plan-2026-09-14T042205-a11f6af3/checkpoints/cp-000-iter1.md | CREATE(+18) | radius:LOW(0) | - | nuclear fallback checkpoint before iter-1 EXECUTE
 2026-09-14T05:00:16Z | iter-1/step-1 | uncommitted | plans/plan-2026-09-14T042205-a11f6af3/decisions.md | EDIT(+64,-0) | radius:MED(5) | - | append Step 1 raw GPU diagnostic data (verdict gate PASS)
+2026-09-14T06:10:00Z | iter-1/step-2 | uncommitted | src/dl_techniques/models/language/mamba/components.py | EDIT(+31,-11) | radius:MED(4) | D-003 | chunk deltaA/deltaB_u precompute into while_loop body per-step
