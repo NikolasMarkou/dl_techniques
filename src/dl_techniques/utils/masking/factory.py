@@ -815,7 +815,9 @@ def create_banded_attend_mask(
     Args:
         hidden_states: Sequence tensor of shape `(batch, seq_len, dim)`.
         window_size: Half-width in tokens. A key at exactly this distance
-            from a query is inside the band (inclusive, symmetric).
+            from a query is inside the band (inclusive, symmetric). Must be
+            positive: `window_size=0` raises (`band_width = 2 * window_size`
+            must be positive per `MaskFactory.create_banded_mask`).
         attention_mask: Optional caller mask, either a rank-2 `(batch,
             seq_len)` key mask or a rank-3 `(batch, seq_len, seq_len)`
             pairwise mask, nonzero/`True` meaning keep. AND-ed into the
