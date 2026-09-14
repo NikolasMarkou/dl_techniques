@@ -40,6 +40,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.masking import create_banded_attend_mask
 from .single_window_attention import SingleWindowAttention
 
 # ---------------------------------------------------------------------
@@ -815,39 +816,13 @@ class WindowAttention(keras.layers.Layer):
         :return: Output tensor ``(B, N, dim)``.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-010: band is a keep predicate,
-        # composed (never substituted) with the caller's mask; not gemma3's causal/suppress expression, and no hand-rolled -1e9 (NaN under float16). See decisions.md.
-        n_tokens = keras.ops.shape(inputs)[1]
-        positions = keras.ops.arange(n_tokens, dtype="int32")
-        distance = keras.ops.absolute(
-            keras.ops.expand_dims(positions, axis=-1)
-            - keras.ops.expand_dims(positions, axis=0)
-        )
-        # (1, N, N) keep predicate: 1 where the key is inside the band.
-        band_keep = keras.ops.expand_dims(
-            keras.ops.cast(distance <= self.window_size, "int32"), axis=0
-        )
-
-        if attention_mask is None:
-            keep = band_keep
-        elif len(attention_mask.shape) == 3:
-            # (B, N, N) pairwise caller mask, AND-ed with the band.
-            keep = keras.ops.cast(attention_mask, "int32") * band_keep
-        elif len(attention_mask.shape) == 2:
-            # (B, N) key mask -> (B, 1, N), AND-ed with the band.
-            keep = (
-                keras.ops.cast(
-                    keras.ops.expand_dims(attention_mask, axis=1), "int32"
-                )
-                * band_keep
-            )
-        else:
-            raise ValueError(
-                f"WindowAttention(partition_mode='band') accepts a rank-2 "
-                f"(B, N) key mask or a rank-3 (B, N, N) pairwise mask; got "
-                f"rank {len(attention_mask.shape)} with shape "
-                f"{tuple(attention_mask.shape)}."
-            )
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-010 (supplemented by
+        # plan-2026-09-14T160941-bef1ba88): band is a keep predicate, composed
+        # (never substituted) with the caller's mask; not gemma3's causal/suppress
+        # expression, and no hand-rolled -1e9 (NaN under float16). Now built via
+        # the shared create_banded_attend_mask, which enforces this contract
+        # centrally. See decisions.md.
+        keep = create_banded_attend_mask(inputs, self.window_size, attention_mask)
 
         return self._attend(
             inputs,
