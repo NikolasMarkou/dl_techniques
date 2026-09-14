@@ -1,9 +1,11 @@
 """Tests for dl_techniques.utils.masking.factory.create_causal_attend_mask.
 
-Direct unit coverage for the shared rank-3 causal attend-mask helper
-consolidated from duplicated implementations in
-`dl_techniques.layers.blt.blt_blocks` and
-`dl_techniques.models.vision_language.clip.model`.
+Direct unit coverage for the shared rank-3 causal (+ optional padding)
+attend-mask helper consolidated from duplicated implementations in
+`dl_techniques.layers.blt.blt_blocks`,
+`dl_techniques.models.vision_language.clip.model` (pure-causal), and
+`dl_techniques.models.language.qwen.components`,
+`dl_techniques.layers.transformers.text_decoder` (causal + optional padding).
 """
 
 import keras
@@ -71,3 +73,59 @@ class TestCreateCausalAttendMask:
             [True, True, True, True],
         ])
         np.testing.assert_array_equal(mask_np, expected)
+
+    def test_none_attention_mask_matches_pre_extension_behavior(self):
+        hidden_states = keras.ops.zeros((2, 5, 4))
+
+        mask_explicit_none = create_causal_attend_mask(hidden_states, None)
+        mask_omitted = create_causal_attend_mask(hidden_states)
+
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(mask_explicit_none),
+            keras.ops.convert_to_numpy(mask_omitted),
+        )
+
+    def test_padding_mask_suppresses_padded_query_and_key_positions(self):
+        hidden_states = keras.ops.zeros((1, 4, 2))
+        attention_mask = keras.ops.convert_to_tensor([[1, 1, 1, 0]])
+
+        mask = create_causal_attend_mask(hidden_states, attention_mask)
+        mask_np = keras.ops.convert_to_numpy(mask)[0]
+
+        # Causal triangle further suppressed: key col 3 blocked for every
+        # query, and query row 3 (itself padded) attends to nothing.
+        expected = np.array([
+            [True, False, False, False],
+            [True, True, False, False],
+            [True, True, True, False],
+            [False, False, False, False],
+        ])
+        np.testing.assert_array_equal(mask_np, expected)
+
+    def test_padding_mask_batch_broadcasting(self):
+        hidden_states = keras.ops.zeros((2, 4, 2))
+        attention_mask = keras.ops.convert_to_tensor([
+            [1, 1, 1, 1],
+            [1, 1, 0, 0],
+        ])
+
+        mask = create_causal_attend_mask(hidden_states, attention_mask)
+        mask_np = keras.ops.convert_to_numpy(mask)
+
+        # Example 0: no padding, plain causal triangle.
+        expected_0 = np.array([
+            [True, False, False, False],
+            [True, True, False, False],
+            [True, True, True, False],
+            [True, True, True, True],
+        ])
+        np.testing.assert_array_equal(mask_np[0], expected_0)
+
+        # Example 1: last two positions padded (both as query and key).
+        expected_1 = np.array([
+            [True, False, False, False],
+            [True, True, False, False],
+            [False, False, False, False],
+            [False, False, False, False],
+        ])
+        np.testing.assert_array_equal(mask_np[1], expected_1)
