@@ -230,7 +230,7 @@ def build_new_area_attention(pinned_module: Any, **kwargs: Any) -> keras.layers.
 
     ``normalization_kwargs`` is the ONE exception, and it is not a loophole. The pre-move
     ``yolo12_blocks.ConvBlock`` HARDCODED the D-067 pair ``epsilon=1e-3, momentum=0.97``;
-    ``standard_blocks.ConvBlock`` reaches the normalization factory, whose defaults are
+    ``conv_blocks.conv_block.ConvBlock`` reaches the normalization factory, whose defaults are
     ``epsilon=1e-6, momentum=0.99``. Under D-005 that pair keeps exactly ONE home
     (``yolo12_blocks.YOLO12_NORM_KWARGS``) and is threaded to the relocated class as DATA by
     its yolo12 caller, so "the constructor arguments as used by yolo12" INCLUDE it. Passing
@@ -265,7 +265,7 @@ def build_new_area_attention_block(pinned_module: Any, **kwargs: Any) -> keras.l
     ``normalization_kwargs`` is the ONE exception, for exactly the reason spelled out on
     `build_new_area_attention`: the pre-move ``yolo12_blocks.ConvBlock`` HARDCODED the D-067
     pair ``epsilon=1e-3, momentum=0.97`` in the block's ``mlp1``/``mlp2`` as well as inside
-    the attention, while ``standard_blocks.ConvBlock`` reaches the normalization factory
+    the attention, while ``conv_blocks.conv_block.ConvBlock`` reaches the normalization factory
     whose defaults are ``epsilon=1e-6, momentum=0.99``. Under D-005 that pair keeps exactly
     ONE home (``yolo12_blocks.YOLO12_NORM_KWARGS``) and is threaded to the relocated block as
     DATA by its yolo12 caller. Measured with it OMITTED, on this exact probe grid: max|delta|

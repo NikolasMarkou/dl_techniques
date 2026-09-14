@@ -27,7 +27,7 @@ from dl_techniques.layers.yolo12.yolo12_blocks import (
 
 
 class TestConvBlock:
-    """Construction and validation suite for the SHARED `standard_blocks.ConvBlock`.
+    """Construction and validation suite for the SHARED `conv_blocks.conv_block.ConvBlock`.
 
     This suite used to target `yolo12_blocks.ConvBlock`, which was deleted as a
     duplicate. It is retargeted rather than removed because the `groups=0`,
