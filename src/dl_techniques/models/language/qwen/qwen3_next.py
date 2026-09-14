@@ -65,12 +65,13 @@ from typing import Optional, Union, Any, Dict
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
+from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 from dl_techniques.layers.ffn import assemble_ffn_config
 
-from .components import Qwen3NextBlock, build_causal_attention_mask
+from .components import Qwen3NextBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -420,7 +421,7 @@ class Qwen3Next(keras.Model):
 
         # Causal (+ padding) mask. Qwen3Next is a decoder-only causal LM;
         # without this every token attended to every future token.
-        causal_attend_mask = build_causal_attention_mask(
+        causal_attend_mask = create_causal_attend_mask(
             hidden_states, attention_mask)
 
         # Pass through all Qwen3Next blocks

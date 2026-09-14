@@ -55,7 +55,7 @@ module docstring is the reference. Two ideas drive it:
   dimension (Matryoshka representation learning), and L2-normalized so cosine similarity is a
   dot product. The trunk is **not causal** and that is deliberate: `Qwen3EmbeddingLayer.call`
   forwards the caller's 2D padding mask unchanged and never calls
-  `build_causal_attention_mask` (the sibling `Qwen3RerankerLayer` does, because it reads an LM
+  `create_causal_attend_mask` (the sibling `Qwen3RerankerLayer` does, because it reads an LM
   head and is a next-token prediction). Nothing is predicted from the pooled vector, so there
   is no target to leak. Last-token pooling here is a convention carried over from the
   decoder-only lineage, not evidence of causality; see the module docstring of

@@ -20,7 +20,7 @@ the context — otherwise distant positions become numerically
 indistinguishable from near ones.
 
 Causality is imposed once at the model level: `call` builds a combined
-causal-plus-padding mask via `build_causal_attention_mask` and passes the
+causal-plus-padding mask via `create_causal_attend_mask` and passes the
 same tensor to every block, since neither `TransformerLayer` nor the
 attention layers it wraps manufacture one on their own. Blocks are pre-norm
 RMSNorm with no biases; the LM head is an independent bias-free `Dense`, so
@@ -58,13 +58,13 @@ from typing import Optional, Union, Any, Dict, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 from dl_techniques.layers.ffn import assemble_ffn_config
 
-from .components import build_causal_attention_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -434,7 +434,7 @@ class Qwen3(keras.Model):
 
         # Causal (+ padding) mask. Qwen3 is a decoder-only causal LM; without
         # this every token attended to every future token.
-        causal_attend_mask = build_causal_attention_mask(
+        causal_attend_mask = create_causal_attend_mask(
             hidden_states, attention_mask)
 
         # Pass through all transformer blocks

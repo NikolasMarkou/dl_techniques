@@ -44,8 +44,8 @@ from typing import Optional, Tuple, Dict, Any, Union
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.factory import create_embedding_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
+from dl_techniques.utils.masking import create_causal_attend_mask
 
-from .components import build_causal_attention_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -398,7 +398,7 @@ class Qwen3RerankerLayer(keras.layers.Layer):
 
     Note:
         Attention here is causal, built by
-        :func:`.components.build_causal_attention_mask`: this layer scores
+        :func:`dl_techniques.utils.masking.create_causal_attend_mask`: this layer scores
         its own next-token prediction, so a position must not attend to
         tokens after it. :class:`Qwen3EmbeddingLayer` attends bidirectionally
         instead, since it predicts nothing from the pooled vector.
@@ -544,7 +544,7 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         # position has already attended to the tokens it is being asked to
         # score. Shared with qwen3.py / qwen3_next.py; returns ATTEND semantics
         # and folds the padding mask in, so the raw 2D mask is not forwarded.
-        causal_attend_mask = build_causal_attention_mask(
+        causal_attend_mask = create_causal_attend_mask(
             hidden_states, attention_mask
         )
 
