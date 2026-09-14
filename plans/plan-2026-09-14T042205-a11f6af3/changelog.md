@@ -11,3 +11,5 @@
 2026-09-14T08:35:00Z | iter-1/step-5 | uncommitted | plans/plan-2026-09-14T042205-a11f6af3/progress.md | EDIT(+4,-2) | radius:LOW(1) | - | mark step 5 complete in progress.md
 2026-09-14T09:00:00Z | iter-1/step-6 | uncommitted | src/dl_techniques/models/language/mamba/components.py | EDIT(+9,-2) | radius:MED(3) | D-003 | document measured chunking outcome (batch=4->5, batch=8 not reached)
 2026-09-14T09:00:00Z | iter-1/step-6 | uncommitted | plans/plan-2026-09-14T042205-a11f6af3/decisions.md | EDIT(+65,-0) | radius:MED(4) | D-003 | write final D-003 decisions.md entry with anchor-refs backlink
+2026-09-14T09:40:00Z | iter-1/step-6.1 | uncommitted | src/dl_techniques/models/language/mamba/components.py | EDIT(+3,-1) | radius:LOW(2) | - | mark first docstring note superseded by the batch=5 ceiling
+2026-09-14T09:41:00Z | iter-1/step-6.1 | uncommitted | tests/test_models/test_mamba/test_mamba_v1.py | EDIT(+29,-6) | radius:LOW(2) | D-005 | fix vacuous per-weight gradient tolerance for near-zero-magnitude weights

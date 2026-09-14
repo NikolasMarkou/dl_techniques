@@ -468,7 +468,9 @@ class MambaLayer(keras.layers.Layer):
            ``variant="130m"``: batch<=4 at ``seq_len=128`` now fits (was batch<=2
            pre-fix); batch=8 still exceeds the 12GB budget. See
            `plans/plan-2026-09-13T165751-bc5433cb/decisions.md` D-005 for the full
-           measurement and the recommended v2 follow-up.
+           measurement and the recommended v2 follow-up. **Superseded by the ceiling
+           in the note below**: the ``tf.recompute_grad`` wrap alone put the ceiling
+           at batch=4; the per-timestep chunking added afterward moved it to batch=5.
 
         .. note::
            ``deltaA``/``deltaB_u`` are computed per-timestep inside the

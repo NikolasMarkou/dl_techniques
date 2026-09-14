@@ -23,8 +23,19 @@
   `tests/test_models/test_mamba/` suite re-run CPU-only: 194 passed, 0 failed — zero regressions
   from the docstring-only addition.
 
+- [x] REFLECT iter-1: verifier 7/7 PASS. Adversarial review (D-004) independently re-confirmed the causal claim (chunking genuinely causes the batch=4 improvement, not an artifact) but found 2 fixable defects: vacuous gradient test for A_log, inconsistent docstring ceiling statement.
+
+- [x] Completion fix iter-1/step-6.1 (commit pending): fixed the vacuous gradient test by
+  normalizing both gradients by their own `scale` before applying `reassociation_atol(scale=1.0)`
+  (D-005), instead of passing the raw near-zero `scale` into the helper's `max(1.0, scale)` floor.
+  RED-proved: the reviewer's `deltaB_u_t *= 1.0001` mutation now fails BOTH the forward and the
+  gradient test (previously only the forward test caught it); mutation reverted, both pass again.
+  Also added one supersession clause to `_selective_scan`'s first docstring note so the two ceiling
+  statements no longer read as contradictory (batch=5 is now the one current-ceiling claim).
+  Full `tests/test_models/test_mamba/` suite: 194 passed, 0 failed.
+
 ## In Progress
-*Nothing currently — plan complete, ready for REFLECT.*
+*Nothing currently.*
 
 ## Blocked
 *Nothing currently.*

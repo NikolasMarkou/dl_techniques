@@ -302,3 +302,99 @@ No code changes were made in this step (confirmed: `git status` shows no changes
 `tests/`). No surprises beyond the ones already recorded in Steps 1 and 4's raw-data sections above;
 this step's own result is a clean, unsurprising confirmation of both the regression scope and the
 v1-only import-graph boundary.
+
+## D-004 | REFLECT iter-1 | 2026-09-14
+**Context**: A plain verifier returned 7/7 PASS. Per this plan lineage's own standing lesson (the
+immediately-prior plan's iteration-1 verifier also returned clean, and only an adversarial review
+caught that the measured improvement's CAUSE was misattributed), an adversarial review was spawned
+early (`findings/review-iter-1.md`) specifically to interrogate the causal claim ("chunking works
+because it eliminates the tensor, not because of incidental XLA scheduling") rather than just
+re-check the numbers.
+**Decision**: The causal claim SURVIVES the attack — the reviewer independently re-measured
+batch=4's peak on a freshly-idle GPU1 (old formula monkeypatched back from pre-plan HEAD `36127802f`
+vs the shipped chunked code, same harness, paired, reproduced twice each): 9.5216 GiB (old) vs
+7.7695 GiB (chunked), matching the claimed number exactly and the cross-session baseline (9.497
+GiB) to 0.26%. The diff contains nothing but the relocation — no bundled confound. Chunking is
+confirmed the cause, not an artifact. Bonus, previously unmeasured: chunked is also ~6% FASTER per
+step (0.2594s vs 0.2771s) — this is not even a compute-for-memory trade where it works, a pure win.
+The batch=6 "XLA re-fusion" concern the plain verifier flagged does NOT hold up: the reviewer found
+no pre-chunking buffer-dump exists to serve as a control, and the OOM is fully explained by the
+plan's own linear slope extrapolation without needing a re-fusion hypothesis.
+**However**, the review found TWO real, fixable, non-blocking-to-the-headline-result defects:
+(1) the per-weight gradient-correctness test is VACUOUS for `A_log` (and possibly other
+near-zero-gradient weights) — `reassociation_atol()`'s `max(1.0, scale)` floor (3.304e-06) swamps
+`A_log`'s actual gradient magnitude (~2.971e-08), RED-proved by a mutation
+(`deltaB_u_t *= 1.0001`) that fails the forward test but passes the gradient test; (2)
+`_selective_scan`'s docstring states two different ceilings in one file (`batch<=4` in one note,
+`batch=5` in another) — an internal inconsistency from step 6's documentation pass.
+**Also found**: the orchestrator's own `verification.md` was left at its PLAN-phase template
+(`NOT YET RUN` throughout) through the end of EXECUTE — a process lapse, now corrected at REFLECT
+using the verifier's and reviewer's actual returned results (no data was lost, both agents' full
+reports existed independently of this file).
+**Route**: REFLECT → EXECUTE (same-iteration completion fix, `iter-1/step-6.1`) for the two named
+defects — NOT PIVOT or EXPLORE, since the causal claim and headline result are independently
+verified sound; this is polish, not a reopened investigation.
+**Trade-off**: Spending one more completion-fix round to close two real, disclosed gaps **at the
+cost of** a slightly later CLOSE — justified because a test with a documented-but-untrue
+"all 9 weights meaningfully checked" claim, and a self-contradicting docstring, are exactly the
+kind of small, cheap-to-fix defects that erode trust in this plan's own otherwise-solid evidence
+if left unfixed.
+**Anchor-Refs**: none (this entry records a REFLECT routing decision, not a new code anchor; the
+completion fix's own commit will touch the existing D-003 anchor site for the docstring
+correction only, no new anchor).
+
+## D-005 | EXECUTE iter-1/step-6.1 (completion fix) | 2026-09-14
+**Context**: D-004's adversarial review (Concern 1) RED-proved that
+`test_gradients_match_old_precompute_formula_per_weight` (step 3) was vacuous for near-zero-
+magnitude gradients: calling `reassociation_atol([layer.d_state], seq_len, scale=scale)` with the
+weight's own raw gradient `scale` hits the helper's `max(1.0, scale)` floor whenever `scale < 1.0`,
+so every weight with `max|gradient| < 1.0` (`A_log` ~2.971e-08, `x_proj/kernel` ~2.479e-06,
+`dt_proj/bias` ~1.597e-06, `dt_proj/kernel` ~4.032e-07) got the SAME floored atol (3.304e-06)
+regardless of how small its actual gradient was — for `A_log` that bound is ~111x the entire
+gradient, so a mutation that changes the real gradient (`deltaB_u_t *= 1.0001` inside
+`_selective_scan`) still passed.
+**Options considered** (per the completion-fix spawn prompt): (a) a relative-tolerance check
+scaled to each gradient's own magnitude; (b) reuse an existing repo convention for this exact
+"tolerance vs. near-zero signal" problem; (c) at minimum, tighten this one test so the RED-proof
+mutation fails it. Grepped the test suite (`grep -rn "reassociation_atol\|near-zero" tests/`) —
+no existing helper in this repo already solves "normalize before bounding"; `tests/numerics.py`'s
+own docstring for `reassociation_atol` explicitly documents the `max(1.0, scale)` floor as
+calibrated for O(1)-magnitude tensor OUTPUTS (its calibration table measures Hopfield/attention
+outputs, all `scale >= 1.0`), and separately warns against loosening an ATTAINABLE bound — so
+raising the floor or hand-picking a smaller literal for this one call site was explicitly ruled
+out as the wrong fix (it would be exactly the "pasted constant" anti-pattern the module's own
+header forbids).
+**Decision**: (a), applied without touching the shared `tests/numerics.py` helper. Each per-weight
+comparison now normalizes both gradients by their own `scale`
+(`g_chunked_np / scale`, `g_old_np / scale`) before comparing, and calls
+`reassociation_atol([layer.d_state], seq_len, scale=1.0)` — i.e. the SAME derived random-walk
+bound, but always evaluated at the point the floor was designed for (`scale=1.0`), making the
+check genuinely scale-RELATIVE instead of absolute-floored. `scale == 0.0` (both gradients exactly
+zero) is handled as a separate `atol=0, rtol=0` branch to avoid a division by zero. This changes
+only the TEST's assertion, not `_selective_scan` or `reassociation_atol` itself, so the fix cannot
+regress any other `reassociation_atol` consumer.
+**RED-proof acceptance** (per the completion-fix spawn's own acceptance criterion): applied the
+reviewer's exact mutation, `deltaB_u_t = deltaB_u_t * 1.0001` immediately after the `deltaB_u_t`
+einsum in `_selective_scan`'s `body()`. Before the fix: `test_gradients_match_old_precompute_formula_per_weight`
+PASSED under the mutation (vacuous). After the fix: BOTH
+`test_forward_pass_matches_old_precompute_formula_exactly` and
+`test_gradients_match_old_precompute_formula_per_weight` FAIL under the mutation (`A_log` shows 11/64
+elements over the tolerance, max relative difference 1.0e-04). Mutation reverted
+(`git diff` on `components.py`'s `_selective_scan` body shows zero residual change — the only
+remaining diff is the unrelated docstring supersession clause below); both tests PASS again.
+Full `tests/test_models/test_mamba/` suite re-run: 194 passed, 0 failed.
+**Docstring fix (same commit)**: `_selective_scan`'s first `.. note::` (inherited from
+`plan-2026-09-13T165751-bc5433cb`'s D-005, stating `batch<=4`) and second `.. note::` (this plan's
+D-003, stating the ceiling "moved from batch=4 to batch=5") read as two different current numbers
+with no supersession marker. Added one clause to the first note: "Superseded by the ceiling in the
+note below: the `tf.recompute_grad` wrap alone put the ceiling at batch=4; the per-timestep
+chunking added afterward moved it to batch=5." The historical number is kept (it documents what was
+true at that earlier commit, under its own decision reference) rather than being rewritten, per the
+completion-fix instruction to make a one-paragraph fix, not a rewrite. The `call()`-site D-005
+anchor comment (`components.py:~636`, owned by `plan-2026-09-13T165751-bc5433cb`'s own decision,
+also flagged as stale by the reviewer's Concern 4) is explicitly OUT of this fix's scope — the
+completion-fix spawn prompt scoped Defect 2 to `_selective_scan`'s docstring only.
+**Anchor-Refs**: `tests/test_models/test_mamba/test_mamba_v1.py:1522` (new anchor, the
+scale-normalization fix); `src/dl_techniques/models/language/mamba/components.py:472` (docstring
+supersession clause, no new anchor comment — plain-prose fix inside the existing D-005/D-003
+`.. note::` blocks).

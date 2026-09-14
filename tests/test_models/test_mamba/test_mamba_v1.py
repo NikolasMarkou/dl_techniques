@@ -1504,11 +1504,42 @@ class TestMambaLayerChunkedScanForwardAndGradientNumerics:
             # `einsum("bdn,bn->bd", h, C[:, :, t])`, applied once per
             # sequence step.
             scale = float(max(np.abs(g_chunked_np).max(), np.abs(g_old_np).max()))
-            atol = reassociation_atol([layer.d_state], seq_len, scale=scale)
+
+            if scale == 0.0:
+                # Both arms produced an exactly-zero gradient for this weight;
+                # nothing to normalize by, and nothing but exact equality is
+                # meaningful here.
+                np.testing.assert_allclose(
+                    g_chunked_np,
+                    g_old_np,
+                    atol=0,
+                    rtol=0,
+                    err_msg=f"gradient mismatch for weight {w.path}",
+                )
+                checked_any = True
+                continue
+
+            # DECISION plan-2026-09-14T042205-a11f6af3/D-005: `reassociation_atol`'s
+            # `max(1.0, scale)` floor is calibrated for O(1)-magnitude tensor
+            # OUTPUTS (see its calibration table in `tests/numerics.py`) --
+            # calling it with this weight's own raw gradient `scale` made the
+            # bound VACUOUS for near-zero-magnitude gradients: `A_log`'s
+            # max|gradient| measures ~2.971e-08 against a floored atol of
+            # 3.304e-06, ~111x the entire gradient, so a mutation that actually
+            # changes the gradient (`deltaB_u_t *= 1.0001` inside
+            # `_selective_scan`) still PASSED this assertion while correctly
+            # failing `test_forward_pass_matches_old_precompute_formula_exactly`
+            # above (findings/review-iter-1.md Concern 1). Fix: compare
+            # gradients NORMALIZED by their own `scale` so the derived
+            # random-walk bound is always evaluated at scale=1.0 -- a genuinely
+            # scale-RELATIVE tolerance, rather than an absolute floor sized for
+            # O(1) outputs. Do not go back to passing the raw `scale` into
+            # `reassociation_atol` here -- see decisions.md D-005.
+            atol = reassociation_atol([layer.d_state], seq_len, scale=1.0)
 
             np.testing.assert_allclose(
-                g_chunked_np,
-                g_old_np,
+                g_chunked_np / scale,
+                g_old_np / scale,
                 atol=atol,
                 rtol=0,
                 err_msg=f"gradient mismatch for weight {w.path}",
