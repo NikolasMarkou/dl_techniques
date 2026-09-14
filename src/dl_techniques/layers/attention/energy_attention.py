@@ -101,6 +101,17 @@ def _symmetric_token_keep(token_keep: keras.KerasTensor) -> keras.KerasTensor:
     Keras-propagated ``mask``); see the D-008 / D-002 anchors in :meth:`_build_keep_mask`.
     Do not duplicate it, or weaken either factor to a key-only mask.
 
+    Conceptually the same self-outer-product pattern as
+    ``dl_techniques.utils.masking.factory.MaskFactory.create_padding_mask`` (expand
+    one 1D per-token vector along both the key and query axes and combine), but not
+    routed through it: that helper is rank-3 boolean SUPPRESS-polarity, while every
+    downstream consumer here (``_project``, ``energy``, ``update``) requires a rank-4
+    numeric KEEP-polarity tensor already cast to ``mask_dtype`` (D-009 — must never be
+    bool). A factory-routed wrap would need two dtype casts, two logical negations, and
+    an extra ``expand_dims`` to bridge that gap — more code than this function's own
+    two ``expand_dims`` plus one multiply, for a conceptual-only overlap. Left as its
+    own local implementation on purpose.
+
     :param token_keep: 0/1 tensor of shape ``(B, N)`` in the mask compute dtype.
     :type token_keep: keras.KerasTensor
 
