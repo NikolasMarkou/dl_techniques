@@ -131,3 +131,61 @@ transfer to anything close to that magnitude at the real 24-layer, `recompute_gr
 configuration — the trend in this diagnostic's own data suggests a real but much smaller
 (single-digit-to-low-double-digit percent) saving at full scale, likely enough to shift the ceiling
 but not guaranteed to reach batch=8. Step 4 must report the actual number rather than assume it.
+
+## Step 4 raw measurement data | EXECUTE | 2026-09-14
+
+Real harness (`profile_v1.py`, reused unmodified from EXPLORE), real `CausalLanguageModel` +
+`Mamba.from_variant("130m")` (24 layers, real wiring, not the isolated `ScanBlock` toy stack from
+Step 1), `seq_len=128`, `jit_compile="auto"` (production regime, via `model.fit(...,
+steps_per_epoch=1)`), against the SHIPPED chunked `components.py` (commits `d9014c3e0`/`d83d4acdb`,
+no further code changes made in this step). `CUDA_VISIBLE_DEVICES=1` only. `nvidia-smi -i 1` read
+`18 MiB used` before AND after every single run (5 runs total: batch={4,8,6,5}, plus the idle
+checks); every run's log confirmed the clean `Created device ... with 10157 MB memory` TF init
+line. Foreground/synchronous, one run at a time, no parallel jobs.
+
+| batch | outcome | peak / attempted-alloc | notes |
+|---|---|---|---|
+| 4 (pre-chunking baseline, from `findings/clean-baseline-and-dstate-check.md`) | succeeds | 9.497 GiB peak | reference point, not re-run this step |
+| 4 (chunked, this step) | succeeds | 7.7695 GiB peak | `after-1-train_step` report |
+| 8 (pre-chunking baseline, from `findings/clean-baseline-and-dstate-check.md`) | OOMs | 14.8 GiB attempted | reference point, not re-run this step |
+| 8 (chunked, this step) | OOMs | 9,871.5 MiB / 9.8715 GiB attempted (10,599,452,976 B), against a 10,157 MB / 9.919 GiB pool with 1.43 GiB already in-use at failure time | clean TF init line confirmed; process aborted post-OOM with a `bfc_allocator.cc:811` internal check-fail during cleanup — a known TF/XLA post-OOM crash artifact, not a measurement contamination (the `ResourceExhaustedError` and attempted-alloc size were already captured cleanly before the abort) |
+| 6 (chunked, this step, exploratory — not in plan's required {4,8} set) | OOMs | small residual allocation (9,437,184 B) fails after near-total pool exhaustion — a fragmentation-tail OOM, not one dominant oversized tensor; `after-forward-only` reported 1.2126 GiB peak before `fit()` failed | XLA's `while` fusion materializes a `f32[128,6,1536,16]` (seq, batch, d_inner, d_state) buffer per the error dump — i.e., XLA IS reconstituting a full-sequence-shaped intermediate for at least one op inside the loop, a partial version of Pre-Mortem #1's named risk (loop-invariant code motion re-fusing something precompute-shaped), though not enough to erase the measured savings (see below) |
+| 5 (chunked, this step, exploratory) | succeeds | 8.9565 GiB peak | `after-1-train_step` report; this is the new ceiling |
+
+**Computed improvement vs the pre-chunking baseline** (both numbers measured, not rounded toward
+Step 1's small-scale prediction):
+- Batch=4: peak dropped 9.497 -> 7.7695 GiB, a savings of 1.7275 GiB (18.19%).
+- Batch=8 (both still OOM): attempted-allocation size dropped 14.8 -> 9.8715 GiB, a reduction of
+  4.9285 GiB (33.30% smaller attempted allocation) — much larger than Step 1's n=24 isolated-toy
+  slope-sweep prediction of ~11.1% (attempted-alloc gap between arms at n=24 in the standalone
+  `ScanBlock` diagnostic). The real full model with real embedding/head/optimizer overhead shows
+  roughly 3x the relative saving the isolated diagnostic predicted.
+- New ceiling: batch=5 succeeds (8.9565 GiB peak, 5.69% below the ORIGINAL batch=4 baseline's 9.497
+  GiB), batch=6 OOMs. The target `batch=8` is NOT reached. This is the plan's disjunctive "partial
+  success" outcome — the ceiling moved from batch=4 to batch=5 (a one-step, not four-step,
+  improvement over the pre-chunking ceiling), while the batch=8 shortfall itself shrank
+  substantially (attempted-alloc gap fell from a ~4.9 GiB shortfall to ~1.4-2.0 GiB, depending on
+  whether the already-in-use 1.43 GiB is counted against the 9.919 GiB pool or not).
+
+**Pre-Mortem STOP-IF #2 verdict**: FIRES, but in the surprising/positive direction, not the
+feared one. The clause reads "disagrees by more than ~2x from what Step 1's slope-sweep
+extrapolation would predict, OR shows no improvement at all over the current batch=4 ceiling" — the
+second disjunct is false (batch=4's peak dropped 18.19%, and the ceiling did move, to batch=5), but
+the first disjunct is TRUE: the batch=8 measured improvement (33.30% attempted-alloc reduction) is
+roughly 3x Step 1's own n=24 slope-sweep prediction (~11.1%), which is itself a ">~2x disagreement"
+by the stated test — just in the helpful direction (real-scale saving is BIGGER than predicted, not
+smaller or absent). Reporting this plainly rather than declining to flag it because the surprise is
+welcome: the STOP-IF's literal trigger condition is met, so this is escalated to REFLECT/the
+orchestrator to decide next steps, per the plan's explicit instruction not to spin either kind of
+surprise and not to attempt further code changes in this step to chase a bigger number. No
+production code was touched in this step.
+
+**Surprise**: batch=6's OOM traceback shows XLA's `while` loop fusion still materializes at least
+one `f32[seq, batch, d_inner, d_state]`-shaped buffer (`128,6,1536,16`) — i.e., a partial
+re-fusion of a precompute-shaped intermediate inside the loop, echoing (in miniature) Pre-Mortem
+#1's named "XLA reconstructs the removed precompute via loop-invariant code motion" risk. This did
+NOT collapse the measured saving (batch=8's attempted-alloc still dropped 33%), so it does not
+retroactively fail Step 1's STOP-IF #1 gate (which tested the auto-vs-off RATIO, not zero
+re-fusion) — but it is a partial, real-scale confirmation that the "XLA-fusion-immune" reasoning in
+`findings/v1-chunking-design.md` was optimistic in degree (chunking reduces, but does not fully
+eliminate, XLA's tendency to materialize sequence-shaped intermediates under `jit_compile="auto"`).
