@@ -1,16 +1,19 @@
-"""HierarchicalMLPStem, a hierarchical non-overlapping convolutional ViT stem.
+"""Hierarchical convolutional stem for Vision Transformers.
 
-Replaces the standard ViT stem's single linear projection of flattened
-patches with a stack of non-overlapping convolutions (`stride = kernel_size`
-at every stage), so local features build up hierarchically inside each patch
-before the tokens reach the transformer body. Because each stage never
-overlaps, every output patch depends only on the pixels in its own input
-region, with no leakage across patch boundaries. That patch independence is
-what makes the stem compatible with masked image modeling (MAE, BEiT): a
-masked input patch maps to a predictable output token without touching any
-other patch's representation. The stem starts with one `4x4`, stride-4
-convolution, then stacks `2x2`, stride-2 convolutions until the target patch
-size is reached.
+``HierarchicalMLPStem`` turns an image into patch tokens
+``(batch, num_patches, embed_dim)``. In place of the standard ViT stem's single
+linear projection of flattened patches, it stacks non-overlapping convolutions,
+each with ``stride = kernel_size``: one 4x4 stride-4 stage, then 2x2 stride-2
+stages until the accumulated stride reaches ``patch_size``. Since no stage
+overlaps, an output token depends only on the pixels of its own patch, so a
+masked input patch maps to a predictable token without touching any neighbour.
+Intermediate stages carry ``embed_dim // 4`` channels; the last carries
+``embed_dim`` and applies no activation.
+
+``patch_size`` must be square, a power of two, and at least 4, and ``embed_dim``
+must be divisible by 4. ``img_size`` only fixes the reported ``num_patches``;
+the forward pass reads the actual input shape, so an image of a different size
+still runs.
 
 References:
     - Liu et al., 2022. h-MLP: Vision MLP with Hierarchical Rearrangement.
@@ -38,64 +41,124 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.layers.hierarchical_mlp_stem")
 class HierarchicalMLPStem(keras.layers.Layer):
-    """Hierarchical MLP stem for Vision Transformers with patch-independent processing.
+    """Embed image patches through non-overlapping convolutional stages.
 
-    Processes image patches through a sequence of hierarchical, non-overlapping
-    convolutional stages with no cross-patch information leakage. Stages are
-    created dynamically to support various patch sizes (8, 16, 32, ...),
-    compatible with masked self-supervised learning methods like MAE and BEiT.
-    The non-overlapping property (``stride = kernel_size``) ensures each
-    output patch token depends exclusively on the pixels in its own input
-    region.
+    The stage list is built in ``__init__`` from ``patch_size``: a 4x4 stride-4
+    convolution, then 2x2 stride-2 convolutions until the accumulated stride
+    equals the patch size. Every convolution uses ``valid`` padding with
+    ``stride = kernel_size``, so no receptive field crosses a patch boundary.
+    The final feature map is flattened to one token per patch.
 
     Architecture:
 
     .. code-block:: text
 
-        input [batch, H, W, in_channels]
-              |
-        stage 0: Conv2D(dim1, k=4, s=4) -> Norm -> Activation
-              |     (processes 4x4 patches independently)
-        stage 1: Conv2D(dim1, k=2, s=2) -> Norm -> Activation
-              |     (8x8 patches, hierarchically)
-        stage N: Conv2D(embed_dim, k=2, s=2) -> Norm
-              |     (final stage, no activation)
-        reshape [batch, num_patches, embed_dim]
+              input [B, H, W, in_channels]
+                                ▼
+                ┌───────────────────────────────┐
+                │ Conv2D(dim1, k=4, s=4)        │
+                │  Norm, activation             │
+                └───────────────┬───────────────┘
+                     [B, H/4, W/4, dim1]
+                                ▼
+                ┌───────────────────────────────┐
+                │ Conv2D(dim1, k=2, s=2)        │
+                │  Norm, activation             │
+                │  repeated until patch_size    │
+                └───────────────┬───────────────┘
+                     [B, H/s, W/s, dim1]
+                                ▼
+                ┌───────────────────────────────┐
+                │ Conv2D(embed_dim, k=2, s=2)   │
+                │  Norm, no activation          │
+                └───────────────┬───────────────┘
+                    [B, h, w, embed_dim]
+                                ▼
+                ┌───────────────────────────────┐
+                │ reshape to tokens             │
+                └───────────────┬───────────────┘
+                                ▼
+                     [B, h*w, embed_dim]
 
-    :param embed_dim: Final embedding dimension for each patch. Must be positive
-        and divisible by 4. Defaults to 768.
+    One stage:
+
+    .. code-block:: text
+
+                        x
+                        ▼
+              ┌───────────────────┐
+              │ Conv2D k=s, valid │
+              └─────────┬─────────┘
+                        ▼
+              ┌───────────────────┐
+              │ BatchNorm or      │
+              │  LayerNorm        │
+              └─────────┬─────────┘
+                        ▼
+              ┌───────────────────┐
+              │ activation        │
+              │  (not last stage) │
+              └─────────┬─────────┘
+                        ▼
+                        y
+
+    Stages by patch size:
+
+    .. code-block:: text
+
+        patch_size   stages                      output channels
+        ──────────   ─────────────────────────   ───────────────────────
+        4            4x4/4                       embed_dim
+        8            4x4/4, 2x2/2                dim1, embed_dim
+        16           4x4/4, 2x2/2, 2x2/2         dim1, dim1, embed_dim
+        32           4x4/4, three 2x2/2          dim1 x 3, embed_dim
+
+    ``dim1`` is ``embed_dim // 4``. At ``patch_size=4`` there is a single stage,
+    which is therefore the last one and carries no activation.
+
+    :param embed_dim: Final embedding dimension per patch. Must be positive and
+        divisible by 4. Defaults to 768.
     :type embed_dim: int
-    :param img_size: Input image dimensions as ``(height, width)``.
-        Both dimensions must be divisible by patch_size. Defaults to ``(224, 224)``.
+    :param img_size: Input image dimensions as ``(height, width)``, both
+        divisible by ``patch_size``. Used to report ``num_patches``; the
+        forward pass reads the actual input shape. Defaults to ``(224, 224)``.
     :type img_size: Tuple[int, int]
-    :param patch_size: Final patch dimensions. Both dimensions must be equal,
-        a power of two, and >= 4. Defaults to ``(16, 16)``.
+    :param patch_size: Final patch dimensions. The two entries must be equal, a
+        power of two, and at least 4. Defaults to ``(16, 16)``.
     :type patch_size: Tuple[int, int]
-    :param in_channels: Number of input image channels. Must be positive.
-        Defaults to 3.
+    :param in_channels: Number of input image channels. Must be positive, and
+        the input's channel axis must match it. Defaults to 3.
     :type in_channels: int
-    :param norm_layer: Type of normalization to apply. ``'batch'`` provides
-        better performance, ``'layer'`` is more stable for small batches.
-        Defaults to ``'batch'``.
+    :param norm_layer: ``'batch'`` for ``BatchNormalization`` or ``'layer'`` for
+        ``LayerNormalization(epsilon=1e-6)``. Defaults to ``'batch'``.
     :type norm_layer: Literal['batch', 'layer']
-    :param activation: Activation function for intermediate stages.
+    :param activation: Activation applied after every stage except the last.
         Defaults to ``'gelu'``.
     :type activation: Union[str, Callable]
-    :param use_bias: Whether convolution layers include bias parameters.
-        Defaults to True.
+    :param use_bias: Give the convolutions a bias. Defaults to True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for convolution kernel weights.
-        Defaults to ``'glorot_uniform'``.
+    :param kernel_initializer: Initializer for convolution kernels. Defaults to
+        ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for bias parameters.
-        Defaults to ``'zeros'``.
+    :param bias_initializer: Initializer for biases. Defaults to ``'zeros'``.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Regularizer applied to convolution kernels.
-        Defaults to None.
+    :param kernel_regularizer: Regularizer for convolution kernels. Defaults to
+        None.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional keyword arguments for the Layer base class.
 
-    :raises ValueError: If parameters are invalid (e.g., unsupported patch size).
+    Input shape:
+        4D tensor ``(batch, height, width, in_channels)``.
+
+    Output shape:
+        3D tensor ``(batch, num_patches, embed_dim)``.
+
+    :raises ValueError: From ``__init__``, if ``embed_dim`` is not positive and
+        divisible by 4, if the two ``patch_size`` entries differ or are not a
+        power of two of at least 4, if ``img_size`` is not divisible by the
+        patch size, if ``norm_layer`` is neither name, or if ``in_channels`` is
+        not positive. From ``build``, if the input is not rank 4 or its channel
+        axis does not equal ``in_channels``.
     """
 
     def __init__(
@@ -114,7 +177,6 @@ class HierarchicalMLPStem(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate all inputs
         if embed_dim <= 0 or embed_dim % 4 != 0:
             raise ValueError(f"embed_dim must be positive and divisible by 4, got {embed_dim}")
         if patch_size[0] != patch_size[1]:
@@ -134,27 +196,24 @@ class HierarchicalMLPStem(keras.layers.Layer):
         self.patch_size = patch_size
         self.in_channels = in_channels
         self.norm_layer = norm_layer
-        # DECISION plan-2026-08-23T091307-9a110062/D-401: keep the real
-        # activation value, not an 'activation_name' placeholder -- a prior version stored the literal string 'custom' and silently dropped callables. See decisions.md D-400.
+        # DECISION D-401: store the resolved activation, never an
+        # 'activation_name' placeholder, which drops callables. See decisions.md.
         self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # Calculate derived values
         self.dim1 = embed_dim // 4
         self.num_patches = (img_size[0] // p_size) * (img_size[1] // p_size)
         self.activation_fn = keras.activations.get(self.activation)
 
-        # Dynamically create hierarchical stages
         self.conv_stages = []
         self.norm_stages = []
         current_stride = 1
         stage_idx = 0
         in_ch = self.in_channels
 
-        # Start with a 4x4 convolution
         if p_size >= 4:
             stride = 4
             out_ch = self.dim1 if p_size > 4 else self.embed_dim
@@ -163,7 +222,6 @@ class HierarchicalMLPStem(keras.layers.Layer):
             in_ch = out_ch
             stage_idx += 1
 
-        # Add 2x2 convolutions until the target patch size is reached
         while current_stride < p_size:
             stride = 2
             out_ch = self.dim1 if (current_stride * stride) < p_size else self.embed_dim
@@ -185,9 +243,9 @@ class HierarchicalMLPStem(keras.layers.Layer):
         :type in_channels: int
         :param out_channels: Number of output channels for this stage.
         :type out_channels: int
-        :param kernel_size: Kernel size (also used as stride).
+        :param kernel_size: Kernel size, also used as the stride.
         :type kernel_size: int
-        :param name: Name prefix for the stage layers.
+        :param name: Name prefix for the stage's layers.
         :type name: str
         """
         self.conv_stages.append(keras.layers.Conv2D(
@@ -207,10 +265,12 @@ class HierarchicalMLPStem(keras.layers.Layer):
             self.norm_stages.append(keras.layers.LayerNormalization(epsilon=1e-6, name=f"{name}_norm"))
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and all its sub-layers dynamically.
+        """Build every stage, threading each stage's output shape to the next.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the input is not rank 4, or its channel axis does
+            not equal ``in_channels``.
         """
         if self.built:
             return
@@ -235,7 +295,7 @@ class HierarchicalMLPStem(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply hierarchical MLP stem to input images.
+        """Embed the input image into patch tokens.
 
         :param inputs: Input tensor of shape ``(batch, height, width, in_channels)``.
         :type inputs: keras.KerasTensor
@@ -249,21 +309,21 @@ class HierarchicalMLPStem(keras.layers.Layer):
         for i, (conv_layer, norm_layer) in enumerate(zip(self.conv_stages, self.norm_stages)):
             x = conv_layer(x, training=training)
             x = norm_layer(x, training=training)
-            # No activation after the final stage
+            # The last stage stays linear, so the tokens reach the body
+            # unsquashed.
             if i < num_stages - 1:
                 x = self.activation_fn(x)
 
-        # Reshape from [batch, h, w, c] to [batch, num_patches, embed_dim]
         batch_size, height, width, channels = ops.shape(x)
         x = ops.reshape(x, [batch_size, height * width, channels])
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """Compute the output shape from the input's own spatial size.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple.
+        :return: ``(batch, num_patches, embed_dim)``.
         :rtype: Tuple[Optional[int], ...]
         """
         batch_size = input_shape[0]
