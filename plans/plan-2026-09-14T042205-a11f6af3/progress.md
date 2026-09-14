@@ -15,8 +15,16 @@
   that zamba2/hnet reference only `Mamba2Layer`/`Mamba2ResidualBlock` (v2), zero `MambaLayer` (v1)
   references — matches plan.md's assertion, no scope-drift found.
 
+- [x] Step 6: updated `_selective_scan`'s docstring with the measured outcome (batch=4->5,
+  batch=8 not reached, bit-exact forward, reassociation_atol-derived gradient tolerance). Wrote
+  final decisions.md D-003 entry (full measurement table, batch=8 not reached, combined
+  batch=2->4->5 history across both plans, v2 d_state named as deferred follow-up, Anchor-Refs
+  backlink to components.py:480/518 closing the pending gap from Step 3). Full
+  `tests/test_models/test_mamba/` suite re-run CPU-only: 194 passed, 0 failed — zero regressions
+  from the docstring-only addition.
+
 ## In Progress
-- [ ] Step 6: document final outcome, name v2's d_state as deferred follow-up
+*Nothing currently — plan complete, ready for REFLECT.*
 
 ## Blocked
 *Nothing currently.*

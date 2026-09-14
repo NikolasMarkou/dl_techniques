@@ -190,6 +190,86 @@ re-fusion) — but it is a partial, real-scale confirmation that the "XLA-fusion
 `findings/v1-chunking-design.md` was optimistic in degree (chunking reduces, but does not fully
 eliminate, XLA's tendency to materialize sequence-shaped intermediates under `jit_compile="auto"`).
 
+## D-003 | EXECUTE | 2026-09-14
+**Anchor-Refs**: `src/dl_techniques/models/language/mamba/components.py:480` (docstring pointer),
+`:518` (`# DECISION plan-2026-09-14T042205-a11f6af3/D-003` anchor in `body()`).
+
+**Context**: `_selective_scan`'s two full-sequence `deltaA`/`deltaB_u` precompute tensors
+(`(batch, d_inner, seq_len, d_state)` each, materialized before the `while_loop` started) were
+identified in EXPLORE as a genuine, root-cause-level memory lever for v1 specifically — distinct
+from the prior plan's `tf.recompute_grad` checkpointing fix, which addresses backward-pass
+retention, not this forward-only allocation. D-001/D-002 record the decision to attempt this,
+gated by an early falsification diagnostic, with v2 explicitly out of scope.
+
+**Implemented** (Step 2, commit `d9014c3e0`): `deltaA_t`/`deltaB_u_t` are now computed per-timestep
+inside the `while_loop` `body()`, sliced from the already-cast `delta`/`u`/`B` tensors (preserving
+D-044's dtype discipline), mirroring the existing `C[:, :, t]` slicing precedent in the same loop.
+The two full-sequence precompute tensors are eliminated entirely — this is a computation-graph
+change (what is computed, not just when), not an additional checkpointing wrap. It composes with,
+and does not replace, the existing `tf.recompute_grad` wrap from the prior plan.
+
+**Correctness** (Step 3, commit `d83d4acdb`): forward pass is bit-exact against the old
+full-precompute form (`max_abs_diff = 0.0`, verified on a real `MambaLayer`'s actual sublayer
+outputs, not a CPU toy tensor). Gradients agree within a tolerance derived from
+`tests/numerics.py::reassociation_atol()` (~1e-13 absolute on `A_log`) — this is float32
+reduction-order noise from `tf.recompute_grad`'s backward re-execution visiting the same einsum
+contractions in a different order, not a numerical defect; the tolerance was re-derived from the
+noise source, not hand-loosened to pass. 194/194 tests pass across the full `test_mamba/` suite
+(Step 5, commit `8094ad6b7`), zero regressions.
+
+**Measured outcome** (Step 4, commit `e172f7cbe`, real `CausalLanguageModel` +
+`Mamba.from_variant("130m")`, 24 layers, `seq_len=128`, `jit_compile="auto"` production regime, 12GB
+GPU):
+
+| batch | pre-chunking (prior plan's baseline) | chunked (this plan) | change |
+|---|---|---|---|
+| 4 | succeeds, 9.497 GiB peak | succeeds, 7.7695 GiB peak | -18.19% peak memory |
+| 5 | (not separately measured pre-chunking; batch=4 was the pre-chunking ceiling) | succeeds, 8.9565 GiB peak | **new ceiling** |
+| 6 | — | OOMs (fragmentation-tail; XLA still re-fuses a `f32[128,6,1536,16]` buffer inside the loop) | — |
+| 8 | OOMs, 14.8 GiB attempted | OOMs, 9.8715 GiB attempted | -33.30% attempted allocation, still OOMs |
+
+**The original batch=8/seq=128 target is NOT reached** — stated plainly, not rounded up. The ceiling
+moved by exactly one batch step (4->5), not to the target. This holds even though the batch=8
+attempted-allocation shortfall shrank substantially (33.30%, roughly 3x Step 1's own small-scale
+`num_layers=24` isolated-diagnostic prediction of ~11.1% — a real, positive surprise, not a
+shortfall; Pre-Mortem STOP-IF #2 fired in the helpful direction, escalated and accepted per Step 4's
+raw data).
+
+**Combined history across both plans** (for a reader who only sees this plan's own delta): v1's
+ceiling has moved batch=2 (original) -> batch=4 (prior plan's `tf.recompute_grad` wrap) -> batch=5
+(this plan's chunking). Two independent, additive levers, two partial improvements, target still
+not reached.
+
+**Decision**: Ship the chunked `_selective_scan` — it is a pure internal computation-graph
+optimization with bit-exact forward numerics and gradient-correctness re-verified, no behavior
+change, no new abstraction, and a real (if partial) memory improvement, additive to the existing
+`tf.recompute_grad` wrap.
+
+**Trade-off**: A more invasive computation-graph change — one that touches the actual computed
+values' code path (what is computed), not just backward timing (when it is recomputed) — **at the
+cost of** requiring a stronger correctness proof (forward-numerics-identical AND
+gradient-identical tests, not just a serialization/shape check) than the prior plan's
+checkpointing-only fix needed. This is a cost paid once, in review/verification burden, not a
+recurring runtime or quality cost — unlike the prior plan's declined XLA-off option, which traded
+memory for a 23-31x recurring wall-clock/step penalty. Worth paying: the verification cost is
+already discharged (Step 3, 194/194 tests), and the resulting fix has no disclosed downside beyond
+that one-time proof burden.
+
+**v2's `d_state` reduction remains a NAMED, DEFERRED follow-up**, not attempted by this plan
+(out of scope per D-002, the orchestrator's own scope decision) — v2 (`Mamba2Layer._ssm_scan`) has
+no analogous full-sequence precompute to chunk (confirmed negative result, `findings/v2-chunking-design.md`);
+its only available lever is a capacity/quality trade-off (reducing `d_state`) requiring its own
+future user decision, exactly as the prior plan's declined XLA-off option was named-and-deferred
+before this plan investigated one of its two named follow-ups. v2's OOM ceiling (batch<=2 at
+`seq_len=128`) remains unimproved by either this plan or the prior one.
+
+**Reasoning**: A negative-adjacent partial result ("batch=5, not batch=8") is reported honestly
+per `plans/LESSONS.md`'s standing rule that a negative or partial result is a deliverable when
+it is localized and the real numbers are on record — not rounded toward the original target, and
+not silently omitted. Both the shipped fix's real benefit and its real shortfall are stated in the
+same entry so a future reader (or a future plan targeting v1's remaining gap, or v2's `d_state`
+lever) has the full, honest picture rather than just this plan's own delta.
+
 ## Step 5 raw result | EXECUTE | 2026-09-14
 
 Confirmed the current file list under `tests/test_models/test_mamba/` before running anything

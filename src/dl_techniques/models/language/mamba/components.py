@@ -476,9 +476,16 @@ class MambaLayer(keras.layers.Layer):
            ``C`` already was, rather than precomputed as full
            ``(batch, d_inner, seq_len, d_state)`` tensors before the loop starts.
            This eliminates two large forward-only tensors per layer, additive to
-           the ``tf.recompute_grad`` wrap above. See
-           `plans/plan-2026-09-14T042205-a11f6af3/decisions.md` D-003 for the
-           measured outcome.
+           the ``tf.recompute_grad`` wrap above. Forward outputs are bit-exact
+           (``max_abs_diff = 0.0``) vs. the old precompute form; gradients agree
+           within ``reassociation_atol()`` (float32 reduction-order noise from
+           ``tf.recompute_grad``'s backward re-execution, not a defect). MEASURED
+           at ``variant="130m"`` (24 layers), ``seq_len=128``, on a 12GB GPU: the
+           ceiling moved from batch=4 to batch=5 (batch=4's peak fell 18.19%,
+           9.497->7.7695 GiB; batch=8's attempted allocation shrank 33.30% but
+           still exceeds the pool). The original batch=8 target is still NOT
+           reached. See `plans/plan-2026-09-14T042205-a11f6af3/decisions.md` D-003
+           for the full measurement table and the deferred v2 `d_state` follow-up.
         """
         batch_size, d_inner, seq_len = keras.ops.shape(u)
 
