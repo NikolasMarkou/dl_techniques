@@ -36,6 +36,7 @@ from typing import Optional, Dict, Any, Tuple, Union, List
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -953,11 +954,9 @@ class LighthouseAttention(keras.layers.Layer):
         scores = keras.ops.matmul(q_t, keras.ops.transpose(k_t, (0, 1, 3, 2))) * scale
 
         # Lower-triangular keep-mask, inclusive of the diagonal.
-        i = keras.ops.arange(keras.ops.shape(scores)[-2])
-        j = keras.ops.arange(keras.ops.shape(scores)[-1])
-        keep = keras.ops.expand_dims(j, 0) <= keras.ops.expand_dims(i, -1)
+        blocked = MaskFactory.create_causal_mask(keras.ops.shape(scores)[-1], dtype="bool")
         scores = keras.ops.where(
-            keep, scores, keras.ops.cast(_mask_value(scores.dtype), scores.dtype)
+            blocked, keras.ops.cast(_mask_value(scores.dtype), scores.dtype), scores
         )
 
         attn = self.attn_prob(scores)
