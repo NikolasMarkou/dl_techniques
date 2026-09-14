@@ -734,6 +734,41 @@ def create_mask(
         raise ValueError(f"Unknown mask type: {mask_type}")
 
 
+def create_causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
+    """Build the rank-3 causal self-attention mask, in attend semantics.
+
+    Only the batch and sequence-length dimensions of `hidden_states` are
+    read; its values and dtype are ignored. This is the shared consolidation
+    point for the "pure causal, no padding" rank-3 attend mask pattern that
+    was previously duplicated across `dl_techniques.layers.blt.blt_blocks`
+    and `dl_techniques.models.vision_language.clip.model`.
+
+    Mask semantics:
+        `MaskFactory.create_causal_mask` returns block semantics (True =
+        mask out). This is inverted once at the end into attend semantics
+        (True = may attend), then broadcast to rank 3.
+
+    Rank 3 matters: the attention layers used in this codebase read a
+    rank-2 mask as a `(batch, seq_len)` padding mask rather than a
+    `(seq_len, seq_len)` score mask, so a rank-2 causal mask would be
+    misread. This function always returns rank 3.
+
+    Args:
+        hidden_states: Sequence tensor of shape `(batch, seq_len, dim)`.
+
+    Returns:
+        keras.KerasTensor: Boolean mask of shape `(batch, seq_len, seq_len)`,
+            `True` where a position may attend.
+    """
+    batch_size = ops.shape(hidden_states)[0]
+    seq_len = ops.shape(hidden_states)[1]
+    blocked = MaskFactory.create_causal_mask(seq_len, dtype="bool")
+    blocked = ops.broadcast_to(
+        ops.expand_dims(blocked, axis=0), (batch_size, seq_len, seq_len)
+    )
+    return ops.logical_not(blocked)
+
+
 def combine_masks(
         *masks: keras.KerasTensor,
         combination: Literal["and", "or", "xor"] = "or"
