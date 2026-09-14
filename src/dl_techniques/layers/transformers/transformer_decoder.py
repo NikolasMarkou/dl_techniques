@@ -35,6 +35,7 @@ from .transformer import (
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
 from ...utils.logger import logger
+from ...utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -376,19 +377,6 @@ class TransformerDecoderLayer(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _causal_keep_mask(self, seq_len: int, dtype: Any) -> keras.KerasTensor:
-        """Lower-triangular keep-mask ``(1, T, T)``; ``mask[i, j] = 1 iff j <= i``.
-
-        Built via an arange index comparison (``row >= col``) rather than
-        ``ops.tril``/``ops.triu`` (both carry the same graph-mode trap) for
-        backend portability and to match the repo's causal-mask
-        idiom. The downstream attention applies ``scores + (1 - mask) * -1e9``.
-        """
-        row = ops.arange(seq_len)[:, None]
-        col = ops.arange(seq_len)[None, :]
-        mask = ops.cast(row >= col, dtype)
-        return mask[None, :, :]
-
     def call(
             self,
             inputs: keras.KerasTensor,
@@ -428,7 +416,7 @@ class TransformerDecoderLayer(keras.layers.Layer):
         # Resolve the self-attention mask (causal default).
         self_mask = self_attention_mask
         if self_mask is None and self.use_causal_mask:
-            self_mask = self._causal_keep_mask(ops.shape(inputs)[1], inputs.dtype)
+            self_mask = create_causal_attend_mask(inputs)
 
         if self.normalization_position == 'pre':
             # 1. Self-attention
