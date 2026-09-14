@@ -734,19 +734,27 @@ def create_mask(
         raise ValueError(f"Unknown mask type: {mask_type}")
 
 
-def create_causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
-    """Build the rank-3 causal self-attention mask, in attend semantics.
+def create_causal_attend_mask(
+        hidden_states: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+) -> keras.KerasTensor:
+    """Build the rank-3 causal (+ optional padding) self-attention mask, in attend semantics.
 
     Only the batch and sequence-length dimensions of `hidden_states` are
     read; its values and dtype are ignored. This is the shared consolidation
-    point for the "pure causal, no padding" rank-3 attend mask pattern that
-    was previously duplicated across `dl_techniques.layers.blt.blt_blocks`
-    and `dl_techniques.models.vision_language.clip.model`.
+    point for two previously-duplicated patterns:
+
+    - "pure causal, no padding" (`attention_mask=None`), previously duplicated
+      across `dl_techniques.layers.blt.blt_blocks` and
+      `dl_techniques.models.vision_language.clip.model`.
+    - "causal OR'd with optional padding", previously duplicated across
+      `dl_techniques.models.language.qwen.components.build_causal_attention_mask`
+      and an inline block in
+      `dl_techniques.layers.transformers.text_decoder.TextDecoder.call`.
 
     Mask semantics:
-        `MaskFactory.create_causal_mask` returns block semantics (True =
-        mask out). This is inverted once at the end into attend semantics
-        (True = may attend), then broadcast to rank 3.
+        Block semantics throughout (True = block), inverted once at the end
+        into attend semantics (True = may attend), then broadcast to rank 3.
 
     Rank 3 matters: the attention layers used in this codebase read a
     rank-2 mask as a `(batch, seq_len)` padding mask rather than a
@@ -755,6 +763,11 @@ def create_causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTe
 
     Args:
         hidden_states: Sequence tensor of shape `(batch, seq_len, dim)`.
+        attention_mask: Optional padding mask of shape `(batch, seq_len)`,
+            `1` for real tokens and `0` for padding, in the tokenizer
+            convention. When `None` (the default), the returned mask is
+            purely causal, byte-identical to this function's pre-extension
+            behavior.
 
     Returns:
         keras.KerasTensor: Boolean mask of shape `(batch, seq_len, seq_len)`,
@@ -766,6 +779,12 @@ def create_causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTe
     blocked = ops.broadcast_to(
         ops.expand_dims(blocked, axis=0), (batch_size, seq_len, seq_len)
     )
+
+    if attention_mask is not None:
+        padding_mask_1d = ops.equal(attention_mask, 0)
+        padding_mask_3d = MaskFactory.create_padding_mask(padding_mask_1d, dtype="bool")
+        blocked = combine_masks(blocked, padding_mask_3d, combination="or")
+
     return ops.logical_not(blocked)
 
 
