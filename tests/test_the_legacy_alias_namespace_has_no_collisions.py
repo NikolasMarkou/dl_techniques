@@ -425,7 +425,7 @@ class TestTheLegacyAliasNamespace:
     #: rot, is what actually pins the population; this arm exists to assert the RUNTIME
     #: consequence that no AST census can see.
     _REFUSAL_ROSTER = (
-        ("dl_techniques.layers.standard_blocks", ("ConvBlock",)),
+        ("dl_techniques.layers.conv_blocks.conv_block", ("ConvBlock",)),
         ("dl_techniques.layers.attention.area_attention", ("AreaAttention",)),
         ("dl_techniques.layers.ffn.mlp", ("MLPBlock",)),
         ("dl_techniques.layers.tabular.tabm_mlp_block", ("TabMMLPBlock", "MLPBlock")),

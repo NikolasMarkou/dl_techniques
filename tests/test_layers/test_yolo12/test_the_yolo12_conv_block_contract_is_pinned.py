@@ -35,7 +35,7 @@ This file is the unit-level contract only.
 import keras
 import pytest
 
-from dl_techniques.layers import standard_blocks
+from dl_techniques.layers.conv_blocks import conv_block
 from dl_techniques.layers.yolo12.yolo12_blocks import YOLO12_NORM_KWARGS, yolo12_conv_block
 
 
@@ -44,7 +44,7 @@ class TestTheHelperReturnsTheSharedConvBlock:
 
     def test_it_returns_a_standard_blocks_conv_block(self) -> None:
         block = yolo12_conv_block(filters=8)
-        assert type(block) is standard_blocks.ConvBlock, (
+        assert type(block) is conv_block.ConvBlock, (
             f"yolo12_conv_block returned {type(block)!r}. The plan's entire premise is "
             "that yolo12 has NO ConvBlock of its own -- a second class reappearing here "
             "re-creates the duplication that was removed."
