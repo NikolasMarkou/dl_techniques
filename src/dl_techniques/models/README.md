@@ -81,6 +81,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `masked_autoencoder/` | MAE |
 | `mobilenet/` | MobileNet V1, V2, V3, V4 |
 | `omnipoint/` | OmniPoint camera-agnostic monocular metric point-cloud model |
+| `rad_convnet/` | RADConvNet — ConvNeXt-shaped backbone built on RAD-Conv (Region-Aware Deformable Convolution, arXiv:2509.15436) |
 | `resnet/` | ResNet architectures |
 | `squeezenet/` | SqueezeNet |
 | `super_resolution/pft_sr/` | PFT-SR progressive focused transformer |

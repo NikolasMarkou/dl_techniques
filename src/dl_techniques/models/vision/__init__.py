@@ -1,6 +1,6 @@
 """Vision models — image backbones, detectors, segmenters, denoisers and generators.
 
-The largest family: 38 leaf packages listed below, five of which sit one level deeper
+The largest family: 39 leaf packages listed below, five of which sit one level deeper
 under a task subdirectory (`image_restoration/`, `keypoints/`, `super_resolution/`).
 (This list has a pre-existing gap of 3 undocumented leaf packages — `omnipoint/`,
 `image_restoration/doc_res/`, `image_restoration/doc_scanner/` — tracked in
@@ -35,6 +35,8 @@ this bullet's edit, which only adds `fftnet/`.)
 - `lewm/` — latent-energy world model
 - `masked_autoencoder/` — MAE
 - `mobilenet/` — MobileNet variants (V1, V2, V3, V4)
+- `rad_convnet/` — RADConvNet, a ConvNeXt-shaped backbone built on RAD-Conv (Region-Aware
+  Deformable Convolution, arXiv:2509.15436)
 - `resnet/` — ResNet architectures
 - `squeezenet/` — SqueezeNet
 - `super_resolution/pft_sr/` — super-resolution
