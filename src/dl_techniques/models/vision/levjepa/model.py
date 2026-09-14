@@ -46,6 +46,7 @@ SCALE_CONFIGS: Dict[str, Tuple[int, int, int, float, int]] = {
 #: supports.
 MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {name: {"scale": name} for name in SCALE_CONFIGS}
 
+# ---------------------------------------------------------------------
 
 def from_variant(
     variant: str,
@@ -142,6 +143,7 @@ def from_variant(
         **kwargs,
     )
 
+# ---------------------------------------------------------------------
 
 def create_levjepa(
     variant: str = "vit_base",

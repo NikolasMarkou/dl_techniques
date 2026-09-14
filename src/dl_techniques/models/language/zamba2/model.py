@@ -178,7 +178,7 @@ class Zamba2Model(keras.Model):
         input_ids [B, S]
                │
                ▼ Embedding(vocab_size, hidden_size)
-        original_embedding [B, S, H]  ──────────────────────┐
+        original_embedding [B, S, H]  ───────────────────────┐
                │                                             │  (re-read at
                ▼                                             │   every 'g')
         hidden_state = original_embedding                    │
@@ -191,9 +191,9 @@ class Zamba2Model(keras.Model):
           │   Zamba2SharedAttentionBlock_{i%N}(  │◄──────────┘
           │     hidden_state, original_embedding)│  (one of N=num_mem_blocks
           │   hidden_state =                     │   shared instances,
-          │   Zamba2SharedMLPBlock_{i%N}(         │   round-robin; occurrence
-          │     hidden_state,                     │   counter increments once
-          │     occurrence_idx=<g counter>)       │   per 'g', independent of
+          │   Zamba2SharedMLPBlock_{i%N}(        │   round-robin; occurrence
+          │     hidden_state,                    │   counter increments once
+          │     occurrence_idx=<g counter>)      │   per 'g', independent of
           └────┬─────────────────────────────────┘   which physical slot)
                ▼
         final RMSNorm

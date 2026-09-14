@@ -368,7 +368,7 @@ class Zamba2SharedAttentionBlock(keras.layers.Layer):
           normed_hidden                            │
                │                                   │
                └──────────────┬────────────────────┘
-                               ▼ concatenate (feature axis)
+                              ▼ concatenate (feature axis)
                         [B, S, 2*d_model]
                                │
                                ▼ Dense -> d_model

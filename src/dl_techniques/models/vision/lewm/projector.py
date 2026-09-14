@@ -7,7 +7,14 @@ than BatchNormalization, so a batch of size 1 still works.
 
 import keras
 from typing import Any, Dict, Optional, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.lewm.projector")
@@ -92,3 +99,6 @@ class MLPProjector(keras.layers.Layer):
             "use_layer_norm": self.use_layer_norm,
         })
         return config
+
+# ---------------------------------------------------------------------
+

@@ -2,60 +2,26 @@
 Pre-norm vision transformer in the DINO family, with optional rotary position
 embeddings.
 
-The DINOv3 paper answers a problem where self-distillation, run long enough,
-degrades dense features (segmentation, depth) even as global features keep
-improving: Gram anchoring, an extra loss pulling the student's patch-feature
-Gram matrix toward an earlier frozen copy, plus a positional scheme that does
-not bake in one resolution. This file implements only the second half.
-`positional_embedding_type='rope'` replaces the learned absolute table with
-rotary embeddings applied to Q and K inside the attention operator, so the
-attention score depends on the difference of two positions rather than their
-absolute values, generalizing across sequence lengths a fixed table cannot
-represent. Gram anchoring is not implemented: no frozen Gram teacher and no
-Gram-matrix loss term exist in this repository.
+This file defines the ``DINOv3`` model and the ``create_dino_v3`` factory: patch
+embedding, a learnable [CLS] token, ``depth`` pre-norm transformer blocks with a
+linearly increasing stochastic-depth rate, a final normalization, and the [CLS]
+row as the feature vector, optionally followed by a classifier.
+``positional_embedding_type='rope'`` replaces the learned absolute position
+table with rotary embeddings applied to Q and K inside the registered
+``group_query`` attention, run with ``num_kv_heads == num_heads`` so it reduces
+to ordinary multi-head attention. Under ``'rope'`` the table is omitted rather
+than added on top of the rotation.
 
-RoPE is reached through the registered `group_query` attention with
-`num_kv_heads == num_heads`, which reduces grouped-query attention to
-ordinary multi-head attention that rotates Q and K after projection, rather
-than rotating the token stream before it (which would destroy the
-relative-position property RoPE is defined by). Under `'rope'` the learned
-absolute table is omitted rather than stacked on the rotation, since two
-position signals would be redundant and the table alone would break
-permutation equivariance. `rope_percentage=0.0` is legal and leaves the
-model with no positional information at all; it exists as the control arm of
-the RoPE-liveness test, not as a training configuration. A checkpoint is not
-portable between the two positional modes, since they instantiate different
-attention classes.
-
-Everything else is a conventional pre-norm ViT: patch embedding, a learnable
-[CLS] token, `depth` transformer blocks with linearly increasing stochastic
-depth, a final normalization, and the [CLS] row as the feature vector,
-optionally followed by a classifier.
-
-Several other DINOv3 mechanisms are absent. The RoPE here is 1-D over the
-flattened token sequence (position = token index); the paper uses a 2-D
-axial formulation over patch (row, column) coordinates with random
-coordinate jittering during training. Sinkhorn-Knopp centering is not
-implemented (`dl_techniques.losses.dino_loss` offers EMA centering only).
-Register tokens are not implemented in this model;
-`dino_v2.DINOv2VisionTransformer` has them. High-resolution adaptation and
-distillation from a large pretrained teacher are not implemented, and no
-pretrained weights are shipped: `pretrained=True` raises
-`NotImplementedError` rather than returning a randomly initialized model.
-
-`patch_size=None` is the only place in the DINO trio where it resolves to
-something other than a constant: `giant` carries `(14, 14)` and
-`stochastic_depth_rate=0.4` while every other variant carries `(16, 16)`.
-`get_last_selfattention` raises `NotImplementedError` rather than returning
-a zero tensor a caller cannot distinguish from a broken model, since under
-`'learned'` the multi-head attention classes accept no
-`return_attention_scores` at all, while under `'rope'`
-`GroupedQueryAttention` returns a correct probability map but
-`TransformerLayer.call` never forwards the flag.
+The rotation is 1-D over the flattened token sequence. Gram anchoring, 2-D axial
+RoPE with coordinate jittering, Sinkhorn-Knopp centering and register tokens are
+not implemented. No pretrained weights ship with this repository, so
+``pretrained=True`` raises ``NotImplementedError``. A checkpoint is not portable
+between the two positional modes, which instantiate different attention classes,
+and ``rope_percentage=0.0`` leaves the model with no positional information at
+all.
 
 References:
-    - Siméoni et al., 2025. DINOv3. (arXiv preprint; Gram anchoring and 2-D axial
-      RoPE, neither implemented here)
+    - Siméoni et al., 2025. DINOv3. (arXiv preprint)
     - Caron et al., 2021. Emerging Properties in Self-Supervised Vision
       Transformers. (https://arxiv.org/abs/2104.14294)
     - Oquab et al., 2023. DINOv2: Learning Robust Visual Features without
@@ -92,102 +58,206 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.dino.dino_v3")
 class DINOv3(keras.Model):
-    """
-    DINOv3 Vision Transformer Model Implementation.
+    """Build a pre-norm DINO vision transformer with a selectable position scheme.
 
-    A pre-normalization Vision Transformer backbone, usable for classification and
-    as the trunk of DINO-style self-supervised training. Pre-norm is what the DINO
-    line relies on for self-distillation stability.
+    The model is assembled with the functional API at construction time. Its one
+    structural choice is ``positional_embedding_type``: ``'learned'`` adds an
+    absolute embedding table to the token stream, while ``'rope'`` creates no
+    table and instead rotates Q and K inside every attention operator. The two
+    modes run different attention classes, so weights do not transfer between
+    them.
 
-    The model consists of:
-    - A patch embedding layer to convert images into sequences of tokens.
-    - A learnable [CLS] token for global image representation.
-    - Positional information, selected by ``positional_embedding_type``:
-      either a learned absolute embedding table added to the token stream
-      (``"learned"``), or 1-D rotary position embeddings applied to Q and K
-      inside every attention operator (``"rope"``). The two are mutually
-      exclusive — under ``"rope"`` no learned table is created at all.
-    - A stack of pre-normalized Transformer encoder layers.
-    - A final normalization layer.
-    - An optional classification head.
+    Architecture:
 
-    Implemented vs. not implemented (DINOv3 mechanisms):
-        RoPE is implemented (1-D, over the flattened token sequence).
-        **Gram anchoring is NOT implemented** — it requires a third frozen "Gram
-        teacher" network and is an explicit non-goal here. **Sinkhorn-Knopp
-        centering is NOT implemented.** **2-D axial RoPE with coordinate jittering
-        is NOT implemented** — the rotation here is 1-D over token index.
-        **Register tokens are NOT implemented** in this model. See the module
-        docstring for the full list.
+    .. code-block:: text
 
-    Args:
-        image_size: Integer, or tuple of integers (height, width), for the input
-            image. An integer ``s`` is normalized to ``(s, s)``.
-            Defaults to (224, 224).
-        patch_size: Integer, or tuple of integers (height, width), for the image
-            patches. An integer ``p`` is normalized to ``(p, p)``.
-            Defaults to (16, 16).
-        num_classes: Number of output classes for the classification head. If 0,
-            no head is added. Defaults to 1000.
-        embed_dim: The dimensionality of the token embeddings. Defaults to 768.
-        depth: The number of transformer encoder layers. Defaults to 12.
-        num_heads: The number of attention heads in each transformer layer.
-            Defaults to 12.
-        mlp_ratio: Ratio to determine the hidden dimension of the FFN in
-            transformer layers (hidden_dim = embed_dim * mlp_ratio). Defaults to 4.0.
-        qkv_bias: If True, add a learnable bias to the query, key, and value
-            projections. Defaults to True.
-        dropout_rate: Dropout rate for the embedding and FFN layers.
-            Defaults to 0.0.
-        attention_dropout_rate: Dropout rate for the attention weights.
-            Defaults to 0.0.
-        stochastic_depth_rate: Maximum drop rate for stochastic depth, which
-            linearly increases across layers. Defaults to 0.0.
-        normalization_type: The type of normalization to use ('layer_norm',
-            'rms_norm'). Defaults to 'layer_norm'.
-        positional_embedding_type: How positional information enters the model.
-            ``'learned'`` (default) adds a learned absolute embedding table to the
-            token stream. ``'rope'`` instead applies rotary position embeddings to
-            Q and K inside each attention operator and creates **no** learned
-            table. Defaults to 'learned'.
-        rope_theta: Base frequency for the rotary embeddings. Only read when
-            ``positional_embedding_type='rope'``. Defaults to 10000.0.
-        rope_percentage: Fraction of each head's dimensions the rotation is
-            applied to. Only read when ``positional_embedding_type='rope'``.
-            **0.0 disables the rotation entirely**, which — since no learned table
-            is created under ``'rope'`` — leaves the model with NO positional
-            information at all (a permutation-equivariant bag of patches). That
-            configuration is legal because it is the control arm the RoPE-liveness
-            test needs; it is not a useful training configuration.
-            Defaults to 1.0.
-        activation: Activation function for the FFN layers. Defaults to 'gelu'.
-        kernel_initializer: Initializer for kernel weights. Defaults to
-            ``TruncatedNormal(stddev=0.02)``, DINO's published
-            ``trunc_normal_(std=.02)``
-            (https://github.com/facebookresearch/dinov3/blob/main/dinov3/models/vision_transformer.py).
-        bias_initializer: Initializer for bias weights. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        include_top: If True, include the final classification head. If False,
-            the model outputs features from the transformer. Defaults to True.
-        **kwargs: Additional arguments for the `keras.Model` base class.
+                     input_image [B, H, W, 3]
+                                 ▼
+                   ┌───────────────────────────┐
+                   │ PatchEmbedding2D          │
+                   └─────────────┬─────────────┘
+                         [B, N, embed_dim]
+                                 ▼
+                   ┌───────────────────────────┐
+                   │ ClassTokenPrepend         │
+                   └─────────────┬─────────────┘
+                        [B, N+1, embed_dim]
+                                 ▼
+                   ┌─────────────┴─────────────┐
+                   ▼                           ▼
+               'learned'                     'rope'
+    ┌─────────────────────┐     ┌─────────────────────┐
+    │ PositionalEmbedding │     │ Dropout             │
+    │  table + dropout    │     │  only if dropout>0  │
+    └──────────┬──────────┘     └──────────┬──────────┘
+               └─────────────┬─────────────┘
+                             ▼
+                   ┌───────────────────────────┐
+                   │ TransformerLayer x depth  │
+                   │  pre-norm, drop-path ramp │
+                   └─────────────┬─────────────┘
+                                 ▼
+                   ┌───────────────────────────┐
+                   │ final_norm                │
+                   └─────────────┬─────────────┘
+                                 ▼
+                   ┌───────────────────────────┐
+                   │ take [CLS] row x[:, 0]    │
+                   └─────────────┬─────────────┘
+                      features [B, embed_dim]
+                                 │
+                   ┌─────────────┴─────────────┐
+                   ▼                           ▼
+    include_top, classes>0                 otherwise
+    ┌─────────────────────┐                │
+    │ Dense(num_classes)  │                │
+    └──────────┬──────────┘                │
+                   ▼                           ▼
+           [B, num_classes]             [B, embed_dim]
+
+    Encoder block (pre-norm, two residual halves):
+
+    .. code-block:: text
+
+                      x [B, N+1, D]
+                            │
+                ┌───────────┤
+                │           ▼
+                │   ┌───────────────┐
+                │   │ norm          │
+                │   └───────┬───────┘
+                │           ▼
+                │   ┌───────────────┐
+                │   │ attention     │
+                │   │  q, k rotated │
+                │   │  ('rope' only)│
+                │   └───────┬───────┘
+                │           ▼
+                │   ┌───────────────┐
+                │   │ drop path     │
+                │   │  (optional)   │
+                │   └───────┬───────┘
+                │           ▼
+                │   ┌───────────────┐
+                └──►│ add           │
+                    └───────┬───────┘
+                            ▼
+                ┌───────────┤
+                │           ▼
+                │   ┌───────────────┐
+                │   │ norm          │
+                │   └───────┬───────┘
+                │           ▼
+                │   ┌───────────────┐
+                │   │ mlp           │
+                │   └───────┬───────┘
+                │           ▼
+                │   ┌───────────────┐
+                │   │ drop path     │
+                │   │  (optional)   │
+                │   └───────┬───────┘
+                │           ▼
+                │   ┌───────────────┐
+                └──►│ add           │
+                    └───────┬───────┘
+                            ▼
+                      y [B, N+1, D]
+
+    Variants:
+
+    .. code-block:: text
+
+        variant  embed_dim  depth  heads  mlp  patch  drop path
+        ───────  ─────────  ─────  ─────  ───  ─────  ─────────
+        tiny           192     12      3  4.0  16x16  (default)
+        small          384     12      6  4.0  16x16  (default)
+        base           768     12     12  4.0  16x16  (default)
+        large         1024     24     16  4.0  16x16  (default)
+        giant         1536     40     24  4.0  14x14        0.4
+
+    (default) means the variant sets no value and ``stochastic_depth_rate``
+    keeps whatever the caller passed.
+
+    :param image_size: Input image size as ``(height, width)``; an integer ``s``
+        becomes ``(s, s)``. Defaults to ``(224, 224)``.
+    :type image_size: int or tuple
+    :param patch_size: Patch size as ``(height, width)``; an integer ``p``
+        becomes ``(p, p)``. Defaults to ``(16, 16)``.
+    :type patch_size: int or tuple
+    :param num_classes: Number of classifier outputs. ``0`` adds no head.
+        Defaults to 1000.
+    :type num_classes: int
+    :param embed_dim: Token embedding width. Defaults to 768.
+    :type embed_dim: int
+    :param depth: Number of transformer blocks. Defaults to 12.
+    :type depth: int
+    :param num_heads: Attention heads per block. Defaults to 12.
+    :type num_heads: int
+    :param mlp_ratio: FFN hidden width as a multiple of ``embed_dim``. Defaults
+        to 4.0.
+    :type mlp_ratio: float
+    :param qkv_bias: Add a bias to the query, key and value projections.
+        Defaults to True.
+    :type qkv_bias: bool
+    :param dropout_rate: Dropout for the embedding and FFN layers. Defaults to
+        0.0.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Dropout on the attention weights. Defaults to
+        0.0.
+    :type attention_dropout_rate: float
+    :param stochastic_depth_rate: Drop rate of the last block; the rate rises
+        linearly from 0 across the stack. Defaults to 0.0.
+    :type stochastic_depth_rate: float
+    :param normalization_type: ``'layer_norm'`` or ``'rms_norm'``. Defaults to
+        ``'layer_norm'``.
+    :type normalization_type: str
+    :param positional_embedding_type: ``'learned'`` for an absolute table,
+        ``'rope'`` for 1-D rotary embeddings inside attention. Defaults to
+        ``'learned'``.
+    :type positional_embedding_type: str
+    :param rope_theta: Rotary base frequency. Read only under ``'rope'``.
+        Defaults to 10000.0.
+    :type rope_theta: float
+    :param rope_percentage: Fraction of each head's dimensions that are rotated.
+        Read only under ``'rope'``. ``0.0`` disables the rotation, which leaves
+        the model with no positional information, since ``'rope'`` creates no
+        table. Defaults to 1.0.
+    :type rope_percentage: float
+    :param activation: FFN activation. Defaults to ``'gelu'``.
+    :type activation: str or callable
+    :param kernel_initializer: Initializer for kernel weights. Defaults to
+        ``TruncatedNormal(stddev=0.02)``, DINO's published
+        ``trunc_normal_(std=.02)``.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias weights. Defaults to
+        ``'zeros'``.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: keras.regularizers.Regularizer or None
+    :param include_top: Append the classification head. Defaults to True.
+    :type include_top: bool
+    :param kwargs: Additional :class:`keras.Model` arguments.
+
+    :raises ValueError: If ``image_size`` is not divisible by ``patch_size``, if
+        ``embed_dim`` is not divisible by ``num_heads``, if
+        ``positional_embedding_type`` is not one of the two names, if
+        ``rope_theta`` is not positive, or if ``rope_percentage`` falls outside
+        ``[0, 1]``.
 
     Input shape:
-        A 4D tensor of shape `(batch_size, height, width, channels)`, where
-        height and width must match `image_size`.
+        4D tensor ``(batch_size, height, width, channels)``, with height and
+        width matching ``image_size``.
 
     Output shape:
-        - If `include_top=True`: A 2D tensor of shape `(batch_size, num_classes)`.
-        - If `include_top=False`: A 2D tensor of shape `(batch_size, embed_dim)`
-          representing the [CLS] token features.
-
-    Raises:
-        ValueError: If model parameters are invalid or incompatible.
+        ``(batch_size, num_classes)`` when ``include_top=True`` and
+        ``num_classes > 0``, otherwise ``(batch_size, embed_dim)``.
     """
 
     MODEL_VARIANTS = {
@@ -231,8 +301,8 @@ class DINOv3(keras.Model):
         rope_theta: float = 10000.0,
         rope_percentage: float = 1.0,
         activation: Union[str, Callable] = 'gelu',
-        # DECISION plan-2026-08-23T091307-9a110062/D-504: default to DINO_KERNEL_INITIALIZER, never 'glorot_uniform' or the bare string "truncated_normal".
-        # The bare string resolves to Keras' stddev=0.05, 2.5x wider than DINOv3's published std=.02. See decisions.md.
+        # DECISION D-504: default to DINO_KERNEL_INITIALIZER, never the bare
+        # string, which is Keras' stddev=0.05 not DINO's 0.02. See decisions.md.
         kernel_initializer: Union[str, Dict[str, Any], initializers.Initializer] = DINO_KERNEL_INITIALIZER,
         bias_initializer: Union[str, initializers.Initializer] = 'zeros',
         kernel_regularizer: Optional[regularizers.Regularizer] = None,
@@ -240,9 +310,8 @@ class DINOv3(keras.Model):
         include_top: bool = True,
         **kwargs: Any
     ) -> None:
-        # Normalize int-or-tuple spellings BEFORE any subscript. Passing
-        # `image_size=224` used to crash on `image_size[0]` with a bare TypeError
-        # instead of building a 224x224 model, unlike v1/v2 which both accept an int.
+        # Both spellings are normalized before any subscript, since v1 and v2
+        # also accept a bare int.
         image_size = (
             tuple(image_size) if isinstance(image_size, (tuple, list))
             else (image_size, image_size)
@@ -252,7 +321,6 @@ class DINOv3(keras.Model):
             else (patch_size, patch_size)
         )
 
-        # Input validation
         if image_size[0] % patch_size[0] != 0 or image_size[1] % patch_size[1] != 0:
             raise ValueError(f"image_size {image_size} must be divisible by patch_size {patch_size}")
         if embed_dim % num_heads != 0:
@@ -267,10 +335,9 @@ class DINOv3(keras.Model):
         if not 0.0 <= rope_percentage <= 1.0:
             raise ValueError(f"rope_percentage must be in [0, 1], got {rope_percentage}")
 
-        # DECISION plan_2026-06-15_39a31d4a/D-001: call `super().__init__(inputs=, outputs=)` exactly once, at the end of `__init__`.
-        # A bare `super().__init__(**kwargs)` here double-initializes the Functional model. See decisions.md.
+        # DECISION D-001: call super().__init__(inputs=, outputs=) once, at the
+        # end; a bare super().__init__(**kwargs) double-inits it. decisions.md.
 
-        # Store configuration
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_classes = num_classes
@@ -293,17 +360,14 @@ class DINOv3(keras.Model):
         self.bias_regularizer = regularizers.get(bias_regularizer)
         self.include_top = include_top
 
-        # Compute derived values
         self.num_patches = (image_size[0] // patch_size[0]) * (image_size[1] // patch_size[1])
         self.sequence_length = self.num_patches + 1
 
-        # Build the model using the functional API pattern
         inputs = keras.Input(shape=(*image_size, 3), name="input_image")
         outputs = self._build_model(inputs)
 
-        # Finalize the Model
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `name` stays a default via `setdefault`, never a hard-coded literal.
-        # `from_config` passes `name` through `**kwargs`; a hard-coded `name=` beside it raises a duplicate-keyword TypeError. See decisions.md.
+        # DECISION D-082: keep `name` a setdefault, never a literal; from_config
+        # passes name through **kwargs and a duplicate keyword raises.
         kwargs.setdefault("name", "DINOv3")
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
@@ -313,25 +377,21 @@ class DINOv3(keras.Model):
         )
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Constructs the model architecture."""
-        # 1. Patch Embedding
+        """Assemble the full graph from input tensor to output tensor."""
         x = self._build_patch_embedding(inputs)
 
-        # 2. Add CLS Token and Positional Embedding
         x = self._build_token_processing(x)
 
-        # 3. Transformer Encoder Layers
         x = self._build_encoder(x)
 
-        # 4. Final Processing and Head
         x = self._build_head(x)
 
         return x
 
     def _build_patch_embedding(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Creates the patch embedding layer."""
-        # DECISION plan-2026-08-23T091307-9a110062/D-540: give every consumer its own `clone_initializer(...)` copy, never `self.kernel_initializer` directly.
-        # A shared seedless initializer instance replays its draw, so every same-shape kernel it reaches is bit-identical. See decisions.md.
+        """Create the patch embedding layer and apply it."""
+        # DECISION D-540: give every consumer its own clone_initializer copy; a
+        # shared seedless instance replays its draw. See decisions.md.
         self.patch_embed = PatchEmbedding2D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
@@ -344,17 +404,18 @@ class DINOv3(keras.Model):
         return self.patch_embed(inputs)
 
     def _build_token_processing(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Adds the [CLS] token and, for the 'learned' mode, positional embeddings."""
-        # DECISION plan_2026-06-15_39a31d4a/D-001: own the CLS token via ClassTokenPrepend, never an inline `self.add_weight` here.
-        # This runs inside `_build_model`, before `super().__init__`; an inline add_weight would fire too early and crash. See decisions.md.
+        """Prepend the [CLS] token and add positional information."""
+        # DECISION D-001: own the CLS token via ClassTokenPrepend, not an inline
+        # add_weight; this runs before super().__init__. See decisions.md.
         self.cls_token_layer = ClassTokenPrepend(name="cls_token")
         x = self.cls_token_layer(x)
 
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-015: omit the learned absolute table under 'rope', never stack it on top of the rotation.
-        # Both together give two redundant position signals, and the table alone breaks permutation equivariance. See decisions.md.
+        # DECISION D-015: omit the learned table under 'rope', never stack it on
+        # the rotation; two position signals are redundant. See decisions.md.
         if self.positional_embedding_type == 'rope':
             self.pos_embed = None
-            # PositionalEmbedding also owned the post-embedding dropout; preserve it.
+            # The 'learned' path gets its dropout from PositionalEmbedding, so
+            # this path supplies its own.
             if self.dropout_rate > 0.0:
                 self.embed_dropout = layers.Dropout(
                     self.dropout_rate, name="embedding_dropout"
@@ -364,7 +425,6 @@ class DINOv3(keras.Model):
                 self.embed_dropout = None
             return x
 
-        # Add positional embedding using the shared layer
         self.embed_dropout = None
         self.pos_embed = PositionalEmbedding(
             max_seq_len=self.sequence_length,
@@ -375,15 +435,17 @@ class DINOv3(keras.Model):
         return self.pos_embed(x)
 
     def _attention_spec(self) -> Tuple[str, Dict[str, Any]]:
-        """The attention type + factory args every encoder block is built with.
+        """Return the attention type and factory arguments for every block.
 
-        Returns ``(attention_type, attention_args)``. Under
-        ``positional_embedding_type='rope'`` this selects the rope-capable
-        ``group_query`` attention with ``num_kv_heads == num_heads``; otherwise the
-        plain ``multi_head`` attention, byte-identically to the pre-RoPE behaviour.
+        Under ``positional_embedding_type='rope'`` this selects the rope-capable
+        ``group_query`` attention with ``num_kv_heads == num_heads``; otherwise
+        the plain ``multi_head`` attention.
+
+        :return: ``(attention_type, attention_args)``.
+        :rtype: tuple
         """
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-015: reach RoPE through registered `group_query` attention, never by rotating the token stream directly.
-        # RoPE must rotate Q and K after projection; `num_kv_heads == num_heads` makes GQA reduce to plain MHA. Do not simplify to `multi_head` plus a rope kwarg. See decisions.md.
+        # DECISION D-015: reach RoPE through registered group_query attention,
+        # never by rotating the token stream. See decisions.md.
         if self.positional_embedding_type == 'rope':
             return 'group_query', {
                 'num_kv_heads': self.num_heads,
@@ -395,10 +457,10 @@ class DINOv3(keras.Model):
         return 'multi_head', {'use_bias': self.qkv_bias}
 
     def _build_encoder(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Creates the stack of transformer encoder layers."""
+        """Create the stack of transformer encoder layers and apply it."""
         self.encoder_layers = []
-        # DECISION plan-2026-08-11T165740-53dac34a/D-004: use the shared `linear_drop_path_rates` helper, never a hand-rolled `ops.linspace` ramp.
-        # It returns plain Python floats; a keras tensor has no `.item()`. See decisions.md.
+        # DECISION D-004: use linear_drop_path_rates, not a hand-rolled
+        # ops.linspace ramp; a keras tensor has no .item(). See decisions.md.
         dpr = linear_drop_path_rates(self.depth, self.stochastic_depth_rate)
 
         attention_type, attention_args = self._attention_spec()
@@ -411,7 +473,7 @@ class DINOv3(keras.Model):
                 attention_type=attention_type,
                 attention_args=dict(attention_args),
                 normalization_type=self.normalization_type,
-                normalization_position='pre',  # DINO uses pre-norm
+                normalization_position='pre',
                 ffn_type='mlp',
                 activation=self.activation,
                 dropout_rate=self.dropout_rate,
@@ -430,22 +492,19 @@ class DINOv3(keras.Model):
         return x
 
     def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Creates the final normalization and classification head."""
-        # Final normalization using the shared factory
+        """Apply the final normalization and, if requested, the classifier."""
         self.norm = create_normalization_layer(
             self.normalization_type,
             name='final_norm'
         )
         x = self.norm(x)
 
-        # Extract [CLS] token for classification
         features = x[:, 0]
 
-        # Add classification head if requested
         if self.include_top:
             if self.num_classes > 0:
-                # DECISION plan-2026-08-23T091307-9a110062/D-504: use DINO_KERNEL_INITIALIZER here too, never the bare string.
-                # The bare string is Keras' stddev=0.05, not DINO's 0.02. See decisions.md.
+                # DECISION D-504: DINO_KERNEL_INITIALIZER here too, never the
+                # bare string, which is Keras' stddev=0.05. See decisions.md.
                 self.classifier = layers.Dense(
                     units=self.num_classes,
                     kernel_initializer=initializers.get(DINO_KERNEL_INITIALIZER),
@@ -455,47 +514,28 @@ class DINOv3(keras.Model):
                 )
                 outputs = self.classifier(features)
             else:
-                # If include_top is True but num_classes is 0, return features
                 outputs = features
         else:
-            # If not including top, return features
             outputs = features
 
         return outputs
 
     def get_last_selfattention(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Not implemented. Raises ``NotImplementedError``.
+        """Raise ``NotImplementedError``; attention maps are not reachable here.
 
         DINO's attention-map visualization needs the last block's attention
-        PROBABILITIES. This model composes ``TransformerLayer``, whose ``call()``
-        signature is ``(inputs, attention_mask, layer_idx, training)`` and which
-        returns only the block output — it has no way to surface its attention
-        sub-layer's probabilities, under EITHER
-        ``positional_embedding_type``. MEASURED on keras 3.8.0.
+        probabilities. ``TransformerLayer.call`` returns only the block output
+        and forwards no flag that would surface them. Under ``'learned'`` the
+        ``multi_head`` path accepts no such flag at all and caches nothing;
+        under ``'rope'`` ``GroupedQueryAttention`` accepts
+        ``return_attention_weights`` and returns a correct
+        ``(batch, heads, seq, seq)`` map, but the block never passes the flag
+        through. Surfacing either means changing shared layers used across the
+        repository.
 
-        The gap differs per path, and both are named here rather than collapsed:
-
-        - ``'learned'`` -> ``multi_head`` attention: ``MultiHeadAttention.call`` and
-          the ``MultiHeadCrossAttention.call`` it delegates to accept no
-          ``return_attention_scores`` at all, and cache no probabilities.
-        - ``'rope'`` -> ``group_query`` attention: ``GroupedQueryAttention.call``
-          DOES accept ``return_attention_weights`` and returns a correct
-          ``(batch, heads, seq, seq)`` map whose rows sum to 1 — but
-          ``TransformerLayer.call`` does not forward that flag, so the capability
-          is unreachable without reaching into block internals and re-implementing
-          the block's pre-norm ordering in this model.
-
-        Implementing this truthfully means adding the flag through
-        ``TransformerLayer`` (and, for the learned path, through
-        ``MultiHeadAttention`` / ``MultiHeadCrossAttention``) — a change to shared
-        layers used across the repository, out of scope for this model file.
-
-        Args:
-            inputs: A batch of images. Unused.
-
-        Raises:
-            NotImplementedError: Always.
+        :param inputs: A batch of images. Unused.
+        :type inputs: keras.KerasTensor
+        :raises NotImplementedError: Always.
         """
         raise NotImplementedError(
             "DINOv3.get_last_selfattention() is not implemented. It needs the last "
@@ -518,18 +558,23 @@ class DINOv3(keras.Model):
         include_top: bool = True,
         **kwargs: Any
     ) -> "DINOv3":
-        """
-        Creates a DINOv3 model from a predefined variant.
+        """Create a model from a named entry of ``MODEL_VARIANTS``.
 
-        Args:
-            variant: The model variant, one of "tiny", "small", "base", "large", "giant".
-            image_size: The input image size; an int, or (height, width).
-            num_classes: Number of output classes.
-            include_top: Whether to include the classification head.
-            **kwargs: Additional arguments to pass to the model constructor.
+        :param variant: One of ``"tiny"``, ``"small"``, ``"base"``, ``"large"``,
+            ``"giant"``.
+        :type variant: str
+        :param image_size: Input image size; an int, or ``(height, width)``.
+        :type image_size: int or tuple
+        :param num_classes: Number of classifier outputs.
+        :type num_classes: int
+        :param include_top: Append the classification head.
+        :type include_top: bool
+        :param kwargs: Additional constructor arguments, which override the
+            variant's own entries.
+        :return: A configured model.
+        :rtype: DINOv3
 
-        Returns:
-            A DINOv3 model instance.
+        :raises ValueError: If ``variant`` is not a known name.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -549,9 +594,13 @@ class DINOv3(keras.Model):
         )
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the model's configuration for serialization."""
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: call `super().get_config()` first, never a literal dict.
-        # Without it, `name` and `trainable` reload at their defaults, so a frozen model comes back unfrozen. See decisions.md.
+        """Return every constructor argument.
+
+        :return: Serializable configuration dictionary.
+        :rtype: dict
+        """
+        # DECISION D-082: call super().get_config() first; without it name and
+        # trainable reload at defaults, so a frozen model comes back unfrozen.
         config = super().get_config()
         config.update({
             'image_size': self.image_size,
@@ -580,7 +629,13 @@ class DINOv3(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "DINOv3":
-        """Creates a model from its configuration."""
+        """Rebuild a model from a configuration dictionary.
+
+        :param config: Dictionary produced by :meth:`get_config`.
+        :type config: dict
+        :return: A configured model.
+        :rtype: DINOv3
+        """
         return cls(**config)
 
 
@@ -597,55 +652,58 @@ def create_dino_v3(
     pretrained: bool = False,
     **kwargs: Any
 ) -> DINOv3:
-    """
-    A factory function to create DINOv3 models.
+    """Create a :class:`DINOv3` model from a variant name.
 
-    Signature note (converged surface): ``create_dino_v1``, ``create_dino_v2`` and
-    ``create_dino_v3`` share ``(variant, *, image_size, patch_size, num_classes,
-    include_top, **kwargs)``. ``patch_size`` used to be reachable only through
-    ``**kwargs`` here; it is now a named parameter on all three. There is no
-    ``input_shape`` spelling on any of them — the input shape is derived from
-    ``image_size``.
+    ``create_dino_v1``, ``create_dino_v2`` and ``create_dino_v3`` share the
+    signature ``(variant, *, image_size, patch_size, num_classes, include_top,
+    **kwargs)``. None of them accepts ``input_shape``; the input shape comes
+    from ``image_size``.
 
-    **Variant-defers precedence rule** (shared by all three factories):
-    ``patch_size=None`` defers to the variant's own ``MODEL_VARIANTS`` entry; an
-    EXPLICIT non-``None`` value ALWAYS wins over it. This matters here and only
-    here: ``DINOv3.MODEL_VARIANTS['giant']`` carries ``patch_size=(14, 14)`` while
-    every other variant carries ``(16, 16)``, so ``create_dino_v3('giant')`` gives
-    a /14 model and ``create_dino_v3('giant', patch_size=16)`` gives a /16 one.
-    ``giant`` likewise carries ``stochastic_depth_rate=0.4``, overridable the same
-    way by passing it through ``**kwargs``.
+    ``patch_size=None`` defers to the variant's own entry, and an explicit
+    non-``None`` value always wins. That matters for ``giant``, which carries
+    ``(14, 14)`` while every other variant carries ``(16, 16)``, so
+    ``create_dino_v3('giant')`` gives a /14 model and
+    ``create_dino_v3('giant', patch_size=16)`` gives a /16 one. ``giant`` also
+    carries ``stochastic_depth_rate=0.4``, overridable through ``**kwargs``.
 
-    Args:
-        variant: Model variant ("tiny", "small", "base", "large", "giant").
-        image_size: Input image size; an int, or (height, width).
-        patch_size: Patch size; an int, or (height, width). ``None`` defers to the
-            variant ((14, 14) for 'giant', (16, 16) otherwise).
-        num_classes: Number of output classes.
-        include_top: Whether to include the final classification layer.
-        positional_embedding_type: ``'learned'`` (absolute table) or ``'rope'``
-            (1-D rotary, applied inside a ``group_query`` attention). A checkpoint
-            is NOT portable between the two — they run different attention classes.
-        rope_theta: RoPE base frequency. Ignored unless
-            ``positional_embedding_type='rope'``.
-        rope_percentage: Fraction of each head's dimensions that are rotated.
-            Ignored unless ``positional_embedding_type='rope'``. ``0.0`` is legal
-            but leaves the model with NO positional information at all.
-        pretrained: Must be False. `True` raises `NotImplementedError` — NO
-            pretrained DINOv3 weights are shipped with this repository.
-        **kwargs: Additional arguments for the model constructor, e.g.
-            ``stochastic_depth_rate``, ``normalization_type``.
+    :param variant: One of ``"tiny"``, ``"small"``, ``"base"``, ``"large"``,
+        ``"giant"``.
+    :type variant: str
+    :param image_size: Input image size; an int, or ``(height, width)``.
+    :type image_size: int or tuple
+    :param patch_size: Patch size; an int, or ``(height, width)``. ``None``
+        defers to the variant, which is ``(14, 14)`` for ``giant`` and
+        ``(16, 16)`` otherwise.
+    :type patch_size: int or tuple or None
+    :param num_classes: Number of classifier outputs.
+    :type num_classes: int
+    :param include_top: Append the classification head.
+    :type include_top: bool
+    :param positional_embedding_type: ``'learned'`` for an absolute table, or
+        ``'rope'`` for 1-D rotary embeddings inside a ``group_query`` attention.
+        A checkpoint does not transfer between the two.
+    :type positional_embedding_type: str
+    :param rope_theta: Rotary base frequency. Read only under ``'rope'``.
+    :type rope_theta: float
+    :param rope_percentage: Fraction of each head's dimensions that are rotated.
+        Read only under ``'rope'``. ``0.0`` is accepted and leaves the model with
+        no positional information.
+    :type rope_percentage: float
+    :param pretrained: Must be False; no pretrained weights ship with this
+        repository.
+    :type pretrained: bool
+    :param kwargs: Additional constructor arguments, for example
+        ``stochastic_depth_rate`` or ``normalization_type``.
+    :return: A configured model.
+    :rtype: DINOv3
 
-    Returns:
-        A DINOv3 model instance.
-
-    Raises:
-        TypeError: If ``input_shape`` is passed — use ``image_size`` instead.
-        NotImplementedError: If ``pretrained=True`` (no checkpoints shipped).
+    :raises TypeError: If ``input_shape`` is passed; use ``image_size``.
+    :raises NotImplementedError: If ``pretrained=True``.
     """
     reject_input_shape(kwargs, "create_dino_v3")
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise, do not warn-and-continue.
+    # DECISION D-069: raise on pretrained=True, do not warn and continue; no
+    # checkpoints ship with this repository. See decisions.md.
     if pretrained:
         raise NotImplementedError(
             f"No pretrained DINOv3 weights are distributed with dl_techniques "
@@ -658,8 +716,8 @@ def create_dino_v3(
             f"load_weights is silent about a checkpoint that matches nothing."
         )
 
-    # DECISION plan-2026-08-01T105809-dc0c402e/D-017: `patch_size=None` defers to the variant; never give this a concrete default like `= 16`.
-    # A concrete default would always override the variant's and silently turn `create_dino_v3('giant')` from /14 into /16. See decisions.md.
+    # DECISION D-017: patch_size=None defers to the variant; a concrete default
+    # would silently turn create_dino_v3('giant') from /14 into /16.
     if patch_size is not None:
         kwargs['patch_size'] = patch_size
 
@@ -673,3 +731,5 @@ def create_dino_v3(
         rope_percentage=rope_percentage,
         **kwargs
     )
+
+# ---------------------------------------------------------------------

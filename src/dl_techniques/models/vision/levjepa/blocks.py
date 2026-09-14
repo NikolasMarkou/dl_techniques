@@ -1,22 +1,28 @@
-"""``LeVJEPABlock``: pre-norm self-attention + MLP transformer block for LeVJEPA.
+"""Pre-norm self-attention and MLP transformer block for LeVJEPA.
 
-Ports the LeVJEPA PyTorch reference's ``Block`` class:
-``x = x + Attn(LN(x)); x = x + MLP(LN(x))``, with
-``Attn(y) = softmax(Q K^T / sqrt(d_head) + mask) V``. No ``LayerScale`` on
-either residual branch, matching the reference (see the ``DECISION`` note
-below for why this diverges from an earlier draft of this file's spec).
+``LeVJEPABlock`` ports the LeVJEPA reference's ``Block``:
 
-The attention is hand-rolled (QKV, reshape, optional RoPE, scaled dot
-product, projection) rather than built on
-``layers/attention/multi_head_attention.py``, because :class:`VideoRoPE3D`
-must rotate ``q``/``k`` after the head split and before the softmax, a hook
-the generic attention layer does not expose.
+    x = x + Attn(LN(x)); x = x + MLP(LN(x))
+
+with plain residual addition on both branches and no ``LayerScale``. The
+attention is written out here (fused QKV, head split, optional rotary
+embedding, scaled dot product, output projection) instead of delegating to
+``layers/attention/multi_head_attention.py``, because :class:`VideoRoPE3D` has
+to rotate ``q`` and ``k`` after the head split and before the softmax, which the
+shared attention layer gives no hook for. Block-depth rescaling of the ``proj``
+and ``fc2`` kernels is expressed as a pre-scaled initializer standard deviation
+rather than a post-build weight division.
+
+An attention mask arrives as a pre-built boolean keep predicate, where ``True``
+means attend; the layer infers no polarity of its own. ``use_rope=True``
+requires ``height_patches`` and ``width_patches`` at call time. ``layer_id``
+defaults to ``None``, which disables depth rescaling.
 
 References:
     - LeVJEPA PyTorch reference, ``module.py::Block`` / ``Attention`` /
-      ``RoPEAttention`` (pasted transcript; no public arXiv id in this plan's
-      context).
-    - Vaswani et al. (2017). "Attention Is All You Need". arXiv:1706.03762.
+      ``RoPEAttention``.
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
 
 import keras
@@ -38,102 +44,175 @@ from dl_techniques.layers.attention.common import (
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-03T113223-2a714a91/D-011: no LayerScale sub-layers here.
-# An earlier draft of this file's spec described gamma_a/gamma_m LayerScale gates,
-# but the actual pasted PyTorch reference uses plain residual addition. See decisions.md.
+# DECISION D-011: no LayerScale sub-layers; the reference uses plain residual
+# addition on both branches. See decisions.md.
 
 REFERENCE_INIT_STD = 0.02
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.levjepa.blocks")
 class LeVJEPABlock(keras.layers.Layer):
-    """Pre-norm self-attention + MLP block, with an optional 3-axis video RoPE.
+    """Apply pre-norm self-attention and an MLP, each inside a residual branch.
 
-    Ports the LeVJEPA reference's ``Block`` verbatim: ``x = x + Attn(LN(x));
-    x = x + MLP(LN(x))``, with no ``LayerScale`` on either residual (see the
-    module-level ``DECISION`` note).
-
-    The attention is a bespoke QKV projection and scaled-dot-product, not a
-    call into ``layers/attention/multi_head_attention.py``: ``VideoRoPE3D``
-    (when ``use_rope=True``) must rotate ``q``/``k`` after the head split and
-    before the softmax, a hook the generic attention layer does not expose.
-    A block-causal (or any other) attention mask is accepted as a pre-built
-    boolean keep predicate (``True`` = attend), applied via
-    ``layers/attention/common.py::apply_attention_mask``; this layer infers
-    no polarity of its own.
+    The block normalizes before each sub-layer and adds the sub-layer output
+    back to its input. Attention runs through a fused QKV projection, an
+    optional 3-axis video rotary embedding on ``q`` and ``k``, and an output
+    projection. The first ``num_prefix_tokens`` tokens pass through the rotation
+    unrotated.
 
     Architecture:
 
     .. code-block:: text
 
-        x [B, N, D]
-            |
-            +---------------------------------+  (residual)
-        LayerNorm(eps=1e-6)                    |
-            |                                  |
-        Dense(3D) -> reshape [B, N, 3, H, d]    |
-            |                                  |
-        split q, k, v  [B, H, N, d] each        |
-            |                                  |
-        (use_rope) VideoRoPE3D rotates          |
-        q[:, :, prefix:, :], k[:, :, prefix:, :] |
-            |                                  |
-        logits = (q k^T) * scale                |
-        + block-causal mask (optional)          |
-        softmax -> attn_drop                    |
-            |                                  |
-        out = attn @ v -> reshape [B, N, D]     |
-            |                                  |
-        Dense(D) -> proj_drop                   |
-            |                                  |
-           (+) <-------------------------------+
-            |
-            +---------------------------------+  (residual)
-        LayerNorm(eps=1e-6)                    |
-            |                                  |
-        Dense(hidden) -> GELU -> drop           |
-        Dense(D) -> drop                        |
-            |                                  |
-           (+) <-------------------------------+
-            |
-        x' [B, N, D]
+                           x [B, N, D]
+                                │
+            ┌───────────────────┤
+            │                   ▼
+            │         ┌───────────────────┐
+            │         │ LayerNorm eps 1e-6│
+            │         └─────────┬─────────┘
+            │                   ▼
+            │         ┌───────────────────┐
+            │         │ self-attention    │
+            │         │  (see below)      │
+            │         └─────────┬─────────┘
+            │                   ▼
+            │         ┌───────────────────┐
+            └────────►│ add               │
+                      └─────────┬─────────┘
+                                ▼
+            ┌───────────────────┤
+            │                   ▼
+            │         ┌───────────────────┐
+            │         │ LayerNorm eps 1e-6│
+            │         └─────────┬─────────┘
+            │                   ▼
+            │         ┌───────────────────┐
+            │         │ MLP               │
+            │         │  (see below)      │
+            │         └─────────┬─────────┘
+            │                   ▼
+            │         ┌───────────────────┐
+            └────────►│ add               │
+                      └─────────┬─────────┘
+                                ▼
+                          x' [B, N, D]
 
-    :param dim: Model / embedding dimension. Must be positive and divisible
-        by ``num_heads``.
+    Self-attention:
+
+    .. code-block:: text
+
+               y [B, N, D] after LayerNorm
+                                ▼
+                ┌───────────────────────────────┐
+                │ Dense(3D), qkv_bias           │
+                └───────────────┬───────────────┘
+                           [B, N, 3D]
+                                ▼
+                ┌───────────────────────────────┐
+                │ reshape to [B, N, 3, H, d]    │
+                │  transpose to [3, B, H, N, d] │
+                └───────────────┬───────────────┘
+                   q, k, v  [B, H, N, d] each
+                                ▼
+                ┌───────────────────────────────┐
+                │ VideoRoPE3D rotates q, k      │
+                │  tokens from num_prefix_tokens│
+                │  ('use_rope' only)            │
+                └───────────────┬───────────────┘
+                                ▼
+                ┌───────────────────────────────┐
+                │ logits = q k^T * scale        │
+                └───────────────┬───────────────┘
+                          [B, H, N, N]
+                                ▼
+                ┌───────────────────────────────┐
+                │ apply_attention_mask          │
+                │  (attn_mask, True = attend)   │
+                └───────────────┬───────────────┘
+                                ▼
+                ┌───────────────────────────────┐
+                │ softmax in float32, cast back │
+                │  attn_drop (optional)         │
+                └───────────────┬───────────────┘
+                                ▼
+                ┌───────────────────────────────┐
+                │ attn @ v, merge heads         │
+                └───────────────┬───────────────┘
+                            [B, N, D]
+                                ▼
+                ┌───────────────────────────────┐
+                │ Dense(D), proj_drop optional  │
+                └───────────────┬───────────────┘
+                                ▼
+                   attention output [B, N, D]
+
+    MLP:
+
+    .. code-block:: text
+
+               h [B, N, D] after LayerNorm
+                                ▼
+                ┌───────────────────────────────┐
+                │ Dense(hidden_dim)             │
+                └───────────────┬───────────────┘
+                      [B, N, D * mlp_ratio]
+                                ▼
+                ┌───────────────────────────────┐
+                │ gelu                          │
+                │  drop1 (optional)             │
+                └───────────────┬───────────────┘
+                                ▼
+                ┌───────────────────────────────┐
+                │ Dense(D)                      │
+                │  drop2 (optional)             │
+                └───────────────┬───────────────┘
+                                ▼
+                      mlp output [B, N, D]
+
+    Kernel initializer std:
+
+    .. code-block:: text
+
+        kernel      std
+        ──────      ────────────────────────────────
+        qkv, fc1    init_std
+        proj, fc2   init_std / sqrt(2 * layer_id)
+                    init_std, when layer_id is None
+
+    :param dim: Model dimension. Must be positive and divisible by
+        ``num_heads``.
     :type dim: int
     :param num_heads: Number of attention heads.
     :type num_heads: int
     :param mlp_ratio: MLP hidden-dimension multiplier. Must be positive.
         Defaults to ``4.0``.
     :type mlp_ratio: float
-    :param qkv_bias: Whether the fused QKV projection has a bias. Defaults to
-        ``True``, matching the reference.
+    :param qkv_bias: Give the fused QKV projection a bias. Defaults to ``True``,
+        matching the reference.
     :type qkv_bias: bool
-    :param use_rope: Whether to rotate ``q``/``k`` with :class:`VideoRoPE3D`
-        before the softmax. When ``True``, ``call()`` requires ``num_frames``,
+    :param use_rope: Rotate ``q`` and ``k`` with :class:`VideoRoPE3D` before the
+        softmax. When ``True``, ``call()`` requires ``num_frames``,
         ``height_patches`` and ``width_patches``. Defaults to ``False``.
     :type use_rope: bool
-    :param rope_theta: Rotary base frequency, forwarded to ``VideoRoPE3D``
-        when ``use_rope=True``. Defaults to ``10000.0``.
+    :param rope_theta: Rotary base frequency, forwarded to ``VideoRoPE3D`` when
+        ``use_rope=True``. Defaults to ``10000.0``.
     :type rope_theta: float
-    :param num_prefix_tokens: Number of leading tokens (the CLS token(s))
-        excluded from RoPE rotation -- they pass through unrotated, matching
-        the reference's ``q[:, :, num_prefix:, :]`` slicing. Defaults to
-        ``1``.
+    :param num_prefix_tokens: Number of leading tokens, the CLS tokens, that
+        pass through the rotation unrotated. Defaults to ``1``.
     :type num_prefix_tokens: int
-    :param dropout_rate: Dropout rate applied after the output projection and
-        inside the MLP. Must be in ``[0, 1]``. Defaults to ``0.0``.
+    :param dropout_rate: Dropout applied after the output projection and inside
+        the MLP. Must be in ``[0, 1]``. Defaults to ``0.0``.
     :type dropout_rate: float
-    :param attention_dropout_rate: Dropout rate applied to the post-softmax
-        attention weights. Must be in ``[0, 1]``. Defaults to ``0.0``.
+    :param attention_dropout_rate: Dropout applied to the post-softmax attention
+        weights. Must be in ``[0, 1]``. Defaults to ``0.0``.
     :type attention_dropout_rate: float
-    :param layer_id: 1-indexed block position within the encoder stack. Used
-        only to compute the block-depth-rescaled initializer std for
-        ``proj`` and ``fc2`` (``init_std / sqrt(2 * layer_id)``), matching
-        the reference's ``_rescale_blocks`` post-hoc weight division. ``None``
-        (default) disables rescaling -- both kernels use ``init_std``
-        directly, i.e. ``layer_id`` behaves as if it were ``inf``. See the
-        ``_rescale_blocks`` note below.
+    :param layer_id: 1-indexed block position within the encoder stack. Sets the
+        initializer std of ``proj`` and ``fc2`` to
+        ``init_std / sqrt(2 * layer_id)``, matching the reference's
+        ``_rescale_blocks`` weight division. ``None`` (default) leaves both at
+        ``init_std``.
     :type layer_id: Optional[int]
     :param init_std: Base truncated-normal std for every kernel in this block.
         Defaults to ``0.02``, the reference's ``init_std``.
@@ -145,7 +224,7 @@ class LeVJEPABlock(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Optional regularizer for every bias.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
-    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+    :param kwargs: Additional ``Layer`` base-class arguments.
 
     :ivar norm1: Pre-attention ``LayerNormalization(epsilon=1e-6)``.
     :ivar norm2: Pre-MLP ``LayerNormalization(epsilon=1e-6)``.
@@ -162,10 +241,10 @@ class LeVJEPABlock(keras.layers.Layer):
     Output shape:
         ``(batch, num_tokens, dim)``, unchanged.
 
-    :raises ValueError: If ``dim`` is not divisible by ``num_heads``, if
-        ``dim``, ``num_heads`` or ``mlp_ratio`` is not positive, or if
-        ``dropout_rate``/``attention_dropout_rate`` leaves ``[0, 1]``. Raised
-        from ``__init__``.
+    :raises ValueError: From ``__init__``, if ``dim`` is not divisible by
+        ``num_heads``, if ``dim``, ``num_heads`` or ``mlp_ratio`` is not
+        positive, if ``num_prefix_tokens`` is negative, or if ``dropout_rate``
+        or ``attention_dropout_rate`` falls outside ``[0, 1]``.
 
     Example:
 
@@ -200,37 +279,8 @@ class LeVJEPABlock(keras.layers.Layer):
     ) -> None:
         """Validate the configuration and create every sub-layer.
 
-        :param dim: Model / embedding dimension.
-        :type dim: int
-        :param num_heads: Number of attention heads.
-        :type num_heads: int
-        :param mlp_ratio: MLP hidden-dimension multiplier.
-        :type mlp_ratio: float
-        :param qkv_bias: Whether the QKV projection has a bias.
-        :type qkv_bias: bool
-        :param use_rope: Whether to rotate q/k with VideoRoPE3D.
-        :type use_rope: bool
-        :param rope_theta: Rotary base frequency.
-        :type rope_theta: float
-        :param num_prefix_tokens: Number of leading unrotated prefix tokens.
-        :type num_prefix_tokens: int
-        :param dropout_rate: Output/MLP dropout rate.
-        :type dropout_rate: float
-        :param attention_dropout_rate: Post-softmax attention dropout rate.
-        :type attention_dropout_rate: float
-        :param layer_id: 1-indexed block position for depth rescaling.
-        :type layer_id: Optional[int]
-        :param init_std: Base truncated-normal std.
-        :type init_std: float
-        :param bias_initializer: Bias initializer.
-        :type bias_initializer: Union[str, keras.initializers.Initializer]
-        :param kernel_regularizer: Optional kernel regularizer.
-        :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-        :param bias_regularizer: Optional bias regularizer.
-        :type bias_regularizer: Optional[keras.regularizers.Regularizer]
-        :param kwargs: Additional keyword arguments for the ``Layer`` base
-            class.
-        :type kwargs: Any
+        Arguments are documented on the class.
+
         :raises ValueError: If the configuration is invalid.
         """
         super().__init__(**kwargs)
@@ -272,10 +322,8 @@ class LeVJEPABlock(keras.layers.Layer):
 
         self._scale = compute_attention_scale(self.head_dim)
 
-        # DECISION plan-2026-09-03T113223-2a714a91/D-012: block-depth rescaling is
-        # a pre-scaled initializer std, not a post-build `.assign()` (which
-        # StatelessScope discards). Dividing a TruncatedNormal sample by a
-        # constant is distributionally identical to scaling its std. See decisions.md.
+        # DECISION D-012: depth rescaling is a pre-scaled initializer std, never
+        # a post-build .assign(), which StatelessScope discards. decisions.md.
         rescale_std = self.init_std
         if self.layer_id is not None:
             rescale_std = self.init_std / ((2.0 * float(self.layer_id)) ** 0.5)
@@ -411,13 +459,12 @@ class LeVJEPABlock(keras.layers.Layer):
         attn_mask: Optional[Any] = None,
         training: Optional[bool] = None,
     ) -> Any:
-        """Apply the pre-norm attention + MLP block.
+        """Apply the pre-norm attention and MLP block.
 
         :param inputs: Token sequence, ``(batch, num_tokens, dim)``.
         :type inputs: keras.KerasTensor
         :param num_frames: Number of frame positions in the video grid.
-            Required when ``use_rope=True`` and ``token_ids`` is not given
-            (default identity grid).
+            Required when ``use_rope=True`` and ``token_ids`` is not given.
         :type num_frames: Optional[int]
         :param height_patches: Number of patches along the height axis.
             Required when ``use_rope=True``.
@@ -425,17 +472,17 @@ class LeVJEPABlock(keras.layers.Layer):
         :param width_patches: Number of patches along the width axis.
             Required when ``use_rope=True``.
         :type width_patches: Optional[int]
-        :param token_ids: Optional true flat grid index per PATCH token
-            (excluding the prefix tokens), shape ``(num_patches,)`` or
-            ``(batch, num_patches)`` -- forwarded straight to
-            :class:`VideoRoPE3D`. ``None`` defaults to the no-dropping
-            identity grid.
+        :param token_ids: Optional flat grid index per patch token, excluding
+            the prefix tokens, of shape ``(num_patches,)`` or
+            ``(batch, num_patches)``, forwarded to :class:`VideoRoPE3D`.
+            ``None`` uses the identity grid.
         :type token_ids: Optional[Any]
-        :param attn_mask: Optional pre-built boolean KEEP predicate (``True``
-            = attend), broadcastable against the ``(batch, num_heads,
-            num_tokens, num_tokens)`` attention logits -- typically
-            :func:`~dl_techniques.models.vision.levjepa.masking.build_block_causal_mask`'s
-            output. ``None`` means full (unmasked) attention.
+        :param attn_mask: Optional pre-built boolean keep predicate, where
+            ``True`` means attend, broadcastable against the
+            ``(batch, num_heads, num_tokens, num_tokens)`` logits. Typically the
+            output of
+            :func:`~dl_techniques.models.vision.levjepa.masking.build_block_causal_mask`.
+            ``None`` means unmasked attention.
         :type attn_mask: Optional[Any]
         :param training: Standard Keras training flag.
         :type training: Optional[bool]
@@ -458,7 +505,6 @@ class LeVJEPABlock(keras.layers.Layer):
 
         qkv = self.qkv(y, training=training)
         qkv = keras.ops.reshape(qkv, (batch_size, num_tokens, 3, self.num_heads, self.head_dim))
-        # (3, B, H, N, d)
         qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -492,14 +538,16 @@ class LeVJEPABlock(keras.layers.Layer):
         if attn_mask is not None:
             logits = apply_attention_mask(logits, attn_mask, rescue_axis=-1)
 
+        # The softmax runs in float32 so a half-precision block keeps a stable
+        # normalization, then casts back to the value dtype.
         attn = keras.ops.softmax(keras.ops.cast(logits, "float32"), axis=-1)
         attn = keras.ops.cast(attn, v.dtype)
 
         if self.attn_drop is not None:
             attn = self.attn_drop(attn, training=training)
 
-        out = keras.ops.matmul(attn, v)  # (B, H, N, d)
-        out = keras.ops.transpose(out, (0, 2, 1, 3))  # (B, N, H, d)
+        out = keras.ops.matmul(attn, v)
+        out = keras.ops.transpose(out, (0, 2, 1, 3))
         out = keras.ops.reshape(out, (batch_size, num_tokens, self.dim))
 
         out = self.proj(out, training=training)
@@ -523,7 +571,7 @@ class LeVJEPABlock(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Return ``input_shape`` unchanged -- the block preserves shape.
+        """Return ``input_shape`` unchanged; the block preserves shape.
 
         :param input_shape: Shape of ``x``.
         :type input_shape: Tuple[Optional[int], ...]
@@ -558,6 +606,3 @@ class LeVJEPABlock(keras.layers.Layer):
             }
         )
         return config
-
-
-# ---------------------------------------------------------------------

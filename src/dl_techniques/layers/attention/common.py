@@ -52,13 +52,20 @@ from typing import Any, Optional, Sequence, Union
 
 import keras
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.dtype_policy import mask_sentinel
+
+# ---------------------------------------------------------------------
 
 # DECISION plan-2026-07-27T130643-38c5646a/D-002: only bias inside a
 # mask_dtype(...) chain, never the compute dtype -- np.float16(-1e9) is -inf.
 # Never write (1 - keep) * MASK_BIAS_VALUE: 0 * -inf = NaN. See decisions.md.
 MASK_BIAS_VALUE = mask_sentinel("float32")
 
+# ---------------------------------------------------------------------
 
 def mask_dtype(compute_dtype: str) -> str:
     """Dtype in which a masked softmax / logsumexp chain must be evaluated.
@@ -76,6 +83,7 @@ def mask_dtype(compute_dtype: str) -> str:
     """
     return "float64" if compute_dtype == "float64" else "float32"
 
+# ---------------------------------------------------------------------
 
 def apply_attention_mask(
         logits: Any,
@@ -358,3 +366,5 @@ def compute_attention_scale(head_dim: int) -> float:
     :rtype: float
     """
     return 1.0 / math.sqrt(float(head_dim))
+
+# ---------------------------------------------------------------------

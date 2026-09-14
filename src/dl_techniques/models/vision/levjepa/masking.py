@@ -20,6 +20,7 @@ from typing import Any, Optional, Tuple
 
 import keras
 
+# ---------------------------------------------------------------------
 
 def build_block_causal_mask(
     num_frames: int,
@@ -164,3 +165,5 @@ def random_token_drop(
         axis=1,
     )
     return gathered, token_ids
+
+# ---------------------------------------------------------------------

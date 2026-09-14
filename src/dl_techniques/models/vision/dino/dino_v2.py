@@ -98,18 +98,18 @@ class DINOv2Block(keras.layers.Layer):
     .. code-block:: text
 
         Input x [B, N, D] ────────────────────────────┐
-              │                                        │
-              ▼                                        │
-        LayerNorm → Attention → LayerScale → DropPath  │
-              │                                        │
-              ▼                                        │
-             (+) ◄──────────────────────────────────────
+              │                                       │
+              ▼                                       │
+        LayerNorm → Attention → LayerScale → DropPath │
+              │                                       │
+              ▼                                       │
+             (+) ◄────────────────────────────────────┘
               │
               ▼
         LayerNorm → FFN → LayerScale → DropPath ──┐
-              │                                    │
-              ▼                                    │
-        (+) ◄────────────────────────────────────────
+              │                                   │
+              ▼                                   │
+             (+) ◄────────────────────────────────┘
               │
               ▼
         Output [B, N, D]

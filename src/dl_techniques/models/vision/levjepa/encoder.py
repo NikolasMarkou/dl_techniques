@@ -1,22 +1,26 @@
-"""``LeVJEPAEncoder``: the LeVJEPA Vision Transformer encoder.
+"""
+Vision transformer encoder for LeVJEPA.
 
-Ports the LeVJEPA PyTorch reference's ``VisionTransformer.forward``, minus
-its multi-output-features ``out_layers`` branch, which LeVJEPA's own
-training consumer never needs (see the ``DECISION`` note in ``__init__``).
+``LeVJEPAEncoder`` turns a video clip or a still image into a token sequence
+with the CLS token at index 0. Patch embedding dispatches to
+:class:`PatchEmbed3D` when ``num_frames > 1`` and :class:`PatchEmbedding2D`
+when it is 1, so the temporal axis enters as a tubelet rather than as extra
+channels. Position information arrives one of two ways, never both: a frozen 3D
+sincos table added to the tokens, or :class:`VideoRoPE3D` rotating ``q`` and
+``k`` inside every block. Attention can be gated by a block-causal mask that is
+bidirectional within a frame and causal across frames.
 
-Patch embedding dispatches to :class:`PatchEmbed3D` for video
-(``num_frames > 1``) or :class:`PatchEmbedding2D` for a still image
-(``num_frames == 1``). The encoder is a standard ViT extended with a
-temporal axis (tubelet embedding, per VideoMAE), an optional 3-axis rotary
-position embedding used in place of an additive one, and an optional
-block-causal attention mask (bidirectional within a frame, causal across
-frames) for autoregressive-over-time pretraining.
+The reference's ``out_layers`` multi-feature output is not ported; only the
+final sequence is returned. There is no positional-embedding interpolation: the
+sincos table is built once for the configured ``input_shape`` and
+``num_frames``, and an input whose rank does not match raises. ``use_rope=True``
+builds no ``pos_embed`` weight at all.
 
 References:
-    - LeVJEPA PyTorch reference, ``module.py::VisionTransformer`` (pasted
-      transcript; no public arXiv id in this plan's context).
-    - Dosovitskiy et al. (2020). "An Image is Worth 16x16 Words". arXiv:2010.11929.
-    - Tong, Z., et al. (2022). "VideoMAE". arXiv:2203.12602.
+    - LeVJEPA PyTorch reference, ``module.py::VisionTransformer``.
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words.
+      (https://arxiv.org/abs/2010.11929)
+    - Tong et al., 2022. VideoMAE. (https://arxiv.org/abs/2203.12602)
 """
 
 import keras
@@ -43,114 +47,145 @@ AttnMode = Literal["full", "block_causal"]
 
 # ---------------------------------------------------------------------
 
-
 @register_dl_technique("dl_techniques.models.levjepa.encoder")
 class LeVJEPAEncoder(keras.Model):
-    """LeVJEPA's shared ViT encoder: video or image in, CLS-first sequence out.
+    """Encode a video clip or image into a CLS-first token sequence.
 
-    Dispatches to a tubelet (:class:`PatchEmbed3D`) or 2D
-    (:class:`PatchEmbedding2D`) patch embedding depending on ``num_frames``,
-    prepends a learnable CLS token, adds a frozen 3D sincos positional table
-    or rotates q/k with :class:`~dl_techniques.layers.embedding.video_rope.VideoRoPE3D`
-    inside each block (mutually exclusive -- see the ``use_rope`` parameter),
-    optionally drops a fraction of patch tokens at train time, and optionally
-    gates attention with a block-causal mask before running the
-    :class:`~dl_techniques.models.vision.levjepa.blocks.LeVJEPABlock` stack.
-
-    Two simplifications from the reference, both intentional (see the
-    ``DECISION`` notes in ``__init__``): there is no ``out_layers``
-    multi-feature-map output, since LeVJEPA only ever consumes the final CLS
-    token; and there is no dynamic positional-embedding interpolation, since
-    the frozen sincos table is built once for the configured
-    ``input_shape``/``num_frames`` and a mismatched call raises rather than
-    resampling the table.
+    The encoder patch-embeds the input, adds position information, optionally
+    drops a fraction of patch tokens at train time, prepends a learnable CLS
+    token, optionally builds a block-causal attention mask, runs the
+    :class:`~dl_techniques.models.vision.levjepa.blocks.LeVJEPABlock` stack, and
+    normalizes. Each block receives the patch grid dimensions, the surviving
+    ``token_ids`` and the mask, so rotation and masking stay correct after
+    tokens are dropped.
 
     Architecture:
 
     .. code-block:: text
 
-        input [B, T, H, W, C] video  or  [B, H, W, C] image
-            |
-        PatchEmbed3D (num_frames > 1)  or  PatchEmbedding2D (num_frames == 1)
-            |
-        x [B, N, D]   N = T'*H'*W'
-            |
-        + frozen 3D sincos table            (use_rope=False)
-        or rotate inside each block instead  (use_rope=True)
-            |
-        random_token_drop(x, token_dropout_rate, training) -> (x, token_ids)
-            |  (identity when dropout_rate <= 0 or not training)
-        prepend cls_token (+ cls pos_embed row, if not use_rope)
-            |
-        build_block_causal_mask(...) if attn_mode == "block_causal" else None
-            |
-        LeVJEPABlock x depth  (each forwarded T/H'/W'/token_ids/attn_mask)
-            |
-        LayerNorm(eps=1e-6)
-            |
-        [B, 1 + N_kept, D], CLS at index 0
+          input [B, T, H, W, C] or [B, H, W, C]
+                                │
+                   ┌────────────┴────────────┐
+                   ▼                         ▼
+            num_frames > 1                num_frames == 1
+        ┌─────────────────────┐   ┌─────────────────────┐
+        │ PatchEmbed3D        │   │ PatchEmbedding2D    │
+        └──────────┬──────────┘   └──────────┬──────────┘
+                   └────────────┬────────────┘
+                                ▼
+                   x [B, N, D]   N = T'*H'*W'
+                                ▼
+                ┌───────────────────────────────┐
+                │ + frozen 3D sincos table      │
+                │  (use_rope=False only)        │
+                └───────────────┬───────────────┘
+                                ▼
+                ┌───────────────────────────────┐
+                │ random_token_drop             │
+                │  (training and rate > 0)      │
+                └───────────────┬───────────────┘
+                                ▼
+                   x [B, N_kept, D], token_ids
+                                ▼
+                ┌───────────────────────────────┐
+                │ prepend cls_token             │
+                │  + cls pos row (not use_rope) │
+                └───────────────┬───────────────┘
+                                ▼
+                       [B, 1 + N_kept, D]
+                                ▼
+                ┌───────────────────────────────┐
+                │ build_block_causal_mask       │
+                │  ('block_causal' only)        │
+                └───────────────┬───────────────┘
+                                ▼
+                ┌───────────────────────────────┐
+                │ LeVJEPABlock x depth          │
+                │  t/h/w, token_ids, attn_mask  │
+                └───────────────┬───────────────┘
+                                ▼
+                ┌───────────────────────────────┐
+                │ LayerNorm eps 1e-6            │
+                └───────────────┬───────────────┘
+                                ▼
+               [B, 1 + N_kept, D], CLS at index 0
 
-    :param input_shape: Spatial input shape ``(height, width, channels)``.
-        Must be divisible by ``patch_size``. Defaults to ``(224, 224, 3)``.
+    Positional modes (mutually exclusive):
+
+    .. code-block:: text
+
+        use_rope    pos_embed weight   rotation inside blocks
+        ────────    ────────────────   ──────────────────────
+        False       frozen sincos      none
+        True        None               VideoRoPE3D on q and k
+
+    Positional table slicing:
+
+    .. code-block:: text
+
+        pos_embed [1, 1 + num_patches, D]
+             │
+             ├─ [:, :1, :]  ──►  added to cls_token
+             └─ [:, 1:, :]  ──►  added to patch tokens
+
+    :param input_shape: Spatial input shape ``(height, width, channels)``. The
+        spatial dimensions must be divisible by ``patch_size``. Defaults to
+        ``(224, 224, 3)``.
     :type input_shape: Tuple[int, int, int]
-    :param num_frames: Number of frames per clip. ``1`` (default) routes
-        through :class:`PatchEmbedding2D` (the still-image path, plan.md
-        Assumption A1); any value ``> 1`` routes through :class:`PatchEmbed3D`
-        and must be divisible by ``tubelet_size``.
+    :param num_frames: Frames per clip. ``1`` (default) routes through
+        :class:`PatchEmbedding2D`; any value above 1 routes through
+        :class:`PatchEmbed3D` and must be divisible by ``tubelet_size``.
     :type num_frames: int
     :param patch_size: Spatial patch size. Defaults to ``16``.
     :type patch_size: int
-    :param tubelet_size: Temporal patch size, used only when
+    :param tubelet_size: Temporal patch size, read only when
         ``num_frames > 1``. Defaults to ``2``.
     :type tubelet_size: int
-    :param embed_dim: Token embedding dimension. Must be positive.
+    :param embed_dim: Token embedding dimension. Must be positive. Defaults to
+        ``192``.
     :type embed_dim: int
     :param depth: Number of :class:`LeVJEPABlock` layers. Must be positive.
+        Defaults to ``12``.
     :type depth: int
     :param num_heads: Attention heads per block. Must divide ``embed_dim``.
+        Defaults to ``3``.
     :type num_heads: int
     :param mlp_ratio: MLP hidden-dimension multiplier. Defaults to ``4.0``.
     :type mlp_ratio: float
-    :param qkv_bias: Whether every block's QKV projection has a bias.
-        Defaults to ``True``.
+    :param qkv_bias: Give every block's QKV projection a bias. Defaults to
+        ``True``.
     :type qkv_bias: bool
-    :param use_rope: Whether to use :class:`VideoRoPE3D` rotation instead of
-        an additive frozen sincos positional table. ``True`` builds no
-        ``pos_embed`` weight at all (``self.pos_embed is None``); ``False``
-        (default) builds the frozen sincos table and every block runs
-        without RoPE. There is no separate toggle to request both: the
-        reference's own ``VisionTransformer.__init__`` has exactly one
-        ``use_rope`` flag and no independent ``pos_embed`` argument to
-        conflict with it, so the two mechanisms are mutually exclusive by
-        construction rather than by a runtime check -- see the ``DECISION``
-        note in ``__init__`` resolving plan.md Success Criterion 6 against
-        this fact.
+    :param use_rope: Rotate ``q`` and ``k`` with :class:`VideoRoPE3D` instead of
+        adding a frozen sincos table. ``True`` leaves ``pos_embed`` as ``None``;
+        ``False`` (default) builds the table and every block runs without
+        rotation. One flag selects both halves, so the two mechanisms cannot be
+        combined.
     :type use_rope: bool
-    :param rope_theta: Rotary base frequency, forwarded to every block's
-        ``VideoRoPE3D`` when ``use_rope=True``. Defaults to ``10000.0``.
+    :param rope_theta: Rotary base frequency, forwarded to every block when
+        ``use_rope=True``. Defaults to ``10000.0``.
     :type rope_theta: float
     :param attn_mode: ``'full'`` (default) for unmasked attention, or
-        ``'block_causal'`` for the bidirectional-within-frame /
-        causal-across-frame mask (:func:`build_block_causal_mask`).
+        ``'block_causal'`` for the bidirectional-within-frame and
+        causal-across-frame mask from :func:`build_block_causal_mask`.
     :type attn_mode: AttnMode
-    :param token_dropout_rate: Fraction of patch tokens dropped at train time
-        only (:func:`random_token_drop`). ``0.0`` (default) is a true no-op.
+    :param token_dropout_rate: Fraction of patch tokens dropped during training
+        only, via :func:`random_token_drop`. ``0.0`` (default) is a no-op.
     :type token_dropout_rate: float
-    :param dropout_rate: Dropout rate forwarded to every block's output/MLP
+    :param dropout_rate: Dropout forwarded to every block's output and MLP
         dropout. Defaults to ``0.0``.
     :type dropout_rate: float
-    :param attention_dropout_rate: Dropout rate forwarded to every block's
+    :param attention_dropout_rate: Dropout forwarded to every block's
         post-softmax attention dropout. Defaults to ``0.0``.
     :type attention_dropout_rate: float
-    :param init_std: Base truncated-normal std for every kernel and for the
-        CLS token. Defaults to ``0.02``.
+    :param init_std: Base truncated-normal std for every kernel and for the CLS
+        token. Defaults to ``0.02``.
     :type init_std: float
-    :param uniform_power: Forwarded to :func:`get_3d_sincos_pos_embed` /
-        the 2D image path's band split. Defaults to ``False``.
+    :param uniform_power: Forwarded to :func:`get_3d_sincos_pos_embed` on the
+        video path. The image path does not read it. Defaults to ``False``.
     :type uniform_power: bool
-    :param name: Model name; auto-generated when ``None``.
+    :param name: Model name. ``None`` gives ``"levjepa_encoder"``.
     :type name: Optional[str]
-    :param kwargs: Additional keyword arguments for the ``Model`` base class.
+    :param kwargs: Additional ``Model`` base-class arguments.
 
     :ivar cls_token: Learnable ``(1, 1, embed_dim)`` weight, created in
         ``build()``.
@@ -166,10 +201,11 @@ class LeVJEPAEncoder(keras.Model):
     Output shape:
         ``(batch, 1 + num_patches_kept, embed_dim)``, CLS token at index 0.
 
-    :raises ValueError: If ``attn_mode`` is not ``'full'``/``'block_causal'``,
-        if any dimension/dropout parameter is invalid, or if the spatial
-        dimensions are not divisible by ``patch_size`` (video: also frames by
-        ``tubelet_size``). Raised from ``__init__``.
+    :raises ValueError: From ``__init__``, if ``attn_mode`` is neither
+        ``'full'`` nor ``'block_causal'``, if any dimension or dropout
+        parameter is out of range, if the spatial dimensions are not divisible
+        by ``patch_size``, or if ``num_frames`` is not divisible by
+        ``tubelet_size`` on the video path.
 
     Example:
 
@@ -218,6 +254,8 @@ class LeVJEPAEncoder(keras.Model):
     ) -> None:
         """Validate the configuration and create every sub-layer.
 
+        Arguments are documented on the class.
+
         :raises ValueError: If the configuration is invalid.
         """
         if name is None:
@@ -259,9 +297,8 @@ class LeVJEPAEncoder(keras.Model):
                 f"attention_dropout_rate must be in [0, 1], got {attention_dropout_rate}"
             )
 
-        # DECISION plan-2026-09-03T113223-2a714a91/D-013: no separate `pos_embed=`
-        # constructor argument; `use_rope: bool` is the only toggle, matching the
-        # reference. `test_encoder.py` pins `use_rope=True -> pos_embed is None`. See decisions.md.
+        # DECISION D-013: use_rope is the only positional toggle; do not add a
+        # separate pos_embed argument. See decisions.md.
         self.input_shape_config = tuple(input_shape)
         self.num_frames = int(num_frames)
         self.patch_size = int(patch_size)
@@ -349,7 +386,7 @@ class LeVJEPAEncoder(keras.Model):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create the CLS token, the optional sincos table, and build every sub-layer.
+        """Create the CLS token and optional sincos table, then build sub-layers.
 
         :param input_shape: Input shape, 5D for video or 4D for image.
         :type input_shape: Tuple[Optional[int], ...]
@@ -375,10 +412,8 @@ class LeVJEPAEncoder(keras.Model):
         )
 
         if not self.use_rope:
-            # Pure NumPy table -> Constant initializer -> add_weight, computed
-            # once here. Never add_weight(zeros) + .assign(): StatelessScope
-            # discards the assign and the table stays all zeros (see the
-            # sincos_pos_embed_3d.py / _2d.py module docstrings).
+            # The table reaches the weight through a Constant initializer, never
+            # add_weight(zeros) plus .assign(), which StatelessScope discards.
             if self.is_video:
                 table = get_3d_sincos_pos_embed(
                     embed_dim=self.embed_dim,
@@ -398,12 +433,9 @@ class LeVJEPAEncoder(keras.Model):
                     cls_token=True,
                     extra_tokens=1,
                 )
-            # Both builders return a 2D (N, embed_dim) table (N includes the
-            # prepended CLS row). Add the leading batch axis here so the
-            # weight broadcasts over any batch size at `x + patch_pos_embed`
-            # / `cls_token + cls_pos_embed` below -- a bare (N, D) weight
-            # indexed with the same `[:, 1:, :]` slicing used at call time
-            # would slice the wrong axis (index 2 into a rank-2 tensor).
+            # Both builders return (N, embed_dim) with the CLS row included. The
+            # leading batch axis is what makes the [:, 1:, :] slicing in call()
+            # address tokens rather than features.
             table = table[None, ...]
             self.pos_embed = self.add_weight(
                 name="pos_embed",
@@ -426,12 +458,10 @@ class LeVJEPAEncoder(keras.Model):
         """Run the encoder forward pass.
 
         :param inputs: ``(batch, T, height, width, channels)`` video or
-            ``(batch, height, width, channels)`` image, matching
-            ``is_video``.
+            ``(batch, height, width, channels)`` image, matching ``is_video``.
         :type inputs: keras.KerasTensor
-        :param training: Standard Keras training flag. Token dropping is a
-            no-op unless ``training`` is exactly truthy and
-            ``token_dropout_rate > 0``.
+        :param training: Standard Keras training flag. Token dropping happens
+            only when ``training`` is truthy and ``token_dropout_rate > 0``.
         :type training: Optional[bool]
         :return: ``(batch, 1 + num_patches_kept, embed_dim)``, CLS at index 0.
         :rtype: keras.KerasTensor
@@ -453,6 +483,7 @@ class LeVJEPAEncoder(keras.Model):
 
         attn_mask = None
         if self.attn_mode == "block_causal":
+            # token_ids already carries the batch axis when tokens were dropped.
             attn_mask = build_block_causal_mask(
                 num_frames=self.t_patches,
                 tokens_per_frame=self.tokens_per_frame,
@@ -479,8 +510,8 @@ class LeVJEPAEncoder(keras.Model):
     ) -> Tuple[Optional[int], ...]:
         """Compute the output shape.
 
-        Token dropping makes the exact kept-token count a runtime quantity;
-        this reports the upper bound (no dropping).
+        Token dropping makes the kept-token count a runtime quantity, so this
+        reports the upper bound, with no dropping.
 
         :param input_shape: Input shape.
         :type input_shape: Tuple[Optional[int], ...]
@@ -519,6 +550,5 @@ class LeVJEPAEncoder(keras.Model):
             }
         )
         return config
-
 
 # ---------------------------------------------------------------------

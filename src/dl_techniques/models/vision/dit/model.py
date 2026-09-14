@@ -848,3 +848,5 @@ def create_dit(
         >>> model = create_dit("DiT-S/2", input_size=8, num_classes=10)
     """
     return DiT.from_variant(variant, pretrained=pretrained, **kwargs)
+
+# ---------------------------------------------------------------------
