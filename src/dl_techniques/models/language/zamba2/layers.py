@@ -26,6 +26,7 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.norms.rms_norm import RMSNorm
@@ -572,38 +573,6 @@ class Zamba2SharedAttentionBlock(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _build_causal_mask(
-        self,
-        batch_size: Any,
-        seq_len: Any,
-        dtype: Any,
-    ) -> keras.KerasTensor:
-        """
-        Build a rank-3 ``(batch_size, seq_len, seq_len)`` causal keep-mask.
-
-        ``1`` marks a position as attendable (key index <= query index,
-        i.e. the standard lower-triangular causal predicate); ``0`` marks a
-        future position. Built at rank 3 deliberately -- a rank-2
-        ``(seq_len, seq_len)`` mask would be broadcast by the attention
-        layer as a PADDING mask, not a per-query-row causal one, silently
-        degrading the invariant this block exists to hold (plan.md Problem
-        Statement invariant 3).
-
-        :param batch_size: Dynamic batch size tensor/value.
-        :type batch_size: Any
-        :param seq_len: Dynamic sequence-length tensor/value.
-        :type seq_len: Any
-        :param dtype: Dtype the mask is cast to (the attention layer's
-            compute dtype).
-        :type dtype: Any
-        :return: Causal keep-mask of shape ``(batch_size, seq_len, seq_len)``.
-        :rtype: keras.KerasTensor
-        """
-        row_idx = keras.ops.arange(seq_len)[:, None]
-        col_idx = keras.ops.arange(seq_len)[None, :]
-        mask_2d = keras.ops.cast(col_idx <= row_idx, dtype=dtype)
-        return keras.ops.broadcast_to(mask_2d[None, :, :], (batch_size, seq_len, seq_len))
-
     def call(
         self,
         hidden_state: keras.KerasTensor,
@@ -640,7 +609,10 @@ class Zamba2SharedAttentionBlock(keras.layers.Layer):
         rotated = keras.ops.transpose(rotated, (0, 2, 1, 3))
         rotated = keras.ops.reshape(rotated, (batch_size, seq_len, self.d_model))
 
-        causal_mask = self._build_causal_mask(batch_size, seq_len, dtype=rotated.dtype)
+        # Rank 3 deliberately -- create_causal_attend_mask always returns rank 3;
+        # a rank-2 (seq_len, seq_len) mask would be broadcast by the attention
+        # layer as a PADDING mask, not a per-query-row causal one.
+        causal_mask = create_causal_attend_mask(rotated)
         attention_output = self.attention(
             rotated, attention_mask=causal_mask, training=training
         )
