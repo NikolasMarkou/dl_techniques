@@ -1,0 +1,6 @@
+# Changelog
+*Append-only per-edit ledger. One line per file edit. Owner: ip-executor (writes). Reader: ip-reviewer at REFLECT.*
+*Field order: `UTC | iter-N/step-M[.K] | commit | path | op | radius | D-NNN-or-dash | reason`. Field shapes are defined once, in `CHANGELOG_SPEC` (scripts/schema.mjs) — read the spec, not a copy.*
+*See references/blast-radius.md for radius scoring. Decision-ref optional — `-` means no `# DECISION` anchor governs this edit.*
+2026-09-14T05:00:16Z | iter-1/step-1 | uncommitted | plans/plan-2026-09-14T042205-a11f6af3/checkpoints/cp-000-iter1.md | CREATE(+18) | radius:LOW(0) | - | nuclear fallback checkpoint before iter-1 EXECUTE
+2026-09-14T05:00:16Z | iter-1/step-1 | uncommitted | plans/plan-2026-09-14T042205-a11f6af3/decisions.md | EDIT(+64,-0) | radius:MED(5) | - | append Step 1 raw GPU diagnostic data (verdict gate PASS)
