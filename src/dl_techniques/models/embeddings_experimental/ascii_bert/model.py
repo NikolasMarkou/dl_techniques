@@ -32,13 +32,20 @@ from typing import Any, Dict, Optional
 
 import keras
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
 from ..shared.encoder import EmbeddingEncoder
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 __all__ = ["AsciiBert", "create_ascii_bert"]
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.ascii_bert.model")
 class AsciiBert(EmbeddingEncoder):
@@ -260,3 +267,5 @@ def create_ascii_bert(
         is raised by :meth:`AsciiBert.from_variant`.
     """
     return AsciiBert.from_variant(variant, pretrained=pretrained, **kwargs)
+
+# ---------------------------------------------------------------------

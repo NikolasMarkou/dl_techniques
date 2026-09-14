@@ -41,6 +41,10 @@ from typing import Any, Dict, Optional
 
 import keras
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
 from ..shared.blocks import conv_receptive_field
@@ -51,8 +55,11 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 
+# ---------------------------------------------------------------------
+
 __all__ = ["AsciiConvNextBert", "create_ascii_convnext_bert"]
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.ascii_convnext_bert.model")
 class AsciiConvNextBert(EmbeddingEncoder):
@@ -66,12 +73,12 @@ class AsciiConvNextBert(EmbeddingEncoder):
         ascii ids [B, S] ──► ASCII embedding table [101, H]
                                         │
                                         ▼
-                    ┌───────── convnext block ─────────┐  x num_layers
-                    │ depthwise conv (sequence axis)    │
+                    ┌───────── convnext block ───────────┐  x num_layers
+                    │ depthwise conv (sequence axis)     │
                     │ + norm + pointwise 4x + act        │
                     │ + pointwise contract + LayerScale  │
                     └──────────────────┬─────────────────┘
-                                        ▼
+                                       ▼
                                   pooling head
                                         │
                                         ▼
@@ -271,3 +278,5 @@ def create_ascii_convnext_bert(
     return AsciiConvNextBert.from_variant(
         variant, pretrained=pretrained, **kwargs
     )
+
+# ---------------------------------------------------------------------

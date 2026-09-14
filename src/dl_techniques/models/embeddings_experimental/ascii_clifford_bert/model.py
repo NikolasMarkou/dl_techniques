@@ -41,14 +41,21 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import keras
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
 from ..shared.blocks import clifford_receptive_field
 from ..shared.encoder import EmbeddingEncoder
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 __all__ = ["AsciiCliffordBert", "create_ascii_clifford_bert"]
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.ascii_clifford_bert.model")
 class AsciiCliffordBert(EmbeddingEncoder):
@@ -63,10 +70,10 @@ class AsciiCliffordBert(EmbeddingEncoder):
                                         │
                                         ▼
                      ┌────────── clifford block ──────────┐  x num_layers
-                     │ shifted geometric product (channel) │
-                     │ + depthwise conv context branch     │
-                     │ + global context (optional)         │
-                     └──────────────────┬───────────────────┘
+                     │ shifted geometric product (channel)│
+                     │ + depthwise conv context branch    │
+                     │ + global context (optional)        │
+                     └──────────────────┬─────────────────┘
                                          ▼
                                   pooling head
                                         │
@@ -285,3 +292,5 @@ def create_ascii_clifford_bert(
         is raised by :meth:`AsciiCliffordBert.from_variant`.
     """
     return AsciiCliffordBert.from_variant(variant, pretrained=pretrained, **kwargs)
+
+# ---------------------------------------------------------------------
