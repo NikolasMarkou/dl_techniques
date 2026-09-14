@@ -25,7 +25,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.standard_blocks import ConvBlock
+from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
 from dl_techniques.layers.heads.vision.factory import create_vision_head
 from dl_techniques.models.vision.fractalnet.model import create_fractal_net
 
