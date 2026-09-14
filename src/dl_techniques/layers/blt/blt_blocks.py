@@ -1,6 +1,7 @@
 """Seven layers that make up the Byte Latent Transformer (BLT): ByteTokenizer,
 EntropyModel, DynamicPatcher, PatchPooling, LocalEncoder, GlobalTransformer,
-and LocalDecoder, plus the shared `causal_attend_mask` helper.
+and LocalDecoder, using the shared `create_causal_attend_mask` helper from
+`dl_techniques.utils.masking`.
 
 BLT replaces a fixed subword vocabulary with entropy-driven patching over raw
 UTF-8 bytes. A small causal EntropyModel scores each byte's next-byte
@@ -11,7 +12,7 @@ bytes and pools each patch to one vector; GlobalTransformer attends across
 patches; LocalDecoder combines local byte context with the preceding patch's
 global representation to produce next-byte logits. Each stack is causal
 because every call site hands its `TransformerLayer`s an explicit
-`causal_attend_mask`; the attention layers mask only with what they are given.
+`create_causal_attend_mask`; the attention layers mask only with what they are given.
 `DynamicPatcher.compute_patch_ids` needs its `seq_len` passed explicitly under
 a traced or XLA-compiled graph, since recovering it from the data makes the
 output shape data-dependent. Patch slots beyond a sequence's boundary count
@@ -31,51 +32,11 @@ from typing import Optional, Dict, Any, List, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.masking import create_mask
+from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from ..transformers.transformer import TransformerLayer
 from ..embedding.positional_embedding import PositionalEmbedding
-
-# ---------------------------------------------------------------------
-
-
-def causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
-    """Build the lower-triangular self-attention mask for a BLT stack.
-
-    Only the batch and sequence sizes of ``hidden_states`` are read; its values
-    and dtype are ignored. Every stack in BLT is consumed under a next-byte
-    objective, so each call site passes this mask to its ``TransformerLayer``s.
-
-    Mask semantics:
-
-    .. code-block:: text
-
-        create_mask('causal')   True = mask out    (block semantics)
-              │
-              ▼
-        logical_not             True = may attend  (attend semantics)
-              │
-              ▼
-        broadcast to [B, S, S]
-
-    Rank 3 matters: the attention layers read a rank-2 mask as a
-    ``(batch, seq_len)`` padding mask rather than a ``(seq_len, seq_len)``
-    score mask, so a rank-2 causal mask would be misread.
-
-    :param hidden_states: Sequence tensor of shape ``(batch, seq_len, dim)``.
-    :type hidden_states: keras.KerasTensor
-    :return: Boolean mask ``(batch, seq_len, seq_len)``, ``True`` = may attend.
-    :rtype: keras.KerasTensor
-    """
-    batch_size = ops.shape(hidden_states)[0]
-    seq_len = ops.shape(hidden_states)[1]
-    blocked = create_mask('causal', seq_len=seq_len, dtype='bool')
-    blocked = ops.broadcast_to(
-        ops.expand_dims(blocked, axis=0), (batch_size, seq_len, seq_len)
-    )
-    return ops.logical_not(blocked)
-
 
 # ---------------------------------------------------------------------
 
@@ -382,7 +343,7 @@ class EntropyModel(keras.layers.Layer):
 
         # Without the mask, the surprise at position i is computed from a state
         # that has already read byte i+1.
-        attend_mask = causal_attend_mask(x)
+        attend_mask = create_causal_attend_mask(x)
         for layer in self.transformer_layers:
             x = layer(x, attention_mask=attend_mask, training=training)
 
@@ -1192,7 +1153,7 @@ class LocalEncoder(keras.layers.Layer):
 
         # The pooled patch vectors feed a next-byte objective, so byte i must
         # not attend past itself.
-        attend_mask = causal_attend_mask(x)
+        attend_mask = create_causal_attend_mask(x)
         for layer in self.transformer_layers:
             x = layer(x, attention_mask=attend_mask, training=training)
 
@@ -1359,7 +1320,7 @@ class GlobalTransformer(keras.layers.Layer):
         x = self.patch_positional_embedding(patch_representations, training=training)
 
         # Patch p's representation must not depend on the patches after it.
-        attend_mask = causal_attend_mask(x)
+        attend_mask = create_causal_attend_mask(x)
         for layer in self.transformer_layers:
             x = layer(x, attention_mask=attend_mask, training=training)
 
@@ -1616,7 +1577,7 @@ class LocalDecoder(keras.layers.Layer):
         if self.context_projection is not None:
             global_context = self.context_projection(global_context)
 
-        attend_mask = causal_attend_mask(x)
+        attend_mask = create_causal_attend_mask(x)
         for i, (decoder_layer, cross_attention, cross_norm) in enumerate(
                 zip(self.decoder_layers, self.cross_attention_layers, self.cross_attention_norms)
         ):
@@ -1696,11 +1657,7 @@ class LocalDecoder(keras.layers.Layer):
 
         # keras MultiHeadAttention takes attend semantics at (B, T_q, T_k), and
         # the key axis here is the byte axis.
-        blocked = create_mask('causal', seq_len=seq_len, dtype='bool')
-        blocked = ops.broadcast_to(
-            ops.expand_dims(blocked, axis=0), (batch_size, seq_len, seq_len)
-        )
-        cross_attend_mask = ops.logical_not(blocked)
+        cross_attend_mask = create_causal_attend_mask(decoder_hidden)
 
         attended = cross_attention(
             query=decoder_hidden,
