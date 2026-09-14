@@ -788,6 +788,63 @@ def create_causal_attend_mask(
     return ops.logical_not(blocked)
 
 
+def create_banded_attend_mask(
+        hidden_states: keras.KerasTensor,
+        window_size: int,
+        attention_mask: Optional[keras.KerasTensor] = None,
+) -> keras.KerasTensor:
+    """Build the rank-3 symmetric-band self-attention KEEP mask, composed with a caller mask.
+
+    Only the batch and sequence-length dimensions of `hidden_states` are
+    read; its values and dtype are ignored. Consolidates the hand-rolled
+    band predicate previously duplicated in
+    `dl_techniques.layers.attention.window_attention.WindowAttention._call_band`.
+
+    Mask semantics:
+        `MaskFactory.create_banded_mask(seq_len, band_width, dtype)` returns
+        SUPPRESS polarity (`True` = masked) at `distance > band_width // 2`.
+        This function calls it with `band_width = 2 * window_size` so its
+        `half_width` lands exactly on `window_size`, inverts to KEEP polarity
+        once, then composes a caller-supplied mask in by multiplication
+        (logical AND under `{0, 1}`) rather than substitution. The result is
+        always a multiplicative KEEP mask, never an additive `-1e9`-style
+        bias -- an additive sentinel can silently overflow to `-inf` under
+        `mixed_float16` and poison every kept position via `0 * -inf = NaN`
+        (see `tests/test_the_mask_sentinel_population_is_closed.py`).
+
+    Args:
+        hidden_states: Sequence tensor of shape `(batch, seq_len, dim)`.
+        window_size: Half-width in tokens. A key at exactly this distance
+            from a query is inside the band (inclusive, symmetric).
+        attention_mask: Optional caller mask, either a rank-2 `(batch,
+            seq_len)` key mask or a rank-3 `(batch, seq_len, seq_len)`
+            pairwise mask, nonzero/`True` meaning keep. AND-ed into the
+            band; never replaces it. `None` (the default) returns the band
+            alone.
+
+    Returns:
+        keras.KerasTensor: int32 mask of shape `(batch, seq_len, seq_len)`,
+            nonzero where a position may attend.
+
+    Raises:
+        ValueError: If `attention_mask` is neither rank 2 nor rank 3.
+    """
+    seq_len = ops.shape(hidden_states)[1]
+    blocked = MaskFactory.create_banded_mask(seq_len, band_width=2 * window_size, dtype="bool")
+    band_keep = ops.cast(ops.expand_dims(ops.logical_not(blocked), axis=0), "int32")
+
+    if attention_mask is None:
+        return band_keep
+    if len(attention_mask.shape) == 3:
+        return ops.cast(attention_mask, "int32") * band_keep
+    if len(attention_mask.shape) == 2:
+        return ops.cast(ops.expand_dims(attention_mask, axis=1), "int32") * band_keep
+    raise ValueError(
+        f"create_banded_attend_mask accepts a rank-2 (B, N) key mask or a "
+        f"rank-3 (B, N, N) pairwise mask; got rank {len(attention_mask.shape)}."
+    )
+
+
 def combine_masks(
         *masks: keras.KerasTensor,
         combination: Literal["and", "or", "xor"] = "or"

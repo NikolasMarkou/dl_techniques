@@ -9,6 +9,7 @@ __all__ = [
     # Main interfaces
     "create_mask",
     "create_causal_attend_mask",
+    "create_banded_attend_mask",
     "combine_masks",
     "visualize_mask",
     "get_mask_info",
