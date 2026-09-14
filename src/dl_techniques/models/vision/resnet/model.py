@@ -48,10 +48,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations import create_activation_layer
-from dl_techniques.layers.standard_blocks import (
-    BasicBlock,
-    BottleneckBlock,
-)
+from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
+from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 

@@ -1,7 +1,7 @@
 """Core building blocks of the YOLOv12 object detection architecture.
 
 Provides ``yolo12_conv_block()`` (a Conv2D + BatchNorm + SiLU unit built on
-the shared :class:`~dl_techniques.layers.standard_blocks.ConvBlock`),
+the shared :class:`~dl_techniques.layers.conv_blocks.conv_block.ConvBlock`),
 ``Bottleneck`` (two conv blocks plus an optional residual add),
 ``C3k2Block`` (a CSP-style block splitting input into a bottleneck-processed
 path and a passthrough path, then concatenating), and ``A2C2fBlock`` (an
@@ -22,7 +22,7 @@ from typing import Optional, Tuple, Union, Dict, Any
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from dl_techniques.layers import standard_blocks
+from dl_techniques.layers.conv_blocks import conv_block
 from dl_techniques.layers.transformers.area_attention_block import AreaAttentionBlock
 
 # ---------------------------------------------------------------------
@@ -68,7 +68,7 @@ def yolo12_conv_block(
     kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
     kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
     **kwargs: Any
-) -> standard_blocks.ConvBlock:
+) -> conv_block.ConvBlock:
     """Build the YOLOv12 Conv-BN-SiLU unit on top of the shared ``ConvBlock``.
 
     Every convolution in the YOLOv12 tree is bias-free, He-initialised, batch
@@ -102,10 +102,10 @@ def yolo12_conv_block(
         ``name``.
     :type kwargs: Any
 
-    :return: An unbuilt ``standard_blocks.ConvBlock``.
-    :rtype: standard_blocks.ConvBlock
+    :return: An unbuilt ``conv_block.ConvBlock``.
+    :rtype: conv_block.ConvBlock
     """
-    return standard_blocks.ConvBlock(
+    return conv_block.ConvBlock(
         filters=filters,
         kernel_size=kernel_size,
         strides=strides,

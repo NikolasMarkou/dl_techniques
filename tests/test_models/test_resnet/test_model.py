@@ -29,7 +29,8 @@ import keras
 import numpy as np
 
 from dl_techniques.models.vision.resnet.model import ResNet
-from dl_techniques.layers.standard_blocks import BasicBlock, BottleneckBlock
+from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
+from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
 
 
 # ---------------------------------------------------------------------

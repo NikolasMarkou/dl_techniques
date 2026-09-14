@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.fractal_block import FractalBlock
-from dl_techniques.layers.standard_blocks import ConvBlock
+from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
 
 B, H, W, C = 2, 8, 8, 4
 F = 8

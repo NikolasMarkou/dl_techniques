@@ -16,7 +16,7 @@ import tensorflow as tf
 # `layers/transformers/` RENAMED `AreaAttentionBlock`. Each class's own suite
 # now lives beside its new home; what is exercised from here is only the
 # yolo12-level composition.
-from dl_techniques.layers.standard_blocks import ConvBlock
+from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
 from dl_techniques.layers.attention.area_attention import AreaAttention
 from dl_techniques.layers.transformers.area_attention_block import AreaAttentionBlock
 from dl_techniques.layers.yolo12.yolo12_blocks import (

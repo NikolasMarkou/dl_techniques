@@ -29,7 +29,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.standard_blocks import ConvBlock
+from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.utils.keras_registration import register_dl_technique
 

@@ -56,7 +56,8 @@ from typing import Dict, List, Optional, Union, Tuple, Any, Literal
 # ---------------------------------------------------------------------
 
 from ...activations import ActivationType
-from ...standard_blocks import ConvBlock, DenseBlock
+from ...conv_blocks.conv_block import ConvBlock
+from ...dense_block import DenseBlock
 from ...ffn.factory import create_ffn_layer, FFNType
 from ...attention import AttentionType
 from ...attention.factory import (

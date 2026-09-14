@@ -35,7 +35,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.fractal_block import FractalBlock
-from dl_techniques.layers.standard_blocks import ConvBlock
+from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

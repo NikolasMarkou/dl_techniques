@@ -30,7 +30,7 @@ from typing import Tuple, Optional, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .standard_blocks import ConvBlock
+from .conv_blocks.conv_block import ConvBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

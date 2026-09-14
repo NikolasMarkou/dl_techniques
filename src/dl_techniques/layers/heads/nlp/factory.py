@@ -53,7 +53,7 @@ from typing import Dict, List, Optional, Union, Tuple, Any, Literal
 # ---------------------------------------------------------------------
 
 from ...activations import ActivationType
-from ...standard_blocks import DenseBlock
+from ...dense_block import DenseBlock
 from ...ffn import create_ffn_layer, FFNType
 from ...attention import AttentionType
 from ...attention.factory import (
