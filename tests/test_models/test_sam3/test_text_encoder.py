@@ -32,6 +32,7 @@ import pytest
 from keras import ops
 
 from dl_techniques.models.vision_language.sam.sam3.text_encoder_ve import Sam3TextEncoder
+from dl_techniques.utils.masking import create_causal_attend_mask
 
 
 # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
@@ -244,10 +245,16 @@ class TestCausality:
 
 
 class TestCausalMask:
+    # `Sam3TextEncoder.causal_keep_mask` was consolidated into the shared
+    # `dl_techniques.utils.masking.create_causal_attend_mask` (plan
+    # plan-2026-09-14T144611-d4cd776b); these tests now exercise the shared
+    # function directly, using a dummy (batch, seq_len) tensor the same way
+    # the real call site (`Sam3TextEncoder.call`) passes its token-id tensor
+    # -- only its shape is read, values/dtype are irrelevant.
 
     def test_mask_is_lower_triangular_and_boolean(self, tiny_encoder):
         mask = ops.convert_to_numpy(
-            tiny_encoder.causal_keep_mask(2, TINY_SEQ)
+            create_causal_attend_mask(keras.ops.zeros((2, TINY_SEQ)))
         )
         assert mask.dtype == np.bool_
         assert mask.shape == (2, TINY_SEQ, TINY_SEQ)
@@ -258,13 +265,17 @@ class TestCausalMask:
     def test_mask_keeps_the_diagonal(self, tiny_encoder):
         # `>=` not `>`: a token must attend to ITSELF. An off-by-one here makes
         # position 0 attend to nothing at all.
-        mask = ops.convert_to_numpy(tiny_encoder.causal_keep_mask(1, TINY_SEQ))
+        mask = ops.convert_to_numpy(
+            create_causal_attend_mask(keras.ops.zeros((1, TINY_SEQ)))
+        )
         assert bool(mask[0, 0, 0]) is True
 
     def test_mask_is_built_at_the_supplied_length_not_the_context(
             self, tiny_encoder
     ):
-        mask = ops.convert_to_numpy(tiny_encoder.causal_keep_mask(1, 3))
+        mask = ops.convert_to_numpy(
+            create_causal_attend_mask(keras.ops.zeros((1, 3)))
+        )
         assert mask.shape == (1, 3, 3)
 
 
