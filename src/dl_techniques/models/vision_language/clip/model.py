@@ -54,7 +54,7 @@ from dl_techniques.utils.clip_utils import (
     last_non_pad_token,
 )
 from dl_techniques.layers.transformers import TransformerLayer
-from dl_techniques.utils.masking import create_mask
+from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -768,17 +768,7 @@ class CLIP(keras.Model):
         # Token embeddings: (batch, seq_len, text_width)
         x = self.token_embedding(text_ids, training=training)
 
-        # `create_mask` returns block semantics (True = mask out); attention
-        # layers expect attend semantics, hence the inversion. Broadcast to
-        # rank 3 (batch, seq, seq): a rank-2 mask reads as a (batch, seq) padding mask.
-        batch_size = ops.shape(text_ids)[0]
-        seq_len = ops.shape(text_ids)[1]
-        causal_block = create_mask('causal', seq_len=seq_len, dtype='bool')
-        causal_block = ops.broadcast_to(
-            ops.expand_dims(causal_block, axis=0),
-            (batch_size, seq_len, seq_len),
-        )
-        attend_mask = ops.logical_not(causal_block)
+        attend_mask = create_causal_attend_mask(text_ids)
 
         # Apply text transformer layers
         for transformer_layer in self.text_transformer_layers:
