@@ -3,7 +3,8 @@
 Direct unit coverage for:
 - `create_causal_attend_mask`: shared rank-3 causal (+ optional padding)
   attend-mask helper consolidated from duplicated implementations in
-  `dl_techniques.layers.blt.blt_blocks`,
+  `dl_techniques.layers.blt.entropy_model`, `dl_techniques.layers.blt.local_encoder`,
+  `dl_techniques.layers.blt.global_transformer`, `dl_techniques.layers.blt.local_decoder`,
   `dl_techniques.models.vision_language.clip.model` (pure-causal), and
   `dl_techniques.models.language.qwen.components`,
   `dl_techniques.layers.transformers.text_decoder` (causal + optional padding).

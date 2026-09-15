@@ -12,7 +12,7 @@ Four guards are owed by plan step 5:
 (ii)  ``test_a_later_boundary_never_displaces_an_earlier_one`` -- a row whose
       LATE boundary carries the HIGHEST probability must lose exactly that
       boundary, because truncation is in POSITION order and never in magnitude
-      order (S5; the measured hazard is `layers/blt/blt_blocks.py:410-420`);
+      order (S5; the measured hazard is `layers/blt/dynamic_patcher.py:31-49`);
 (iii) ``test_row_i_is_independent_of_row_j`` -- row 0's output is bit-identical
       across 32 randomisations of row 1, with a "something changed" twin on row
       1 AND an arm showing the reference's own data-dependent width FAILS this;
@@ -493,7 +493,7 @@ class TestGuardTwoPositionOrderTruncation:
     This is the guard that makes the ``# DECISION .../D-007`` anchor on the
     ``max_chunks`` cap a guard rather than a comment. Magnitude-order truncation
     is the causality hazard: an earlier token's chunk assignment would depend on
-    a later token's score (S5; MEASURED in `layers/blt/blt_blocks.py:410-420`).
+    a later token's score (S5; MEASURED in `layers/blt/dynamic_patcher.py:31-49`).
     """
 
     def test_a_later_boundary_never_displaces_an_earlier_one(self):

@@ -37,7 +37,7 @@ failed in the full `tests/test_layers/` run. Four collisions existed:
 
     Custom>ConvBlock       layers.standard_blocks        vs layers.yolo12_blocks
     Custom>ConvUNextStem   models.bias_free_denoisers    vs models.convunext.model
-    Custom>ByteTokenizer   layers.blt_blocks             vs models.modern_bert.components
+    Custom>ByteTokenizer   layers.blt (single-file)      vs models.modern_bert.components
     Custom>CoverageMetric  metrics.probabilistic_...     vs models.cliffordnet...
 
 The `ConvUNextStem` row is NOT a registry-key collision and never was -- read it as a
@@ -62,6 +62,12 @@ in the repo: `models.modern_bert.components` and `models.cliffordnet.confidence_
 the `package=` arguments below exist -- do not go looking for those two modules, and do
 not drop a `package=` just because its collision partner is gone: the checker below is
 derived from what is importable TODAY, so it is the thing that decides, not this table.
+
+The `ByteTokenizer` row's left-hand module is likewise stale on purpose: the single-file
+module it names (`layers/blt/<former single module>.py`) was split into 7 per-class files
+on 2026-09-15 (plan-2026-09-15T175707-5b389e31), and `ByteTokenizer` now lives at
+`layers.blt.byte_tokenizer`. Do not go looking for that former single-file module either --
+same rule as the two deleted modules above.
 
 Fix: give each colliding class an explicit, distinct ``package=``.
 
