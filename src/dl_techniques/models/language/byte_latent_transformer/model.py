@@ -35,9 +35,10 @@ from typing import Optional, Union, Dict, Any, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.blt.byte_tokenizer import ByteTokenizer
+from dl_techniques.layers.blt.dynamic_patcher import DynamicPatcher
 from dl_techniques.layers.blt.blt_blocks import (
     EntropyModel,
-    DynamicPatcher, LocalDecoder,
+    LocalDecoder,
     LocalEncoder, GlobalTransformer
 )
 from dl_techniques.utils.keras_registration import register_dl_technique

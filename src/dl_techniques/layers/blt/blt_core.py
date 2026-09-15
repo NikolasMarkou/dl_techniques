@@ -36,9 +36,10 @@ from ..reasoning.hrm_reasoning_module import HierarchicalReasoningModule
 from ..reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 
 from .byte_tokenizer import ByteTokenizer
+from .dynamic_patcher import DynamicPatcher
 from .blt_blocks import (
     EntropyModel,
-    DynamicPatcher, LocalEncoder,
+    LocalEncoder,
     GlobalTransformer, LocalDecoder
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
