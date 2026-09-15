@@ -623,3 +623,19 @@ class TestMLPBlockEdgeCases:
         layer_high = MLPBlock(hidden_dim=64, output_dim=32, dropout_rate=0.99)
         output_high = layer_high(test_input, training=True)
         assert not keras.ops.any(keras.ops.isnan(output_high))
+
+    def test_layer_valued_activation_rejected_at_construction(self):
+        """A `keras.layers.Layer`-valued `activation` must raise at
+        construction time (inside `MLPBlock.__init__`'s `resolve_activation`
+        call), never deferred to a later `.build()`/`.get_config()` call.
+
+        Guards Invariant 1 (construction-time rejection) for `MLPBlock`, the
+        FFN factory's representative migrated layer. See plan.md Step 8 /
+        decisions.md for the RED-proof this test was validated against.
+        """
+        with pytest.raises(ValueError):
+            MLPBlock(
+                hidden_dim=32,
+                output_dim=16,
+                activation=keras.layers.LeakyReLU(),
+            )
