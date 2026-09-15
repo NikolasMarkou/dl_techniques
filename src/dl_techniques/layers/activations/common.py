@@ -42,6 +42,11 @@ from typing import (
     Callable,
 )
 
+from dl_techniques.utils.activation_serialization import (
+    deserialize_activation as _deserialize_activation,
+    serialize_activation as _serialize_activation,
+)
+
 # ---------------------------------------------------------------------------
 
 def activation_spec(activation: Any) -> Any:
@@ -59,8 +64,15 @@ def activation_spec(activation: Any) -> Any:
     :return: Canonical activation spec: ``None``, a string, or a callable.
     :rtype: Any
     """
-    if activation is None or isinstance(activation, str):
-        return activation
+    # DECISION plan-2026-09-15T034909-a7edc8da/D-002
+    # Thin wrapper, not a deletion -- see decisions.md D-002. This module's
+    # own historical behavior differs from `activation_serialization.py`'s
+    # in the dict branch (`keras.activations.deserialize`, not
+    # `keras.saving.deserialize_keras_object`), which is why this one line
+    # stays inline rather than delegating: the unified helper's dict path
+    # additionally dispatches Layer construction, a form this function's
+    # contract has never accepted (`resolve_activation` below rejects a
+    # resolved Layer, so a config-carried Layer must never reach that far).
     if isinstance(activation, dict):
         return keras.activations.deserialize(activation)
     return activation
@@ -119,21 +131,30 @@ def resolve_activation(activation: Any) -> Callable[[Any], Any]:
     :rtype: Callable[[Any], Any]
     :raises ValueError: If ``activation`` is a ``keras.layers.Layer``.
     """
-    if isinstance(activation, keras.layers.Layer):
-        raise ValueError(
-            "Activation must be a string name or a plain callable, not a "
-            f"keras Layer instance ({type(activation).__name__}). Layer "
-            "activations may own weights, which would be created during "
-            "call() rather than build() and would not survive a .keras "
-            "round-trip. Use e.g. 'leaky_relu' or keras.activations.silu."
-        )
+    # DECISION plan-2026-09-15T034909-a7edc8da/D-002
+    # Partial delegation, not a full one -- see decisions.md D-002. The
+    # str/dict resolution stays inline: the unified helper's `str` arm is a
+    # passthrough (it returns the STRING unchanged, because its ~60 existing
+    # callers store the string itself), whereas this function's contract is
+    # to return a CALLABLE -- delegating the str branch would silently hand
+    # back a non-callable string. Its `dict` arm goes through
+    # `keras.saving.deserialize_keras_object`, which raises for an
+    # unregistered custom activation function that `keras.activations.deserialize`
+    # (used here) resolves successfully -- MEASURED, not assumed: delegating
+    # that branch too would regress a currently-working round-trip. Only the
+    # final Layer-rejection raise is unified, by handing the fully-resolved
+    # value to `_deserialize_activation`, which is a no-op resolution step
+    # for anything that already isn't a dict and applies the one shared raise
+    # message if what's left is a `keras.layers.Layer`.
     if activation is None:
-        return keras.activations.linear
-    if isinstance(activation, str):
-        return keras.activations.get(activation)
-    if isinstance(activation, dict):
-        return keras.activations.deserialize(activation)
-    return activation
+        resolved = keras.activations.linear
+    elif isinstance(activation, str):
+        resolved = keras.activations.get(activation)
+    elif isinstance(activation, dict):
+        resolved = keras.activations.deserialize(activation)
+    else:
+        resolved = activation
+    return _deserialize_activation(resolved, allow_layer=False)
 
 
 def serialize_activation(activation: Any) -> Any:
@@ -152,9 +173,15 @@ def serialize_activation(activation: Any) -> Any:
     :return: JSON-serialisable representation.
     :rtype: Any
     """
-    if activation is None or isinstance(activation, str):
-        return activation
-    return keras.saving.serialize_keras_object(activation)
+    # DECISION plan-2026-09-15T034909-a7edc8da/D-002
+    # Thin wrapper -- see decisions.md D-002. Behaviorally identical to the
+    # old inline body: `activation_serialization.serialize_activation`
+    # already passes `None`/`str` through unchanged and routes everything
+    # else through `keras.saving.serialize_keras_object` for a plain
+    # callable, and through the same function for a `Layer` (this module's
+    # `resolve_activation` never lets a `Layer` reach storage, so that arm is
+    # unreachable here, not a behavior change).
+    return _serialize_activation(activation)
 
 # ---------------------------------------------------------------------------
 
