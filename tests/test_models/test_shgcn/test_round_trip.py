@@ -76,6 +76,79 @@ class TestSHGCNRoundTrip:
         assert out.shape == (16, 3)
         self._run(model)
 
+    def test_keras_roundtrip_bit_for_bit_with_string_activation(self):
+        """New .keras save/load round-trip test (plan Item 5b).
+
+        Builds `SHGCNModel(hidden_dims=[16, 16], output_dim=8,
+        output_activation='tanh')` -- a non-default `output_activation`
+        (the class default is `'linear'`) -- runs a deterministic forward
+        pass over `_graph()`'s fixed-shape graph at `training=False`,
+        `.save()`s to a `tempfile.TemporaryDirectory()`-backed `.keras`
+        path, `keras.models.load_model()`s it back, and compares the
+        reloaded forward pass to the original BIT-FOR-BIT
+        (`np.testing.assert_array_equal`, not `assert_allclose`). This is a
+        stronger claim than `test_model_round_trip` above (which uses
+        `rtol=1e-5, atol=1e-5` and the DEFAULT `'linear'` activation) --
+        this test additionally proves the file-based save/load mechanism
+        survives a non-default, non-linear `output_activation` string with
+        ZERO drift, not just drift under a tolerance.
+
+        RED-proof: see
+        `test_keras_roundtrip_detects_weight_perturbation_with_string_activation`
+        below, a permanent second test that perturbs the reloaded model's
+        weights by a known amount and asserts the bit-for-bit comparison
+        DOES fail.
+        """
+        model = SHGCNModel(hidden_dims=[16, 16], output_dim=8, output_activation='tanh')
+        x = _graph()
+        original_prediction = ops.convert_to_numpy(model(x, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "shgcn_tanh.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = ops.convert_to_numpy(loaded_model(x, training=False))
+
+        np.testing.assert_array_equal(
+            original_prediction,
+            loaded_prediction,
+            err_msg="Reloaded model's forward pass is not bit-for-bit identical",
+        )
+
+    def test_keras_roundtrip_detects_weight_perturbation_with_string_activation(self):
+        """RED-proof for `test_keras_roundtrip_bit_for_bit_with_string_activation`.
+
+        Repeats the same save/load round trip with `output_activation='tanh'`,
+        then perturbs the reloaded model's output-layer kernel by a known,
+        clearly-detectable amount before comparing. Asserts the bit-for-bit
+        comparison DOES raise `AssertionError` against the perturbed
+        reload, proving the comparison above is not vacuously passing.
+        """
+        model = SHGCNModel(hidden_dims=[16, 16], output_dim=8, output_activation='tanh')
+        x = _graph()
+        original_prediction = ops.convert_to_numpy(model(x, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "shgcn_tanh_perturbed.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+
+            output_layer = loaded_model.output_layer
+            weights = output_layer.get_weights()
+            weights[0] = weights[0] + 1.0
+            output_layer.set_weights(weights)
+
+            perturbed_prediction = ops.convert_to_numpy(loaded_model(x, training=False))
+
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                original_prediction,
+                perturbed_prediction,
+                err_msg="Perturbation should have been detected but was not",
+            )
+
     def test_link_predictor_round_trip(self):
         model = SHGCNLinkPredictor(hidden_dims=[16, 16])
         # link predictor consumes [features, adjacency, edge_pairs]

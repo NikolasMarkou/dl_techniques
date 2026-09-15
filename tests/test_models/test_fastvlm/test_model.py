@@ -233,6 +233,100 @@ class TestFastVLM:
                 err_msg="Feature predictions differ after serialization"
             )
 
+    def test_keras_roundtrip_bit_for_bit_with_string_activation(
+        self,
+        base_config: Dict[str, Any],
+        sample_input: keras.KerasTensor,
+    ) -> None:
+        """New .keras save/load round-trip test (plan Item 5b).
+
+        Uses `base_config` with `activation` swapped to a non-default
+        string ('relu' instead of the fixture's default 'gelu'), saves to a
+        `tempfile.TemporaryDirectory()`-backed `.keras` path, reloads via
+        `keras.models.load_model()`, and compares an inference-mode
+        (`training=False`) forward pass BIT-FOR-BIT
+        (`np.testing.assert_array_equal`, not `assert_allclose`). At
+        `training=False` both dropout and stochastic depth are inactive, so
+        there is no source of nondeterminism between the two forward
+        passes. This proves the file-based save/load mechanism itself
+        survives a non-default string activation value -- the existing
+        `test_serialization_cycle` above already covers the default
+        'gelu' activation with a loose `rtol=1e-6, atol=1e-6` tolerance;
+        this test additionally proves ZERO drift for a DIFFERENT activation
+        string.
+
+        RED-proof: see
+        `test_keras_roundtrip_detects_weight_perturbation_with_string_activation`
+        below, a permanent second test that perturbs the reloaded model's
+        weights by a known amount and asserts the bit-for-bit comparison
+        DOES fail.
+        """
+        config = base_config.copy()
+        config['activation'] = 'relu'
+        model = FastVLM(**config)
+
+        original_prediction = keras.ops.convert_to_numpy(
+            model(sample_input, training=False)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "fastvlm_relu.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = keras.ops.convert_to_numpy(
+                loaded_model(sample_input, training=False)
+            )
+
+        np.testing.assert_array_equal(
+            original_prediction,
+            loaded_prediction,
+            err_msg="Reloaded model's forward pass is not bit-for-bit identical",
+        )
+
+    def test_keras_roundtrip_detects_weight_perturbation_with_string_activation(
+        self,
+        base_config: Dict[str, Any],
+        sample_input: keras.KerasTensor,
+    ) -> None:
+        """RED-proof for `test_keras_roundtrip_bit_for_bit_with_string_activation`.
+
+        Repeats the same save/load round trip with `activation='relu'`,
+        then perturbs the reloaded model's classification head kernel by a
+        known, clearly-detectable amount before comparing. Asserts the
+        bit-for-bit comparison DOES raise `AssertionError` against the
+        perturbed reload, proving the comparison above is not vacuously
+        passing.
+        """
+        config = base_config.copy()
+        config['activation'] = 'relu'
+        model = FastVLM(**config)
+
+        original_prediction = keras.ops.convert_to_numpy(
+            model(sample_input, training=False)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "fastvlm_relu_perturbed.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+
+            head_layer = loaded_model.head
+            head_kernel, head_bias = head_layer.get_weights()
+            head_layer.set_weights([head_kernel + 1.0, head_bias])
+
+            perturbed_prediction = keras.ops.convert_to_numpy(
+                loaded_model(sample_input, training=False)
+            )
+
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                original_prediction,
+                perturbed_prediction,
+                err_msg="Perturbation should have been detected but was not",
+            )
+
     def test_config_completeness(self, base_config: Dict[str, Any]) -> None:
         """Test that get_config contains all constructor parameters."""
         model = FastVLM(**base_config)
