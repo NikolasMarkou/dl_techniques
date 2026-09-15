@@ -5,6 +5,7 @@ from typing import Optional, Any, Dict, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 from dl_techniques.layers.embedding.continuous_sin_cos_embedding import ContinuousSinCosEmbed
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -130,7 +131,7 @@ class SupernodePooling(keras.layers.Layer):
         self.k_neighbors = k_neighbors
         self.max_neighbors = max_neighbors
         self.mode = mode
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -455,7 +456,7 @@ class SupernodePooling(keras.layers.Layer):
             "k_neighbors": self.k_neighbors,
             "max_neighbors": self.max_neighbors,
             "mode": self.mode,
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),

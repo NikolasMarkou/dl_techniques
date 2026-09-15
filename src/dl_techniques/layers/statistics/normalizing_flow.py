@@ -57,6 +57,7 @@ from typing import Dict, Optional, Tuple, Any, List, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -290,8 +291,8 @@ class AffineCouplingLayer(keras.layers.Layer):
         self.hidden_units = hidden_units
         self.reverse = reverse
         # Normalize activation to a callable/object so a callable passed in
-        # (e.g. keras.activations.relu) round-trips via keras.activations.serialize.
-        self.activation = keras.activations.get(activation)
+        # (e.g. keras.activations.relu) round-trips via serialize_activation.
+        self.activation = resolve_activation(activation)
         self.use_tanh_stabilization = use_tanh_stabilization
 
         # Compute splitting dimension
@@ -564,8 +565,8 @@ class AffineCouplingLayer(keras.layers.Layer):
             "hidden_units": self.hidden_units,
             "reverse": self.reverse,
             # Serialize the activation so a callable (e.g. keras.activations.relu)
-            # round-trips as JSON; keras.activations.get rebuilds it on load.
-            "activation": keras.activations.serialize(self.activation),
+            # round-trips as JSON; resolve_activation rebuilds it on load.
+            "activation": serialize_activation(self.activation),
             "use_tanh_stabilization": self.use_tanh_stabilization,
         })
         return config
@@ -741,8 +742,8 @@ class NormalizingFlowLayer(keras.layers.Layer):
         self.context_dim = context_dim
         self.hidden_units_coupling = hidden_units_coupling
         # Normalize activation to a callable/object so a callable passed in
-        # (e.g. keras.activations.relu) round-trips via keras.activations.serialize.
-        self.activation = keras.activations.get(activation)
+        # (e.g. keras.activations.relu) round-trips via serialize_activation.
+        self.activation = resolve_activation(activation)
         self.use_tanh_stabilization = use_tanh_stabilization
 
         # CREATE coupling layers in __init__ (modern Keras 3 pattern).
@@ -957,8 +958,8 @@ class NormalizingFlowLayer(keras.layers.Layer):
             "context_dim": self.context_dim,
             "hidden_units_coupling": self.hidden_units_coupling,
             # Serialize the activation so a callable (e.g. keras.activations.relu)
-            # round-trips as JSON; keras.activations.get rebuilds it on load.
-            "activation": keras.activations.serialize(self.activation),
+            # round-trips as JSON; resolve_activation rebuilds it on load.
+            "activation": serialize_activation(self.activation),
             "use_tanh_stabilization": self.use_tanh_stabilization,
         })
         return config

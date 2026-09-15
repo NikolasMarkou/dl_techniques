@@ -125,6 +125,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.tensors import is_power_of_two
@@ -501,7 +502,7 @@ class PolarWeightNorm(keras.layers.Layer):
         self._validate_inputs(units, epsilon)
 
         self.units = int(units)
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -741,7 +742,7 @@ class PolarWeightNorm(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "units": self.units,
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),

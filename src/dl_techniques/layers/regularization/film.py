@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Literal
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -198,8 +199,8 @@ class FiLMLayer(keras.layers.Layer):
 
         self.gamma_units = gamma_units
         self.beta_units = beta_units
-        self.gamma_activation = gamma_activation
-        self.beta_activation = beta_activation
+        self.gamma_activation = resolve_activation(gamma_activation)
+        self.beta_activation = resolve_activation(beta_activation)
         self.use_bias = use_bias
         self.scale_factor = scale_factor
         self.projection_dropout_rate = projection_dropout_rate
@@ -430,8 +431,8 @@ class FiLMLayer(keras.layers.Layer):
         config.update({
             'gamma_units': self.gamma_units,
             'beta_units': self.beta_units,
-            'gamma_activation': keras.activations.serialize(keras.activations.get(self.gamma_activation)),
-            'beta_activation': keras.activations.serialize(keras.activations.get(self.beta_activation)),
+            'gamma_activation': serialize_activation(self.gamma_activation),
+            'beta_activation': serialize_activation(self.beta_activation),
             'use_bias': self.use_bias,
             'scale_factor': self.scale_factor,
             'projection_dropout_rate': self.projection_dropout_rate,

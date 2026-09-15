@@ -21,6 +21,7 @@ from typing import Optional, Tuple, Union, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -101,7 +102,7 @@ class AntennalLobeLayer(keras.layers.Layer):
         super().__init__(**kwargs)
         self.units = units
         self.inhibition_strength = inhibition_strength
-        self.activation_fn = keras.activations.get(activation)
+        self.activation_fn = resolve_activation(activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
@@ -189,7 +190,7 @@ class AntennalLobeLayer(keras.layers.Layer):
         config.update({
             'units': self.units,
             'inhibition_strength': self.inhibition_strength,
-            'activation': keras.activations.serialize(self.activation_fn),
+            'activation': serialize_activation(self.activation_fn),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'use_bias': self.use_bias,
@@ -282,7 +283,7 @@ class MushroomBodyLayer(keras.layers.Layer):
         self.units = units
         self.sparsity = sparsity
         self.connection_sparsity = connection_sparsity
-        self.activation_fn = keras.activations.get(activation)
+        self.activation_fn = resolve_activation(activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.trainable_projection = trainable_projection
         self.use_bias = use_bias
@@ -404,7 +405,7 @@ class MushroomBodyLayer(keras.layers.Layer):
             'units': self.units,
             'sparsity': self.sparsity,
             'connection_sparsity': self.connection_sparsity,
-            'activation': keras.activations.serialize(self.activation_fn),
+            'activation': serialize_activation(self.activation_fn),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'trainable_projection': self.trainable_projection,
             'use_bias': self.use_bias,
