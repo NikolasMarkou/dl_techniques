@@ -91,6 +91,13 @@ def resolve_activation(
 ) -> Callable[[keras.KerasTensor], keras.KerasTensor]:
     """Resolve an activation identifier, extending ``keras.activations.get``.
 
+    There is a name clash with ``layers.activations.common.resolve_activation``.
+    That module's own docstring already documents it: "this one rejects
+    ``keras.layers.Layer`` instances, the other extends ``keras.activations.get``
+    with the tanh-GELU spellings." The two are intentionally distinct functions,
+    not a duplicate to unify — audited under
+    plan-2026-09-15T034909-a7edc8da/D-010 (step 5d). No functional change here.
+
     Interface contract (this is a shared asset, called from model packages):
 
     - **Accepts** anything ``keras.activations.get`` accepts (``str``, callable,

@@ -324,6 +324,10 @@ class BiasFreeConv2D(keras.layers.Layer):
             'kernel_size': self.kernel_size,
             # DECISION plan_2026-07-04_58ac8e73/D-002: serialize a layer-instance activation
             # (e.g. LeakyReLU(0.1)) so it round-trips; string/function path stays byte-identical. See decisions.md.
+            # Audited under plan-2026-09-15T034909-a7edc8da/D-008 (step 5a): deliberately NOT
+            # migrated to layers/activations/common.py's trio, which rejects a Layer outright.
+            # This class needs the Layer-serialize semantics common.py's resolve_activation
+            # does not provide. See decisions.md D-008.
             'activation': (
                 keras.layers.serialize(self.activation)
                 if isinstance(self.activation, keras.layers.Layer)

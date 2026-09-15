@@ -160,6 +160,36 @@ class TestMultiModalFusion:
         assert config['attention_config']['num_heads'] == 4
         assert config['ffn_config']['hidden_dim'] == dim * 2
 
+    def test_layer_instance_activation_round_trips(
+        self, sample_input: List[keras.KerasTensor], dim: int
+    ):
+        """A Layer-instance activation must survive get_config/from_config.
+
+        D-011 (plan-2026-09-15T034909-a7edc8da): before the fix,
+        ``from_config`` unconditionally routed the serialized activation
+        through ``keras.activations.deserialize``, which silently returns the
+        bare class-name STRING for a Layer-shaped dict instead of
+        reconstructing the Layer -- a subsequent forward pass would then try
+        to call a string, or ``keras.activations.get`` on that string would
+        raise. This guards against that regressing.
+        """
+        layer = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=keras.layers.LeakyReLU(negative_slope=0.2),
+        )
+        config = layer.get_config()
+        assert isinstance(config['activation'], dict)
+        assert config['activation'].get('module') == 'keras.layers'
+
+        rebuilt = MultiModalFusion.from_config(config)
+        assert isinstance(rebuilt.activation, keras.layers.LeakyReLU)
+        assert rebuilt.activation.negative_slope == pytest.approx(0.2)
+
+        # And the rebuilt layer actually runs.
+        output = rebuilt(sample_input)
+        assert output.shape == sample_input[0].shape
+
     @pytest.mark.parametrize("strategy", SINGLE_OUTPUT_STRATEGIES)
     def test_gradients_flow_single_output(self, strategy: FusionStrategy, sample_input: List[keras.KerasTensor],
                                           dim: int):

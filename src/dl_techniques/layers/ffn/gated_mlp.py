@@ -275,6 +275,15 @@ class GatedMLP(keras.layers.Layer):
                 f"data_format must be 'channels_first' or 'channels_last', got {self.data_format}"
             )
 
+        # DECISION plan-2026-09-15T034909-a7edc8da/D-012 (step 5e): this
+        # allow-list, the `Literal[...]` type hint above, and `_get_activation`'s
+        # own if/elif chain below are three concordant, mutually-redundant
+        # narrow-list enforcements -- not a "by omission" gap. No test pins
+        # the specific ValueError text, but widening only `_get_activation`
+        # (as the standard Tier-2 migration would) is inert: this check runs
+        # FIRST and already rejects anything outside the five names, so
+        # `_get_activation` never sees a wider value to resolve. Left
+        # unmigrated; see decisions.md D-012.
         valid_activations = {"relu", "gelu", "swish", "silu", "linear"}
         if attention_activation not in valid_activations:
             raise ValueError(
@@ -341,6 +350,13 @@ class GatedMLP(keras.layers.Layer):
     def _get_activation(self, activation: str) -> Callable[[keras.KerasTensor], keras.KerasTensor]:
         """
         Get activation function by name.
+
+        Audited under plan-2026-09-15T034909-a7edc8da/D-012 (step 5e):
+        deliberately NOT migrated to ``layers.activations.common``'s trio.
+        ``__init__``'s ``valid_activations`` check (above this call) already
+        rejects anything outside this same five-name set before this method
+        ever runs, so this is enforcement in depth, not the sole gate -- no
+        functional change made. See decisions.md D-012.
 
         :param activation: String name of activation function.
         :type activation: str

@@ -1735,7 +1735,18 @@ class MultiModalFusion(keras.layers.Layer):
             'num_tensor_projections': self.num_tensor_projections,
             'dropout_rate': self.dropout_rate,
             'use_residual': self.use_residual,
-            'activation': keras.activations.serialize(self.activation),
+            # DECISION plan-2026-09-15T034909-a7edc8da/D-011: a Layer-instance
+            # activation (e.g. LeakyReLU(0.2)) must be serialized via
+            # keras.layers.serialize, not keras.activations.serialize -- MEASURED
+            # (step 5c): keras.activations.deserialize() on a Layer-shaped dict
+            # silently returns the bare class-name STRING ("LeakyReLU"), not a
+            # reconstructed Layer, so the round trip through from_config would
+            # otherwise fail silently rather than raise. See decisions.md D-011.
+            'activation': (
+                keras.layers.serialize(self.activation)
+                if isinstance(self.activation, keras.layers.Layer)
+                else keras.activations.serialize(self.activation)
+            ),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
@@ -1756,8 +1767,19 @@ class MultiModalFusion(keras.layers.Layer):
         :return: A new layer with that configuration.
         :rtype: MultiModalFusion
         """
-        # Turn the serialized dicts back into objects
-        config['activation'] = keras.activations.deserialize(config['activation'])
+        # Turn the serialized dicts back into objects.
+        # DECISION plan-2026-09-15T034909-a7edc8da/D-011: a `keras.layers.*`-module
+        # dict is a serialized Layer instance and must go through
+        # keras.layers.deserialize; everything else (str, or a `builtins.function`
+        # dict for a custom activation function) goes through
+        # keras.activations.deserialize as before. See decisions.md D-011.
+        activation_config = config['activation']
+        if isinstance(activation_config, dict) and str(
+            activation_config.get('module', '')
+        ).startswith('keras.layers'):
+            config['activation'] = keras.layers.deserialize(activation_config)
+        else:
+            config['activation'] = keras.activations.deserialize(activation_config)
         config['kernel_initializer'] = keras.initializers.deserialize(config['kernel_initializer'])
         config['bias_initializer'] = keras.initializers.deserialize(config['bias_initializer'])
         config['kernel_regularizer'] = keras.regularizers.deserialize(config.get('kernel_regularizer'))
