@@ -24,7 +24,8 @@ from pathlib import Path
 from train.common import setup_gpu, set_seeds, json_numpy_default
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.language.byte_latent_transformer.model import create_blt_model
-from dl_techniques.layers.blt.blt_blocks import ByteTokenizer, DynamicPatcher, EntropyModel
+from dl_techniques.layers.blt.byte_tokenizer import ByteTokenizer
+from dl_techniques.layers.blt.blt_blocks import DynamicPatcher, EntropyModel
 
 
 # ---------------------------------------------------------------------

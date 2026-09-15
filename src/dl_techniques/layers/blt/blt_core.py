@@ -35,8 +35,9 @@ from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
 from ..reasoning.hrm_reasoning_module import HierarchicalReasoningModule
 from ..reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 
+from .byte_tokenizer import ByteTokenizer
 from .blt_blocks import (
-    ByteTokenizer, EntropyModel,
+    EntropyModel,
     DynamicPatcher, LocalEncoder,
     GlobalTransformer, LocalDecoder
 )

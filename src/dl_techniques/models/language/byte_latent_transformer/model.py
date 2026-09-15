@@ -34,8 +34,9 @@ from typing import Optional, Union, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.blt.byte_tokenizer import ByteTokenizer
 from dl_techniques.layers.blt.blt_blocks import (
-    ByteTokenizer, EntropyModel,
+    EntropyModel,
     DynamicPatcher, LocalDecoder,
     LocalEncoder, GlobalTransformer
 )
