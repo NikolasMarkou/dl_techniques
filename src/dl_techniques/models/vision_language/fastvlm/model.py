@@ -159,6 +159,9 @@ class FastVLM(keras.Model):
     :ivar stages: The three stage blocks (RepMixer, RepMixer, Attention).
     :ivar head: The classification head, or ``None`` when not built.
     :ivar downsample_layers: The two downsampling convs between stages.
+    :ivar activation: The resolved activation callable, produced by
+        ``resolve_activation``. Note this is a resolved callable, not the raw
+        constructor spec.
 
     Example:
         .. code-block:: python

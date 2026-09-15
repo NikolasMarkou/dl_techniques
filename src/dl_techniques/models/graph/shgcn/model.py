@@ -107,6 +107,10 @@ class SHGCNModel(keras.Model):
 
     :ivar hidden_layers: List of :class:`SHGCNLayer` instances.
     :ivar output_layer: Final :class:`SHGCNLayer` producing the model output.
+    :ivar output_activation: The resolved activation callable, produced by
+        ``resolve_activation``, or ``None`` if no output activation was
+        requested. Note this is a resolved callable, not the raw constructor
+        spec.
 
     Example:
         .. code-block:: python

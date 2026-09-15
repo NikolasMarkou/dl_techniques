@@ -734,9 +734,19 @@ class TestMLPBlockEdgeCases:
 
         Guards Invariant 1 (construction-time rejection) for `MLPBlock`, the
         FFN factory's representative migrated layer. See plan.md Step 8 /
-        decisions.md for the RED-proof this test was validated against.
+        decisions.md (D-012) for the RED-proof this test was validated
+        against.
+
+        `match=` pins a distinctive substring of the actual raise message
+        (`utils/activation_serialization.py::deserialize_activation`'s
+        `allow_layer=False` branch, reached via
+        `layers/activations/common.py::resolve_activation`), mirroring
+        `tests/test_layers/test_tabular/test_tabm_blocks.py`'s equivalent
+        Layer-rejection guards -- a bare `pytest.raises(ValueError)` would
+        also pass for any unrelated `ValueError` raised anywhere else in
+        `MLPBlock.__init__`.
         """
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="not a keras Layer instance"):
             MLPBlock(
                 hidden_dim=32,
                 output_dim=16,
