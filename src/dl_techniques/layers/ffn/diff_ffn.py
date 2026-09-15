@@ -166,7 +166,9 @@ class DifferentialFFN(keras.layers.Layer):
     :ivar output_dim: The stored output width.
     :vartype output_dim: int
     :ivar branch_activation: The resolved branch activation, always a
-        callable after ``keras.activations.get``.
+        callable produced by :func:`resolve_activation`. A
+        ``keras.layers.Layer`` instance raises ``ValueError`` rather than
+        being stored here.
     :vartype branch_activation: Callable
     :ivar gate_activation: The resolved gate activation.
     :vartype gate_activation: Callable

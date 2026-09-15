@@ -212,8 +212,10 @@ class AffineCouplingLayer(keras.layers.Layer):
         splitting, so the other half is the transformed one. Defaults to False.
     :type reverse: bool
     :param activation: Activation for the two hidden Dense layers. Defaults to
-        "relu". Stored through ``keras.activations.get`` so a callable
-        round-trips.
+        "relu". A string name, ``None``, a serialized dict, or a callable,
+        resolved via :func:`resolve_activation` so it round-trips through
+        ``get_config()``. A ``keras.layers.Layer`` instance raises
+        ``ValueError``.
     :type activation: str | callable
     :param use_tanh_stabilization: If True, ``s = exp(tanh(log_s))``, which caps
         the scale in ``[exp(-1), exp(1)]``. If False, ``s = exp(clip(log_s,

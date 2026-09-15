@@ -200,9 +200,9 @@ class OrthoBlock(keras.layers.Layer):
         else:
             self.kernel_initializer = keras.initializers.get(kernel_initializer)
 
-        # keras.activations.get(None) returns `linear`, not None, so a
-        # `self.activation is not None` guard never fires. Compare against the
-        # identity function instead. This is also stable across a
+        # resolve_activation(None) returns `keras.activations.linear`, not None,
+        # so a `self.activation is not None` guard never fires. Compare against
+        # the identity function instead. This is also stable across a
         # serialize/deserialize round trip, where None becomes "linear".
         self._is_identity_activation = self.activation is keras.activations.linear
 
@@ -328,7 +328,7 @@ class OrthoBlock(keras.layers.Layer):
 
         outputs = self.constrained_scale(z_norm, training=training)
 
-        # Skipped when activation is the identity (keras.activations.get(None)).
+        # Skipped when activation is the identity (resolve_activation(None)).
         if not self._is_identity_activation:
             outputs = self.activation(outputs)
 

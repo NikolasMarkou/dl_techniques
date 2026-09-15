@@ -176,8 +176,9 @@ class CountingFFN(keras.layers.Layer):
     :vartype count_dim: int
     :ivar counting_scope: The stored scope name.
     :vartype counting_scope: str
-    :ivar activation: The resolved activation, a callable after
-        ``keras.activations.get``.
+    :ivar activation: The resolved activation, a callable produced by
+        :func:`resolve_activation`. A ``keras.layers.Layer`` instance raises
+        ``ValueError`` rather than being stored here.
     :vartype activation: Callable
     :ivar use_bias: Whether the Dense layers carry a bias.
     :vartype use_bias: bool
