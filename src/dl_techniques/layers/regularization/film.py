@@ -34,7 +34,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
+from dl_techniques.layers.activations.common import (
+    activation_spec,
+    resolve_activation,
+    serialize_activation,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -199,8 +203,19 @@ class FiLMLayer(keras.layers.Layer):
 
         self.gamma_units = gamma_units
         self.beta_units = beta_units
-        self.gamma_activation = resolve_activation(gamma_activation)
-        self.beta_activation = resolve_activation(beta_activation)
+        # DECISION plan-2026-09-15T034909-a7edc8da/D-015
+        # Store the RAW spec on the public attribute, resolve to a separate
+        # `_..._activation_fn` for `call()`/`build()` use -- see decisions.md
+        # D-015. Before this plan's Step 4e migration, `self.gamma_activation`
+        # held the raw spec (e.g. the string 'tanh'); the migration collapsed
+        # that into storing the RESOLVED CALLABLE directly, silently changing
+        # this public attribute's runtime type. Restoring the two-attribute
+        # split (spec + `_fn` cache) mirrors `geometric/clifford_block.py`'s
+        # established pattern for the same trio.
+        self.gamma_activation = activation_spec(gamma_activation)
+        self.beta_activation = activation_spec(beta_activation)
+        self._gamma_activation_fn = resolve_activation(self.gamma_activation)
+        self._beta_activation_fn = resolve_activation(self.beta_activation)
         self.use_bias = use_bias
         self.scale_factor = scale_factor
         self.projection_dropout_rate = projection_dropout_rate
@@ -279,7 +294,7 @@ class FiLMLayer(keras.layers.Layer):
         if self.modulation_mode in ['multiplicative', 'both']:
             self.gamma_projection = keras.layers.Dense(
                 gamma_proj_units,
-                activation=self.gamma_activation,
+                activation=self._gamma_activation_fn,
                 use_bias=self.use_bias,
                 kernel_initializer=self.gamma_kernel_initializer,
                 bias_initializer=self.gamma_bias_initializer,
@@ -303,7 +318,7 @@ class FiLMLayer(keras.layers.Layer):
         if self.modulation_mode in ['additive', 'both']:
             self.beta_projection = keras.layers.Dense(
                 beta_proj_units,
-                activation=self.beta_activation,
+                activation=self._beta_activation_fn,
                 use_bias=self.use_bias,
                 kernel_initializer=self.beta_kernel_initializer,
                 bias_initializer=self.beta_bias_initializer,

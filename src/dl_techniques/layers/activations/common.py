@@ -153,6 +153,24 @@ def resolve_activation(activation: Any) -> Callable[[Any], Any]:
     elif isinstance(activation, dict):
         resolved = keras.activations.deserialize(activation)
     else:
+        # DECISION plan-2026-09-15T034909-a7edc8da/D-014
+        # Restore the callable() validation `keras.activations.get` provided
+        # pre-migration -- see decisions.md D-014. Without this check, a
+        # non-callable garbage value (an int, float, bool, list) fell through
+        # to `_deserialize_activation(resolved, allow_layer=False)` below,
+        # which only rejects a resolved `keras.layers.Layer` and otherwise
+        # returns its input UNCHANGED -- so `resolve_activation(7)` returned
+        # `7` instead of raising, deferring the failure to a confusing
+        # `TypeError: 'int' object is not callable` inside the layer's
+        # `call()` instead of an immediate `ValueError` at construction time.
+        # This check must run BEFORE the `_deserialize_activation` call so a
+        # `keras.layers.Layer` (which IS callable) still reaches that
+        # function's own, more specific Layer-rejection message rather than
+        # this generic one.
+        if not callable(activation):
+            raise ValueError(
+                f"Could not interpret activation function identifier: {activation!r}"
+            )
         resolved = activation
     return _deserialize_activation(resolved, allow_layer=False)
 

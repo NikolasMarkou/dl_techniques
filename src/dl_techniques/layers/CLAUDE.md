@@ -84,8 +84,8 @@ mechanism (the dl_techniques factory-key passthrough contract, the `allow_layer`
 `get_config`/`__init__`-never-`from_config` call-site rule); this section only covers what
 `common.py` adds on top.
 
-**This is the import path used by all 39 files this plan (`plan-2026-09-15T034909-a7edc8da`)
-migrated onto the unified helper** — the 37 Tier-2 batch files (Step 4) plus `clifford_block.py` /
+**This is the import path used by all 37 files this plan (`plan-2026-09-15T034909-a7edc8da`)
+migrated onto the unified helper** — the 35 Tier-2 batch files (Step 4) plus `clifford_block.py` /
 `clifford_rnn.py`'s literal-duplicate fix (Step 3) — not the raw `activation_serialization.py` pair
 directly. Every one of those files needs correct str/dict-to-callable resolution inline
 (`resolve_activation` must return a callable, and its dict branch must resolve an unregistered
