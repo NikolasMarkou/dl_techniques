@@ -73,6 +73,11 @@ def activation_spec(activation: Any) -> Any:
     # additionally dispatches Layer construction, a form this function's
     # contract has never accepted (`resolve_activation` below rejects a
     # resolved Layer, so a config-carried Layer must never reach that far).
+    # DECISION plan-2026-09-15T034909-a7edc8da/D-003
+    # MEASURED, not assumed: a full delegation to `deserialize_activation`
+    # would raise `TypeError` for an unregistered custom activation dict that
+    # `keras.activations.deserialize` (used here) resolves successfully. See
+    # decisions.md D-003.
     if isinstance(activation, dict):
         return keras.activations.deserialize(activation)
     return activation
@@ -155,6 +160,10 @@ def resolve_activation(activation: Any) -> Callable[[Any], Any]:
     # value to `_deserialize_activation`, which is a no-op resolution step
     # for anything that already isn't a dict and applies the one shared raise
     # message if what's left is a `keras.layers.Layer`.
+    # DECISION plan-2026-09-15T034909-a7edc8da/D-003
+    # MEASURED, not assumed: delegating the str branch would return the bare
+    # STRING unchanged instead of a callable, breaking this function's
+    # documented "returns a callable" contract. See decisions.md D-003.
     if activation is None:
         resolved = keras.activations.linear
     elif isinstance(activation, str):
@@ -208,6 +217,9 @@ def serialize_activation(activation: Any) -> Any:
     # callable, and through the same function for a `Layer` (this module's
     # `resolve_activation` never lets a `Layer` reach storage, so that arm is
     # unreachable here, not a behavior change).
+    # DECISION plan-2026-09-15T034909-a7edc8da/D-003
+    # This is the one function of the three verified safe for FULL delegation
+    # -- see decisions.md D-003.
     return _serialize_activation(activation)
 
 # ---------------------------------------------------------------------------

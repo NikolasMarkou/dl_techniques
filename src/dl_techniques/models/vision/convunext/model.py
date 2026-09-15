@@ -563,6 +563,7 @@ def _make_supervision_activation(activation, name):
     """
     # DECISION plan_2026-06-21_eb7fd829/D-006: pass a string or a cloned bare layer;
     # never Activation(<live layer instance>). See decisions.md D-006.
+    # DECISION plan-2026-09-15T034909-a7edc8da/D-009
     # Audited under plan-2026-09-15T034909-a7edc8da/D-009 (step 5b): deliberately NOT
     # migrated to layers/activations/common.py's trio, which rejects a Layer outright.
     # This function exists specifically to clone a Layer-instance activation via

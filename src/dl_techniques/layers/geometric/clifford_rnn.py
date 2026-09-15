@@ -175,6 +175,7 @@ from .clifford_block import (
 # rejected there, and ``get_config`` emitted raw callables that are not
 # JSON-serialisable. See decisions.md D-010.
 #
+# DECISION plan-2026-09-15T034909-a7edc8da/D-006
 # SUPERSEDED (source, not policy) 2026-09-15, plan-2026-09-15T034909-a7edc8da/D-006.
 # D-010's ruling was "do not extract into a NEW shared module" -- the trio was
 # a private duplicate that only `clifford_block.py` and this file shared, so a
