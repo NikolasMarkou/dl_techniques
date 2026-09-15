@@ -190,6 +190,85 @@ class TestMultiModalFusion:
         output = rebuilt(sample_input)
         assert output.shape == sample_input[0].shape
 
+    def test_unregistered_custom_function_activation_round_trips_in_a_scope(
+        self, sample_input: List[keras.KerasTensor], dim: int
+    ):
+        """An UNREGISTERED custom activation function round-trips IN a scope.
+
+        MEASURED (completion-fix step 13.1, plan-2026-09-15T094955-31fbe3db):
+        an unregistered plain Python function serializes to a
+        ``{'module': 'builtins', 'class_name': 'function', ...}`` dict that
+        carries no resolvable module path -- Keras can only reconstruct it
+        given an explicit name->object mapping, either
+        ``keras.saving.custom_object_scope`` (used here) or
+        ``keras.models.load_model(..., custom_objects=...)``. This is a
+        documented Keras contract (see
+        ``utils/activation_serialization.py``'s own module-docstring table),
+        not something this class can work around -- so this test exercises
+        the REALISTIC, supported round trip, which both the pre-fix (D-005)
+        and post-fix code already pass (this call path was never the
+        regression; see the sibling test below for what was).
+        """
+        def my_custom_activation(x):
+            return x * 2.0
+
+        layer = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=my_custom_activation,
+        )
+        config = layer.get_config()
+        assert isinstance(config['activation'], dict)
+        assert config['activation'].get('module') != 'keras.layers'
+
+        with keras.saving.custom_object_scope({'my_custom_activation': my_custom_activation}):
+            rebuilt = MultiModalFusion.from_config(config)
+        assert rebuilt.activation is my_custom_activation
+
+        # And the rebuilt layer actually runs (weights differ from `layer`'s
+        # own random init, so only shape -- not value -- is compared here,
+        # matching test_layer_instance_activation_round_trips's own strength).
+        output = rebuilt(sample_input)
+        assert output.shape == sample_input[0].shape
+
+    def test_unregistered_custom_function_activation_fails_clearly_without_a_scope(
+        self, dim: int
+    ):
+        """Outside any custom_objects scope, the failure must be a clear ValueError.
+
+        RED-PROOF (completion-fix step 13.1, plan-2026-09-15T094955-31fbe3db):
+        commit 8fa35229f (D-005) routed a non-Layer-shaped activation dict
+        through ``deserialize_activation(..., allow_layer=True)``
+        unconditionally, which -- for an unregistered custom FUNCTION dict
+        with no active ``custom_objects`` mapping -- raises a confusing
+        internal ``TypeError: Could not locate function '<name>'`` straight
+        out of ``keras.saving.serialization_lib``. This test fails against
+        that pre-fix code (wrong exception TYPE: ``TypeError``, not
+        ``ValueError``) and passes against the fix, which restores this
+        class's original, pre-D-011 dispatch for the function-dict branch
+        (``keras.activations.deserialize`` in ``from_config`` feeding
+        ``keras.activations.get()`` in ``__init__``), raising the same
+        ``ValueError: Could not interpret activation function identifier``
+        this class always raised for this exact unsupported case -- both
+        before D-011 ever existed and after this fix. This is NOT a claim
+        that the bare round trip now succeeds (it structurally cannot,
+        without a custom_objects mapping); it is a claim that the failure
+        mode is restored to a clear, expected exception rather than a
+        Keras-internal deserialization error.
+        """
+        def my_custom_activation(x):
+            return x * 2.0
+
+        layer = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=my_custom_activation,
+        )
+        config = layer.get_config()
+
+        with pytest.raises(ValueError, match="Could not interpret activation"):
+            MultiModalFusion.from_config(config)
+
     @pytest.mark.parametrize("strategy", SINGLE_OUTPUT_STRATEGIES)
     def test_gradients_flow_single_output(self, strategy: FusionStrategy, sample_input: List[keras.KerasTensor],
                                           dim: int):
