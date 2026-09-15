@@ -166,18 +166,32 @@ from dl_techniques.layers.norms import create_normalization_layer  # type: ignor
 from .clifford_block import (
     SparseRollingGeometricProduct,
     GatedGeometricResidual,
-    # DECISION plan-2026-08-10T130454-3649c19e/D-010
-    # The activation helper trio is IMPORTED from the sibling, not re-copied.
-    # Do NOT reinstate a local copy: this file previously carried a stale fork
-    # of ``_resolve_activation`` that pre-dated the sibling's hardening, so a
-    # keras.layers.Layer passed as an activation was silently accepted here and
-    # rejected there, and ``get_config`` emitted raw callables that are not
-    # JSON-serialisable. Do NOT extract these into a new shared module either:
-    # two call sites is not an earned abstraction and the sibling owns them.
-    # See decisions.md D-010.
-    _activation_spec,
-    _resolve_activation,
-    _serialize_activation,
+)
+# DECISION plan-2026-08-10T130454-3649c19e/D-010
+# The activation helper trio is IMPORTED, not re-copied. Do NOT reinstate a
+# local copy: this file previously carried a stale fork of the
+# resolve-activation helper that pre-dated the sibling's hardening, so a
+# keras.layers.Layer passed as an activation was silently accepted here and
+# rejected there, and ``get_config`` emitted raw callables that are not
+# JSON-serialisable. See decisions.md D-010.
+#
+# SUPERSEDED (source, not policy) 2026-09-15, plan-2026-09-15T034909-a7edc8da/D-006.
+# D-010's ruling was "do not extract into a NEW shared module" -- the trio was
+# a private duplicate that only `clifford_block.py` and this file shared, so a
+# fresh module would have been an earned-by-two-callers abstraction with no
+# other consumer. That census is now stale: `layers/activations/common.py`
+# already existed as a general, multi-consumer canonical home for this exact
+# trio (activation_spec / resolve_activation / serialize_activation, byte-
+# identical contract, confirmed in clifford_block.py's own migration in this
+# same commit) for reasons independent of these two files. Importing from it
+# does not create the module D-010 rejected; it retires a private duplicate of
+# one that already existed. D-010's core ruling -- import the trio, never fork
+# a local copy -- is UNCHANGED and still enforced; only the import source
+# moves from the sibling to the shared module. See decisions.md D-006.
+from dl_techniques.layers.activations.common import (
+    activation_spec,
+    resolve_activation,
+    serialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -399,13 +413,13 @@ class CliffordRNNCell(_DropoutRNNCellMixin, keras.layers.Layer):
         self.include_vector_grade = include_vector_grade
         self.layer_scale_init = layer_scale_init
         self.forget_bias_init = forget_bias_init
-        self.activation = _activation_spec(activation)
-        self.dot_activation = _activation_spec(dot_activation)
-        self.gate_activation = _activation_spec(gate_activation)
-        self.feature_activation = _activation_spec(feature_activation)
+        self.activation = activation_spec(activation)
+        self.dot_activation = activation_spec(dot_activation)
+        self.gate_activation = activation_spec(gate_activation)
+        self.feature_activation = activation_spec(feature_activation)
         # Resolve eagerly so a keras.layers.Layer activation is rejected at
         # construction (the sibling's contract) rather than mid-scan.
-        self._activation_fn = _resolve_activation(self.activation)
+        self._activation_fn = resolve_activation(self.activation)
         self.use_gate = use_gate
         self.use_bias = use_bias
         self.normalization_type = normalization_type
@@ -776,10 +790,10 @@ class CliffordRNNCell(_DropoutRNNCellMixin, keras.layers.Layer):
                 "include_vector_grade": self.include_vector_grade,
                 "layer_scale_init": self.layer_scale_init,
                 "forget_bias_init": self.forget_bias_init,
-                "activation": _serialize_activation(self.activation),
-                "dot_activation": _serialize_activation(self.dot_activation),
-                "gate_activation": _serialize_activation(self.gate_activation),
-                "feature_activation": _serialize_activation(
+                "activation": serialize_activation(self.activation),
+                "dot_activation": serialize_activation(self.dot_activation),
+                "gate_activation": serialize_activation(self.gate_activation),
+                "feature_activation": serialize_activation(
                     self.feature_activation
                 ),
                 "use_gate": self.use_gate,
@@ -1003,10 +1017,10 @@ class CliffordRNN(keras.layers.RNN):
             "include_vector_grade": cell.include_vector_grade,
             "layer_scale_init": cell.layer_scale_init,
             "forget_bias_init": cell.forget_bias_init,
-            "activation": _serialize_activation(cell.activation),
-            "dot_activation": _serialize_activation(cell.dot_activation),
-            "gate_activation": _serialize_activation(cell.gate_activation),
-            "feature_activation": _serialize_activation(
+            "activation": serialize_activation(cell.activation),
+            "dot_activation": serialize_activation(cell.dot_activation),
+            "gate_activation": serialize_activation(cell.gate_activation),
+            "feature_activation": serialize_activation(
                 cell.feature_activation
             ),
             "use_gate": cell.use_gate,

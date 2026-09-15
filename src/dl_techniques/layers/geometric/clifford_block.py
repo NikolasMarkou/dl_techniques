@@ -331,7 +331,6 @@ from __future__ import annotations
 import numbers
 from typing import (
     Any,
-    Callable,
     Dict,
     FrozenSet,
     List,
@@ -351,6 +350,11 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.regularization.layer_scale import LayerScale
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import (
+    activation_spec,
+    resolve_activation,
+    serialize_activation,
+)
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -436,68 +440,6 @@ def _call_with_training_gate(
         lambda: layer(*args, training=True, **kwargs),
         lambda: layer(*args, training=False, **kwargs),
     )
-
-
-def _activation_spec(activation: Any) -> Any:
-    """Canonicalise an activation spec for storage on the layer.
-
-    Returns the spec in a form that :func:`_serialize_activation` can round-trip:
-    ``None`` and strings pass through; a serialized dict (as produced by
-    deserialization of a saved config) is turned back into a callable; anything
-    else is returned unchanged.
-
-    :param activation: String name, ``None``, serialized dict, or callable.
-    :return: Canonical activation spec.
-    """
-    if activation is None or isinstance(activation, str):
-        return activation
-    if isinstance(activation, dict):
-        return keras.activations.deserialize(activation)
-    return activation
-
-
-def _resolve_activation(activation: Any) -> Callable[[Any], Any]:
-    """Resolve an activation spec to a callable.
-
-    Strings are resolved via ``keras.activations.get``; ``None`` maps to
-    identity (linear); callables are returned as-is.  Stateful activation
-    *layers* are rejected: they would create their weights during ``call()``
-    instead of ``build()``, which breaks ``.keras`` weight loading.
-
-    :param activation: String name, ``None``, serialized dict, or callable.
-    :return: A callable applying the activation.
-    :raises ValueError: If ``activation`` is a ``keras.layers.Layer``.
-    """
-    if isinstance(activation, keras.layers.Layer):
-        raise ValueError(
-            "Activation must be a string name or a plain callable, not a "
-            f"keras Layer instance ({type(activation).__name__}). Layer "
-            "activations may own weights, which would be created during "
-            "call() rather than build() and would not survive a .keras "
-            "round-trip. Use e.g. 'leaky_relu' or keras.activations.silu."
-        )
-    if activation is None:
-        return keras.activations.linear
-    if isinstance(activation, str):
-        return keras.activations.get(activation)
-    if isinstance(activation, dict):
-        return keras.activations.deserialize(activation)
-    return activation
-
-
-def _serialize_activation(activation: Any) -> Any:
-    """Serialize an activation spec for ``get_config``.
-
-    ``None`` and strings pass through unchanged; callables are serialized via
-    ``keras.saving.serialize_keras_object`` so that a config containing a raw
-    function object is still JSON-serialisable.
-
-    :param activation: Canonical activation spec.
-    :return: JSON-serialisable representation.
-    """
-    if activation is None or isinstance(activation, str):
-        return activation
-    return keras.saving.serialize_keras_object(activation)
 
 
 def _validate_shifts(shifts: Any) -> List[int]:
@@ -658,8 +600,8 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         self.cli_mode = cli_mode
         self.use_bias = use_bias
         # The default "silu" reproduces the reference implementation exactly.
-        self.dot_activation = _activation_spec(dot_activation)
-        self._dot_activation_fn = _resolve_activation(self.dot_activation)
+        self.dot_activation = activation_spec(dot_activation)
+        self._dot_activation_fn = resolve_activation(self.dot_activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -793,7 +735,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
                 "shifts": list(self.shifts),
                 "cli_mode": self.cli_mode,
                 "use_bias": self.use_bias,
-                "dot_activation": _serialize_activation(self.dot_activation),
+                "dot_activation": serialize_activation(self.dot_activation),
                 "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
                 "bias_initializer": keras.initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
@@ -899,11 +841,11 @@ class GatedGeometricResidual(keras.layers.Layer):
         self.use_bias = use_bias
         # Defaults ("sigmoid"/"silu", use_gate=True) reproduce the reference
         # GGR update.
-        self.gate_activation = _activation_spec(gate_activation)
-        self.feature_activation = _activation_spec(feature_activation)
+        self.gate_activation = activation_spec(gate_activation)
+        self.feature_activation = activation_spec(feature_activation)
         self.use_gate = use_gate
-        self._gate_activation_fn = _resolve_activation(self.gate_activation)
-        self._feature_activation_fn = _resolve_activation(self.feature_activation)
+        self._gate_activation_fn = resolve_activation(self.gate_activation)
+        self._feature_activation_fn = resolve_activation(self.feature_activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -1008,8 +950,8 @@ class GatedGeometricResidual(keras.layers.Layer):
                 "channels": self.channels,
                 "layer_scale_init": self.layer_scale_init,
                 "use_bias": self.use_bias,
-                "gate_activation": _serialize_activation(self.gate_activation),
-                "feature_activation": _serialize_activation(
+                "gate_activation": serialize_activation(self.gate_activation),
+                "feature_activation": serialize_activation(
                     self.feature_activation
                 ),
                 "use_gate": self.use_gate,
@@ -1373,11 +1315,11 @@ class CliffordNetBlock(keras.layers.Layer):
         self.input_mode = resolved_input_mode
         self.layer_scale_init = layer_scale_init
         self.use_bias = use_bias
-        self.activation = _activation_spec(activation)
-        self.dot_activation = _activation_spec(dot_activation)
-        self.gate_activation = _activation_spec(gate_activation)
-        self.feature_activation = _activation_spec(feature_activation)
-        self._activation_fn = _resolve_activation(self.activation)
+        self.activation = activation_spec(activation)
+        self.dot_activation = activation_spec(dot_activation)
+        self.gate_activation = activation_spec(gate_activation)
+        self.feature_activation = activation_spec(feature_activation)
+        self._activation_fn = resolve_activation(self.activation)
         self.use_gate = use_gate
         self.context_kernel_size = int(context_kernel_size)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -1894,11 +1836,11 @@ class CliffordNetBlock(keras.layers.Layer):
                 "input_mode": self.input_mode,
                 "layer_scale_init": self.layer_scale_init,
                 "use_bias": self.use_bias,
-                "activation": _serialize_activation(self.activation),
-                "dot_activation": _serialize_activation(self.dot_activation),
-                "gate_activation": _serialize_activation(self.gate_activation),
+                "activation": serialize_activation(self.activation),
+                "dot_activation": serialize_activation(self.dot_activation),
+                "gate_activation": serialize_activation(self.gate_activation),
                 "use_gate": self.use_gate,
-                "feature_activation": _serialize_activation(
+                "feature_activation": serialize_activation(
                     self.feature_activation
                 ),
                 "context_kernel_size": self.context_kernel_size,
