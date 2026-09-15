@@ -568,6 +568,18 @@ def _make_supervision_activation(activation, name):
     # migrated to layers/activations/common.py's trio, which rejects a Layer outright.
     # This function exists specifically to clone a Layer-instance activation via
     # keras.layers.serialize/deserialize. See decisions.md D-009.
+    # DECISION plan-2026-09-15T094955-31fbe3db/D-006
+    # Re-confirmed at this plan's step 5, after Idioms B/C in sibling files were migrated
+    # onto utils/activation_serialization.py's serialize_activation/deserialize_activation
+    # pair: that pair is also not a fit here, for a reason distinct from common.py's
+    # Layer-reject policy above. serialize_activation/deserialize_activation round-trip a
+    # STORED spec -- a value serialize_activation() produced is deserialized back later,
+    # unchanged, to reconstitute the SAME object. This function's job is different: given
+    # an already-live Layer, clone it under a NEW name in the same call. Composing the pair
+    # (serialize_activation, splice in "name", deserialize_activation) would reduce to
+    # exactly the two keras.layers.serialize/deserialize calls already below, with no
+    # behavior or readability gain, so this stays a direct call rather than a call through
+    # the shared pair. See decisions.md D-006.
     if isinstance(activation, keras.layers.Layer):
         cfg = keras.layers.serialize(activation)
         cfg = {**cfg, "config": {**cfg["config"], "name": name}}
