@@ -345,7 +345,21 @@ class BiasFreeConv2D(keras.layers.Layer):
             # above, which still holds) was consolidated onto utils/activation_serialization.py's
             # serialize_activation, per D-003's confirmed round-trip-equivalence measurement.
             # See decisions.md D-004.
-            'activation': serialize_activation(self.activation),
+            # DECISION plan-2026-09-15T094955-31fbe3db/D-011: `serialize_activation(None)`
+            # returns `None` unchanged (utils/activation_serialization.py's documented
+            # passthrough), which silently changed this class's `activation=None` config
+            # entry from the pre-D-004 value `'linear'` to `None` -- a regression D-004's own
+            # "no round-trip behavior change" claim did not intend. `self.activation` stays
+            # `None` above (that is what skips building an Activation sublayer at all), so the
+            # fix is local to serialization: explicitly resolve `None` to
+            # `keras.activations.linear` only at this call site, restoring the original
+            # serialized value without touching the `is not None` control flow. See
+            # decisions.md D-011.
+            'activation': (
+                keras.activations.serialize(keras.activations.linear)
+                if self.activation is None
+                else serialize_activation(self.activation)
+            ),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'use_batch_norm': self.use_batch_norm,
@@ -613,7 +627,14 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             # DECISION plan-2026-09-15T094955-31fbe3db/D-004: consolidated the hand-rolled
             # isinstance(Layer)-branching idiom onto serialize_activation, per D-003's
             # confirmed round-trip-equivalence measurement. See decisions.md D-004.
-            'activation': serialize_activation(self.activation),
+            # DECISION plan-2026-09-15T094955-31fbe3db/D-011: restore the `activation=None`
+            # -> `'linear'` serialization contract D-004 silently dropped. See decisions.md
+            # D-011 and BiasFreeConv2D.get_config's identical comment above.
+            'activation': (
+                keras.activations.serialize(keras.activations.linear)
+                if self.activation is None
+                else serialize_activation(self.activation)
+            ),
             'use_batch_norm': self.use_batch_norm,
             'normalization_type': self.normalization_type,
             'dropout_rate': self.dropout_rate,

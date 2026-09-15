@@ -355,6 +355,32 @@ class TestBiasFreeConv2D:
         assert output.shape == (2, 32, 32, 16)
         assert layer.activation_layer is None
 
+    def test_none_activation_serializes_as_linear(self) -> None:
+        """activation=None must serialize as 'linear', matching this class's ORIGINAL,
+        pre-plan-2026-09-15T094955-31fbe3db contract (`keras.activations.serialize(
+        keras.activations.get(None))` == 'linear'), not silently regress to `None` --
+        this is the exact defect the review found and D-011 fixed. See decisions.md D-011.
+        """
+        layer = BiasFreeConv2D(filters=16, activation=None)
+        config = layer.get_config()
+
+        assert config['activation'] == 'linear'
+
+    def test_layer_instance_activation_round_trips(self) -> None:
+        """A keras.layers.Layer-valued activation must construct AND get_config()/
+        from_config() round-trip it as the same Layer type with matching config, not
+        raise ValueError at get_config() time (D-011, mirroring bias_free_conv1d.py's
+        equivalent Fix A test)."""
+        layer = BiasFreeConv2D(filters=8, activation=keras.layers.LeakyReLU(negative_slope=0.3))
+
+        config = layer.get_config()
+        assert isinstance(config['activation'], dict)
+        assert config['activation']['class_name'] == 'LeakyReLU'
+
+        reconstructed = BiasFreeConv2D.from_config(config)
+        assert isinstance(reconstructed.activation, keras.layers.LeakyReLU)
+        assert reconstructed.activation.get_config()['negative_slope'] == pytest.approx(0.3)
+
     def test_grayscale_denoising_scenario(self, grayscale_input: keras.KerasTensor) -> None:
         """Test layer in typical grayscale denoising scenario."""
         layer = BiasFreeConv2D(filters=64, kernel_size=5, activation='relu')
@@ -644,6 +670,27 @@ class TestBiasFreeResidualBlock:
 
         expected_shape = (None, 128, 128, basic_config['filters'])
         assert output_shape == expected_shape
+
+    def test_none_activation_serializes_as_linear(self) -> None:
+        """activation=None must serialize as 'linear' for BiasFreeResidualBlock too,
+        mirroring BiasFreeConv2D's equivalent test above (D-011)."""
+        layer = BiasFreeResidualBlock(filters=16, activation=None)
+        config = layer.get_config()
+
+        assert config['activation'] == 'linear'
+
+    def test_layer_instance_activation_round_trips(self) -> None:
+        """A keras.layers.Layer-valued activation must construct AND get_config()/
+        from_config() round-trip it, not raise ValueError at get_config() time (D-011)."""
+        layer = BiasFreeResidualBlock(filters=8, activation=keras.layers.LeakyReLU(negative_slope=0.2))
+
+        config = layer.get_config()
+        assert isinstance(config['activation'], dict)
+        assert config['activation']['class_name'] == 'LeakyReLU'
+
+        reconstructed = BiasFreeResidualBlock.from_config(config)
+        assert isinstance(reconstructed.activation, keras.layers.LeakyReLU)
+        assert reconstructed.activation.get_config()['negative_slope'] == pytest.approx(0.2)
 
     def test_deep_residual_stack(self, basic_config: Dict[str, Any]) -> None:
         """Test stacking multiple residual blocks."""
