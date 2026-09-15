@@ -21,6 +21,7 @@ from typing import Optional, Union, Tuple, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -223,8 +224,8 @@ class BiasFreeConv1D(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
-            'activation': keras.activations.serialize(
-                keras.activations.get(self.activation)
+            'activation': serialize_activation(
+                resolve_activation(self.activation)
             ),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
@@ -462,8 +463,8 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
-            'activation': keras.activations.serialize(
-                keras.activations.get(self.activation)
+            'activation': serialize_activation(
+                resolve_activation(self.activation)
             ),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),

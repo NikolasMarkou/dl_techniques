@@ -31,6 +31,14 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+# `RepMixerBlock` below uses common.py's Layer-rejecting trio, aliased to
+# avoid colliding with `ConvolutionalStem`'s (unrelated, untouched) pair
+# imported above -- the two classes deliberately use different activation
+# helpers and neither should be repointed at the other's.
+from dl_techniques.layers.activations.common import (
+    resolve_activation as _resolve_activation_common,
+    serialize_activation as _serialize_activation_common,
+)
 
 from .mobile_one_block import MobileOneBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -133,7 +141,7 @@ class RepMixerBlock(keras.layers.Layer):
         self.kernel_size = kernel_size
         self.expansion_ratio = expansion_ratio
         self.dropout_rate = dropout_rate
-        self.activation = keras.activations.get(activation)
+        self.activation = _resolve_activation_common(activation)
         self.use_layer_norm = use_layer_norm
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -304,7 +312,7 @@ class RepMixerBlock(keras.layers.Layer):
             'kernel_size': self.kernel_size,
             'expansion_ratio': self.expansion_ratio,
             'dropout_rate': self.dropout_rate,
-            'activation': keras.activations.serialize(self.activation),
+            'activation': _serialize_activation_common(self.activation),
             'use_layer_norm': self.use_layer_norm,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),

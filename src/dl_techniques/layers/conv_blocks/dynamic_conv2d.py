@@ -21,6 +21,7 @@ from typing import Optional, Union, Tuple, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -193,7 +194,7 @@ class DynamicConv2D(keras.layers.Layer):
 
         # Handle activation
         if activation is not None:
-            self.activation = keras.activations.get(activation)
+            self.activation = resolve_activation(activation)
         else:
             self.activation = None
 
@@ -422,7 +423,7 @@ class DynamicConv2D(keras.layers.Layer):
             'padding': self.padding,
             'dilation_rate': self.dilation_rate,
             'groups': self.groups,
-            'activation': keras.activations.serialize(self.activation),
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),

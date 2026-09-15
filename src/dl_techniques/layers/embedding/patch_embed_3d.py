@@ -69,6 +69,7 @@ from typing import Optional, Union, Tuple, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -228,7 +229,7 @@ class PatchEmbed3D(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.flatten = flatten
 
@@ -380,7 +381,7 @@ class PatchEmbed3D(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "flatten": self.flatten,
         })

@@ -24,6 +24,7 @@ from typing import Dict, Optional, Tuple, Union, Callable, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -112,7 +113,7 @@ class SqueezeExcitation(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        self.reduction_activation = keras.activations.get(activation)
+        self.reduction_activation = resolve_activation(activation)
 
         # Set in build(), since they depend on input_shape.
         self.input_channels: Optional[int] = None
@@ -291,7 +292,7 @@ class SqueezeExcitation(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'reduction_ratio': self.reduction_ratio,
-            'activation': keras.activations.serialize(self.reduction_activation),
+            'activation': serialize_activation(self.reduction_activation),
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
