@@ -370,6 +370,15 @@ class SigLIPVisionTransformer(keras.Model):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
+        # DECISION plan-2026-09-15T135450-e083ae85/D-016
+        # Unlike vit_hmlp's twin fix (D-013 above applies identically to both
+        # files), this file's raw-regularizer-storage bug predates this plan
+        # entirely: the pre-plan `from_config` here never called
+        # regularizers.deserialize()/.get() on these fields either (its own
+        # docstring claimed otherwise, but the code did not), so this is a
+        # pre-existing latent defect being corrected, not a regression
+        # introduced by this plan's step 4a migration -- see decisions.md
+        # D-016.
         self.normalization_type = str(normalization_type)
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)
