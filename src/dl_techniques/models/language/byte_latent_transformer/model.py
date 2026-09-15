@@ -37,9 +37,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.blt.byte_tokenizer import ByteTokenizer
 from dl_techniques.layers.blt.dynamic_patcher import DynamicPatcher
 from dl_techniques.layers.blt.entropy_model import EntropyModel
+from dl_techniques.layers.blt.local_encoder import LocalEncoder
 from dl_techniques.layers.blt.blt_blocks import (
     LocalDecoder,
-    LocalEncoder, GlobalTransformer
+    GlobalTransformer
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 

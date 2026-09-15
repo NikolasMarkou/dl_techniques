@@ -38,8 +38,8 @@ from ..reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 from .byte_tokenizer import ByteTokenizer
 from .dynamic_patcher import DynamicPatcher
 from .entropy_model import EntropyModel
+from .local_encoder import LocalEncoder
 from .blt_blocks import (
-    LocalEncoder,
     GlobalTransformer, LocalDecoder
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
