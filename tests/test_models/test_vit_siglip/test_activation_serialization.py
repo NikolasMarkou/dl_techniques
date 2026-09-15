@@ -141,8 +141,10 @@ class TestActivationSerialization:
         assert delta == 0.0, f"default 'gelu' path changed: max|delta| = {delta:.6e}"
 
     @pytest.mark.parametrize("activation", ["gelu", "relu"])
-    def test_from_config_leaves_string_activations_as_strings(self, activation):
+    def test_from_config_resolves_string_activations_to_callables(self, activation):
+        # Post D-005 migration: __init__ resolves eagerly via resolve_activation,
+        # so a string activation is a resolved callable on both the original
+        # and the from_config-reconstructed instance -- not a raw string.
         model = _build(activation)
         restored = SigLIPVisionTransformer.from_config(model.get_config())
-        assert restored.activation == activation
-        assert isinstance(restored.activation, str)
+        assert restored.activation == keras.activations.get(activation)

@@ -41,7 +41,7 @@ class TestSigLIPInitialization:
         assert model.normalization_type == "layer_norm"
         assert model.normalization_position == "post"
         assert model.ffn_type == "mlp"
-        assert model.activation == "gelu"
+        assert model.activation == keras.activations.get("gelu")
         assert not model.built
 
     def test_custom_initialization(self):
@@ -76,7 +76,7 @@ class TestSigLIPInitialization:
         assert model.normalization_type == "rms_norm"
         assert model.normalization_position == "pre"
         assert model.ffn_type == "swiglu"
-        assert model.activation == "relu"
+        assert model.activation == keras.activations.get("relu")
         assert model.name == "custom_siglip_vit"
 
     def test_scale_configurations(self):
