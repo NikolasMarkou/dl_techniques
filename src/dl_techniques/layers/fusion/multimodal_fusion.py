@@ -413,6 +413,24 @@ class MultiModalFusion(keras.layers.Layer):
         # activation, e.g. 'gelu', no longer resolving to a callable) -- proof
         # the risk is real, not hypothetical. See decisions.md D-010 for the
         # full measurement and the from_config fix.
+        #
+        # DECISION plan-2026-09-15T135450-e083ae85/D-003: re-confirmed at a
+        # later EXECUTE pass that the line below is still the right call and
+        # still needs no change. Explicitly, by name:
+        #   - `layers/activations/common.py::resolve_activation` REJECTS a
+        #     `keras.layers.Layer` instance outright -- wrong for this class,
+        #     which explicitly supports a Layer-valued `activation` argument
+        #     per D-010/D-011 above.
+        #   - `utils/activation_serialization.py::deserialize_activation(
+        #     allow_layer=True)` allows a Layer through but does NOT resolve
+        #     a bare string (e.g. 'gelu') to a callable -- this is the exact
+        #     regression D-010's own prior fix attempt hit and reverted.
+        #   - `keras.activations.get()`'s own contract already provides both
+        #     properties in one call: its `elif callable(identifier): return
+        #     identifier` branch passes a Layer through unchanged (a Layer
+        #     is callable), while its string branch resolves a bare name via
+        #     the internal registry. No new helper or code change is needed.
+        # See decisions.md D-003 for the full trade-off writeup.
         self.activation = keras.activations.get(activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
