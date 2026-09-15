@@ -40,9 +40,7 @@ from .dynamic_patcher import DynamicPatcher
 from .entropy_model import EntropyModel
 from .local_encoder import LocalEncoder
 from .global_transformer import GlobalTransformer
-from .blt_blocks import (
-    LocalDecoder
-)
+from .local_decoder import LocalDecoder
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

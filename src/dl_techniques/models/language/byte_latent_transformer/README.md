@@ -12,7 +12,7 @@ This implementation leverages `dl_techniques` factories to provide modern stabil
 
 > ### Implementation status — patching IS entropy-based; read this for how it differs
 >
-> The patcher lives in `layers/blt_blocks.py` at `DynamicPatcher.call`.
+> The patcher lives in `layers/blt/dynamic_patcher.py` at `DynamicPatcher.call`.
 >
 > - **Boundaries come from the entropy values.** A byte opens a new patch when its
 >   entropy exceeds `entropy_threshold`, and every row of the batch is segmented

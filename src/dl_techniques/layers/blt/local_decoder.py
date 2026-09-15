@@ -1,22 +1,9 @@
-"""Seven layers that make up the Byte Latent Transformer (BLT): ByteTokenizer,
-EntropyModel, DynamicPatcher, PatchPooling, LocalEncoder, GlobalTransformer,
-and LocalDecoder, using the shared `create_causal_attend_mask` helper from
+"""LocalDecoder, the Byte Latent Transformer's next-byte prediction stack,
+using the shared `create_causal_attend_mask` helper from
 `dl_techniques.utils.masking`.
 
-BLT replaces a fixed subword vocabulary with entropy-driven patching over raw
-UTF-8 bytes. A small causal EntropyModel scores each byte's next-byte
-surprise; DynamicPatcher opens a new patch wherever that surprise crosses a
-threshold, so predictable stretches merge into large patches and
-hard-to-predict stretches get finer-grained compute. LocalEncoder attends over
-bytes and pools each patch to one vector; GlobalTransformer attends across
-patches; LocalDecoder combines local byte context with the preceding patch's
-global representation to produce next-byte logits. Each stack is causal
-because every call site hands its `TransformerLayer`s an explicit
-`create_causal_attend_mask`; the attention layers mask only with what they are given.
-`DynamicPatcher.compute_patch_ids` needs its `seq_len` passed explicitly under
-a traced or XLA-compiled graph, since recovering it from the data makes the
-output shape data-dependent. Patch slots beyond a sequence's boundary count
-are empty rather than masked, and nothing here carries pretrained weights.
+LocalDecoder combines local byte context with the preceding patch's global
+representation to produce next-byte logits.
 
 References:
     - Pagnoni et al., 2024. Byte Latent Transformer: Patches Scale Better
@@ -25,20 +12,16 @@ References:
 
 import keras
 from keras import ops
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
-from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from ..transformers.transformer import TransformerLayer
 from ..embedding.positional_embedding import PositionalEmbedding
 
-@register_dl_technique("dl_techniques.layers.blt.blt_blocks")
+
+@register_dl_technique("dl_techniques.layers.blt.local_decoder")
 class LocalDecoder(keras.layers.Layer):
     """Generate next-byte logits from causal self-attention and patch context.
 
@@ -386,5 +369,3 @@ class LocalDecoder(keras.layers.Layer):
             'dropout_rate': self.dropout_rate
         })
         return config
-
-# ---------------------------------------------------------------------

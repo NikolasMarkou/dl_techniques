@@ -745,7 +745,7 @@ def create_causal_attend_mask(
     point for two previously-duplicated patterns:
 
     - "pure causal, no padding" (`attention_mask=None`), previously duplicated
-      across `dl_techniques.layers.blt.blt_blocks` and
+      across `dl_techniques.layers.blt` and
       `dl_techniques.models.vision_language.clip.model`.
     - "causal OR'd with optional padding", previously duplicated across
       `dl_techniques.models.language.qwen.components.build_causal_attention_mask`

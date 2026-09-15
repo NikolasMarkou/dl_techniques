@@ -218,7 +218,7 @@ valid chunk count never exceeds `L`, so `plug_back_idx` never reads them.
 
 Truncation is by position and not by boundary probability on purpose: magnitude-order truncation
 lets a later, higher-scoring byte displace an earlier boundary, which is a causality defect
-`layers/blt/blt_blocks.py` already measured and guards against.
+`layers/blt/dynamic_patcher.py` already measured and guards against.
 
 ### 5.4 No `chunk_size` knob
 
