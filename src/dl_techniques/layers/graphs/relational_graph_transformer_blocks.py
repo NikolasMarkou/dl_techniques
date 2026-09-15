@@ -32,6 +32,7 @@ from ...initializers import clone_initializer
 from ..transformers import TransformerLayer
 from ..norms import create_normalization_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -147,7 +148,7 @@ class LightweightGNNLayer(keras.layers.Layer):
             raise ValueError(f"units must be positive, got {units}")
 
         self.units = units
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
@@ -243,7 +244,7 @@ class LightweightGNNLayer(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "units": self.units,
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })

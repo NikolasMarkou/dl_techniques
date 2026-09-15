@@ -93,6 +93,7 @@ from ..norms.rms_norm import RMSNorm
 from ..norms.factory import create_normalization_layer
 from ...initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -259,7 +260,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         self.message_passing = message_passing
         self.aggregation = aggregation
         self.normalization = normalization
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.dropout_rate = dropout_rate
         self.use_residual = use_residual
         self.num_attention_heads = num_attention_heads
@@ -450,7 +451,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                     MLPBlock(
                         hidden_dim=self.concept_dim * 2,
                         output_dim=self.concept_dim,
-                        activation=keras.activations.serialize(self.activation),
+                        activation=serialize_activation(self.activation),
                         dropout_rate=self.dropout_rate,
                         use_bias=True,
                         kernel_initializer=self.kernel_initializer,
@@ -817,7 +818,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             'message_passing': self.message_passing,
             'aggregation': self.aggregation,
             'normalization': self.normalization,
-            'activation': keras.activations.serialize(self.activation),
+            'activation': serialize_activation(self.activation),
             'dropout_rate': self.dropout_rate,
             'use_residual': self.use_residual,
             'num_attention_heads': self.num_attention_heads,

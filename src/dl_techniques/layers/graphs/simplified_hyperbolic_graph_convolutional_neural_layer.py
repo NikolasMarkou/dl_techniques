@@ -27,6 +27,7 @@ from typing import Optional, Union, List, Tuple, Any
 
 from dl_techniques.utils.geometry.poincare_math import PoincareMath
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -125,7 +126,7 @@ class SHGCNLayer(keras.layers.Layer):
             raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
 
         self.units = units
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.use_curvature = use_curvature
         self.dropout_rate = dropout_rate
@@ -295,7 +296,7 @@ class SHGCNLayer(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'units': self.units,
-            'activation': keras.activations.serialize(self.activation),
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'use_curvature': self.use_curvature,
             'dropout_rate': self.dropout_rate,

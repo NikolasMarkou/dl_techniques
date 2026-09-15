@@ -30,6 +30,7 @@ from typing import Optional, Dict, Any, Callable, Union, Tuple, Sequence
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -243,7 +244,7 @@ class BitLinear(keras.layers.Layer):
         self.activation_scale_method = activation_scale_method
         self.weight_per_channel = weight_per_channel
         self.quantization_method = quantization_method
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.use_input_norm = use_input_norm
         self.ste_lambda = ste_lambda
@@ -601,7 +602,7 @@ class BitLinear(keras.layers.Layer):
             "activation_scale_method": self.activation_scale_method,
             "weight_per_channel": self.weight_per_channel,
             "quantization_method": self.quantization_method,
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "use_input_norm": self.use_input_norm,
             "ste_lambda": self.ste_lambda,

@@ -45,6 +45,7 @@ from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraint
 from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -181,7 +182,7 @@ class OrthoBlock(keras.layers.Layer):
             raise ValueError(f"scale_initial_value must be between 0.0 and 1.0, got {scale_initial_value}")
 
         self.units = units
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.ortho_reg_factor = ortho_reg_factor
         self.ortho_l1_factor = ortho_l1_factor
@@ -356,7 +357,7 @@ class OrthoBlock(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "units": self.units,
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "ortho_reg_factor": self.ortho_reg_factor,
             "ortho_l1_factor": self.ortho_l1_factor,

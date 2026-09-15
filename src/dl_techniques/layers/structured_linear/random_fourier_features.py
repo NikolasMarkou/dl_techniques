@@ -23,6 +23,7 @@ from typing import Optional, Union, Tuple, Any, Dict, Callable
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -133,7 +134,7 @@ class RFFKernelLayer(keras.layers.Layer):
         self.n_features = n_features
         self.gamma = gamma
         self.use_bias = use_bias
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -253,7 +254,7 @@ class RFFKernelLayer(keras.layers.Layer):
             'n_features': self.n_features,
             'gamma': self.gamma,
             'use_bias': self.use_bias,
-            'activation': keras.activations.serialize(self.activation),
+            'activation': serialize_activation(self.activation),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
