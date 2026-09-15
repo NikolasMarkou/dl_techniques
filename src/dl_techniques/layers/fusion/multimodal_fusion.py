@@ -1823,21 +1823,32 @@ class MultiModalFusion(keras.layers.Layer):
         """
         # Turn the serialized dicts back into objects.
         # DECISION plan-2026-09-15T094955-31fbe3db/D-010: a dict-shaped
-        # 'activation' is EITHER a serialized keras.layers.Layer OR a
-        # serialized activation FUNCTION. `deserialize_activation`'s dict
-        # branch always calls keras.saving.deserialize_keras_object, which
-        # correctly reconstructs the Layer case (MEASURED, D-003 probe (b))
-        # but raises TypeError for an unregistered function dict outside a
-        # custom_objects scope, where `keras.activations.deserialize` --
-        # together with __init__'s `keras.activations.get()` -- raises the
-        # older, clearer ValueError instead (and correctly resolves a
-        # REGISTERED function, or an unregistered one inside a
-        # `keras.saving.custom_object_scope`, in either case). Commit
-        # 8fa35229f (D-005) routed BOTH shapes through `deserialize_activation`
-        # unconditionally, changing the unregistered-function-outside-any-scope
-        # failure from ValueError to a more confusing TypeError -- restore the
-        # two-way dispatch. Do NOT reintroduce D-005's single unconditional
-        # call. See decisions.md D-010.
+        # 'activation' is EITHER a serialized keras.layers.Layer
+        # (module == 'keras.layers') OR a serialized activation FUNCTION (any
+        # other module, e.g. 'builtins' for a plain/custom function).
+        # `deserialize_activation`'s dict branch always calls
+        # keras.saving.deserialize_keras_object, which correctly reconstructs
+        # the Layer case (MEASURED, D-003 probe (b)) but raises TypeError for
+        # an unregistered function dict outside a custom_objects scope, where
+        # `keras.activations.deserialize` -- together with __init__'s
+        # `keras.activations.get()` -- raises the older, clearer ValueError
+        # instead (and correctly resolves a REGISTERED function, or an
+        # unregistered one inside a `keras.saving.custom_object_scope`, in
+        # either case). Commit 8fa35229f (D-005) routed BOTH shapes through
+        # `deserialize_activation` unconditionally, changing the unregistered-
+        # function-outside-any-scope failure from ValueError to a more
+        # confusing TypeError -- restore the two-way dispatch. Do NOT
+        # reintroduce D-005's single unconditional call. See decisions.md D-010.
+        #
+        # NOTE (plan-2026-09-15T135450-e083ae85/D-015): the paragraph above is
+        # D-010's original text, restored verbatim after step 3b's edit
+        # accidentally reworded it (dropped the "(module == 'keras.layers')"
+        # and "(any other module, e.g. 'builtins' ...)" parentheticals) while
+        # rewriting the code below it. See decisions.md D-015. The dispatch
+        # predicate the paragraph above describes is now stale in ONE respect
+        # only -- see the D-004 block immediately below, which documents the
+        # narrower, structural replacement without touching this paragraph's
+        # own wording.
         #
         # DECISION plan-2026-09-15T135450-e083ae85/D-004: the dispatch used to
         # test `activation_config.get('module') == 'keras.layers'`, which only
