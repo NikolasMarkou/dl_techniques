@@ -381,6 +381,104 @@ class TestBiasFreeConv2D:
         assert isinstance(reconstructed.activation, keras.layers.LeakyReLU)
         assert reconstructed.activation.get_config()['negative_slope'] == pytest.approx(0.3)
 
+    def test_keras_roundtrip_bit_for_bit_with_layer_activation(self) -> None:
+        """.keras save/load round trip with a Layer-valued activation (Item 5a).
+
+        Following `tests/test_layers/test_ffn/test_mlp.py:627-728`'s template:
+        a functional `keras.Model` wraps `BiasFreeConv2D` constructed with
+        `activation=keras.layers.LeakyReLU()` (not a plain string -- every
+        existing round-trip test for this class only exercises a string
+        activation, so none of them proves the FILE-based `.keras` mechanism
+        itself survives a Layer-valued activation, per plan.md Item 5/D-007).
+        `dropout_rate=0.0` (the default) keeps `call()` deterministic.
+
+        Expectation: BIT-FOR-BIT equality (`np.testing.assert_array_equal`),
+        matching the stronger claim `test_mlp.py`'s template makes over the
+        `rtol=1e-6, atol=1e-6` general-purpose serialization smoke tests
+        elsewhere in this file.
+
+        RED-proof: see
+        `test_keras_roundtrip_detects_weight_perturbation_with_layer_activation`
+        below, a permanent sibling proving this comparison has the power to
+        detect a real difference.
+        """
+        inputs = keras.Input(shape=(16, 16, 4))
+        outputs = BiasFreeConv2D(
+            filters=8,
+            kernel_size=3,
+            activation=keras.layers.LeakyReLU(),
+            dropout_rate=0.0,
+        )(inputs)
+        model = keras.Model(inputs, outputs)
+
+        deterministic_input = keras.ops.ones((2, 16, 16, 4)) * 0.37
+        original_prediction = keras.ops.convert_to_numpy(
+            model(deterministic_input, training=False)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = keras.ops.convert_to_numpy(
+                loaded_model(deterministic_input, training=False)
+            )
+
+        np.testing.assert_array_equal(
+            original_prediction,
+            loaded_prediction,
+            err_msg="Reloaded model's forward pass is not bit-for-bit identical",
+        )
+
+    def test_keras_roundtrip_detects_weight_perturbation_with_layer_activation(self) -> None:
+        """RED-proof for `test_keras_roundtrip_bit_for_bit_with_layer_activation`.
+
+        Repeats the same save/load round trip, then perturbs the reloaded
+        `BiasFreeConv2D` sublayer's conv kernel by a known, clearly-detectable
+        amount before comparing. Asserts the bit-for-bit comparison DOES
+        raise `AssertionError` against the perturbed reload, proving the
+        comparison above is not vacuously passing.
+        """
+        inputs = keras.Input(shape=(16, 16, 4))
+        conv_layer = BiasFreeConv2D(
+            filters=8,
+            kernel_size=3,
+            activation=keras.layers.LeakyReLU(),
+            dropout_rate=0.0,
+        )
+        outputs = conv_layer(inputs)
+        model = keras.Model(inputs, outputs)
+
+        deterministic_input = keras.ops.ones((2, 16, 16, 4)) * 0.37
+        original_prediction = keras.ops.convert_to_numpy(
+            model(deterministic_input, training=False)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+
+            # Locate the reloaded BiasFreeConv2D sublayer and perturb its
+            # conv kernel by a known, clearly-detectable amount.
+            loaded_conv_layer = loaded_model.layers[-1]
+            assert isinstance(loaded_conv_layer, BiasFreeConv2D)
+            kernel = loaded_conv_layer.conv.kernel
+            loaded_conv_layer.conv.kernel.assign(kernel + 1.0)
+
+            perturbed_prediction = keras.ops.convert_to_numpy(
+                loaded_model(deterministic_input, training=False)
+            )
+
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                original_prediction,
+                perturbed_prediction,
+                err_msg="Perturbation should have been detected but was not",
+            )
+
     def test_grayscale_denoising_scenario(self, grayscale_input: keras.KerasTensor) -> None:
         """Test layer in typical grayscale denoising scenario."""
         layer = BiasFreeConv2D(filters=64, kernel_size=5, activation='relu')

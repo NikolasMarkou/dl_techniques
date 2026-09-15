@@ -344,6 +344,108 @@ class TestMultiModalFusion:
         output = rebuilt(sample_input)
         assert output.shape == sample_input[0].shape
 
+    def test_keras_roundtrip_bit_for_bit_with_layer_activation(
+        self, sample_input: List[keras.KerasTensor], dim: int
+    ):
+        """.keras save/load round trip with a Layer-valued activation (Item 5a).
+
+        Following `tests/test_layers/test_ffn/test_mlp.py:627-728`'s template:
+        a functional `keras.Model` wraps `MultiModalFusion` constructed with
+        `activation=keras.layers.LeakyReLU()` and `dropout_rate=0.0` (this
+        class's `'concatenation'` strategy builds a `Dropout` layer from
+        `dropout_rate`, so 0.0 keeps `call()` deterministic). Every existing
+        round-trip test for this class (`test_serialization_cycle_*`) only
+        exercises the default string activation, so none of them proves the
+        FILE-based `.keras` mechanism itself survives a Layer-valued
+        activation, per plan.md Item 5/D-007.
+
+        Expectation: BIT-FOR-BIT equality (`np.testing.assert_array_equal`),
+        matching the stronger claim `test_mlp.py`'s template makes over the
+        `rtol=1e-6, atol=1e-6` general-purpose serialization smoke tests
+        elsewhere in this file.
+
+        RED-proof: see
+        `test_keras_roundtrip_detects_weight_perturbation_with_layer_activation`
+        below, a permanent sibling proving this comparison has the power to
+        detect a real difference.
+        """
+        inputs = [keras.Input(shape=s.shape[1:]) for s in sample_input]
+        outputs = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=keras.layers.LeakyReLU(),
+            dropout_rate=0.0,
+        )(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        original_prediction = ops.convert_to_numpy(
+            model(sample_input, training=False)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = ops.convert_to_numpy(
+                loaded_model(sample_input, training=False)
+            )
+
+        np.testing.assert_array_equal(
+            original_prediction,
+            loaded_prediction,
+            err_msg="Reloaded model's forward pass is not bit-for-bit identical",
+        )
+
+    def test_keras_roundtrip_detects_weight_perturbation_with_layer_activation(
+        self, sample_input: List[keras.KerasTensor], dim: int
+    ):
+        """RED-proof for `test_keras_roundtrip_bit_for_bit_with_layer_activation`.
+
+        Repeats the same save/load round trip, then perturbs the reloaded
+        `MultiModalFusion` sublayer's output-projection kernel by a known,
+        clearly-detectable amount before comparing. Asserts the bit-for-bit
+        comparison DOES raise `AssertionError` against the perturbed reload,
+        proving the comparison above is not vacuously passing.
+        """
+        inputs = [keras.Input(shape=s.shape[1:]) for s in sample_input]
+        fusion_layer = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=keras.layers.LeakyReLU(),
+            dropout_rate=0.0,
+        )
+        outputs = fusion_layer(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        original_prediction = ops.convert_to_numpy(
+            model(sample_input, training=False)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+
+            # Locate the reloaded MultiModalFusion sublayer and perturb one
+            # of its trainable weights by a known, clearly-detectable amount.
+            loaded_fusion_layer = loaded_model.layers[-1]
+            assert isinstance(loaded_fusion_layer, MultiModalFusion)
+            perturbed_weight = loaded_fusion_layer.trainable_weights[0]
+            perturbed_weight.assign(perturbed_weight + 1.0)
+
+            perturbed_prediction = ops.convert_to_numpy(
+                loaded_model(sample_input, training=False)
+            )
+
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                original_prediction,
+                perturbed_prediction,
+                err_msg="Perturbation should have been detected but was not",
+            )
+
     @pytest.mark.parametrize("strategy", SINGLE_OUTPUT_STRATEGIES)
     def test_gradients_flow_single_output(self, strategy: FusionStrategy, sample_input: List[keras.KerasTensor],
                                           dim: int):
