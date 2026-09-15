@@ -5,4 +5,4 @@
 
 2026-09-15T14:13:55Z | iter-1/step-1 | 58cd36ceb | src/dl_techniques/layers/tabular/tabm_mlp_block.py | EDIT(+32,-0) | radius:LOW(1) | D-001 | strengthen Idiom-E KEEP exception documentation
 2026-09-15T14:30:00Z | iter-1/step-2 | uncommitted | plans/plan-2026-09-15T135450-e083ae85/decisions.md | EDIT(+7,-0) | radius:MED(3) | D-008 | re-confirm Idiom D no-simplification, verification-only, no source change
-2026-09-15T14:20:53Z | iter-1/step-3a | uncommitted | src/dl_techniques/layers/fusion/multimodal_fusion.py | EDIT(+18,-0) | radius:LOW(0) | D-003 | document raw keras.activations.get as intentional
+2026-09-15T14:20:53Z | iter-1/step-3a | e84105bf7 | src/dl_techniques/layers/fusion/multimodal_fusion.py | EDIT(+18,-0) | radius:LOW(0) | D-003 | document raw keras.activations.get as intentional
