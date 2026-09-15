@@ -20,6 +20,30 @@ SINGLE_OUTPUT_STRATEGIES: List[FusionStrategy] = [
 ]
 
 
+@keras.saving.register_keras_serializable(package="test_custom")
+class _CustomActivationLayer(keras.layers.Layer):
+    """A minimal custom (non-``keras.layers``) activation Layer, for D-004.
+
+    Deliberately registered under its own ``test_custom`` package rather than
+    left unregistered, and never decorated with the project's own
+    ``@register_dl_technique`` -- this class exists purely to prove
+    ``from_config``'s dispatch predicate does not depend on WHERE the class
+    is registered. See ``test_custom_layer_activation_round_trips``.
+    """
+
+    def __init__(self, scale: float = 1.0, **kwargs):
+        super().__init__(**kwargs)
+        self.scale = scale
+
+    def call(self, x):
+        return keras.ops.relu(x) * self.scale
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'scale': self.scale})
+        return config
+
+
 class TestMultiModalFusion:
     """Comprehensive test suite for the MultiModalFusion layer."""
 
@@ -268,6 +292,57 @@ class TestMultiModalFusion:
 
         with pytest.raises(ValueError, match="Could not interpret activation"):
             MultiModalFusion.from_config(config)
+
+    def test_custom_layer_activation_round_trips(
+        self, sample_input: List[keras.KerasTensor], dim: int
+    ):
+        """A CUSTOM (non-``keras.layers``) Layer-instance activation round-trips.
+
+        D-004 (plan-2026-09-15T135450-e083ae85): before this fix,
+        ``from_config`` dispatched on
+        ``activation_config.get('module') == 'keras.layers'``, which only
+        matches a BUILT-IN ``keras.layers.Layer`` (see
+        ``test_layer_instance_activation_round_trips`` above, using
+        ``LeakyReLU``). A custom Layer subclass registered under its own
+        package serializes with a *different* ``module`` value (MEASURED:
+        ``None`` for this locally-defined, ``register_keras_serializable``-
+        decorated class, via ``keras.saving.serialize_keras_object`` --
+        never the literal string ``'keras.layers'``), so the OLD predicate
+        would misroute it into the function-deserialization branch below and
+        fail. This test proves the fix's structural predicate (dispatch on
+        whether the serialized dict's ``'config'`` value is itself a dict,
+        not on which package registered the class) reconstructs a custom
+        Layer correctly.
+
+        RED-PROOF (manual, one-off interpreter check, not shipped as a
+        mutation test): for this exact serialized dict,
+        ``serialized.get('module') == 'keras.layers'`` evaluates ``False``
+        (the OLD predicate would have routed to the function branch and
+        raised/corrupted), while the FIXED predicate
+        (``isinstance(serialized, dict) and
+        isinstance(serialized.get('config'), dict)``) evaluates ``True``.
+        """
+        activation_layer = _CustomActivationLayer(scale=2.0)
+        layer = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=activation_layer,
+        )
+        config = layer.get_config()
+        assert isinstance(config['activation'], dict)
+        # The custom class is registered under its OWN package, never under
+        # 'keras.layers' -- confirming the old module-string predicate could
+        # never have matched this case.
+        assert config['activation'].get('module') != 'keras.layers'
+        assert isinstance(config['activation'].get('config'), dict)
+
+        rebuilt = MultiModalFusion.from_config(config)
+        assert isinstance(rebuilt.activation, _CustomActivationLayer)
+        assert rebuilt.activation.scale == pytest.approx(2.0)
+
+        # And the rebuilt layer actually runs.
+        output = rebuilt(sample_input)
+        assert output.shape == sample_input[0].shape
 
     @pytest.mark.parametrize("strategy", SINGLE_OUTPUT_STRATEGIES)
     def test_gradients_flow_single_output(self, strategy: FusionStrategy, sample_input: List[keras.KerasTensor],
