@@ -624,6 +624,109 @@ class TestMLPBlockEdgeCases:
         output_high = layer_high(test_input, training=True)
         assert not keras.ops.any(keras.ops.isnan(output_high))
 
+    def test_keras_roundtrip_bit_for_bit(self):
+        """New .keras save/load round-trip test (plan Item 5).
+
+        Builds a small functional `keras.Model` wrapping `MLPBlock`
+        (dropout_rate=0.0, so `call()` has no randomness), runs a
+        deterministic forward pass, `.save()`s to a `tmp_path`-style
+        temporary `.keras` file, `keras.models.load_model()`s it back, and
+        compares the reloaded forward pass to the original.
+
+        Expectation: BIT-FOR-BIT equality (`np.testing.assert_array_equal`,
+        not `assert_allclose`). A `.keras` save/load round trip persists the
+        exact float32 weight arrays and the exact architecture graph with no
+        re-initialization or resampling in between; with dropout disabled and
+        the same deterministic input tensor run through the same ops on the
+        same device in the same process, there is no source of nondeterminism
+        between the two forward passes. This is a stronger claim than
+        `test_serialization_cycle`'s `rtol=1e-6, atol=1e-6` above, which
+        exists as a looser general-purpose serialization smoke test; this
+        test additionally proves the round trip has ZERO drift, not just
+        drift under a tolerance.
+
+        RED-proof: see `test_keras_roundtrip_detects_weight_perturbation`
+        below, a permanent second test that perturbs the reloaded model's
+        weights by a known amount and asserts the bit-for-bit comparison
+        DOES fail -- proving this comparison has the power to detect a real
+        difference, per plan.md's Pre-Mortem signal 3.
+        """
+        inputs = keras.Input(shape=(16, 32))
+        outputs = MLPBlock(
+            hidden_dim=64,
+            output_dim=24,
+            activation="gelu",
+            dropout_rate=0.0,
+        )(inputs)
+        model = keras.Model(inputs, outputs)
+
+        deterministic_input = keras.ops.ones((2, 16, 32)) * 0.37
+        original_prediction = keras.ops.convert_to_numpy(model(deterministic_input))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = keras.ops.convert_to_numpy(
+                loaded_model(deterministic_input)
+            )
+
+        np.testing.assert_array_equal(
+            original_prediction,
+            loaded_prediction,
+            err_msg="Reloaded model's forward pass is not bit-for-bit identical",
+        )
+
+    def test_keras_roundtrip_detects_weight_perturbation(self):
+        """RED-proof for `test_keras_roundtrip_bit_for_bit`.
+
+        Repeats the same save/load round trip, then perturbs one of the
+        reloaded model's `MLPBlock` weights by a known, clearly-detectable
+        amount (+1.0 added to `fc2`'s kernel) before comparing. Asserts the
+        bit-for-bit comparison DOES raise `AssertionError` against the
+        perturbed reload, proving the comparison in
+        `test_keras_roundtrip_bit_for_bit` is not vacuously passing --
+        i.e. it has the power to fail against a genuinely broken subject,
+        per plan.md's Pre-Mortem signal 3.
+        """
+        inputs = keras.Input(shape=(16, 32))
+        mlp_layer = MLPBlock(
+            hidden_dim=64,
+            output_dim=24,
+            activation="gelu",
+            dropout_rate=0.0,
+        )
+        outputs = mlp_layer(inputs)
+        model = keras.Model(inputs, outputs)
+
+        deterministic_input = keras.ops.ones((2, 16, 32)) * 0.37
+        original_prediction = keras.ops.convert_to_numpy(model(deterministic_input))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+
+            # Locate the reloaded MLPBlock sublayer and perturb its fc2
+            # kernel by a known, clearly-detectable amount.
+            loaded_mlp_layer = loaded_model.layers[-1]
+            assert isinstance(loaded_mlp_layer, MLPBlock)
+            fc2_kernel, fc2_bias = loaded_mlp_layer.fc2.get_weights()
+            loaded_mlp_layer.fc2.set_weights([fc2_kernel + 1.0, fc2_bias])
+
+            perturbed_prediction = keras.ops.convert_to_numpy(
+                loaded_model(deterministic_input)
+            )
+
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                original_prediction,
+                perturbed_prediction,
+                err_msg="Perturbation should have been detected but was not",
+            )
+
     def test_layer_valued_activation_rejected_at_construction(self):
         """A `keras.layers.Layer`-valued `activation` must raise at
         construction time (inside `MLPBlock.__init__`'s `resolve_activation`
