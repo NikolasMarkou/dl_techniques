@@ -34,6 +34,10 @@ import numpy as np
 from keras import initializers, regularizers, layers, ops
 from typing import Dict, Any, Optional, Union, List, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.ffn import create_ffn_layer
@@ -41,6 +45,7 @@ from dl_techniques.layers.time_series.prism_blocks import PRISMLayer, PRISMTimeT
 from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.prism.model")
 class PRISMModel(keras.Model, ForecastMixin):
@@ -55,36 +60,36 @@ class PRISMModel(keras.Model, ForecastMixin):
     .. code-block:: text
 
         input [B, context_len, F]
-             |
-             v
+             │
+             ▼
         ┌──────────────┐
-        │ input          │
-        │ projection     │
+        │ input        │
+        │ projection   │
         └──────────────┘
-             |
-             v
+             │
+             ▼
         ┌──────────────┐
-        │ prism layer 1  │  hierarchical time-frequency decomposition
-        │ ...            │
-        │ prism layer N  │
+        │ prism layer 1│  hierarchical time-frequency decomposition
+        │ ...          │
+        │ prism layer N│
         └──────────────┘
-             |
-             v
+             │
+             ▼
         latent [B, context_len, H]
-             |
-             v
-        ┌──────────────┐
+             │
+             ▼
+        ┌────────────────┐
         │ transpose      │  [B, H, context_len]
         │ temporal dense │  context_len -> forecast_len, shared across H
         │ transpose      │  [B, forecast_len, H]
-        └──────────────┘
-             |
-             v
-        ┌──────────────┐
+        └────────────────┘
+             │
+             ▼
+        ┌────────────────┐
         │ head dropout   │
         │ forecast head  │  shared across every forecast step
-        └──────────────┘
-             |
+        └────────────────┘
+             │
              ├─ point forecast: [B, forecast_len, F]
              └─ quantile forecast: [B, forecast_len, F, Q]
 
@@ -758,3 +763,5 @@ def create_prism_model(
     )
 
     return model
+
+# ---------------------------------------------------------------------

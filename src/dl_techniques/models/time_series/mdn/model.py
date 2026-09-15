@@ -38,6 +38,10 @@ from keras import ops
 from keras import layers
 from typing import List, Union, Optional, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.statistics.mdn_layer import (
     MDNLayer,
@@ -51,6 +55,7 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.mdn.model")
 class MDNModel(keras.Model):
@@ -67,21 +72,21 @@ class MDNModel(keras.Model):
     .. code-block:: text
 
         input [B, D]
-             |
-             v
-        ┌──────────────┐
+             │
+             ▼
+        ┌───────────────┐
         │ dense         │  (repeated per hidden_layers entry)
         │ batchnorm     │  (optional)
         │ activation    │
         │ dropout       │  (optional)
-        └──────────────┘
-             |
-             v
-        ┌──────────────┐
+        └───────────────┘
+             │
+             ▼
+        ┌───────────────┐
         │ mdn_layer     │  emits [mu | sigma | pi]
-        └──────────────┘
-             |
-             v
+        └───────────────┘
+             │
+             ▼
         output [B, 2*output_dim*num_mixtures + num_mixtures]
 
     :param hidden_layers: Sizes of the hidden feature-extraction layers.

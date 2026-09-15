@@ -58,6 +58,7 @@ def _inverse_softplus(x: float) -> float:
         raise ValueError(f"inverse_softplus requires x > 0, got {x}")
     return math.log(math.expm1(x))
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.adaptive_ema.model")
 class AdaptiveEMASlopeFilterModel(keras.Model):

@@ -40,13 +40,20 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 import numpy as np
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 
+# ---------------------------------------------------------------------
+
 #: The pure-additive ETS variants this model implements.
 ETS_VARIANTS = ("ANN", "AAN", "AAA")
 
+# ---------------------------------------------------------------------
 
 def _inverse_sigmoid(value: float) -> float:
     """Return the logit of ``value``, for initialising a sigmoid-bounded weight.
@@ -58,6 +65,7 @@ def _inverse_sigmoid(value: float) -> float:
     """
     return math.log(value / (1.0 - value))
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.ets.model")
 class ETSModel(keras.Model, ForecastMixin):
@@ -72,22 +80,22 @@ class ETSModel(keras.Model, ForecastMixin):
     .. code-block:: text
 
         context [B, T]
-             |
-             v
+             │
+             ▼
         ┌───────────────┐
-        │ filter (scan)  │  level/trend/seasonal recursion, one step at a time
+        │ filter (scan) │  level/trend/seasonal recursion, one step at a time
         └───────────────┘
-             |
-             v
+             │
+             ▼
         final state [B, 2+m]
-             |
-             v
-        ┌───────────────┐
+             │
+             ▼
+        ┌────────────────┐
         │ closed-form    │  yhat_{t+h} = level + h*trend + seasonal[h]
         │ horizon read   │
-        └───────────────┘
-             |
-             v
+        └────────────────┘
+             │
+             ▼
         forecast [B, H, 1]
 
     :param variant: ``"ANN"`` (level only), ``"AAN"`` (level + trend) or
@@ -502,3 +510,4 @@ def create_ets(
         **kwargs,
     )
 
+# ---------------------------------------------------------------------

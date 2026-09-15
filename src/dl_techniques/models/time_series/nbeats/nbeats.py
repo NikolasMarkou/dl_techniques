@@ -33,6 +33,10 @@ import numpy as np
 from keras import ops, initializers, regularizers
 from typing import List, Tuple, Optional, Union, Any, Dict, Callable, Sequence
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.time_series.nbeats_blocks import (
@@ -43,6 +47,8 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.nbeats.nbeats")
 class NBeatsNet(keras.Model, ForecastMixin):
@@ -60,27 +66,27 @@ class NBeatsNet(keras.Model, ForecastMixin):
     .. code-block:: text
 
         input [B, T, D]
-             |
-             v
+             │
+             ▼
         ┌──────────────┐
-        │ normalize      │  (optional, reversible)
+        │ normalize    │  (optional, reversible)
         └──────────────┘
-             |
-             v
+             │
+             ▼
         residual [B, T*D]
-             |
-             v
+             │
+             ▼
         ┌──────────────┐
-        │ stack 1        │──> forecast_1
-        │ (blocks)       │
+        │ stack 1      │──> forecast_1
+        │ (blocks)     │
         └──────────────┘
-             |  residual
-             v
+             │  residual
+             ▼
         ┌──────────────┐
-        │ stack 2 ...    │──> forecast_2 ...
+        │ stack 2 ...  │──> forecast_2 ...
         └──────────────┘
-             |
-             v
+             │
+             ▼
         final residual        sum(forecast_i) --> forecast [B, H, D]
 
     :param backcast_length: Length of the input time series window. Recommended
@@ -675,3 +681,4 @@ def create_nbeats_model(
 
     return model
 
+# ---------------------------------------------------------------------

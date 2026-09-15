@@ -42,6 +42,10 @@ import keras
 from typing import Any, Callable, Dict, List, Optional, Union, Sequence
 from keras import ops, layers, initializers, regularizers
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.nbeatsx_blocks import ExogenousBlock
 from dl_techniques.layers.time_series.nbeats_blocks import GenericBlock, TrendBlock, SeasonalityBlock
@@ -51,6 +55,7 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.nbeats.nbeatsx")
 class NBeatsXNet(keras.Model):
@@ -70,30 +75,30 @@ class NBeatsXNet(keras.Model):
     .. code-block:: text
 
         target_history [B, backcast, 1]
-             |
-             v
+             │
+             ▼
         ┌──────────────┐
-        │ revin          │  (optional)
+        │ revin        │  (optional)
         └──────────────┘
-             |
-             v
+             │
+             ▼
         residual [B, backcast]
-             |
-             v
-        ┌──────────────┐   exog_history, exog_forecast
+             │
+             ▼
+        ┌────────────────┐   exog_history, exog_forecast
         │ stack 0        │◄──────────────────────────
         │ trend/season/  │
         │ generic/       │
         │ exogenous(tcn) │
-        └──────────────┘
-             |  residual'          forecast_sum
-             v                          |
-            ...                         v
+        └────────────────┘
+             │  residual'          forecast_sum
+             ▼                          │
+            ...                         ▼
                               ┌──────────────┐
-                              │ denorm         │  (optional)
+                              │ denorm       │  (optional)
                               └──────────────┘
-                                          |
-                                          v
+                                          │
+                                          ▼
                                    forecast [B, forecast, 1]
 
     Exogenous and endogenous blocks alternate freely within ``stack_types``;
@@ -530,3 +535,5 @@ def create_nbeatsx_model(
 
     logger.info(f"Created NBEATSx with stacks: {stack_types}")
     return model
+
+# ---------------------------------------------------------------------
