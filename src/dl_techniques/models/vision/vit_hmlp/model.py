@@ -42,9 +42,9 @@ from dl_techniques.layers.hierarchical_mlp_stem import HierarchicalMLPStem
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
-from dl_techniques.utils.activation_serialization import (
+from dl_techniques.layers.activations.common import (
+    resolve_activation,
     serialize_activation,
-    deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -383,13 +383,32 @@ class ViTHMLP(keras.Model):
         self.pos_dropout_rate = float(pos_dropout_rate)
         self.stem_norm_layer = str(stem_norm_layer)
         self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        # DECISION plan-2026-09-15T135450-e083ae85/D-013
+        # Resolve eagerly here, mirroring the kernel_initializer/bias_initializer
+        # lines immediately above -- see decisions.md D-013. The deleted
+        # from_config override (see the D-006 anchor below) used to run
+        # regularizers.deserialize() on these two args; __init__ storing them
+        # raw left model.kernel_regularizer/bias_regularizer as an unresolved
+        # dict after a from_config round trip (sublayers still regularized
+        # correctly via their own regularizers.get() calls, but the model's
+        # own stored attribute had the wrong type). Do not revert to storing
+        # the raw `kernel_regularizer`/`bias_regularizer` arguments here.
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.bias_regularizer = bias_regularizer
+        self.bias_regularizer = regularizers.get(bias_regularizer)
         self.normalization_type = str(normalization_type)
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)
-        self.activation = activation
+        # DECISION plan-2026-09-15T135450-e083ae85/D-006
+        # Resolve eagerly here, in __init__, never deferred to a from_config
+        # override -- see decisions.md D-006. Matches the D-005 shape already
+        # applied to vit_siglip (and the D-008 shape applied to shgcn/fastvlm):
+        # construction-time behavior is then identical regardless of entry
+        # point (Cls(...) vs Cls.from_config(...)), and the from_config
+        # override this line used to require is deleted below (the default
+        # cls(**config) reconstruction now works because __init__ resolves
+        # eagerly). Do not revert to storing the raw `activation` argument here.
+        self.activation = resolve_activation(activation)
         self.use_stochastic_depth = bool(use_stochastic_depth)
         self.stochastic_depth_rate = float(stochastic_depth_rate)
 
@@ -670,42 +689,6 @@ class ViTHMLP(keras.Model):
             "stochastic_depth_rate": self.stochastic_depth_rate,
         })
         return config
-
-    @classmethod
-    def from_config(
-            cls,
-            config: Dict[str, Any],
-            custom_objects: Optional[Dict[str, Any]] = None
-    ) -> "ViTHMLP":
-        """Recreate a model from its serialized configuration.
-
-        ``get_config`` serializes the initializers, regularizers and
-        activation, so they need deserializing back into objects here;
-        otherwise the raw config dicts reach ``__init__`` and get stored
-        (and re-serialized) as dicts.
-
-        :param config: Configuration dictionary from :meth:`get_config`.
-        :type config: Dict[str, Any]
-        :param custom_objects: Optional mapping of names to custom callables,
-            used to resolve an activation that is not registered with
-            ``keras.saving.register_keras_serializable``.
-        :type custom_objects: Optional[Dict[str, Any]]
-        :return: A new ``ViTHMLP`` instance.
-        :rtype: ViTHMLP
-        """
-        config = dict(config)
-        for key in ("kernel_initializer", "bias_initializer"):
-            if config.get(key) is not None:
-                config[key] = initializers.deserialize(config[key])
-        for key in ("kernel_regularizer", "bias_regularizer"):
-            if config.get(key) is not None:
-                config[key] = regularizers.deserialize(config[key])
-        activation = config.get("activation")
-        if activation is not None and not isinstance(activation, str):
-            config["activation"] = deserialize_activation(
-                activation, custom_objects=custom_objects
-            )
-        return cls(**config)
 
     @classmethod
     def from_variant(

@@ -110,9 +110,10 @@ class BitLinear(keras.layers.Layer):
         whenever ``training`` is not true, so inference stays deterministic.
     :type quantization_method: str
     :param activation: Activation applied to the de-quantized output, after
-        the bias. Accepts anything ``keras.activations.get`` accepts. Defaults
-        to ``None``, which ``keras.activations.get`` resolves to the identity,
-        matching ``keras.layers.Dense``.
+        the bias. A string name, ``None``, a serialized dict, or a callable,
+        resolved via :func:`resolve_activation`. Defaults to ``None``, which
+        resolves to the identity, matching ``keras.layers.Dense``. A
+        ``keras.layers.Layer`` instance raises ``ValueError``.
     :type activation: Optional[Union[str, Callable]]
     :param use_bias: Whether the layer uses a bias vector. Defaults to
         ``False``, following BitNet, which drops the bias in its quantized

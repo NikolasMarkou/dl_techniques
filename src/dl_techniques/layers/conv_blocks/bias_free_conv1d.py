@@ -21,7 +21,10 @@ from typing import Optional, Union, Tuple, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
+from dl_techniques.utils.activation_serialization import (
+    deserialize_activation,
+    serialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -104,7 +107,16 @@ class BiasFreeConv1D(keras.layers.Layer):
         # Store configuration parameters
         self.filters = filters
         self.kernel_size = kernel_size
-        self.activation = activation
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-011: resolve at construction time via
+        # the canonical serialize_activation/deserialize_activation(allow_layer=True) pair
+        # (utils/activation_serialization.py), mirroring bias_free_conv2d.py's BiasFreeConv2D
+        # (Idiom B, D-004) applied to this file's 1D sibling, which was never in that
+        # migration's scope. Previously this attribute stored the raw constructor argument
+        # unresolved, so a keras.layers.Layer-valued activation constructed successfully but
+        # raised ValueError only later, at get_config() time -- the deferred-resolution
+        # defect D-008 fixed elsewhere. allow_layer=True preserves this class's
+        # Layer-serialize round-trip contract. See decisions.md D-011.
+        self.activation = deserialize_activation(activation, allow_layer=True)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_batch_norm = use_batch_norm
@@ -224,8 +236,17 @@ class BiasFreeConv1D(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
-            'activation': serialize_activation(
-                resolve_activation(self.activation)
+            # DECISION plan-2026-09-15T094955-31fbe3db/D-011: `self.activation` is already
+            # resolved in __init__ above (None stays None there, to keep the "no Activation
+            # sublayer" branch intact); None must still SERIALIZE as 'linear' to match this
+            # class's pre-existing, tested contract (and bias_free_conv2d.py's ORIGINAL
+            # contract, restored by this same fix's Fix B) rather than silently becoming
+            # `None` in the config, which is the D-004 regression this step fixes without
+            # repeating. See decisions.md D-011.
+            'activation': (
+                keras.activations.serialize(keras.activations.linear)
+                if self.activation is None
+                else serialize_activation(self.activation)
             ),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
@@ -315,7 +336,11 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         # Store configuration parameters
         self.filters = filters
         self.kernel_size = kernel_size
-        self.activation = activation
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-011: resolve at construction time via
+        # the canonical serialize_activation/deserialize_activation(allow_layer=True) pair
+        # (utils/activation_serialization.py), mirroring BiasFreeConv1D's consolidation of
+        # the same deferred-resolution defect (Idiom B, D-004/D-011). See decisions.md D-011.
+        self.activation = deserialize_activation(activation, allow_layer=True)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
@@ -463,8 +488,13 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
-            'activation': serialize_activation(
-                resolve_activation(self.activation)
+            # DECISION plan-2026-09-15T094955-31fbe3db/D-011: `self.activation` is already
+            # resolved in __init__ above; None must still SERIALIZE as 'linear'. See
+            # decisions.md D-011 and BiasFreeConv1D.get_config's identical comment above.
+            'activation': (
+                keras.activations.serialize(keras.activations.linear)
+                if self.activation is None
+                else serialize_activation(self.activation)
             ),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),

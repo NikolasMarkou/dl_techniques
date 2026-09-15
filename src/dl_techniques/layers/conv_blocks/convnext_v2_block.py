@@ -503,11 +503,6 @@ class ConvNextV2Block(keras.layers.Layer):
                 config_copy["kernel_regularizer"]
             )
 
-        # Deserialize a layer-instance activation (a dict) back into a Layer; a raw string
-        # activation (e.g. "gelu") passes through untouched. See decisions.md D-001.
-        if isinstance(config_copy.get("activation"), dict):
-            config_copy["activation"] = keras.layers.deserialize(config_copy["activation"])
-
         # Deserialize the depthwise init/regularizer overrides when present and non-None
         if "depthwise_initializer" in config_copy and config_copy["depthwise_initializer"] is not None:
             config_copy["depthwise_initializer"] = keras.initializers.deserialize(

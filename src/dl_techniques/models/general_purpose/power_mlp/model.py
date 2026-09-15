@@ -570,10 +570,6 @@ class PowerMLP(keras.Model):
             config["bias_regularizer"] = keras.regularizers.deserialize(
                 config["bias_regularizer"]
             )
-        if "output_activation" in config:
-            config["output_activation"] = resolve_activation(
-                config["output_activation"]
-            )
 
         return cls(**config)
 

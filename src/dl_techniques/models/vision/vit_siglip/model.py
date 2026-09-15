@@ -42,9 +42,9 @@ from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
-from dl_techniques.utils.activation_serialization import (
+from dl_techniques.layers.activations.common import (
+    resolve_activation,
     serialize_activation,
-    deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -357,13 +357,41 @@ class SigLIPVisionTransformer(keras.Model):
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.pos_dropout_rate = float(pos_dropout_rate)
         self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        # DECISION plan-2026-09-15T135450-e083ae85/D-013
+        # Resolve eagerly here, mirroring the kernel_initializer/bias_initializer
+        # lines immediately above -- see decisions.md D-013 (same fix as
+        # vit_hmlp/model.py, applied here after confirming the identical gap).
+        # Storing these raw left model.kernel_regularizer/bias_regularizer as
+        # an unresolved dict after a from_config round trip (sublayers still
+        # regularized correctly via their own regularizers.get() calls, but
+        # the model's own stored attribute had the wrong type). Do not revert
+        # to storing the raw `kernel_regularizer`/`bias_regularizer` arguments
+        # here.
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.bias_regularizer = bias_regularizer
+        self.bias_regularizer = regularizers.get(bias_regularizer)
+        # DECISION plan-2026-09-15T135450-e083ae85/D-016
+        # Unlike vit_hmlp's twin fix (D-013 above applies identically to both
+        # files), this file's raw-regularizer-storage bug predates this plan
+        # entirely: the pre-plan `from_config` here never called
+        # regularizers.deserialize()/.get() on these fields either (its own
+        # docstring claimed otherwise, but the code did not), so this is a
+        # pre-existing latent defect being corrected, not a regression
+        # introduced by this plan's step 4a migration -- see decisions.md
+        # D-016.
         self.normalization_type = str(normalization_type)
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)
-        self.activation = activation
+        # DECISION plan-2026-09-15T135450-e083ae85/D-005
+        # Resolve eagerly here, in __init__, never deferred to a from_config
+        # override -- see decisions.md D-005. Matches the D-008 shape already
+        # applied to shgcn/fastvlm: construction-time behavior is then
+        # identical regardless of entry point (Cls(...) vs Cls.from_config(...)),
+        # and the from_config override this line used to require is deleted
+        # below (the default cls(**config) reconstruction now works because
+        # __init__ resolves eagerly). Do not revert to storing the raw
+        # `activation` argument here.
+        self.activation = resolve_activation(activation)
 
         # Get model configuration from scale
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
@@ -751,37 +779,6 @@ class SigLIPVisionTransformer(keras.Model):
             "activation": serialize_activation(self.activation),
         })
         return config
-
-    @classmethod
-    def from_config(
-            cls,
-            config: Dict[str, Any],
-            custom_objects: Optional[Dict[str, Any]] = None
-    ) -> "SigLIPVisionTransformer":
-        """Recreate a model from its serialized configuration.
-
-        The only key needing explicit handling is ``activation``:
-        ``get_config`` writes a serialized form for callables, and it has to
-        turn back into a callable before ``__init__`` hands it to
-        ``TransformerLayer``. Every other key is already resolved by
-        ``initializers.get`` / ``regularizers.get`` inside ``__init__``.
-
-        :param config: Configuration dictionary from :meth:`get_config`.
-        :type config: Dict[str, Any]
-        :param custom_objects: Optional mapping of names to custom callables,
-            used to resolve an activation that is not registered with
-            ``keras.saving.register_keras_serializable``.
-        :type custom_objects: Optional[Dict[str, Any]]
-        :return: A new ``SigLIPVisionTransformer`` instance.
-        :rtype: SigLIPVisionTransformer
-        """
-        config = dict(config)
-        activation = config.get("activation")
-        if activation is not None and not isinstance(activation, str):
-            config["activation"] = deserialize_activation(
-                activation, custom_objects=custom_objects
-            )
-        return cls(**config)
 
     def get_feature_extractor(self) -> "SigLIPVisionTransformer":
         """Return a feature-extractor twin of this model.

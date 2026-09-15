@@ -122,8 +122,10 @@ class MLPBlock(keras.layers.Layer):
     :ivar output_dim: The stored output width.
     :vartype output_dim: int
     :ivar activation_name: The activation exactly as passed in, before
-        ``keras.activations.get``. Stored for reference; ``get_config()``
-        serializes ``activation_fn`` instead.
+        resolution by :func:`resolve_activation`. Stored for reference;
+        ``get_config()`` serializes ``activation_fn`` instead. A
+        ``keras.layers.Layer`` instance would raise ``ValueError`` during
+        resolution rather than reach this attribute.
     :vartype activation_name: Union[str, Callable]
     :ivar activation_fn: The resolved activation, called in ``call()``.
     :vartype activation_fn: Callable

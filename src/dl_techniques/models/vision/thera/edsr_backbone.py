@@ -73,8 +73,10 @@ class EDSRResidualBlock(keras.layers.Layer):
         before the skip add. The default 1.0 matches THERA's reference,
         which stores but never applies this scale; pass 0.1 for textbook EDSR.
     :type res_scale: float
-    :param activation: Activation applied between the two convolutions, any
-        value accepted by :func:`keras.activations.get`.
+    :param activation: Activation applied between the two convolutions. A
+        string name, ``None``, a serialized dict, or a callable, resolved via
+        :func:`resolve_activation`. A ``keras.layers.Layer`` instance raises
+        ``ValueError``.
     :type activation: str
     :param kwargs: Forwarded to :class:`keras.layers.Layer`.
 
@@ -155,15 +157,6 @@ class EDSRResidualBlock(keras.layers.Layer):
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "EDSRResidualBlock":
-        config = dict(config)
-        if "activation" in config:
-            # Accepts a serialized dict or a bare string name; resolve is
-            # a no-op on an already-callable value.
-            config["activation"] = resolve_activation(config["activation"])
-        return cls(**config)
 
 
 @register_dl_technique("dl_techniques.models.thera.edsr_backbone")
@@ -325,12 +318,3 @@ class EDSRBackbone(keras.layers.Layer):
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "EDSRBackbone":
-        config = dict(config)
-        if "activation" in config:
-            # Accepts a serialized dict or a bare string name; resolve is
-            # a no-op on an already-callable value.
-            config["activation"] = resolve_activation(config["activation"])
-        return cls(**config)

@@ -61,6 +61,9 @@ from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation, deserialize_activation
+)
 
 # ---------------------------------------------------------------------
 # Type definitions for fusion strategies
@@ -391,7 +394,43 @@ class MultiModalFusion(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.use_residual = use_residual
 
-        # Resolve strings to activation, initializer and regularizer objects
+        # Resolve strings to activation, initializer and regularizer objects.
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-010: this file is a
+        # documented EXEMPTION from the "resolve only in __init__, never in
+        # from_config" placement rule (utils/CLAUDE.md; applied elsewhere by
+        # this same plan's Steps 6-7, D-008). from_config must discriminate a
+        # `keras.layers.*`-module dict (a serialized Layer) from any other
+        # dict (a serialized activation function) BEFORE this line runs, and
+        # that discrimination is a deserialization-time-only concern -- at
+        # direct construction time `activation` is already a live str/
+        # callable/Layer/None, which keras.activations.get() below already
+        # handles correctly by simple passthrough (this line is UNCHANGED
+        # from the file's original code). Moving the dict-discrimination
+        # logic into __init__ instead was attempted and reverted during this
+        # fix: it requires __init__ itself to become dict-aware (since
+        # cls(**config) would then pass the raw dict straight through), and
+        # the attempt silently reintroduced a DIFFERENT bug (a plain string
+        # activation, e.g. 'gelu', no longer resolving to a callable) -- proof
+        # the risk is real, not hypothetical. See decisions.md D-010 for the
+        # full measurement and the from_config fix.
+        #
+        # DECISION plan-2026-09-15T135450-e083ae85/D-003: re-confirmed at a
+        # later EXECUTE pass that the line below is still the right call and
+        # still needs no change. Explicitly, by name:
+        #   - `layers/activations/common.py::resolve_activation` REJECTS a
+        #     `keras.layers.Layer` instance outright -- wrong for this class,
+        #     which explicitly supports a Layer-valued `activation` argument
+        #     per D-010/D-011 above.
+        #   - `utils/activation_serialization.py::deserialize_activation(
+        #     allow_layer=True)` allows a Layer through but does NOT resolve
+        #     a bare string (e.g. 'gelu') to a callable -- this is the exact
+        #     regression D-010's own prior fix attempt hit and reverted.
+        #   - `keras.activations.get()`'s own contract already provides both
+        #     properties in one call: its `elif callable(identifier): return
+        #     identifier` branch passes a Layer through unchanged (a Layer
+        #     is callable), while its string branch resolves a bare name via
+        #     the internal registry. No new helper or code change is needed.
+        # See decisions.md D-003 for the full trade-off writeup.
         self.activation = keras.activations.get(activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -1742,11 +1781,26 @@ class MultiModalFusion(keras.layers.Layer):
             # silently returns the bare class-name STRING ("LeakyReLU"), not a
             # reconstructed Layer, so the round trip through from_config would
             # otherwise fail silently rather than raise. See decisions.md D-011.
-            'activation': (
-                keras.layers.serialize(self.activation)
-                if isinstance(self.activation, keras.layers.Layer)
-                else keras.activations.serialize(self.activation)
-            ),
+            # DECISION plan-2026-09-15T094955-31fbe3db/D-005: D-011's fix hand-rolled
+            # the str/Layer branch inline. utils/activation_serialization.py's
+            # serialize_activation/deserialize_activation pair already covers this
+            # exact dispatch (MEASURED, D-003 probe (b)) -- it is a different function
+            # than keras.activations.deserialize, the one D-011 found broken. Do not
+            # reintroduce the hand-rolled isinstance/module-prefix branch here; call
+            # the shared pair directly. See decisions.md D-005.
+            # DECISION plan-2026-09-15T094955-31fbe3db/D-010: D-005's from_config
+            # change (unconditional deserialize_activation) changed the exception
+            # raised for an unregistered-custom-function dict outside any
+            # custom_objects/custom_object_scope from ValueError to a more
+            # confusing TypeError (measured: both the pre-D-011 code and the
+            # current code fail this exact bare case -- it is not resolvable
+            # without a custom_objects mapping, per Keras's own serialization
+            # contract; see this module's D-010 for the full measurement).
+            # from_config now discriminates the Layer-dict vs function-dict
+            # shapes explicitly again (see the ``# DECISION`` block in
+            # from_config below) rather than delegating both to
+            # deserialize_activation unconditionally. See decisions.md D-010.
+            'activation': serialize_activation(self.activation),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
@@ -1768,16 +1822,52 @@ class MultiModalFusion(keras.layers.Layer):
         :rtype: MultiModalFusion
         """
         # Turn the serialized dicts back into objects.
-        # DECISION plan-2026-09-15T034909-a7edc8da/D-011: a `keras.layers.*`-module
-        # dict is a serialized Layer instance and must go through
-        # keras.layers.deserialize; everything else (str, or a `builtins.function`
-        # dict for a custom activation function) goes through
-        # keras.activations.deserialize as before. See decisions.md D-011.
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-010: a dict-shaped
+        # 'activation' is EITHER a serialized keras.layers.Layer
+        # (module == 'keras.layers') OR a serialized activation FUNCTION (any
+        # other module, e.g. 'builtins' for a plain/custom function).
+        # `deserialize_activation`'s dict branch always calls
+        # keras.saving.deserialize_keras_object, which correctly reconstructs
+        # the Layer case (MEASURED, D-003 probe (b)) but raises TypeError for
+        # an unregistered function dict outside a custom_objects scope, where
+        # `keras.activations.deserialize` -- together with __init__'s
+        # `keras.activations.get()` -- raises the older, clearer ValueError
+        # instead (and correctly resolves a REGISTERED function, or an
+        # unregistered one inside a `keras.saving.custom_object_scope`, in
+        # either case). Commit 8fa35229f (D-005) routed BOTH shapes through
+        # `deserialize_activation` unconditionally, changing the unregistered-
+        # function-outside-any-scope failure from ValueError to a more
+        # confusing TypeError -- restore the two-way dispatch. Do NOT
+        # reintroduce D-005's single unconditional call. See decisions.md D-010.
+        #
+        # NOTE (plan-2026-09-15T135450-e083ae85/D-015): the paragraph above is
+        # D-010's original text, restored verbatim after step 3b's edit
+        # accidentally reworded it (dropped the "(module == 'keras.layers')"
+        # and "(any other module, e.g. 'builtins' ...)" parentheticals) while
+        # rewriting the code below it. See decisions.md D-015. The dispatch
+        # predicate the paragraph above describes is now stale in ONE respect
+        # only -- see the D-004 block immediately below, which documents the
+        # narrower, structural replacement without touching this paragraph's
+        # own wording.
+        #
+        # DECISION plan-2026-09-15T135450-e083ae85/D-004: the dispatch used to
+        # test `activation_config.get('module') == 'keras.layers'`, which only
+        # matches a BUILT-IN keras.layers.Layer. A custom (non-keras.layers)
+        # Layer subclass activation serializes with `module` set to ITS OWN
+        # package (e.g. 'dl_techniques.layers.activations.foo' or a test
+        # module), so the module-string check would misroute it into the
+        # function branch below and raise/corrupt on reconstruction. Dispatch
+        # structurally instead: `serialize_activation` puts a Layer's own
+        # `get_config()` dict (always a dict) under the 'config' key, while
+        # `keras.activations.serialize` puts a function name (a string leaf,
+        # never a dict) there -- MEASURED against LeakyReLU, an unregistered
+        # custom function and a locally-defined custom Layer subclass (see
+        # decisions.md D-004). Do NOT reintroduce a module-string comparison
+        # here; it is a property of WHERE a class happens to be registered,
+        # not of WHAT was serialized.
         activation_config = config['activation']
-        if isinstance(activation_config, dict) and str(
-            activation_config.get('module', '')
-        ).startswith('keras.layers'):
-            config['activation'] = keras.layers.deserialize(activation_config)
+        if isinstance(activation_config, dict) and isinstance(activation_config.get('config'), dict):
+            config['activation'] = deserialize_activation(activation_config, allow_layer=True)
         else:
             config['activation'] = keras.activations.deserialize(activation_config)
         config['kernel_initializer'] = keras.initializers.deserialize(config['kernel_initializer'])

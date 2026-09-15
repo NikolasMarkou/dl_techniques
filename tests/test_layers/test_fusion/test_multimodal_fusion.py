@@ -20,6 +20,30 @@ SINGLE_OUTPUT_STRATEGIES: List[FusionStrategy] = [
 ]
 
 
+@keras.saving.register_keras_serializable(package="test_custom")
+class _CustomActivationLayer(keras.layers.Layer):
+    """A minimal custom (non-``keras.layers``) activation Layer, for D-004.
+
+    Deliberately registered under its own ``test_custom`` package rather than
+    left unregistered, and never decorated with the project's own
+    ``@register_dl_technique`` -- this class exists purely to prove
+    ``from_config``'s dispatch predicate does not depend on WHERE the class
+    is registered. See ``test_custom_layer_activation_round_trips``.
+    """
+
+    def __init__(self, scale: float = 1.0, **kwargs):
+        super().__init__(**kwargs)
+        self.scale = scale
+
+    def call(self, x):
+        return keras.ops.relu(x) * self.scale
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'scale': self.scale})
+        return config
+
+
 class TestMultiModalFusion:
     """Comprehensive test suite for the MultiModalFusion layer."""
 
@@ -189,6 +213,238 @@ class TestMultiModalFusion:
         # And the rebuilt layer actually runs.
         output = rebuilt(sample_input)
         assert output.shape == sample_input[0].shape
+
+    def test_unregistered_custom_function_activation_round_trips_in_a_scope(
+        self, sample_input: List[keras.KerasTensor], dim: int
+    ):
+        """An UNREGISTERED custom activation function round-trips IN a scope.
+
+        MEASURED (completion-fix step 13.1, plan-2026-09-15T094955-31fbe3db):
+        an unregistered plain Python function serializes to a
+        ``{'module': 'builtins', 'class_name': 'function', ...}`` dict that
+        carries no resolvable module path -- Keras can only reconstruct it
+        given an explicit name->object mapping, either
+        ``keras.saving.custom_object_scope`` (used here) or
+        ``keras.models.load_model(..., custom_objects=...)``. This is a
+        documented Keras contract (see
+        ``utils/activation_serialization.py``'s own module-docstring table),
+        not something this class can work around -- so this test exercises
+        the REALISTIC, supported round trip, which both the pre-fix (D-005)
+        and post-fix code already pass (this call path was never the
+        regression; see the sibling test below for what was).
+        """
+        def my_custom_activation(x):
+            return x * 2.0
+
+        layer = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=my_custom_activation,
+        )
+        config = layer.get_config()
+        assert isinstance(config['activation'], dict)
+        assert config['activation'].get('module') != 'keras.layers'
+
+        with keras.saving.custom_object_scope({'my_custom_activation': my_custom_activation}):
+            rebuilt = MultiModalFusion.from_config(config)
+        assert rebuilt.activation is my_custom_activation
+
+        # And the rebuilt layer actually runs (weights differ from `layer`'s
+        # own random init, so only shape -- not value -- is compared here,
+        # matching test_layer_instance_activation_round_trips's own strength).
+        output = rebuilt(sample_input)
+        assert output.shape == sample_input[0].shape
+
+    def test_unregistered_custom_function_activation_fails_clearly_without_a_scope(
+        self, dim: int
+    ):
+        """Outside any custom_objects scope, the failure must be a clear ValueError.
+
+        RED-PROOF (completion-fix step 13.1, plan-2026-09-15T094955-31fbe3db):
+        commit 8fa35229f (D-005) routed a non-Layer-shaped activation dict
+        through ``deserialize_activation(..., allow_layer=True)``
+        unconditionally, which -- for an unregistered custom FUNCTION dict
+        with no active ``custom_objects`` mapping -- raises a confusing
+        internal ``TypeError: Could not locate function '<name>'`` straight
+        out of ``keras.saving.serialization_lib``. This test fails against
+        that pre-fix code (wrong exception TYPE: ``TypeError``, not
+        ``ValueError``) and passes against the fix, which restores this
+        class's original, pre-D-011 dispatch for the function-dict branch
+        (``keras.activations.deserialize`` in ``from_config`` feeding
+        ``keras.activations.get()`` in ``__init__``), raising the same
+        ``ValueError: Could not interpret activation function identifier``
+        this class always raised for this exact unsupported case -- both
+        before D-011 ever existed and after this fix. This is NOT a claim
+        that the bare round trip now succeeds (it structurally cannot,
+        without a custom_objects mapping); it is a claim that the failure
+        mode is restored to a clear, expected exception rather than a
+        Keras-internal deserialization error.
+        """
+        def my_custom_activation(x):
+            return x * 2.0
+
+        layer = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=my_custom_activation,
+        )
+        config = layer.get_config()
+
+        with pytest.raises(ValueError, match="Could not interpret activation"):
+            MultiModalFusion.from_config(config)
+
+    def test_custom_layer_activation_round_trips(
+        self, sample_input: List[keras.KerasTensor], dim: int
+    ):
+        """A CUSTOM (non-``keras.layers``) Layer-instance activation round-trips.
+
+        D-004 (plan-2026-09-15T135450-e083ae85): before this fix,
+        ``from_config`` dispatched on
+        ``activation_config.get('module') == 'keras.layers'``, which only
+        matches a BUILT-IN ``keras.layers.Layer`` (see
+        ``test_layer_instance_activation_round_trips`` above, using
+        ``LeakyReLU``). A custom Layer subclass registered under its own
+        package serializes with a *different* ``module`` value (MEASURED:
+        ``None`` for this locally-defined, ``register_keras_serializable``-
+        decorated class, via ``keras.saving.serialize_keras_object`` --
+        never the literal string ``'keras.layers'``), so the OLD predicate
+        would misroute it into the function-deserialization branch below and
+        fail. This test proves the fix's structural predicate (dispatch on
+        whether the serialized dict's ``'config'`` value is itself a dict,
+        not on which package registered the class) reconstructs a custom
+        Layer correctly.
+
+        RED-PROOF (manual, one-off interpreter check, not shipped as a
+        mutation test): for this exact serialized dict,
+        ``serialized.get('module') == 'keras.layers'`` evaluates ``False``
+        (the OLD predicate would have routed to the function branch and
+        raised/corrupted), while the FIXED predicate
+        (``isinstance(serialized, dict) and
+        isinstance(serialized.get('config'), dict)``) evaluates ``True``.
+        """
+        activation_layer = _CustomActivationLayer(scale=2.0)
+        layer = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=activation_layer,
+        )
+        config = layer.get_config()
+        assert isinstance(config['activation'], dict)
+        # The custom class is registered under its OWN package, never under
+        # 'keras.layers' -- confirming the old module-string predicate could
+        # never have matched this case.
+        assert config['activation'].get('module') != 'keras.layers'
+        assert isinstance(config['activation'].get('config'), dict)
+
+        rebuilt = MultiModalFusion.from_config(config)
+        assert isinstance(rebuilt.activation, _CustomActivationLayer)
+        assert rebuilt.activation.scale == pytest.approx(2.0)
+
+        # And the rebuilt layer actually runs.
+        output = rebuilt(sample_input)
+        assert output.shape == sample_input[0].shape
+
+    def test_keras_roundtrip_bit_for_bit_with_layer_activation(
+        self, sample_input: List[keras.KerasTensor], dim: int
+    ):
+        """.keras save/load round trip with a Layer-valued activation (Item 5a).
+
+        Following `tests/test_layers/test_ffn/test_mlp.py:627-728`'s template:
+        a functional `keras.Model` wraps `MultiModalFusion` constructed with
+        `activation=keras.layers.LeakyReLU()` and `dropout_rate=0.0` (this
+        class's `'concatenation'` strategy builds a `Dropout` layer from
+        `dropout_rate`, so 0.0 keeps `call()` deterministic). Every existing
+        round-trip test for this class (`test_serialization_cycle_*`) only
+        exercises the default string activation, so none of them proves the
+        FILE-based `.keras` mechanism itself survives a Layer-valued
+        activation, per plan.md Item 5/D-007.
+
+        Expectation: BIT-FOR-BIT equality (`np.testing.assert_array_equal`),
+        matching the stronger claim `test_mlp.py`'s template makes over the
+        `rtol=1e-6, atol=1e-6` general-purpose serialization smoke tests
+        elsewhere in this file.
+
+        RED-proof: see
+        `test_keras_roundtrip_detects_weight_perturbation_with_layer_activation`
+        below, a permanent sibling proving this comparison has the power to
+        detect a real difference.
+        """
+        inputs = [keras.Input(shape=s.shape[1:]) for s in sample_input]
+        outputs = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=keras.layers.LeakyReLU(),
+            dropout_rate=0.0,
+        )(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        original_prediction = ops.convert_to_numpy(
+            model(sample_input, training=False)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = ops.convert_to_numpy(
+                loaded_model(sample_input, training=False)
+            )
+
+        np.testing.assert_array_equal(
+            original_prediction,
+            loaded_prediction,
+            err_msg="Reloaded model's forward pass is not bit-for-bit identical",
+        )
+
+    def test_keras_roundtrip_detects_weight_perturbation_with_layer_activation(
+        self, sample_input: List[keras.KerasTensor], dim: int
+    ):
+        """RED-proof for `test_keras_roundtrip_bit_for_bit_with_layer_activation`.
+
+        Repeats the same save/load round trip, then perturbs the reloaded
+        `MultiModalFusion` sublayer's output-projection kernel by a known,
+        clearly-detectable amount before comparing. Asserts the bit-for-bit
+        comparison DOES raise `AssertionError` against the perturbed reload,
+        proving the comparison above is not vacuously passing.
+        """
+        inputs = [keras.Input(shape=s.shape[1:]) for s in sample_input]
+        fusion_layer = MultiModalFusion(
+            dim=dim,
+            fusion_strategy='concatenation',
+            activation=keras.layers.LeakyReLU(),
+            dropout_rate=0.0,
+        )
+        outputs = fusion_layer(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        original_prediction = ops.convert_to_numpy(
+            model(sample_input, training=False)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "model.keras")
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+
+            # Locate the reloaded MultiModalFusion sublayer and perturb one
+            # of its trainable weights by a known, clearly-detectable amount.
+            loaded_fusion_layer = loaded_model.layers[-1]
+            assert isinstance(loaded_fusion_layer, MultiModalFusion)
+            perturbed_weight = loaded_fusion_layer.trainable_weights[0]
+            perturbed_weight.assign(perturbed_weight + 1.0)
+
+            perturbed_prediction = ops.convert_to_numpy(
+                loaded_model(sample_input, training=False)
+            )
+
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                original_prediction,
+                perturbed_prediction,
+                err_msg="Perturbation should have been detected but was not",
+            )
 
     @pytest.mark.parametrize("strategy", SINGLE_OUTPUT_STRATEGIES)
     def test_gradients_flow_single_output(self, strategy: FusionStrategy, sample_input: List[keras.KerasTensor],

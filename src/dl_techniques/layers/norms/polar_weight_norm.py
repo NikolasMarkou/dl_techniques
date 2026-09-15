@@ -376,8 +376,10 @@ class PolarWeightNorm(keras.layers.Layer):
 
     :param units: Output dimensionality. Must be a positive ``int``.
     :type units: int
-    :param activation: Activation applied after the bias. Name, callable or
-        ``None``. Defaults to ``None``, which Keras resolves to the identity.
+    :param activation: Activation applied after the bias. A string name,
+        ``None``, a serialized dict, or a callable, resolved via
+        :func:`resolve_activation`. Defaults to ``None``, which resolves to
+        the identity. A ``keras.layers.Layer`` instance raises ``ValueError``.
     :type activation: Optional[Union[str, Any]]
     :param use_bias: Whether to add a bias vector. Defaults to ``True``.
     :type use_bias: bool
@@ -406,9 +408,11 @@ class PolarWeightNorm(keras.layers.Layer):
 
     :ivar units: The configured output width, stored as ``int(units)``.
     :vartype units: int
-    :ivar activation: The resolved activation callable. Note that
-        ``keras.activations.get(None)`` returns ``keras.activations.linear``, so
-        this attribute is never ``None``.
+    :ivar activation: The resolved activation callable, produced by
+        :func:`resolve_activation`. ``None`` resolves to
+        ``keras.activations.linear``, so this attribute is never ``None``; a
+        ``keras.layers.Layer`` instance is rejected with ``ValueError`` at
+        construction, so it never reaches this attribute.
     :vartype activation: Callable
     :ivar use_bias: The configured flag, stored exactly as passed.
     :vartype use_bias: bool
@@ -706,6 +710,16 @@ class PolarWeightNorm(keras.layers.Layer):
         # behaviour-preserving: forward output BIT-identical (uint32 view) at
         # BOTH `activation=None` and `activation='relu'`, before and after, plus
         # a matching `.keras` round-trip and `get_config()` at each.
+        # Discrepancy note (plan-2026-09-15T094955-31fbe3db/D-009, added after the
+        # D-003 block above -- that block's text is left untouched by this note):
+        # the D-003 block's "resolves it through `keras.activations.get(activation)`"
+        # description is now imprecise. `__init__` actually resolves `self.activation`
+        # via `resolve_activation`, not a direct `keras.activations.get` call.
+        # `resolve_activation`'s own `None` branch returns `keras.activations.linear`
+        # WITHOUT delegating to `keras.activations.get` at all -- it short-circuits
+        # before that call. The end result D-003 measured (identity at `None`,
+        # `keras.activations.linear`) is still correct; only the intermediate
+        # call path description is stale.
         outputs = self.activation(outputs)
         return keras.ops.cast(outputs, inputs.dtype)
 
