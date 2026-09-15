@@ -76,3 +76,23 @@ class TestFiLMLayer:
         rebuilt = FiLMLayer.from_config(layer.get_config())
         assert rebuilt.gamma_units == 16
         assert rebuilt.modulation_mode == "multiplicative"
+
+    def test_string_activations_are_stored_raw(self, sample_inputs):
+        # D-015 guard: `gamma_activation`/`beta_activation` must hold the raw
+        # string spec, not the resolved callable, so `get_config` can
+        # serialize it and a rebuilt layer matches one built from scratch.
+        content, style = sample_inputs
+        layer = FiLMLayer(gamma_activation="tanh", beta_activation="sigmoid")
+
+        assert isinstance(layer.gamma_activation, str)
+        assert layer.gamma_activation == "tanh"
+        assert isinstance(layer.beta_activation, str)
+        assert layer.beta_activation == "sigmoid"
+
+        out = layer([content, style])
+        assert tuple(out.shape) == (B, H, W, C)
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+
+        rebuilt = FiLMLayer.from_config(layer.get_config())
+        assert rebuilt.gamma_activation == "tanh"
+        assert rebuilt.beta_activation == "sigmoid"

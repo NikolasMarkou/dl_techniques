@@ -85,8 +85,9 @@ def resolve_activation(activation: Any) -> Callable[[Any], Any]:
     Checks are applied in the order shown below, and the first match wins.
     ``None`` maps to ``keras.activations.linear``, which is the identity.
     Strings go through ``keras.activations.get``. Serialized dicts go through
-    ``keras.activations.deserialize``. Anything left over is assumed to be a
-    callable and returned unchanged.
+    ``keras.activations.deserialize``. Anything left over must be callable;
+    a non-callable value raises ``ValueError``, matching
+    ``keras.activations.get``'s contract.
 
     A ``keras.layers.Layer`` is rejected. A layer can own weights, and those
     weights would be created during ``call()`` rather than ``build()``, which
@@ -120,16 +121,24 @@ def resolve_activation(activation: Any) -> Callable[[Any], Any]:
         └─────────────┬─────────────┘
                       │ no
                       ▼
+        ┌───────────────────────────┐
+        │ is callable?              │──── no ───► ValueError
+        └─────────────┬─────────────┘
+                      │ yes
+                      ▼
              returned unchanged
 
-    The last branch does no checking. A non-callable that reaches it fails
-    later, at the call site, not here.
+    The last branch checks ``callable()`` before returning. A non-callable
+    value (an int, float, bool, list, ...) raises ``ValueError`` immediately,
+    here, rather than deferring to a confusing ``TypeError`` at the call
+    site inside ``call()``.
 
     :param activation: String name, ``None``, serialized dict, or callable.
     :type activation: Any
     :return: A callable applying the activation.
     :rtype: Callable[[Any], Any]
-    :raises ValueError: If ``activation`` is a ``keras.layers.Layer``.
+    :raises ValueError: If ``activation`` is a ``keras.layers.Layer``, or if
+        it is a non-callable value that is not ``None``, a string, or a dict.
     """
     # DECISION plan-2026-09-15T034909-a7edc8da/D-002
     # Partial delegation, not a full one -- see decisions.md D-002. The
