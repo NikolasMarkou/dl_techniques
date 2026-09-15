@@ -52,15 +52,20 @@ class xLSTM(keras.Model):
     .. code-block:: text
 
         tokens [B, T]
-           |
+           │
+           ▼
         Embedding                 -> [B, T, embed_dim]
-           | (dropout, optional)
+           │ (dropout, optional)
+           ▼
         mLSTM block  x n_mlstm     (lower layers)
-           |
+           │
+           ▼
         sLSTM block  x n_slstm     (upper layers)
-           |
+           │
+           ▼
         final normalization
-           |
+           │
+           ▼
         Dense (output_head)       -> [B, T, vocab_size]
 
     The first ``int(num_layers * mlstm_ratio)`` blocks are mLSTM; the rest are sLSTM.

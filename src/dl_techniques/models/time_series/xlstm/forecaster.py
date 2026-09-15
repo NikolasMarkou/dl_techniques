@@ -79,19 +79,26 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
     .. code-block:: text
 
         context [B, input_length, F]
-           |
+           │
+           ▼
         reversible instance-norm      (optional)
-           |
+           │
+           ▼
         Dense(embed_dim)
-           |
+           │
+           ▼
         mLSTM / sLSTM block  x num_layers
-           |
+           │
+           ▼
         final_norm
-           |
+           │
+           ▼
         mean-pool over time            -> [B, 1, embed_dim]
-           |
+           │
+           ▼
         head: QuantileHead -> [B, H, Q]  or  Dense -> [B, H, F]
-           |
+           │
+           ▼
         reversible denormalization    (optional)
 
     The first ``int(num_layers * mlstm_ratio)`` blocks are mLSTM; the rest are sLSTM.

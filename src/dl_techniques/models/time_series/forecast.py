@@ -23,6 +23,8 @@ from typing import Optional
 import numpy as np
 
 # ---------------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
@@ -161,3 +163,6 @@ class ForecastMixin:
 
         logger.debug("predict_forecast produced %r", forecast)
         return forecast
+
+# ---------------------------------------------------------------------
+

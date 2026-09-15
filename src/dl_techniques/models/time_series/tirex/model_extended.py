@@ -43,12 +43,17 @@ import numpy as np
 from keras import ops
 from typing import Optional, List, Any, Dict, Tuple
 
+# ---------------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.quantile_head_variable_io import QuantileSequenceHead
 
 from .model import BlockType, DEFAULT_QUANTILES, TiRexCore
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.tirex.model_extended")
 class TiRexExtended(TiRexCore):
@@ -59,26 +64,27 @@ class TiRexExtended(TiRexCore):
     .. code-block:: text
 
         history embedded [B, num_patches, embed_dim]
-             |
+             │
+             ▼
         (append learnable query tokens)
-             |
-             v
+             │
+             ▼
         [B, num_patches + prediction_length, embed_dim]
-             |
-             v
-        ┌──────────────┐
+             │
+             ▼
+        ┌────────────────┐
         │ block 1        │  lstm carries history state into query tokens;
         │ ...            │  attention lets a query token read history directly
         │ block N        │
-        └──────────────┘
-             |
-             v
-        ┌──────────────┐
+        └────────────────┘
+             │
+             ▼
+        ┌────────────────┐
         │ output norm    │
         │ slice last     │  -> [B, prediction_length, embed_dim]
         │ prediction_len │
         │ quantile head  │  token-wise, -> [B, prediction_length, Q]
-        └──────────────┘
+        └────────────────┘
 
     No pooling: each forecast step keeps its own latent state instead of
     sharing one summary vector.
@@ -334,3 +340,5 @@ def create_tirex_extended(
     )
 
     return model
+
+# ---------------------------------------------------------------------------

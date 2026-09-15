@@ -42,6 +42,10 @@ import numpy as np
 from keras import ops
 from typing import Optional, Union, List, Any, Sequence, Tuple, Dict, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.norms import create_normalization_layer
@@ -51,6 +55,8 @@ from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequentialBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+
 BlockType = Literal['lstm', 'transformer', 'mixed']
 
 # Canonical source list; also exposed as TiRexCore.DEFAULT_QUANTILES and
@@ -59,6 +65,7 @@ BlockType = Literal['lstm', 'transformer', 'mixed']
 # a mutable list aliased by the class attribute let a caller mutate the shared default in place. See decisions.md.
 DEFAULT_QUANTILES: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.tirex.model")
 class TiRexCore(keras.Model, ForecastMixin):
@@ -72,38 +79,38 @@ class TiRexCore(keras.Model, ForecastMixin):
     .. code-block:: text
 
         input [B, T, F]
-             |
-             v
-        ┌──────────────┐
+             │
+             ▼
+        ┌────────────────┐
         │ mask + z-score │  NaN-safe, per series/feature (optional)
-        └──────────────┘
-             |
-             v
-        ┌──────────────┐
+        └────────────────┘
+             │
+             ▼
+        ┌────────────────┐
         │ patch embed    │  [B, T, 2F] -> [B, num_patches, 2*embed_dim]
         │ input proj     │  -> [B, num_patches, embed_dim]
-        └──────────────┘
-             |
-             v
-        ┌──────────────┐
+        └────────────────┘
+             │
+             ▼
+        ┌────────────────┐
         │ block 1        │  lstm / transformer / mixed
         │ ...            │
         │ block N        │
-        └──────────────┘
-             |
-             v
-        ┌──────────────┐
+        └────────────────┘
+             │
+             ▼
+        ┌────────────────┐
         │ output norm    │
         │ mean pool      │  -> [B, 1, embed_dim]
         │ quantile head  │  -> [B, prediction_length, num_quantiles]
-        └──────────────┘
-             |
-             v
-        ┌──────────────┐
+        └────────────────┘
+             │
+             ▼
+        ┌────────────────┐
         │ denormalize    │  (optional)
-        └──────────────┘
-             |
-             v
+        └────────────────┘
+             │
+             ▼
         output [B, prediction_length, num_quantiles]
 
     :param patch_size: Size of input patches for tokenization.
