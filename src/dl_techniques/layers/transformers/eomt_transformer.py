@@ -25,7 +25,7 @@ References:
 
 import keras
 from keras import ops, initializers, regularizers
-from typing import Optional, Any, Tuple, Union, Dict, Literal
+from typing import Optional, Any, Tuple, Union, Dict, Literal, Callable
 
 # ---------------------------------------------------------------------
 # local imports
@@ -105,7 +105,7 @@ class EomtTransformer(keras.layers.Layer):
     :param stochastic_depth_rate: Drop-path rate. Default: 0.1.
     :type stochastic_depth_rate: float
     :param activation: FFN activation. Default: ``'gelu'``.
-    :type activation: Union[str, keras.layers.Activation]
+    :type activation: Union[str, Callable]
     :param use_bias: Whether layers use bias. Default: True.
     :type use_bias: bool
     :param use_masked_attention: Enable segmentation masked attention. Requires
@@ -156,7 +156,7 @@ class EomtTransformer(keras.layers.Layer):
             attention_dropout_rate: float = 0.0,
             use_stochastic_depth: bool = False,
             stochastic_depth_rate: float = 0.1,
-            activation: Union[str, keras.layers.Activation] = 'gelu',
+            activation: Union[str, Callable] = 'gelu',
             use_bias: bool = True,
             use_masked_attention: bool = False,
             mask_probability: float = 1.0,

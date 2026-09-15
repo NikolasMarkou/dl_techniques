@@ -710,6 +710,16 @@ class PolarWeightNorm(keras.layers.Layer):
         # behaviour-preserving: forward output BIT-identical (uint32 view) at
         # BOTH `activation=None` and `activation='relu'`, before and after, plus
         # a matching `.keras` round-trip and `get_config()` at each.
+        # Discrepancy note (plan-2026-09-15T094955-31fbe3db/D-009, added after the
+        # D-003 block above -- that block's text is left untouched by this note):
+        # the D-003 block's "resolves it through `keras.activations.get(activation)`"
+        # description is now imprecise. `__init__` actually resolves `self.activation`
+        # via `resolve_activation`, not a direct `keras.activations.get` call.
+        # `resolve_activation`'s own `None` branch returns `keras.activations.linear`
+        # WITHOUT delegating to `keras.activations.get` at all -- it short-circuits
+        # before that call. The end result D-003 measured (identity at `None`,
+        # `keras.activations.linear`) is still correct; only the intermediate
+        # call path description is stale.
         outputs = self.activation(outputs)
         return keras.ops.cast(outputs, inputs.dtype)
 

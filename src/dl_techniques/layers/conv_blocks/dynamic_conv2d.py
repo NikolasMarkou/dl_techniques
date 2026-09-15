@@ -14,7 +14,7 @@ References:
 """
 
 import keras
-from typing import Optional, Union, Tuple, Any, Dict, List
+from typing import Optional, Union, Tuple, Any, Dict, List, Callable
 
 # ---------------------------------------------------------------------
 # local imports
@@ -102,7 +102,7 @@ class DynamicConv2D(keras.layers.Layer):
     :param groups: Number of groups for grouped convolution. Defaults to 1.
     :type groups: int
     :param activation: Activation function. Defaults to None.
-    :type activation: Optional[Union[str, keras.layers.Activation]]
+    :type activation: Optional[Union[str, Callable]]
     :param use_bias: Whether the layer uses bias vectors. Defaults to True.
     :type use_bias: bool
     :param kernel_initializer: Initializer for convolution kernel weights.
@@ -134,7 +134,7 @@ class DynamicConv2D(keras.layers.Layer):
             padding: str = "valid",
             dilation_rate: Union[int, Tuple[int, int]] = 1,
             groups: int = 1,
-            activation: Optional[Union[str, keras.layers.Activation]] = None,
+            activation: Optional[Union[str, Callable]] = None,
             use_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
