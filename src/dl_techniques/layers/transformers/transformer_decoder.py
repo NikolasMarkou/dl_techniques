@@ -37,6 +37,7 @@ from ..norms import create_normalization_layer, NormalizationType
 from ...utils.logger import logger
 from ...utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -215,7 +216,7 @@ class TransformerDecoderLayer(keras.layers.Layer):
                 f"explicitly, or choose a maskable self_attention_type "
                 f"(anything outside {sorted(self._MASKLESS_ATTENTION_TYPES)})."
             )
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -492,7 +493,7 @@ class TransformerDecoderLayer(keras.layers.Layer):
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
             'use_causal_mask': self.use_causal_mask,
-            'activation': keras.activations.serialize(self.activation),
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),

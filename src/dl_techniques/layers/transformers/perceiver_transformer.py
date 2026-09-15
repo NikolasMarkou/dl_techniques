@@ -30,6 +30,7 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 
 from ..attention.perceiver_attention import PerceiverAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -130,7 +131,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.dropout_rate = dropout_rate
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -336,7 +337,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             "num_heads": self.num_heads,
             "mlp_ratio": self.mlp_ratio,
             "dropout_rate": self.dropout_rate,
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),

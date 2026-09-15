@@ -35,6 +35,7 @@ from .transformer import (
 )
 from ..sequence_pooling import SequencePooling, PoolingStrategy
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -255,7 +256,7 @@ class VisionEncoder(keras.layers.Layer):
         self.attention_dropout_rate = attention_dropout_rate
         self.pos_dropout_rate = pos_dropout_rate
         self.stochastic_depth_rate = stochastic_depth_rate
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -793,7 +794,7 @@ class VisionEncoder(keras.layers.Layer):
             'attention_dropout_rate': self.attention_dropout_rate,
             'pos_dropout_rate': self.pos_dropout_rate,
             'stochastic_depth_rate': self.stochastic_depth_rate,
-            'activation': keras.activations.serialize(self.activation),
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),

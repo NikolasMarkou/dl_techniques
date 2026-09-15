@@ -30,6 +30,7 @@ from typing import Tuple, Optional, Dict, Any, Union, Callable
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import window_reverse, window_partition
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 from ..ffn import SwinMLP
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
@@ -213,7 +214,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.stochastic_depth_rate = stochastic_depth_rate
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
 
         # Store and serialize initializers and regularizers
@@ -733,7 +734,7 @@ class SwinTransformerBlock(keras.layers.Layer):
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
             "stochastic_depth_rate": self.stochastic_depth_rate,
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "bias_initializer": initializers.serialize(self.bias_initializer),
