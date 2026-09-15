@@ -10,7 +10,7 @@ cannot extrapolate past that length. Normalization is pre-norm, with one final
 LayerNorm before the head, which keeps deep variants (up to 48 layers) trainable
 without a warmup schedule. By default the head reuses the token embedding matrix,
 ``logits = h @ E^T``; pass ``tie_word_embeddings=False`` for an independent Dense
-projection. The activation is ``gpt2_gelu``, the tanh approximation GPT-2 uses,
+projection. The activation is ``gelu_tanh``, the tanh approximation GPT-2 uses,
 not Keras' exact-erf ``'gelu'`` string. The two residual-path output projections
 in every block use a depth-scaled initializer std, matching the published recipe.
 
@@ -37,7 +37,6 @@ References:
 
 import os
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -50,26 +49,10 @@ from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
 
 # ---------------------------------------------------------------------
 
-
-@register_dl_technique("dl_techniques.models.gpt2.gpt2")
-def gpt2_gelu(x: keras.KerasTensor) -> keras.KerasTensor:
-    """GPT-2's ``gelu_new``: the tanh approximation, not the exact-erf form.
-
-    Keras' own ``'gelu'`` string resolves to ``gelu(x, approximate=False)``
-    (``keras/src/activations/activations.py``), which is a different function.
-    Measured divergence over 1e5 samples of ``N(0, 3)``: ``max|d| = 4.74e-04``,
-    ``mean|d| = 1.49e-04``.
-
-    Registered because a bare lambda is not serializable: ``TextDecoder``
-    round-trips this through ``get_config()``.
-    """
-    return ops.gelu(x, approximate=True)
-
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.gpt2.gpt2")
 class GPT2(keras.Model):
@@ -299,7 +282,7 @@ class GPT2(keras.Model):
             normalization_type="layer_norm",
             normalization_position="pre",
             ffn_type=self.ffn_type,
-            activation=gpt2_gelu,
+            activation=gelu_tanh,
             dropout_rate=self.dropout_rate,
             attention_dropout_rate=self.attention_dropout_rate,
             initializer_range=self.initializer_range,

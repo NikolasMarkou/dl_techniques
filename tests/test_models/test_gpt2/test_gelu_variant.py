@@ -23,19 +23,28 @@ model. So the assertion is an IDENTITY pin on the function actually installed
 on ``MLPBlock.activation_fn``, checked at both ends of the plumbing:
 ``TextDecoder(activation=...)`` -> ``TransformerLayer`` -> ``MLPBlock``.
 
-Proven RED against the real source by deleting ``activation=gpt2_gelu`` from
+Proven RED against the real source by deleting ``activation=gelu_tanh`` from
 ``GPT2._build_architecture``: ``test_every_ffn_got_it`` and
 ``test_survives_round_trip`` both fail. ``test_helper_is_the_tanh_form`` stays
-GREEN and is SUPPOSED to -- it is a definitional check on ``gpt2_gelu`` itself,
+GREEN and is SUPPOSED to -- it is a definitional check on ``gelu_tanh`` itself,
 and it exists so that a later "simplification" of the helper to ``'gelu'`` is
 caught by something. Two of three is the honest RED count.
+
+``gpt2_gelu`` (a private, model-local wrapper around this exact computation)
+was removed 2026-09-15: it duplicated
+``dl_techniques.layers.activations.gelu_tanh.gelu_tanh`` byte-for-byte, and
+``GPT2`` now imports that shared, registered function directly. This is a
+deliberate behavior-preserving simplification, not a "later simplification of
+the helper to ``'gelu'``" that this test guards against -- the computation is
+unchanged, only the import source moved to the canonical shared helper.
 """
 
 import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.language.gpt2.gpt2 import GPT2, gpt2_gelu
+from dl_techniques.models.language.gpt2.gpt2 import GPT2
+from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
 
 _PROBE = np.linspace(-6.0, 6.0, 25).astype("float32")
 
@@ -66,10 +75,10 @@ def model() -> GPT2:
 class TestGPT2UsesTanhGelu:
     def test_helper_is_the_tanh_form(self):
         assert np.max(
-            np.abs(np.array(gpt2_gelu(_PROBE)) - np.array(keras.activations.gelu(_PROBE, approximate=True)))
+            np.abs(np.array(gelu_tanh(_PROBE)) - np.array(keras.activations.gelu(_PROBE, approximate=True)))
         ) == 0.0
         erf_gap = float(
-            np.max(np.abs(np.array(gpt2_gelu(_PROBE)) - np.array(keras.activations.gelu(_PROBE, approximate=False))))
+            np.max(np.abs(np.array(gelu_tanh(_PROBE)) - np.array(keras.activations.gelu(_PROBE, approximate=False))))
         )
         assert erf_gap > 1e-4, f"tanh and erf GELU are indistinguishable here ({erf_gap:.3e})"
 
