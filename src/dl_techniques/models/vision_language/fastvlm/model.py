@@ -300,7 +300,11 @@ class FastVLM(keras.Model):
         self.attention_type = attention_type
         self.attention_max_seq_len = attention_max_seq_len
         self.use_layer_scale = use_layer_scale
-        self.activation = activation
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-008
+        # Restores Invariant 1 (resolve activation in __init__, never deferred to
+        # get_config/save time) — see plan.md Step 7 / decisions.md D-008. Do not
+        # revert to storing the raw `activation` argument here.
+        self.activation = resolve_activation(activation)
         self.kernel_initializer = kernel_initializer
         self.include_top = include_top
         self._input_shape = input_shape
@@ -560,9 +564,7 @@ class FastVLM(keras.Model):
             'attention_type': self.attention_type,
             'attention_max_seq_len': self.attention_max_seq_len,
             'use_layer_scale': self.use_layer_scale,
-            'activation': serialize_activation(
-                resolve_activation(self.activation)
-            ),
+            'activation': serialize_activation(self.activation),
             'kernel_initializer': keras.initializers.serialize(
                 keras.initializers.get(self.kernel_initializer)
             ),

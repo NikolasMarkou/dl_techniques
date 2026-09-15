@@ -69,7 +69,9 @@ class TestFastVLM:
         assert model.use_se == base_config['use_se']
         assert model.attention_type == base_config['attention_type']
         assert model.use_layer_scale == base_config['use_layer_scale']
-        assert model.activation == base_config['activation']
+        # D-008: __init__ now resolves the activation spec eagerly (Invariant 1),
+        # so `model.activation` is the resolved callable, not the raw string.
+        assert model.activation == keras.activations.get(base_config['activation'])
         assert model.include_top == base_config['include_top']
         assert model._input_shape == base_config['input_shape']
 
@@ -448,7 +450,9 @@ class TestFastVLM:
         assert model.attention_type == 'group_query'
         assert model.attention_max_seq_len == 2048
         assert model.use_layer_scale is True
-        assert model.activation == 'gelu'
+        # D-008: __init__ now resolves the activation spec eagerly (Invariant 1),
+        # so `model.activation` is the resolved callable, not the raw string.
+        assert model.activation == keras.activations.get('gelu')
         assert model.include_top is True
         assert model._input_shape == (224, 224, 3)
 

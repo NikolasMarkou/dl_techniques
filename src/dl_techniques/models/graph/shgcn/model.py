@@ -154,7 +154,15 @@ class SHGCNModel(keras.Model):
 
         self.hidden_dims = hidden_dims
         self.output_dim = output_dim
-        self.output_activation = output_activation
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-008
+        # Restores Invariant 1 (resolve activation in __init__, never deferred to
+        # get_config/save time) — see plan.md Step 7 / decisions.md D-008. Do not
+        # revert to storing the raw `output_activation` argument here.
+        self.output_activation = (
+            resolve_activation(output_activation)
+            if output_activation is not None
+            else None
+        )
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.use_curvature = use_curvature
@@ -246,9 +254,7 @@ class SHGCNModel(keras.Model):
             'hidden_dims': self.hidden_dims,
             'output_dim': self.output_dim,
             'output_activation': (
-                serialize_activation(
-                    resolve_activation(self.output_activation)
-                )
+                serialize_activation(self.output_activation)
                 if self.output_activation is not None
                 else None
             ),
