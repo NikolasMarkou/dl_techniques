@@ -18,7 +18,7 @@ see § Naming traps.
 | `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting, diff, logic, Swin MLP, residual block, Restormer GDFN (rank-4 NHWC only) |
 | `norms/` | Y | RMS family (RMS, zero-centered, band, adaptive band), logit-norm family, dynamic tanh, GRN, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (not factory-registered) |
 | `embedding/` | Y | Patch (1D/2D), learned positional, sinusoidal (2D / scalar / timestep), RoPE family (plain, dual, continuous, multi-axis), BERT / ModernBERT / ALBERT-factorized token embeddings, class-label table with a classifier-free-guidance dropout row. `HierarchicalCodebookEmbedding` is direct-import-only |
-| `activations/` | Y | GoLU, Mish, hard sigmoid/swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability / routing outputs, basis function |
+| `activations/` | Y | GoLU, Mish, hard sigmoid/swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability / routing outputs, basis function. `common.py`'s `activation_spec`/`resolve_activation`/`serialize_activation` trio is the shared activation-argument helper for layers elsewhere in the package — see § `activations/common.py` below |
 | `heads/` | Y | Task heads in `nlp/`, `vision/`, `vlm/` — see below |
 | `logic/` | Y | Arithmetic operators, logic operators, neural circuit |
 | `memory/` | Y | NTM family, SOM family, NeuroGrid — see below |
@@ -71,6 +71,43 @@ differentiable topographic memory grid, orthogonal hypersphere init + soft-ortho
 regularization). `factory.py` exposes `create_mann(...)` and `create_som_2d(...)`; **`create_mann`
 is the ONLY MANN construction path** — there is no standalone MANN class, it returns a
 `NeuralTuringMachine` configured to preserve the historical MANN output shape.
+
+### `activations/common.py` — the Layer-rejecting activation-argument trio
+
+Three helpers — `activation_spec(activation)`, `resolve_activation(activation)`,
+`serialize_activation(activation)` — cover a layer's `activation` constructor argument end to end
+(canonicalize on the way in, resolve to a callable in `call()`, serialize back out for
+`get_config()`). They are a **thin, Layer-rejecting convenience wrapper** (partial delegation, see
+decisions.md D-002/D-003) around `utils/activation_serialization.py`'s
+`serialize_activation`/`deserialize_activation` pair — **`utils/CLAUDE.md`** owns the underlying
+mechanism (the dl_techniques factory-key passthrough contract, the `allow_layer` parameter, the
+`get_config`/`__init__`-never-`from_config` call-site rule); this section only covers what
+`common.py` adds on top.
+
+**This is the import path used by all 39 files this plan (`plan-2026-09-15T034909-a7edc8da`)
+migrated onto the unified helper** — the 37 Tier-2 batch files (Step 4) plus `clifford_block.py` /
+`clifford_rnn.py`'s literal-duplicate fix (Step 3) — not the raw `activation_serialization.py` pair
+directly. Every one of those files needs correct str/dict-to-callable resolution inline
+(`resolve_activation` must return a callable, and its dict branch must resolve an unregistered
+custom-activation dict); MEASURED (D-003): the raw pair's non-dict branch returns a string
+**unchanged** rather than resolving it, and its dict branch raises on an unregistered custom
+function where `keras.activations.deserialize` succeeds — so only `common.py`'s trio is safe to
+import at those call sites.
+
+**Name clash, still standing (D-010).** `gelu_tanh.py` also defines a `resolve_activation`, and
+*that* is the one `activations/__init__.py` re-exports (its own public API name). The two are
+different functions — `common.py`'s rejects a `keras.layers.Layer`; `gelu_tanh.py`'s extends
+`keras.activations.get` with the tanh-GELU spellings. Always disambiguate with an explicit
+`from .common import resolve_activation`; never rely on the package-level re-export when you mean
+`common.py`'s version.
+
+**5 files deliberately stay off this path (Tier-3, D-008 through D-012)** — audited individually,
+not migrated: `bias_free_conv2d.py` and `convunext/model.py`'s supervision head both need
+Layer-serialize round-trip semantics `common.py`'s Layer-rejecting contract cannot provide;
+`fusion/multimodal_fusion.py` got a narrower, targeted fix in place (a real latent serialization bug,
+not a `common.py` migration); `gelu_tanh.py` is a deliberately distinct function (see name-clash
+note above); `ffn/gated_mlp.py`'s narrow activation allow-list is redundant with two other guards in
+the same file, so migrating it would be inert. Full reasoning for each: `decisions.md` D-008–D-012.
 
 ### `heads/`
 
