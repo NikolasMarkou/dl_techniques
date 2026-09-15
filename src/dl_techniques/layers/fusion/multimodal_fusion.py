@@ -61,6 +61,9 @@ from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.activation_serialization import (
+    serialize_activation, deserialize_activation
+)
 
 # ---------------------------------------------------------------------
 # Type definitions for fusion strategies
@@ -1742,11 +1745,14 @@ class MultiModalFusion(keras.layers.Layer):
             # silently returns the bare class-name STRING ("LeakyReLU"), not a
             # reconstructed Layer, so the round trip through from_config would
             # otherwise fail silently rather than raise. See decisions.md D-011.
-            'activation': (
-                keras.layers.serialize(self.activation)
-                if isinstance(self.activation, keras.layers.Layer)
-                else keras.activations.serialize(self.activation)
-            ),
+            # DECISION plan-2026-09-15T094955-31fbe3db/D-005: D-011's fix hand-rolled
+            # the str/Layer branch inline. utils/activation_serialization.py's
+            # serialize_activation/deserialize_activation pair already covers this
+            # exact dispatch (MEASURED, D-003 probe (b)) -- it is a different function
+            # than keras.activations.deserialize, the one D-011 found broken. Do not
+            # reintroduce the hand-rolled isinstance/module-prefix branch here; call
+            # the shared pair directly. See decisions.md D-005.
+            'activation': serialize_activation(self.activation),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
@@ -1773,13 +1779,16 @@ class MultiModalFusion(keras.layers.Layer):
         # keras.layers.deserialize; everything else (str, or a `builtins.function`
         # dict for a custom activation function) goes through
         # keras.activations.deserialize as before. See decisions.md D-011.
-        activation_config = config['activation']
-        if isinstance(activation_config, dict) and str(
-            activation_config.get('module', '')
-        ).startswith('keras.layers'):
-            config['activation'] = keras.layers.deserialize(activation_config)
-        else:
-            config['activation'] = keras.activations.deserialize(activation_config)
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-005: D-011's hand-rolled
+        # module-prefix check is redundant against deserialize_activation(...,
+        # allow_layer=True)'s own dict branch, which dispatches str/None/dict/
+        # callable/Layer internally (MEASURED, D-003 probe (b): fed the exact
+        # Layer-shaped dict this file's get_config produces, confirmed a live,
+        # correctly-typed Layer instance comes back, not a bare string). Do not
+        # reintroduce the isinstance/startswith branching here. See decisions.md D-005.
+        config['activation'] = deserialize_activation(
+            config['activation'], allow_layer=True
+        )
         config['kernel_initializer'] = keras.initializers.deserialize(config['kernel_initializer'])
         config['bias_initializer'] = keras.initializers.deserialize(config['bias_initializer'])
         config['kernel_regularizer'] = keras.regularizers.deserialize(config.get('kernel_regularizer'))
