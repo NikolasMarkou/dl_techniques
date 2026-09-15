@@ -39,8 +39,9 @@ from .byte_tokenizer import ByteTokenizer
 from .dynamic_patcher import DynamicPatcher
 from .entropy_model import EntropyModel
 from .local_encoder import LocalEncoder
+from .global_transformer import GlobalTransformer
 from .blt_blocks import (
-    GlobalTransformer, LocalDecoder
+    LocalDecoder
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
