@@ -124,6 +124,61 @@ class TestTheHelperPair:
 
 
 # ---------------------------------------------------------------------
+# Unit level: the `allow_layer=False` Layer-rejecting policy (D-002).
+# ---------------------------------------------------------------------
+
+
+class TestAllowLayerFalseRejectsLayerInstances:
+    """Covers the ``layers.activations.common.resolve_activation``-style
+    policy unified into this module by D-002: same helper, opt-in reject.
+    """
+
+    def test_a_layer_instance_is_rejected(self):
+        layer = keras.layers.ReLU()
+        with pytest.raises(ValueError, match="keras Layer instance"):
+            deserialize_activation(layer, allow_layer=False)
+
+    def test_a_serialized_layer_dict_is_also_rejected(self):
+        """The reject check applies to the RESOLVED value, not just a raw
+        Layer passed directly -- a dict that deserializes to a Layer must be
+        caught too, not silently allowed through the dict branch."""
+        layer = keras.layers.ReLU()
+        blob = keras.saving.serialize_keras_object(layer)
+        with pytest.raises(ValueError, match="keras Layer instance"):
+            deserialize_activation(blob, allow_layer=False)
+
+    @pytest.mark.parametrize(
+        "value",
+        ["gelu", "mish", "sparsemax", None, True, False, 3],
+        ids=["gelu", "mish", "sparsemax", "none", "true", "false", "int"],
+    )
+    def test_non_layer_values_pass_through_identically_to_allow_layer_true(
+            self, value):
+        assert deserialize_activation(value, allow_layer=False) == (
+            deserialize_activation(value, allow_layer=True)
+        )
+        assert deserialize_activation(value, allow_layer=False) is value
+
+    def test_an_unregistered_callable_still_round_trips_under_allow_layer_false(self):
+        blob = serialize_activation(_unregistered_activation)
+        with keras.utils.custom_object_scope(CUSTOM_OBJECTS):
+            restored = deserialize_activation(blob, allow_layer=False)
+        assert restored is _unregistered_activation
+
+    def test_an_already_live_callable_survives_under_allow_layer_false(self):
+        assert deserialize_activation(
+            _unregistered_activation, allow_layer=False
+        ) is _unregistered_activation
+
+    def test_allow_layer_true_is_still_the_default(self):
+        """A caller that never passes ``allow_layer`` must keep seeing the
+        original, Layer-permissive behavior -- this is the backward
+        compatibility guarantee D-002 is anchored on."""
+        layer = keras.layers.ReLU()
+        assert deserialize_activation(layer) is layer
+
+
+# ---------------------------------------------------------------------
 # Integration level: real classes, one per package family.
 # ---------------------------------------------------------------------
 
