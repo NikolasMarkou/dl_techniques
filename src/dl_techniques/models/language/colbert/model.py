@@ -462,7 +462,8 @@ class ColBERT(keras.Model):
             zero at positions ``participation_mask`` zeroes.
         """
         # DECISION plan-2026-08-25T121346-c71fc3ad/D-029: attention_mask and participation_mask
-        # must stay separate — collapsing them feeds the skiplist to the backbone's attention (measured max|delta| 0.0024). See decisions.md.
+        # must stay separate — collapsing them feeds the skiplist to the backbone's attention
+        # (measured max|delta| 0.0024). See decisions.md.
         if participation_mask is None:
             participation_mask = attention_mask
         encoded = self.encoder(

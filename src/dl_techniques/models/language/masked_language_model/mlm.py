@@ -29,7 +29,7 @@ from keras import ops
 from typing import Dict, Any, Optional, Union, List, Tuple
 
 # ---------------------------------------------------------------------
-# lcaol imports
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger

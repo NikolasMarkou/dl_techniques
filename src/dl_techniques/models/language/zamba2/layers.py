@@ -695,11 +695,11 @@ class Zamba2SharedMLPBlock(keras.layers.Layer):
         ▼                         ▼
     gate_proj                 up_proj            lora(normed_hidden,
     Dense(H)                  Dense(H)             occurrence_idx)
-        │                         │                    │
-        ▼ SiLU                   └─────────(+)─────────┘
+        │                         │                     │
+        ▼ SiLU                    └─────────(+)─────────┘
     [B, S, H]                         [B, S, H]
         │                                 │
-        └───────────(x)──────────────────┘
+        └───────────(x)───────────────────┘
                       │
                       ▼  multiply  [B, S, H]
                       │
@@ -1067,8 +1067,8 @@ class Zamba2MambaBlock(keras.layers.Layer):
     mamba_output         new_residual
     [B, S, d_model]      (== hidden_state, residual was None)
         └─────────(+)────────┘
-                    │
-                    ▼
+                   │
+                   ▼
              [B, S, d_model]
 
     :param d_model: Dimensionality of the decoder's hidden state, forwarded
@@ -1310,3 +1310,5 @@ class Zamba2MambaBlock(keras.layers.Layer):
             }
         )
         return config
+
+# ---------------------------------------------------------------------

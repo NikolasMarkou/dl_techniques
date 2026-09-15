@@ -52,8 +52,14 @@ from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 from scipy.optimize import quadratic_assignment
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.mini_vec2vec.model")
 class MiniVec2VecAligner(keras.Model):
@@ -555,3 +561,5 @@ def create_mini_vec2vec_aligner(
         >>> aligner.build(input_shape=(None, 128))
     """
     return MiniVec2VecAligner(embedding_dim=embedding_dim, **kwargs)
+
+# ---------------------------------------------------------------------
