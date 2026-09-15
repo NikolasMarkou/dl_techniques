@@ -156,15 +156,6 @@ class EDSRResidualBlock(keras.layers.Layer):
         )
         return config
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "EDSRResidualBlock":
-        config = dict(config)
-        if "activation" in config:
-            # Accepts a serialized dict or a bare string name; resolve is
-            # a no-op on an already-callable value.
-            config["activation"] = resolve_activation(config["activation"])
-        return cls(**config)
-
 
 @register_dl_technique("dl_techniques.models.thera.edsr_backbone")
 class EDSRBackbone(keras.layers.Layer):
@@ -325,12 +316,3 @@ class EDSRBackbone(keras.layers.Layer):
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "EDSRBackbone":
-        config = dict(config)
-        if "activation" in config:
-            # Accepts a serialized dict or a bare string name; resolve is
-            # a no-op on an already-callable value.
-            config["activation"] = resolve_activation(config["activation"])
-        return cls(**config)
