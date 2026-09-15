@@ -35,6 +35,10 @@ from dl_techniques.layers.conv_blocks.repmixer_block import RepMixerBlock, Convo
 
 from .components import AttentionBlockVLM
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import (
+    resolve_activation,
+    serialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -556,8 +560,8 @@ class FastVLM(keras.Model):
             'attention_type': self.attention_type,
             'attention_max_seq_len': self.attention_max_seq_len,
             'use_layer_scale': self.use_layer_scale,
-            'activation': keras.activations.serialize(
-                keras.activations.get(self.activation)
+            'activation': serialize_activation(
+                resolve_activation(self.activation)
             ),
             'kernel_initializer': keras.initializers.serialize(
                 keras.initializers.get(self.kernel_initializer)

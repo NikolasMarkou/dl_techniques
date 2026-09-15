@@ -22,6 +22,10 @@ Reference:
 import keras
 from typing import Any, Dict, List, Optional, Tuple
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import (
+    resolve_activation,
+    serialize_activation,
+)
 
 # ---------------------------------------------------------------------
 # local imports
@@ -104,8 +108,8 @@ class EDSRResidualBlock(keras.layers.Layer):
         self.kernel_size = int(kernel_size)
         self.res_scale = float(res_scale)
         # Stored as a resolved Keras activation object so it round-trips
-        # through keras.activations.serialize/deserialize.
-        self.activation = keras.activations.get(activation)
+        # through serialize_activation/resolve_activation.
+        self.activation = resolve_activation(activation)
         self._activation_fn = self.activation
 
         self.conv1 = keras.layers.Conv2D(
@@ -147,7 +151,7 @@ class EDSRResidualBlock(keras.layers.Layer):
                 "num_feats": self.num_feats,
                 "kernel_size": self.kernel_size,
                 "res_scale": self.res_scale,
-                "activation": keras.activations.serialize(self.activation),
+                "activation": serialize_activation(self.activation),
             }
         )
         return config
@@ -156,9 +160,9 @@ class EDSRResidualBlock(keras.layers.Layer):
     def from_config(cls, config: Dict[str, Any]) -> "EDSRResidualBlock":
         config = dict(config)
         if "activation" in config:
-            # Accepts a serialized dict or a bare string name; deserialize is
-            # a no-op on an already-string value.
-            config["activation"] = keras.activations.deserialize(config["activation"])
+            # Accepts a serialized dict or a bare string name; resolve is
+            # a no-op on an already-callable value.
+            config["activation"] = resolve_activation(config["activation"])
         return cls(**config)
 
 
@@ -252,7 +256,7 @@ class EDSRBackbone(keras.layers.Layer):
         self.res_scale = float(res_scale)
         # Stored as a resolved Keras activation object, forwarded to each
         # residual block, which re-resolves it (a no-op on a callable).
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
 
         self.head_conv = keras.layers.Conv2D(
             filters=self.num_feats,
@@ -317,7 +321,7 @@ class EDSRBackbone(keras.layers.Layer):
                 "num_blocks": self.num_blocks,
                 "kernel_size": self.kernel_size,
                 "res_scale": self.res_scale,
-                "activation": keras.activations.serialize(self.activation),
+                "activation": serialize_activation(self.activation),
             }
         )
         return config
@@ -326,7 +330,7 @@ class EDSRBackbone(keras.layers.Layer):
     def from_config(cls, config: Dict[str, Any]) -> "EDSRBackbone":
         config = dict(config)
         if "activation" in config:
-            # Accepts a serialized dict or a bare string name; deserialize is
-            # a no-op on an already-string value.
-            config["activation"] = keras.activations.deserialize(config["activation"])
+            # Accepts a serialized dict or a bare string name; resolve is
+            # a no-op on an already-callable value.
+            config["activation"] = resolve_activation(config["activation"])
         return cls(**config)

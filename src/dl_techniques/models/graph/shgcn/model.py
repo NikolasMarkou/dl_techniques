@@ -32,6 +32,10 @@ from typing import List, Optional, Tuple, Union, Any
 from dl_techniques.layers.graphs.fermi_diract_decoder import FermiDiracDecoder
 from dl_techniques.layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer import SHGCNLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import (
+    resolve_activation,
+    serialize_activation,
+)
 
 # ---------------------------------------------------------------------
 
@@ -242,8 +246,8 @@ class SHGCNModel(keras.Model):
             'hidden_dims': self.hidden_dims,
             'output_dim': self.output_dim,
             'output_activation': (
-                keras.activations.serialize(
-                    keras.activations.get(self.output_activation)
+                serialize_activation(
+                    resolve_activation(self.output_activation)
                 )
                 if self.output_activation is not None
                 else None

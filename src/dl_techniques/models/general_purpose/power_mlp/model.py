@@ -42,6 +42,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn.power_mlp_layer import PowerMLPLayer
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import (
+    resolve_activation,
+    serialize_activation,
+)
 
 
 # ---------------------------------------------------------------------
@@ -334,7 +338,7 @@ class PowerMLP(keras.Model):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.use_bias = use_bias
-        self.output_activation = keras.activations.get(output_activation)
+        self.output_activation = resolve_activation(output_activation)
         self.dropout_rate = dropout_rate
         self.batch_normalization = batch_normalization
 
@@ -531,7 +535,7 @@ class PowerMLP(keras.Model):
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "use_bias": self.use_bias,
-            "output_activation": keras.activations.serialize(self.output_activation),
+            "output_activation": serialize_activation(self.output_activation),
             "dropout_rate": self.dropout_rate,
             "batch_normalization": self.batch_normalization,
         })
@@ -566,8 +570,8 @@ class PowerMLP(keras.Model):
             config["bias_regularizer"] = keras.regularizers.deserialize(
                 config["bias_regularizer"]
             )
-        if "output_activation" in config and isinstance(config["output_activation"], dict):
-            config["output_activation"] = keras.activations.deserialize(
+        if "output_activation" in config:
+            config["output_activation"] = resolve_activation(
                 config["output_activation"]
             )
 
