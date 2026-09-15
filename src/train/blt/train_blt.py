@@ -26,7 +26,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.models.language.byte_latent_transformer.model import create_blt_model
 from dl_techniques.layers.blt.byte_tokenizer import ByteTokenizer
 from dl_techniques.layers.blt.dynamic_patcher import DynamicPatcher
-from dl_techniques.layers.blt.blt_blocks import EntropyModel
+from dl_techniques.layers.blt.entropy_model import EntropyModel
 
 
 # ---------------------------------------------------------------------

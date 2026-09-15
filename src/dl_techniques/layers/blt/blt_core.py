@@ -37,8 +37,8 @@ from ..reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 
 from .byte_tokenizer import ByteTokenizer
 from .dynamic_patcher import DynamicPatcher
+from .entropy_model import EntropyModel
 from .blt_blocks import (
-    EntropyModel,
     LocalEncoder,
     GlobalTransformer, LocalDecoder
 )
