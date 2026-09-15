@@ -196,6 +196,38 @@ class TabMMLPBlock(keras.layers.Layer):
         # serialize/deserialize ROUND-TRIP equivalence, not error-message or
         # traceback-frame equivalence, so this narrow raise stays hand-rolled here. See
         # decisions.md D-004.
+        # DECISION plan-2026-09-15T135450-e083ae85/D-001: re-confirmed on a fresh read,
+        # not rubber-stamped -- two independent blockers, both still live, block
+        # collapsing this raise onto
+        # `deserialize_activation(activation, allow_layer=False)`:
+        #   (a) MESSAGE TOKENS -- the helper's `allow_layer=False` message
+        #       (activation_serialization.py) names 'leaky_relu' and
+        #       keras.activations.silu; `test_activation_layer_is_rejected`
+        #       (test_tabm_blocks.py:526-531) asserts the literal substrings "'relu'"
+        #       and "keras.activations.gelu", which only this file's hand-rolled
+        #       message contains.
+        #   (b) TRACEBACK FRAME -- calling the helper directly moves the raising frame
+        #       to activation_serialization.py, not this file.
+        #       `test_activation_layer_is_rejected_before_any_block_is_usable`
+        #       (test_tabm_blocks.py:632-644) pins
+        #       `exc.traceback[-1].path == "tabm_mlp_block.py"` for a REAL invariant,
+        #       not an incidental implementation detail: that test's own comment
+        #       (test_tabm_blocks.py:632-640) explains TabMBackbone hands ONE
+        #       activation instance to every block it builds, so a stateful Layer
+        #       shared across blocks of differing width previously (255400a0f)
+        #       surfaced as an `InvalidArgumentError` deep inside PReLU's forward
+        #       pass -- "arbitrarily far from the constructor that caused it." The
+        #       guard must therefore fire from TabMMLPBlock, the single owning
+        #       module, at construction time -- not from a shared helper frames
+        #       removed. Relaxing the frame assertion to accept
+        #       activation_serialization.py as the raising frame would erase the
+        #       test's power to catch a future regression where TabMBackbone starts
+        #       calling deserialize_activation itself, duplicating the guard in two
+        #       places -- exactly the "one copy, not two that can drift" invariant
+        #       the D-004 anchor above already protects.
+        #   CONCLUSION: KEEP, do not migrate. See decisions.md D-001 for the full
+        #   trade-off (a third permanent, narrow idiom divergence from the canonical
+        #   pair, accepted because both blockers are real and mutually reinforcing).
         if isinstance(activation, keras.layers.Layer):
             raise ValueError(
                 f"activation must be a name string (e.g. 'relu', 'mish') or a stateless "
