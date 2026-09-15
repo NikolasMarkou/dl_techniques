@@ -29,6 +29,10 @@ from typing import Optional, Union, Tuple, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.activation_serialization import (
+    deserialize_activation,
+    serialize_activation,
+)
 
 from ..norms.bias_free_batch_norm import BiasFreeBatchNorm
 
@@ -172,7 +176,14 @@ class BiasFreeConv2D(keras.layers.Layer):
 
         self.filters = filters
         self.kernel_size = kernel_size
-        self.activation = activation
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-004: resolve at construction time via
+        # the canonical serialize_activation/deserialize_activation(allow_layer=True) pair
+        # (utils/activation_serialization.py) rather than the prior hand-rolled
+        # isinstance(Layer) branch that used to live only in get_config/from_config
+        # (Idiom B). allow_layer=True preserves this class's Layer-serialize round-trip
+        # contract, measured equivalent to keras.layers.serialize/deserialize in D-003.
+        # See decisions.md D-004.
+        self.activation = deserialize_activation(activation, allow_layer=True)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_batch_norm = use_batch_norm
@@ -329,11 +340,12 @@ class BiasFreeConv2D(keras.layers.Layer):
             # migrated to layers/activations/common.py's trio, which rejects a Layer outright.
             # This class needs the Layer-serialize semantics common.py's resolve_activation
             # does not provide. See decisions.md D-008.
-            'activation': (
-                keras.layers.serialize(self.activation)
-                if isinstance(self.activation, keras.layers.Layer)
-                else keras.activations.serialize(keras.activations.get(self.activation))
-            ),
+            # DECISION plan-2026-09-15T094955-31fbe3db/D-004: the hand-rolled
+            # isinstance(Layer)-branching idiom itself (not the "stay off common.py" ruling
+            # above, which still holds) was consolidated onto utils/activation_serialization.py's
+            # serialize_activation, per D-003's confirmed round-trip-equivalence measurement.
+            # See decisions.md D-004.
+            'activation': serialize_activation(self.activation),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'use_batch_norm': self.use_batch_norm,
@@ -341,14 +353,6 @@ class BiasFreeConv2D(keras.layers.Layer):
             'dropout_rate': self.dropout_rate,
         })
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "BiasFreeConv2D":
-        """Deserialize, reviving a layer-instance activation from its dict form."""
-        config = dict(config)
-        if isinstance(config.get('activation'), dict):
-            config['activation'] = keras.layers.deserialize(config['activation'])
-        return cls(**config)
 
 
 # ---------------------------------------------------------------------
@@ -449,7 +453,11 @@ class BiasFreeResidualBlock(keras.layers.Layer):
 
         self.filters = filters
         self.kernel_size = kernel_size
-        self.activation = activation
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-004: resolve at construction time via
+        # the canonical serialize_activation/deserialize_activation(allow_layer=True) pair
+        # (utils/activation_serialization.py), mirroring BiasFreeConv2D's consolidation of
+        # the same hand-rolled isinstance(Layer) idiom (Idiom B). See decisions.md D-004.
+        self.activation = deserialize_activation(activation, allow_layer=True)
         self.use_batch_norm = use_batch_norm
         self.normalization_type = normalization_type
         self.dropout_rate = dropout_rate
@@ -602,11 +610,10 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             'kernel_size': self.kernel_size,
             # DECISION plan_2026-07-04_58ac8e73/D-002: layer-instance activation round-trip
             # mirrors BiasFreeConv2D; string path stays byte-identical. See decisions.md.
-            'activation': (
-                keras.layers.serialize(self.activation)
-                if isinstance(self.activation, keras.layers.Layer)
-                else keras.activations.serialize(keras.activations.get(self.activation))
-            ),
+            # DECISION plan-2026-09-15T094955-31fbe3db/D-004: consolidated the hand-rolled
+            # isinstance(Layer)-branching idiom onto serialize_activation, per D-003's
+            # confirmed round-trip-equivalence measurement. See decisions.md D-004.
+            'activation': serialize_activation(self.activation),
             'use_batch_norm': self.use_batch_norm,
             'normalization_type': self.normalization_type,
             'dropout_rate': self.dropout_rate,
@@ -614,13 +621,5 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "BiasFreeResidualBlock":
-        """Deserialize, reviving a layer-instance activation from its dict form."""
-        config = dict(config)
-        if isinstance(config.get('activation'), dict):
-            config['activation'] = keras.layers.deserialize(config['activation'])
-        return cls(**config)
 
 # ---------------------------------------------------------------------

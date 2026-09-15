@@ -184,6 +184,18 @@ class TabMMLPBlock(keras.layers.Layer):
             raise ValueError(f"k must be positive when given; got {k!r}")
         if not 0.0 <= dropout_rate <= 1.0:
             raise ValueError(f"dropout_rate must be in [0, 1]; got {dropout_rate!r}")
+        # DECISION plan-2026-09-15T094955-31fbe3db/D-004: NOT collapsed onto the single
+        # `deserialize_activation(activation, allow_layer=False)` call plan.md Step 3
+        # otherwise prescribes. `activation_serialization.py`'s own `allow_layer=False`
+        # message ("...not a keras Layer instance ({type}). ... Use e.g. 'leaky_relu' or
+        # keras.activations.silu.") does not contain the `'relu'` / `keras.activations.gelu`
+        # remedy tokens `test_tabm_blocks.py::test_activation_layer_...` asserts, and that
+        # raise's frame would be `activation_serialization.py`, not this file --
+        # `test_activation_layer_is_rejected_before_any_block_is_usable` pins
+        # `exc.traceback[-1].path == "tabm_mlp_block.py"`. D-003 confirmed
+        # serialize/deserialize ROUND-TRIP equivalence, not error-message or
+        # traceback-frame equivalence, so this narrow raise stays hand-rolled here. See
+        # decisions.md D-004.
         if isinstance(activation, keras.layers.Layer):
             raise ValueError(
                 f"activation must be a name string (e.g. 'relu', 'mish') or a stateless "
