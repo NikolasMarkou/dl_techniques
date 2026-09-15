@@ -115,7 +115,7 @@ class TestViTHMLPInitialization:
         assert model.normalization_type == "layer_norm"
         assert model.normalization_position == "pre"
         assert model.ffn_type == "mlp"
-        assert model.activation == "gelu"
+        assert model.activation == keras.activations.get("gelu")
         assert model.use_stochastic_depth is False
         assert model.stochastic_depth_rate == 0.1
         assert not model.built
@@ -156,7 +156,7 @@ class TestViTHMLPInitialization:
         assert model.normalization_type == "rms_norm"
         assert model.normalization_position == "post"
         assert model.ffn_type == "swiglu"
-        assert model.activation == "relu"
+        assert model.activation == keras.activations.get("relu")
         assert model.use_stochastic_depth is True
         assert model.stochastic_depth_rate == 0.15
         assert model.name == "custom_vit_hmlp"

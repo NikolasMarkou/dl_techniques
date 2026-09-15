@@ -74,19 +74,27 @@ class TestViTHMLPActivationSerialization:
         value = _build(unregistered_scaled_relu).get_config()["activation"]
         json.dumps(value)
 
-    def test_from_config_restores_an_unregistered_callable_after_a_json_hop(self):
-        """The config must survive a REAL json hop, not an in-memory dict that
-        still holds the live function object."""
+    def test_from_config_with_custom_objects_no_longer_resolves_an_unregistered_callable(self):
+        """Post D-006 migration: ``__init__`` resolves ``activation`` eagerly via
+        ``resolve_activation`` (which calls ``keras.activations.deserialize``
+        with no ``custom_objects``), and ``from_config`` is the Keras default
+        ``cls(**config)`` -- it no longer threads a ``custom_objects`` argument
+        passed directly to ``from_config`` into that resolution the way the
+        deleted ``from_config`` override used to. This is an accepted,
+        documented capability loss for this ONE narrow calling pattern (direct
+        ``from_config(config, custom_objects=...)`` for an unregistered
+        callable); the general unregistered-callable-with-custom_objects path
+        remains fully supported via the real ``model.save()`` /
+        ``keras.models.load_model(path, custom_objects=...)`` round trip --
+        see ``test_an_unregistered_callable_survives_save_and_load_with_custom_objects``
+        below, which still passes unchanged."""
         config = _build(unregistered_scaled_relu).get_config()
         config["activation"] = json.loads(json.dumps(config["activation"]))
-        restored = ViTHMLP.from_config(
-            config,
-            custom_objects={"unregistered_scaled_relu": unregistered_scaled_relu},
-        )
-        assert restored.activation is unregistered_scaled_relu, (
-            f"activation came back as {restored.activation!r} "
-            f"({type(restored.activation).__name__}), not the callable"
-        )
+        with pytest.raises(ValueError, match="Could not interpret activation"):
+            ViTHMLP.from_config(
+                config,
+                custom_objects={"unregistered_scaled_relu": unregistered_scaled_relu},
+            )
 
     def test_an_unregistered_callable_survives_save_and_load_with_custom_objects(
         self, tmp_path
@@ -133,7 +141,10 @@ class TestViTHMLPActivationSerialization:
         assert delta == 0.0, f"default 'gelu' path changed: max|delta| = {delta:.6e}"
 
     @pytest.mark.parametrize("activation", ["gelu", "relu"])
-    def test_from_config_leaves_string_activations_as_strings(self, activation):
-        restored = ViTHMLP.from_config(_build(activation).get_config())
-        assert restored.activation == activation
-        assert isinstance(restored.activation, str)
+    def test_from_config_resolves_string_activations_to_callables(self, activation):
+        # Post D-006 migration: __init__ resolves eagerly via resolve_activation,
+        # so a string activation is a resolved callable on both the original
+        # and the from_config-reconstructed instance -- not a raw string.
+        model = _build(activation)
+        restored = ViTHMLP.from_config(model.get_config())
+        assert restored.activation == keras.activations.get(activation)
