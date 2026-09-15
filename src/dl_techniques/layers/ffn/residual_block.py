@@ -25,6 +25,7 @@ from typing import Optional, Union, Any, Tuple, Callable
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -220,7 +221,7 @@ class ResidualBlock(keras.layers.Layer):
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.dropout_rate = dropout_rate
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -362,7 +363,7 @@ class ResidualBlock(keras.layers.Layer):
             "hidden_dim": self.hidden_dim,
             "output_dim": self.output_dim,
             "dropout_rate": self.dropout_rate,
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),

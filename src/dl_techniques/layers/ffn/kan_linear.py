@@ -20,6 +20,7 @@ from typing import Tuple, Optional, Dict, Any, Union, Callable
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -258,7 +259,7 @@ class KANLinear(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.base_scaler_initializer = keras.initializers.get(base_scaler_initializer)
         self.epsilon = epsilon
-        self.base_activation_fn = keras.activations.get(activation)
+        self.base_activation_fn = resolve_activation(activation)
 
         # Attributes initialized in build()
         self.input_features: Optional[int] = None
@@ -587,7 +588,7 @@ class KANLinear(keras.layers.Layer):
             "grid_size": self.grid_size,
             "spline_order": self.spline_order,
             "grid_range": self.grid_range,
-            "activation": keras.activations.serialize(self.base_activation_fn),
+            "activation": serialize_activation(self.base_activation_fn),
             "base_trainable": self.base_trainable,
             "spline_trainable": self.spline_trainable,
             "kernel_initializer": keras.initializers.serialize(

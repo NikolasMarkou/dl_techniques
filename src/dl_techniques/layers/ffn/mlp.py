@@ -20,6 +20,7 @@ from typing import Optional, Union, Any, Dict, Tuple, Callable
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -250,7 +251,7 @@ class MLPBlock(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Get activation function once
-        self.activation_fn = keras.activations.get(activation)
+        self.activation_fn = resolve_activation(activation)
 
         # Sub-layers are created here, unbuilt; build() builds them.
         # fc1 and fc2 each get their own kernel and bias clones, never a
@@ -400,7 +401,7 @@ class MLPBlock(keras.layers.Layer):
         config.update({
             "hidden_dim": self.hidden_dim,
             "output_dim": self.output_dim,
-            "activation": keras.activations.serialize(self.activation_fn),
+            "activation": serialize_activation(self.activation_fn),
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),

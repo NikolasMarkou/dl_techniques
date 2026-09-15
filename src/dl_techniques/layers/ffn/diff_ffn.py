@@ -27,6 +27,7 @@ from typing import Callable, Optional, Union, Tuple, Dict, Any
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -261,8 +262,8 @@ class DifferentialFFN(keras.layers.Layer):
 
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
-        self.branch_activation = keras.activations.get(branch_activation)
-        self.gate_activation = keras.activations.get(gate_activation)
+        self.branch_activation = resolve_activation(branch_activation)
+        self.gate_activation = resolve_activation(gate_activation)
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -442,8 +443,8 @@ class DifferentialFFN(keras.layers.Layer):
         config.update({
             'hidden_dim': self.hidden_dim,
             'output_dim': self.output_dim,
-            'branch_activation': keras.activations.serialize(self.branch_activation),
-            'gate_activation': keras.activations.serialize(self.gate_activation),
+            'branch_activation': serialize_activation(self.branch_activation),
+            'gate_activation': serialize_activation(self.gate_activation),
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),

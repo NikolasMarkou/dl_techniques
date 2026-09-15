@@ -30,6 +30,7 @@ from typing import Literal, Tuple, Optional, Union, Any, Dict
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 
 # ---------------------------------------------------------------------
 
@@ -281,7 +282,7 @@ class CountingFFN(keras.layers.Layer):
         self.output_dim = output_dim
         self.count_dim = count_dim
         self.counting_scope = counting_scope
-        self.activation = keras.activations.get(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -450,7 +451,7 @@ class CountingFFN(keras.layers.Layer):
             "output_dim": self.output_dim,
             "count_dim": self.count_dim,
             "counting_scope": self.counting_scope,
-            "activation": keras.activations.serialize(self.activation),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
