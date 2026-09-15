@@ -357,9 +357,19 @@ class SigLIPVisionTransformer(keras.Model):
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.pos_dropout_rate = float(pos_dropout_rate)
         self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        # DECISION plan-2026-09-15T135450-e083ae85/D-013
+        # Resolve eagerly here, mirroring the kernel_initializer/bias_initializer
+        # lines immediately above -- see decisions.md D-013 (same fix as
+        # vit_hmlp/model.py, applied here after confirming the identical gap).
+        # Storing these raw left model.kernel_regularizer/bias_regularizer as
+        # an unresolved dict after a from_config round trip (sublayers still
+        # regularized correctly via their own regularizers.get() calls, but
+        # the model's own stored attribute had the wrong type). Do not revert
+        # to storing the raw `kernel_regularizer`/`bias_regularizer` arguments
+        # here.
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.bias_regularizer = bias_regularizer
+        self.bias_regularizer = regularizers.get(bias_regularizer)
         self.normalization_type = str(normalization_type)
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)

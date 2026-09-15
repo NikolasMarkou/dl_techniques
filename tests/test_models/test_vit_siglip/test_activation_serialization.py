@@ -91,6 +91,29 @@ class TestActivationSerialization:
             f"activation came back as {restored.activation!r}"
         )
 
+    def test_from_config_with_custom_objects_no_longer_resolves_an_unregistered_callable(self):
+        """Mirror of vit_hmlp's identically-named test (D-012). ``__init__``
+        resolves ``activation`` eagerly via ``resolve_activation`` (which calls
+        ``keras.activations.deserialize`` with no ``custom_objects``), and
+        ``from_config`` is the Keras default ``cls(**config)`` -- it no longer
+        threads a ``custom_objects`` argument passed directly to
+        ``from_config`` into that resolution the way the deleted
+        ``from_config`` override used to. This is the SAME accepted,
+        documented capability loss D-012 recorded for ``vit_hmlp``, confirmed
+        symmetric here and now pinned by this mirror test (decisions.md
+        D-014). The general unregistered-callable-with-custom_objects path
+        remains fully supported via the real ``model.save()`` /
+        ``keras.models.load_model(path, custom_objects=...)`` round trip --
+        see ``test_an_unregistered_callable_is_restored_as_a_callable_with_custom_objects``
+        below, which still passes unchanged."""
+        cfg = _build(unregistered_activation).get_config()
+        cfg["activation"] = json.loads(json.dumps(cfg["activation"]))
+        with pytest.raises(ValueError, match="Could not interpret activation"):
+            SigLIPVisionTransformer.from_config(
+                cfg,
+                custom_objects={"unregistered_activation": unregistered_activation},
+            )
+
     def test_an_unregistered_callable_is_restored_as_a_callable_with_custom_objects(
         self, tmp_path
     ):
