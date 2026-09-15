@@ -252,8 +252,6 @@ class ConvUNextStem(keras.layers.Layer):
         :rtype: ConvUNextStem
         """
         config = dict(config)
-        if isinstance(config.get('activation'), dict):
-            config['activation'] = keras.layers.deserialize(config['activation'])
         # keras.*.get(...) accepts a serialized dict in Keras 3, so these pass through.
         return cls(**config)
 
