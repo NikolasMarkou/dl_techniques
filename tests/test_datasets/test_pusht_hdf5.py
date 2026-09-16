@@ -28,7 +28,35 @@ required):
 Case 5 (`/episode_ends` absent -> fallback to `[n_pixels]`) is included as a
 one-line variant of the shared helper.
 
-Only Cases 1, 1b and 4 touch TF ops (`tf.image.resize` inside
+6. Non-square input frames (`h0 != w0`, e.g. 48x32): every prior fixture uses
+   a square frame, so a bug that swaps axes inside `_preprocess_pair`'s
+   `tf.image.resize(pixels_f, [img_size, img_size])` call — or drops the
+   resize entirely — would be invisible, since a square input already
+   produces a square output by coincidence. This case forces the resize to
+   actually run and checks both the output shape (still `img_size x
+   img_size`, not `h0 x w0`-shaped) and the exact post-normalization pixel
+   value, strong enough to distinguish a correct resize from an axis-swapped
+   or skipped one.
+7. Three episodes of deliberately UNEQUAL, non-round length (7, 15, 9): the
+   existing boundary tests (Cases 3-4) use only 2 episodes, so a mutant that
+   validates only the FIRST episode boundary (rather than iterating every
+   boundary in `ends`) is indistinguishable from correct code there — with
+   one internal boundary, "check the first" and "check every" are the same
+   code path. Three unequal episodes create 2 distinct internal boundaries,
+   strong enough to catch a first-boundary-only mutant that would silently
+   admit a straddling window at the second boundary.
+8. Spatially AND temporally correlated pixel content (a per-frame linear
+   ramp, `(i + y + x + c) % 256`, rather than uniform random noise or a flat
+   constant): prior fixtures are either mutually indistinguishable across
+   frames in aggregate (uniform random) or numerically identical across all
+   frames in a window (constant), so neither can catch a mutant that applies
+   correct normalization to the WRONG frame within a window (e.g. an
+   off-by-one window shift in the generator). This fixture makes every
+   (frame, y, x, c) coordinate map to a unique raw value, strong enough to
+   catch a one-frame shift by changing every checked value by a provable
+   amount rather than leaving it unchanged.
+
+Only Cases 1, 1b, 4, 6 and 8 touch TF ops (`tf.image.resize` inside
 `as_tf_dataset()`); they are pinned to CPU via `_pin_cpu_only` since none of
 them need a GPU and a reviewer reproduced a genuine CUDA OOM here under real
 external GPU contention on this machine (D-011).
