@@ -1,21 +1,32 @@
 """
 RBFProtoNet CIFAR-100 Classification Training (Pattern-1 style)
 
-Training pipeline for ``RBFProtoNet`` (CNN backbone + RBF prototype-
-classification head, ``output_mode='normalized'``) on CIFAR-100. Modeled on
-``train.vit.train_vit`` (the repo's Pattern-1 vision-classification
-exemplar, see ``src/train/CLAUDE.md``), with the deviations required by the
-RBF head documented inline where they occur (see decisions.md D-003 for this
-plan).
+Training pipeline for RBF prototype-classification heads
+(``output_mode='normalized'``) on CIFAR-100, over two selectable backbone
+variants (``--model-variant``):
+
+- ``rbf_protonet`` (default): ``RBFProtoNet``'s CNN backbone. Modeled on
+  ``train.vit.train_vit`` (the repo's Pattern-1 vision-classification
+  exemplar, see ``src/train/CLAUDE.md``), with the deviations required by the
+  RBF head documented inline where they occur (see decisions.md D-003 for
+  this plan).
+- ``clifford_rbf_protonet``: ``CliffordRBFProtoNet``'s isotropic
+  Clifford-algebra backbone (nano-equivalent defaults, see decisions.md
+  D-003/D-004 for the plan that added it), tunable via ``--clifford-depth``
+  and ``--clifford-channels``.
 
 This is a single-purpose, CIFAR-100-only trainer (no ``--dataset`` choice,
 no ViT-style ``--patch-size``/``--image-size 224`` knobs) -- CIFAR-100 is the
-only dataset ``RBFProtoNet`` targets at this stage.
+only dataset either variant targets at this stage.
 
 Usage:
     MPLBACKEND=Agg .venv/bin/python -m train.rbf_protonet.train_rbf_protonet \\
         --epochs 20 --batch-size 128 --learning-rate 3e-4 \\
         --output-dir results/rbf_protonet_cifar100_smoke --gpu 1
+
+    MPLBACKEND=Agg .venv/bin/python -m train.rbf_protonet.train_rbf_protonet \\
+        --model-variant clifford_rbf_protonet --clifford-depth 12 \\
+        --clifford-channels 128 --gpu 1
 """
 
 import os
@@ -37,7 +48,10 @@ from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
 )
-from dl_techniques.models.vision.rbf_protonet import create_rbf_protonet
+from dl_techniques.models.vision.rbf_protonet import (
+    create_rbf_protonet,
+    create_clifford_rbf_protonet,
+)
 
 
 # =============================================================================
@@ -57,10 +71,13 @@ class TrainingConfig:
     batch_size: int = 128
 
     # Model
+    model_variant: str = "rbf_protonet"
     num_classes: int = 100
     feature_dim: int = 128  # per decisions.md D-006/D-007 (Step 1 smoke test)
     repulsion_strength: float = 0.1
     min_distance: float = 1.0
+    clifford_depth: int = 12
+    clifford_channels: int = 128
 
     # Training
     epochs: int = 20
@@ -290,14 +307,28 @@ def train_rbf_protonet(
         else (keras.regularizers.L2(config.weight_decay) if config.weight_decay > 0 else None)
     )
 
-    model = create_rbf_protonet(
-        num_classes=config.num_classes,
-        input_shape=input_shape,
-        feature_dim=config.feature_dim,
-        repulsion_strength=config.repulsion_strength,
-        min_distance=config.min_distance,
-        kernel_regularizer=kernel_reg,
-    )
+    if config.model_variant == "rbf_protonet":
+        model = create_rbf_protonet(
+            num_classes=config.num_classes,
+            input_shape=input_shape,
+            feature_dim=config.feature_dim,
+            repulsion_strength=config.repulsion_strength,
+            min_distance=config.min_distance,
+            kernel_regularizer=kernel_reg,
+        )
+    elif config.model_variant == "clifford_rbf_protonet":
+        model = create_clifford_rbf_protonet(
+            num_classes=config.num_classes,
+            input_shape=input_shape,
+            feature_dim=config.feature_dim,
+            repulsion_strength=config.repulsion_strength,
+            min_distance=config.min_distance,
+            depth=config.clifford_depth,
+            channels=config.clifford_channels,
+            kernel_regularizer=kernel_reg,
+        )
+    else:
+        raise ValueError(f"Unknown model_variant: {config.model_variant!r}")
     # Probe build so summary + count_params work.
     model.build((None,) + input_shape)
     model.summary()
@@ -382,11 +413,21 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     # Model
+    parser.add_argument("--model-variant", type=str, default="rbf_protonet",
+                        choices=["rbf_protonet", "clifford_rbf_protonet"],
+                        help="Backbone variant: 'rbf_protonet' (CNN backbone, default) or "
+                             "'clifford_rbf_protonet' (isotropic Clifford-algebra backbone)")
     parser.add_argument("--feature-dim", type=int, default=128,
                         help="Pooled backbone feature dimensionality feeding the RBF head "
                              "(locked to 128 per decisions.md D-006)")
     parser.add_argument("--repulsion-strength", type=float, default=0.1)
     parser.add_argument("--min-distance", type=float, default=1.0)
+    parser.add_argument("--clifford-depth", type=int, default=12,
+                        help="Number of CliffordNetBlocks (only used when "
+                             "--model-variant=clifford_rbf_protonet)")
+    parser.add_argument("--clifford-channels", type=int, default=128,
+                        help="Channel width of the Clifford backbone (only used when "
+                             "--model-variant=clifford_rbf_protonet)")
 
     # Training
     parser.add_argument("--epochs", type=int, default=20)
@@ -421,9 +462,12 @@ def main() -> None:
 
     config = TrainingConfig(
         batch_size=args.batch_size,
+        model_variant=args.model_variant,
         feature_dim=args.feature_dim,
         repulsion_strength=args.repulsion_strength,
         min_distance=args.min_distance,
+        clifford_depth=args.clifford_depth,
+        clifford_channels=args.clifford_channels,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         optimizer_type=args.optimizer,
