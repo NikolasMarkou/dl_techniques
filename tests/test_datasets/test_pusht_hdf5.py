@@ -412,6 +412,90 @@ def test_window_starts_and_dataset_respect_three_unequal_length_episodes(
     assert sorted(seen_starts) == expected_starts
 
 
+def test_as_tf_dataset_with_correlated_pixel_content_preserves_temporal_structure(
+    tmp_path, monkeypatch
+):
+    # Every fixture so far is either uniform random noise (Cases 1/4/5 —
+    # frames are mutually indistinguishable in aggregate, so a
+    # wrong-frame-within-window bug wouldn't shift any single-value
+    # assertion) or a per-frame CONSTANT (Cases 1b, non-square, 3-episode —
+    # all frames in a window are numerically identical, so which frame a
+    # given assertion "actually" reads is unobservable). Neither extreme can
+    # catch a mutant that applies the correct normalization formula to the
+    # WRONG frame within a window (e.g. reading `pixels_ds[i+1 : i+1+T]`
+    # instead of `pixels_ds[i : i+T]` in `as_tf_dataset`'s generator — a
+    # window silently shifted by one). A per-frame linear ramp
+    # (`(i + y + x + c) % 256`) is spatially AND temporally distinct: every
+    # (frame, y, x, c) coordinate maps to a unique raw value, so a
+    # one-frame shift changes every checked value by a fixed, provable
+    # amount rather than leaving it unchanged.
+    #
+    # Empirically verified (per plan.md step 6): temporarily changed
+    # `as_tf_dataset`'s generator line to
+    # `win_pixels = pixels_ds[i + 1 : i + 1 + T]` (a one-frame window shift)
+    # and reran this test in isolation — it failed, because the decoded
+    # `start` value from frame 0 no longer lines up with the (start + t + ..)
+    # formula used at frames t=2 and t=3 below (a uniform-random or
+    # all-constant fixture would not have detected this: the former has no
+    # exact-value assertion, and the latter's shifted window looks
+    # byte-identical to the unshifted one). Reverted after confirming RED.
+    _pin_cpu_only(monkeypatch)
+    n, h0, w0, action_dim = 6, 8, 8, 2
+    img_size = h0  # no-op resize (== h0 == w0), per plan.md Assumptions
+    history_size, num_preds = 3, 1
+    T = history_size + num_preds  # 4; valid starts in [0, n - T] = [0, 2]
+
+    idx = np.arange(n, dtype=np.int64).reshape(n, 1, 1, 1)
+    yy = np.arange(h0, dtype=np.int64).reshape(1, h0, 1, 1)
+    xx = np.arange(w0, dtype=np.int64).reshape(1, 1, w0, 1)
+    cc = np.arange(3, dtype=np.int64).reshape(1, 1, 1, 3)
+    pixels = np.broadcast_to((idx + yy + xx + cc) % 256, (n, h0, w0, 3)).astype(
+        np.uint8
+    )
+    action = np.zeros((n, action_dim), dtype=np.float32)
+    h5_path = tmp_path / "pusht_correlated.h5"
+    _write_pusht_h5(str(h5_path), pixels, action, episode_ends=[n])
+
+    dataset = PushTHDF5Dataset(
+        str(h5_path),
+        img_size=img_size,
+        action_dim=action_dim,
+        history_size=history_size,
+        num_preds=num_preds,
+        batch_size=1,
+    )
+    x, _y = next(iter(dataset.as_tf_dataset()))
+    got = x["pixels"].numpy()[0]  # (T, h0, w0, 3)
+
+    # Decode the window's start index from frame 0's (y=0, x=0, c=0) pixel:
+    # by construction its raw value is `(start + 0 + 0 + 0) % 256 == start`
+    # (no wraparound since `start <= n - T = 2 < 256`). This makes the
+    # assertions below robust to `as_tf_dataset`'s window-order shuffle —
+    # we don't assume `start == 0`, we recover it from the data itself, same
+    # discipline as the end-to-end tests above.
+    def _decode_raw(value: float, channel: int) -> int:
+        return int(
+            round(
+                (float(value) * _IMAGENET_STD[channel] + _IMAGENET_MEAN[channel])
+                * 255
+            )
+        )
+
+    start = _decode_raw(got[0, 0, 0, 0], 0)
+    assert 0 <= start <= n - T
+
+    # (2+) specific (frame, y, x, c) coordinates, spanning distinct frames
+    # AND distinct spatial positions, each checked against an
+    # independently-computed expected value derived from the fixture's own
+    # construction formula plus the decoded `start`.
+    for t, y_coord, x_coord, c_coord in [(0, 0, 0, 0), (2, 3, 5, 1), (3, 7, 7, 2)]:
+        raw = (start + t + y_coord + x_coord + c_coord) % 256
+        expected = (raw / 255.0 - _IMAGENET_MEAN[c_coord]) / _IMAGENET_STD[c_coord]
+        assert np.isclose(
+            got[t, y_coord, x_coord, c_coord], expected, atol=1e-5
+        ), f"mismatch at (t={t}, y={y_coord}, x={x_coord}, c={c_coord})"
+
+
 def test_load_metadata_falls_back_to_n_pixels_when_episode_ends_absent(tmp_path):
     rng = np.random.default_rng(0)
     n, h0, w0, action_dim = 20, 48, 48, 2
