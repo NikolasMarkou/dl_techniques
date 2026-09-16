@@ -1560,7 +1560,7 @@ def train(args: argparse.Namespace) -> None:
         f"step-checkpoints + retrieval probes inherited from run-level state"
     )
 
-    wrapper.fit(
+    history = wrapper.fit(
         train_ds,
         validation_data=val_ds,
         epochs=train_cfg.epochs,
@@ -1571,6 +1571,24 @@ def train(args: argparse.Namespace) -> None:
 
     # Close the persistent CSV writer cleanly.
     step_ckpt_cb.close()
+
+    # DECISION plan-2026-09-16T114148-70556a67/D-008: StepCheckpointCallback's
+    # dynamic-schema mode only writes a row every --log-every-steps steps and
+    # never flushes at epoch/train end (see decisions.md D-006/D-008) -- this
+    # smoke-scale run may finish with zero total steps ever crossing that
+    # threshold, leaving training_log.csv missing entirely. Do NOT change the
+    # shared step_checkpoint.py callback (out of blast-radius); write a
+    # minimal local fallback CSV instead if the callback never created one.
+    training_log_path = os.path.join(results_dir, "training_log.csv")
+    if not os.path.exists(training_log_path):
+        with open(training_log_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch", "train_loss", "val_loss"])
+            writer.writerow([
+                len(history.history.get("loss", [])),
+                history.history.get("loss", [None])[-1],
+                history.history.get("val_loss", [None])[-1],
+            ])
 
     # --- Save final model ---
     final_path = os.path.join(results_dir, f"cliffordclip_{args.variant}.keras")
