@@ -3,6 +3,7 @@ stream, plus the promptable segmenters that grew out of them.
 
 - `bit_diffusion/` — BiT/BiB bidirectional text<->image diffusion bridge (DiTXA)
 - `clip/` — CLIP
+- `clifford_clip/` — CliffordCLIP, a Clifford-algebra (geometric-algebra) variant of CLIP
 - `fastvlm/` — a vision-only hybrid backbone (MobileOne stem + RepMixer + attention
   stages). The name misattributes; see `models/CLAUDE.md`
 - `ideogram4/` — Ideogram4 text-to-image flow-matching DiT
