@@ -36,7 +36,7 @@ shares the same algebraic core:
 
 | Model | Domain | File | Key Idea |
 |:------|:-------|:-----|:---------|
-| `CliffordCLIP` | Vision-Language | `src/dl_techniques/models/vision_language/clip/clifford_clip.py` | Dual-encoder contrastive model with Clifford-aware projection head |
+| `CliffordCLIP` | Vision-Language | `src/dl_techniques/models/vision_language/clifford_clip/model.py` | Dual-encoder contrastive model with Clifford-aware projection head |
 
 **Export surface.** `src/dl_techniques/models/vision/cliffordnet/__init__.py` exports exactly
 two names — `CliffordNet` and `create_cliffordnet`. `CliffordNetLM` is **not**
@@ -283,7 +283,7 @@ result = model(token_ids)  # {"logits": (B, seq_len, vocab_size)}
 ### CliffordCLIP (Vision-Language)
 
 ```python
-from dl_techniques.models.vision_language.clip.clifford_clip import CliffordCLIP
+from dl_techniques.models.vision_language.clifford_clip.model import CliffordCLIP
 
 model = CliffordCLIP.from_variant(
     "small", vocab_size=50257, image_size=112, context_length=64,

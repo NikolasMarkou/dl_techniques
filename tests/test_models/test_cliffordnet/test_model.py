@@ -53,7 +53,7 @@ class TestCliffordNetIter1Refactor:
         #   - CliffordCLIP is deliberately ABSENT: commit 6bc9b69b
         #     (plan-2026-07-15-776c737a/iter-1/step-1) git-mv'd it from
         #     cliffordnet/clip.py to clip/clifford_clip.py and dropped the
-        #     re-export. Import it from dl_techniques.models.vision_language.clip.clifford_clip,
+        #     re-export. Import it from dl_techniques.models.vision_language.clifford_clip.model,
         #     not from here.
         assert set(pkg.__all__) == {
             "CliffordNet",

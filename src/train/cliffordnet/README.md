@@ -12,7 +12,7 @@ image-text contrastive learning.
 | `train_cliffordnet.py` | `CliffordNet` (`models/vision/cliffordnet/model.py`) | CIFAR-10/100 classification. |
 | `train_downsampling_techniques.py` | hand-composed `CliffordNetBlock` stacks | CIFAR-100 ablation of 6 downsampling compositions. |
 | `train_cliffordnet_nlp.py` | `CliffordNetLM` (`models/vision/cliffordnet/lm.py`) | Causal LM pretraining on Wikipedia or TFDS text. |
-| `train_clip.py` | `CliffordCLIP` (`models/vision_language/clip/clifford_clip.py`) | Dual-encoder CLIP, both towers Clifford. |
+| `train_clip.py` | `CliffordCLIP` (`models/vision_language/clifford_clip/model.py`) | Dual-encoder CLIP, both towers Clifford. |
 | `infer_cliffordnet_nlp.py` | `CliffordNetLM` | Generation: nucleus, MCMC power sampling, max-swap. |
 | `eval_clip_retrieval.py` | `CliffordCLIP` | COCO 2017 zero-shot retrieval, R@1/5/10 both directions. |
 | `filter_cc3m_clipscore.py` | `CliffordCLIP` | CLIP-score caption filter; writes a drop-in CC3M manifest. |
@@ -264,7 +264,7 @@ results/cliffordclip_<variant>_<timestamp>/
 `CliffordCLIP` is **not** exported from
 `dl_techniques.models.vision.cliffordnet` (that package exports `CliffordNet`
 and `create_cliffordnet` only). Import it from
-`dl_techniques.models.vision_language.clip.clifford_clip`.
+`dl_techniques.models.vision_language.clifford_clip.model`.
 
 ### Companion tools
 

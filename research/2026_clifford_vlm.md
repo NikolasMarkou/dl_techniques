@@ -48,7 +48,7 @@ Standard VLMs fuse vision and language through dot-product cross-attention, whic
 | Causal LM backbone (CausalCliffordNetBlock) | Done | `layers/geometric/clifford_block.py` |
 | Vision classifier (CliffordNet) | Done | `models/vision/cliffordnet/model.py` |
 | Causal LM (CliffordNetLM) | Done | `models/vision/cliffordnet/lm.py` |
-| Contrastive model (CliffordCLIP) | Done | `models/vision/cliffordnet/clip.py` |
+| Contrastive model (CliffordCLIP) | Done | `models/vision_language/clifford_clip/model.py` |
 | Contrastive loss (CLIPContrastiveLoss) | Done | `losses/clip_contrastive_loss.py` |
 | Multimodal fusion layer | Done | `layers/fusion/multimodal_fusion.py` |
 | VLM task heads | Done | `layers/heads/vlm/factory.py` |

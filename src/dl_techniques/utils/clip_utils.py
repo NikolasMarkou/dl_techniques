@@ -8,7 +8,7 @@ model file.
 These are plain functions, not registered Keras layers or losses, so there
 is no serialization concern; they hold no state and add no trainable
 weights. They exist purely to remove duplicated inline blocks from
-:mod:`dl_techniques.models.vision_language.clip.clifford_clip` and
+:mod:`dl_techniques.models.vision_language.clifford_clip.model` and
 :mod:`dl_techniques.models.vision_language.clip.model`.
 
 Interface contract (both functions):
