@@ -82,6 +82,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `mobilenet/` | MobileNet V1, V2, V3, V4 |
 | `omnipoint/` | OmniPoint camera-agnostic monocular metric point-cloud model |
 | `rad_convnet/` | RADConvNet — ConvNeXt-shaped backbone built on RAD-Conv (Region-Aware Deformable Convolution, arXiv:2509.15436) |
+| `rbf_protonet/` | CNN backbone + RBF distance-based prototype classification head, CIFAR-100 |
 | `resnet/` | ResNet architectures |
 | `squeezenet/` | SqueezeNet |
 | `super_resolution/pft_sr/` | PFT-SR progressive focused transformer |

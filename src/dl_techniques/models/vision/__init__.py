@@ -37,6 +37,7 @@ this bullet's edit, which only adds `fftnet/`.)
 - `mobilenet/` — MobileNet variants (V1, V2, V3, V4)
 - `rad_convnet/` — RADConvNet, a ConvNeXt-shaped backbone built on RAD-Conv (Region-Aware
   Deformable Convolution, arXiv:2509.15436)
+- `rbf_protonet/` — CNN backbone + RBF distance-based prototype classification head (CIFAR-100)
 - `resnet/` — ResNet architectures
 - `squeezenet/` — SqueezeNet
 - `super_resolution/pft_sr/` — super-resolution
