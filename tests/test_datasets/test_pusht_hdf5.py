@@ -36,14 +36,18 @@ one-line variant of the shared helper.
    actually run and checks the output shape (still `img_size x img_size`,
    not `h0 x w0`-shaped). The fixture content is the per-pixel formula
    `(3*y + 7*x) % 256` — spatially ASYMMETRIC, not a constant — so it
-   distinguishes a correct resize from an axis-swapped one because a
-   transpose inserted before the resize reads a different raw value at any
-   coordinate where `y != x`. The exact post-normalization value is checked
-   at such a coordinate (on the resize's untouched edge column, where
-   bilinear interpolation is exact and the expected value stays
-   hand-computable). An earlier revision used a spatially-INVARIANT
-   (constant) fixture here, which is a no-op under any spatial permutation
-   and provably does NOT catch this bug class (REFLECT D-004).
+   distinguishes a correct resize from a WHOLE-FRAME axis-swapped one (a
+   transpose, rotation, or flip inserted before the resize reads a
+   different raw value at any coordinate where `y != x`), but does NOT pin
+   the resize kernel's own interior interpolation arithmetic or sampling
+   convention: `method="nearest"`, `method="area"`, and an
+   `align_corners=True` half-pixel convention all leave this test green
+   (measured, REFLECT D-005), because the exact post-normalization value is
+   checked on the resize's untouched edge column, where every
+   interpolation kernel and both sampling conventions agree exactly. An
+   earlier revision used a spatially-INVARIANT (constant) fixture here,
+   which is a no-op under any spatial permutation and provably does NOT
+   catch this bug class (REFLECT D-004).
 7. Three episodes of deliberately UNEQUAL, non-round length (7, 15, 9): the
    existing boundary tests (Cases 3-4) use only 2 episodes, so a mutant that
    validates only the FIRST episode boundary (rather than iterating every
@@ -455,21 +459,23 @@ def test_window_starts_and_dataset_respect_three_unequal_length_episodes(
     expected_starts = sorted(expected_starts)
 
     actual_starts = dataset._window_starts(np.asarray(episode_ends, dtype=np.int64))
+    # (a) no window straddles EITHER internal boundary (7 and 22). REFLECT
+    # D-005: this set-equality assertion (comparing the real,
+    # `_window_starts`-derived `actual_starts` against the test's OWN
+    # independently re-derived `expected_starts`) is the assertion a
+    # "first-boundary-only" mutant actually fails on boundary 2 — measured:
+    # `MUTANT=firstboundary` fails here, at this line. An earlier revision
+    # additionally iterated `actual_starts` in a per-element boundary-check
+    # loop placed AFTER this assertion; once this assertion has passed, the
+    # loop's only reachable input is a set already proven equal to
+    # `expected_starts`, whose every element satisfies the per-boundary
+    # check by construction of the re-derivation above — so the loop could
+    # never fail and was deleted rather than kept as a guard that cannot
+    # fail (REFLECT D-005).
     assert sorted(actual_starts.tolist()) == expected_starts
 
     # (b) the window count matches the independently-derived count EXACTLY.
     assert len(expected_starts) == 22  # hand check: 4 (ep1) + 12 (ep2) + 6 (ep3)
-
-    # (a) no window straddles EITHER internal boundary (7 and 22). REFLECT
-    # D-004: an earlier revision iterated `expected_starts` here — the
-    # test's OWN re-derived value — making this true BY CONSTRUCTION
-    # regardless of what `_window_starts` actually returns (it can never
-    # fail). Iterating `actual_starts` (the real, `_window_starts`-derived
-    # value asserted equal to `expected_starts` above) is the assertion a
-    # "first-boundary-only" mutant would actually fail on boundary 2.
-    for s in actual_starts.tolist():
-        for boundary in (episode_ends[0], episode_ends[1]):
-            assert s + T <= boundary or s >= boundary
 
     # (c) drive the REAL end-to-end pipeline (not `_window_starts()` alone)
     # and confirm the emitted window-start set is exactly the expected set,

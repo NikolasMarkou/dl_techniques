@@ -87,8 +87,8 @@ def test_build_model_accepts_consistent_config() -> None:
 
 # ---------------------------------------------------------------------
 # --image-size near-homograph warning
-# (DECISION plan-2026-09-16T184828-4799af4c/D-004 reverses D-001: the
-# machinery to detect this was already live, so the cheap warning ships)
+# Per D-004 (reverses D-001): the machinery to detect this was already
+# live, so the cheap warning ships.
 # ---------------------------------------------------------------------
 
 def test_explicit_image_size_warns_it_has_no_effect(monkeypatch, caplog) -> None:
@@ -97,8 +97,11 @@ def test_explicit_image_size_warns_it_has_no_effect(monkeypatch, caplog) -> None
     )
     with caplog.at_level("WARNING"):
         parse_args()
-    assert "--image-size" in caplog.text
-    assert "--img-size" in caplog.text
+    # A directional fragment, not mere substring presence of both flag
+    # names: a message with the flags reversed ("--img-size has no effect,
+    # use --image-size instead") would satisfy a substring-only check but
+    # not this one (REFLECT D-005).
+    assert "use --img-size instead" in caplog.text
 
 
 def test_omitted_image_size_does_not_warn(monkeypatch, caplog) -> None:

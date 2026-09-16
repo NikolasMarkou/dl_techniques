@@ -240,8 +240,11 @@ auto-enabled.
   synthetic, schema-correct HDF5 fixtures — including non-square frames, 3+
   unequal-length episodes, and spatially/temporally correlated pixel content.
   That coverage validates window enumeration, NaN-zeroing, and normalization
-  value correctness; spatial-axis handling is now also covered (per the
-  strengthened test suite). None of it validates compatibility with a real
+  value correctness; whole-frame spatial-axis ordering (transpose, rotation,
+  flip — not a resize-interpolation-arithmetic check) is now also
+  independently verified. The resize kernel's own interior interpolation
+  arithmetic and sampling convention (nearest/area/align_corners) are NOT
+  separately pinned by any test in the suite. None of it validates compatibility with a real
   file: the `/pixels`/`/action`/`/episode_ends` schema itself is an assumption
   "per upstream" with no citable URL/spec found anywhere in this repo (the only
   citation, "Sobal et al., 2024", carries no link), so a real file's
