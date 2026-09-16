@@ -242,7 +242,7 @@ class RBFProtoNet(keras.Model):
         self.input_height, self.input_width, self.input_channels = input_shape
         self.stem_filters = stem_filters
         self.filters_per_stage = filters_per_stage
-        # DECISION plan-2026-09-16-7dfede94/D-006: default feature_dim=128, not
+        # DECISION plan-2026-09-16T052349-7dfede94/D-006: default feature_dim=128, not
         # 256 or 512. Step 1's standalone smoke test measured RBFLayer(units=100,
         # output_mode='normalized') gradients on centers/gamma at D in
         # {128, 256, 512}; 128 already fully passed, with the STRONGEST
@@ -332,7 +332,7 @@ class RBFProtoNet(keras.Model):
     def _build_rbf_head(self) -> None:
         """Build the RBF prototype-classification head.
 
-        # DECISION plan-2026-09-16-7dfede94/D-002: 'normalized' is the ONLY
+        # DECISION plan-2026-09-16T052349-7dfede94/D-002: 'normalized' is the ONLY
         # supported output_mode for this model's head -- do not expose
         # output_mode as a constructor knob defaulting to 'basis'. RBFLayer's
         # own docstring and decisions.md D-002 both document 'basis' as
