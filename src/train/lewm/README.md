@@ -141,7 +141,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.lewm.train_lewm --smoke --synthetic
 MPLBACKEND=Agg .venv/bin/python -m train.lewm.train_lewm --synthetic --gpu 0
 ```
 
-### Real Data (HDF5 PushT — loader logic tested only against synthetic fixtures)
+### Real Data (HDF5 PushT — UNTESTED on real data; loader logic synthetic-only)
 
 ```bash
 MPLBACKEND=Agg .venv/bin/python -m train.lewm.train_lewm \
@@ -239,7 +239,9 @@ auto-enabled.
   zeroing, ImageNet normalization, and episode-boundary respect against
   synthetic, schema-correct HDF5 fixtures — including non-square frames, 3+
   unequal-length episodes, and spatially/temporally correlated pixel content.
-  That coverage validates the loader's own logic, not compatibility with a real
+  That coverage validates window enumeration, NaN-zeroing, and normalization
+  value correctness; spatial-axis handling is now also covered (per the
+  strengthened test suite). None of it validates compatibility with a real
   file: the `/pixels`/`/action`/`/episode_ends` schema itself is an assumption
   "per upstream" with no citable URL/spec found anywhere in this repo (the only
   citation, "Sobal et al., 2024", carries no link), so a real file's

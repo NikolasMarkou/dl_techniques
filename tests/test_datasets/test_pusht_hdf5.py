@@ -70,7 +70,7 @@ one-line variant of the shared helper.
    from the (possibly shifted) data itself, so a uniform shift is invisible
    to it in isolation.
 
-Only Cases 1, 1b, 4, 6 and 8 touch TF ops (`tf.image.resize` inside
+Only Cases 1, 1b, 4, 6, 7 and 8 touch TF ops (`tf.image.resize` inside
 `as_tf_dataset()`); they are pinned to CPU via `_pin_cpu_only` since none of
 them need a GPU and a reviewer reproduced a genuine CUDA OOM here under real
 external GPU contention on this machine (D-011).
