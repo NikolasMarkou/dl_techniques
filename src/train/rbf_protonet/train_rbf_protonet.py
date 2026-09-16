@@ -225,12 +225,21 @@ def create_cifar100_dataset(
 # CALLBACKS
 # =============================================================================
 
-def create_callbacks(config: TrainingConfig) -> Tuple[List[keras.callbacks.Callback], str]:
+def create_callbacks(
+        config: TrainingConfig, run_dir: str
+) -> Tuple[List[keras.callbacks.Callback], str]:
     """Standard early-stop/checkpoint/CSV bundle (no RBF-specific callback exists yet,
     see findings/cifar_training_pipeline.md section 3)."""
+    # DECISION plan-2026-09-16-7dfede94/D-008: run_dir=run_dir is REQUIRED here.
+    # Do not drop it: without it, create_common_callbacks derives its OWN
+    # "{prefix}_{model_name}_{timestamp}" directory under output_root="results",
+    # silently ignoring the run dir prepare_run_dir(config) already created for
+    # config.json/training_history.json -- producing two disjoint result trees
+    # for one run (measured in Step 7's first attempt). See decisions.md D-008.
     callbacks, results_dir = create_common_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix="rbf_protonet",
+        run_dir=run_dir,
         monitor="val_accuracy",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
@@ -330,7 +339,7 @@ def train_rbf_protonet(
     model.compile(optimizer=optimizer, loss=loss_fn, metrics=metrics)
 
     # ---- Train ----
-    callbacks, _ = create_callbacks(config)
+    callbacks, _ = create_callbacks(config, str(output_dir))
 
     start_time = time.time()
     history = model.fit(
