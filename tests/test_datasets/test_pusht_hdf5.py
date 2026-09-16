@@ -33,10 +33,17 @@ one-line variant of the shared helper.
    `tf.image.resize(pixels_f, [img_size, img_size])` call — or drops the
    resize entirely — would be invisible, since a square input already
    produces a square output by coincidence. This case forces the resize to
-   actually run and checks both the output shape (still `img_size x
-   img_size`, not `h0 x w0`-shaped) and the exact post-normalization pixel
-   value, strong enough to distinguish a correct resize from an axis-swapped
-   or skipped one.
+   actually run and checks the output shape (still `img_size x img_size`,
+   not `h0 x w0`-shaped). The fixture content is the per-pixel formula
+   `(3*y + 7*x) % 256` — spatially ASYMMETRIC, not a constant — so it
+   distinguishes a correct resize from an axis-swapped one because a
+   transpose inserted before the resize reads a different raw value at any
+   coordinate where `y != x`. The exact post-normalization value is checked
+   at such a coordinate (on the resize's untouched edge column, where
+   bilinear interpolation is exact and the expected value stays
+   hand-computable). An earlier revision used a spatially-INVARIANT
+   (constant) fixture here, which is a no-op under any spatial permutation
+   and provably does NOT catch this bug class (REFLECT D-004).
 7. Three episodes of deliberately UNEQUAL, non-round length (7, 15, 9): the
    existing boundary tests (Cases 3-4) use only 2 episodes, so a mutant that
    validates only the FIRST episode boundary (rather than iterating every
@@ -46,15 +53,22 @@ one-line variant of the shared helper.
    strong enough to catch a first-boundary-only mutant that would silently
    admit a straddling window at the second boundary.
 8. Spatially AND temporally correlated pixel content (a per-frame linear
-   ramp, `(i + y + x + c) % 256`, rather than uniform random noise or a flat
-   constant): prior fixtures are either mutually indistinguishable across
-   frames in aggregate (uniform random) or numerically identical across all
-   frames in a window (constant), so neither can catch a mutant that applies
-   correct normalization to the WRONG frame within a window (e.g. an
-   off-by-one window shift in the generator). This fixture makes every
-   (frame, y, x, c) coordinate map to a unique raw value, strong enough to
-   catch a one-frame shift by changing every checked value by a provable
-   amount rather than leaving it unchanged.
+   ramp, `(i + 2*y + 3*x + 5*c) % 256` — distinct, asymmetric coefficients
+   per axis so the raw value is not invariant under a y<->x transpose either
+   — rather than uniform random noise or a flat constant): prior fixtures
+   are either mutually indistinguishable across frames in aggregate (uniform
+   random) or numerically identical across all frames in a window
+   (constant), so neither can catch a mutant that applies correct
+   normalization to the WRONG frame within a window (e.g. an off-by-one
+   window shift in the generator). This fixture makes every (frame, y, x, c)
+   coordinate map to a unique raw value; combined with a window-start-set
+   assertion (mirroring Case 4's `sorted(seen) == sorted(expected)` over a
+   full epoch), a one-frame shift is caught because the emitted start set no
+   longer matches `_window_starts()`'s own output — REFLECT D-004 corrects
+   an earlier revision's inline comment, which misattributed this catch to
+   the decoded per-value formula alone; that formula's `start` is read back
+   from the (possibly shifted) data itself, so a uniform shift is invisible
+   to it in isolation.
 
 Only Cases 1, 1b, 4, 6 and 8 touch TF ops (`tf.image.resize` inside
 `as_tf_dataset()`); they are pinned to CPU via `_pin_cpu_only` since none of
@@ -172,7 +186,23 @@ def test_pixel_normalization_matches_imagenet_stats_exactly(tmp_path, monkeypatc
     )
     x, _y = next(iter(dataset.as_tf_dataset()))
 
-    expected = (-_IMAGENET_MEAN / _IMAGENET_STD).astype(np.float32)
+    # Standard ImageNet normalization constants, hard-coded here
+    # independently of the module under test — do not import from
+    # pusht_hdf5. REFLECT D-004: every expected value in this file was
+    # computed by importing `_IMAGENET_MEAN`/`_IMAGENET_STD` from
+    # `pusht_hdf5` itself, so a wrong-constant bug in the module (e.g. both
+    # replaced with `[0.5, 0.5, 0.5]`) left this test green (measured: 9/9
+    # pass under that substitution). The two assertions below are the fix
+    # for THIS test specifically — other tests in this file import the
+    # constants only to compute OTHER things (window content, boundaries),
+    # not to verify the constants' own values, so they don't need this
+    # treatment.
+    literal_imagenet_mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    literal_imagenet_std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    assert np.array_equal(_IMAGENET_MEAN.astype(np.float32), literal_imagenet_mean)
+    assert np.array_equal(_IMAGENET_STD.astype(np.float32), literal_imagenet_std)
+
+    expected = (-literal_imagenet_mean / literal_imagenet_std).astype(np.float32)
     got = x["pixels"].numpy()[0, 0, 0, 0, :]  # first window, first frame, one pixel
     assert np.allclose(got, expected, atol=1e-5)
 
@@ -191,18 +221,36 @@ def test_as_tf_dataset_handles_non_square_frames(tmp_path, monkeypatch):
     #
     # `img_size == h0` (per plan.md's Assumptions: keep the resize math
     # tractable by hand) means the height axis is a no-op resize and only
-    # the width axis (32 -> 48) is actually rescaled. The fixture content
-    # is a per-frame CONSTANT pixel value, so bilinear interpolation over
-    # a constant field reproduces that same constant regardless of scale
-    # factor — the exact post-normalization value is therefore
-    # independently computable by hand without simulating the bilinear
-    # kernel, matching `test_pixel_normalization_matches_imagenet_stats_exactly`'s
-    # approach.
+    # the width axis (32 -> 48) is actually rescaled. REFLECT D-004: an
+    # earlier revision used a per-frame CONSTANT pixel value here, which is
+    # spatially INVARIANT — an H/W transpose inserted before the resize call
+    # is a no-op on every value of a constant field, so that fixture cannot
+    # distinguish a correct resize from an axis-swapped one (measured: all 9
+    # tests stayed GREEN under that exact mutant). The fixture below is
+    # spatially ASYMMETRIC instead: `pixels[i, y, x, c] = (3*y + 7*x) % 256`
+    # varies differently along y than along x, so a transpose reads a
+    # different raw value at any `y != x` coordinate.
+    #
+    # Assertion (b) below checks the exact value at `(y=5, x=0)` — `y != x`,
+    # satisfying the requirement above. `x=0` is deliberately the resize's
+    # EDGE column: `tf.image.resize`'s bilinear sampling clamps out-of-range
+    # source coordinates at the edges, so column 0 (and the last column) of
+    # the resized output equals column 0 (last column) of the input EXACTLY,
+    # regardless of scale factor (verified empirically: resizing a
+    # `(3*y + 7*x) % 256` field from width 32 to 48 leaves `out[:, 0, :]` and
+    # `out[:, -1, :]` bit-identical to the corresponding input column). The
+    # height axis is already a no-op (`img_size == h0`). This keeps the
+    # expected value hand-computable — `(3*5 + 7*0) % 256 == 15` — without
+    # simulating the bilinear kernel for interior columns.
     _pin_cpu_only(monkeypatch)
     n, h0, w0, action_dim = 4, 48, 32, 2
     img_size = h0  # one of h0/w0, per plan.md Assumptions
-    const_value = 128  # mid-gray uint8, distinct from the existing all-zero fixture
-    pixels = np.full((n, h0, w0, 3), const_value, dtype=np.uint8)
+    y_check, x_check = 5, 0  # y != x; x_check=0 is the exact-edge column
+    yy = np.arange(h0, dtype=np.int64).reshape(1, h0, 1, 1)
+    xx = np.arange(w0, dtype=np.int64).reshape(1, 1, w0, 1)
+    pixels = np.broadcast_to((3 * yy + 7 * xx) % 256, (n, h0, w0, 3)).astype(
+        np.uint8
+    )
     action = np.zeros((n, action_dim), dtype=np.float32)
     h5_path = tmp_path / "pusht_nonsquare.h5"
     _write_pusht_h5(str(h5_path), pixels, action, episode_ends=[n])
@@ -221,11 +269,13 @@ def test_as_tf_dataset_handles_non_square_frames(tmp_path, monkeypatch):
     # would fail under either mutant named above.
     assert x["pixels"].shape == (1, 3, img_size, img_size, 3)
 
-    # (b) exact normalized value at a specific known coordinate,
-    # independently re-derived from the fixture's own construction
-    # parameters (constant-content resize is a no-op on the value itself).
-    expected = ((const_value / 255.0) - _IMAGENET_MEAN) / _IMAGENET_STD
-    got = x["pixels"].numpy()[0, 0, 0, 0, :]  # first window, first frame, one pixel
+    # (b) exact normalized value at a `y != x` coordinate on the resize's
+    # exact edge column — independently re-derived from the fixture's own
+    # construction formula; a transpose mutant reads a different raw value
+    # here (see comment above).
+    raw = (3 * y_check + 7 * x_check) % 256
+    expected = ((raw / 255.0) - _IMAGENET_MEAN) / _IMAGENET_STD
+    got = x["pixels"].numpy()[0, 0, y_check, x_check, :]  # first window, first frame
     assert np.allclose(got, expected.astype(np.float32), atol=1e-5)
 
 
@@ -410,9 +460,14 @@ def test_window_starts_and_dataset_respect_three_unequal_length_episodes(
     # (b) the window count matches the independently-derived count EXACTLY.
     assert len(expected_starts) == 22  # hand check: 4 (ep1) + 12 (ep2) + 6 (ep3)
 
-    # (a) no window straddles EITHER internal boundary (7 and 22) — this is
-    # the assertion a "first-boundary-only" mutant would fail on boundary 2.
-    for s in expected_starts:
+    # (a) no window straddles EITHER internal boundary (7 and 22). REFLECT
+    # D-004: an earlier revision iterated `expected_starts` here — the
+    # test's OWN re-derived value — making this true BY CONSTRUCTION
+    # regardless of what `_window_starts` actually returns (it can never
+    # fail). Iterating `actual_starts` (the real, `_window_starts`-derived
+    # value asserted equal to `expected_starts` above) is the assertion a
+    # "first-boundary-only" mutant would actually fail on boundary 2.
+    for s in actual_starts.tolist():
         for boundary in (episode_ends[0], episode_ends[1]):
             assert s + T <= boundary or s >= boundary
 
@@ -453,20 +508,35 @@ def test_as_tf_dataset_with_correlated_pixel_content_preserves_temporal_structur
     # WRONG frame within a window (e.g. reading `pixels_ds[i+1 : i+1+T]`
     # instead of `pixels_ds[i : i+T]` in `as_tf_dataset`'s generator — a
     # window silently shifted by one). A per-frame linear ramp
-    # (`(i + y + x + c) % 256`) is spatially AND temporally distinct: every
-    # (frame, y, x, c) coordinate maps to a unique raw value, so a
-    # one-frame shift changes every checked value by a fixed, provable
-    # amount rather than leaving it unchanged.
+    # (`(i + 2*y + 3*x + 5*c) % 256`, distinct asymmetric coefficients per
+    # axis) is spatially AND temporally distinct: every (frame, y, x, c)
+    # coordinate maps to a unique raw value.
     #
-    # Empirically verified (per plan.md step 6): temporarily changed
-    # `as_tf_dataset`'s generator line to
-    # `win_pixels = pixels_ds[i + 1 : i + 1 + T]` (a one-frame window shift)
-    # and reran this test in isolation — it failed, because the decoded
-    # `start` value from frame 0 no longer lines up with the (start + t + ..)
-    # formula used at frames t=2 and t=3 below (a uniform-random or
-    # all-constant fixture would not have detected this: the former has no
-    # exact-value assertion, and the latter's shifted window looks
-    # byte-identical to the unshifted one). Reverted after confirming RED.
+    # REFLECT D-004 corrects an earlier revision's claim here. That revision
+    # said a one-frame window shift is caught because "the decoded `start`
+    # value from frame 0 no longer lines up with the formula used at frames
+    # t=2 and t=3" — this is FALSE: `start` below is decoded FROM the
+    # window's own frame-0 pixel, so a uniform shift of the whole window is
+    # algebraically invisible to a check that only ever compares the window
+    # against a `start` read back from itself (whatever the window's actual
+    # content is, `start` is redefined to match it, and the per-value
+    # assertions below hold by construction regardless of which real frame
+    # the window started at). The one-frame-shift mutant the earlier revision
+    # ran DID go RED, but for an unrelated reason: with only one window
+    # pulled via `next(iter(...))`, shifting `win_pixels = pixels_ds[i+1 :
+    # i+1+T]` at the sequence's END (`i == n - T`, the max valid start) reads
+    # past the end of the `pixels` dataset, and `tf.data`'s `output_signature`
+    # rejects the resulting short/misshapen array before this test's own
+    # assertions even run — a shuffle-order accident, not the claimed
+    # mechanism.
+    #
+    # The window-start-set assertion below, added in this fix and mirroring
+    # Case 4's `sorted(seen) == sorted(expected)` pattern, is what actually,
+    # robustly catches a window-shift mutant: shifting every window's read
+    # by one changes which `start` values the generator's OUTPUT decodes to
+    # (each window still decodes internally-consistently, but the SET of
+    # decoded starts no longer matches `_window_starts()`'s own output),
+    # independent of any single window's per-value formula.
     _pin_cpu_only(monkeypatch)
     n, h0, w0, action_dim = 6, 8, 8, 2
     img_size = h0  # no-op resize (== h0 == w0), per plan.md Assumptions
@@ -477,9 +547,9 @@ def test_as_tf_dataset_with_correlated_pixel_content_preserves_temporal_structur
     yy = np.arange(h0, dtype=np.int64).reshape(1, h0, 1, 1)
     xx = np.arange(w0, dtype=np.int64).reshape(1, 1, w0, 1)
     cc = np.arange(3, dtype=np.int64).reshape(1, 1, 1, 3)
-    pixels = np.broadcast_to((idx + yy + xx + cc) % 256, (n, h0, w0, 3)).astype(
-        np.uint8
-    )
+    pixels = np.broadcast_to(
+        (idx + 2 * yy + 3 * xx + 5 * cc) % 256, (n, h0, w0, 3)
+    ).astype(np.uint8)
     action = np.zeros((n, action_dim), dtype=np.float32)
     h5_path = tmp_path / "pusht_correlated.h5"
     _write_pusht_h5(str(h5_path), pixels, action, episode_ends=[n])
@@ -492,14 +562,14 @@ def test_as_tf_dataset_with_correlated_pixel_content_preserves_temporal_structur
         num_preds=num_preds,
         batch_size=1,
     )
-    x, _y = next(iter(dataset.as_tf_dataset()))
-    got = x["pixels"].numpy()[0]  # (T, h0, w0, 3)
+    expected_starts = dataset._window_starts(np.asarray([n], dtype=np.int64))
+    tf_dataset = dataset.as_tf_dataset()
 
-    # Decode the window's start index from frame 0's (y=0, x=0, c=0) pixel:
-    # by construction its raw value is `(start + 0 + 0 + 0) % 256 == start`
-    # (no wraparound since `start <= n - T = 2 < 256`). This makes the
-    # assertions below robust to `as_tf_dataset`'s window-order shuffle —
-    # we don't assume `start == 0`, we recover it from the data itself, same
+    # Decode a window's start index from frame 0's (y=0, x=0, c=0) pixel: by
+    # construction its raw value is `(start + 2*0 + 3*0 + 5*0) % 256 ==
+    # start` (no wraparound since `start <= n - T = 2 < 256`). This makes the
+    # assertions below robust to `as_tf_dataset`'s window-order shuffle — we
+    # don't assume `start == 0`, we recover it from the data itself, same
     # discipline as the end-to-end tests above.
     def _decode_raw(value: float, channel: int) -> int:
         return int(
@@ -509,19 +579,30 @@ def test_as_tf_dataset_with_correlated_pixel_content_preserves_temporal_structur
             )
         )
 
-    start = _decode_raw(got[0, 0, 0, 0], 0)
-    assert 0 <= start <= n - T
+    seen_starts = []
+    for x, _y in tf_dataset.take(len(expected_starts)):
+        got = x["pixels"].numpy()[0]  # (T, h0, w0, 3)
+        start = _decode_raw(got[0, 0, 0, 0], 0)
+        assert 0 <= start <= n - T
+        seen_starts.append(start)
 
-    # (2+) specific (frame, y, x, c) coordinates, spanning distinct frames
-    # AND distinct spatial positions, each checked against an
-    # independently-computed expected value derived from the fixture's own
-    # construction formula plus the decoded `start`.
-    for t, y_coord, x_coord, c_coord in [(0, 0, 0, 0), (2, 3, 5, 1), (3, 7, 7, 2)]:
-        raw = (start + t + y_coord + x_coord + c_coord) % 256
-        expected = (raw / 255.0 - _IMAGENET_MEAN[c_coord]) / _IMAGENET_STD[c_coord]
-        assert np.isclose(
-            got[t, y_coord, x_coord, c_coord], expected, atol=1e-5
-        ), f"mismatch at (t={t}, y={y_coord}, x={x_coord}, c={c_coord})"
+        # (2+) specific (frame, y, x, c) coordinates, spanning distinct
+        # frames AND distinct spatial positions, each checked against an
+        # independently-computed expected value derived from the fixture's
+        # own construction formula plus the decoded `start`.
+        for t, y_coord, x_coord, c_coord in [(0, 0, 0, 0), (2, 3, 5, 1), (3, 7, 7, 2)]:
+            raw = (start + t + 2 * y_coord + 3 * x_coord + 5 * c_coord) % 256
+            expected = (
+                raw / 255.0 - _IMAGENET_MEAN[c_coord]
+            ) / _IMAGENET_STD[c_coord]
+            assert np.isclose(
+                got[t, y_coord, x_coord, c_coord], expected, atol=1e-5
+            ), f"mismatch at (start={start}, t={t}, y={y_coord}, x={x_coord}, c={c_coord})"
+
+    # The catching mechanism for a window-shift mutant, per the comment
+    # above: the SET of decoded starts across a full epoch must match
+    # `_window_starts()`'s own output exactly.
+    assert sorted(seen_starts) == sorted(expected_starts.tolist())
 
 
 def test_load_metadata_falls_back_to_n_pixels_when_episode_ends_absent(tmp_path):
