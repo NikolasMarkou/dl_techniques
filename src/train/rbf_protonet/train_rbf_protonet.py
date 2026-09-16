@@ -230,7 +230,7 @@ def create_callbacks(
 ) -> Tuple[List[keras.callbacks.Callback], str]:
     """Standard early-stop/checkpoint/CSV bundle (no RBF-specific callback exists yet,
     see findings/cifar_training_pipeline.md section 3)."""
-    # DECISION plan-2026-09-16-7dfede94/D-008: run_dir=run_dir is REQUIRED here.
+    # DECISION plan-2026-09-16T052349-7dfede94/D-008: run_dir=run_dir is REQUIRED here.
     # Do not drop it: without it, create_common_callbacks derives its OWN
     # "{prefix}_{model_name}_{timestamp}" directory under output_root="results",
     # silently ignoring the run dir prepare_run_dir(config) already created for
@@ -323,7 +323,7 @@ def train_rbf_protonet(
     optimizer = optimizer_builder(opt_config, lr_schedule)
 
     # ---- Loss + metrics ----
-    # DECISION plan-2026-09-16-7dfede94/D-003: from_logits=False, deliberately
+    # DECISION plan-2026-09-16T052349-7dfede94/D-003: from_logits=False, deliberately
     # deviating from train_vit.py's from_logits=True. RBFProtoNet's RBF head
     # is constructed with output_mode='normalized' (softmax-over-negative-
     # distance), which IS already a probability vector, not logits. Passing
