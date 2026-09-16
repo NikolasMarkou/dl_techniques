@@ -189,6 +189,7 @@ loading — do NOT force it through `load_dataset()`.
 | `blt` | Multi-stage pipeline (entropy pretraining + main training), class-based trainer |
 | `yolo12/train_multitask` | Per-task callbacks, losses and visualization |
 | `tabm` | Custom `TabMTrainer`, not standard Keras `fit()` |
+| `lewm` | Dict-shaped inputs (`{"pixels", "action"}`) + add_loss-only training; `EpochAnalyzerCallback` doesn't understand either |
 
 When a new script genuinely cannot use `create_callbacks()`, document the reason in a comment at
 the top of its callbacks section. **This table is about CALLBACKS and nothing else — it is not a licence to skip the CLI.** Every
