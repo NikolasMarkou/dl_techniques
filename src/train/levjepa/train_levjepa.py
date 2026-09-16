@@ -37,7 +37,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras
 import tensorflow as tf
 
-from train.common import setup_gpu, set_seeds
+from train.common import setup_gpu, set_seeds, save_config_json
 from train.common.args import explicitly_set_flags
 from dl_techniques.optimization import optimizer_builder, WarmupSchedule
 from dl_techniques.models.vision.levjepa.model import create_levjepa, SCALE_CONFIGS
@@ -352,11 +352,18 @@ def main(argv: Optional[Sequence[str]] = None):
     output_dir = _resolve_output_dir(config)
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Output dir: {output_dir}")
+    save_config_json(config, str(output_dir))
 
+    checkpoint_dir = output_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     callbacks = [
         keras.callbacks.TerminateOnNaN(),
         keras.callbacks.CSVLogger(str(output_dir / "training_log.csv")),
         EMAShadowCallback(decay=config.ema_decay, update_every=config.ema_update_every),
+        keras.callbacks.ModelCheckpoint(
+            filepath=str(checkpoint_dir / "model.keras"),
+            save_best_only=False,
+        ),
     ]
 
     history = model.fit(
