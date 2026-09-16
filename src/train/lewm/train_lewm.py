@@ -32,7 +32,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras
 import tensorflow as tf
 
-from train.common import setup_gpu, create_base_argument_parser, set_seeds
+from train.common import setup_gpu, create_base_argument_parser, set_seeds, save_config_json
 from train.common.args import explicitly_set_flags
 from dl_techniques.models.vision.lewm.config import LeWMConfig
 from dl_techniques.models.vision.lewm.model import LeWM
@@ -251,6 +251,7 @@ def main() -> None:
     results_dir = _results_dir(prefix="lewm")
     logger.info(f"Results dir: {results_dir}")
     callbacks = _build_callbacks(results_dir)
+    save_config_json(model.config, str(results_dir))
 
     history = model.fit(
         dataset,
