@@ -162,7 +162,9 @@ def parse_args() -> argparse.Namespace:
     # Adopt the project's base argument parser for shared flags
     # (--epochs, --batch-size, --learning-rate, --weight-decay, --gpu, ...).
     # --dataset / --image-size / --lr-schedule / --patience / --show-plots are
-    # inherited but unused by this script; that drift is acceptable per
+    # inherited but unused by this script (--image-size is inherited from the
+    # base parser but unused here -- use --img-size instead, which actually
+    # controls image size for this trainer); that drift is acceptable per
     # train/CLAUDE.md guidance to prefer the base parser for consistency.
     p = create_base_argument_parser(
         description="LeWM trainer (upstream defaults; --smoke for fast CPU iteration)",
