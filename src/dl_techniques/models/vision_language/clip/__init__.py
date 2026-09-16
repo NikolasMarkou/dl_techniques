@@ -1,14 +1,13 @@
 """CLIP — public API re-exports.
 
-`model.py` is the standard CLIP; `clifford_clip.py` is a Clifford-algebra
-variant sharing the contrastive objective but not the tower internals.
+This package hosts the standard (non-Clifford) CLIP model. The Clifford-algebra
+variant, CliffordCLIP, lives in its own sibling package,
+`dl_techniques.models.vision_language.clifford_clip`.
 """
-from .clifford_clip import CliffordCLIP
 from .model import CLIP, create_clip_model, create_clip_variant
 
 __all__ = [
     "CLIP",
-    "CliffordCLIP",
     "create_clip_model",
     "create_clip_variant",
 ]
