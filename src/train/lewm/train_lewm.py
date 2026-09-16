@@ -10,8 +10,15 @@ Usage:
 
 This trains a LeWM model on synthetic random data. Loss is added via
 ``self.add_loss`` inside ``LeWM.call``, so we compile with ``loss=None``.
-``jit_compile=False`` avoids XLA tracing issues with the dynamic rollout
-loop / add_loss.
+``jit_compile`` is left at Keras' ``"auto"`` default (the argument is
+omitted from ``model.compile(...)``): ``rollout()``'s eager loop is never on
+the ``fit()`` path, so nothing here asks XLA to trace it. Empirically
+verified safe on 2026-09-16: 19/19 tests green
+(``tests/test_models/test_lewm.py``, ``tests/test_models/test_lewm_causality.py``,
+``tests/test_train/test_lewm/``), and a ``--smoke`` ``fit()`` run completed
+in ~87s with a finite, in-range loss (0.858, matching the prior
+``jit_compile=False`` baseline of 0.861) and "Reload check PASSED
+(max|delta|=0.00e+00)".
 """
 
 from __future__ import annotations
@@ -247,7 +254,6 @@ def main() -> None:
             weight_decay=args.weight_decay,
         ),
         loss=None,  # training loss comes from self.add_loss inside LeWM.call
-        jit_compile=False,
     )
 
     results_dir = _results_dir(prefix="lewm")
