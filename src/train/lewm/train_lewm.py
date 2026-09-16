@@ -174,10 +174,11 @@ def parse_args() -> argparse.Namespace:
     # Adopt the project's base argument parser for shared flags
     # (--epochs, --batch-size, --learning-rate, --weight-decay, --gpu, ...).
     # --dataset / --image-size / --lr-schedule / --patience / --show-plots are
-    # inherited but unused by this script (--image-size is inherited from the
-    # base parser but unused here -- use --img-size instead, which actually
-    # controls image size for this trainer); that drift is acceptable per
-    # train/CLAUDE.md guidance to prefer the base parser for consistency.
+    # inherited but unused by this script for their base-parser purpose
+    # (--image-size does not control image size here -- use --img-size
+    # instead; passing --image-size explicitly triggers a warning below).
+    # That drift is acceptable per train/CLAUDE.md guidance to prefer the
+    # base parser for consistency.
     p = create_base_argument_parser(
         description="LeWM trainer (upstream defaults; --smoke for fast CPU iteration)",
         default_dataset="cifar10",  # ignored
@@ -231,6 +232,12 @@ def parse_args() -> argparse.Namespace:
     # unmodified defaults.
     explicit = explicitly_set_flags(p)
     args = p.parse_args()
+
+    if "image_size" in explicit:
+        logger.warning(
+            "--image-size was explicitly passed but has no effect on this "
+            "trainer -- use --img-size instead."
+        )
 
     if args.smoke:
         for key, value in _SMOKE_OVERRIDES.items():

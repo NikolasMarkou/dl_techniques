@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +25,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
-from train.lewm.train_lewm import _build_model  # noqa: E402
+from train.lewm.train_lewm import _build_model, parse_args  # noqa: E402
 from dl_techniques.models.vision.lewm.model import LeWM  # noqa: E402
 from dl_techniques.models.vision.lewm.config import LeWMConfig  # noqa: E402
 from dl_techniques.datasets.pusht_hdf5 import synthetic_lewm_dataset  # noqa: E402
@@ -82,6 +83,29 @@ def test_build_model_accepts_consistent_config() -> None:
     model = _build_model(args)
     assert isinstance(model, LeWM)
     assert model.config.embed_dim == 192
+
+
+# ---------------------------------------------------------------------
+# --image-size near-homograph warning
+# (DECISION plan-2026-09-16T184828-4799af4c/D-004 reverses D-001: the
+# machinery to detect this was already live, so the cheap warning ships)
+# ---------------------------------------------------------------------
+
+def test_explicit_image_size_warns_it_has_no_effect(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(
+        sys, "argv", ["train_lewm.py", "--image-size", "128", "--synthetic"]
+    )
+    with caplog.at_level("WARNING"):
+        parse_args()
+    assert "--image-size" in caplog.text
+    assert "--img-size" in caplog.text
+
+
+def test_omitted_image_size_does_not_warn(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(sys, "argv", ["train_lewm.py", "--synthetic"])
+    with caplog.at_level("WARNING"):
+        parse_args()
+    assert "--image-size" not in caplog.text
 
 
 # ---------------------------------------------------------------------
