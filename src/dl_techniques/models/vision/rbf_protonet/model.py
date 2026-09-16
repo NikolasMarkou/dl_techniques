@@ -568,10 +568,12 @@ class CliffordRBFProtoNet(keras.Model):
         └────────────────────────────────────────┘
 
     Note:
-        As of this step, ``build()``, ``call()``, ``get_config()`` and
-        ``from_config()`` are NOT yet implemented -- they are step 4's
-        deliverable in this plan. This class currently supports
-        construction only (sublayer creation), not a forward pass.
+        The RBF head is built via ``create_mixture_layer('rbf', units=
+        num_classes, output_mode='normalized', ...)`` (see decisions.md
+        D-002: ``'normalized'`` is the ONLY supported mode for this model --
+        ``'basis'`` is not exposed as a togglable knob). ``call()`` runs the
+        stem, the isotropic Clifford block stack, the pooling head and then
+        the RBF head, returning a per-class probability vector.
 
     :param input_shape: Input shape ``(height, width, channels)`` excluding
         the batch dimension. Defaults to ``(32, 32, 3)`` (CIFAR).
@@ -633,8 +635,7 @@ class CliffordRBFProtoNet(keras.Model):
         4D tensor with shape ``(batch_size, height, width, channels)``.
 
     Output shape:
-        2D tensor ``(batch_size, num_classes)``, rows summing to 1.0 (once
-        ``call()`` is implemented in step 4).
+        2D tensor ``(batch_size, num_classes)``, rows summing to 1.0.
     """
 
     def __init__(
@@ -785,6 +786,111 @@ class CliffordRBFProtoNet(keras.Model):
             self.repulsion_strength,
             self.min_distance,
         )
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from `input_shape` by tracing `call`.
+
+        :param input_shape: Shape (or nest of shapes) of the input to `call`.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Run the stem, the isotropic Clifford block stack, and the pooling head.
+
+        :param inputs: Input tensor of shape `(batch_size, height, width, channels)`.
+        :param training: Whether batch norm and stochastic depth run in training mode.
+        :return: Per-class probability tensor `(batch_size, num_classes)`,
+            rows summing to 1.0 (``output_mode='normalized'`` contract).
+        """
+        x = self.stem_conv(inputs)
+        x = self.stem_bn(x, training=training)
+
+        for block, drop_path in zip(self.blocks, self.drop_paths):
+            x = x + drop_path(block(x, training=training), training=training)
+
+        pooled = self.gap(x)
+        if self.feature_proj is not None:
+            pooled = self.feature_proj(pooled)
+
+        return self.rbf_head(pooled, training=training)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get model configuration for serialization."""
+        config = {
+            "input_shape": self.input_shape_config,
+            "num_classes": self.num_classes,
+            "channels": self.channels,
+            "depth": self.depth,
+            "shifts": self.shifts,
+            "patch_size": self.patch_size,
+            "use_global_context": self.use_global_context,
+            "drop_path_rate": self.drop_path_rate,
+            "feature_dim": self.feature_dim,
+            "repulsion_strength": self.repulsion_strength,
+            "min_distance": self.min_distance,
+            "kernel_regularizer": keras.regularizers.serialize(
+                self.kernel_regularizer) if self.kernel_regularizer else None,
+            "pretrained": self.pretrained,
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "CliffordRBFProtoNet":
+        """Create a model from its `get_config()` output."""
+        if config.get("kernel_regularizer"):
+            config["kernel_regularizer"] = keras.regularizers.deserialize(
+                config["kernel_regularizer"]
+            )
+        return cls(**config)
+
+
+# ---------------------------------------------------------------------
+
+
+def create_clifford_rbf_protonet(
+        num_classes: int = 100,
+        input_shape: Tuple[int, int, int] = (32, 32, 3),
+        pretrained: bool = False,
+        **kwargs: Any,
+) -> CliffordRBFProtoNet:
+    """Create a :class:`CliffordRBFProtoNet` model.
+
+    Thin delegating factory, per the house model module shape -- no extra
+    logic beyond forwarding to the constructor.
+
+    :param num_classes: Number of RBF prototype units (= output classes).
+        Defaults to ``100`` (CIFAR-100).
+    :type num_classes: int
+    :param input_shape: Input shape ``(height, width, channels)`` excluding
+        the batch dimension. Defaults to ``(32, 32, 3)``.
+    :type input_shape: Tuple[int, int, int]
+    :param pretrained: If ``True``, raises ``NotImplementedError`` (no
+        pretrained weights are distributed). Defaults to ``False``.
+    :type pretrained: bool
+    :param kwargs: Additional keyword arguments forwarded to
+        :class:`CliffordRBFProtoNet`.
+    :return: A configured, uncompiled :class:`CliffordRBFProtoNet` model.
+    :rtype: CliffordRBFProtoNet
+    """
+    if pretrained:
+        raise NotImplementedError(
+            "CliffordRBFProtoNet has no pretrained weights; pass "
+            "pretrained=False and use model.load_weights(path) for warm starts."
+        )
+    return CliffordRBFProtoNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        pretrained=pretrained,
+        **kwargs,
+    )
 
 # ---------------------------------------------------------------------
 
