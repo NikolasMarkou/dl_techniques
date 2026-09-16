@@ -83,8 +83,11 @@ Autoregressive rollout from a history of pixel observations.
 ### Loss Wiring
 
 The model uses `self.add_loss()` inside `call`, so it is compiled with
-`loss=None`. `jit_compile=False` avoids XLA tracing issues with the dynamic
-rollout / add_loss path.
+`loss=None`. `jit_compile=False` is kept explicit: under `"auto"`, SIGReg's
+unseeded random projections draw in a different order under the
+compiled/XLA train function, shifting `sigreg_loss` ~5.5% deterministically
+versus eager execution; `"auto"` also has a measured ~2.5s/step real cost at
+smoke scale, and no existing test exercises the `"auto"` path.
 
 ### Dataset Schema
 
