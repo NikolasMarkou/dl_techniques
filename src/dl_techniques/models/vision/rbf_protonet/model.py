@@ -70,45 +70,45 @@ class RBFProtoNet(keras.Model):
 
     .. code-block:: text
 
-        ┌──────────────────────────────────────┐
-        │       Input [B, 32, 32, 3]            │
+        ┌────────────────────────────────────────┐
+        │       Input [B, 32, 32, 3]             │
         └───────────────┬────────────────────────┘
                         │
                         ▼
-        ┌──────────────────────────────────────┐
-        │  Stem: ConvBlock 3x3 /1               │  32x32 -> 32x32
-        │  (no pooling -- input has no spare    │
-        │   resolution to give up)              │
+        ┌────────────────────────────────────────┐
+        │  Stem: ConvBlock 3x3 /1                │  32x32 -> 32x32
+        │  (no pooling -- input has no spare     │
+        │   resolution to give up)               │
         └───────────────┬────────────────────────┘
                         ▼
-        ┌──────────────────────────────────────┐
-        │  Stage 1: ConvBlock 3x3 /2            │  32x32 -> 16x16
+        ┌────────────────────────────────────────┐
+        │  Stage 1: ConvBlock 3x3 /2             │  32x32 -> 16x16
         └───────────────┬────────────────────────┘
                         ▼
-        ┌──────────────────────────────────────┐
-        │  Stage 2: ConvBlock 3x3 /2            │  16x16 -> 8x8
+        ┌────────────────────────────────────────┐
+        │  Stage 2: ConvBlock 3x3 /2             │  16x16 -> 8x8
         └───────────────┬────────────────────────┘
                         ▼
-        ┌──────────────────────────────────────┐
-        │  Stage 3: ConvBlock 3x3 /2            │  8x8   -> 4x4
+        ┌────────────────────────────────────────┐
+        │  Stage 3: ConvBlock 3x3 /2             │  8x8   -> 4x4
         └───────────────┬────────────────────────┘
                         ▼
-        ┌──────────────────────────────────────┐
-        │  GlobalAveragePooling2D               │  4x4xF -> F
-        │  (+ Dense projection to feature_dim,  │
-        │   only if the last stage width != F)  │
+        ┌────────────────────────────────────────┐
+        │  GlobalAveragePooling2D                │  4x4xF -> F
+        │  (+ Dense projection to feature_dim,   │
+        │   only if the last stage width != F)   │
         └───────────────┬────────────────────────┘
                         ▼
-        ┌──────────────────────────────────────┐
-        │  RBFLayer head (output_mode=          │  F -> num_classes
-        │  'normalized', via create_mixture_    │
-        │  layer('rbf', ...))                   │
+        ┌────────────────────────────────────────┐
+        │  RBFLayer head (output_mode=           │  F -> num_classes
+        │  'normalized', via create_mixture_     │
+        │  layer('rbf', ...))                    │
         └───────────────┬────────────────────────┘
                         ▼
-        ┌──────────────────────────────────────┐
+        ┌────────────────────────────────────────┐
         │  Output: [B, num_classes]              │
         │  (probabilities, sums to 1.0 per row)  │
-        └──────────────────────────────────────┘
+        └────────────────────────────────────────┘
 
     Note:
         The RBF head is built via ``create_mixture_layer('rbf', units=
@@ -447,3 +447,6 @@ def create_rbf_protonet(
         pretrained=pretrained,
         **kwargs,
     )
+
+# ---------------------------------------------------------------------
+
