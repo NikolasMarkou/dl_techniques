@@ -163,6 +163,26 @@ class LeWM(keras.Model):
         shape = ops.shape(pixels)
         B, T = shape[0], shape[1]
         H, W, C = self.config.img_size, self.config.img_size, self.config.img_channels
+
+        # Static-shape guard: `pixels.shape` (not `ops.shape`) so `build()`'s
+        # KerasTensor placeholders with symbolic/None dims are never flagged —
+        # only a dim that is concretely known AND wrong raises.
+        static_h, static_w, static_c = pixels.shape[2], pixels.shape[3], pixels.shape[4]
+        mismatches = [
+            (name, expected, actual)
+            for name, expected, actual in (("H", H, static_h), ("W", W, static_w), ("C", C, static_c))
+            if actual is not None and actual != expected
+        ]
+        if mismatches:
+            raise ValueError(
+                f"LeWM.encode_pixels: pixels tensor's static shape (H, W, C)="
+                f"{(static_h, static_w, static_c)} disagrees with config-derived "
+                f"(H, W, C)=({H}, {W}, {C}) (self.config.img_size={self.config.img_size}, "
+                f"img_channels={self.config.img_channels}); mismatched axes: "
+                f"{[name for name, _, _ in mismatches]}. Check that the input pixel "
+                f"tensor's shape matches the model's config."
+            )
+
         flat = ops.reshape(pixels, (B * T, H, W, C))
         feat = self.encoder(flat, training=training)
         proj = self.projector(feat, training=training)
