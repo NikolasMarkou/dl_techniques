@@ -377,7 +377,7 @@ def test_clip_has_no_identical_random_pairs_outside_the_rope_caches():
 
 
 def _clifford_clip():
-    from dl_techniques.models.vision_language.clip.clifford_clip import CliffordCLIP
+    from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
     keras.utils.set_random_seed(1234)
     model = CliffordCLIP.from_variant(
         "nano", vocab_size=64, image_size=64, context_length=16,

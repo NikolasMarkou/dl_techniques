@@ -190,7 +190,7 @@ def _cliffordnet_stem_momentum() -> float:
 
 
 def _clifford_clip_stem_momentum() -> float:
-    from dl_techniques.models.vision_language.clip.clifford_clip import _VISION_STEM_BN_MOMENTUM
+    from dl_techniques.models.vision_language.clifford_clip.model import _VISION_STEM_BN_MOMENTUM
 
     return _VISION_STEM_BN_MOMENTUM
 

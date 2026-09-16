@@ -34,7 +34,7 @@ import pytest
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.vision_language.clip.clifford_clip import CliffordCLIP
+from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
 from train.cliffordnet.train_clip import (
     ContrastiveCliffordCLIP,
     _build_arg_parser,
