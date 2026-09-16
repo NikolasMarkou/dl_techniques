@@ -321,6 +321,97 @@ def test_as_tf_dataset_windows_never_straddle_episode_boundary_end_to_end(
     assert sorted(seen_starts) == sorted(expected_starts.tolist())
 
 
+def test_window_starts_and_dataset_respect_three_unequal_length_episodes(
+    tmp_path, monkeypatch
+):
+    # The existing boundary tests (Cases 3-4) use exactly 2 episodes of
+    # ROUND, equal-ish length (10, 10). A boundary-check bug that only
+    # validates the FIRST episode transition (e.g. hardcoding the single
+    # boundary rather than iterating `ends`) would be invisible there: with
+    # only one internal boundary, "check the first boundary" and "check
+    # every boundary" are the same code path. Using 3 episodes of
+    # DELIBERATELY unequal, non-round lengths (7, 15, 9 — none equal to each
+    # other, to T, or to a round number) creates 2 DISTINCT internal
+    # boundaries, so a mutant that only validates the first one would pass
+    # the boundary-1 check but silently admit a straddling window at
+    # boundary 2.
+    _pin_cpu_only(monkeypatch)
+    episode_lengths = [7, 15, 9]
+    n = sum(episode_lengths)
+    episode_ends = list(np.cumsum(episode_lengths))  # [7, 22, 31]
+    h0, w0, action_dim = 8, 8, 2
+    # Index-encode every frame, same pattern as the Case-4 end-to-end test,
+    # so each emitted window can be decoded back to the frame indices it
+    # actually contains.
+    pixels = np.zeros((n, h0, w0, 3), dtype=np.uint8)
+    for i in range(n):
+        pixels[i, ...] = i
+    action = np.stack(
+        [np.arange(n, dtype=np.float32), -np.arange(n, dtype=np.float32)], axis=1
+    )
+    h5_path = tmp_path / "pusht_three_episodes.h5"
+    _write_pusht_h5(str(h5_path), pixels, action, episode_ends=episode_ends)
+
+    history_size, num_preds = 3, 1
+    T = history_size + num_preds
+    dataset = PushTHDF5Dataset(
+        str(h5_path),
+        img_size=h0,  # == input size: resize is a no-op, preserving the index
+        action_dim=action_dim,
+        history_size=history_size,
+        num_preds=num_preds,
+        batch_size=1,
+    )
+
+    # Independently re-derive the expected per-episode window-start set with
+    # the SAME "while i + T <= end" rule as `test_window_starts_never_crosses_an_episode_boundary`
+    # — regenerated fresh for this 3-episode, unequal-length case, not copied.
+    expected_starts = []
+    prev_end = 0
+    for end in episode_ends:
+        i = prev_end
+        while i + T <= end:
+            expected_starts.append(i)
+            i += 1
+        prev_end = end
+    expected_starts = sorted(expected_starts)
+
+    actual_starts = dataset._window_starts(np.asarray(episode_ends, dtype=np.int64))
+    assert sorted(actual_starts.tolist()) == expected_starts
+
+    # (b) the window count matches the independently-derived count EXACTLY.
+    assert len(expected_starts) == 22  # hand check: 4 (ep1) + 12 (ep2) + 6 (ep3)
+
+    # (a) no window straddles EITHER internal boundary (7 and 22) — this is
+    # the assertion a "first-boundary-only" mutant would fail on boundary 2.
+    for s in expected_starts:
+        for boundary in (episode_ends[0], episode_ends[1]):
+            assert s + T <= boundary or s >= boundary
+
+    # (c) drive the REAL end-to-end pipeline (not `_window_starts()` alone)
+    # and confirm the emitted window-start set is exactly the expected set,
+    # and that no window straddles either boundary when read from actual
+    # decoded frame content.
+    tf_dataset = dataset.as_tf_dataset()
+    seen_starts = []
+    for x, _y in tf_dataset.take(len(expected_starts)):
+        win_pixels = x["pixels"].numpy()[0]  # (T, h0, w0, 3)
+        win_action = x["action"].numpy()[0]  # (T - 1, action_dim)
+        decoded = np.round(
+            (win_pixels[:, 0, 0, 0] * _IMAGENET_STD[0] + _IMAGENET_MEAN[0]) * 255.0
+        ).astype(int)
+        start = int(decoded[0])
+        seen_starts.append(start)
+        assert np.array_equal(decoded, np.arange(start, start + T))
+        for boundary in (episode_ends[0], episode_ends[1]):
+            assert start + T <= boundary or start >= boundary
+        frame_idx = np.arange(start, start + T - 1, dtype=np.float32)
+        expected_action = np.stack([frame_idx, -frame_idx], axis=1)
+        assert np.allclose(win_action, expected_action)
+
+    assert sorted(seen_starts) == expected_starts
+
+
 def test_load_metadata_falls_back_to_n_pixels_when_episode_ends_absent(tmp_path):
     rng = np.random.default_rng(0)
     n, h0, w0, action_dim = 20, 48, 48, 2
