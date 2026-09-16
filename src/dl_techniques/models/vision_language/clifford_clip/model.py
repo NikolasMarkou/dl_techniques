@@ -108,7 +108,12 @@ _LN_EPS: float = 1e-6
 # ===========================================================================
 
 
-@register_dl_technique("dl_techniques.models.clip.clifford_clip")
+# DECISION plan-2026-09-16T085926-41908265/D-001: registration key fixed to
+# dl_techniques.models.clifford_clip.model (convention-correct, per models/CLAUDE.md).
+# Do NOT assume any .keras archive exists under the old "dl_techniques.models.clip.clifford_clip"
+# key -- none does (results/ scan confirmed empty) -- and do not revert this without re-checking
+# results/ first. See decisions.md D-001.
+@register_dl_technique("dl_techniques.models.clifford_clip.model")
 class CliffordCLIP(keras.Model):
     """CLIP-style dual-encoder model with Clifford geometric blocks.
 
