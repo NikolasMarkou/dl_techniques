@@ -81,7 +81,7 @@ def _create_rbf_head(
     function from their own ``_build_rbf_head`` rather than duplicating the
     ``create_mixture_layer`` call inline. See decisions.md D-002.
 
-    # DECISION plan-2026-09-16-b83f88ad/D-002: 'normalized' is the ONLY
+    # DECISION plan-2026-09-16T064227-b83f88ad/D-002: 'normalized' is the ONLY
     # supported output_mode for this head -- do not expose output_mode as a
     # parameter here defaulting to 'basis'. RBFLayer's own docstring and
     # decisions.md D-002 both document 'basis' as barely-trainable at this
@@ -705,7 +705,7 @@ class CliffordRBFProtoNet(keras.Model):
     def _build_stem(self) -> None:
         """Build the patch-embedding stem: strided ``Conv2D`` + ``BatchNormalization``.
 
-        # DECISION plan-2026-09-16-b83f88ad/D-005: this exact composition
+        # DECISION plan-2026-09-16T064227-b83f88ad/D-005: this exact composition
         # (Conv2D(strides=patch_size) -> BatchNormalization(momentum=0.9))
         # was validated by step 1's standalone smoke test before being
         # folded into this class. Do not swap in ConvBlock or a different
