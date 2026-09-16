@@ -1,25 +1,22 @@
-"""CLIP-style contrastive dual encoder whose towers are CliffordNet
+"""
+CLIP-style contrastive dual encoder whose towers are CliffordNet
 geometric-algebra blocks instead of attention, with a selectable Clifford-aware
 projection head.
 
-Two towers are trained to place an image and its caption at the same point of
-a shared unit sphere, supervised only by which pairing in the batch is the
-true one, exactly as in standard CLIP. What differs is how each tower mixes
-information: a CliffordNet block reads features as multivectors over the
-channel axis and combines channel pairs at a fixed shift through the
-geometric product `a b = <a, b> + a ^ b`. The inner part behaves like a
-dot-product attention score; the wedge part carries orientation, which a
-symmetric similarity discards. Because the shift set is small and fixed
-rather than all-pairs, cost is linear in sequence or spatial size.
-
-The geometric product mixes channels, not positions, so spatial and
-sequential context comes from a depthwise convolution inside each block
-instead — bidirectional in the vision tower, causal in the text tower. The
-vision tower is hierarchical (patch stem, then stages linked by
-`PatchMerging`), the text tower is isotropic, and both use an external
-residual around each transform-only block. The contrastive loss itself is
-not defined here; `dl_techniques.losses.CLIPContrastiveLoss` matches this
-model's output schema.
+Defines :class:`CliffordCLIP`, which maps an image and a caption to the same unit
+sphere, supervised only by which pairing in the batch is the true one, as in standard
+CLIP. What differs is how each tower mixes information: a CliffordNet block reads
+features as multivectors over the channel axis and combines channel pairs at a fixed
+shift through the geometric product ``a b = <a, b> + a ^ b``, whose inner part behaves
+like a dot-product score and whose wedge part carries the orientation a symmetric
+similarity discards. The shift set is small and fixed rather than all-pairs, so cost
+is linear in sequence or spatial size. The product mixes channels and not positions,
+so spatial and sequential context comes from a depthwise convolution inside each
+block, bidirectional in the vision tower and causal in the text tower. The vision
+tower is hierarchical, a patch stem then stages linked by ``PatchMerging``; the text
+tower is isotropic; both wrap each transform-only block in an external residual. The
+contrastive loss is not defined here, and
+``dl_techniques.losses.CLIPContrastiveLoss`` matches this model's output schema.
 
 References:
     - Ji, 2026. CliffordNet: All You Need is Geometric Algebra.
@@ -72,10 +69,14 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]:
     """Return a valid non-empty list of head shifts given the channel size.
 
-    The SparseRollingGeometricProduct filters out shifts ``>= channels``
-    and raises if none remain. For the tower head we want a small, robust
-    default that works across variants, so we fall back to ``[1]`` when the
-    requested set would be filtered empty.
+    ``SparseRollingGeometricProduct`` filters out shifts ``>= channels`` and raises
+    when none remain, so this falls back to ``[1]`` for a head whose requested set
+    would be filtered empty.
+
+    :param channels: Channel count the head's geometric product runs at.
+    :param requested: Requested shifts, or ``None`` for ``[1, 2]``.
+    :return: The shifts that survive the filter.
+    :raises ValueError: If ``channels`` is too small for any shift.
     """
     base = list(requested) if requested else [1, 2]
     kept = [s for s in base if s < channels]
@@ -90,14 +91,14 @@ def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]
 
 # ---------------------------------------------------------------------------
 
-# DECISION plan-2026-08-19T163559-499b6f0e/D-072: this is one shared Initializer
-# instance; pass `clone_initializer(...)` to every consumer, never the object itself —
-# sharing it gave the two towers 763 bit-identical weight pairs. See decisions.md.
+# DECISION plan-2026-08-19T163559-499b6f0e/D-072: one shared Initializer instance;
+# pass clone_initializer(...) to every consumer, or the two towers come out with 763
+# bit-identical weight pairs. See decisions.md.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 
-# DECISION plan-2026-08-23T091307-9a110062/D-480: BatchNorm momentum is 0.9 (torch
-# convention), matching CliffordNet's stem; Keras and torch define momentum oppositely
-# (keras_momentum = 1 - torch_momentum), so do not "correct" this to 0.1. See decisions.md.
+# DECISION plan-2026-08-23T091307-9a110062/D-480: BatchNorm momentum is 0.9, the torch
+# convention CliffordNet's stem uses; keras_momentum = 1 - torch_momentum, so this is
+# not a typo for 0.1. See decisions.md.
 _VISION_STEM_BN_MOMENTUM = 0.9
 _LN_EPS: float = 1e-6
 
@@ -111,12 +112,91 @@ _LN_EPS: float = 1e-6
 class CliffordCLIP(keras.Model):
     """CLIP-style dual-encoder model with Clifford geometric blocks.
 
-    The vision and text towers are both built from Clifford algebra blocks.
-    Given a batch of ``(image, text)`` pairs, both encoders produce
-    L2-normalized feature vectors in a shared ``embed_dim`` space. The
-    symmetric image-text and text-image cross-entropy over the
-    temperature-scaled similarity matrix is the contrastive training
-    objective.
+    Both towers produce L2-normalized features in a shared ``embed_dim`` space, and
+    ``call`` returns those features together with the temperature-scaled similarity
+    matrices. The symmetric image-text and text-image cross-entropy over them is the
+    training objective, computed outside this class.
+
+    Architecture:
+
+    .. code-block:: text
+
+        image [B, H, W, C]              text [B, L] int32
+                 │                              │
+                 ▼                              ▼
+        ┌──────────────────────┐   ┌──────────────────────┐
+        │ vision tower         │   │ text tower           │
+        └──────────────────────┘   └──────────────────────┘
+                 │                              │
+                 ▼                              ▼
+           projection head                projection head
+                 │  L2 normalize                │  L2 normalize
+                 ▼                              ▼
+          image_features [B, E]          text_features [B, E]
+                 └───────────► logits ◄──────────────┘
+                                 │  * exp(logit_scale), capped
+                                 ▼
+                logits_per_image, logits_per_text  [B, B]
+
+    logit_scale stays float32 even under a mixed policy.
+
+    Vision tower:
+
+    .. code-block:: text
+
+        image
+                 │
+                 ▼
+        ┌──────────────────────┐
+        │ stem  conv, stride p │
+        └──────────────────────┘
+                 │  [B, H/p, W/p, stage_channels[0]]
+                 ▼  + vision_pos_embed (optional)
+        ┌──────────────────────┐
+        │ stage i blocks       │  depths[i] blocks, external residual
+        └──────────────────────┘
+                 │
+                 ▼
+        ┌──────────────────────┐
+        │ patch_merge_i        │  halves H and W, emits 2 * src
+        └──────────────────────┘
+                 │
+                 ▼
+        ┌──────────────────────┐
+        │ merge_proj_i         │  only when target != 2 * src
+        └──────────────────────┘
+                 │  repeats at every stage boundary
+                 ▼
+        last stage [B, H', W', stage_channels[-1]]
+
+    The text tower is isotropic: embeddings, then text_depth causal blocks.
+
+    Projection heads:
+
+    .. code-block:: text
+
+        head_kind               z_det       z_ctx            output
+        plain                   -           -                anchor
+        mean_max                mean pool   max or last      geo(z_det, z_ctx)
+        learned_query           mean pool   attention pool   geo(z_det, z_ctx)
+        learned_query_residual  mean pool   attention pool   anchor + scale *
+                                                             geo(z_det, z_ctx)
+
+    The anchor is the mean pool for vision and the last non-pad token for text.
+
+    Variants:
+
+    .. code-block:: text
+
+        variant  vision channels      depths      text  t.depth  embed
+        nano     128,128,256,256      3,3,3,3     128   12       256
+        nano_g   128,128,256,256      3,3,3,3     128   12       256
+        mini     192,192,384,384      3,3,3,3     192   12       384
+        small    192,192,384,384      4,4,4,3     192   15       384
+        base     256,256,512,512      4,4,4,4     256   12       512
+        large    384,384,768,768      5,5,5,5     384   16       768
+
+    nano_g is nano with the vision global-context branch switched on.
 
     :param image_size: Input image resolution (``H == W``). Must be positive
         and divisible by ``vision_patch_size``.
@@ -124,15 +204,30 @@ class CliffordCLIP(keras.Model):
     :param vision_patch_size: Patch stem stride. Accepts
         ``1``/``2``/``4`` (matching :class:`CliffordNet` stem variants) or
         any positive integer for a generic single-conv stem.
-    :param vision_channels: Feature dim ``D_v`` for vision blocks.
-    :param vision_depth: Number of :class:`CliffordNetBlock` layers.
-    :param vision_shifts: Sparse rolling product shifts for vision blocks.
+    :param vision_stage_channels: Channel count per vision stage. This and
+        ``vision_stage_depths`` are the preferred configuration, and every shipped
+        variant uses them; both must be given together.
+    :param vision_stage_depths: Number of :class:`CliffordNetBlock` layers per stage.
+    :param vision_stage_shifts: Sparse rolling product shifts per stage. ``None``
+        broadcasts ``vision_shifts`` (or ``[1, 2]``) to every stage. Each stage's
+        largest shift must be below that stage's channel count.
+    :param vision_channels: Legacy single-stage channel count, used only when no
+        stage lists are given. Defaults to 192 on that path. After construction the
+        attribute of this name holds the last stage's channels.
+    :param vision_depth: Legacy single-stage block count, used only when no stage
+        lists are given. Defaults to 12 on that path. The attribute afterwards holds
+        the summed depth.
+    :param vision_shifts: Legacy single-stage shifts, also the broadcast source for
+        ``vision_stage_shifts=None``.
     :param vision_cli_mode: Clifford components ``"inner"``, ``"wedge"``,
         or ``"full"`` (default).
     :param vision_ctx_mode: Vision context mode ``"diff"`` or ``"abs"``.
     :param vision_use_global_context: Add global GAP context branch to
         vision blocks.
-    :param vision_stochastic_depth_rate: Max DropPath rate for vision blocks.
+    :param vision_stochastic_depth_rate: Max DropPath rate for vision blocks,
+        scheduled linearly across the summed depth of all stages.
+    :param vision_positional_encoding: Add a learned 2D positional weight over the
+        post-stem map. Off by default, in which case no such weight exists.
     :param vocab_size: Text vocabulary size. Must match the tokenizer used to
         produce ``input_ids``; the shipped trainer defaults to tiktoken
         ``gpt2`` (50257 tokens). Any tokenizer works as long as ``vocab_size``
@@ -172,32 +267,42 @@ class CliffordCLIP(keras.Model):
     :param head_kind: Which projection head to use. One of:
 
         - ``"plain"`` — Standard CLIP head: single pooled view
-          (GAP for vision, last-token for text) → LayerNorm → Dense
-          (embed_dim). Baseline; Clifford blocks are only in the
-          backbone.
+          (mean for vision, last-token for text) → LayerNorm → Dense
+          (embed_dim). Clifford blocks stay in the backbone only.
         - ``"mean_max"`` — Clifford-aware head with two pooling views
           combined via :class:`SparseRollingGeometricProduct`. Vision
-          uses (GAP, GMP); text uses (masked-mean, last-token).
+          uses (mean, max); text uses (masked-mean, last-token).
         - ``"learned_query"`` — Clifford-aware head where the second
           pooling view is a single learned attention query over the
-          sequence of features. Vision ``z_det=GAP``; text
+          sequence of features. Vision ``z_det=mean``; text
           ``z_det=masked-mean``; both pair with an attention-pooled
           ``z_ctx`` from a learnable ``(1, D)`` query.
         - ``"learned_query_residual"`` *(default)* — Same two pooling
           views as ``learned_query``, but the geometric product output
           is injected as a LayerScale-gated residual on top of the
           canonical CLIP anchor (``z_det`` for vision, ``last_feat``
-          for text). LayerScale gamma initialises near zero so the
-          head starts behaving like ``plain`` and gradually introduces
-          wedge/inner content where it helps. This mirrors the
-          :class:`GatedGeometricResidual` pattern used inside the
-          Clifford backbone itself and is the empirical winner on
-          CC3M-smoke at 12.5 k steps.
+          for text). LayerScale gamma starts near zero, so the head
+          begins as ``plain`` and introduces wedge/inner content as
+          training proceeds, the way
+          :class:`GatedGeometricResidual` works inside the backbone.
     :param use_bias: Whether Dense layers use bias.
     :param kernel_initializer: Kernel initializer for all Dense/projection.
     :param bias_initializer: Bias initializer.
     :param kernel_regularizer: Optional kernel regularizer.
     :param bias_regularizer: Optional bias regularizer.
+    :param **kwargs: Forwarded to :class:`keras.Model`.
+
+    :raises ValueError: If ``image_size`` or ``vision_patch_size`` is non-positive or
+        they do not divide, if a channel, depth, embed or vocabulary size is
+        non-positive, if the vision stage lists differ in length or one is given
+        without the other, if a stage's largest shift is not below its channel count,
+        if the post-stem map is smaller than ``2 ** n_stages`` so the final stage
+        would be 1x1, or if ``head_cli_mode`` or ``head_kind`` is unknown.
+
+    Output:
+        A dict with ``image_features`` and ``text_features`` at ``(B, embed_dim)``,
+        ``logits_per_image`` and ``logits_per_text`` at ``(B, B)``, and the scalar
+        ``logit_scale``.
 
     Example:
         .. code-block:: python
@@ -214,21 +319,13 @@ class CliffordCLIP(keras.Model):
 
     LAYERNORM_EPSILON: float = _LN_EPS
 
-    # Scaling ladder; both towers share depth/channels so the contrastive
-    # temperature update sees balanced gradient magnitudes. ``nano`` and
-    # ``nano_g`` match the depth/shifts of :class:`CliffordNet` / :class:`
-    # CliffordNetLM` nano (channels=128, depth=12, shifts=[1,2]); ``nano_g``
-    # adds a global-context branch on the vision tower, mirroring
-    # :class:`CliffordNet.lite_g`.
+    # Scaling ladder; both towers share depth and channels so the contrastive
+    # temperature update sees balanced gradient magnitudes. nano and nano_g match
+    # CliffordNet / CliffordNetLM nano (channels=128, depth=12, shifts=[1,2]).
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
-        # Vision tower is now hierarchical: 4 stages with PatchMerging
-        # between them and the channel progression ``[D, D, 2D, 2D]``
-        # (D-002: doubling twice across 4 stages keeps the parameter
-        # budget within ~2x of the pre-refactor isotropic count while
-        # delivering the activation-memory win from spatial halving).
-        # Total vision depth is preserved against the pre-refactor
-        # ladder (sum of stage depths == old vision_depth).
-        # The text tower remains isotropic per D-001.
+        # Hierarchical vision tower: 4 stages with PatchMerging between them and
+        # the channel progression [D, D, 2D, 2D] (D-002). Total vision depth
+        # matches the isotropic ladder; the text tower stays isotropic (D-001).
         "nano": dict(
             vision_stage_channels=[128, 128, 256, 256],
             vision_stage_depths=[3, 3, 3, 3],          # sum 12
@@ -240,11 +337,8 @@ class CliffordCLIP(keras.Model):
             vision_stochastic_depth_rate=0.05,
             text_stochastic_depth_rate=0.05,
         ),
-        # nano_g: nano with a global-context branch on the vision tower
-        # (gFFN-G), mirroring CliffordNet.lite_g. The global-context flag
-        # currently broadcasts to all stages (parking-lot decision in
-        # decisions.md). Text tower defaults to text_use_global_context=False
-        # to match CliffordNetLM; pass text_use_global_context=True to enable.
+        # nano with the vision global-context branch (gFFN-G), mirroring
+        # CliffordNet.lite_g. The flag currently reaches every stage.
         "nano_g": dict(
             vision_stage_channels=[128, 128, 256, 256],
             vision_stage_depths=[3, 3, 3, 3],
@@ -312,12 +406,7 @@ class CliffordCLIP(keras.Model):
         vision_channels: Optional[int] = None,
         vision_depth: Optional[int] = None,
         vision_shifts: Optional[List[int]] = None,
-        # Hierarchical vision config (preferred over scalar legacy fields).
-        # Each list has one entry per stage; PatchMerging is inserted between
-        # adjacent stages, halving spatial resolution. Channel transitions
-        # between stages are handled by PatchMerging (always 4*src -> 2*src)
-        # followed by an optional Dense projection to the target stage's
-        # channel count when ``target != 2*src``.
+        # Hierarchical vision config, preferred over the scalar fields above.
         vision_stage_channels: Optional[List[int]] = None,
         vision_stage_depths: Optional[List[int]] = None,
         vision_stage_shifts: Optional[List[List[int]]] = None,
@@ -356,7 +445,6 @@ class CliffordCLIP(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
-        # --- Validation ---
         if image_size <= 0:
             raise ValueError(f"image_size must be positive, got {image_size}")
         if vision_patch_size <= 0:
@@ -379,12 +467,6 @@ class CliffordCLIP(keras.Model):
                 f"context_length must be positive, got {context_length}"
             )
 
-        # --- Resolve vision staged config (back-compat with scalar fields) ---
-        # Preference order:
-        #   1. Explicit per-stage lists (``vision_stage_channels`` etc.)
-        #   2. Legacy scalar fields (``vision_channels`` / ``vision_depth`` /
-        #      ``vision_shifts``) -> single-stage isotropic, no PatchMerging.
-        #   3. Default scalar fallback (channels=192, depth=12) -> single stage.
         if vision_stage_channels is not None or vision_stage_depths is not None:
             if (
                 vision_stage_channels is None
@@ -397,7 +479,7 @@ class CliffordCLIP(keras.Model):
             stage_channels = list(vision_stage_channels)
             stage_depths = list(vision_stage_depths)
             if vision_stage_shifts is None:
-                # Broadcast scalar ``vision_shifts`` (or default) to all stages.
+                # Broadcast scalar `vision_shifts` (or the default) to all stages.
                 base_shifts = (
                     list(vision_shifts) if vision_shifts is not None else [1, 2]
                 )
@@ -405,7 +487,7 @@ class CliffordCLIP(keras.Model):
             else:
                 stage_shifts = [list(s) for s in vision_stage_shifts]
         else:
-            # Legacy single-stage path.
+            # Legacy single-stage path: no PatchMerging, scalar fields only.
             scalar_channels = vision_channels if vision_channels is not None else 192
             scalar_depth = vision_depth if vision_depth is not None else 12
             scalar_shifts = (
@@ -438,9 +520,9 @@ class CliffordCLIP(keras.Model):
                     f"vision_stage_shifts[{i}] has shift >= channels "
                     f"({max(sh)} >= {stage_channels[i]})"
                 )
-        # Validate post-stem spatial dim keeps a >=2x2 map at the final stage.
-        # DECISION plan-2026-07-15T114613-5add9baa/D-001: require >=2x2 final spatial (post_stem >= 2^n_stages) —
-        # a 1x1 map makes the attention pool (softmax-over-1) a dead-gradient no-op (B1); do not relax to 2^(n_stages-1).
+        # DECISION plan-2026-07-15T114613-5add9baa/D-001: require post_stem >= 2^n_stages
+        # so the final stage keeps a 2x2 map; at 1x1 the attention pool is a
+        # softmax over one element and its gradient is dead. See decisions.md.
         post_stem = image_size // vision_patch_size
         if post_stem < (1 << n_stages):
             raise ValueError(
@@ -451,17 +533,16 @@ class CliffordCLIP(keras.Model):
                 f"patch_size={vision_patch_size}, n_stages={n_stages}"
             )
 
-        # --- Store config ---
         self.image_size = image_size
         self.image_channels = image_channels
         self.vision_patch_size = vision_patch_size
         self.vision_stage_channels = stage_channels
         self.vision_stage_depths = stage_depths
         self.vision_stage_shifts = stage_shifts
-        # Derived scalars for downstream sizing + back-compat introspection.
-        self.vision_channels = stage_channels[-1]   # last-stage channel count
+        # Derived scalars for downstream sizing and legacy introspection.
+        self.vision_channels = stage_channels[-1]
         self.vision_depth = sum(stage_depths)
-        self.vision_shifts = list(stage_shifts[0])  # representative for legacy callers
+        self.vision_shifts = list(stage_shifts[0])
         # Stem produces stage-0 channels.
         self._vision_stem_channels = stage_channels[0]
         self.vision_cli_mode = vision_cli_mode
@@ -469,8 +550,7 @@ class CliffordCLIP(keras.Model):
         self.vision_use_global_context = vision_use_global_context
         self.vision_stochastic_depth_rate = vision_stochastic_depth_rate
         self.vision_positional_encoding = vision_positional_encoding
-        # Learned 2D positional weight; materialised in build() only when the
-        # flag is True (default-off => attribute stays None, no extra weight).
+        # Materialised in build() only when the flag is on, so off means no weight.
         self.vision_pos_embed = None
 
         self.vocab_size = vocab_size
@@ -514,12 +594,11 @@ class CliffordCLIP(keras.Model):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # --- Build sub-layer groups ---
         self._build_vision_tower()
         self._build_text_tower()
         self._build_projections()
 
-        # Weight placeholder; created in build()
+        # Weight placeholder; created in build().
         self.logit_scale = None
 
         logger.info(
@@ -532,10 +611,11 @@ class CliffordCLIP(keras.Model):
         )
 
     # ------------------------------------------------------------------
-    # Builders (golden rule: create sub-layers in __init__)
+    # Builders
     # ------------------------------------------------------------------
 
     def _dense_kwargs(self) -> Dict[str, Any]:
+        """Return the shared Dense arguments, with a fresh kernel initializer."""
         return dict(
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -545,17 +625,14 @@ class CliffordCLIP(keras.Model):
         )
 
     def _build_vision_tower(self) -> None:
-        """Vision tower: patch stem -> staged CliffordNetBlocks (with
-        PatchMerging between stages) -> GAP -> LN.
+        """Create the patch stem, the staged blocks, the merges and the head norm.
 
-        The body is built as ``len(vision_stage_channels)`` consecutive
-        stages. Each stage has ``vision_stage_depths[i]`` shape-preserving
-        :class:`CliffordNetBlock` layers operating at
-        ``vision_stage_channels[i]`` channels and ``vision_stage_shifts[i]``
-        shifts. Between adjacent stages a :class:`PatchMerging` halves the
-        spatial resolution (and produces ``2 * src_channels`` channels);
-        an optional ``Dense`` projects to the next stage's channel count
-        when it differs from ``2 * src``.
+        Each stage holds ``vision_stage_depths[i]`` shape-preserving
+        :class:`CliffordNetBlock` layers at ``vision_stage_channels[i]`` channels
+        and ``vision_stage_shifts[i]`` shifts. Between adjacent stages a
+        :class:`PatchMerging` halves the spatial resolution and emits
+        ``2 * src_channels``, and a Dense projects to the next stage's channel count
+        when that differs.
         """
         _conv_kw: Dict[str, Any] = dict(
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -564,7 +641,7 @@ class CliffordCLIP(keras.Model):
             bias_regularizer=self.bias_regularizer,
         )
 
-        stem_channels = self._vision_stem_channels  # = stage_channels[0]
+        stem_channels = self._vision_stem_channels
 
         # Stem: mirrors CliffordNet.model._build_stem semantics.
         if self.vision_patch_size == 1:
@@ -640,16 +717,14 @@ class CliffordCLIP(keras.Model):
             name="vision_stem_norm", momentum=_VISION_STEM_BN_MOMENTUM
         )
 
-        # --- Staged CliffordNet blocks + PatchMerging downsamples ---
-        # Global linear DropPath schedule across the *total* depth.
+        # One linear DropPath schedule across the total depth, not per stage.
         total_depth = sum(self.vision_stage_depths)
         global_drop_rates = linear_drop_path_rates(
             total_depth, self.vision_stochastic_depth_rate
         )
 
         self.vision_blocks: List[CliffordNetBlock] = []
-        # Cumulative depth offsets of length n_stages (offset of stage i is
-        # the index in ``vision_blocks`` of stage i's first block).
+        # Index in `vision_blocks` of each stage's first block.
         self._vision_stage_offsets: List[int] = []
         block_idx = 0
         for stage_idx, (stage_c, stage_d, stage_sh) in enumerate(
@@ -682,8 +757,8 @@ class CliffordCLIP(keras.Model):
                 )
                 block_idx += 1
 
-        # External residual + drop_path per vision block (transform-only blocks):
-        # x = x + StochasticDepth(rate)(block(x)). One SD per flat vision block.
+        # The blocks are transform-only, so the residual lives here: one
+        # StochasticDepth per flat vision block.
         self.vision_drop_paths: List[StochasticDepth] = [
             StochasticDepth(
                 drop_path_rate=global_drop_rates[i],
@@ -692,10 +767,8 @@ class CliffordCLIP(keras.Model):
             for i in range(total_depth)
         ]
 
-        # PatchMerging between adjacent stages. PatchMerging always emits
-        # ``2 * src``; an optional Dense projects to ``target`` when the
-        # progression is not pure-doubling (e.g. D -> D needs a 2D -> D
-        # projection; D -> 2D needs no projection because src=D, 2*src=2D).
+        # PatchMerging always emits 2 * src, so a Dense follows only where the
+        # progression is not pure doubling.
         self.vision_merge_layers: List[PatchMerging] = []
         self.vision_merge_projections: List[Optional[keras.layers.Dense]] = []
         for i in range(len(self.vision_stage_channels) - 1):
@@ -727,15 +800,10 @@ class CliffordCLIP(keras.Model):
             else:
                 self.vision_merge_projections.append(None)
 
-        # Pooling is routed through generic SequencePooling instances created
-        # in _build_projections (vision_det_pool / vision_ctx_pool); the old
-        # GlobalAveragePooling2D / GlobalMaxPooling2D are gone (D-001).
         self.vision_head_norm = keras.layers.LayerNormalization(
             epsilon=_LN_EPS, name="vision_head_norm"
         )
-        # Optional pre-projection dropout, gated on dropout_rate > 0 — mirrors
-        # CliffordNet.head_dropout (model.py) so the CLIP vision head has the
-        # same regularisation hook as the vanilla classifier head.
+        # Gated on dropout_rate > 0, matching CliffordNet.head_dropout.
         self.vision_head_dropout = (
             keras.layers.Dropout(self.dropout_rate, name="vision_head_dropout")
             if self.dropout_rate > 0.0
@@ -798,9 +866,7 @@ class CliffordCLIP(keras.Model):
         self.text_head_norm = keras.layers.LayerNormalization(
             epsilon=_LN_EPS, name="text_head_norm"
         )
-        # Optional pre-projection dropout on the (B, L, D) sequence — mirrors
-        # CliffordNetLM.head_dropout (lm.py) which also drops on the 3D
-        # sequence after head_norm and before the output projection.
+        # Drops on the (B, L, D) sequence, matching CliffordNetLM.head_dropout.
         self.text_head_dropout = (
             keras.layers.Dropout(self.dropout_rate, name="text_head_dropout")
             if self.dropout_rate > 0.0
@@ -808,14 +874,12 @@ class CliffordCLIP(keras.Model):
         )
 
     def _build_projections(self) -> None:
-        """Projection heads, one per tower. Shape depends on ``head_kind``.
+        """Create the pooling views, geometric products and projections per tower.
 
-        - ``plain``: LayerNorm → Dense(embed_dim) on a single pooled view.
-        - ``mean_max`` / ``learned_query``: two pooled views are combined
-          through a :class:`SparseRollingGeometricProduct` so the projected
-          embedding carries explicit bivector (wedge) content. The
-          difference between the two Clifford variants is only how the
-          second pooled view (``z_ctx``) is produced.
+        ``plain`` projects a single pooled view. The Clifford variants combine two
+        pooled views through a :class:`SparseRollingGeometricProduct` so the
+        embedding carries explicit bivector content, and differ only in how the
+        second view ``z_ctx`` is produced.
         """
         _dk = self._dense_kwargs()
 
@@ -823,9 +887,9 @@ class CliffordCLIP(keras.Model):
         self.vision_head_geo = None
         self.text_head_geo = None
 
-        # DECISION plan-2026-07-15T140843-168d5bac/D-001: pool via generic
-        # SequencePooling (attention_hidden_dim=channels, its default 256 differs) —
-        # do not re-wire GlobalAveragePooling2D/GlobalMaxPooling2D here. See decisions.md.
+        # DECISION plan-2026-07-15T140843-168d5bac/D-001: pool through generic
+        # SequencePooling with attention_hidden_dim=channels, since its own default
+        # is 256; do not re-wire the global pooling layers. See decisions.md.
         self.vision_det_pool = SequencePooling(
             strategy="mean", name="vision_det_pool"
         )
@@ -841,7 +905,8 @@ class CliffordCLIP(keras.Model):
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 name="vision_ctx_pool",
             )
-        else:  # plain — vision anchor is z_det (mean); no context pool.
+        # plain: the vision anchor is z_det, so there is no context pool.
+        else:
             self.vision_ctx_pool = None
 
         if self.head_kind == "plain":
@@ -860,7 +925,8 @@ class CliffordCLIP(keras.Model):
                     kernel_initializer=clone_initializer(self.kernel_initializer),
                     name="text_ctx_pool",
                 )
-            else:  # mean_max — text z_ctx is last_feat; no context pool.
+            # mean_max: text z_ctx is last_feat, so there is no context pool.
+            else:
                 self.text_ctx_pool = None
 
         if self.head_kind != "plain":
@@ -934,14 +1000,15 @@ class CliffordCLIP(keras.Model):
         shape for a single modality. When only one shape is provided, the
         other tower is built from the configured defaults so the model
         remains fully serializable.
+
+        :param input_shape: Dict of per-modality shapes, or a single shape.
         """
         if self.built:
             return
 
-        # DECISION plan_2026-05-31_76981d58/D-001: pin logit_scale to float32.
-        # Do not drop dtype="float32" — under a bf16 global policy the learnable
-        # temperature would silently be created as bf16, drifting the contrastive
-        # logits. float32 temperature is standard CLIP practice. See decisions.md D-001.
+        # DECISION plan_2026-05-31_76981d58/D-001: pin logit_scale to float32; under a
+        # bf16 policy the learned temperature drifts the contrastive logits.
+        # See decisions.md.
         self.logit_scale = self.add_weight(
             name="logit_scale",
             shape=(),
@@ -950,10 +1017,8 @@ class CliffordCLIP(keras.Model):
             dtype="float32",
         )
 
-        # Opt-in learned 2D positional weight over the post-stem feature map.
-        # Created here (before the symbolic forward below) so the gated add in
-        # _apply_vision_body finds it materialised — avoids the lazy-build trap
-        # where a build()-created weight is missing on .keras reload.
+        # Created before the symbolic forward below, so the gated add in
+        # _apply_vision_body finds it materialised and a reload keeps it.
         if self.vision_positional_encoding:
             post_stem = self.image_size // self.vision_patch_size
             self.vision_pos_embed = self.add_weight(
@@ -963,9 +1028,7 @@ class CliffordCLIP(keras.Model):
                 trainable=True,
             )
 
-        # Trigger sub-layer builds via symbolic forward passes so every
-        # nested weight is materialised before super().build() marks us
-        # as built.
+        # Symbolic passes materialise every nested weight before super().build().
         image_shape = (
             None,
             self.image_size,
@@ -1015,15 +1078,20 @@ class CliffordCLIP(keras.Model):
 
         Walks ``vision_blocks`` in order and inserts a
         :class:`PatchMerging` (and optional Dense projection) at the
-        boundary between each pair of stages. Returns
-        ``(B, H', W', vision_stage_channels[-1])``.
+        boundary between each pair of stages.
+
+        :param images: Image tensor ``(B, H, W, C)``.
+        :param training: Whether in training mode.
+        :return: ``(B, H', W', vision_stage_channels[-1])``.
         """
         x = self._apply_vision_stem(images, training=training)
-        # DECISION plan-2026-07-15T114613-5add9baa/D-004: opt-in learned 2D positional encoding (default OFF = byte-identical, checkpoint-safe); the Clifford geometric product mixes channels not space, so the vision tower otherwise has no positional signal (G1).
+        # DECISION plan-2026-07-15T114613-5add9baa/D-004: positional encoding is
+        # opt-in and off by default, which keeps old checkpoints loadable; the
+        # geometric product mixes channels, not space. See decisions.md.
         if self.vision_positional_encoding:
             x = x + self.vision_pos_embed
         n_stages = len(self.vision_stage_channels)
-        # Stage end indices in the flat ``vision_blocks`` list.
+        # Stage end indices in the flat `vision_blocks` list.
         stage_ends: List[int] = []
         running = 0
         for d in self.vision_stage_depths:
@@ -1062,22 +1130,21 @@ class CliffordCLIP(keras.Model):
         """
         x = self._apply_vision_body(images, training=training)
 
-        # x: (B, H, W, D_v) -> flatten to a (B, H*W, D_v) token sequence so the
-        # generic SequencePooling instances handle every pooling view. z_det is
-        # the canonical CLIP anchor (mean over patches == the old GAP, F2).
+        # Flattened to a token sequence so the generic SequencePooling layers
+        # handle every pooling view; z_det, the mean, is the CLIP anchor.
         b, h, w, d = (
             ops.shape(x)[0],
             ops.shape(x)[1],
             ops.shape(x)[2],
             ops.shape(x)[3],
         )
-        seq = ops.reshape(x, (b, h * w, d))            # (B, H*W, D_v)
-        z_det = self.vision_det_pool(seq)              # (B, D_v)
+        seq = ops.reshape(x, (b, h * w, d))
+        z_det = self.vision_det_pool(seq)
         z_ctx = (
             self.vision_ctx_pool(seq, training=training)
             if self.vision_ctx_pool is not None
             else None
-        )                                               # (B, D_v) or None
+        )
         mixed = apply_clifford_head(
             self.head_kind,
             anchor=z_det,
@@ -1092,9 +1159,8 @@ class CliffordCLIP(keras.Model):
             mixed = self.vision_head_dropout(mixed, training=training)
         mixed = self.vision_projection(mixed)
         if normalize:
-            # fp16-safe L2-normalize: the 1e-8 epsilon underflows to 0.0 in
-            # fp16, so compute norm+divide in float32 then cast back. At
-            # float32 this is an identity cast (byte-identical).
+            # The 1e-8 epsilon underflows to 0.0 in fp16, so normalize in float32
+            # and cast back; at float32 the casts are identities.
             mixed_f = ops.cast(mixed, "float32")
             mixed_f = mixed_f / (ops.norm(mixed_f, axis=-1, keepdims=True) + 1e-8)
             mixed = ops.cast(mixed_f, mixed.dtype)
@@ -1123,7 +1189,7 @@ class CliffordCLIP(keras.Model):
         x = self.text_embed_norm(x)
         x = self.text_embed_dropout(x, training=training)
 
-        # ``x`` stays ``(B, L, D_t)`` — see ``layers/geometric/clifford_block.py``.
+        # `x` stays (B, L, D_t) — see `layers/geometric/clifford_block.py`.
         for block, drop_path in zip(self.text_blocks, self.text_drop_paths):
             x = x + drop_path(block(x, training=training), training=training)
         x = self.text_head_norm(x)
@@ -1133,28 +1199,27 @@ class CliffordCLIP(keras.Model):
         # Pad mask (1 = real token, 0 = pad).
         non_pad = ops.cast(
             ops.not_equal(input_ids, self.pad_token_id), x.dtype
-        )                                       # (B, L)
+        )
 
         # Last-non-pad-token index (the canonical CLIP text anchor).
         last_feat = last_non_pad_token(
             x, input_ids, self.pad_token_id
-        )                                       # (B, D_t)
+        )
 
-        # The canonical CLIP text anchor is always last_feat. For Clifford
-        # variants, z_det is the masked mean (SequencePooling('mean', mask)
-        # == the old sum(x*mask)/max(len,1), F2) and z_ctx is either last_feat
-        # (mean_max) or the attention pool over the masked sequence.
+        # For the Clifford variants z_det is the masked mean, and z_ctx is either
+        # last_feat (mean_max) or the attention pool over the masked sequence.
         anchor = last_feat
         if self.head_kind == "plain":
             mixed = anchor
         else:
-            z_det = self.text_det_pool(x, mask=non_pad)          # (B, D_t)
+            z_det = self.text_det_pool(x, mask=non_pad)
             if self.head_kind == "mean_max":
                 z_ctx = last_feat
-            else:  # learned_query or learned_query_residual
+            # learned_query or learned_query_residual.
+            else:
                 z_ctx = self.text_ctx_pool(
                     x, mask=non_pad, training=training
-                )                                                # (B, D_t)
+                )
             mixed = apply_clifford_head(
                 self.head_kind,
                 anchor=anchor,
@@ -1166,9 +1231,7 @@ class CliffordCLIP(keras.Model):
 
         mixed = self.text_projection(mixed)
         if normalize:
-            # fp16-safe L2-normalize (see encode_image): 1e-8 underflows to
-            # 0.0 in fp16, so normalize in float32 then cast back. float32
-            # path is an identity cast (byte-identical).
+            # Same fp16-safe normalize as encode_image.
             mixed_f = ops.cast(mixed, "float32")
             mixed_f = mixed_f / (
                 ops.norm(mixed_f, axis=-1, keepdims=True) + 1e-8
@@ -1182,8 +1245,8 @@ class CliffordCLIP(keras.Model):
 
     def _get_logit_scale(self) -> keras.KerasTensor:
         """Return ``exp(logit_scale)`` clipped to ``logit_scale_max``."""
-        # Match OpenCLIP: log-temperature is learned, temperature is clipped.
-        # DECISION plan-2026-07-15T114613-5add9baa/D-001: exp(logit_scale) in float32 — fp16 autocast overflows exp() past log(65504); do not let this run in compute-dtype.
+        # DECISION plan-2026-07-15T114613-5add9baa/D-001: exponentiate in float32, as
+        # OpenCLIP does; in fp16 exp() overflows past log(65504). See decisions.md.
         ls = ops.cast(self.logit_scale, "float32")
         scale = ops.exp(ls)
         return ops.minimum(scale, ops.cast(self.logit_scale_max, "float32"))
@@ -1196,13 +1259,14 @@ class CliffordCLIP(keras.Model):
         ],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass.
+        """Encode both modalities and return features with their similarity matrices.
 
         :param inputs: Dict with ``"image"`` and ``"text"`` keys, or a
             tuple ``(images, input_ids)``.
         :param training: Whether in training mode.
         :return: Dict with ``image_features``, ``text_features``,
-            ``logits_per_image``, ``logits_per_text``, ``logit_scale``.
+            ``logits_per_image``, ``logits_per_text``, and the float32
+            ``logit_scale``.
         """
         if isinstance(inputs, dict):
             images = inputs["image"]
@@ -1214,9 +1278,7 @@ class CliffordCLIP(keras.Model):
         text_features = self.encode_text(input_ids, training=training)
 
         scale = self._get_logit_scale()
-        # scale is float32 (B4); cast to the features' compute dtype so the
-        # fp16 matmul does not raise on a mixed-dtype multiply. Identity at
-        # float32 (byte-identical).
+        # Cast to the features' dtype, or an fp16 matmul raises on mixed dtypes.
         scale_c = ops.cast(scale, image_features.dtype)
         logits_per_image, logits_per_text = compute_clip_logits(
             image_features, text_features, scale_c
@@ -1241,6 +1303,12 @@ class CliffordCLIP(keras.Model):
             Tuple[Optional[int], ...],
         ],
     ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Compute the shapes of all five outputs.
+
+        :param input_shape: Dict of per-modality shapes, or ``(image, text)``.
+        :return: Dict of output name to shape; the logits are ``(B, B)`` and
+            ``logit_scale`` is scalar.
+        """
         if isinstance(input_shape, dict):
             image_shape = input_shape.get("image")
             text_shape = input_shape.get("text")
@@ -1260,6 +1328,10 @@ class CliffordCLIP(keras.Model):
     # ------------------------------------------------------------------
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the constructor arguments, with the staged vision fields resolved.
+
+        :return: Configuration dictionary.
+        """
         config = super().get_config()
         config.update(
             {
@@ -1314,6 +1386,11 @@ class CliffordCLIP(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CliffordCLIP":
+        """Rebuild a model, deserializing the two regularizers.
+
+        :param config: Dict as returned by :meth:`get_config`.
+        :return: A new model instance.
+        """
         for key in ("kernel_regularizer", "bias_regularizer"):
             if config.get(key) and isinstance(config[key], dict):
                 config[key] = regularizers.deserialize(config[key])
@@ -1341,7 +1418,11 @@ class CliffordCLIP(keras.Model):
             ``vocab_size``).
         :param image_size: Image resolution.
         :param context_length: Maximum text sequence length.
-        :param kwargs: Override any default hyperparameter.
+        :param **kwargs: Override any default hyperparameter.
+        :return: A configured model.
+        :rtype: CliffordCLIP
+        :raises ValueError: If ``variant`` is unknown, or a resolved argument fails
+            the constructor's checks.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -1363,8 +1444,5 @@ class CliffordCLIP(keras.Model):
 # Contrastive loss
 # ===========================================================================
 #
-# Training uses :class:`dl_techniques.losses.CLIPContrastiveLoss` which
-# matches this model's output schema (dict with ``logits_per_image`` and
-# ``logits_per_text``). Import and configure it directly from the losses
-# package; no wrapper is needed here. See ``train/cliffordnet/train_clip.py``
-# for a usage example.
+# Training uses dl_techniques.losses.CLIPContrastiveLoss, which matches this
+# model's output schema; see train/cliffordnet/train_clip.py for a usage example.
