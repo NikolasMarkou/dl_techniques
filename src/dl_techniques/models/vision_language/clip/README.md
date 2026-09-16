@@ -8,7 +8,7 @@ A Keras 3 implementation of **CLIP (Contrastive Language-Image Pre-training)**: 
 
 This is a **modernized** CLIP, not a weight-compatible port. Both towers are built from this repo's `TransformerLayer` with grouped-query attention, RMSNorm, SwiGLU and rotary position embeddings, and neither tower carries a learned positional table. No pretrained weights are distributed.
 
-The package also ships `CliffordCLIP` (`clifford_clip.py`), a Clifford-algebra variant that shares the contrastive objective but not the tower internals. It is not documented here.
+A Clifford-algebra variant sharing the contrastive objective but not the tower internals, `CliffordCLIP`, lives in the sibling package `dl_techniques.models.vision_language.clifford_clip` — see its own `README.md` there, not this one.
 
 ---
 
@@ -130,8 +130,11 @@ print(sorted(model({'text': tokens}, training=False)))   # ['text_features']
 | **`CLIP.from_variant`** | `...clip.model.CLIP.from_variant` | Build from a `MODEL_VARIANTS` key; kwargs override the row. |
 | **`create_clip_variant`** | `...clip.model.create_clip_variant` | Thin wrapper around `from_variant`. |
 | **`create_clip_model`** | `...clip.model.create_clip_model` | Thin wrapper around the constructor, for custom configs. |
-| **`CliffordCLIP`** | `...clip.clifford_clip.CliffordCLIP` | Clifford-algebra variant; separate architecture. |
 | **`TransformerLayer`** | `...layers.transformers.TransformerLayer` | The block both towers are built from. |
+
+`CliffordCLIP`, a separate Clifford-algebra architecture sharing this model's contrastive
+objective, lives in the sibling package `dl_techniques.models.vision_language.clifford_clip`
+— see its own `README.md` there.
 
 Model methods beyond the Keras surface: `encode_image(image, training=None)` and `encode_text(text, training=None)`, both returning L2-normalized features.
 
