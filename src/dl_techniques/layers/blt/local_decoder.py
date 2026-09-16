@@ -14,12 +14,17 @@ import keras
 from keras import ops
 from typing import Optional, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from ..transformers.transformer import TransformerLayer
 from ..embedding.positional_embedding import PositionalEmbedding
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.blt.local_decoder")
 class LocalDecoder(keras.layers.Layer):
@@ -369,3 +374,5 @@ class LocalDecoder(keras.layers.Layer):
             'dropout_rate': self.dropout_rate
         })
         return config
+
+# ---------------------------------------------------------------------

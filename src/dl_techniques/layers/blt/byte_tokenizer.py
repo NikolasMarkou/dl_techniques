@@ -10,8 +10,13 @@ are plain Python over lists of ints.
 import keras
 from typing import Any, Dict, List, Optional, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.blt.byte_tokenizer")
 class ByteTokenizer(keras.layers.Layer):
@@ -157,3 +162,5 @@ class ByteTokenizer(keras.layers.Layer):
             'byte_offset': self.byte_offset
         })
         return config
+
+# ---------------------------------------------------------------------

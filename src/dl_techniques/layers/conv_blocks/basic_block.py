@@ -249,3 +249,5 @@ class BasicBlock(keras.layers.Layer):
             "activation_type": self.activation_type,
         })
         return config
+
+# ---------------------------------------------------------------------

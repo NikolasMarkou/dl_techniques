@@ -295,3 +295,5 @@ class ConvBlock(keras.layers.Layer):
             'use_bias': self.use_bias,
         })
         return config
+
+# ---------------------------------------------------------------------

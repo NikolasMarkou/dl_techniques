@@ -11,9 +11,14 @@ import keras
 from keras import ops
 from typing import Optional, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.blt.dynamic_patcher")
 class DynamicPatcher(keras.layers.Layer):
@@ -286,3 +291,5 @@ class DynamicPatcher(keras.layers.Layer):
             'max_patches': self.max_patches
         })
         return config
+
+# ---------------------------------------------------------------------

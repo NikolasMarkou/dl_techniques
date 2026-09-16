@@ -17,6 +17,8 @@ from ..transformers.transformer import TransformerLayer
 from ..embedding.positional_embedding import PositionalEmbedding
 from .patch_pooling import PatchPooling
 
+# ---------------------------------------------------------------------
+
 @register_dl_technique("dl_techniques.layers.blt.local_encoder")
 class LocalEncoder(keras.layers.Layer):
     """Process bytes with causal attention, then pool them into patches.
@@ -237,3 +239,5 @@ class LocalEncoder(keras.layers.Layer):
             'cross_attention_queries': self.cross_attention_queries
         })
         return config
+
+# ---------------------------------------------------------------------

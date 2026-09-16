@@ -11,8 +11,13 @@ import keras
 from keras import ops
 from typing import Optional, Dict, Any, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.blt.patch_pooling")
 class PatchPooling(keras.layers.Layer):
@@ -310,3 +315,5 @@ class PatchPooling(keras.layers.Layer):
             'max_patches': self.max_patches
         })
         return config
+
+# ---------------------------------------------------------------------
