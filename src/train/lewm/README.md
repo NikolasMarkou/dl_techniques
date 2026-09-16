@@ -141,7 +141,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.lewm.train_lewm --smoke --synthetic
 MPLBACKEND=Agg .venv/bin/python -m train.lewm.train_lewm --synthetic --gpu 0
 ```
 
-### Real Data (HDF5 PushT — UNTESTED)
+### Real Data (HDF5 PushT — loader logic tested only against synthetic fixtures)
 
 ```bash
 MPLBACKEND=Agg .venv/bin/python -m train.lewm.train_lewm \
@@ -150,7 +150,16 @@ MPLBACKEND=Agg .venv/bin/python -m train.lewm.train_lewm \
     --gpu 0
 ```
 
-The HDF5 schema expected (per upstream) is:
+`PushTHDF5Dataset`'s loader logic (window enumeration, NaN-action zeroing, ImageNet
+normalization, episode-boundary respect) is covered by 9 tests in
+`tests/test_datasets/test_pusht_hdf5.py`, including non-square frames, 3+ unequal-length
+episodes, and spatially/temporally correlated pixel content — but every one of those 9
+tests runs against a synthetic, schema-correct HDF5 fixture built in-test. **The loader
+has never been run against a real PushT `.h5` file.**
+
+The HDF5 schema below is stated "per upstream" (the "Sobal et al., 2024" citation above
+carries no URL, and no other citable spec for this schema exists anywhere in this repo),
+so even a real file's compatibility with this schema is unverified:
 - `/pixels`: `(N, H0, W0, 3)` uint8
 - `/action`: `(N, A)` float (NaN sentinels at episode breaks become 0)
 - `/episode_ends`: int boundary indices
@@ -224,11 +233,20 @@ auto-enabled.
 
 ## Known limitations
 
-- **`PushTHDF5Dataset` is an UNTESTED SKELETON.** It has never been run against
-  a real PushT HDF5 file. Windows are read on demand via `h5py` indexing with a
-  per-epoch index-level shuffle (`shuffle_seed`); `tf.image.resize` is called
-  inside the Python generator, which works but is not the idiomatic
-  `tf.data.map` path.
+- **`PushTHDF5Dataset`'s loader logic is tested only against synthetic data, and has
+  never been run against a real PushT HDF5 file.** 9 tests in
+  `tests/test_datasets/test_pusht_hdf5.py` cover window enumeration, NaN-action
+  zeroing, ImageNet normalization, and episode-boundary respect against
+  synthetic, schema-correct HDF5 fixtures — including non-square frames, 3+
+  unequal-length episodes, and spatially/temporally correlated pixel content.
+  That coverage validates the loader's own logic, not compatibility with a real
+  file: the `/pixels`/`/action`/`/episode_ends` schema itself is an assumption
+  "per upstream" with no citable URL/spec found anywhere in this repo (the only
+  citation, "Sobal et al., 2024", carries no link), so a real file's
+  compatibility with this schema is unverified. Windows are read on demand via
+  `h5py` indexing with a per-epoch index-level shuffle (`shuffle_seed`);
+  `tf.image.resize` is called inside the Python generator, which works but is
+  not the idiomatic `tf.data.map` path.
 - **Outside the analyzer ecosystem.** The script rolls its own minimal callback
   set (see Callbacks above), so it produces none of the standard analyzer
   visualizations.
