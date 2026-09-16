@@ -1584,7 +1584,18 @@ def train(args: argparse.Namespace) -> None:
             ),
             "text": np.zeros((2, args.context_length), dtype=np.int32),
         }
-        expected = clip_model(sample, training=False)
+        # DECISION plan-2026-09-16T114148-70556a67/D-005: use .predict(), not a
+        # direct __call__, to build `expected`. validate_model_loading always
+        # evaluates the RELOADED model via .predict() (train/common/evaluation.py),
+        # and .predict()'s compiled/XLA-fused numerics diverge from a bare eager
+        # __call__ by ~1e-4-1e-3 on this 12-layer network -- MEASURED reproducible
+        # even with zero save/reload involved (same model, same weights). Mixing
+        # __call__ (expected) with .predict() (loaded) therefore fires this
+        # warning on every run regardless of whether weights survive the
+        # round-trip; do not "fix" this by loosening tolerance or by chasing a
+        # weight-materialization bug in CliffordCLIP.build() -- see decisions.md
+        # D-005.
+        expected = clip_model.predict(sample, verbose=0)
         validate_model_loading(
             final_path, sample, expected,
             custom_objects={"CliffordCLIP": CliffordCLIP},
