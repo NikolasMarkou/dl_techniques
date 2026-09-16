@@ -396,8 +396,19 @@ class RBFProtoNet(keras.Model):
     def _build_rbf_head(self) -> None:
         """Build the RBF prototype-classification head.
 
+        # DECISION plan-2026-09-16T052349-7dfede94/D-002: 'normalized' is the ONLY
+        # supported output_mode for this model's head -- do not expose
+        # output_mode as a constructor knob defaulting to 'basis'. RBFLayer's
+        # own docstring and decisions.md D-002 both document 'basis' as
+        # barely-trainable at this scale; making it reachable here would
+        # reintroduce that footgun through this model's own config surface.
+        # See decisions.md D-002 for the full trade-off.
+
         Delegates to the module-level ``_create_rbf_head`` helper shared with
-        :class:`CliffordRBFProtoNet` -- see decisions.md D-002.
+        :class:`CliffordRBFProtoNet` -- see decisions.md D-002 (this plan's own
+        entry, which documents the extraction; the anchor comment above is the
+        UNCHANGED, preserved decision from the prior plan that originally
+        justified 'normalized'-only).
         """
         self.rbf_head = _create_rbf_head(
             self.num_classes,
