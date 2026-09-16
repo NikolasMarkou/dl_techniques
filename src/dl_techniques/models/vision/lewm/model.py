@@ -164,6 +164,12 @@ class LeWM(keras.Model):
         B, T = shape[0], shape[1]
         H, W, C = self.config.img_size, self.config.img_size, self.config.img_channels
 
+        if len(pixels.shape) != 5:
+            raise ValueError(
+                f"LeWM.encode_pixels: pixels must be rank 5 (B, T, H, W, C), got "
+                f"rank {len(pixels.shape)} with shape {pixels.shape}."
+            )
+
         # Static-shape guard: `pixels.shape` (not `ops.shape`) so `build()`'s
         # KerasTensor placeholders with symbolic/None dims are never flagged —
         # only a dim that is concretely known AND wrong raises.
