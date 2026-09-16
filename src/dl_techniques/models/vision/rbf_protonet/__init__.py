@@ -1,13 +1,14 @@
 """RBF prototype-network public API.
 
-Re-exports the backbone class. As of this revision the class implements only
-the CNN backbone (no RBF head yet, no ``create_rbf_protonet`` factory) -- both
-are added in a later revision of ``model.py``, at which point this file's
-exports and ``__all__`` are extended to match.
+Re-exports the model class and its factory. ``RBFProtoNet`` composes a
+CIFAR-style CNN backbone with an ``RBFLayer`` prototype-classification head
+(``output_mode='normalized'``); ``create_rbf_protonet()`` is the delegating
+factory.
 """
 
-from .model import RBFProtoNet
+from .model import RBFProtoNet, create_rbf_protonet
 
 __all__ = [
     'RBFProtoNet',
+    'create_rbf_protonet',
 ]

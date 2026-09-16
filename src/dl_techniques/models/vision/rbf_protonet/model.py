@@ -1,14 +1,13 @@
-"""``RBFProtoNet``, a small CIFAR-style CNN backbone for an RBF prototype-classification head.
+"""``RBFProtoNet``, a small CIFAR-style CNN backbone with an RBF prototype-classification head.
 
-A CNN reduces a 32x32 RGB image to a flat feature vector; a later step attaches
-an ``RBFLayer`` (``dl_techniques.layers.mixtures.radial_basis_function``) as a
-distance-based class-prototype classification head on top of that vector, so
-each class gets one learned, inspectable prototype in feature space instead of
-a distributed softmax-of-logits weight matrix. This module currently implements
-only the CNN half of that composition: the backbone reduces an input image to a
-``feature_dim``-wide pooled vector and returns it directly from ``call()``. The
-RBF head is added in a later revision of this same class (see the class
-docstring's Note); no RBF/mixture code is imported here.
+A CNN reduces a 32x32 RGB image to a flat feature vector; an ``RBFLayer``
+(``dl_techniques.layers.mixtures.radial_basis_function``, built through
+``create_mixture_layer('rbf', ...)``) is then applied as a distance-based
+class-prototype classification head on top of that vector, so each class gets
+one learned, inspectable prototype in feature space instead of a distributed
+softmax-of-logits weight matrix. ``call()`` runs the backbone, then the head,
+and returns a per-class probability vector (``output_mode='normalized'``, see
+D-002) that sums to 1.0 along the last axis.
 
 The backbone follows the ``stem_type='cifar'`` precedent from
 ``dl_techniques.models.vision.resnet.model.ResNet``: a single 3x3 stride-1 stem
@@ -46,6 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
+from dl_techniques.layers.mixtures.factory import create_mixture_layer
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -55,7 +55,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.rbf_protonet.model")
 class RBFProtoNet(keras.Model):
     """
-    CIFAR-style CNN backbone that pools an image to a flat feature vector.
+    CIFAR-style CNN backbone with an RBF prototype-classification head.
 
     A single 3x3 stride-1 stem (``stem_type='cifar'`` precedent, no max-pool)
     feeds a configurable number of stride-2 downsampling stages, each built
@@ -100,17 +100,23 @@ class RBFProtoNet(keras.Model):
         └───────────────┬────────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
-        │  Output: [B, feature_dim]              │
+        │  RBFLayer head (output_mode=          │  F -> num_classes
+        │  'normalized', via create_mixture_    │
+        │  layer('rbf', ...))                   │
+        └───────────────┬────────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output: [B, num_classes]              │
+        │  (probabilities, sums to 1.0 per row)  │
         └──────────────────────────────────────┘
 
     Note:
-        This class currently implements only the CNN backbone described
-        above; ``call()`` returns the pooled ``feature_dim``-wide vector
-        directly. A prototype-classification head built from ``RBFLayer``
-        (``output_mode='normalized'``) is wired onto this same class in a
-        later revision, at which point ``call()`` is extended (not replaced)
-        to run the backbone and then the head. No RBF/mixture import exists
-        in this file by design -- it is added alongside the head.
+        The RBF head is built via ``create_mixture_layer('rbf', units=
+        num_classes, output_mode='normalized', ...)`` (see D-002 in this
+        plan's ``decisions.md``: ``'normalized'`` is the ONLY supported
+        mode for this model -- ``'basis'`` is not exposed as a togglable
+        knob). ``call()`` runs the backbone and then the head, returning a
+        per-class probability vector.
 
     :param input_shape: Input shape ``(height, width, channels)`` excluding
         the batch dimension. Defaults to ``(32, 32, 3)`` (CIFAR).
@@ -144,24 +150,46 @@ class RBFProtoNet(keras.Model):
         stage's ``ConvBlock`` (``0.0`` disables it). Not applied in the stem.
         Defaults to ``0.0``.
     :type dropout_rate: float
+    :param num_classes: Number of RBF prototype units (= number of output
+        classes) in the head. Must be a positive int. Defaults to ``100``
+        (CIFAR-100).
+    :type num_classes: int
+    :param repulsion_strength: Strength of the RBF head's center-repulsion
+        penalty, forwarded verbatim to ``create_mixture_layer('rbf', ...)``.
+        Defaults to ``0.1`` (the factory's own default), which is exactly
+        the value Step 1's smoke test measured at ``units=100, feature_dim=
+        128``: repulsion loss stayed at 0.14%-1.14% of total loss, nowhere
+        near the 50% dominance floor -- see decisions.md D-006. Not
+        re-tuned here since the measured default already passes.
+    :type repulsion_strength: float
+    :param min_distance: Minimum desired distance between RBF centers,
+        forwarded verbatim to ``create_mixture_layer('rbf', ...)``. Defaults
+        to ``1.0`` (the factory's own default), for the same reason as
+        ``repulsion_strength`` above.
+    :type min_distance: float
+    :param pretrained: If ``True``, raises ``NotImplementedError`` --
+        this package distributes no pretrained weights. Defaults to
+        ``False``.
+    :type pretrained: bool
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
-    :raises ValueError: If ``input_shape`` is not 3D, if ``stem_filters`` or
-        ``feature_dim`` is not positive, or if ``filters_per_stage`` is empty
-        or contains a non-positive value.
+    :raises ValueError: If ``input_shape`` is not 3D, if ``stem_filters``,
+        ``feature_dim`` or ``num_classes`` is not positive, or if
+        ``filters_per_stage`` is empty or contains a non-positive value.
+    :raises NotImplementedError: If ``pretrained=True``.
 
     Input shape:
         4D tensor with shape ``(batch_size, height, width, channels)``.
 
     Output shape:
-        2D tensor ``(batch_size, feature_dim)``.
+        2D tensor ``(batch_size, num_classes)``, rows summing to 1.0.
 
     Example:
-        >>> backbone = RBFProtoNet(input_shape=(32, 32, 3))
-        >>> features = backbone(keras.random.normal((4, 32, 32, 3)))
-        >>> features.shape
-        TensorShape([4, 128])
+        >>> model = RBFProtoNet(input_shape=(32, 32, 3), num_classes=100)
+        >>> probs = model(keras.random.normal((4, 32, 32, 3)))
+        >>> probs.shape
+        TensorShape([4, 100])
     """
 
     def __init__(
@@ -175,9 +203,19 @@ class RBFProtoNet(keras.Model):
             activation_type: str = "relu",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             dropout_rate: float = 0.0,
+            num_classes: int = 100,
+            repulsion_strength: float = 0.1,
+            min_distance: float = 1.0,
+            pretrained: bool = False,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+
+        if pretrained:
+            raise NotImplementedError(
+                "RBFProtoNet ships no pretrained weights; pretrained=True is "
+                "not supported."
+            )
 
         if input_shape is None or len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
@@ -185,6 +223,8 @@ class RBFProtoNet(keras.Model):
             raise ValueError(f"stem_filters must be positive, got {stem_filters}")
         if feature_dim <= 0:
             raise ValueError(f"feature_dim must be positive, got {feature_dim}")
+        if not isinstance(num_classes, int) or isinstance(num_classes, bool) or num_classes <= 0:
+            raise ValueError(f"num_classes must be a positive int, got {num_classes}")
 
         filters_per_stage = (
             list(filters_per_stage) if filters_per_stage is not None else [64, 128, 128]
@@ -216,6 +256,10 @@ class RBFProtoNet(keras.Model):
         self.activation_type = activation_type
         self.kernel_regularizer = kernel_regularizer
         self.dropout_rate = dropout_rate
+        self.num_classes = num_classes
+        self.repulsion_strength = repulsion_strength
+        self.min_distance = min_distance
+        self.pretrained = pretrained
 
         self._build_stem()
 
@@ -224,11 +268,13 @@ class RBFProtoNet(keras.Model):
             self._build_stage(stage_idx)
 
         self._build_head()
+        self._build_rbf_head()
 
         logger.info(
-            f"Created RBFProtoNet backbone with {len(self.filters_per_stage)} "
+            f"Created RBFProtoNet with {len(self.filters_per_stage)} "
             f"downsampling stages for input {self.input_shape_config}, "
-            f"pooled feature_dim={self.feature_dim}"
+            f"pooled feature_dim={self.feature_dim}, "
+            f"num_classes={self.num_classes}"
         )
 
     def _build_stem(self) -> None:
@@ -283,6 +329,26 @@ class RBFProtoNet(keras.Model):
         else:
             self.feature_proj = None
 
+    def _build_rbf_head(self) -> None:
+        """Build the RBF prototype-classification head.
+
+        # DECISION plan-2026-09-16-7dfede94/D-002: 'normalized' is the ONLY
+        # supported output_mode for this model's head -- do not expose
+        # output_mode as a constructor knob defaulting to 'basis'. RBFLayer's
+        # own docstring and decisions.md D-002 both document 'basis' as
+        # barely-trainable at this scale; making it reachable here would
+        # reintroduce that footgun through this model's own config surface.
+        # See decisions.md D-002 for the full trade-off.
+        """
+        self.rbf_head = create_mixture_layer(
+            "rbf",
+            units=self.num_classes,
+            output_mode="normalized",
+            repulsion_strength=self.repulsion_strength,
+            min_distance=self.min_distance,
+            name="rbf_head",
+        )
+
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer from `input_shape` by tracing `call`.
 
@@ -302,7 +368,8 @@ class RBFProtoNet(keras.Model):
 
         :param inputs: Input tensor of shape `(batch_size, height, width, channels)`.
         :param training: Whether batch norm and dropout run in training mode.
-        :return: Pooled feature tensor `(batch_size, feature_dim)`.
+        :return: Per-class probability tensor `(batch_size, num_classes)`,
+            rows summing to 1.0 (``output_mode='normalized'`` contract).
         """
         x = self.stem(inputs, training=training)
 
@@ -313,7 +380,7 @@ class RBFProtoNet(keras.Model):
         if self.feature_proj is not None:
             pooled = self.feature_proj(pooled)
 
-        return pooled
+        return self.rbf_head(pooled, training=training)
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
@@ -328,6 +395,10 @@ class RBFProtoNet(keras.Model):
             "kernel_regularizer": keras.regularizers.serialize(
                 self.kernel_regularizer) if self.kernel_regularizer else None,
             "dropout_rate": self.dropout_rate,
+            "num_classes": self.num_classes,
+            "repulsion_strength": self.repulsion_strength,
+            "min_distance": self.min_distance,
+            "pretrained": self.pretrained,
         }
         base_config = super().get_config()
         return {**base_config, **config}
@@ -343,3 +414,36 @@ class RBFProtoNet(keras.Model):
 
 
 # ---------------------------------------------------------------------
+
+
+def create_rbf_protonet(
+        num_classes: int = 100,
+        input_shape: Tuple[int, int, int] = (32, 32, 3),
+        pretrained: bool = False,
+        **kwargs: Any,
+) -> RBFProtoNet:
+    """Create an :class:`RBFProtoNet` model.
+
+    Thin delegating factory, per the house model module shape -- no extra
+    logic beyond forwarding to the constructor.
+
+    :param num_classes: Number of RBF prototype units (= output classes).
+        Defaults to ``100`` (CIFAR-100).
+    :type num_classes: int
+    :param input_shape: Input shape ``(height, width, channels)`` excluding
+        the batch dimension. Defaults to ``(32, 32, 3)``.
+    :type input_shape: Tuple[int, int, int]
+    :param pretrained: If ``True``, raises ``NotImplementedError`` (no
+        pretrained weights are distributed). Defaults to ``False``.
+    :type pretrained: bool
+    :param kwargs: Additional keyword arguments forwarded to
+        :class:`RBFProtoNet`.
+    :return: A configured, uncompiled :class:`RBFProtoNet` model.
+    :rtype: RBFProtoNet
+    """
+    return RBFProtoNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        pretrained=pretrained,
+        **kwargs,
+    )
