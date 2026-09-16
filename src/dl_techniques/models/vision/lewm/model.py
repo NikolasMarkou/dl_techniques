@@ -160,15 +160,15 @@ class LeWM(keras.Model):
         :param training: forwarded to the encoder and projector so the
             train/eval mode is explicit (consistent with `predict_next`).
         """
-        shape = ops.shape(pixels)
-        B, T = shape[0], shape[1]
-        H, W, C = self.config.img_size, self.config.img_size, self.config.img_channels
-
         if len(pixels.shape) != 5:
             raise ValueError(
                 f"LeWM.encode_pixels: pixels must be rank 5 (B, T, H, W, C), got "
                 f"rank {len(pixels.shape)} with shape {pixels.shape}."
             )
+
+        shape = ops.shape(pixels)
+        B, T = shape[0], shape[1]
+        H, W, C = self.config.img_size, self.config.img_size, self.config.img_channels
 
         # Static-shape guard: `pixels.shape` (not `ops.shape`) so `build()`'s
         # KerasTensor placeholders with symbolic/None dims are never flagged —
