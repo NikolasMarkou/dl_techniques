@@ -149,6 +149,58 @@ def test_pixel_normalization_matches_imagenet_stats_exactly(tmp_path, monkeypatc
     assert np.allclose(got, expected, atol=1e-5)
 
 
+def test_as_tf_dataset_handles_non_square_frames(tmp_path, monkeypatch):
+    # Every existing fixture in this file uses a SQUARE input frame
+    # ((48,48), (16,16), (8,8)), so a bug that swaps axes inside
+    # `_preprocess_pair`'s `tf.image.resize(pixels_f, [img_size, img_size])`
+    # call — or drops the resize entirely — would be invisible: a square
+    # input already produces a square output by coincidence. Using
+    # `h0 != w0` here forces the resize to actually run and produce a
+    # SQUARE `img_size x img_size` output from a non-square input, so
+    # either mutant (no resize, or an axis-swapped resize target) would
+    # leave `x["pixels"].shape` at `(h0, w0)`-shaped, not `(img_size,
+    # img_size)`-shaped — assertion (a) below would catch it directly.
+    #
+    # `img_size == h0` (per plan.md's Assumptions: keep the resize math
+    # tractable by hand) means the height axis is a no-op resize and only
+    # the width axis (32 -> 48) is actually rescaled. The fixture content
+    # is a per-frame CONSTANT pixel value, so bilinear interpolation over
+    # a constant field reproduces that same constant regardless of scale
+    # factor — the exact post-normalization value is therefore
+    # independently computable by hand without simulating the bilinear
+    # kernel, matching `test_pixel_normalization_matches_imagenet_stats_exactly`'s
+    # approach.
+    _pin_cpu_only(monkeypatch)
+    n, h0, w0, action_dim = 4, 48, 32, 2
+    img_size = h0  # one of h0/w0, per plan.md Assumptions
+    const_value = 128  # mid-gray uint8, distinct from the existing all-zero fixture
+    pixels = np.full((n, h0, w0, 3), const_value, dtype=np.uint8)
+    action = np.zeros((n, action_dim), dtype=np.float32)
+    h5_path = tmp_path / "pusht_nonsquare.h5"
+    _write_pusht_h5(str(h5_path), pixels, action, episode_ends=[n])
+
+    dataset = PushTHDF5Dataset(
+        str(h5_path),
+        img_size=img_size,
+        action_dim=action_dim,
+        history_size=2,
+        num_preds=1,
+        batch_size=1,
+    )
+    x, _y = next(iter(dataset.as_tf_dataset()))
+
+    # (a) output is SQUARE post-resize even though the input was not —
+    # would fail under either mutant named above.
+    assert x["pixels"].shape == (1, 3, img_size, img_size, 3)
+
+    # (b) exact normalized value at a specific known coordinate,
+    # independently re-derived from the fixture's own construction
+    # parameters (constant-content resize is a no-op on the value itself).
+    expected = ((const_value / 255.0) - _IMAGENET_MEAN) / _IMAGENET_STD
+    got = x["pixels"].numpy()[0, 0, 0, 0, :]  # first window, first frame, one pixel
+    assert np.allclose(got, expected.astype(np.float32), atol=1e-5)
+
+
 def test_load_metadata_replaces_nan_actions_with_zero(tmp_path):
     rng = np.random.default_rng(0)
     n, h0, w0, action_dim = 20, 48, 48, 2
