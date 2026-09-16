@@ -120,7 +120,7 @@ Example::
 
     # smoke test
     python -m train.cliffordnet.train_clip --synthetic --epochs 1 \\
-        --image-size 32 --batch-size 8 --max-train-samples 64 \\
+        --image-size 64 --batch-size 8 --max-train-samples 64 \\
         --skip-pretrain
 """
 
