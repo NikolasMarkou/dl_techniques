@@ -1505,9 +1505,8 @@ def create_convunext(
             f'encoder_downsample_{level}' if level < depth - 1 else 'bottleneck_downsample'
         )
         skip, x = DownsampleAndSkip(
-            use_laplacian_pyramid=use_laplacian_pyramid,
+            pool_type="laplacian" if use_laplacian_pyramid else downsample_pool_type,
             laplacian_kernel_size=laplacian_kernel_size,
-            pool_type=downsample_pool_type,
             # Only the 'strided_conv' branch reads these three.
             use_bias=use_bias,
             kernel_initializer=kernel_initializer,

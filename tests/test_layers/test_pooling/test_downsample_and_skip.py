@@ -45,12 +45,12 @@ def block_input() -> np.ndarray:
 
 
 # ---------------------------------------------------------------------
-# OFF path (raw skip + pooling)
+# pooling branches (raw skip + pooling)
 # ---------------------------------------------------------------------
 
 
 class TestPoolingPath:
-    """``use_laplacian_pyramid=False``."""
+    """``pool_type='max'`` / ``'average'``."""
 
     def test_off_path_skip_is_the_input_tensor(self, sample_input):
         """RED-proof target for a swapped output tuple.
@@ -60,9 +60,7 @@ class TestPoolingPath:
         would even share a shape), and a "skip is bigger" assertion is a proxy, not
         the contract.
         """
-        layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5)
-        )
+        layer = DownsampleAndSkip(laplacian_kernel_size=(5, 5))
         skip, downsampled = layer(keras.ops.convert_to_tensor(sample_input))
 
         np.testing.assert_allclose(
@@ -72,9 +70,7 @@ class TestPoolingPath:
 
     def test_off_path_downsampled_is_not_the_input(self, sample_input):
         """Dead-component probe target: ``return inputs, inputs`` must not pass."""
-        layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5)
-        )
+        layer = DownsampleAndSkip(laplacian_kernel_size=(5, 5))
         _, downsampled = layer(keras.ops.convert_to_tensor(sample_input))
         out = keras.ops.convert_to_numpy(downsampled)
 
@@ -84,7 +80,7 @@ class TestPoolingPath:
     def test_max_pool_type_selects_max_pooling(self, block_input):
         """The default path pools by MAX, asserted on the pooled VALUES."""
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type="max",
         )
         _, downsampled = layer(keras.ops.convert_to_tensor(block_input))
@@ -103,7 +99,7 @@ class TestPoolingPath:
         is constructed correctly but never applied.
         """
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type="average",
         )
         _, downsampled = layer(keras.ops.convert_to_tensor(block_input))
@@ -117,7 +113,7 @@ class TestPoolingPath:
     def test_average_pooling_is_linear_hence_homogeneous(self, sample_input):
         """``f(a*x) == a*f(x)``: the property the average path exists to provide."""
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type="average",
         )
         alpha = 3.7
@@ -131,28 +127,24 @@ class TestPoolingPath:
         )
 
     def test_off_path_constructs_no_pyramid_sublayer(self):
-        layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5)
-        )
+        layer = DownsampleAndSkip(laplacian_kernel_size=(5, 5))
         assert layer.pyramid is None
         assert layer.pool is not None
 
     def test_invalid_pool_type_raises(self):
         with pytest.raises(ValueError, match="pool_type"):
             DownsampleAndSkip(
-                use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+                laplacian_kernel_size=(5, 5),
                 pool_type="median",
             )
 
     def test_invalid_laplacian_kernel_size_raises(self):
         with pytest.raises(ValueError, match="laplacian_kernel_size"):
-            DownsampleAndSkip(
-                use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5, 5)
-            )
+            DownsampleAndSkip(laplacian_kernel_size=(5, 5, 5))
 
 
 # ---------------------------------------------------------------------
-# OFF path, learned variant (strided conv)
+# learned branch (strided conv)
 # ---------------------------------------------------------------------
 
 
@@ -168,7 +160,7 @@ class TestStridedConvPath:
         on an even-sized input, so a shape-only test stays green under the alias.
         """
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type="strided_conv", name="junction",
         )
         skip, downsampled = layer(keras.ops.convert_to_tensor(sample_input))
@@ -185,7 +177,7 @@ class TestStridedConvPath:
     def test_strided_conv_skip_is_the_input_tensor(self, sample_input):
         """Same contract as the pooling branch: the skip is the RAW input."""
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type="strided_conv",
         )
         skip, _ = layer(keras.ops.convert_to_tensor(sample_input))
@@ -204,7 +196,7 @@ class TestStridedConvPath:
         rng = np.random.default_rng(7)
         x = rng.normal(size=(1, 8, 8, 7)).astype("float32")
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type="strided_conv",
         )
         skip, downsampled = layer(keras.ops.convert_to_tensor(x))
@@ -215,7 +207,7 @@ class TestStridedConvPath:
 
     def test_strided_conv_use_bias_true_creates_a_bias_vector(self, sample_input):
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type="strided_conv", use_bias=True,
         )
         layer(keras.ops.convert_to_tensor(sample_input))
@@ -238,7 +230,7 @@ class TestStridedConvPath:
         three orders of magnitude above this tolerance.
         """
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type="strided_conv", use_bias=False,
         )
         alpha = 3.7
@@ -261,7 +253,7 @@ class TestStridedConvPath:
         evidence. The bias is set to a nonzero constant first.
         """
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type="strided_conv", use_bias=True,
         )
         layer(keras.ops.convert_to_tensor(sample_input))
@@ -285,7 +277,6 @@ class TestStridedConvPath:
         ``True``) and the initializer/regularizer are non-default too.
         """
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False,
             laplacian_kernel_size=(7, 7),
             pool_type="strided_conv",
             use_bias=False,
@@ -320,14 +311,14 @@ class TestStridedConvPath:
         explicitly; this test states why, so nobody "simplifies" it away.
         """
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type=pool_type, use_bias=False,
         )
         assert layer.weights == []
         assert getattr(layer, "use_bias", False) is False
 
         default_layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             pool_type=pool_type,
         )
         assert getattr(default_layer, "use_bias", False) is True, (
@@ -341,7 +332,6 @@ class TestStridedConvPath:
         """
         inputs = keras.Input(shape=(8, 8, 3))
         skip, down = DownsampleAndSkip(
-            use_laplacian_pyramid=False,
             laplacian_kernel_size=(5, 5),
             pool_type="strided_conv",
             use_bias=False,
@@ -366,12 +356,12 @@ class TestStridedConvPath:
 
 
 # ---------------------------------------------------------------------
-# ON path (Laplacian pyramid split)
+# Laplacian branch (pyramid split)
 # ---------------------------------------------------------------------
 
 
 class TestLaplacianPath:
-    """``use_laplacian_pyramid=True``."""
+    """``pool_type='laplacian'``."""
 
     def test_on_path_returns_high_band_first(self, sample_input):
         """The skip is the FULL-resolution high band; the second output is the low band.
@@ -380,7 +370,7 @@ class TestLaplacianPath:
         satisfied by returning the input unchanged, nor by swapping the tuple.
         """
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(5, 5)
+            pool_type="laplacian", laplacian_kernel_size=(5, 5)
         )
         x = keras.ops.convert_to_tensor(sample_input)
         skip, downsampled = layer(x)
@@ -400,7 +390,7 @@ class TestLaplacianPath:
     def test_on_path_skip_is_not_the_input(self, sample_input):
         """The high band is a RESIDUAL, so it must differ from the input in value."""
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(5, 5)
+            pool_type="laplacian", laplacian_kernel_size=(5, 5)
         )
         skip, _ = layer(keras.ops.convert_to_tensor(sample_input))
 
@@ -411,28 +401,11 @@ class TestLaplacianPath:
 
     def test_on_path_shapes(self, sample_input):
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(5, 5)
+            pool_type="laplacian", laplacian_kernel_size=(5, 5)
         )
         skip, downsampled = layer(keras.ops.convert_to_tensor(sample_input))
         assert keras.ops.convert_to_numpy(skip).shape == (2, 8, 8, 3)
         assert keras.ops.convert_to_numpy(downsampled).shape == (2, 4, 4, 3)
-
-    def test_on_path_pool_type_is_inert(self, sample_input):
-        """``pool_type`` does not apply to the pyramid path -- both give the same split."""
-        x = keras.ops.convert_to_tensor(sample_input)
-        a = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(5, 5), pool_type="max"
-        )(x)
-        b = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(5, 5),
-            pool_type="average",
-        )(x)
-        for lhs, rhs in zip(a, b):
-            np.testing.assert_allclose(
-                keras.ops.convert_to_numpy(lhs),
-                keras.ops.convert_to_numpy(rhs),
-                atol=1e-6,
-            )
 
     def test_on_path_kernel_size_changes_the_split(self, sample_input):
         """``laplacian_kernel_size`` is LIVE, not decorative.
@@ -442,10 +415,10 @@ class TestLaplacianPath:
         """
         x = keras.ops.convert_to_tensor(sample_input)
         _, low_a = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(3, 3)
+            pool_type="laplacian", laplacian_kernel_size=(3, 3)
         )(x)
         _, low_b = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(7, 7)
+            pool_type="laplacian", laplacian_kernel_size=(7, 7)
         )(x)
 
         assert not np.allclose(
@@ -457,7 +430,7 @@ class TestLaplacianPath:
     def test_on_path_is_homogeneous(self, sample_input):
         """Bias-free by construction: ``f(a*x) == a*f(x)`` on BOTH bands."""
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(5, 5)
+            pool_type="laplacian", laplacian_kernel_size=(5, 5)
         )
         alpha = 2.5
         base = layer(keras.ops.convert_to_tensor(sample_input))
@@ -471,7 +444,7 @@ class TestLaplacianPath:
 
     def test_on_path_constructs_no_pool_sublayer(self):
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(5, 5)
+            pool_type="laplacian", laplacian_kernel_size=(5, 5)
         )
         assert layer.pool is None
         assert layer.pyramid is not None
@@ -486,7 +459,7 @@ class TestNamingAndShape:
 
     def test_pool_sublayer_name_is_derived_from_the_wrapper_name(self):
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5),
+            laplacian_kernel_size=(5, 5),
             name="bottleneck_downsample",
         )
         assert layer.name == "bottleneck_downsample"
@@ -494,16 +467,16 @@ class TestNamingAndShape:
 
     def test_pyramid_sublayer_name_is_derived_from_the_wrapper_name(self):
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=True, laplacian_kernel_size=(5, 5),
+            pool_type="laplacian", laplacian_kernel_size=(5, 5),
             name="encoder_downsample_0",
         )
         assert layer.name == "encoder_downsample_0"
         assert layer.pyramid.name == "encoder_downsample_0_pyramid"
 
-    @pytest.mark.parametrize("use_pyramid", [False, True])
-    def test_compute_output_shape_matches_the_call(self, sample_input, use_pyramid):
+    @pytest.mark.parametrize("pool_type", ["max", "laplacian"])
+    def test_compute_output_shape_matches_the_call(self, sample_input, pool_type):
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=use_pyramid, laplacian_kernel_size=(5, 5)
+            pool_type=pool_type, laplacian_kernel_size=(5, 5)
         )
         skip, downsampled = layer(keras.ops.convert_to_tensor(sample_input))
         skip_shape, down_shape = layer.compute_output_shape(sample_input.shape)
@@ -514,32 +487,29 @@ class TestNamingAndShape:
 
 class TestConfig:
 
-    @pytest.mark.parametrize("use_pyramid", [False, True])
-    def test_config_round_trip_preserves_kernel_size(self, use_pyramid):
+    @pytest.mark.parametrize("pool_type", ["average", "laplacian"])
+    def test_config_round_trip_preserves_kernel_size(self, pool_type):
         """RED-proof target for a ``laplacian_kernel_size`` dropped from get_config."""
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=use_pyramid,
+            pool_type=pool_type,
             laplacian_kernel_size=(7, 7),
-            pool_type="average",
         )
         config = layer.get_config()
         assert "laplacian_kernel_size" in config
 
         restored = DownsampleAndSkip.from_config(config)
         assert tuple(restored.laplacian_kernel_size) == (7, 7)
-        if use_pyramid:
+        if pool_type == "laplacian":
             assert tuple(restored.pyramid.blur_kernel_size) == (7, 7)
 
     def test_config_round_trip_preserves_pool_type_and_branch(self):
         layer = DownsampleAndSkip(
-            use_laplacian_pyramid=False,
             laplacian_kernel_size=(5, 5),
             pool_type="average",
         )
         restored = DownsampleAndSkip.from_config(layer.get_config())
 
         assert restored.pool_type == "average"
-        assert restored.use_laplacian_pyramid is False
         assert isinstance(restored.pool, keras.layers.AveragePooling2D)
 
     def test_registered_serializable(self):
@@ -557,14 +527,13 @@ class TestConfig:
 
 class TestModelRoundTrip:
 
-    @pytest.mark.parametrize("use_pyramid", [False, True])
-    def test_keras_round_trip_in_a_functional_model(self, sample_input, use_pyramid):
+    @pytest.mark.parametrize("pool_type", ["average", "laplacian"])
+    def test_keras_round_trip_in_a_functional_model(self, sample_input, pool_type):
         """A multi-output custom Layer must survive `.keras` save/load by VALUE."""
         inputs = keras.Input(shape=(8, 8, 3))
         skip, down = DownsampleAndSkip(
-            use_laplacian_pyramid=use_pyramid,
+            pool_type=pool_type,
             laplacian_kernel_size=(5, 5),
-            pool_type="average",
             name="bottleneck_downsample",
         )(inputs)
         merged = keras.layers.Concatenate(name="merge")(
@@ -583,17 +552,14 @@ class TestModelRoundTrip:
         np.testing.assert_allclose(before, after, atol=1e-6)
 
         restored_layer = reloaded.get_layer("bottleneck_downsample")
-        assert restored_layer.use_laplacian_pyramid is use_pyramid
-        assert restored_layer.pool_type == "average"
+        assert restored_layer.pool_type == pool_type
         assert tuple(restored_layer.laplacian_kernel_size) == (5, 5)
 
     def test_gradients_flow_through_both_outputs(self, sample_input):
         import tensorflow as tf
 
         inputs = keras.Input(shape=(8, 8, 3))
-        skip, down = DownsampleAndSkip(
-            use_laplacian_pyramid=False, laplacian_kernel_size=(5, 5)
-        )(inputs)
+        skip, down = DownsampleAndSkip(laplacian_kernel_size=(5, 5))(inputs)
         head = keras.layers.Conv2D(4, 3, padding="same", name="head")
         out = keras.layers.Concatenate()(
             [head(keras.layers.AveragePooling2D(pool_size=(2, 2))(skip)), head(down)]

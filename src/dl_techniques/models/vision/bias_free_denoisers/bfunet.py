@@ -358,9 +358,8 @@ def _build_encoder_path(
             else 'bottleneck_downsample'
         )
         skip, x = DownsampleAndSkip(
-            use_laplacian_pyramid=use_laplacian_pyramid,
+            pool_type="laplacian" if use_laplacian_pyramid else downsample_pool_type,
             laplacian_kernel_size=laplacian_kernel_size,
-            pool_type=downsample_pool_type,
             # bfunet is unconditionally bias-free, and `DownsampleAndSkip.use_bias`
             # (added for its learned 'strided_conv' branch) is READ BY THE TRAINERS'
             # compliance sweep -- `train/bfunet/train_unet_denoiser.py:198` walks
