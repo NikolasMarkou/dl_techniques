@@ -30,7 +30,12 @@ from dl_techniques.visualization import (
     TrainingHistory,
     TrainingCurvesVisualization,
 )
-from train.common import setup_gpu, create_base_argument_parser
+from train.common import (
+    setup_gpu,
+    create_base_argument_parser,
+    default_experiment_name,
+    prepare_run_dir,
+)
 
 
 # Resolved once and reused by both `create_visualization_manager()` (D-002)
@@ -419,6 +424,20 @@ def main() -> None:
     args = parser.parse_args()
 
     setup_gpu(args.gpu)
+
+    # Unified run directory (Step 1 of the bfunet-output-layout normalization
+    # plan): ONE run directory at results/<prefix>_<variant>_<timestamp>/,
+    # replacing the two disconnected paths this file used to write (a flat,
+    # overwritten results/kan_regression/kan_model.keras plus a separately-
+    # timestamped results/kan_regression/<ts>/ viz dir). `args` is passed
+    # directly as `prepare_run_dir`'s `config` -- `save_config_json` falls
+    # back to `vars(config)` for anything exposing `__dict__`, which an
+    # `argparse.Namespace` has, so no new config dataclass is needed here.
+    # Step 2 wires the model/history artifacts into `run_dir`; Step 3
+    # re-points visualization output at `run_dir / "visualizations"`.
+    run_dir = REPO_ROOT / "results" / default_experiment_name(EXPERIMENT_NAME, args.variant)
+    prepare_run_dir(args, output_dir=run_dir)
+    logger.info(f"Run directory: {run_dir}")
 
     logger.info("Initializing KAN Training Pipeline")
 
