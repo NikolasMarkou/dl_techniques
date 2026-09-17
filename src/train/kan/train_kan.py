@@ -11,6 +11,7 @@ Usage:
     python train_kan.py --epochs 300 --batch-size 256 --learning-rate 0.005
 """
 
+import gc
 import argparse
 import keras
 import matplotlib
@@ -221,6 +222,95 @@ class KANGridUpdateCallback(keras.callbacks.Callback):
             self.model.update_kan_grids(self.x_data)
 
 
+class KANVisualizationCallback(keras.callbacks.Callback):
+    """Per-epoch cheap loss dashboard + periodic expensive function/spline grid.
+
+    # DECISION plan-2026-09-17-0d194df2/D-002
+    Structurally mirrors `DenoisingVisualizationCallback`
+    (src/train/bfunet/common.py:1610-1889): a single-use abstraction within this file
+    (one instantiation site in `main()`, wired in Step 6) admitted as a charge against
+    the 2-max complexity budget specifically because it MIRRORS an already-proven,
+    already-amortized repo-wide pattern rather than inventing a new one -- do not
+    generalize this into a shared cross-trainer base class on the strength of "it looks
+    reusable"; python-software.md Sec.B.16 rules that out for a training script with one
+    real consumer. See decisions.md D-002 for the full trade-off.
+
+    Every `on_epoch_end` call re-renders a cheap combined loss/val_loss dashboard via
+    the existing `TrainingCurvesVisualization` plugin (through `viz_manager`, never a
+    hand-rolled plot). Every `freq` epochs it additionally re-renders the more
+    expensive `function_approximation` + `kan_splines` grid via
+    `render_function_and_spline_grid()` -- the SAME helper `plot_results()` uses for its
+    final post-hoc render, so there is exactly one code path for that grid, called from
+    two places (periodic-during-training and final-post-hoc). Both renders are wrapped
+    in `try/except Exception` + `logger.warning` so a rendering failure never aborts
+    training (verified by Step 8's deliberate-exception fail-soft check, not merely
+    assumed from reading the `try/except`).
+    """
+
+    def __init__(
+        self,
+        viz_manager: VisualizationManager,
+        X_train: Optional[np.ndarray] = None,
+        y_train: Optional[np.ndarray] = None,
+        freq: int = 5,
+    ) -> None:
+        """
+        Args:
+            viz_manager: Registered `VisualizationManager` (see
+                `create_visualization_manager`) -- the SAME instance `plot_results()`
+                uses at the end of `main()`, so periodic and final renders land in the
+                same `run_dir / "visualizations"` directory.
+            X_train: Training inputs. Accepted for interface parity with
+                `DenoisingVisualizationCallback` (which stores a fixed eval batch) and
+                for a future data-dependent render; the current
+                `render_function_and_spline_grid()` helper evaluates on a synthetic
+                mesh grid (matching `plot_results()`'s pre-existing behavior) and a
+                fixed `KANLinear` input range, so `X_train`/`y_train` are not read by
+                this callback today.
+            y_train: Training targets. See `X_train`.
+            freq: Epoch cadence for the expensive function/spline grid render. Every
+                epoch still gets the cheap loss dashboard regardless of `freq`.
+        """
+        super().__init__()
+        self.viz_manager = viz_manager
+        self.X_train = X_train
+        self.y_train = y_train
+        self.freq = max(1, int(freq))
+        self._hist = {"epoch": [], "loss": [], "val_loss": []}
+
+    def on_epoch_end(self, epoch: int, logs: Optional[dict] = None) -> None:
+        """Record per-epoch scalars, re-render the cheap dashboard every epoch, and
+        the expensive function/spline grid every `self.freq` epochs."""
+        logs = logs or {}
+        self._hist["epoch"].append(epoch + 1)
+        self._hist["loss"].append(logs.get("loss", float("nan")))
+        self._hist["val_loss"].append(logs.get("val_loss", float("nan")))
+
+        try:
+            train_history = TrainingHistory(
+                epochs=self._hist["epoch"],
+                train_loss=self._hist["loss"],
+                val_loss=self._hist["val_loss"],
+            )
+            self.viz_manager.visualize(
+                data=train_history, plugin_name="training_curves",
+                smooth_factor=0.0, show=False,
+            )
+        except Exception as e:  # visualization must never break training
+            logger.warning(f"Per-epoch dashboard render failed at epoch {epoch + 1}: {e}")
+
+        if (epoch + 1) % self.freq != 0:
+            return
+        try:
+            render_function_and_spline_grid(self.model, self.viz_manager, show=False)
+        except Exception as e:  # visualization must never break training
+            logger.warning(
+                f"Periodic function/spline grid render failed at epoch {epoch + 1}: {e}"
+            )
+        finally:
+            gc.collect()
+
+
 # ---------------------------------------------------------------------
 # Data Generation (synthetic function approximation)
 # ---------------------------------------------------------------------
@@ -282,6 +372,74 @@ def create_visualization_manager(run_dir: Path) -> VisualizationManager:
     return viz_manager
 
 
+def render_function_and_spline_grid(
+    model: keras.Model,
+    viz_manager: VisualizationManager,
+    show: bool = False,
+) -> None:
+    """Renders the 3D function-approximation surface + KAN spline interpretability grid.
+
+    Shared data-construction+render helper for the `function_approximation` and
+    `kan_splines` plugins (plan-2026-09-17-0d194df2/D-002, Step 5): extracted out of
+    `plot_results()` so `KANVisualizationCallback`'s periodic expensive render and the
+    final post-hoc `plot_results()` call both go through ONE code path instead of two
+    copies of this grid-construction logic drifting apart.
+
+    Interface contract (2 call sites: `plot_results()` and `KANVisualizationCallback`):
+        Args:
+            model: A `KANLinear`-containing Keras model, trained or mid-training. Must
+                support `model.predict(...)` and expose `model.layers`.
+            viz_manager: A `VisualizationManager` with `"function_approximation"` and
+                `"kan_splines"` plugins already registered (see
+                `create_visualization_manager`).
+            show: Forwarded verbatim to `viz_manager.visualize(show=...)`.
+        Returns:
+            None. Side effect only: writes PNGs via `viz_manager`. Logs a warning and
+            returns early (skipping the spline render only) if `model` has no
+            `KANLinear` layers yet -- this is expected mid-training before the first
+            `update_kan_grids()` call has run, so it is not raised as an exception.
+        Failure mode: propagates any exception from `model.predict()` or
+            `viz_manager.visualize()` to the caller -- callers that must not let a
+            render failure abort training (e.g. `KANVisualizationCallback`) are
+            responsible for their own `try/except`.
+    """
+    # 3D function approximation surface
+    res = 50
+    x1 = np.linspace(-1, 1, res)
+    x2 = np.linspace(-1, 1, res)
+    X1, X2 = np.meshgrid(x1, x2)
+    grid_inputs = np.column_stack([X1.ravel(), X2.ravel()])
+
+    Z_true = np.sin(np.pi * X1) + X2 ** 2
+    Z_pred = model.predict(grid_inputs, verbose=0).reshape(res, res)
+
+    viz_manager.visualize(
+        data=KANFunctionApproximation(
+            x1_grid=X1, x2_grid=X2,
+            z_true=Z_true, z_pred=Z_pred,
+        ),
+        plugin_name="function_approximation", show=show,
+    )
+
+    # KAN spline interpretability
+    kan_layers = [l for l in model.layers if isinstance(l, KANLinear)]
+    if not kan_layers:
+        logger.warning("No KANLinear layers found for spline visualization.")
+        return
+
+    logger.info("Extracting learned activation functions from Layer 0...")
+    viz_manager.visualize(
+        data=KANSplineData(
+            layer=kan_layers[0],
+            input_dim=2,
+            x_range=np.linspace(-1.5, 1.5, 100),
+            feature_names=[r'Input 0 ($x_1$)', r'Input 1 ($x_2$)'],
+            expected_shapes=['Sine Wave-like', 'Quadratic-like'],
+        ),
+        plugin_name="kan_splines", show=show,
+    )
+
+
 def plot_results(
     history: keras.callbacks.History,
     model: keras.Model,
@@ -304,41 +462,8 @@ def plot_results(
         smooth_factor=0.0, show=show,
     )
 
-    # 2. 3D function approximation surface
-    res = 50
-    x1 = np.linspace(-1, 1, res)
-    x2 = np.linspace(-1, 1, res)
-    X1, X2 = np.meshgrid(x1, x2)
-    grid_inputs = np.column_stack([X1.ravel(), X2.ravel()])
-
-    Z_true = np.sin(np.pi * X1) + X2 ** 2
-    Z_pred = model.predict(grid_inputs, verbose=0).reshape(res, res)
-
-    viz_manager.visualize(
-        data=KANFunctionApproximation(
-            x1_grid=X1, x2_grid=X2,
-            z_true=Z_true, z_pred=Z_pred,
-        ),
-        plugin_name="function_approximation", show=show,
-    )
-
-    # 3. KAN spline interpretability
-    kan_layers = [l for l in model.layers if isinstance(l, KANLinear)]
-    if not kan_layers:
-        logger.warning("No KANLinear layers found for spline visualization.")
-        return
-
-    logger.info("Extracting learned activation functions from Layer 0...")
-    viz_manager.visualize(
-        data=KANSplineData(
-            layer=kan_layers[0],
-            input_dim=2,
-            x_range=np.linspace(-1.5, 1.5, 100),
-            feature_names=[r'Input 0 ($x_1$)', r'Input 1 ($x_2$)'],
-            expected_shapes=['Sine Wave-like', 'Quadratic-like'],
-        ),
-        plugin_name="kan_splines", show=show,
-    )
+    # 2-3. 3D function approximation surface + KAN spline interpretability
+    render_function_and_spline_grid(model, viz_manager, show=show)
 
 
 # ---------------------------------------------------------------------
@@ -411,6 +536,9 @@ def main() -> None:
                         help='Hidden layer feature sizes')
     parser.add_argument('--grid-update-freq', type=int, default=5,
                         help='Grid update frequency in epochs')
+    parser.add_argument('--viz-freq', type=int, default=5,
+                        help='Periodic (expensive) function/spline visualization '
+                             'frequency in epochs, for KANVisualizationCallback')
     # `--image-size`/`--weight-decay`/`--lr-schedule` joined `--dataset`/
     # `--patience` (D-005) as confirmed-dead here: `generate_data()` has no
     # notion of an image size, and `model.compile()` above uses a plain
