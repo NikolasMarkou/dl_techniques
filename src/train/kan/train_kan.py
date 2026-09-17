@@ -472,9 +472,15 @@ def plot_results(
     history: keras.callbacks.History,
     model: keras.Model,
     viz_manager: VisualizationManager,
-    show: bool = True,
+    show: bool = False,
 ) -> None:
-    """Visualizes training history, 3D prediction surface, and learned splines."""
+    """Visualizes training history, 3D prediction surface, and learned splines.
+
+    `show` defaults to `False` (plan-2026-09-17T064004-0d194df2 D-003) so the safe,
+    non-interactive behavior is the default under `matplotlib.use('Agg')` -- a future
+    call site that omits `show=` cannot silently re-break the invariant `main()`'s own
+    call relies on.
+    """
     logger.info("Generating visualizations...")
 
     # 1. Training curves
@@ -693,6 +699,7 @@ def main() -> None:
             keras.callbacks.ModelCheckpoint(
                 best_checkpoint_path(str(run_dir)),
                 monitor='val_loss',
+                mode='min',
                 save_best_only=True,
             ),
             keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
