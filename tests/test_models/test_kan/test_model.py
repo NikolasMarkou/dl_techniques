@@ -1065,10 +1065,11 @@ class TestKANCrossLayerMagnitudeStability:
         """The class default (`init_scheme='glorot_inspired'`) must not blow up.
 
         Bound derived from measurement (review-iter-1.md finding #7), not
-        pasted: the README's own §4.1 records 1.1 for this exact probe on
-        `small`, and a follow-up 3-variant check (`small`/`medium`/`large`,
-        `init_seed=0`) measured 0.91/2.24/1.20 -- `< 20.0` is roughly 10x the
-        largest of those, tight enough to catch a real regression back
+        pasted: a 4-variant x 5-seed sweep of this exact probe measured a
+        worst case of 3.32 (`small`/`medium`/`large`/`xlarge`, seeds 0-4;
+        README §4.1's own "roughly 1" figure is a separate, less precise
+        measurement of the same effect) -- `< 20.0` is about 6x that worst
+        case, tight enough to catch a real regression back
         toward the pre-D-006 catastrophic scale (tens of thousands) while
         not being fragile to normal seed-to-seed variance.
         """
@@ -1143,4 +1144,99 @@ class TestKANCrossLayerMagnitudeStability:
             "the legacy init_scheme=None path no longer reproduces the "
             "documented blow-up -- either KANLinear's own bare defaults "
             "changed, or this guard needs re-deriving"
+        )
+
+
+class TestKANInitSchemeMechanics:
+    """D-008 (``plan-2026-09-17T132602-7a6ebdb4``, review-iter-1-pass2.md NEW-2):
+    five behaviours the completion-fix shipped had zero test coverage --
+    each was correct at the time (hand-verified by the reviewer), but
+    nothing kept it correct. This class is that guard, one test per
+    behaviour, none needing a GPU or more than a 2-layer model.
+    """
+
+    def test_a_partial_override_still_gets_the_missing_key_injected(self):
+        """The exact path review-iter-1.md finding #3 exists for: a layer
+        config setting ONLY ``kernel_initializer`` must still get a real,
+        non-degenerate ``base_scaler_initializer`` -- not the constant
+        ``1.0`` every connection would otherwise share.
+        """
+        model = KAN(
+            layer_configs=[
+                {"features": 8, "kernel_initializer": "glorot_uniform"},
+                {"features": 1, "activation": "linear"},
+            ],
+            input_features=2,
+            init_seed=0,
+        )
+        layer0 = model.get_layer("kan_layer_0")
+
+        assert isinstance(layer0.kernel_initializer, keras.initializers.GlorotUniform), (
+            "the caller's explicit kernel_initializer must be respected verbatim"
+        )
+        base_scaler = keras.ops.convert_to_numpy(layer0.base_scaler)
+        assert len(np.unique(base_scaler)) > 1, (
+            "base_scaler must NOT be the degenerate all-ones constant -- the "
+            "missing key must still be auto-injected"
+        )
+        assert model._layers_with_explicit_initializer_override == [0]
+
+    def test_init_scheme_rejects_an_unknown_string(self):
+        for bad_scheme in ("glorot", "", 5):
+            with pytest.raises(ValueError, match="init_scheme must be one of"):
+                KAN(
+                    layer_configs=[{"features": 4}],
+                    input_features=2,
+                    init_scheme=bad_scheme,
+                )
+
+    def test_from_layer_sizes_forwards_init_scheme_and_init_seed(self):
+        """review-iter-1.md finding #6: before the fix, passing either raised
+        an unrelated ``KANLinear`` ``TypeError`` (they were swallowed into
+        ``**kan_layer_kwargs`` and forwarded per-layer instead of to `KAN`).
+        """
+        legacy = KAN.from_layer_sizes([2, 4, 1], init_scheme=None)
+        assert legacy.init_scheme is None
+        legacy_base_scaler = keras.ops.convert_to_numpy(
+            legacy.get_layer("kan_layer_0").base_scaler
+        )
+        assert np.all(legacy_base_scaler == 1.0), "init_scheme=None must give the bare KANLinear default"
+
+        seeded = KAN.from_layer_sizes([2, 4, 1], init_seed=7)
+        assert seeded.init_scheme == "glorot_inspired"
+        assert seeded.init_seed == 7
+
+    def test_init_seed_is_deterministic_and_seed_dependent(self):
+        """Same seed -> identical weights; different seed -> different weights.
+
+        Guards the ``+ i * 2`` per-layer stride (review-iter-1-pass2.md's
+        Blind Spots): an off-by-one there would make layer i's spline stream
+        equal layer i+1's residual stream, silently, with no other symptom.
+        """
+        m0a = KAN.from_layer_sizes([2, 4, 1], init_seed=0)
+        m0b = KAN.from_layer_sizes([2, 4, 1], init_seed=0)
+        m1 = KAN.from_layer_sizes([2, 4, 1], init_seed=1)
+
+        w0a = keras.ops.convert_to_numpy(m0a.get_layer("kan_layer_0").spline_weight)
+        w0b = keras.ops.convert_to_numpy(m0b.get_layer("kan_layer_0").spline_weight)
+        w1 = keras.ops.convert_to_numpy(m1.get_layer("kan_layer_0").spline_weight)
+
+        np.testing.assert_array_equal(w0a, w0b)
+        assert not np.array_equal(w0a, w1)
+
+    def test_init_scheme_survives_get_config_round_trip(self):
+        model = KAN.from_variant(
+            "small", input_features=2, output_features=1,
+            output_activation="linear", init_scheme=None,
+        )
+        reloaded = KAN.from_config(model.get_config())
+
+        assert reloaded.init_scheme is None
+        assert reloaded.init_seed is None
+        reloaded_base_scaler = keras.ops.convert_to_numpy(
+            reloaded.get_layer("kan_layer_0").base_scaler
+        )
+        assert np.all(reloaded_base_scaler == 1.0), (
+            "a reloaded init_scheme=None model must NOT silently switch to "
+            "the class default"
         )

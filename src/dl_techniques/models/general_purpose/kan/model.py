@@ -58,7 +58,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.ffn.kan_linear import KANLinear
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.initializers.kan_initializer import create_kan_initializers, _VALID_SCHEMES
+from dl_techniques.initializers.kan_initializer import create_kan_initializers, VALID_KAN_SCHEMES
 
 # ---------------------------------------------------------------------
 
@@ -71,6 +71,18 @@ _KANLINEAR_DEFAULTS = {
     for name, param in inspect.signature(KANLinear.__init__).parameters.items()
     if name in ("grid_size", "spline_order", "grid_range")
 }
+assert set(_KANLINEAR_DEFAULTS) == {"grid_size", "spline_order", "grid_range"}, (
+    "KANLinear.__init__'s signature no longer names one of these three "
+    "parameters -- _build_functional_model's injection site reads this dict "
+    "by key and would otherwise fail at model-build time instead of here, "
+    "at import time (review-iter-1-pass2.md NOTE #6)"
+)
+
+#: `KAN.__init__`'s and `KAN.from_layer_sizes`'s shared `init_scheme` default
+#: -- one definition, so the two constructors cannot silently drift apart
+#: the way `_KANLINEAR_DEFAULTS` above was introduced to prevent for
+#: `KANLinear`'s own defaults (review-iter-1-pass2.md NOTE #5).
+_DEFAULT_INIT_SCHEME = "glorot_inspired"
 
 # ---------------------------------------------------------------------
 
@@ -153,13 +165,16 @@ class KAN(keras.Model):
     :type input_features: int
     :param name: Optional model name. Defaults to ``'kan_model'``.
     :type name: Optional[str]
-    :param init_scheme: Variance-controlled initializer scheme auto-injected into
-        every layer that does not already set ``kernel_initializer`` AND
-        ``base_scaler_initializer`` explicitly -- one of ``'power_law'``,
-        ``'glorot_inspired'`` (the default) or ``'baseline'`` (see
-        :func:`dl_techniques.initializers.create_kan_initializers`). ``None``
-        restores ``KANLinear``'s own bare constructor defaults exactly (see
-        the ``Warning`` block below and D-006).
+    :param init_scheme: Variance-controlled initializer scheme, one of
+        ``'power_law'``, ``'glorot_inspired'`` (the default) or ``'baseline'``
+        (see :func:`dl_techniques.initializers.create_kan_initializers`).
+        Auto-injected into every layer, independently for each of
+        ``kernel_initializer`` and ``base_scaler_initializer`` -- a layer's
+        own config setting only ONE of the two still gets the other filled
+        in, rather than silently keeping ``KANLinear``'s degenerate bare
+        default for it. ``None`` restores ``KANLinear``'s own bare
+        constructor defaults exactly, for both keys, on every layer (see the
+        ``Warning`` block below and D-006).
     :type init_scheme: Optional[str]
     :param init_seed: Optional base seed for the auto-injected initializers, one
         per layer via a ``+ i * 2`` offset (matching
@@ -232,7 +247,7 @@ class KAN(keras.Model):
         layer_configs: List[Dict[str, Any]],
         input_features: int,
         name: Optional[str] = None,
-        init_scheme: Optional[str] = "glorot_inspired",
+        init_scheme: Optional[str] = _DEFAULT_INIT_SCHEME,
         init_seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
@@ -240,9 +255,9 @@ class KAN(keras.Model):
             raise ValueError("layer_configs must be a non-empty list")
         if not isinstance(input_features, int) or input_features <= 0:
             raise ValueError(f"input_features must be positive integer, got {input_features}")
-        if init_scheme is not None and init_scheme not in _VALID_SCHEMES:
+        if init_scheme is not None and init_scheme not in VALID_KAN_SCHEMES:
             raise ValueError(
-                f"init_scheme must be one of {_VALID_SCHEMES} or None, got {init_scheme!r}"
+                f"init_scheme must be one of {VALID_KAN_SCHEMES} or None, got {init_scheme!r}"
             )
 
         self.layer_configs = self._validate_and_copy_configs(layer_configs)
@@ -707,7 +722,7 @@ class KAN(keras.Model):
         spline_order: int = 3,
         activation: str = "swish",
         final_activation: Optional[str] = None,
-        init_scheme: Optional[str] = "glorot_inspired",
+        init_scheme: Optional[str] = _DEFAULT_INIT_SCHEME,
         init_seed: Optional[int] = None,
         **kan_layer_kwargs: Any
     ) -> "KAN":

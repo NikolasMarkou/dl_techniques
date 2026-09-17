@@ -124,6 +124,13 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 _VALID_SCHEMES = ("power_law", "glorot_inspired", "baseline")
 _VALID_TARGETS = ("residual", "spline")
 
+#: Public alias of ``_VALID_SCHEMES`` for callers outside this module that
+#: need to validate a scheme string without duplicating the tuple (e.g.
+#: ``KAN.__init__``'s early validation, D-006/D-008,
+#: ``plan-2026-09-17T132602-7a6ebdb4``). ``_VALID_SCHEMES`` itself stays
+#: private and unchanged; this is a read-only re-export, not a rename.
+VALID_KAN_SCHEMES = _VALID_SCHEMES
+
 #: Gauss-Legendre nodes for the SiLU moments (a smooth, non-polynomial integrand).
 _SILU_QUADRATURE_NODES = 1024
 

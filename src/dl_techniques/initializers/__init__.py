@@ -86,6 +86,7 @@ from .clone import clone_initializer
 from .kan_initializer import (
     KANInitializer,
     create_kan_initializers,
+    VALID_KAN_SCHEMES,
 )
 
 __all__ = [
@@ -104,4 +105,5 @@ __all__ = [
     "RandomSigns",
     "KANInitializer",
     "create_kan_initializers",
+    "VALID_KAN_SCHEMES",
 ]
