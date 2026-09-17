@@ -13,6 +13,13 @@ Usage:
         --epochs 50 --batch-size 128 --learning-rate 3e-4 \\
         --optimizer adamw --weight-decay 0.05 --warmup-epochs 5 \\
         --output-dir results/vit_cifar10 --experiment-name iter1_baseline --gpu 0
+
+Note: ``--output-dir`` (default ``"results"``) is resolved relative to the
+current working directory, not to the repo root. Invoke this module from the
+repo root (as in the example above, ``python -m train.vit.train_vit ...``)
+so runs land in the repo-root ``results/`` directory per the project
+convention -- never ``src/results/``. This matches every other Pattern-1
+trainer under ``src/train/`` (see plans/plan-2026-09-17T032714-403de954/decisions.md D-002).
 """
 
 import sys
@@ -557,7 +564,12 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     # Output
-    parser.add_argument("--output-dir", type=str, default="results")
+    parser.add_argument(
+        "--output-dir", type=str, default="results",
+        help="Resolved relative to the current working directory, not the "
+             "repo root -- invoke this module from the repo root so runs "
+             "land in the repo-root results/ directory.",
+    )
     parser.add_argument("--experiment-name", type=str, default=None)
     parser.add_argument("--monitor-every", type=int, default=5)
     parser.add_argument("--early-stopping-patience", type=int, default=15)
