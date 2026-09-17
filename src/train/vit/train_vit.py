@@ -15,26 +15,24 @@ Usage:
         --output-dir results/vit_cifar10 --experiment-name iter1_baseline --gpu 0
 """
 
-import os
 import sys
 import gc
 import time
 import keras
 import argparse
-import numpy as np
 import tensorflow as tf
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
 )
-from dl_techniques.models.vision.vit import ViT, create_vit
+from dl_techniques.models.vision.vit import create_vit
 
 
 # =============================================================================
