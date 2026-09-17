@@ -391,16 +391,32 @@ def main() -> None:
                         help='Hidden layer feature sizes')
     parser.add_argument('--grid-update-freq', type=int, default=5,
                         help='Grid update frequency in epochs')
-    _drop_base_parser_args(parser, "dataset", "patience")
+    # `--image-size`/`--weight-decay`/`--lr-schedule` joined `--dataset`/
+    # `--patience` (D-005) as confirmed-dead here: `generate_data()` has no
+    # notion of an image size, and `model.compile()` above uses a plain
+    # `keras.optimizers.Adam(learning_rate=...)` with no weight-decay term
+    # and no schedule object at all. Same reasoning as D-005 applies
+    # unchanged (see decisions.md D-006): these three remain live for other
+    # Pattern-1 trainers sharing `create_base_argument_parser()`, so only
+    # THIS script's own parser instance drops them.
+    _drop_base_parser_args(
+        parser, "dataset", "patience", "image_size", "weight_decay", "lr_schedule"
+    )
+    # DECISION plan-2026-09-17T052443-2c932602/D-006
+    # KAN's own preferred defaults (200 epochs / batch 128 / lr 1e-2) differ
+    # from `create_base_argument_parser()`'s general defaults (100 / 64 /
+    # 1e-3). Do NOT reintroduce the previous "if args.X == <old default>:
+    # args.X = <new default>" pattern here -- it cannot distinguish "user
+    # never passed --batch-size" from "user explicitly passed --batch-size
+    # 64", so an explicit `--batch-size 64` was silently clobbered to 128
+    # (confirmed live: this is why the Step 1 baseline run's progress bar
+    # showed 2 steps/epoch for 256 samples, not the expected 4 -- see
+    # decisions.md D-006). `set_defaults()` changes what argparse falls back
+    # to when a flag is ABSENT, so an explicit CLI value of any kind
+    # (including one that happens to equal the base parser's old default) is
+    # honored correctly.
+    parser.set_defaults(epochs=200, batch_size=128, learning_rate=1e-2)
     args = parser.parse_args()
-
-    # Override defaults for KAN
-    if args.epochs == 100:
-        args.epochs = 200
-    if args.batch_size == 64:
-        args.batch_size = 128
-    if args.learning_rate == 1e-3:
-        args.learning_rate = 1e-2
 
     setup_gpu(args.gpu)
 
