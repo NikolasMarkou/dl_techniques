@@ -610,6 +610,13 @@ def main() -> None:
     )
     model.summary()
 
+    # Visualization manager -- created BEFORE `fit()` (not after, as in the
+    # pre-Step-6 layout) so the SAME instance is shared by
+    # `KANVisualizationCallback` (periodic, during training) and the final
+    # post-hoc `plot_results()` call below: both renders land in the same
+    # `run_dir / "visualizations"` directory via one `VisualizationManager`.
+    viz_manager = create_visualization_manager(run_dir)
+
     # Training
     logger.info("Starting training...")
     # DECISION plan-2026-09-17T064004-0d194df2/D-001
@@ -639,6 +646,9 @@ def main() -> None:
                 save_best_only=True,
             ),
             keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
+            KANVisualizationCallback(
+                viz_manager, X_train, y_train, freq=args.viz_freq,
+            ),
         ],
         verbose=1
     )
@@ -657,8 +667,10 @@ def main() -> None:
     model.save(model_path)
     logger.info(f"Saved trained model to {model_path}")
 
-    # Visualization
-    viz_manager = create_visualization_manager(run_dir)
+    # Visualization: final, definitive-quality post-hoc render. Reuses the
+    # SAME `viz_manager` instance `KANVisualizationCallback` used during
+    # training (created above, before `fit()`), so periodic and final
+    # renders share one `run_dir / "visualizations"` directory.
     plot_results(history, model, viz_manager, show=args.show_plots)
 
 
