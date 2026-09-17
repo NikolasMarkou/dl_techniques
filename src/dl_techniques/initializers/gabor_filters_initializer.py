@@ -824,6 +824,12 @@ def create_gabor_depthwise_conv2d(
     ``(kh, kw, in_channels, filters_per_channel)`` and is exposed as
     ``layer.kernel`` in Keras 3.8, not ``layer.depthwise_kernel``.
 
+    Constructs its ``GaborFiltersInitializer`` with ``depthwise=True``, so
+    normalization uses ``fan_in = kh * kw`` (no cross-channel summation),
+    matching this layer's actual per-channel fan-in. See
+    :func:`create_gabor_conv2d` for the cross-channel ``fan_in = kh * kw *
+    in_ch`` counterpart.
+
     # DECISION plan_2026-06-18_ba4e0079/D-001: per-channel (depthwise) Gabor.
     # Do not swap this for a Conv2D: that sums across input channels and
     # destroys the per-channel front-end. See D-001.
@@ -917,6 +923,7 @@ def create_gabor_depthwise_conv2d(
             sigma_range=sigma_range, theta_range=theta_range,
             lambda_range=lambda_range, gamma_range=gamma_range,
             psi_range=psi_range, sweep=sweep, normalize=normalize,
+            depthwise=True,
         ),
         trainable=trainable,
         name=name or 'gabor_depthwise_conv2d',
@@ -970,6 +977,12 @@ def create_gabor_conv2d(
     channels. The layer is colour-blind at initialization and training has to
     break that symmetry. ``normalize=True`` is what keeps the layer trainable at
     all: it gives every output channel the same He-like gain.
+
+    Constructs its ``GaborFiltersInitializer`` with the default
+    ``depthwise=False``, so normalization uses the cross-channel
+    ``fan_in = kh * kw * in_ch``, correct for this layer's true summation
+    across input channels. See :func:`create_gabor_depthwise_conv2d` for the
+    per-channel ``fan_in = kh * kw`` counterpart.
 
     :param filters: Number of output channels, which is also the number of Gabor
         filters. Must be >= 1.
