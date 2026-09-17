@@ -15,6 +15,7 @@ References:
       (https://arxiv.org/abs/1706.03762)
 """
 
+import inspect
 import keras
 import numpy as np
 from typing import Any, Dict, Optional, Tuple, Union
@@ -27,6 +28,10 @@ from .common import apply_attention_mask
 from ..ffn.kan_linear import KANLinear
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
+from dl_techniques.initializers.kan_initializer import (
+    create_kan_initializers,
+    VALID_KAN_SCHEMES,
+)
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -167,6 +172,20 @@ class SingleWindowAttention(keras.layers.Layer):
     :param kan_activation: Activation for the KAN layer.
         Defaults to ``'swish'``.
     :type kan_activation: str
+    :param kan_init_scheme: Optional variance-controlled initializer scheme
+        for the ``kan_key`` mode's KAN key projection, forwarded to
+        :func:`~dl_techniques.initializers.kan_initializer.create_kan_initializers`.
+        One of ``'power_law'``, ``'glorot_inspired'``, ``'baseline'``, or
+        ``None`` (default) to leave ``KANLinear``'s own bare constructor
+        defaults (``base_scaler_initializer='ones'``,
+        ``kernel_initializer='glorot_uniform'``) untouched. Ignored outside
+        ``kan_key`` mode.
+    :type kan_init_scheme: Optional[str]
+    :param kan_init_seed: Optional integer seed forwarded to
+        :func:`~dl_techniques.initializers.kan_initializer.create_kan_initializers`
+        when ``kan_init_scheme`` is set. Has no effect when
+        ``kan_init_scheme`` is ``None``.
+    :type kan_init_seed: Optional[int]
     :param kernel_initializer: Initializer for kernel weights.
         Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
@@ -180,9 +199,11 @@ class SingleWindowAttention(keras.layers.Layer):
     :param kwargs: Additional keyword arguments forwarded to the base Layer.
 
     :raises ValueError: If ``attention_mode`` is not one of
-        ``{'linear', 'kan_key'}`` or if ``probability_type`` is a score-level
+        ``{'linear', 'kan_key'}``, if ``probability_type`` is a score-level
         routing strategy (``'routing'``, ``'deterministic_routing'``,
-        ``'hierarchical'``, ``'hierarchical_routing'``).
+        ``'hierarchical'``, ``'hierarchical_routing'``), or if
+        ``kan_init_scheme`` is not ``None`` and not one of
+        ``VALID_KAN_SCHEMES``.
     """
 
     def __init__(
@@ -199,6 +220,8 @@ class SingleWindowAttention(keras.layers.Layer):
             kan_grid_size: int = 5,
             kan_spline_order: int = 3,
             kan_activation: str = "swish",
+            kan_init_scheme: Optional[str] = None,
+            kan_init_seed: Optional[int] = None,
             probability_type: str = "softmax",
             probability_config: Optional[Dict[str, Any]] = None,
             qk_norm_type: Optional[str] = None,
@@ -227,8 +250,9 @@ class SingleWindowAttention(keras.layers.Layer):
         :meth:`build`. See the class docstring for the parameter reference.
 
         :raises ValueError: If ``attention_mode`` is not one of ``"linear"`` or
-            ``"kan_key"``, or if ``probability_type`` names a score-level
-            routing or hierarchical variant.
+            ``"kan_key"``, if ``probability_type`` names a score-level
+            routing or hierarchical variant, or if ``kan_init_scheme`` is not
+            ``None`` and not one of ``VALID_KAN_SCHEMES``.
         """
         super().__init__(**kwargs)
 
@@ -251,6 +275,11 @@ class SingleWindowAttention(keras.layers.Layer):
                 f"routing strategies {invalid_prob_types} are not allowed for "
                 f"SingleWindowAttention."
             )
+        if kan_init_scheme is not None and kan_init_scheme not in VALID_KAN_SCHEMES:
+            raise ValueError(
+                f"kan_init_scheme must be one of {VALID_KAN_SCHEMES} or None, "
+                f"got {kan_init_scheme!r}"
+            )
 
         # Store ALL configuration parameters
         self.dim = dim
@@ -269,6 +298,8 @@ class SingleWindowAttention(keras.layers.Layer):
         self.kan_grid_size = kan_grid_size
         self.kan_spline_order = kan_spline_order
         self.kan_activation = deserialize_activation(kan_activation)
+        self.kan_init_scheme = kan_init_scheme
+        self.kan_init_seed = kan_init_seed
         self.probability_type = probability_type
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type
@@ -293,12 +324,45 @@ class SingleWindowAttention(keras.layers.Layer):
             self.query = keras.layers.Dense(
                 self.dim, use_bias=False, name="query"
             )
+            # DECISION plan-2026-09-17T194331-3ce35186/D-008: injection here is
+            # UNCONDITIONAL for both keys whenever kan_init_scheme is set --
+            # unlike the FFN factory's 'kan' type (per-key-conditional, since a
+            # caller there can already set kernel_initializer/
+            # base_scaler_initializer explicitly), this constructor has NEVER
+            # exposed either key for the KAN key projection, so there is no
+            # caller-set value that could be overwritten (D-003). grid_range is
+            # read live via inspect.signature(KANLinear.__init__) rather than a
+            # hardcoded (-2.0, 2.0) literal, matching model.py's drift-safety
+            # rationale for the same idiom -- this site exposes no
+            # kan_grid_range override param to read instead. See decisions.md.
+            kan_key_kwargs: Dict[str, Any] = {}
+            if self.kan_init_scheme is not None:
+                grid_range = inspect.signature(
+                    KANLinear.__init__
+                ).parameters["grid_range"].default
+                base_scaler_init, spline_init = create_kan_initializers(
+                    grid_size=self.kan_grid_size,
+                    spline_order=self.kan_spline_order,
+                    scheme=self.kan_init_scheme,
+                    grid_range=grid_range,
+                    seed=self.kan_init_seed,
+                )
+                kan_key_kwargs["base_scaler_initializer"] = base_scaler_init
+                kan_key_kwargs["kernel_initializer"] = spline_init
+            # This site constructs one KANLinear per SingleWindowAttention
+            # instance, never in a loop today (D-004) -- no `+ i * 2`-style
+            # seed-offset stride is applied. A future loop consumer (e.g. a
+            # Swin-style stack of WindowAttention(attention_mode='kan_key', ...)
+            # blocks) should offset kan_init_seed per instance the way
+            # models/general_purpose/kan/model.py:435 does, rather than reuse
+            # one seed verbatim across instances.
             self.key = KANLinear(
                 features=self.dim,
                 grid_size=self.kan_grid_size,
                 spline_order=self.kan_spline_order,
                 activation=self.kan_activation,
                 name="key_kan",
+                **kan_key_kwargs,
             )
             self.value = keras.layers.Dense(
                 self.dim, use_bias=False, name="value"
@@ -863,6 +927,8 @@ class SingleWindowAttention(keras.layers.Layer):
                 "kan_grid_size": self.kan_grid_size,
                 "kan_spline_order": self.kan_spline_order,
                 "kan_activation": serialize_activation(self.kan_activation),
+                "kan_init_scheme": self.kan_init_scheme,
+                "kan_init_seed": self.kan_init_seed,
                 "probability_type": self.probability_type,
                 "probability_config": self.probability_config,
                 "qk_norm_type": self.qk_norm_type,

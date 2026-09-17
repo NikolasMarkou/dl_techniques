@@ -258,6 +258,17 @@ class WindowAttention(keras.layers.Layer):
     :param kan_activation: Activation for the KAN layer. Only used when
         `attention_mode` is `'kan_key'`. Default: 'swish'.
     :type kan_activation: str
+    :param kan_init_scheme: Optional variance-controlled initializer scheme
+        for the `'kan_key'` mode's KAN key projection, forwarded through to
+        `SingleWindowAttention`. One of `'power_law'`, `'glorot_inspired'`,
+        `'baseline'`, or `None` (default) to leave `KANLinear`'s own bare
+        constructor defaults untouched. Only used when `attention_mode` is
+        `'kan_key'`.
+    :type kan_init_scheme: Optional[str]
+    :param kan_init_seed: Optional integer seed forwarded through to
+        `SingleWindowAttention` when `kan_init_scheme` is set. Has no effect
+        when `kan_init_scheme` is `None`.
+    :type kan_init_seed: Optional[int]
     :param kernel_initializer: Initializer for kernel weights.
         Default: 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
@@ -286,6 +297,8 @@ class WindowAttention(keras.layers.Layer):
         kan_grid_size: int = 5,
         kan_spline_order: int = 3,
         kan_activation: str = "swish",
+        kan_init_scheme: Optional[str] = None,
+        kan_init_seed: Optional[int] = None,
         probability_type: str = "softmax",
         probability_config: Optional[Dict[str, Any]] = None,
         qk_norm_type: Optional[str] = None,
@@ -371,6 +384,8 @@ class WindowAttention(keras.layers.Layer):
         self.kan_grid_size = kan_grid_size
         self.kan_spline_order = kan_spline_order
         self.kan_activation = deserialize_activation(kan_activation)
+        self.kan_init_scheme = kan_init_scheme
+        self.kan_init_seed = kan_init_seed
         self.probability_type = probability_type
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type
@@ -403,6 +418,12 @@ class WindowAttention(keras.layers.Layer):
             kan_grid_size=kan_grid_size,
             kan_spline_order=kan_spline_order,
             kan_activation=kan_activation,
+            # D-002 (decisions.md): forward the same 2 new kan_key-mode params
+            # through to SingleWindowAttention, matching the kan_grid_size
+            # etc. forwarding shape above exactly -- the mechanical shape
+            # needed no adaptation from what D-002 already decided.
+            kan_init_scheme=kan_init_scheme,
+            kan_init_seed=kan_init_seed,
             probability_type=probability_type,
             probability_config=probability_config,
             qk_norm_type=qk_norm_type,
@@ -962,6 +983,8 @@ class WindowAttention(keras.layers.Layer):
                 "kan_grid_size": self.kan_grid_size,
                 "kan_spline_order": self.kan_spline_order,
                 "kan_activation": serialize_activation(self.kan_activation),
+                "kan_init_scheme": self.kan_init_scheme,
+                "kan_init_seed": self.kan_init_seed,
                 "probability_type": self.probability_type,
                 "probability_config": self.probability_config,
                 "qk_norm_type": self.qk_norm_type,
