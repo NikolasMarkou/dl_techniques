@@ -51,6 +51,12 @@ the default ``psi_range`` the phase axis holds ``{0, 180}`` from 4 filters and
 the larger banks also get a quadrature partner. The sibling is what makes a
 rectifying activation on a frozen signed bank lossless.
 
+The enumeration runs phase-fastest, then orientation, then scale, and is cut to
+exactly ``n`` filters. When ``n`` is not a multiple of ``n_psi`` the cut lands
+mid-phase-group, so the final one to three filters of such a bank have no
+phase-reversed sibling. Choose ``n_filters`` as a multiple of the phase count
+(4 at or above 16 filters, 2 from 4 to 15) when the sibling property matters.
+
 ``sweep="diagonal"`` reproduces the paper's single-``linspace`` scheme, in which
 all five parameters are swept jointly with inclusive endpoints and output
 channel ``j`` takes the ``j``-th sample of every parameter. That is a
@@ -97,8 +103,14 @@ Without normalization the raw bank is unusable as an initializer: measured on
 a factor of 38, and the per-output-channel gain ``sum |w|`` spanned 0.54 to
 100.3, two orders of magnitude of activation scale at initialization.
 
+A filter whose energy collapses relative to its own pre-DC-removal energy is
+constant over the window: it carries no orientation or frequency information,
+and rescaling it to the target RMS would amplify float64 cancellation noise by
+an unbounded factor. Such filters are left at zero and counted in a warning.
+
 All math runs in numpy ``float64`` and is cast once to the requested dtype at
-the final step.
+the final step. Dtypes numpy cannot express (``bfloat16``, the ``float8``
+family) are cast to ``float32`` in numpy and narrowed by the backend.
 
 References:
     Ozbulak, G., & Ekenel, H. K. *Initialization of Convolutional Neural
@@ -106,6 +118,7 @@ References:
     Applications Conference (SIU), 2018.
 """
 
+import itertools
 import keras
 import numpy as np
 from typing import Callable, Dict, Any, Optional, Sequence, Tuple, Union
@@ -132,13 +145,55 @@ SIGMA_FRACTIONS = (0.30, 0.60)
 #: ``lambda_range`` when left as ``None``, as a fraction of ``k = min(kh, kw)``.
 LAMBDA_FRACTIONS = (0.30, 1.00)
 
-#: Filters below this L2 norm are left untouched by the normalization step.
+#: ``theta_range`` when left as ``None``. Half-open in ``product`` mode, since
+#: ``g(theta + 180, psi) == g(theta, -psi)``.
+DEFAULT_THETA_RANGE = (0.0, 180.0)
+
+#: ``gamma_range`` when left as ``None``. See the module docstring on why this
+#: is not the reference implementation's ``(0.0, 300.0)``.
+DEFAULT_GAMMA_RANGE = (0.5, 1.5)
+
+#: ``psi_range`` when left as ``None``. Half-open in ``product`` mode.
+DEFAULT_PSI_RANGE = (0.0, 360.0)
+
+#: Absolute floor below which a filter's L2 norm counts as no energy at all.
 _NORM_EPS = 1e-12
+
+#: Relative floor: a filter whose post-DC-removal norm falls below this
+#: fraction of its pre-DC-removal norm is constant over the window, and
+#: rescaling it would amplify cancellation noise without bound.
+_NORM_REL_EPS = 1e-8
+
+#: numpy dtype used when the requested dtype has no numpy equivalent.
+_FALLBACK_NUMPY_FLOAT = "float32"
+
+#: Per-prefix layer-name counters, mirroring Keras' own auto-naming so that two
+#: builder calls in one model do not collide on a hardcoded name.
+_NAME_COUNTERS: Dict[str, "itertools.count"] = {}
 
 # ---------------------------------------------------------------------
 
+
+def _unique_name(prefix: str) -> str:
+    """Return ``prefix`` the first time and ``prefix_N`` thereafter.
+
+    Keras 3 rejects a model holding two layers with the same explicit name, so
+    a builder that hardcodes one cannot be used twice. This mirrors Keras'
+    own uid-suffix scheme for auto-named layers.
+
+    :param prefix: Base layer name.
+    :type prefix: str
+    :return: A name unique among the names this function has handed out.
+    :rtype: str
+    """
+    index = next(_NAME_COUNTERS.setdefault(prefix, itertools.count()))
+    return prefix if index == 0 else f"{prefix}_{index}"
+
+# ---------------------------------------------------------------------
+
+
 def _numpy_dtype(dtype: Any) -> str:
-    """Convert a Keras dtype spec to a numpy-acceptable dtype name.
+    """Convert a Keras dtype spec to a dtype name.
 
     The Keras-2 ``standardize_dtype`` helper is banned tree-wide (see
     ``tests/test_the_keras2_backend_calls_are_gone.py``); this is the sanctioned
@@ -153,6 +208,44 @@ def _numpy_dtype(dtype: Any) -> str:
 # ---------------------------------------------------------------------
 
 
+def _to_backend_tensor(array: np.ndarray, dtype: Any) -> Any:
+    """Cast a float64 numpy array to ``dtype`` and hand it to the backend.
+
+    ``numpy.ndarray.astype`` cannot express the backend-only float dtypes a
+    mixed-precision policy produces (``bfloat16``, the ``float8`` family), so
+    those go through ``float32`` and are narrowed by the backend instead.
+
+    :param array: The float64 source array.
+    :type array: numpy.ndarray
+    :param dtype: Requested dtype, as a name or dtype object.
+    :return: A backend tensor of the requested dtype.
+    :rtype: tensor
+    :raises ValueError: If ``dtype`` names a non-floating numpy dtype, which
+        would silently truncate the whole bank.
+    """
+    name = _numpy_dtype(dtype)
+    try:
+        np_dtype: Optional[np.dtype] = np.dtype(name)
+    except TypeError:
+        # Not a numpy dtype (bfloat16, float8_e4m3, ...). Narrow in the backend.
+        np_dtype = None
+
+    if np_dtype is None:
+        casted = array.astype(_FALLBACK_NUMPY_FLOAT)
+    else:
+        if np_dtype.kind != "f":
+            raise ValueError(
+                f"GaborFiltersInitializer requires a floating dtype, got "
+                f"{name!r}; an integer or boolean kernel would truncate every "
+                f"filter to zero"
+            )
+        casted = array.astype(np_dtype)
+
+    return keras.ops.cast(keras.ops.convert_to_tensor(casted), dtype)
+
+# ---------------------------------------------------------------------
+
+
 def _validate_range(name: str, rng: RangeLike) -> Optional[Tuple[float, float]]:
     """Coerce a ``(min, max)`` range to a tuple of floats and validate it.
 
@@ -162,20 +255,36 @@ def _validate_range(name: str, rng: RangeLike) -> Optional[Tuple[float, float]]:
     :type rng: tuple of float or None
     :return: The coerced ``(min, max)`` tuple, or ``None``.
     :rtype: tuple of float or None
-    :raises ValueError: If the range is not 2-element, holds a non-finite bound,
-        or has ``min > max``.
+    :raises ValueError: If the range is not an iterable of exactly 2 numbers,
+        holds a non-finite bound, or has ``min > max``.
     """
     if rng is None:
         return None
 
-    coerced = tuple(rng)
+    # A string is iterable and would pass the length check for a 2-character
+    # value, so reject it before coercion.
+    if isinstance(rng, (str, bytes)):
+        raise ValueError(f"{name} must be a (min, max) pair or None, got {rng!r}")
+
+    try:
+        coerced = tuple(rng)
+    except TypeError as exc:
+        raise ValueError(
+            f"{name} must be a (min, max) pair or None, got {rng!r}"
+        ) from exc
+
     if len(coerced) != 2:
         raise ValueError(
             f"{name} must have exactly 2 elements (min, max), "
             f"got {len(coerced)}: {coerced}"
         )
 
-    lo, hi = (float(coerced[0]), float(coerced[1]))
+    try:
+        lo, hi = (float(coerced[0]), float(coerced[1]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} bounds must be numbers, got {coerced!r}"
+        ) from exc
 
     # A non-finite bound passes every naive comparison (nan > hi is False and
     # nan <= 0 is False) and yields an all-NaN kernel, so reject it here.
@@ -187,6 +296,7 @@ def _validate_range(name: str, rng: RangeLike) -> Optional[Tuple[float, float]]:
     return (lo, hi)
 
 # ---------------------------------------------------------------------
+
 
 def _axis(
     lo: float,
@@ -206,8 +316,8 @@ def _axis(
     :type hi: float
     :param n: Number of samples, >= 1.
     :type n: int
-    :param geometric: If ``True``, space the samples geometrically. Requires
-        ``lo > 0``.
+    :param geometric: If ``True``, space the samples geometrically. Falls back
+        to linear spacing unless ``lo > 0``.
     :type geometric: bool
     :return: A ``(n,)`` float64 array.
     :rtype: numpy.ndarray
@@ -220,6 +330,7 @@ def _axis(
     return np.linspace(lo, hi, n, dtype=np.float64)
 
 # ---------------------------------------------------------------------
+
 
 def _factorize_bank(n: int) -> Tuple[int, int, int]:
     """Split ``n`` filters into ``(n_theta, n_scale, n_psi)`` product axes.
@@ -241,6 +352,7 @@ def _factorize_bank(n: int) -> Tuple[int, int, int]:
     return n_theta, n_scale, n_psi
 
 # ---------------------------------------------------------------------
+
 
 @register_dl_technique("dl_techniques.initializers.gabor_filters_initializer")
 class GaborFiltersInitializer(keras.initializers.Initializer):
@@ -348,8 +460,9 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         window or sub-pixel.
     :type sigma_range: tuple of float or None
     :param theta_range: ``(min, max)`` interval for the filter orientation
-        ``theta``, in DEGREES. The upper endpoint is exclusive in ``product``
-        mode, since ``g(theta + 180, psi) == g(theta, -psi)``.
+        ``theta``, in DEGREES; ``None`` means :data:`DEFAULT_THETA_RANGE`. The
+        upper endpoint is exclusive in ``product`` mode, since
+        ``g(theta + 180, psi) == g(theta, -psi)``.
     :type theta_range: tuple of float or None
     :param lambda_range: ``(min, max)`` interval for the sinusoid wavelength
         ``lambda``; ``min`` must be strictly positive, since it divides
@@ -357,12 +470,14 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         ``(0.30 * k, 1.00 * k)``.
     :type lambda_range: tuple of float or None
     :param gamma_range: ``(min, max)`` interval for the spatial aspect ratio
-        ``gamma``; ``min`` must be >= 0. See the module docstring on why this is
+        ``gamma``; ``min`` must be >= 0. ``None`` means
+        :data:`DEFAULT_GAMMA_RANGE`. See the module docstring on why this is
         not ``(0.0, 300.0)``.
     :type gamma_range: tuple of float or None
     :param psi_range: ``(min, max)`` interval for the phase offset ``psi``, in
-        DEGREES. The upper endpoint is exclusive in ``product`` mode, so two
-        phases give the pair ``(0, 180)``.
+        DEGREES; ``None`` means :data:`DEFAULT_PSI_RANGE`. The upper endpoint
+        is exclusive in ``product`` mode, so two phases give the pair
+        ``(0, 180)``.
     :type psi_range: tuple of float or None
     :param sweep: ``"product"`` for the factorized orientation x scale x phase
         bank, or ``"diagonal"`` for the joint-``linspace`` construction.
@@ -392,8 +507,8 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     :ivar depthwise: Which fan-in convention ``normalize`` targets.
     :vartype depthwise: bool
 
-    :raises ValueError: If any range is not exactly two elements, holds a
-        non-finite bound, or has ``min > max``; if ``sigma_range[0] <= 0``,
+    :raises ValueError: If any range is not an iterable of exactly two finite
+        numbers or has ``min > max``; if ``sigma_range[0] <= 0``,
         ``lambda_range[0] <= 0`` or ``gamma_range[0] < 0``; if ``sweep`` is not
         a member of :data:`SWEEP_MODES`; or if ``n_filters < 1``.
 
@@ -414,10 +529,10 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     def __init__(
         self,
         sigma_range: RangeLike = None,
-        theta_range: RangeLike = (0.0, 180.0),
+        theta_range: RangeLike = DEFAULT_THETA_RANGE,
         lambda_range: RangeLike = None,
-        gamma_range: RangeLike = (0.5, 1.5),
-        psi_range: RangeLike = (0.0, 360.0),
+        gamma_range: RangeLike = DEFAULT_GAMMA_RANGE,
+        psi_range: RangeLike = DEFAULT_PSI_RANGE,
         sweep: str = "product",
         n_filters: Optional[int] = None,
         normalize: bool = True,
@@ -425,18 +540,25 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     ) -> None:
         """Validate the five parameter ranges and the sweep settings.
 
+        ``sigma_range`` and ``lambda_range`` keep ``None`` and resolve against
+        the kernel size at call time. The three scale-free ranges have no
+        kernel-relative meaning, so ``None`` resolves to their module defaults
+        here: leaving them unresolved would fail only later, inside the sweep.
+
         :param sigma_range: ``(min, max)`` for the Gaussian envelope width, or
             ``None`` for a kernel-relative default; ``min`` must be > 0.
         :type sigma_range: tuple of float or None
-        :param theta_range: ``(min, max)`` for orientation, in DEGREES.
+        :param theta_range: ``(min, max)`` for orientation, in DEGREES, or
+            ``None`` for :data:`DEFAULT_THETA_RANGE`.
         :type theta_range: tuple of float or None
         :param lambda_range: ``(min, max)`` for the sinusoid wavelength, or
             ``None`` for a kernel-relative default; ``min`` must be > 0.
         :type lambda_range: tuple of float or None
-        :param gamma_range: ``(min, max)`` for the spatial aspect ratio; ``min``
-            must be >= 0.
+        :param gamma_range: ``(min, max)`` for the spatial aspect ratio, or
+            ``None`` for :data:`DEFAULT_GAMMA_RANGE`; ``min`` must be >= 0.
         :type gamma_range: tuple of float or None
-        :param psi_range: ``(min, max)`` for the phase offset, in DEGREES.
+        :param psi_range: ``(min, max)`` for the phase offset, in DEGREES, or
+            ``None`` for :data:`DEFAULT_PSI_RANGE`.
         :type psi_range: tuple of float or None
         :param sweep: ``"product"`` or ``"diagonal"``.
         :type sweep: str
@@ -455,10 +577,18 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         # keras.initializers.Initializer (Keras 3) defines no __init__, so there
         # is nothing to forward to and this signature is closed.
         self.sigma_range = _validate_range("sigma_range", sigma_range)
-        self.theta_range = _validate_range("theta_range", theta_range)
         self.lambda_range = _validate_range("lambda_range", lambda_range)
-        self.gamma_range = _validate_range("gamma_range", gamma_range)
-        self.psi_range = _validate_range("psi_range", psi_range)
+
+        theta = _validate_range("theta_range", theta_range)
+        gamma = _validate_range("gamma_range", gamma_range)
+        psi = _validate_range("psi_range", psi_range)
+
+        # Only sigma and lambda have a kernel-relative fallback. The other three
+        # must be concrete by the end of __init__, or _resolved_ranges hands a
+        # None to the sweep and it fails with an opaque TypeError.
+        self.theta_range = DEFAULT_THETA_RANGE if theta is None else theta
+        self.gamma_range = DEFAULT_GAMMA_RANGE if gamma is None else gamma
+        self.psi_range = DEFAULT_PSI_RANGE if psi is None else psi
 
         if self.sigma_range is not None and self.sigma_range[0] <= 0:
             raise ValueError(
@@ -470,7 +600,7 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
                 f"lambda_range[0] must be > 0 (it divides 2*pi*x_theta), "
                 f"got {self.lambda_range[0]}"
             )
-        if self.gamma_range is not None and self.gamma_range[0] < 0:
+        if self.gamma_range[0] < 0:
             raise ValueError(
                 f"gamma_range[0] must be >= 0 (it is an aspect ratio), "
                 f"got {self.gamma_range[0]}"
@@ -506,7 +636,8 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
 
         :param k: ``min(kh, kw)``, the reference kernel extent.
         :type k: int
-        :return: A dict with the five resolved ``(min, max)`` ranges.
+        :return: A dict with the five resolved ``(min, max)`` ranges. No entry
+            is ``None``.
         :rtype: dict
         """
         sigma = self.sigma_range
@@ -527,7 +658,7 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     def _sweep_parameters(self, n: int, k: int) -> Tuple[np.ndarray, ...]:
         """Produce ``n`` parameter 5-tuples as five ``(n,)`` float64 arrays.
 
-        :param n: Number of distinct filters.
+        :param n: Number of distinct filters, >= 1.
         :type n: int
         :param k: ``min(kh, kw)``.
         :type k: int
@@ -564,19 +695,20 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         gamma_axis = _axis(rng["gamma"][0], rng["gamma"][1], n_scale)
 
         # Mixed-radix enumeration with psi fastest, so a phase pair stays
-        # adjacent and truncating the tail costs whole orientations, not phases.
-        idx = np.arange(n_theta * n_scale * n_psi)
+        # adjacent and the cut to n costs whole orientations first. n is at most
+        # n_theta * n_scale * n_psi (guaranteed by _factorize_bank), so
+        # scale_idx cannot run off the end of sigma_axis.
+        idx = np.arange(n)
         psi_idx = idx % n_psi
         theta_idx = (idx // n_psi) % n_theta
         scale_idx = idx // (n_psi * n_theta)
 
-        take = slice(0, n)
         return (
-            sigma_axis[scale_idx][take],
-            theta_axis[theta_idx][take],
-            lambda_axis[scale_idx][take],
-            gamma_axis[scale_idx][take],
-            psi_axis[psi_idx][take],
+            sigma_axis[scale_idx],
+            theta_axis[theta_idx],
+            lambda_axis[scale_idx],
+            gamma_axis[scale_idx],
+            psi_axis[psi_idx],
         )
 
     # -----------------------------------------------------------------
@@ -591,15 +723,18 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     ) -> Any:
         """Generate a Gabor filter bank for a 4D Conv2D kernel.
 
-        :param shape: Required 4D shape ``(kh, kw, in_ch, out_ch)``.
+        :param shape: Required 4D shape ``(kh, kw, in_ch, out_ch)``, fully
+            defined.
         :type shape: sequence of int
         :param dtype: Data type of the result. ``None`` falls back to
-            ``keras.config.floatx()``.
+            ``keras.config.floatx()``. Must be a floating dtype.
         :type dtype: str or None
         :param kwargs: Additional arguments (unused).
         :return: A ``(kh, kw, in_ch, out_ch)`` tensor holding the Gabor bank.
         :rtype: tensor
-        :raises ValueError: If ``shape`` is not 4D, or any dimension is < 1.
+        :raises ValueError: If ``shape`` is not 4D, holds a non-integer or
+            undefined dimension, or any dimension is < 1; or if ``dtype`` is
+            not a floating dtype.
         """
         if dtype is None:
             dtype = keras.config.floatx()
@@ -610,7 +745,13 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
                 f"got {len(shape)}D: {tuple(shape)}"
             )
 
-        kh, kw, in_ch, out_ch = (int(d) for d in shape)
+        try:
+            kh, kw, in_ch, out_ch = (int(d) for d in shape)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Kernel shape must be fully defined integers, got "
+                f"{tuple(shape)}"
+            ) from exc
 
         if kh < 1 or kw < 1 or in_ch < 1 or out_ch < 1:
             raise ValueError(
@@ -671,38 +812,49 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         kernel = np.transpose(bank, (1, 2, 0))[:, :, None, :]
         kernel = np.repeat(kernel, in_ch, axis=2)
 
-        return keras.ops.convert_to_tensor(
-            kernel.astype(_numpy_dtype(dtype)), dtype=dtype
-        )
+        return _to_backend_tensor(kernel, dtype)
 
     @staticmethod
     def _normalize_bank(bank: np.ndarray, fan_in: int) -> np.ndarray:
         """DC-remove and energy-normalize every filter of a ``(n, kh, kw)`` bank.
 
-        Filters whose energy vanishes after DC removal, meaning a filter that is
-        constant over the window, are left at zero with a warning. DC removal is
-        skipped entirely for a 1x1 kernel, where it would zero every filter and
-        leave a dead layer.
+        A filter whose energy collapses relative to its own pre-DC-removal
+        energy is constant over the window; it is left at zero with a warning
+        rather than rescaled, since rescaling would multiply pure float64
+        cancellation noise by an unbounded factor. DC removal is skipped
+        entirely for a 1x1 kernel, where it would zero every filter and leave a
+        dead layer.
 
-        :param bank: The raw Gabor bank.
+        :param bank: The raw Gabor bank, shape ``(n, kh, kw)``.
         :type bank: numpy.ndarray
-        :param fan_in: ``kh * kw * in_ch`` of the kernel being initialized.
+        :param fan_in: The consumer's fan-in: ``kh * kw * in_ch`` for a
+            cross-channel ``Conv2D``, ``kh * kw`` for a ``DepthwiseConv2D``.
         :type fan_in: int
-        :return: The normalized bank, each filter with zero mean and per-element
-            RMS ``sqrt(2 / fan_in)``.
+        :return: The normalized bank, each live filter with zero mean and
+            per-element RMS ``sqrt(2 / fan_in)``.
         :rtype: numpy.ndarray
         """
-        if bank.shape[1] * bank.shape[2] > 1:
+        kh, kw = bank.shape[1], bank.shape[2]
+
+        raw_norms = np.sqrt((bank ** 2).sum(axis=(1, 2), keepdims=True))
+        if kh * kw > 1:
             bank = bank - bank.mean(axis=(1, 2), keepdims=True)
         norms = np.sqrt((bank ** 2).sum(axis=(1, 2), keepdims=True))
-        target = np.sqrt(2.0 / fan_in) * np.sqrt(bank.shape[1] * bank.shape[2])
-        dead = int((norms <= _NORM_EPS).sum())
+
+        # Absolute floor catches an all-zero filter; the relative floor catches
+        # a filter that was constant and lost all of its energy to DC removal.
+        floor = np.maximum(_NORM_EPS, _NORM_REL_EPS * raw_norms)
+        alive = norms > floor
+
+        dead = int((~alive).sum())
         if dead:
             logger.warning(
                 f"GaborFiltersInitializer: {dead} filter(s) have no energy after "
                 f"normalization and are initialized to zero"
             )
-        scale = np.where(norms > _NORM_EPS, target / np.maximum(norms, _NORM_EPS), 0.0)
+
+        target = np.sqrt(2.0 / fan_in) * np.sqrt(kh * kw)
+        scale = np.where(alive, target / np.maximum(norms, _NORM_EPS), 0.0)
         return bank * scale
 
     # -----------------------------------------------------------------
@@ -733,6 +885,9 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'GaborFiltersInitializer':
         """Rebuild an initializer from a config dict.
+
+        JSON round-tripping turns the stored range tuples into lists; the
+        constructor re-coerces them.
 
         :param config: Configuration dictionary from :meth:`get_config`.
         :type config: dict
@@ -787,10 +942,10 @@ def create_gabor_depthwise_conv2d(
     kernel_size: Union[int, Tuple[int, int]] = 11,
     activation: Union[str, Callable, keras.layers.Layer, None] = None,
     sigma_range: RangeLike = None,
-    theta_range: RangeLike = (0.0, 180.0),
+    theta_range: RangeLike = DEFAULT_THETA_RANGE,
     lambda_range: RangeLike = None,
-    gamma_range: RangeLike = (0.5, 1.5),
-    psi_range: RangeLike = (0.0, 360.0),
+    gamma_range: RangeLike = DEFAULT_GAMMA_RANGE,
+    psi_range: RangeLike = DEFAULT_PSI_RANGE,
     sweep: str = "product",
     normalize: bool = True,
     strides: Union[int, Tuple[int, int]] = 1,
@@ -815,15 +970,15 @@ def create_gabor_depthwise_conv2d(
         input [B, H, W, C]
               │
               ▼
-        ┌────────────────────────────────────────┐
-        │ DepthwiseConv2D                        │
-        │   kernel_size = kernel_size            │
+        ┌─────────────────────────────────────────┐
+        │ DepthwiseConv2D                         │
+        │   kernel_size = kernel_size             │
         │   depth_multiplier = filters_per_channel│
-        │   strides, padding, activation         │
-        │   depthwise_initializer =              │
-        │       GaborFiltersInitializer(...)     │
-        │   trainable = False by default         │
-        └────────────────┬───────────────────────┘
+        │   strides, padding, activation          │
+        │   depthwise_initializer =               │
+        │       GaborFiltersInitializer(...)      │
+        │   trainable = False by default          │
+        └────────────────┬────────────────────────┘
                          ▼
         output [B, H', W', C * filters_per_channel]
                          │
@@ -870,8 +1025,10 @@ def create_gabor_depthwise_conv2d(
 
         In the default ``sweep="product"`` mode with at least 4 filters the bank
         holds phase-reversed ``(psi, psi + 180)`` pairs, so a rectifying
-        activation keeps every filter's negative lobe on its sibling channel.
-        Under ``sweep="diagonal"`` it does not, and that lobe is discarded.
+        activation keeps every filter's negative lobe on its sibling channel,
+        except for a trailing partial phase group when ``filters_per_channel``
+        is not a multiple of the phase count. Under ``sweep="diagonal"`` there
+        are no pairs at all, and that lobe is discarded.
     :type activation: str or callable or keras.layers.Layer or None
     :param sigma_range: ``(min, max)`` interval for the Gaussian envelope width,
         or ``None`` for the kernel-relative default.
@@ -898,7 +1055,9 @@ def create_gabor_depthwise_conv2d(
     :param trainable: Whether the Gabor kernel can be trained. ``False`` gives a
         frozen per-channel front-end.
     :type trainable: bool
-    :param name: Layer name.
+    :param name: Layer name. ``None`` takes ``gabor_depthwise_conv2d`` for the
+        first such layer in the process and a ``_N`` suffix thereafter, so two
+        of these can live in one model.
     :type name: str or None
     :param filters: Deprecated alias for ``filters_per_channel``. It reads as a
         Keras output-channel count, which this is not.
@@ -942,7 +1101,9 @@ def create_gabor_depthwise_conv2d(
             depthwise=True,
         ),
         trainable=trainable,
-        name=name or 'gabor_depthwise_conv2d',
+        # A hardcoded constant name makes a second instance in the same model
+        # an error in Keras 3.
+        name=name or _unique_name('gabor_depthwise_conv2d'),
     )
 
 
@@ -951,10 +1112,10 @@ def create_gabor_conv2d(
     kernel_size: Union[int, Tuple[int, int]] = 11,
     activation: Union[str, Callable, keras.layers.Layer, None] = None,
     sigma_range: RangeLike = None,
-    theta_range: RangeLike = (0.0, 180.0),
+    theta_range: RangeLike = DEFAULT_THETA_RANGE,
     lambda_range: RangeLike = None,
-    gamma_range: RangeLike = (0.5, 1.5),
-    psi_range: RangeLike = (0.0, 360.0),
+    gamma_range: RangeLike = DEFAULT_GAMMA_RANGE,
+    psi_range: RangeLike = DEFAULT_PSI_RANGE,
     sweep: str = "product",
     normalize: bool = True,
     strides: Union[int, Tuple[int, int]] = 1,
@@ -1032,7 +1193,9 @@ def create_gabor_conv2d(
     :type use_bias: bool
     :param trainable: Whether the kernel is trainable.
     :type trainable: bool
-    :param name: Layer name.
+    :param name: Layer name. ``None`` takes ``gabor_conv2d`` for the first such
+        layer in the process and a ``_N`` suffix thereafter, so two of these can
+        live in one model.
     :type name: str or None
     :return: A ``Conv2D`` warm started with the Gabor bank.
     :rtype: keras.layers.Conv2D
@@ -1065,7 +1228,9 @@ def create_gabor_conv2d(
             psi_range=psi_range, sweep=sweep, normalize=normalize,
         ),
         trainable=trainable,
-        name=name or 'gabor_conv2d',
+        # A hardcoded constant name makes a second instance in the same model
+        # an error in Keras 3.
+        name=name or _unique_name('gabor_conv2d'),
     )
 
 # ---------------------------------------------------------------------
