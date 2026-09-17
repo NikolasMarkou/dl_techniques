@@ -84,12 +84,18 @@ with ``sweep="diagonal"`` to recover the reference behaviour.
 Normalization
 -------------
 With ``normalize=True`` each 2D filter has its DC component removed and is then
-scaled so that its per-element RMS is ``sqrt(2 / fan_in)`` with
-``fan_in = kh * kw * in_ch``. Without it the raw bank is unusable as an
-initializer: measured on ``(11, 11, 3, 96)`` the un-normalized per-filter L2
-norms spanned 0.12 to 4.60, a factor of 38, and the per-output-channel gain
-``sum |w|`` spanned 0.54 to 100.3, two orders of magnitude of activation scale
-at initialization.
+scaled so that its per-element RMS is ``sqrt(2 / fan_in)``. Which ``fan_in`` is
+targeted depends on ``depthwise`` (default ``False``), since a 4D kernel shape
+``(kh, kw, in_ch, out_or_multiplier)`` is identical in rank and axis order for
+both consumers and cannot disambiguate them on its own:
+``depthwise=False`` targets the cross-channel ``Conv2D`` fan-in
+``fan_in = kh * kw * in_ch`` (used by :func:`create_gabor_conv2d`), and
+``depthwise=True`` targets the ``DepthwiseConv2D`` fan-in ``fan_in = kh * kw``,
+with no cross-channel summation (used by :func:`create_gabor_depthwise_conv2d`).
+Without normalization the raw bank is unusable as an initializer: measured on
+``(11, 11, 3, 96)`` the un-normalized per-filter L2 norms spanned 0.12 to 4.60,
+a factor of 38, and the per-output-channel gain ``sum |w|`` spanned 0.54 to
+100.3, two orders of magnitude of activation scale at initialization.
 
 All math runs in numpy ``float64`` and is cast once to the requested dtype at
 the final step.
@@ -321,7 +327,11 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     the bank is replicated across ``in_ch`` exactly as for ``Conv2D``. A
     depthwise convolution does not mix channels, so the result is each input
     channel convolved independently with the full Gabor bank, giving
-    ``in_ch * depth_multiplier`` output channels.
+    ``in_ch * depth_multiplier`` output channels. Because the shape is
+    identical either way, ``normalize``'s fan-in target cannot be inferred from
+    ``shape`` alone: pass ``depthwise=True`` for this per-channel case (fan-in
+    ``kh * kw``) and leave the default ``depthwise=False`` for the
+    cross-channel ``Conv2D`` case (fan-in ``kh * kw * in_ch``).
 
     :param sigma_range: ``(min, max)`` interval for the Gaussian envelope width
         ``sigma``; ``min`` must be strictly positive. ``None`` resolves at call
@@ -356,6 +366,14 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         it to a per-element RMS of ``sqrt(2 / fan_in)``. ``False`` leaves the
         raw Gabor responses.
     :type normalize: bool
+    :param depthwise: Which fan-in convention ``normalize`` targets. ``False``
+        (the default) uses the cross-channel ``Conv2D`` fan-in
+        ``kh * kw * in_ch``, correct for :func:`create_gabor_conv2d`. ``True``
+        uses the ``DepthwiseConv2D`` fan-in ``kh * kw`` (no cross-channel
+        summation), correct for :func:`create_gabor_depthwise_conv2d`. The 4D
+        shape alone cannot disambiguate the two consumers (see "Per-channel
+        use" above), so the caller must set this explicitly.
+    :type depthwise: bool
 
     :ivar sweep: The selected sweep mode.
     :vartype sweep: str
@@ -363,6 +381,8 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     :vartype n_filters: int or None
     :ivar normalize: Whether normalization is applied.
     :vartype normalize: bool
+    :ivar depthwise: Which fan-in convention ``normalize`` targets.
+    :vartype depthwise: bool
 
     :raises ValueError: If any range is not exactly two elements, holds a
         non-finite bound, or has ``min > max``; if ``sigma_range[0] <= 0``,
@@ -393,6 +413,7 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         sweep: str = "product",
         n_filters: Optional[int] = None,
         normalize: bool = True,
+        depthwise: bool = False,
     ) -> None:
         """Validate the five parameter ranges and the sweep settings.
 
@@ -415,6 +436,12 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         :type n_filters: int or None
         :param normalize: Whether to DC-remove and energy-normalize each filter.
         :type normalize: bool
+        :param depthwise: If ``True``, ``normalize`` targets the fan-in of a
+            ``DepthwiseConv2D`` kernel (``kh * kw``, no cross-channel
+            summation) instead of a cross-channel ``Conv2D`` kernel
+            (``kh * kw * in_ch``). Set by :func:`create_gabor_depthwise_conv2d`;
+            :func:`create_gabor_conv2d` leaves the default ``False``.
+        :type depthwise: bool
         :raises ValueError: See the class docstring.
         """
         # keras.initializers.Initializer (Keras 3) defines no __init__, so there
@@ -451,13 +478,15 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         self.sweep = sweep
         self.n_filters = None if n_filters is None else int(n_filters)
         self.normalize = bool(normalize)
+        self.depthwise = bool(depthwise)
 
         logger.debug(
             f"Initialized GaborFiltersInitializer with "
             f"sigma_range={self.sigma_range}, theta_range={self.theta_range}, "
             f"lambda_range={self.lambda_range}, gamma_range={self.gamma_range}, "
             f"psi_range={self.psi_range}, sweep={self.sweep}, "
-            f"n_filters={self.n_filters}, normalize={self.normalize}"
+            f"n_filters={self.n_filters}, normalize={self.normalize}, "
+            f"depthwise={self.depthwise}"
         )
 
     # -----------------------------------------------------------------
@@ -615,7 +644,8 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         ) * np.cos(2.0 * np.pi * x_theta / lambda_ + psi)
 
         if self.normalize:
-            bank = self._normalize_bank(bank, fan_in=kh * kw * in_ch)
+            fan_in = (kh * kw) if self.depthwise else (kh * kw * in_ch)
+            bank = self._normalize_bank(bank, fan_in=fan_in)
 
         # Tile the distinct filters cyclically across the output channels, then
         # replicate each 2D filter identically across all input channels.
@@ -666,8 +696,8 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     def get_config(self) -> Dict[str, Any]:
         """Return the constructor arguments for serialization.
 
-        :return: A dict holding the five ranges plus ``sweep``, ``n_filters``
-            and ``normalize``.
+        :return: A dict holding the five ranges plus ``sweep``, ``n_filters``,
+            ``normalize`` and ``depthwise``.
         :rtype: dict
         """
         config = super().get_config()
@@ -680,6 +710,7 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
             'sweep': self.sweep,
             'n_filters': self.n_filters,
             'normalize': self.normalize,
+            'depthwise': self.depthwise,
         })
         return config
 
