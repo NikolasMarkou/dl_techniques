@@ -910,7 +910,47 @@ def create_ffn_layer(
             # instead of getting it auto-injected. See decisions.md D-006.
             inject_base = init_scheme is not None and 'base_scaler_initializer' not in kwargs
             inject_spline = init_scheme is not None and 'kernel_initializer' not in kwargs
+
+            # DECISION plan-2026-09-17T194331-3ce35186/D-009
+            # A caller-or-wrapper-supplied 'base_scaler_initializer'/'kernel_initializer'
+            # already present in the raw `kwargs` silently WINS over init_scheme's
+            # auto-injection for that key (D-006's per-key rule, by design). This is a
+            # known, documented residual gap, NOT fixed here: `assemble_ffn_config`'s 4
+            # wrapper call sites (TransformerLayer, TransformerDecoderLayer, BaseVLMHead,
+            # ImageCaptioningHead) always forward a generic `kernel_initializer` default
+            # alongside any caller-set `init_scheme`, which is indistinguishable from an
+            # explicit caller override at this point in `create_ffn_layer` -- so a
+            # wrapper-routed 'kan' FFN silently gets only HALF the fix (base_scaler
+            # injected, kernel_initializer suppressed). Do NOT redesign
+            # `assemble_ffn_config` to solve this here (D-009 rejected that: it is a
+            # 22-FFN-type shared helper with zero live 'kan' wrapper callers today) --
+            # only make the suppression loud. See decisions.md D-009.
+            if init_scheme is not None and 'base_scaler_initializer' in kwargs:
+                logger.warning(
+                    f"create_ffn_layer('kan'): init_scheme={init_scheme!r} was set, but "
+                    f"'base_scaler_initializer' was already present in kwargs (e.g. "
+                    f"forwarded as a wrapper's generic default via assemble_ffn_config) -- "
+                    f"that caller-or-wrapper-supplied value takes precedence and "
+                    f"init_scheme's auto-injection for 'base_scaler_initializer' is "
+                    f"suppressed for this call. See decisions.md D-009."
+                )
+            if init_scheme is not None and 'kernel_initializer' in kwargs:
+                logger.warning(
+                    f"create_ffn_layer('kan'): init_scheme={init_scheme!r} was set, but "
+                    f"'kernel_initializer' was already present in kwargs (e.g. forwarded "
+                    f"as a wrapper's generic default via assemble_ffn_config) -- that "
+                    f"caller-or-wrapper-supplied value takes precedence and init_scheme's "
+                    f"auto-injection for 'kernel_initializer' is suppressed for this call. "
+                    f"See decisions.md D-009."
+                )
+
             if inject_base or inject_spline:
+                # This site constructs one KANLinear per create_ffn_layer('kan', ...)
+                # call, never in a loop today (D-004) -- no `+ i * 2`-style seed-offset
+                # stride is applied. A future loop consumer (e.g. a stacked
+                # TransformerLayer(ffn_type='kan', ...) block) should offset init_seed
+                # per instance the way models/general_purpose/kan/model.py:435 does,
+                # rather than reuse one seed verbatim across instances.
                 base_init, spline_init = create_kan_initializers(
                     grid_size=final_params['grid_size'],
                     spline_order=final_params['spline_order'],
