@@ -41,7 +41,7 @@ from train.common import (
 from train.common.callbacks import best_checkpoint_path
 
 
-# Resolved once in `main()` to compute `run_dir` (plan-2026-09-17-0d194df2
+# Resolved once in `main()` to compute `run_dir` (plan-2026-09-17T064004-0d194df2
 # D-001), which is then the SINGLE source both `create_visualization_manager()`
 # (D-004) and `main()`'s post-training `model.save()` read for "the run's
 # results directory" — so the two call sites cannot drift apart.
@@ -225,7 +225,7 @@ class KANGridUpdateCallback(keras.callbacks.Callback):
 class KANVisualizationCallback(keras.callbacks.Callback):
     """Per-epoch cheap loss dashboard + periodic expensive function/spline grid.
 
-    # DECISION plan-2026-09-17-0d194df2/D-002
+    # DECISION plan-2026-09-17T064004-0d194df2/D-002
     Structurally mirrors `DenoisingVisualizationCallback`
     (src/train/bfunet/common.py:1610-1889): a single-use abstraction within this file
     (one instantiation site in `main()`, wired in Step 6) admitted as a charge against
@@ -335,7 +335,7 @@ def generate_data(num_samples: int) -> Tuple[np.ndarray, np.ndarray]:
 
 def create_visualization_manager(run_dir: Path) -> VisualizationManager:
     """Creates visualization manager with KAN-specific plugins."""
-    # DECISION plan-2026-09-17-0d194df2/D-004
+    # DECISION plan-2026-09-17T064004-0d194df2/D-004
     # Supersedes plan-2026-09-17T052443-2c932602/D-002, which anchored
     # `output_dir` at the bare "results" root and passed a non-empty
     # `experiment_name` to avoid double-nesting under THAT plan's split
@@ -380,7 +380,7 @@ def render_function_and_spline_grid(
     """Renders the 3D function-approximation surface + KAN spline interpretability grid.
 
     Shared data-construction+render helper for the `function_approximation` and
-    `kan_splines` plugins (plan-2026-09-17-0d194df2/D-002, Step 5): extracted out of
+    `kan_splines` plugins (plan-2026-09-17T064004-0d194df2/D-002, Step 5): extracted out of
     `plot_results()` so `KANVisualizationCallback`'s periodic expensive render and the
     final post-hoc `plot_results()` call both go through ONE code path instead of two
     copies of this grid-construction logic drifting apart.
@@ -612,7 +612,7 @@ def main() -> None:
 
     # Training
     logger.info("Starting training...")
-    # DECISION plan-2026-09-17-0d194df2/D-001
+    # DECISION plan-2026-09-17T064004-0d194df2/D-001
     # `ModelCheckpoint`/`CSVLogger` are added directly here, NOT via
     # `train.common.create_callbacks()`. The prior plan's D-004 (superseded
     # by this one) rejected `create_callbacks()` wholesale because its
