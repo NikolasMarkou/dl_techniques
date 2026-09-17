@@ -6,7 +6,7 @@
 
 A Keras 3 implementation of the **Kolmogorov-Arnold Network**, which puts the learnable nonlinearity on the *edges* of the graph rather than on its nodes. Each connection carries a B-spline over a knot grid; nodes do nothing but sum.
 
-> **Read §11 before you train anything.** A freshly constructed KAN **cannot be trained as-is at the documented defaults**. `model.update_kan_grids(x_sample)` is part of setup, not tuning, and skipping it fails silently as a flat loss curve.
+> **Read §11 before you train anything.** At the explicit `init_scheme=None` opt-out, a freshly constructed KAN **cannot be trained as-is** and `model.update_kan_grids(x_sample)` is a hard precondition, not tuning — skipping it fails silently as a flat loss curve. At the class default (`init_scheme='glorot_inspired'`), this specific failure does not occur, but `update_kan_grids` is still recommended: it adapts each layer's knot range to the data it actually sees.
 
 ---
 
@@ -86,11 +86,13 @@ A B-spline basis function is nonzero only over `spline_order + 1` adjacent knot 
 
 Splines are only defined over their knot range. The default grid is `grid_range=(-2.0, 2.0)`, set at construction from nothing but a guess about input scale. If the data occupies a different range, every edge spends its capacity on the wrong interval and extrapolates outside it.
 
-The failure mode is **silence, not an error**. `KANLinear` sums over the input axis, so activations grow roughly 30x per layer and leave `(-2, 2)` after layer 0; the spline basis is then identically zero, and with `base_scaler` initialized to a constant the whole model collapses to a constant function.
+At the explicit `init_scheme=None` opt-out (`KANLinear`'s own bare constructor defaults), the failure mode is **silence, not an error**. `KANLinear` sums over the input axis with a per-connection `base_scaler` fixed at the CONSTANT `1.0` (no fan-in compensation), so activations grow roughly 30x per layer and leave `(-2, 2)` after layer 0; the spline basis is then identically zero, and every output unit of a layer computes the identical value — the whole model collapses to a constant function.
 
-Measured on the documented defaults: the output is exactly `1 / output_features` for every input with `std == 0.0`, and **0 of 12 trainable weights receive a non-zero gradient**. After `update_kan_grids` the same model has 12 of 12 live gradients.
+Measured at `init_scheme=None`: the output is exactly `1 / output_features` for every input with `std == 0.0`, and **0 of 12 trainable weights receive a non-zero gradient**. After `update_kan_grids` the same model has 12 of 12 live gradients.
 
-`model.grids_adapted` exposes that state on the object, so it is readable rather than inferred from a flat loss curve. The constructor also logs a warning once.
+**At the class default (`init_scheme='glorot_inspired'`)** this does not happen: `KAN` auto-injects the variance-controlled initializer pair from `dl_techniques.initializers.create_kan_initializers` (Rigas et al., arXiv:2509.03417) into every layer that does not already set `kernel_initializer`/`base_scaler_initializer` explicitly, breaking the `base_scaler` symmetry above. Gradients flow from construction, without requiring `update_kan_grids` first — but a SEPARATE, real instability survives grid adaptation alone: an untrained-but-grid-adapted `small`-variant model, freshly constructed, produced a single corner-point output of 38,494.8 at `init_scheme=None` for a target function bounded in `[-1, 2]`, against 1.1 at the class default, over the identical grid-adaptation call. `update_kan_grids` remains recommended either way — it adapts each layer's knot range to the data it actually sees, which is a different, additive concern from the symmetry-breaking `init_scheme` fixes.
+
+`model.grids_adapted` exposes the grid-adaptation state on the object (independent of `init_scheme`), so it is readable rather than inferred from a flat loss curve. The constructor logs a warning once when `init_scheme=None`, and an informational log otherwise.
 
 ### 4.2 `update_kan_grids(x_data)`
 
@@ -128,7 +130,8 @@ model = create_kan_model(
 )
 print(model.grids_adapted)          # False
 
-# NOT optional. See §4.1.
+# Recommended (adapts knot range to the real data). Required only at the
+# explicit init_scheme=None opt-out. See §4.1.
 model.update_kan_grids(X_train[:100])
 print(model.grids_adapted)          # True
 
@@ -147,7 +150,7 @@ model.fit(X_train, y_train, validation_data=(X_val, y_val),
 | **`create_kan_model`** | `...kan.model.create_kan_model` | Recommended factory; forwards to `from_variant`. |
 | **`KAN.from_variant`** | `...kan.model.KAN.from_variant` | Build from a preset by name. |
 | **`KAN.from_layer_sizes`** | `...kan.model.KAN.from_layer_sizes` | Build from a flat list of node counts, uniform per-layer config. |
-| **`KAN.update_kan_grids`** | — | Re-fit every layer's knots to data. **Required before training.** |
+| **`KAN.update_kan_grids`** | — | Re-fit every layer's knots to data. **Recommended before training; required only at the explicit `init_scheme=None` opt-out.** |
 | **`KAN.get_architecture_summary`** | — | Per-layer widths, grids, orders and activations, as a string. |
 | **`KANLinear`** | `...layers.ffn.kan_linear.KANLinear` | The edge-function layer. Usable standalone. |
 
@@ -305,7 +308,7 @@ Note that `grids_adapted` is **not** part of `get_config`: a reloaded model repo
 
 ## 11. Training and Best Practices
 
-- **Call `update_kan_grids` first.** Always. It is a precondition, not a tuning step (§4.1).
+- **Call `update_kan_grids` first.** Always recommended, and a hard precondition at the explicit `init_scheme=None` opt-out — either way it is setup, not a tuning step (§4.1).
 - **Re-adapt periodically.** Hidden-layer distributions drift as training proceeds:
 
   ```python
@@ -346,7 +349,9 @@ The package suite is at `tests/test_models/test_kan/`, where the untrainable-wit
 
 ## 13. Troubleshooting
 
-**The loss curve is flat and predictions are constant.** You did not call `update_kan_grids`. Check `model.grids_adapted` (§4.1).
+**The loss curve is flat and predictions are constant.** At `init_scheme=None`: you did not call `update_kan_grids`. Check `model.grids_adapted` (§4.1). At the class default this specific cause does not apply — look elsewhere (data pipeline, learning rate, a genuinely degenerate loss).
+
+**Predictions are enormous / diverge near the edges of the training data's range.** A separate, real instability from the one above — `update_kan_grids` alone does not fully guarantee bounded outputs far from the bulk of the training distribution. See §4.1's `init_scheme` discussion.
 
 **`ValueError: Unrecognized keyword arguments passed to KANLinear`.** The base activation keyword is `activation`. `KANLinear` also takes no `kernel_regularizer` — regularize with the optimizer's weight decay instead.
 

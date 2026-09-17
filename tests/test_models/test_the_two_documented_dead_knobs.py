@@ -18,12 +18,19 @@ that a later sweep cannot quietly change the ruling in either direction.
     complex layer passes ``epsilon=``.
 
 ``kan`` / an unadapted knot grid
-    ``create_kan_model`` at the documented defaults returns a CONSTANT FUNCTION
-    (output exactly ``1/output_features``, ``std == 0.0``, 0 of 12 live
-    gradients). That state is already pinned by
-    ``test_models/test_kan/test_model.py``'s ``xfail(strict=True)`` pair and is
-    **not re-litigated**. What is asserted here is the new, inspectable state
-    that makes the condition readable instead of silent.
+    **[NARROWED, plan-2026-09-17T132602-7a6ebdb4/D-006]** ``create_kan_model``
+    at its CLASS DEFAULT (``init_scheme='glorot_inspired'``) no longer returns
+    a constant function -- the auto-injected variance-controlled initializer
+    breaks the ``base_scaler`` symmetry that caused it. The finding below now
+    describes only the explicit ``init_scheme=None`` opt-out, still pinned by
+    ``test_models/test_kan/test_model.py``'s ``TestKANGradientFlowLegacyBareDefaults``
+    class (the same ``xfail(strict=True)`` pair, moved and renamed, not
+    deleted) and **not re-litigated there**. At ``init_scheme=None``,
+    ``create_kan_model`` returns a CONSTANT FUNCTION (output exactly
+    ``1/output_features``, ``std == 0.0``, 0 of 12 live gradients). What is
+    asserted here (the tests below, which construct via the class default and
+    only check the `grids_adapted` bookkeeping flag) is unaffected by the
+    narrowing and still holds unconditionally.
 
 See ``decisions.md`` D-052, D-053.
 """

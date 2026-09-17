@@ -825,11 +825,12 @@ GF_INPUT_FEATURES = 16
 GF_OUTPUT_FEATURES = 4
 
 
-def _gf_model():
+def _gf_model(init_scheme="glorot_inspired"):
     return create_kan_model(
         variant="small",
         input_features=GF_INPUT_FEATURES,
         output_features=GF_OUTPUT_FEATURES,
+        init_scheme=init_scheme,
     )
 
 
@@ -837,12 +838,25 @@ def _gf_batch(rows: int = 4):
     return np.random.default_rng(0).random((rows, GF_INPUT_FEATURES)).astype("float32")
 
 
-class TestKANGradientFlow:
-    """KAN trains only AFTER its knot grids are adapted -- pinned in both states.
+class TestKANGradientFlowLegacyBareDefaults:
+    """GF-01 / R-121, preserved exactly at the explicit ``init_scheme=None`` opt-out.
+
+    Originally this described ``create_kan_model``'s unqualified default. Plan
+    ``plan-2026-09-17T132602-7a6ebdb4`` (D-006) found the real mechanism this
+    class's own docstring already named -- ``base_scaler`` fixed at the
+    CONSTANT ``1.0`` for every connection, with no fan-in compensation --
+    is the SAME cause behind a separate, independently-discovered val_loss
+    instability in a fully-trained model, and fixed it by auto-injecting
+    ``create_kan_initializers`` (already implemented, previously unused) as
+    the new class DEFAULT. This class keeps the original finding reproducible
+    at the explicit ``init_scheme=None`` opt-out, where the bare ``KANLinear``
+    constructor defaults (and this exact degeneracy) still apply unchanged.
+    See ``TestKANGradientFlowDefault`` below for the class default's new,
+    repaired behavior.
 
     The finding (GF-01 in the plan's
     ``findings/gradient-flow-adoption-findings.md``) is that
-    ``create_kan_model`` at documented defaults returns a CONSTANT FUNCTION.
+    ``create_kan_model`` at these bare defaults returns a CONSTANT FUNCTION.
     Measured on one instance across four input distributions -- ``U[0,1)``,
     ``U[0,5)``, ``U[0,0.1)`` and ``N(0,1)`` -- the output is exactly ``0.25``
     everywhere with ``std == 0.0`` over the batch, and all 12 of 12 trainable
@@ -859,23 +873,26 @@ class TestKANGradientFlow:
 
     The two tests below are deliberately a pair. Neither alone is honest:
     the xfail alone would look like a broken model with no working path, and the
-    green one alone would hide the fact that the default factory output is a
+    green one alone would hide the fact that this configuration's output is a
     constant.
     """
 
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "GF-01: create_kan_model at documented defaults is a constant "
-            "function (output exactly 1/output_features for every input) and "
-            "all 12/12 weights get an identically-zero gradient, because the "
-            "activations leave grid_range after layer 0 and base_scaler carries "
-            "no symmetry breaking. strict=True: this goes RED the moment the "
-            "model is repaired, which is the point of pinning it."
+            "GF-01: create_kan_model at init_scheme=None (the old bare "
+            "defaults) is a constant function (output exactly "
+            "1/output_features for every input) and all 12/12 weights get an "
+            "identically-zero gradient, because the activations leave "
+            "grid_range after layer 0 and base_scaler carries no symmetry "
+            "breaking. strict=True: this is the explicit opt-out path, so it "
+            "must stay reproducible exactly as documented -- an XPASS here "
+            "means the opt-out itself broke, not that the class default was "
+            "fixed (that is TestKANGradientFlowDefault's job)."
         ),
     )
     def test_gradients_reach_every_trainable_weight_without_a_grid_pass(self):
-        model = _gf_model()
+        model = _gf_model(init_scheme=None)
         x = _gf_batch()
         model(x, training=False)
 
@@ -890,7 +907,7 @@ class TestKANGradientFlow:
         measured constant, so it also fails if the model becomes a DIFFERENT
         constant.
         """
-        model = _gf_model()
+        model = _gf_model(init_scheme=None)
         out = keras.ops.convert_to_numpy(model(_gf_batch(), training=False))
 
         np.testing.assert_allclose(out, 1.0 / GF_OUTPUT_FEATURES, atol=1e-6)
@@ -901,10 +918,11 @@ class TestKANGradientFlow:
 
         ``KAN.update_kan_grids``'s own docstring calls this "a critical step for
         KAN training". This test is the executable form of that sentence -- and
-        it is a real regression guard, not a workaround, because it is the only
-        state in which this model can be trained at all.
+        it is a real regression guard, not a workaround, because at
+        ``init_scheme=None`` it is the only state in which this model can be
+        trained at all.
         """
-        model = _gf_model()
+        model = _gf_model(init_scheme=None)
         # A representative sample, per update_kan_grids' docstring ("100-1000
         # samples"); the grid adaptation is a quantile match, so a 4-row batch
         # would adapt to noise.
@@ -924,6 +942,66 @@ class TestKANGradientFlow:
         collection-order RNG draw, say). It compares the SAME construction in the
         two states and requires the live-gradient count to move from 0 to 12.
         """
+        before = _gf_model(init_scheme=None)
+        x = _gf_batch()
+        before(x, training=False)
+        n_live_before = sum(
+            1 for v in gradient_report(before, x).values()
+            if v is not None and v > 0.0
+        )
+
+        after = _gf_model(init_scheme=None)
+        after.update_kan_grids(_gf_batch(rows=256))
+        n_live_after = sum(
+            1 for v in gradient_report(after, x).values()
+            if v is not None and v > 0.0
+        )
+
+        assert n_live_before == 0, n_live_before
+        assert n_live_after == 12, n_live_after
+
+
+class TestKANGradientFlowDefault:
+    """The class DEFAULT (``init_scheme='glorot_inspired'``) does not degenerate.
+
+    D-006 (``plan-2026-09-17T132602-7a6ebdb4``): auto-injecting
+    ``create_kan_initializers`` breaks the ``base_scaler`` symmetry
+    ``TestKANGradientFlowLegacyBareDefaults`` measures, so gradients flow from
+    construction -- callers no longer depend on ``update_kan_grids`` for basic
+    trainability, though it remains recommended for knot-range quality (its
+    own docstring still calls it out).
+    """
+
+    def test_gradients_reach_every_trainable_weight_without_a_grid_pass(self):
+        model = _gf_model()
+        x = _gf_batch()
+        model(x, training=False)
+
+        report = assert_gradients_reach_every_trainable_weight(model, x)
+        assert len(report) == 12, "the small variant's weight set changed shape"
+
+    def test_the_default_forward_is_not_a_constant_function(self):
+        """The forward-side statement of D-006: output varies with input.
+
+        Symmetric with `TestKANGradientFlowLegacyBareDefaults`'s constant-
+        function assertion at ``init_scheme=None`` -- this is the same check
+        at the class default, and it must show real variation, not a
+        different constant.
+        """
+        model = _gf_model()
+        out = keras.ops.convert_to_numpy(model(_gf_batch(rows=8), training=False))
+
+        assert float(np.std(out)) > 1e-6
+
+    def test_update_kan_grids_is_no_longer_required_for_liveness(self):
+        """The before/after comparison, inverted: both states are now live.
+
+        `TestKANGradientFlowLegacyBareDefaults.test_the_grid_pass_is_what_makes_the_difference`
+        requires the live-gradient count to move 0 -> 12 at ``init_scheme=None``.
+        At the class default it must be 12 -> 12: a grid pass is still
+        recommended (see ``update_kan_grids``'s own docstring) but is no
+        longer what separates a trainable model from a dead one.
+        """
         before = _gf_model()
         x = _gf_batch()
         before(x, training=False)
@@ -939,5 +1017,83 @@ class TestKANGradientFlow:
             if v is not None and v > 0.0
         )
 
-        assert n_live_before == 0, n_live_before
+        assert n_live_before == 12, n_live_before
         assert n_live_after == 12, n_live_after
+
+
+class TestKANCrossLayerMagnitudeStability:
+    """D-006 (``plan-2026-09-17T132602-7a6ebdb4``): a real end-to-end training
+    run of a 4-layer ``small``-variant KAN plateaued at val_loss ~16 (target
+    range [-1,2]) while train_loss kept declining -- a ~48x train/val gap.
+    Root-caused, empirically, to ``base_scaler`` fixed at the CONSTANT ``1.0``
+    for every connection (no fan-in compensation), which lets internal
+    activation magnitude compound across a multi-layer stack: even an
+    UNTRAINED, freshly grid-adapted model showed a single corner-point output
+    of 38,494.8 for a target function bounded in [-1,2].
+
+    This class is a fast (no training loop) RED-provable guard for that
+    mechanism: it does not need a trained model to reproduce, only a fresh
+    construction plus one ``update_kan_grids`` call. A 12-config, 6-seed,
+    full-training-loop empirical validation (not re-run here -- too slow for
+    a unit test) additionally confirmed val_loss improves from a mean of 2.37
+    (old) to 0.001 (new) and edge-region MSE from 72-86 (old, max single-point
+    error up to 47,579) to ~0.00 (new, max 0.01-0.03), in every one of 6
+    seeds each way; see ``decisions.md`` D-006.
+    """
+
+    @staticmethod
+    def _corner_points():
+        return np.array(
+            [[1.0, 1.0], [-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [0.9, 0.9]],
+            dtype="float32",
+        )
+
+    def test_the_class_default_keeps_corner_outputs_bounded(self):
+        """The class default (`init_scheme='glorot_inspired'`) must not blow up.
+
+        A generous bound (100x the target function's own range, which is
+        roughly [-1, 2]) -- this is not a tight numerical claim, only a
+        guard against the specific catastrophic-magnitude failure mode
+        measured (tens of thousands).
+        """
+        keras.utils.set_random_seed(0)
+        rng = np.random.default_rng(0)
+        x_train = (rng.random((500, 2)).astype("float32") * 2 - 1)
+
+        model = KAN.from_variant(
+            "small", input_features=2, output_features=1,
+            output_activation="linear", init_seed=0,
+        )
+        model.update_kan_grids(x_train)
+
+        out = keras.ops.convert_to_numpy(model(self._corner_points(), training=False))
+        assert float(np.abs(out).max()) < 300.0, (
+            f"corner output magnitude {float(np.abs(out).max())} -- the class "
+            "default must not reproduce the pre-D-006 blow-up"
+        )
+
+    def test_the_legacy_opt_out_still_reproduces_the_blow_up(self):
+        """Anti-vacuity: `init_scheme=None` must still show the ORIGINAL defect.
+
+        Without this, the bound above could pass merely because grid_size,
+        spline_order or some unrelated change happened to shrink outputs for
+        every configuration, not because ``init_scheme`` specifically fixed
+        the symmetry. Pinning the legacy path's failure keeps this a
+        differential guard, not just a threshold on the new path.
+        """
+        keras.utils.set_random_seed(0)
+        rng = np.random.default_rng(0)
+        x_train = (rng.random((500, 2)).astype("float32") * 2 - 1)
+
+        model = KAN.from_variant(
+            "small", input_features=2, output_features=1,
+            output_activation="linear", init_scheme=None,
+        )
+        model.update_kan_grids(x_train)
+
+        out = keras.ops.convert_to_numpy(model(self._corner_points(), training=False))
+        assert float(np.abs(out).max()) > 1000.0, (
+            "the legacy init_scheme=None path no longer reproduces the "
+            "documented blow-up -- either KANLinear's own bare defaults "
+            "changed, or this guard needs re-deriving"
+        )

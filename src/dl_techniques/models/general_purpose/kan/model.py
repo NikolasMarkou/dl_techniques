@@ -9,11 +9,27 @@ added to a fixed base activation. Each node just sums what arrives. The
 base activation keeps the gradient well behaved while the spline
 coefficients are still near zero.
 
-Splines are only defined over their knot range. Data outside that range
-drifts past `grid_range` after the first layer and the model collapses
-to a constant output, so `update_kan_grids(x)` must run on a
-representative sample before training; `grids_adapted` reports whether
-that has happened. Five preset variants (micro through xlarge) live in
+Splines are only defined over their knot range, so `update_kan_grids(x)`
+running on a representative sample before training is still recommended --
+it re-fits each layer's knots to the range that layer's own input actually
+occupies, rather than leaving every layer's grid at the constructor's
+`grid_range` guess. `grids_adapted` reports whether that has happened.
+
+At `KANLinear`'s own bare constructor defaults (`kernel_initializer=
+'glorot_uniform'`, `base_scaler_initializer='ones'`), a fresh multi-layer
+stack is degenerate: `KANLinear` sums over the input axis with a CONSTANT
+per-connection `base_scaler=1.0`, so activation magnitude grows roughly
+with each layer's fan-in and every output unit of a layer computes the
+identical value (no per-connection symmetry breaking) -- the model is an
+exact constant function, 0 of 12 trainable weights get a nonzero gradient,
+and it fails silently as a flat loss curve (see D-052, and D-006 below).
+`init_scheme` (default `'glorot_inspired'`) auto-injects the
+variance-controlled initializer pair from
+`dl_techniques.initializers.create_kan_initializers` (Rigas et al.,
+arXiv:2509.03417) instead, which breaks that symmetry: gradients flow from
+construction, without requiring `update_kan_grids` first. Pass
+`init_scheme=None` to restore the old, degenerate bare defaults exactly
+(see D-006). Five preset variants (micro through xlarge) live in
 `VARIANT_CONFIGS`, aliased as `MODEL_VARIANTS`.
 
 References:
@@ -41,6 +57,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.ffn.kan_linear import KANLinear
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.initializers.kan_initializer import create_kan_initializers
 
 # ---------------------------------------------------------------------
 
@@ -153,12 +170,18 @@ class KAN(keras.Model):
         ``pretrained='/path/to/weights.keras'`` instead.
 
     Warning:
-        A freshly constructed model cannot be trained as-is at the
-        documented defaults. Measured: the output is exactly
-        ``1 / output_features`` for every input with ``std == 0.0``, and
-        0 of 12 trainable weights receive a non-zero gradient. After
+        Only at ``init_scheme=None`` (the old, opt-out ``KANLinear`` bare
+        defaults): a freshly constructed model cannot be trained as-is.
+        Measured: the output is exactly ``1 / output_features`` for every
+        input with ``std == 0.0``, and 0 of 12 trainable weights receive a
+        non-zero gradient, because every connection's ``base_scaler`` starts
+        at the identical constant ``1.0`` (no symmetry breaking). After
         :meth:`update_kan_grids` the same model has 12 of 12 live
-        gradients.
+        gradients. At the class default (``init_scheme='glorot_inspired'``)
+        this degeneracy does not occur -- gradients flow from construction
+        -- but :meth:`update_kan_grids` remains recommended, since it still
+        adapts each layer's knot range to its actual observed input
+        distribution. See D-006.
     """
 
     VARIANT_CONFIGS = {
@@ -178,6 +201,8 @@ class KAN(keras.Model):
         layer_configs: List[Dict[str, Any]],
         input_features: int,
         name: Optional[str] = None,
+        init_scheme: Optional[str] = "glorot_inspired",
+        init_seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
         if not isinstance(layer_configs, list) or not layer_configs:
@@ -188,6 +213,25 @@ class KAN(keras.Model):
         self.layer_configs = self._validate_and_copy_configs(layer_configs)
         self.input_features = input_features
         self.num_layers = len(self.layer_configs)
+        # DECISION plan-2026-09-17T132602-7a6ebdb4/D-006: a freshly-stacked
+        # KANLinear model is numerically fragile under KANLinear's own bare
+        # constructor defaults (kernel_initializer='glorot_uniform',
+        # base_scaler_initializer='ones') -- 'ones' does not compensate for
+        # fan-in at all, so a wide layer's base path alone inflates output
+        # variance roughly linearly with input_features, and this compounds
+        # across a multi-layer stack. Measured: internal layer magnitude
+        # reached 25-47x scale at the domain's dead center on a 4-layer
+        # [64,32,16] stack, and val_loss was bimodal across random seeds
+        # (0.37 to a persistent ~16 plateau) with the SAME hyperparameters.
+        # `init_scheme` auto-injects the variance-controlled pair from
+        # `create_kan_initializers` (Rigas et al., arXiv:2509.03417) per
+        # layer, ONLY when a layer's own config does not already set
+        # `kernel_initializer`/`base_scaler_initializer` explicitly, so an
+        # explicit per-layer override is always respected. `init_scheme=None`
+        # restores the old, uncalibrated `KANLinear` bare defaults. See
+        # decisions.md.
+        self.init_scheme = init_scheme
+        self.init_seed = init_seed
 
         inputs, outputs = self._build_functional_model()
 
@@ -201,6 +245,13 @@ class KAN(keras.Model):
         # DECISION plan-2026-08-19T163559-499b6f0e/D-052: unadapted grids make
         # this a constant function (0 of 12 live gradients). Only update_kan_grids
         # may set this True. See decisions.md.
+        # [SUPERSEDED at init_scheme's class default, plan-2026-09-17T132602-7a6ebdb4/D-006]
+        # D-052 describes exactly `init_scheme=None`, the old bare KANLinear
+        # defaults. The class default (`init_scheme='glorot_inspired'`) breaks
+        # the base_scaler=1.0 symmetry D-052 measured, so the "constant
+        # function, 0/12 live gradients" claim is no longer true there. D-052's
+        # original text is kept verbatim above per house convention; this note
+        # documents the narrowing, it does not retract D-052. See decisions.md.
         self._grids_adapted = False
 
         self._log_model_creation()
@@ -209,9 +260,12 @@ class KAN(keras.Model):
     def grids_adapted(self) -> bool:
         """Whether ``update_kan_grids`` has been run on this instance.
 
-        ``False`` on a freshly constructed model. At the documented defaults,
-        unfitted knot grids make the model a constant function with zero
-        gradients everywhere, so fitting them is required before training.
+        ``False`` on a freshly constructed model. At ``init_scheme=None``
+        (the old, opt-out bare ``KANLinear`` defaults), unfitted knot grids
+        make the model a constant function with zero gradients everywhere,
+        so fitting them is required before training. At the class default
+        (``init_scheme='glorot_inspired'``) this is no longer true, but
+        fitting the grids is still recommended (see :meth:`update_kan_grids`).
 
         :return: ``True`` once :meth:`update_kan_grids` has completed.
         :rtype: bool
@@ -219,23 +273,36 @@ class KAN(keras.Model):
         return self._grids_adapted
 
     def _log_model_creation(self) -> None:
-        """Log the layer widths and warn, once, that the grids are unadapted.
+        """Log the layer widths and, at ``init_scheme=None``, warn that the
+        grids are unadapted.
 
         The warning is emitted at construction rather than at ``fit`` time
         because the unadapted state has no error surface of its own: it presents
         as a flat loss curve, so the only chance to say so is before training
-        starts.
+        starts. At the class default (``init_scheme='glorot_inspired'``) this
+        specific failure mode does not occur (see D-006), so the warning is
+        scoped to the opt-out case rather than printed unconditionally.
         """
         structure = [str(self.input_features)] + [str(cfg['features']) for cfg in self.layer_configs]
         logger.info(f"Created KAN model: {' -> '.join(structure)} ({self.num_layers} layers)")
-        logger.warning(
-            "KAN knot grids are NOT yet adapted to your data. Call "
-            "`model.update_kan_grids(x_sample)` before training: at the "
-            "documented defaults an unadapted KAN is a CONSTANT FUNCTION "
-            "(output exactly 1/output_features, 0 of 12 trainable weights "
-            "receiving a non-zero gradient), and it fails as a flat loss curve "
-            "with no error. `model.grids_adapted` reports this state."
-        )
+        if self.init_scheme is None:
+            logger.warning(
+                "KAN knot grids are NOT yet adapted to your data. Call "
+                "`model.update_kan_grids(x_sample)` before training: at "
+                "`init_scheme=None` an unadapted KAN is a CONSTANT FUNCTION "
+                "(output exactly 1/output_features, 0 of 12 trainable weights "
+                "receiving a non-zero gradient), and it fails as a flat loss curve "
+                "with no error. `model.grids_adapted` reports this state."
+            )
+        else:
+            logger.info(
+                "KAN knot grids are not yet adapted to your data. Calling "
+                "`model.update_kan_grids(x_sample)` before training is still "
+                "recommended (it re-fits each layer's knots to its own "
+                "observed input range), though this instance's "
+                f"`init_scheme={self.init_scheme!r}` does not make gradients "
+                "dead at construction the way `init_scheme=None` does."
+            )
 
     def _validate_and_copy_configs(self, configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Validate every layer config and return shallow copies of them.
@@ -282,6 +349,29 @@ class KAN(keras.Model):
             # Use a local copy to avoid modifying self.layer_configs during build
             kan_args = config.copy()
             is_last_layer = (i == self.num_layers - 1)
+
+            # Auto-inject variance-controlled initializers (D-006) only when
+            # the caller did not already set either one explicitly for this
+            # layer -- never mutates self.layer_configs (get_config() must
+            # keep returning the caller's original, literal per-layer dicts).
+            if (
+                self.init_scheme is not None
+                and 'kernel_initializer' not in kan_args
+                and 'base_scaler_initializer' not in kan_args
+            ):
+                grid_size = kan_args.get('grid_size', 5)
+                spline_order = kan_args.get('spline_order', 3)
+                grid_range = kan_args.get('grid_range', (-2.0, 2.0))
+                layer_seed = None if self.init_seed is None else self.init_seed + i * 2
+                base_init, spline_init = create_kan_initializers(
+                    grid_size=grid_size,
+                    spline_order=spline_order,
+                    scheme=self.init_scheme,
+                    grid_range=grid_range,
+                    seed=layer_seed,
+                )
+                kan_args['base_scaler_initializer'] = base_init
+                kan_args['kernel_initializer'] = spline_init
 
             if is_last_layer:
                 # Force this layer linear so the final activation is not applied twice.
@@ -693,6 +783,8 @@ class KAN(keras.Model):
         config.update({
             "layer_configs": self.layer_configs,
             "input_features": self.input_features,
+            "init_scheme": self.init_scheme,
+            "init_seed": self.init_seed,
         })
         return config
 
@@ -763,17 +855,19 @@ def create_kan_model(
         ...                          output_activation="linear")
 
     Warning:
-        The returned model cannot be trained as-is at these defaults.
-        ``KANLinear`` sums over the input axis, so activations grow roughly 30x
-        per layer and leave ``grid_range=(-2.0, 2.0)`` after the first layer; the
-        B-spline basis is then identically zero and, with ``base_scaler``
-        initialized to the constant 1.0, every output unit computes the same
-        value. Measured on the documented defaults: the output is exactly
-        ``1 / output_features`` for every input with ``std == 0.0``, and 0 of 12
-        trainable weights receive a non-zero gradient. Call
-        :meth:`KAN.update_kan_grids` with a representative sample first — after
-        it, the same model has 12 of 12 live gradients. This is setup, not
-        tuning.
+        At ``init_scheme=None`` (the old, opt-out ``KANLinear`` bare defaults)
+        the returned model cannot be trained as-is. ``KANLinear`` sums over the
+        input axis, so activations grow roughly 30x per layer and leave
+        ``grid_range=(-2.0, 2.0)`` after the first layer; the B-spline basis is
+        then identically zero and, with ``base_scaler`` initialized to the
+        constant 1.0, every output unit computes the same value. Measured at
+        ``init_scheme=None``: the output is exactly ``1 / output_features`` for
+        every input with ``std == 0.0``, and 0 of 12 trainable weights receive a
+        non-zero gradient. At the class default (``init_scheme=
+        'glorot_inspired'``) this degeneracy does not occur — see D-006 — but
+        calling :meth:`KAN.update_kan_grids` with a representative sample is
+        still recommended either way, since it adapts each layer's knots to
+        its own observed input range; check :attr:`KAN.grids_adapted`.
     """
     return KAN.from_variant(
         variant=variant,
