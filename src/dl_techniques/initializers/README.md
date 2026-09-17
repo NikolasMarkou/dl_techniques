@@ -427,7 +427,12 @@ gabor_conv = keras.layers.DepthwiseConv2D(
     kernel_size=11,
     depth_multiplier=96,           # 96 Gabor filters PER input channel
     padding='same',
-    depthwise_initializer=GaborFiltersInitializer(),
+    # depthwise=True: a DepthwiseConv2D kernel has the same 4D shape as a
+    # Conv2D kernel, so the initializer cannot infer the fan-in convention
+    # from shape alone. Omitting this flag here silently normalizes to the
+    # cross-channel fan-in (kh*kw*in_ch) instead of the correct depthwise
+    # fan-in (kh*kw), under-scaling the bank.
+    depthwise_initializer=GaborFiltersInitializer(depthwise=True),
     trainable=False,               # frozen orientation/frequency front-end
 )
 # Input (32, 32, 3) -> Output (32, 32, 3 * 96 = 288)
