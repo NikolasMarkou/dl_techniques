@@ -1158,6 +1158,80 @@ class TestKANInitSchemeMechanics:
             "injected absmax measured at ~3.48)"
         )
 
+    def test_a_partial_override_still_gets_the_missing_key_injected_vice_versa(self):
+        """Mirror image of ``test_a_partial_override_still_gets_the_missing_
+        key_injected`` above: a caller setting ONLY
+        ``base_scaler_initializer`` explicitly must still get a real,
+        non-degenerate spline ``kernel_initializer`` auto-injected. This is
+        the "(and vice versa)" half of plan.md Success Criterion 4, which
+        review-iter-1.md Concern 3 found was asserted by no test -- an
+        unconditional-injection regression on the base-half check would have
+        shipped silently green.
+        """
+        explicit_init = keras.initializers.HeNormal(seed=321)
+        layer = create_ffn_layer(
+            'kan',
+            features=self.FEATURES,
+            grid_size=self.GRID_SIZE,
+            spline_order=self.SPLINE_ORDER,
+            grid_range=self.GRID_RANGE,
+            base_scaler_initializer=explicit_init,
+            init_scheme='glorot_inspired',
+        )
+        assert layer.base_scaler_initializer is explicit_init, (
+            "the caller's explicit base_scaler_initializer must be "
+            "respected verbatim, not overwritten by the injected residual "
+            "initializer"
+        )
+        assert type(layer.kernel_initializer).__name__ == 'KANInitializer', (
+            "the missing kernel_initializer key must still be auto-injected "
+            "even though the caller set base_scaler_initializer explicitly "
+            f"(got {type(layer.kernel_initializer).__name__})"
+        )
+
+    def test_wrapper_shadowed_kernel_initializer_is_a_documented_current_limitation(self):
+        """Pins D-009's DOCUMENTED (not fixed) residual limitation, not an
+        aspirational fix: a caller-shaped kwargs dict where
+        ``kernel_initializer`` is ALREADY present alongside ``init_scheme``
+        -- simulating what ``assemble_ffn_config``'s wrapper call sites
+        would produce, since ``build_transformer_ffn_config`` always
+        forwards its own generic ``kernel_initializer`` default
+        (``transformer.py:861``) -- silently SUPPRESSES the spline-half
+        injection, while ``base_scaler_initializer`` IS still injected
+        (non-degenerate). D-006's per-key rule cannot distinguish "the
+        caller explicitly overrode this" from "a wrapper forwarded its own
+        default alongside init_scheme" -- both look identical in `kwargs`.
+        This test asserts the CURRENT, limited behavior on purpose; it does
+        NOT assert the gap is fixed (D-009 explicitly rejected redesigning
+        ``assemble_ffn_config`` to fix this). See decisions.md D-009 and the
+        ``# DECISION .../D-009`` anchor in ``factory.py`` (the
+        ``logger.warning`` fired for this exact call is exercised here, not
+        asserted on -- step-2.1's own smoke test covers the warning text).
+        """
+        wrapper_default = keras.initializers.GlorotUniform()
+        layer = create_ffn_layer(
+            'kan',
+            features=self.FEATURES,
+            grid_size=self.GRID_SIZE,
+            spline_order=self.SPLINE_ORDER,
+            grid_range=self.GRID_RANGE,
+            kernel_initializer=wrapper_default,
+            init_scheme='glorot_inspired',
+        )
+        assert layer.kernel_initializer is wrapper_default, (
+            "documented D-009 limitation: a wrapper-forwarded "
+            "kernel_initializer default is indistinguishable from an "
+            "explicit caller override, so init_scheme's spline-half "
+            "injection is suppressed -- this pins the CURRENT, "
+            "not-yet-fixed behavior, not a desired outcome"
+        )
+        assert type(layer.base_scaler_initializer).__name__ == 'KANInitializer', (
+            "base_scaler_initializer must still be non-degenerately "
+            "injected even when the spline half is suppressed -- D-009's "
+            "gap is specific to the shadowed key, not the whole fix "
+            f"(got {type(layer.base_scaler_initializer).__name__})"
+        )
+
     def test_init_scheme_rejects_an_unknown_string(self):
         for bad_scheme in ("glorot", "", 5):
             with pytest.raises(ValueError, match="init_scheme must be one of"):
@@ -1232,6 +1306,25 @@ class TestKANInitSchemeMechanics:
             "a reloaded init_scheme=None layer must NOT silently switch to "
             "a non-degenerate base_scaler -- the round trip must reproduce "
             "KANLinear's bare constructor default exactly"
+        )
+        # review-iter-1.md Concern 6: only the base_scaler half was asserted
+        # here -- a regression injecting only the spline half at
+        # init_scheme=None would have passed. kernel_initializer must ALSO
+        # reproduce KANLinear's bare default (GlorotUniform), config-equal to
+        # a bare KANLinear's, through the same round trip.
+        bare = KANLinear(features=self.FEATURES)
+        _ = bare(x)  # trigger build so its kernel_initializer is resolved
+        assert isinstance(reloaded.kernel_initializer, keras.initializers.GlorotUniform), (
+            "a reloaded init_scheme=None layer's kernel_initializer must "
+            "still resolve to GlorotUniform, not silently drift to some "
+            f"other type (got {type(reloaded.kernel_initializer).__name__})"
+        )
+        assert (
+            reloaded.kernel_initializer.get_config()
+            == bare.kernel_initializer.get_config()
+        ), (
+            "reloaded.kernel_initializer must be config-equal to a bare "
+            "KANLinear's own default kernel_initializer"
         )
 
 
