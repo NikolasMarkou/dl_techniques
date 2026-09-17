@@ -246,17 +246,23 @@ class KANVisualizationCallback(keras.callbacks.Callback):
     distinct, epoch-stamped PNG instead of overwriting the previous one in place; the
     final post-hoc call leaves `filename_suffix` at its `""` default, keeping the plain
     `function_approximation.png`/`kan_splines.png` names as the canonical final render.
-    Both renders are wrapped
-    in `try/except Exception` + `logger.warning` so a rendering failure never aborts
-    training (verified by Step 8's deliberate-exception fail-soft check, not merely
-    assumed from reading the `try/except`).
+    Both renders are wrapped in `try/except Exception` + `logger.warning`, but this only
+    catches a failure in THIS module's own `render_function_and_spline_grid()`/
+    `TrainingHistory` construction/`viz_manager.visualize()` call plumbing -- a failure
+    inside a PLUGIN's own `create_visualization()` (e.g. `FunctionApproximationVisualization`,
+    `KANSplineVisualization`, `TrainingCurvesVisualization`) is already caught one layer
+    down, inside `VisualizationManager.visualize()` itself
+    (`dl_techniques/visualization/core.py`), which wraps plugin creation/rendering in its
+    own `try/except Exception: logger.error(...); return None` and never re-raises. So a
+    plugin-level rendering bug can never reach this callback's `try/except` at all; what
+    this wrapper actually guards against is a bug in the helper/plugin-dispatch code
+    itself (verified by Step 8's deliberate-exception fail-soft check, not merely assumed
+    from reading the `try/except`).
     """
 
     def __init__(
         self,
         viz_manager: VisualizationManager,
-        X_train: Optional[np.ndarray] = None,
-        y_train: Optional[np.ndarray] = None,
         freq: int = 5,
     ) -> None:
         """
@@ -265,27 +271,20 @@ class KANVisualizationCallback(keras.callbacks.Callback):
                 `create_visualization_manager`) -- the SAME instance `plot_results()`
                 uses at the end of `main()`, so periodic and final renders land in the
                 same `run_dir / "visualizations"` directory.
-            X_train: Training inputs. Accepted for interface parity with
-                `DenoisingVisualizationCallback` (which stores a fixed eval batch) and
-                for a future data-dependent render; the current
-                `render_function_and_spline_grid()` helper evaluates on a synthetic
-                mesh grid (matching `plot_results()`'s pre-existing behavior) and a
-                fixed `KANLinear` input range, so `X_train`/`y_train` are not read by
-                this callback today.
-            y_train: Training targets. See `X_train`.
             freq: Epoch cadence for the expensive function/spline grid render. Every
-                epoch still gets the cheap loss dashboard regardless of `freq`.
+                epoch still gets the cheap loss dashboard regardless of `freq`. `freq <= 0`
+                disables the periodic expensive render entirely (the cheap per-epoch
+                dashboard still renders every epoch).
         """
         super().__init__()
         self.viz_manager = viz_manager
-        self.X_train = X_train
-        self.y_train = y_train
-        self.freq = max(1, int(freq))
+        self.freq = int(freq)
         self._hist = {"epoch": [], "loss": [], "val_loss": []}
 
     def on_epoch_end(self, epoch: int, logs: Optional[dict] = None) -> None:
         """Record per-epoch scalars, re-render the cheap dashboard every epoch, and
-        the expensive function/spline grid every `self.freq` epochs."""
+        the expensive function/spline grid every `self.freq` epochs (skipped entirely
+        when `self.freq <= 0`)."""
         logs = logs or {}
         self._hist["epoch"].append(epoch + 1)
         self._hist["loss"].append(logs.get("loss", float("nan")))
@@ -304,7 +303,7 @@ class KANVisualizationCallback(keras.callbacks.Callback):
         except Exception as e:  # visualization must never break training
             logger.warning(f"Per-epoch dashboard render failed at epoch {epoch + 1}: {e}")
 
-        if (epoch + 1) % self.freq != 0:
+        if self.freq <= 0 or (epoch + 1) % self.freq != 0:
             return
         try:
             render_function_and_spline_grid(
@@ -567,7 +566,8 @@ def main() -> None:
                         help='Grid update frequency in epochs')
     parser.add_argument('--viz-freq', type=int, default=5,
                         help='Periodic (expensive) function/spline visualization '
-                             'frequency in epochs, for KANVisualizationCallback')
+                             'frequency in epochs, for KANVisualizationCallback; '
+                             'pass 0 to disable periodic rendering')
     # `--image-size`/`--weight-decay`/`--lr-schedule` joined `--dataset`/
     # `--patience` (D-005) as confirmed-dead here: `generate_data()` has no
     # notion of an image size, and `model.compile()` above uses a plain
@@ -698,7 +698,7 @@ def main() -> None:
             keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
             KANGridUpdateCallback(X_train[:500], update_freq=args.grid_update_freq),
             KANVisualizationCallback(
-                viz_manager, X_train, y_train, freq=args.viz_freq,
+                viz_manager, freq=args.viz_freq,
             ),
         ],
         verbose=1
