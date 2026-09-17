@@ -1205,8 +1205,11 @@ class TestKANInitSchemeMechanics:
         NOT assert the gap is fixed (D-009 explicitly rejected redesigning
         ``assemble_ffn_config`` to fix this). See decisions.md D-009 and the
         ``# DECISION .../D-009`` anchor in ``factory.py`` (the
-        ``logger.warning`` fired for this exact call is exercised here, not
-        asserted on -- step-2.1's own smoke test covers the warning text).
+        ``logger.warning`` fired for this exact call is exercised here, but
+        NOT asserted on -- the warning text itself is pinned by
+        ``test_wrapper_shadowed_kernel_initializer_warning_names_the_key``
+        below, added in the D-012 completion fix; step-2.1's own commit
+        (``2864854b9``) touched only ``factory.py``, no test file at all).
         """
         wrapper_default = keras.initializers.GlorotUniform()
         layer = create_ffn_layer(
@@ -1230,6 +1233,114 @@ class TestKANInitSchemeMechanics:
             "injected even when the spline half is suppressed -- D-009's "
             "gap is specific to the shadowed key, not the whole fix "
             f"(got {type(layer.base_scaler_initializer).__name__})"
+        )
+
+    def test_wrapper_shadowed_kernel_initializer_warning_names_the_key(self, caplog):
+        """D-012 completion fix: pass-2 review (Concern 1) found D-009's
+        ``logger.warning`` for the shadowed-``kernel_initializer`` case was
+        asserted by NO test anywhere -- deleting the warning block left the
+        whole suite green. This exercises the exact same call as
+        ``test_wrapper_shadowed_kernel_initializer_is_a_documented_current_
+        limitation`` above, but under ``caplog`` so the warning's actual
+        emission (not just the layer it produces) is a guard, not a comment.
+        """
+        import logging
+
+        wrapper_default = keras.initializers.GlorotUniform()
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            layer = create_ffn_layer(
+                'kan',
+                features=self.FEATURES,
+                grid_size=self.GRID_SIZE,
+                spline_order=self.SPLINE_ORDER,
+                grid_range=self.GRID_RANGE,
+                kernel_initializer=wrapper_default,
+                init_scheme='glorot_inspired',
+            )
+
+        assert layer.kernel_initializer is wrapper_default  # sanity, per the mirror test above
+
+        warnings = [
+            record for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "kernel_initializer" in record.message
+            and "D-009" in record.message
+        ]
+        assert len(warnings) == 1, (
+            "expected exactly one WARNING naming the suppressed "
+            f"'kernel_initializer' key and D-009, got {len(warnings)}: "
+            f"{[r.message for r in caplog.records]}"
+        )
+
+    def test_wrapper_shadowed_base_scaler_initializer_warning_names_the_key(self, caplog):
+        """Symmetric case: a caller/wrapper-shadowed ``base_scaler_initializer``
+        must fire its own D-009 warning naming that key, while
+        ``kernel_initializer`` (the un-shadowed half) is still injected."""
+        import logging
+
+        wrapper_default = keras.initializers.GlorotUniform()
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            layer = create_ffn_layer(
+                'kan',
+                features=self.FEATURES,
+                grid_size=self.GRID_SIZE,
+                spline_order=self.SPLINE_ORDER,
+                grid_range=self.GRID_RANGE,
+                base_scaler_initializer=wrapper_default,
+                init_scheme='glorot_inspired',
+            )
+
+        assert layer.base_scaler_initializer is wrapper_default
+        assert type(layer.kernel_initializer).__name__ == 'KANInitializer'
+
+        warnings = [
+            record for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "base_scaler_initializer" in record.message
+            and "D-009" in record.message
+        ]
+        assert len(warnings) == 1, (
+            "expected exactly one WARNING naming the suppressed "
+            f"'base_scaler_initializer' key and D-009, got {len(warnings)}: "
+            f"{[r.message for r in caplog.records]}"
+        )
+
+    def test_no_shadow_warning_fires_when_nothing_is_shadowed_or_init_scheme_is_none(
+        self, caplog
+    ):
+        """Negative case: the D-009 warning must NOT fire (a) when
+        ``init_scheme`` is set but neither key is shadowed (the normal,
+        fully-injected path), and (b) when ``init_scheme=None`` even though
+        ``kernel_initializer`` is explicitly set (no injection is attempted
+        at all, so there is nothing to shadow)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            create_ffn_layer(
+                'kan',
+                features=self.FEATURES,
+                grid_size=self.GRID_SIZE,
+                spline_order=self.SPLINE_ORDER,
+                grid_range=self.GRID_RANGE,
+                init_scheme='glorot_inspired',
+            )
+            create_ffn_layer(
+                'kan',
+                features=self.FEATURES,
+                grid_size=self.GRID_SIZE,
+                spline_order=self.SPLINE_ORDER,
+                grid_range=self.GRID_RANGE,
+                kernel_initializer=keras.initializers.GlorotUniform(),
+                init_scheme=None,
+            )
+
+        shadow_warnings = [
+            record for record in caplog.records
+            if record.levelno == logging.WARNING and "D-009" in record.message
+        ]
+        assert not shadow_warnings, (
+            "no D-009 shadow warning should fire when nothing is shadowed "
+            f"or init_scheme is None, got: {[r.message for r in caplog.records]}"
         )
 
     def test_init_scheme_rejects_an_unknown_string(self):
