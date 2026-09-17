@@ -30,6 +30,15 @@ from dl_techniques.visualization import (
 from train.common import setup_gpu, create_base_argument_parser
 
 
+# Resolved once and reused by both `create_visualization_manager()` (D-002)
+# and `main()`'s post-training `model.save()` (D-004), so the two call sites
+# in this file cannot drift apart on where "the run's results directory" is.
+# `parents[3]` reaches the repo root from THIS file
+# (src/train/kan/train_kan.py: [0] kan, [1] train, [2] src, [3] <repo>).
+REPO_ROOT = Path(__file__).resolve().parents[3]
+EXPERIMENT_NAME = "kan_regression"
+
+
 # ---------------------------------------------------------------------
 # Custom Data Structures
 # ---------------------------------------------------------------------
@@ -227,9 +236,8 @@ def create_visualization_manager(experiment_name: str) -> VisualizationManager:
     """Creates visualization manager with KAN-specific plugins."""
     # DECISION plan-2026-09-17T052443-2c932602/D-002
     # Anchor "results" at the repo root instead of passing a bare relative
-    # string. `parents[3]` reaches the repo root from THIS file
-    # (src/train/kan/train_kan.py: [0] kan, [1] train, [2] src, [3] <repo>) --
-    # the same depth `train.common.args.resolved_run_dir()` walks from
+    # string. `REPO_ROOT` (module-level, see its definition) reaches the repo
+    # root the same way `train.common.args.resolved_run_dir()` does from
     # src/train/common/args.py. Do NOT call `resolved_run_dir()` itself here:
     # it returns `<root>/<output_dir>/<experiment_name>`, but
     # VisualizationManager/VisualizationContext ALSO appends
@@ -237,10 +245,10 @@ def create_visualization_manager(experiment_name: str) -> VisualizationManager:
     # result through as `output_dir` would double-nest
     # `results/kan_regression/kan_regression/<timestamp>/`. Only the bare
     # "results" root is resolved here; `experiment_name` is still passed to
-    # VisualizationManager separately, unchanged. Do NOT re-derive the index
-    # without checking this file's depth: a wrong index does not raise, it
-    # silently writes under the wrong directory (see decisions.md D-002).
-    output_dir = Path(__file__).resolve().parents[3] / "results"
+    # VisualizationManager separately, unchanged. Do NOT re-derive the repo
+    # root without checking this file's depth: a wrong index does not raise,
+    # it silently writes under the wrong directory (see decisions.md D-002).
+    output_dir = REPO_ROOT / "results"
     viz_manager = VisualizationManager(
         experiment_name=experiment_name,
         output_dir=output_dir
@@ -389,8 +397,29 @@ def main() -> None:
     final_loss = history.history['val_loss'][-1]
     logger.info(f"Final Validation MSE: {final_loss:.6f}")
 
+    # DECISION plan-2026-09-17T052443-2c932602/D-004
+    # Persist the trained model so a run leaves an inspectable artifact
+    # (previously the ONLY outputs were 3 PNGs from `plot_results()`, nothing
+    # a caller could reload). Deliberately `model.save()` only, NOT
+    # `train.common.create_callbacks()`'s EarlyStopping/ModelCheckpoint/
+    # CSVLogger/EpochAnalyzerCallback triad: that helper's defaults
+    # (`monitor='val_accuracy'`) target Pattern-1 classification, this script
+    # is a regression smoke test with no accuracy metric at all, and
+    # `include_analyzer=True` by default would pull in `EpochAnalyzerCallback`
+    # machinery built for classification-shaped outputs -- scope creep this
+    # step's own text rules out ("do not import the full Pattern-1
+    # evaluate/visualize pipeline"). Do NOT swap this for
+    # `create_callbacks()` without first re-deriving a `monitor='val_loss'`
+    # call and confirming the analyzer callback tolerates a single-array
+    # regression output; see decisions.md D-004.
+    model_dir = REPO_ROOT / "results" / EXPERIMENT_NAME
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / "kan_model.keras"
+    model.save(model_path)
+    logger.info(f"Saved trained model to {model_path}")
+
     # Visualization
-    viz_manager = create_visualization_manager("kan_regression")
+    viz_manager = create_visualization_manager(EXPERIMENT_NAME)
     plot_results(history, model, viz_manager, show=args.show_plots)
 
 
