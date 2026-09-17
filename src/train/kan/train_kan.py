@@ -672,19 +672,31 @@ def main() -> None:
     # level `best_checkpoint_path()` primitive instead, matching bfunet's
     # artifact names (`best_model.keras`, `training_log.csv`) without
     # reopening the EarlyStopping question. See decisions.md D-001.
+    # DECISION plan-2026-09-17T064004-0d194df2/D-006
+    # This list's ORDER is load-bearing. Keras runs `on_epoch_end` callbacks in
+    # list order, so `ModelCheckpoint`/`CSVLogger` MUST come before
+    # `KANGridUpdateCallback`: the grid-update callback mutates the model's
+    # weights in-place (`self.model.update_kan_grids(...)`), and if it ran
+    # first, `ModelCheckpoint` would save/select POST-mutation weights against
+    # a `val_loss` that Keras measured PRE-mutation (at `evaluate`/validation
+    # time, before any `on_epoch_end` callback runs), silently corrupting
+    # `best_model.keras` on every grid-update epoch. Do NOT reorder this list
+    # without re-verifying with a weight-comparison run (see decisions.md
+    # D-006) that `best_model.keras` still corresponds to the CSV's true
+    # lowest-`val_loss` epoch.
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
         epochs=args.epochs,
         batch_size=args.batch_size,
         callbacks=[
-            KANGridUpdateCallback(X_train[:500], update_freq=args.grid_update_freq),
             keras.callbacks.ModelCheckpoint(
                 best_checkpoint_path(str(run_dir)),
                 monitor='val_loss',
                 save_best_only=True,
             ),
             keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
+            KANGridUpdateCallback(X_train[:500], update_freq=args.grid_update_freq),
             KANVisualizationCallback(
                 viz_manager, X_train, y_train, freq=args.viz_freq,
             ),
