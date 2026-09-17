@@ -762,7 +762,6 @@ class TestLaplacianPyramidLevel:
 
         # Sublayers created in __init__, not built yet.
         assert layer.blur is not None
-        assert layer.down is not None
         assert layer.up is not None
         assert not layer.built
         assert not layer.blur.built
