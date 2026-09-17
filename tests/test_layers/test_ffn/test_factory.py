@@ -34,6 +34,7 @@ from dl_techniques.layers.ffn.factory import (
     FFN_REGISTRY,
     STRICT_DROPPED_KEY_MARKER,
 )
+from dl_techniques.layers.ffn.kan_linear import KANLinear
 
 
 class TestFFNFactory:
@@ -1065,6 +1066,173 @@ class TestKanAndTverskyFactory:
         assert 'features' in info['kan']['required_params']
         assert 'units' in info['tversky']['required_params']
         assert 'num_features' in info['tversky']['required_params']
+
+
+class TestKANInitSchemeMechanics:
+    """Site-1 (``create_ffn_layer('kan', ...)``) regression tests for the
+    opt-in ``init_scheme``/``init_seed`` injection added in Step 2
+    (plan-2026-09-17T194331-3ce35186, D-006/D-007, commit b2b5ef140).
+
+    Adapted from ``TestKANInitSchemeMechanics``
+    (``tests/test_models/test_kan/test_model.py:1150-1243``), the
+    ``model.py``-level precedent for the identical fix class, substituting
+    ``create_ffn_layer('kan', ...)`` for ``KAN.__init__`` since this factory
+    entry has no per-layer ``layer_configs`` dict.
+
+    Numeric bounds are grounded in Step 1's measured baseline for THIS site
+    (``decisions.md`` Step 1 Evidence), not an assumed value: with
+    ``features=32, grid_size=5, spline_order=3, grid_range=(-2.0, 2.0)``,
+    bare-default corner-output absmax measured ~56.58, the
+    ``'glorot_inspired'``-injected absmax measured ~3.48 (~16.3x reduction),
+    and ``base_scaler`` unique-value count measured 1 -> 1024.
+    """
+
+    FEATURES = 32
+    GRID_SIZE = 5
+    SPLINE_ORDER = 3
+    GRID_RANGE = (-2.0, 2.0)
+
+    @staticmethod
+    def _corner_points(dim: int, grid_range) -> np.ndarray:
+        """5 domain-boundary/corner rows, each broadcast across `dim` features.
+
+        Mirrors Step 1's own probe (`decisions.md` Step 1 Evidence
+        `corner_points()`), itself a generalization of
+        `TestKANCrossLayerMagnitudeStability._corner_points()`
+        (`findings/kan-model-init-pattern.md` Sec 7) to an arbitrary `dim`
+        and this plan's `grid_range=(-2, 2)`.
+        """
+        lo, hi = grid_range
+        near_hi = hi * 0.9
+        rows = [
+            np.full((dim,), hi, dtype="float32"),
+            np.full((dim,), lo, dtype="float32"),
+            np.array([hi if i % 2 == 0 else lo for i in range(dim)], dtype="float32"),
+            np.array([lo if i % 2 == 0 else hi for i in range(dim)], dtype="float32"),
+            np.full((dim,), near_hi, dtype="float32"),
+        ]
+        return np.stack(rows, axis=0)
+
+    def test_a_partial_override_still_gets_the_missing_key_injected(self):
+        """The exact defect class D-006's review caught in the `model.py`
+        precedent: a caller setting ONLY `kernel_initializer` explicitly
+        must still get a real, non-degenerate `base_scaler_initializer` --
+        not the constant `1.0` every connection would otherwise share. This
+        guards that Step 2's factory.py injection is per-key, not
+        all-or-nothing.
+        """
+        explicit_init = keras.initializers.HeNormal(seed=123)
+        layer = create_ffn_layer(
+            'kan',
+            features=self.FEATURES,
+            grid_size=self.GRID_SIZE,
+            spline_order=self.SPLINE_ORDER,
+            grid_range=self.GRID_RANGE,
+            kernel_initializer=explicit_init,
+            init_scheme='glorot_inspired',
+        )
+        assert layer.kernel_initializer is explicit_init, (
+            "the caller's explicit kernel_initializer must be respected "
+            "verbatim, not overwritten by the injected spline initializer"
+        )
+
+        x = keras.random.normal(shape=(4, self.FEATURES))
+        _ = layer(x)  # trigger build
+
+        base_scaler = keras.ops.convert_to_numpy(layer.base_scaler)
+        assert len(np.unique(base_scaler)) > 1, (
+            "base_scaler must NOT be the degenerate all-ones constant -- "
+            "the missing base_scaler_initializer key must still be "
+            "auto-injected even though the caller set kernel_initializer "
+            "explicitly"
+        )
+
+        out = keras.ops.convert_to_numpy(
+            layer(self._corner_points(self.FEATURES, self.GRID_RANGE), training=False)
+        )
+        absmax = float(np.abs(out).max())
+        assert absmax < 20.0, (
+            f"corner-output magnitude {absmax} with the injected "
+            "base_scaler_initializer should be well under the measured "
+            "bare-default ~56.6 absmax (decisions.md Step 1 Evidence: "
+            "injected absmax measured at ~3.48)"
+        )
+
+    def test_init_scheme_rejects_an_unknown_string(self):
+        for bad_scheme in ("glorot", "", 5):
+            with pytest.raises(ValueError, match="init_scheme must be one of"):
+                create_ffn_layer(
+                    'kan',
+                    features=self.FEATURES,
+                    init_scheme=bad_scheme,
+                )
+
+    def test_init_seed_is_deterministic_and_seed_dependent(self):
+        """Same seed -> bit-identical injected weights across two separately
+        constructed layers; a different seed -> different weights."""
+
+        def _build(seed):
+            layer = create_ffn_layer(
+                'kan',
+                features=self.FEATURES,
+                grid_size=self.GRID_SIZE,
+                spline_order=self.SPLINE_ORDER,
+                grid_range=self.GRID_RANGE,
+                init_scheme='glorot_inspired',
+                init_seed=seed,
+            )
+            x = keras.random.normal(shape=(4, self.FEATURES))
+            _ = layer(x)  # trigger build
+            return layer
+
+        layer_seed0a = _build(0)
+        layer_seed0b = _build(0)
+        layer_seed1 = _build(1)
+
+        w0a = keras.ops.convert_to_numpy(layer_seed0a.spline_weight)
+        w0b = keras.ops.convert_to_numpy(layer_seed0b.spline_weight)
+        w1 = keras.ops.convert_to_numpy(layer_seed1.spline_weight)
+        np.testing.assert_array_equal(w0a, w0b)
+        assert not np.array_equal(w0a, w1)
+
+        b0a = keras.ops.convert_to_numpy(layer_seed0a.base_scaler)
+        b0b = keras.ops.convert_to_numpy(layer_seed0b.base_scaler)
+        b1 = keras.ops.convert_to_numpy(layer_seed1.base_scaler)
+        np.testing.assert_array_equal(b0a, b0b)
+        assert not np.array_equal(b0a, b1)
+
+    def test_init_scheme_none_survives_get_config_from_config_round_trip(self):
+        """`init_scheme=None` (the default) must reproduce KANLinear's bare
+        constructor default -- `base_scaler` a constant `1.0` -- and that
+        must SURVIVE a `get_config()`/`from_config()` round trip.
+
+        `create_ffn_layer` itself has no `get_config()` (it is a plain
+        function, not a serializable object) -- only the constructed
+        `KANLinear` instance does, so the round trip is on that instance,
+        the anti-drift twin of `model.py`'s own
+        `test_init_scheme_survives_get_config_round_trip` regression.
+        """
+        layer = create_ffn_layer(
+            'kan',
+            features=self.FEATURES,
+            grid_size=self.GRID_SIZE,
+            spline_order=self.SPLINE_ORDER,
+            grid_range=self.GRID_RANGE,
+            init_scheme=None,
+        )
+        x = keras.random.normal(shape=(4, self.FEATURES))
+        _ = layer(x)  # trigger build
+        assert layer.__class__.__name__ == "KANLinear", layer.__class__.__name__
+
+        reloaded = KANLinear.from_config(layer.get_config())
+        _ = reloaded(x)  # trigger build on the reloaded instance
+
+        reloaded_base_scaler = keras.ops.convert_to_numpy(reloaded.base_scaler)
+        assert np.all(reloaded_base_scaler == 1.0), (
+            "a reloaded init_scheme=None layer must NOT silently switch to "
+            "a non-degenerate base_scaler -- the round trip must reproduce "
+            "KANLinear's bare constructor default exactly"
+        )
 
 
 # ---------------------------------------------------------------------
