@@ -96,6 +96,48 @@ class TestWindowAttention:
         assert not hasattr(inner_attn, "qkv")
         assert inner_attn.kan_grid_size == 5  # Default value
 
+    def test_kan_init_scheme_and_seed_reach_the_inner_attention(self):
+        """Site-2 forwarding coverage (plan-2026-09-17T194331-3ce35186 Step 5,
+        D-002): ``kan_init_scheme``/``kan_init_seed`` were forwarded through
+        ``WindowAttention`` to ``SingleWindowAttention`` in Step 4 (commit
+        70869ccb2); this pins that the 2 new params reach the inner layer's
+        constructor, not just this wrapper's own stored attributes."""
+        layer = WindowAttention(
+            dim=96,
+            window_size=7,
+            num_heads=4,
+            attention_mode="kan_key",
+            kan_init_scheme="glorot_inspired",
+            kan_init_seed=11,
+        )
+        assert layer.kan_init_scheme == "glorot_inspired"
+        assert layer.kan_init_seed == 11
+        inner_attn = layer.attention
+        assert inner_attn.kan_init_scheme == "glorot_inspired"
+        assert inner_attn.kan_init_seed == 11
+
+    def test_kan_init_scheme_and_seed_survive_a_config_round_trip(self):
+        """``get_config()``/``from_config()`` must carry the 2 new params
+        through the wrapper, matching every other ``kan_*`` param at this
+        site."""
+        layer = WindowAttention(
+            dim=96,
+            window_size=7,
+            num_heads=4,
+            attention_mode="kan_key",
+            kan_init_scheme="glorot_inspired",
+            kan_init_seed=11,
+        )
+        config = layer.get_config()
+        assert config["kan_init_scheme"] == "glorot_inspired"
+        assert config["kan_init_seed"] == 11
+
+        rebuilt = WindowAttention.from_config(config)
+        assert rebuilt.kan_init_scheme == "glorot_inspired"
+        assert rebuilt.kan_init_seed == 11
+        assert rebuilt.attention.kan_init_scheme == "glorot_inspired"
+        assert rebuilt.attention.kan_init_seed == 11
+
     @pytest.mark.parametrize("prob_type", ["adaptive", "sparsemax"])
     def test_initialization_advanced_probability(self, prob_type):
         """Test initialization with advanced probability normalization schemes."""

@@ -232,6 +232,77 @@ class TestSerialization:
         assert pred_orig.shape == pred_load.shape
         np.testing.assert_allclose(pred_orig, pred_load, atol=1e-6)
 
+    def test_get_config_kan_key_mode(self):
+        """Before this test, no ``TestSerialization`` case exercised
+        ``attention_mode='kan_key'`` at all -- the class only ever built
+        ``'linear'``-mode layers (see plan-2026-09-17T194331-3ce35186 Step 5's
+        explicit open question, now resolved: coverage did NOT already exist).
+        This pins the ``kan_key``-specific config keys, including the
+        ``kan_init_scheme``/``kan_init_seed`` opt-in added in Step 4 (D-008).
+        """
+        layer = SingleWindowAttention(
+            dim=16,
+            window_size=3,
+            num_heads=2,
+            attention_mode="kan_key",
+            kan_grid_size=4,
+            kan_spline_order=2,
+            kan_activation="relu",
+            kan_init_scheme="glorot_inspired",
+            kan_init_seed=7,
+        )
+        config = layer.get_config()
+        assert config["attention_mode"] == "kan_key"
+        assert config["kan_grid_size"] == 4
+        assert config["kan_spline_order"] == 2
+        assert config["kan_init_scheme"] == "glorot_inspired"
+        assert config["kan_init_seed"] == 7
+
+    def test_from_config_kan_key_mode(self):
+        layer = SingleWindowAttention(
+            dim=16,
+            window_size=3,
+            num_heads=2,
+            attention_mode="kan_key",
+            kan_init_scheme="glorot_inspired",
+            kan_init_seed=7,
+        )
+        config = layer.get_config()
+        rebuilt = SingleWindowAttention.from_config(config)
+        assert rebuilt.attention_mode == "kan_key"
+        assert rebuilt.kan_init_scheme == "glorot_inspired"
+        assert rebuilt.kan_init_seed == 7
+        assert rebuilt.query is not None
+        assert rebuilt.key is not None
+        assert rebuilt.value is not None
+
+    def test_model_save_load_loop_kan_key_mode(self):
+        """Full ``.keras`` save/load round-trip on the ``kan_key`` path --
+        the ``'linear'``-mode ``test_model_save_load_loop`` above cannot see a
+        regression in this branch at all."""
+        inputs = keras.Input(shape=(9, 16))
+        x = SingleWindowAttention(
+            dim=16,
+            window_size=3,
+            num_heads=2,
+            attention_mode="kan_key",
+            kan_init_scheme="glorot_inspired",
+            kan_init_seed=7,
+        )(inputs)
+        model = keras.Model(inputs, x)
+
+        x_in = np.random.normal(size=(2, 9, 16)).astype("float32")
+        pred_orig = model.predict(x_in, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "single_window_attention_kan_key.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+            pred_load = loaded.predict(x_in, verbose=0)
+
+        assert pred_orig.shape == pred_load.shape
+        np.testing.assert_allclose(pred_orig, pred_load, atol=1e-6)
+
 
 # ==============================================================================
 # 6. Edge Cases
@@ -249,6 +320,179 @@ class TestEdgeCases:
             dim=16, window_size=4, num_heads=2, name="swa_special"
         )
         assert layer.name == "swa_special"
+
+
+# ==============================================================================
+# 7. KAN init-scheme mechanics (Site 2, plan-2026-09-17T194331-3ce35186 Step 5)
+# ==============================================================================
+
+class TestKANInitSchemeMechanics:
+    """Site-2 (``SingleWindowAttention(attention_mode='kan_key', ...)``)
+    regression tests for the opt-in ``kan_init_scheme``/``kan_init_seed``
+    injection added in Step 4 (plan-2026-09-17T194331-3ce35186, D-008,
+    commit 70869ccb2). Adapted from ``TestKANInitSchemeMechanics`` in
+    ``tests/test_layers/test_ffn/test_factory.py`` (Step 3's Site-1
+    counterpart), substituting the unconditional-both-keys injection shape
+    (D-003) for that class's per-key one, since this site has never exposed
+    ``kernel_initializer``/``base_scaler_initializer`` for the KAN key
+    projection.
+
+    Numeric bounds are grounded in Step 1's measured baseline for THIS site
+    (``decisions.md`` Step 1 Evidence): with ``dim=32, window_size=3,
+    num_heads=4, grid_size=5, spline_order=3, grid_range=(-2.0, 2.0)``
+    (``KANLinear``'s own bare default -- this site exposes no
+    ``kan_grid_range`` override), bare-default corner-output absmax on the
+    real ``key_kan`` sublayer measured ~56.96, the
+    ``'glorot_inspired'``-injected absmax measured ~3.48 (a proxy
+    measurement -- Step 1 predates Step 4's fix -- but built with identical
+    parameters to what Step 4 now produces), and ``base_scaler``
+    unique-value count measured 1 -> 1024.
+    """
+
+    DIM = 32
+    WINDOW_SIZE = 3
+    NUM_HEADS = 4
+    GRID_SIZE = 5
+    SPLINE_ORDER = 3
+    GRID_RANGE = (-2.0, 2.0)
+
+    @staticmethod
+    def _corner_points(dim: int, grid_range) -> np.ndarray:
+        """5 domain-boundary/corner rows, each broadcast across `dim` features.
+
+        Identical shape to Step 1's own probe and to
+        ``test_factory.py::TestKANInitSchemeMechanics._corner_points`` (Site
+        1's counterpart) -- a generalization of
+        ``TestKANCrossLayerMagnitudeStability._corner_points()``
+        (``findings/kan-model-init-pattern.md`` Sec 7) to an arbitrary `dim`
+        and this plan's `grid_range=(-2, 2)`.
+        """
+        lo, hi = grid_range
+        near_hi = hi * 0.9
+        rows = [
+            np.full((dim,), hi, dtype="float32"),
+            np.full((dim,), lo, dtype="float32"),
+            np.array([hi if i % 2 == 0 else lo for i in range(dim)], dtype="float32"),
+            np.array([lo if i % 2 == 0 else hi for i in range(dim)], dtype="float32"),
+            np.full((dim,), near_hi, dtype="float32"),
+        ]
+        return np.stack(rows, axis=0)
+
+    def test_kan_init_scheme_rejects_an_unknown_string(self):
+        for bad_scheme in ("glorot", "", 5):
+            with pytest.raises(ValueError, match="kan_init_scheme must be one of"):
+                SingleWindowAttention(
+                    dim=self.DIM,
+                    window_size=self.WINDOW_SIZE,
+                    num_heads=self.NUM_HEADS,
+                    attention_mode="kan_key",
+                    kan_init_scheme=bad_scheme,
+                )
+
+    def test_kan_init_seed_is_deterministic_and_seed_dependent(self):
+        """Same seed -> bit-identical `key_kan` weights across two separately
+        constructed layers; a different seed -> different weights."""
+
+        def _build(seed):
+            layer = SingleWindowAttention(
+                dim=self.DIM,
+                window_size=self.WINDOW_SIZE,
+                num_heads=self.NUM_HEADS,
+                attention_mode="kan_key",
+                kan_grid_size=self.GRID_SIZE,
+                kan_spline_order=self.SPLINE_ORDER,
+                kan_init_scheme="glorot_inspired",
+                kan_init_seed=seed,
+            )
+            n_tokens = self.WINDOW_SIZE * self.WINDOW_SIZE
+            x = keras.random.normal((2, n_tokens, self.DIM))
+            _ = layer(x)  # trigger build
+            return layer
+
+        layer_seed0a = _build(0)
+        layer_seed0b = _build(0)
+        layer_seed1 = _build(1)
+
+        w0a = keras.ops.convert_to_numpy(layer_seed0a.key.spline_weight)
+        w0b = keras.ops.convert_to_numpy(layer_seed0b.key.spline_weight)
+        w1 = keras.ops.convert_to_numpy(layer_seed1.key.spline_weight)
+        np.testing.assert_array_equal(w0a, w0b)
+        assert not np.array_equal(w0a, w1)
+
+        b0a = keras.ops.convert_to_numpy(layer_seed0a.key.base_scaler)
+        b0b = keras.ops.convert_to_numpy(layer_seed0b.key.base_scaler)
+        b1 = keras.ops.convert_to_numpy(layer_seed1.key.base_scaler)
+        np.testing.assert_array_equal(b0a, b0b)
+        assert not np.array_equal(b0a, b1)
+
+    def test_kan_init_scheme_none_survives_get_config_from_config_round_trip(self):
+        """`kan_init_scheme=None` (the default) must reproduce `KANLinear`'s
+        bare constructor default -- `base_scaler` a constant `1.0` -- and
+        that must SURVIVE a `get_config()`/`from_config()` round trip. The
+        anti-drift twin of `test_factory.py`'s Site-1 regression of the same
+        shape."""
+        layer = SingleWindowAttention(
+            dim=self.DIM,
+            window_size=self.WINDOW_SIZE,
+            num_heads=self.NUM_HEADS,
+            attention_mode="kan_key",
+            kan_init_scheme=None,
+        )
+        n_tokens = self.WINDOW_SIZE * self.WINDOW_SIZE
+        x = keras.random.normal((2, n_tokens, self.DIM))
+        _ = layer(x)  # trigger build
+
+        rebuilt = SingleWindowAttention.from_config(layer.get_config())
+        _ = rebuilt(x)  # trigger build on the rebuilt instance
+
+        rebuilt_base_scaler = keras.ops.convert_to_numpy(rebuilt.key.base_scaler)
+        assert np.all(rebuilt_base_scaler == 1.0), (
+            "a rebuilt kan_init_scheme=None layer must NOT silently switch to "
+            "a non-degenerate base_scaler -- the round trip must reproduce "
+            "KANLinear's bare constructor default exactly"
+        )
+
+    def test_injected_scheme_reduces_corner_magnitude_and_de_degenerates_base_scaler(self):
+        """The measured, non-obvious effect this fix actually has at Site 2
+        (decisions.md Step 1 Evidence): injecting the scheme cuts
+        corner-output absmax by ~16.3x (56.96 -> 3.48) and turns
+        `base_scaler` from a single repeated value into many distinct ones.
+        Framed as "measurably reduces magnitude", not "prevents dead
+        gradients" -- Step 1 found no dead-gradient mode at a single layer
+        (Pre-Mortem #1's falsification-avoidance framing)."""
+        layer = SingleWindowAttention(
+            dim=self.DIM,
+            window_size=self.WINDOW_SIZE,
+            num_heads=self.NUM_HEADS,
+            attention_mode="kan_key",
+            kan_grid_size=self.GRID_SIZE,
+            kan_spline_order=self.SPLINE_ORDER,
+            kan_init_scheme="glorot_inspired",
+        )
+        n_tokens = self.WINDOW_SIZE * self.WINDOW_SIZE
+        x_build = keras.random.normal((2, n_tokens, self.DIM))
+        _ = layer(x_build)  # trigger build of the layer AND its key_kan sublayer
+
+        key_layer = layer.key
+        assert key_layer.__class__.__name__ == "KANLinear"
+        assert key_layer.built
+
+        base_scaler = keras.ops.convert_to_numpy(key_layer.base_scaler)
+        assert len(np.unique(base_scaler)) > 1, (
+            "base_scaler must NOT be the degenerate all-ones constant once "
+            "kan_init_scheme is set"
+        )
+
+        out = keras.ops.convert_to_numpy(
+            key_layer(self._corner_points(self.DIM, self.GRID_RANGE), training=False)
+        )
+        absmax = float(np.abs(out).max())
+        assert absmax < 20.0, (
+            f"corner-output magnitude {absmax} on the injected key_kan "
+            "sublayer should be well under the measured bare-default ~56.96 "
+            "absmax (decisions.md Step 1 Evidence: injected-proxy absmax "
+            "measured at ~3.48)"
+        )
 
 
 if __name__ == "__main__":
