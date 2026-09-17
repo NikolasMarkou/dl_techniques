@@ -888,6 +888,21 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kan_grid_size': 5,
             'kan_spline_order': 3,
             'kan_activation': 'swish',
+            # DECISION plan-2026-09-17T194331-3ce35186/D-010: reachable-through-the-factory
+            # rule. Every kan_* constructor param SingleWindowAttention/WindowAttention
+            # declare must also be declared here, or a factory-routed caller
+            # (create_attention_layer directly, or anything built on top of it --
+            # TransformerLayer, MixedSequentialBlock, ...) hits a strict ValueError even
+            # though the target class already accepts the kwarg. This is D-002's
+            # WindowAttention-forwarding reasoning recurring one dispatch layer further up.
+            # Pure pass-through, no new injection logic: create_attention_layer merges
+            # optional_params defaults with the caller's kwargs into final_params and calls
+            # attn_class(**final_params) verbatim (factory.py's construction path below) --
+            # SingleWindowAttention/WindowAttention already handle both keys correctly as of
+            # Step 4 (D-003/D-008). Same ruling applies to the 'window'/'window_zigzag'/
+            # 'window_band' entries below; not re-anchored there. See decisions.md D-010.
+            'kan_init_scheme': None,
+            'kan_init_seed': None,
             'probability_type': 'softmax',
             'probability_config': None,
             'qk_norm_type': None,
@@ -1127,6 +1142,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kan_grid_size': 5,
             'kan_spline_order': 3,
             'kan_activation': 'swish',
+            # D-010, see 'single_window' entry above for the full anchor.
+            'kan_init_scheme': None,
+            'kan_init_seed': None,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
@@ -1180,6 +1198,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kan_grid_size': 5,
             'kan_spline_order': 3,
             'kan_activation': 'swish',
+            # D-010, see 'single_window' entry above for the full anchor.
+            'kan_init_scheme': None,
+            'kan_init_seed': None,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
@@ -1245,6 +1266,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kan_grid_size': 5,
             'kan_spline_order': 3,
             'kan_activation': 'swish',
+            # D-010, see 'single_window' entry above for the full anchor.
+            'kan_init_scheme': None,
+            'kan_init_seed': None,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,

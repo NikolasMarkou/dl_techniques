@@ -335,6 +335,21 @@ class SingleWindowAttention(keras.layers.Layer):
             # hardcoded (-2.0, 2.0) literal, matching model.py's drift-safety
             # rationale for the same idiom -- this site exposes no
             # kan_grid_range override param to read instead. See decisions.md.
+            # [EXTENDED per Concern 4/D-011]: do NOT "simplify" this by passing
+            # base_scaler_initializer=None/kernel_initializer=None as explicit
+            # kwargs to KANLinear(...) instead of omitting them via the empty-
+            # dict-splat below. MEASURED: KANLinear(base_scaler_initializer=None,
+            # kernel_initializer=None) yields NoneType for BOTH initializers and a
+            # base_scaler that is NOT all-ones (64 unique values on an 8-feature
+            # layer) -- KANLinear does not guard against None and does not fall
+            # back to its own string defaults ('ones'/'glorot_uniform') when an
+            # explicit None is passed. Passing None explicitly at
+            # kan_init_scheme=None would therefore silently break Invariant 1
+            # (byte-identical default behavior) with no exception raised and no
+            # test failure by design -- only by luck of the round-trip test
+            # actually asserting base_scaler == 1.0. The keys must be truly
+            # ABSENT from the call, which is exactly what the empty dict below
+            # (never populated unless kan_init_scheme is not None) guarantees.
             kan_key_kwargs: Dict[str, Any] = {}
             if self.kan_init_scheme is not None:
                 grid_range = inspect.signature(
