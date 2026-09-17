@@ -11,8 +11,11 @@ Usage:
     python train_kan.py --epochs 300 --batch-size 256 --learning-rate 0.005
 """
 
+import argparse
 import keras
+import matplotlib
 import numpy as np
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Tuple, Optional, List
@@ -322,6 +325,54 @@ def plot_results(
 # Main
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-09-17T052443-2c932602/D-005
+# `--dataset`/`--patience` are dead in THIS script but live in several other
+# Pattern-1 trainers that share `create_base_argument_parser()`
+# (train_capsnet.py, train_convnext_v1.py, train_convnext_v2.py). Do NOT
+# "fix" this by deleting the two `add_argument()` calls from
+# `create_base_argument_parser()` itself -- that would silently break every
+# other caller's live `--dataset`/`--patience` consumption. Instead, this
+# script's own parser INSTANCE is pruned post-construction, by `dest`, via
+# `argparse`'s private action-removal bookkeeping (no public API for this
+# exists). See decisions.md D-005 for the full reasoning and the rejected
+# alternatives (parser.add_argument(..., help=SUPPRESS) only hides the flag
+# from --help, it does not stop the flag from being accepted and silently
+# ignored -- which is exactly the dead-knob problem this step closes).
+def _drop_base_parser_args(parser: argparse.ArgumentParser, *dests: str) -> None:
+    """Removes CLI arguments this script inherits from
+    `create_base_argument_parser()` but never reads, per `src/train/CLAUDE.md`'s
+    "config fields must be live" convention.
+
+    `--dataset` and `--patience` are dead here: `train_kan.py`'s data is 100%
+    synthetic (`generate_data()` never reads `args.dataset`), and Step 4
+    (D-004) deliberately used a plain `model.save()` instead of
+    `create_callbacks()`'s EarlyStopping, so there is no patience knob to
+    gate. `create_base_argument_parser()` itself is left untouched -- these
+    two flags are live for the OTHER Pattern-1 trainers that share it (e.g.
+    `train_capsnet.py`, `train_convnext_v1.py`); only THIS script's own
+    parser instance is pruned, post-construction, by `dest`.
+
+    Args:
+        parser: An `argparse.ArgumentParser` already populated via
+            `create_base_argument_parser()` (or any parser using standard
+            `add_argument`/action-group bookkeeping).
+        *dests: One or more `dest` names (e.g. `"dataset"`) to remove.
+
+    Returns:
+        None. Mutates `parser` in place.
+    """
+    for dest in dests:
+        for action in list(parser._actions):
+            if action.dest != dest:
+                continue
+            parser._actions.remove(action)
+            for group in parser._action_groups:
+                if action in group._group_actions:
+                    group._group_actions.remove(action)
+            for opt in action.option_strings:
+                parser._option_string_actions.pop(opt, None)
+
+
 def main() -> None:
     """Main training pipeline for KAN model."""
     parser = create_base_argument_parser(
@@ -340,6 +391,7 @@ def main() -> None:
                         help='Hidden layer feature sizes')
     parser.add_argument('--grid-update-freq', type=int, default=5,
                         help='Grid update frequency in epochs')
+    _drop_base_parser_args(parser, "dataset", "patience")
     args = parser.parse_args()
 
     # Override defaults for KAN
