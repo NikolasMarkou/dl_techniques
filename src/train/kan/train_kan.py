@@ -309,7 +309,7 @@ def main() -> None:
     parser.add_argument('--val-samples', type=int, default=600,
                         help='Number of validation samples')
     parser.add_argument('--variant', type=str, default='small',
-                        choices=['tiny', 'small', 'medium', 'large'],
+                        choices=['micro', 'small', 'medium', 'large', 'xlarge'],
                         help='KAN model variant')
     parser.add_argument('--hidden-features', type=int, nargs='+', default=[16, 8],
                         help='Hidden layer feature sizes')
