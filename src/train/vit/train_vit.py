@@ -324,16 +324,35 @@ def create_cifar_dataset(
 # CALLBACKS
 # =============================================================================
 
-def create_callbacks(config: TrainingConfig) -> Tuple[List[keras.callbacks.Callback], str]:
-    """Common callbacks (early-stop, ckpt, CSV, analyzer) + ViT-specific metrics viz."""
+def create_callbacks(
+        config: TrainingConfig, run_dir: Union[str, Path]
+) -> Tuple[List[keras.callbacks.Callback], str]:
+    """Common callbacks (early-stop, ckpt, CSV, analyzer) + ViT-specific metrics viz.
+
+    Args:
+        config: The training config.
+        run_dir: The run directory already created by ``prepare_run_dir(config)``
+            in ``train_vit()``. Passed through as ``create_common_callbacks``'s
+            ``run_dir=`` so the shared helper writes ``best_model.keras`` /
+            ``training_log.csv`` into the SAME directory ``config.json`` already
+            lives in, instead of synthesizing a second, independently-timestamped
+            directory.
+    """
+    # DECISION plan-2026-09-17T032714-403de954/D-006: do NOT let
+    # create_common_callbacks() derive its own directory here (the
+    # run_dir=None default path) -- model_name is config.experiment_name,
+    # which ALREADY starts with results_dir_prefix="vit"'s value, so the
+    # derived name doubles to vit_vit_..._<ts1>_<ts2> and diverges from
+    # prepare_run_dir's directory. See decisions.md D-006.
     callbacks, results_dir = create_common_callbacks(
         model_name=config.experiment_name or config.model_variant,
         results_dir_prefix="vit",
+        run_dir=str(run_dir),
         monitor="val_accuracy",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
     )
-    viz_dir = Path(config.output_dir) / config.experiment_name / "training_metrics"
+    viz_dir = Path(results_dir) / "training_metrics"
     callbacks.append(EpochMetricsPlotCallback(
         str(viz_dir),
         ["accuracy", "top5_accuracy"],
@@ -477,7 +496,7 @@ def train_vit(
     model.compile(optimizer=optimizer, loss=loss_fn, metrics=metrics)
 
     # ---- Train ----
-    callbacks, _ = create_callbacks(config)
+    callbacks, _ = create_callbacks(config, output_dir)
 
     start_time = time.time()
     history = model.fit(
