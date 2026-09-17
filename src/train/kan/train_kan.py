@@ -547,8 +547,18 @@ def main() -> None:
     # unchanged (see decisions.md D-006): these three remain live for other
     # Pattern-1 trainers sharing `create_base_argument_parser()`, so only
     # THIS script's own parser instance drops them.
+    # `--show-plots` joins the dead-flag set (plan-2026-09-17T064004-0d194df2
+    # D-003, Resolution (Step 7)): `matplotlib.use('Agg')` runs at module
+    # import, before `args.show_plots` is ever read, so no interactive
+    # display can ever occur regardless of this flag's value -- forwarding
+    # `show=args.show_plots` to `viz_manager.visualize()` was removed (now
+    # unconditionally `show=False`), which makes the flag itself as dead as
+    # `--dataset`/`--patience`/etc above. Dropped via the SAME
+    # `_drop_base_parser_args()` mechanism for consistency with D-005/D-006,
+    # rather than kept as an accepted-but-warned no-op.
     _drop_base_parser_args(
-        parser, "dataset", "patience", "image_size", "weight_decay", "lr_schedule"
+        parser, "dataset", "patience", "image_size", "weight_decay",
+        "lr_schedule", "show_plots",
     )
     # DECISION plan-2026-09-17T052443-2c932602/D-006
     # KAN's own preferred defaults (200 epochs / batch 128 / lr 1e-2) differ
@@ -671,7 +681,12 @@ def main() -> None:
     # SAME `viz_manager` instance `KANVisualizationCallback` used during
     # training (created above, before `fit()`), so periodic and final
     # renders share one `run_dir / "visualizations"` directory.
-    plot_results(history, model, viz_manager, show=args.show_plots)
+    # DECISION plan-2026-09-17T064004-0d194df2/D-003
+    # `show=False` unconditionally, never `args.show_plots` -- see
+    # decisions.md D-003's Resolution (Step 7): `--show-plots` is dropped
+    # from this script's parser entirely (below, via
+    # `_drop_base_parser_args`), so `args.show_plots` no longer exists here.
+    plot_results(history, model, viz_manager, show=False)
 
 
 if __name__ == "__main__":
