@@ -241,7 +241,12 @@ class KANVisualizationCallback(keras.callbacks.Callback):
     expensive `function_approximation` + `kan_splines` grid via
     `render_function_and_spline_grid()` -- the SAME helper `plot_results()` uses for its
     final post-hoc render, so there is exactly one code path for that grid, called from
-    two places (periodic-during-training and final-post-hoc). Both renders are wrapped
+    two places (periodic-during-training and final-post-hoc). The periodic call passes
+    an epoch-derived `filename_suffix` (see D-005) so each `--viz-freq` firing writes a
+    distinct, epoch-stamped PNG instead of overwriting the previous one in place; the
+    final post-hoc call leaves `filename_suffix` at its `""` default, keeping the plain
+    `function_approximation.png`/`kan_splines.png` names as the canonical final render.
+    Both renders are wrapped
     in `try/except Exception` + `logger.warning` so a rendering failure never aborts
     training (verified by Step 8's deliberate-exception fail-soft check, not merely
     assumed from reading the `try/except`).
@@ -302,7 +307,10 @@ class KANVisualizationCallback(keras.callbacks.Callback):
         if (epoch + 1) % self.freq != 0:
             return
         try:
-            render_function_and_spline_grid(self.model, self.viz_manager, show=False)
+            render_function_and_spline_grid(
+                self.model, self.viz_manager, show=False,
+                filename_suffix=f"_epoch{epoch + 1:03d}",
+            )
         except Exception as e:  # visualization must never break training
             logger.warning(
                 f"Periodic function/spline grid render failed at epoch {epoch + 1}: {e}"
@@ -376,6 +384,7 @@ def render_function_and_spline_grid(
     model: keras.Model,
     viz_manager: VisualizationManager,
     show: bool = False,
+    filename_suffix: str = "",
 ) -> None:
     """Renders the 3D function-approximation surface + KAN spline interpretability grid.
 
@@ -385,6 +394,17 @@ def render_function_and_spline_grid(
     final post-hoc `plot_results()` call both go through ONE code path instead of two
     copies of this grid-construction logic drifting apart.
 
+    # DECISION plan-2026-09-17T064004-0d194df2/D-005
+    `filename_suffix` exists so the periodic, callback-triggered render (Step 9 fix)
+    can keep a per-epoch snapshot history (`function_approximation_epoch003.png`,
+    `kan_splines_epoch003.png`, mirroring bfunet's `epoch_{NNN:03d}_denoise_grid.png`
+    pattern) while the final post-hoc `plot_results()` call still writes the plain,
+    unsuffixed `function_approximation.png`/`kan_splines.png` as the canonical
+    "final, definitive" render. Do NOT make the suffix mandatory or change the
+    default -- `plot_results()`'s call site relies on the `""` default to keep its
+    filenames unchanged. See decisions.md D-005 (Step 9 resolution of the Issue Log
+    entry logged at Step 6) for the measured symptom this closes.
+
     Interface contract (2 call sites: `plot_results()` and `KANVisualizationCallback`):
         Args:
             model: A `KANLinear`-containing Keras model, trained or mid-training. Must
@@ -393,6 +413,13 @@ def render_function_and_spline_grid(
                 `"kan_splines"` plugins already registered (see
                 `create_visualization_manager`).
             show: Forwarded verbatim to `viz_manager.visualize(show=...)`.
+            filename_suffix: Appended verbatim to the base filenames
+                (`"function_approximation"`, `"kan_splines"`) before the plugin's own
+                save-format extension is applied. `""` (default) reproduces the
+                original plain filenames -- used by `plot_results()`'s final render.
+                A non-empty value (e.g. `f"_epoch{epoch:03d}"`) gives each periodic
+                callback-triggered render a distinct file instead of overwriting the
+                previous one in place -- used by `KANVisualizationCallback`.
         Returns:
             None. Side effect only: writes PNGs via `viz_manager`. Logs a warning and
             returns early (skipping the spline render only) if `model` has no
@@ -419,6 +446,7 @@ def render_function_and_spline_grid(
             z_true=Z_true, z_pred=Z_pred,
         ),
         plugin_name="function_approximation", show=show,
+        filename=f"function_approximation{filename_suffix}",
     )
 
     # KAN spline interpretability
@@ -437,6 +465,7 @@ def render_function_and_spline_grid(
             expected_shapes=['Sine Wave-like', 'Quadratic-like'],
         ),
         plugin_name="kan_splines", show=show,
+        filename=f"kan_splines{filename_suffix}",
     )
 
 
