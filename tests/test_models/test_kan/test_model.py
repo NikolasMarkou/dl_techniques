@@ -825,12 +825,13 @@ GF_INPUT_FEATURES = 16
 GF_OUTPUT_FEATURES = 4
 
 
-def _gf_model(init_scheme="glorot_inspired"):
+def _gf_model(init_scheme="glorot_inspired", init_seed=0):
     return create_kan_model(
         variant="small",
         input_features=GF_INPUT_FEATURES,
         output_features=GF_OUTPUT_FEATURES,
         init_scheme=init_scheme,
+        init_seed=init_seed,
     )
 
 
@@ -1039,6 +1040,18 @@ class TestKANCrossLayerMagnitudeStability:
     (old) to 0.001 (new) and edge-region MSE from 72-86 (old, max single-point
     error up to 47,579) to ~0.00 (new, max 0.01-0.03), in every one of 6
     seeds each way; see ``decisions.md`` D-006.
+
+    **Disclosed calibration gap (review-iter-1.md finding #4)**: the injected
+    initializer's variance constants (``mu_R_0``/``mu_R_1`` in
+    ``kan_initializer.py``) are derived from SiLU/swish moments. The
+    12-config/6-seed validation and the real `train_kan.py` run (D-007) both
+    used only `small` (`activation='swish'`), and every variant's forced
+    `linear` final layer also mismatches the SiLU assumption. `medium`,
+    `large` and `xlarge` use `gelu` and were never part of that
+    quantitative validation. This class's second test below checks `medium`
+    specifically to confirm the fix still generalizes in practice, but the
+    initializer's own constants remain uncorrected for `gelu` -- a real,
+    disclosed gap, not a silently-assumed one.
     """
 
     @staticmethod
@@ -1051,10 +1064,13 @@ class TestKANCrossLayerMagnitudeStability:
     def test_the_class_default_keeps_corner_outputs_bounded(self):
         """The class default (`init_scheme='glorot_inspired'`) must not blow up.
 
-        A generous bound (100x the target function's own range, which is
-        roughly [-1, 2]) -- this is not a tight numerical claim, only a
-        guard against the specific catastrophic-magnitude failure mode
-        measured (tens of thousands).
+        Bound derived from measurement (review-iter-1.md finding #7), not
+        pasted: the README's own §4.1 records 1.1 for this exact probe on
+        `small`, and a follow-up 3-variant check (`small`/`medium`/`large`,
+        `init_seed=0`) measured 0.91/2.24/1.20 -- `< 20.0` is roughly 10x the
+        largest of those, tight enough to catch a real regression back
+        toward the pre-D-006 catastrophic scale (tens of thousands) while
+        not being fragile to normal seed-to-seed variance.
         """
         keras.utils.set_random_seed(0)
         rng = np.random.default_rng(0)
@@ -1067,9 +1083,40 @@ class TestKANCrossLayerMagnitudeStability:
         model.update_kan_grids(x_train)
 
         out = keras.ops.convert_to_numpy(model(self._corner_points(), training=False))
-        assert float(np.abs(out).max()) < 300.0, (
-            f"corner output magnitude {float(np.abs(out).max())} -- the class "
-            "default must not reproduce the pre-D-006 blow-up"
+        measured = float(np.abs(out).max())
+        assert measured < 20.0, (
+            f"corner output magnitude {measured} (measured value at last "
+            "derivation: ~0.91) -- the class default must not reproduce the "
+            "pre-D-006 blow-up"
+        )
+
+    def test_the_class_default_generalizes_to_a_gelu_variant(self):
+        """D-006's measurement was `small` (swish) only -- review-iter-1.md
+        finding #4: the injected initializer's variance constants are
+        derived from SiLU/swish moments, so a `gelu`-activation variant
+        (`medium`, `large`, `xlarge`) is an undisclosed extrapolation of the
+        measurement unless it is also checked. Measured: `medium` (gelu)
+        corner max abs = 2.24, `large` (gelu) = 1.20 -- both well-bounded
+        despite the calibration mismatch, so the fix generalizes in
+        practice even though the constants are not exactly right for gelu.
+        """
+        keras.utils.set_random_seed(0)
+        rng = np.random.default_rng(0)
+        x_train = (rng.random((500, 2)).astype("float32") * 2 - 1)
+
+        model = KAN.from_variant(
+            "medium", input_features=2, output_features=1,
+            output_activation="linear", init_seed=0,
+        )
+        assert model.layer_configs[0]["activation"] == "gelu"
+        model.update_kan_grids(x_train)
+
+        out = keras.ops.convert_to_numpy(model(self._corner_points(), training=False))
+        measured = float(np.abs(out).max())
+        assert measured < 20.0, (
+            f"corner output magnitude {measured} (measured value at last "
+            "derivation: ~2.24) on the gelu `medium` variant -- the "
+            "SiLU-calibrated initializer must still keep a gelu stack bounded"
         )
 
     def test_the_legacy_opt_out_still_reproduces_the_blow_up(self):

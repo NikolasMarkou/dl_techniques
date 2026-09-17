@@ -201,11 +201,18 @@ def test_the_direct_constructor_also_reports_unadapted_grids():
 def test_the_factory_docstring_states_the_measured_consequence():
     """The warning is part of the public contract, not a comment.
 
-    A caller who reads only `create_kan_model`'s docstring must learn that the
-    returned model cannot be trained as-is; that sentence is what this row
-    ships, so it is asserted rather than trusted.
+    A caller who reads only `create_kan_model`'s docstring must learn that,
+    at the explicit `init_scheme=None` opt-out, the returned model cannot be
+    trained as-is. `plan-2026-09-17T132602-7a6ebdb4`/D-006 narrowed this
+    claim from an unqualified default to the opt-out case -- the extra
+    `init_scheme=None` assertion below is what keeps this guard keyed to the
+    NARROWED sentence rather than passing on a substring match to a claim
+    that no longer describes the class default (the repo's own recorded
+    "substring guard fires on a prefix" / "byte-identity guard = text not
+    behavior" failure shape).
     """
     doc = create_kan_model.__doc__
     assert "update_kan_grids" in doc
     assert "cannot be trained as-is" in doc
+    assert "init_scheme=None" in doc
     assert "grids_adapted" in doc

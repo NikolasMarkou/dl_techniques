@@ -45,6 +45,7 @@ References:
 
 
 import os
+import inspect
 import keras
 from typing import Optional, Dict, Any, List, Tuple, Union
 import numpy as np
@@ -57,7 +58,19 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.ffn.kan_linear import KANLinear
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.initializers.kan_initializer import create_kan_initializers
+from dl_techniques.initializers.kan_initializer import create_kan_initializers, _VALID_SCHEMES
+
+# ---------------------------------------------------------------------
+
+#: `KANLinear`'s own `grid_size`/`spline_order`/`grid_range` constructor
+#: defaults, read off its live signature rather than transcribed, so this
+#: module never falls out of sync with a future change to those defaults
+#: (see D-006 review finding #5).
+_KANLINEAR_DEFAULTS = {
+    name: param.default
+    for name, param in inspect.signature(KANLinear.__init__).parameters.items()
+    if name in ("grid_size", "spline_order", "grid_range")
+}
 
 # ---------------------------------------------------------------------
 
@@ -75,9 +88,13 @@ class KAN(keras.Model):
     ``Activation`` layer with the ``KANLinear`` itself forced to ``'linear'`` so
     the transform is never applied twice.
 
-    Knot grids are a training precondition, not a tuning knob:
-    :meth:`update_kan_grids` must be run on a representative data sample before
-    training, and :attr:`grids_adapted` reports whether it has been.
+    Knot grids should be adapted to real data before training --
+    :meth:`update_kan_grids` re-fits each layer's knots to the range it
+    actually sees, and :attr:`grids_adapted` reports whether that has
+    happened. At the explicit ``init_scheme=None`` opt-out this is a hard
+    training PRECONDITION, not just a tuning step (see the ``Warning`` block
+    below); at the class default it remains recommended but does not gate
+    basic trainability.
 
     Architecture:
 
@@ -136,6 +153,20 @@ class KAN(keras.Model):
     :type input_features: int
     :param name: Optional model name. Defaults to ``'kan_model'``.
     :type name: Optional[str]
+    :param init_scheme: Variance-controlled initializer scheme auto-injected into
+        every layer that does not already set ``kernel_initializer`` AND
+        ``base_scaler_initializer`` explicitly -- one of ``'power_law'``,
+        ``'glorot_inspired'`` (the default) or ``'baseline'`` (see
+        :func:`dl_techniques.initializers.create_kan_initializers`). ``None``
+        restores ``KANLinear``'s own bare constructor defaults exactly (see
+        the ``Warning`` block below and D-006).
+    :type init_scheme: Optional[str]
+    :param init_seed: Optional base seed for the auto-injected initializers, one
+        per layer via a ``+ i * 2`` offset (matching
+        ``KANInitializer``'s own residual/spline offset convention). ``None``
+        draws an unseeded (but still reproducible under a global seed) pair per
+        layer.
+    :type init_seed: Optional[int]
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
 
     :raises ValueError: If ``layer_configs`` is not a non-empty list, if any
@@ -151,7 +182,7 @@ class KAN(keras.Model):
     Example:
         >>> # From a preset variant
         >>> model = KAN.from_variant("small", input_features=784, output_features=10)
-        >>> model.update_kan_grids(x_sample)   # required before training
+        >>> model.update_kan_grids(x_sample)   # recommended; required only at init_scheme=None
         >>>
         >>> # From bare layer sizes
         >>> model = KAN.from_layer_sizes([784, 64, 32, 10], grid_size=5)
@@ -209,6 +240,10 @@ class KAN(keras.Model):
             raise ValueError("layer_configs must be a non-empty list")
         if not isinstance(input_features, int) or input_features <= 0:
             raise ValueError(f"input_features must be positive integer, got {input_features}")
+        if init_scheme is not None and init_scheme not in _VALID_SCHEMES:
+            raise ValueError(
+                f"init_scheme must be one of {_VALID_SCHEMES} or None, got {init_scheme!r}"
+            )
 
         self.layer_configs = self._validate_and_copy_configs(layer_configs)
         self.input_features = input_features
@@ -225,11 +260,12 @@ class KAN(keras.Model):
         # (0.37 to a persistent ~16 plateau) with the SAME hyperparameters.
         # `init_scheme` auto-injects the variance-controlled pair from
         # `create_kan_initializers` (Rigas et al., arXiv:2509.03417) per
-        # layer, ONLY when a layer's own config does not already set
-        # `kernel_initializer`/`base_scaler_initializer` explicitly, so an
-        # explicit per-layer override is always respected. `init_scheme=None`
-        # restores the old, uncalibrated `KANLinear` bare defaults. See
-        # decisions.md.
+        # layer, independently for `kernel_initializer`/`base_scaler_initializer`
+        # -- a layer's own config setting ONE of the two explicitly still gets
+        # the other filled in, so a partial override cannot silently leave
+        # `base_scaler='ones'` (the exact degeneracy this fix removes) in
+        # place. `init_scheme=None` restores the old, uncalibrated `KANLinear`
+        # bare defaults for every layer. See decisions.md.
         self.init_scheme = init_scheme
         self.init_seed = init_seed
 
@@ -295,6 +331,17 @@ class KAN(keras.Model):
                 "with no error. `model.grids_adapted` reports this state."
             )
         else:
+            override_note = ""
+            if self._layers_with_explicit_initializer_override:
+                override_note = (
+                    " NOTE: layer(s) "
+                    f"{self._layers_with_explicit_initializer_override} set "
+                    "kernel_initializer/base_scaler_initializer explicitly in "
+                    "their own config, so this instance's symmetry-breaking "
+                    "guarantee does not necessarily hold for those layers -- "
+                    "the auto-injected pair was only applied to whichever of "
+                    "the two keys each such layer left unset."
+                )
             logger.info(
                 "KAN knot grids are not yet adapted to your data. Calling "
                 "`model.update_kan_grids(x_sample)` before training is still "
@@ -302,6 +349,7 @@ class KAN(keras.Model):
                 "observed input range), though this instance's "
                 f"`init_scheme={self.init_scheme!r}` does not make gradients "
                 "dead at construction the way `init_scheme=None` does."
+                f"{override_note}"
             )
 
     def _validate_and_copy_configs(self, configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -343,6 +391,7 @@ class KAN(keras.Model):
         inputs = keras.Input(shape=(self.input_features,), name="kan_input")
         x = inputs
         final_activation_fn = None
+        self._layers_with_explicit_initializer_override = []
 
         for i, config in enumerate(self.layer_configs):
             layer_name = f"kan_layer_{i}"
@@ -350,18 +399,24 @@ class KAN(keras.Model):
             kan_args = config.copy()
             is_last_layer = (i == self.num_layers - 1)
 
-            # Auto-inject variance-controlled initializers (D-006) only when
-            # the caller did not already set either one explicitly for this
-            # layer -- never mutates self.layer_configs (get_config() must
+            # Auto-inject variance-controlled initializers (D-006), one key at
+            # a time -- never mutates self.layer_configs (get_config() must
             # keep returning the caller's original, literal per-layer dicts).
-            if (
-                self.init_scheme is not None
-                and 'kernel_initializer' not in kan_args
-                and 'base_scaler_initializer' not in kan_args
-            ):
-                grid_size = kan_args.get('grid_size', 5)
-                spline_order = kan_args.get('spline_order', 3)
-                grid_range = kan_args.get('grid_range', (-2.0, 2.0))
+            # Each of base_scaler_initializer/kernel_initializer is injected
+            # independently: a caller who explicitly sets only ONE of the two
+            # still gets the other filled in, rather than silently keeping
+            # KANLinear's own degenerate default for it (D-006 review finding
+            # #3 -- injecting only when BOTH keys are absent left a
+            # caller-set kernel_initializer alone reinstating the exact
+            # base_scaler='ones' symmetry this fix exists to break).
+            inject_base = self.init_scheme is not None and 'base_scaler_initializer' not in kan_args
+            inject_spline = self.init_scheme is not None and 'kernel_initializer' not in kan_args
+            if self.init_scheme is not None and not (inject_base and inject_spline):
+                self._layers_with_explicit_initializer_override.append(i)
+            if inject_base or inject_spline:
+                grid_size = kan_args.get('grid_size', _KANLINEAR_DEFAULTS['grid_size'])
+                spline_order = kan_args.get('spline_order', _KANLINEAR_DEFAULTS['spline_order'])
+                grid_range = kan_args.get('grid_range', _KANLINEAR_DEFAULTS['grid_range'])
                 layer_seed = None if self.init_seed is None else self.init_seed + i * 2
                 base_init, spline_init = create_kan_initializers(
                     grid_size=grid_size,
@@ -370,8 +425,10 @@ class KAN(keras.Model):
                     grid_range=grid_range,
                     seed=layer_seed,
                 )
-                kan_args['base_scaler_initializer'] = base_init
-                kan_args['kernel_initializer'] = spline_init
+                if inject_base:
+                    kan_args['base_scaler_initializer'] = base_init
+                if inject_spline:
+                    kan_args['kernel_initializer'] = spline_init
 
             if is_last_layer:
                 # Force this layer linear so the final activation is not applied twice.
@@ -650,6 +707,8 @@ class KAN(keras.Model):
         spline_order: int = 3,
         activation: str = "swish",
         final_activation: Optional[str] = None,
+        init_scheme: Optional[str] = "glorot_inspired",
+        init_seed: Optional[int] = None,
         **kan_layer_kwargs: Any
     ) -> "KAN":
         """Create a KAN from a flat list of node counts.
@@ -668,6 +727,16 @@ class KAN(keras.Model):
         :param final_activation: Final activation. When omitted, defaults to
             ``'softmax'`` for a multi-unit output and ``'linear'`` otherwise.
         :type final_activation: Optional[str]
+        :param init_scheme: Forwarded to :class:`KAN`'s own ``init_scheme`` --
+            unlike ``kan_layer_kwargs`` below, this is a KAN-level (not
+            per-``KANLinear``) argument, so it is a named parameter here
+            rather than swallowed into ``**kan_layer_kwargs`` (which would
+            forward it straight into every ``KANLinear`` constructor call and
+            raise ``TypeError: Unrecognized keyword arguments``).
+        :type init_scheme: Optional[str]
+        :param init_seed: Forwarded to :class:`KAN`'s own ``init_seed``. Same
+            KAN-level-vs-per-layer distinction as ``init_scheme`` above.
+        :type init_seed: Optional[int]
         :param kan_layer_kwargs: Additional keyword arguments forwarded to every
             ``KANLinear``.
 
@@ -703,7 +772,12 @@ class KAN(keras.Model):
 
             layer_configs.append(config)
 
-        return cls(layer_configs=layer_configs, input_features=input_features)
+        return cls(
+            layer_configs=layer_configs,
+            input_features=input_features,
+            init_scheme=init_scheme,
+            init_seed=init_seed,
+        )
 
     def get_architecture_summary(self) -> str:
         """Render a per-layer summary of widths, grids, orders and activations.
@@ -837,7 +911,9 @@ def create_kan_model(
     :type weights_input_features: Optional[int]
     :param cache_dir: Download cache location.
     :type cache_dir: Optional[str]
-    :param model_kwargs: Additional arguments passed to the model constructor.
+    :param model_kwargs: Additional arguments passed to the model constructor,
+        including ``init_scheme`` (default ``'glorot_inspired'``) and
+        ``init_seed`` -- see :class:`KAN`'s own docstring for both.
 
     :return: Uncompiled KAN model whose knot grids are not yet adapted
         (``model.grids_adapted is False``).
