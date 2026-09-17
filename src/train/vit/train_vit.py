@@ -75,7 +75,12 @@ class TrainingConfig:
 
     # Augmentation
     augment_data: bool = True
-    label_smoothing: float = 0.1
+    # DECISION plan-2026-09-17T032714-403de954/D-003: default is 0.0, not the
+    # previous 0.1. Keras' SparseCategoricalCrossentropy (used below) has no
+    # label_smoothing support, so a non-zero value can never be honored on
+    # this trainer's sparse-label pipeline -- see __post_init__'s hard raise.
+    # Do not silently re-introduce a non-zero default; see decisions.md D-003.
+    label_smoothing: float = 0.0
 
     # Monitoring
     monitor_every_n_epochs: int = 5
@@ -101,6 +106,15 @@ class TrainingConfig:
 
         if self.image_size <= 0:
             raise ValueError("Invalid image_size: must be positive")
+        if self.label_smoothing != 0.0:
+            raise ValueError(
+                f"label_smoothing={self.label_smoothing} is not supported: "
+                "this trainer uses SparseCategoricalCrossentropy on sparse "
+                "integer labels, and Keras' SparseCategoricalCrossentropy "
+                "has no label_smoothing parameter (only CategoricalCrossentropy "
+                "does, which requires one-hot labels). Pass --label-smoothing "
+                "0.0 (the default), or omit the flag."
+            )
         if self.num_classes <= 0:
             raise ValueError("Invalid num_classes: must be positive")
         if self.dataset == "imagenet":
@@ -443,15 +457,10 @@ def train_vit(
     optimizer = optimizer_builder(opt_config, lr_schedule)
 
     # ---- Loss + metrics ----
-    # Keras' SparseCategoricalCrossentropy doesn't support label_smoothing
-    # (that's a CategoricalCrossentropy feature). Keep config.label_smoothing
-    # for potential future one-hot path -- currently informational only.
+    # config.label_smoothing is guaranteed 0.0 here: __post_init__ hard-raises
+    # on any non-zero value (DECISION plan-2026-09-17T032714-403de954/D-003),
+    # since SparseCategoricalCrossentropy has no label_smoothing parameter.
     loss_fn = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-    if config.label_smoothing > 0.0:
-        logger.warning(
-            f"label_smoothing={config.label_smoothing} requested but "
-            "SparseCategoricalCrossentropy doesn't support it; ignoring."
-        )
 
     metrics = [
         keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
@@ -540,7 +549,12 @@ def parse_arguments() -> argparse.Namespace:
 
     # Augmentation
     parser.add_argument("--no-augmentation", dest="augment_data", action="store_false")
-    parser.add_argument("--label-smoothing", type=float, default=0.1)
+    parser.add_argument(
+        "--label-smoothing", type=float, default=0.0,
+        help="Must be 0.0 (default): SparseCategoricalCrossentropy has no "
+             "label_smoothing support; a non-zero value raises at config-"
+             "validation time rather than being silently ignored.",
+    )
 
     # Output
     parser.add_argument("--output-dir", type=str, default="results")

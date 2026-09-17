@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from train.vit.train_vit import _assert_train_val_distribution_match
+from train.vit.train_vit import TrainingConfig, _assert_train_val_distribution_match
 
 
 def _make_ds(mean: float, std: float, *, shape=(8, 32, 32, 3), seed: int = 0):
@@ -37,3 +37,18 @@ def test_assert_train_val_distribution_match_passes_on_match() -> None:
     val_ds = _make_ds(mean=0.0, std=1.0, seed=22)
     # Should return None without raising.
     assert _assert_train_val_distribution_match(train_ds, val_ds) is None
+
+
+def test_training_config_rejects_nonzero_label_smoothing() -> None:
+    """DECISION plan-2026-09-17T032714-403de954/D-003: SparseCategoricalCrossentropy
+    has no label_smoothing support, so a non-zero value must hard-raise at
+    config-validation time rather than being silently ignored.
+    """
+    with pytest.raises(ValueError, match="label_smoothing"):
+        TrainingConfig(label_smoothing=0.1)
+
+
+def test_training_config_default_label_smoothing_is_zero_and_does_not_raise() -> None:
+    """Default invocation (no --label-smoothing flag) must not raise."""
+    config = TrainingConfig()
+    assert config.label_smoothing == 0.0
