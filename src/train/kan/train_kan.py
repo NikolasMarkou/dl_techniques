@@ -14,6 +14,7 @@ Usage:
 import keras
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 from typing import Tuple, Optional, List
 from dataclasses import dataclass
 
@@ -224,9 +225,25 @@ def generate_data(num_samples: int) -> Tuple[np.ndarray, np.ndarray]:
 
 def create_visualization_manager(experiment_name: str) -> VisualizationManager:
     """Creates visualization manager with KAN-specific plugins."""
+    # DECISION plan-2026-09-17T052443-2c932602/D-002
+    # Anchor "results" at the repo root instead of passing a bare relative
+    # string. `parents[3]` reaches the repo root from THIS file
+    # (src/train/kan/train_kan.py: [0] kan, [1] train, [2] src, [3] <repo>) --
+    # the same depth `train.common.args.resolved_run_dir()` walks from
+    # src/train/common/args.py. Do NOT call `resolved_run_dir()` itself here:
+    # it returns `<root>/<output_dir>/<experiment_name>`, but
+    # VisualizationManager/VisualizationContext ALSO appends
+    # `experiment_name` internally (core.py's `get_save_path`), so piping its
+    # result through as `output_dir` would double-nest
+    # `results/kan_regression/kan_regression/<timestamp>/`. Only the bare
+    # "results" root is resolved here; `experiment_name` is still passed to
+    # VisualizationManager separately, unchanged. Do NOT re-derive the index
+    # without checking this file's depth: a wrong index does not raise, it
+    # silently writes under the wrong directory (see decisions.md D-002).
+    output_dir = Path(__file__).resolve().parents[3] / "results"
     viz_manager = VisualizationManager(
         experiment_name=experiment_name,
-        output_dir="results"
+        output_dir=output_dir
     )
     viz_manager.register_template("training_curves", TrainingCurvesVisualization)
     viz_manager.register_template("function_approximation", FunctionApproximationVisualization)
