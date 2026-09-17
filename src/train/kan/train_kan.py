@@ -40,9 +40,10 @@ from train.common import (
 from train.common.callbacks import best_checkpoint_path
 
 
-# Resolved once and reused by both `create_visualization_manager()` (D-002)
-# and `main()`'s post-training `model.save()` (D-004), so the two call sites
-# in this file cannot drift apart on where "the run's results directory" is.
+# Resolved once in `main()` to compute `run_dir` (plan-2026-09-17-0d194df2
+# D-001), which is then the SINGLE source both `create_visualization_manager()`
+# (D-004) and `main()`'s post-training `model.save()` read for "the run's
+# results directory" — so the two call sites cannot drift apart.
 # `parents[3]` reaches the repo root from THIS file
 # (src/train/kan/train_kan.py: [0] kan, [1] train, [2] src, [3] <repo>).
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -242,26 +243,38 @@ def generate_data(num_samples: int) -> Tuple[np.ndarray, np.ndarray]:
 # Visualization
 # ---------------------------------------------------------------------
 
-def create_visualization_manager(experiment_name: str) -> VisualizationManager:
+def create_visualization_manager(run_dir: Path) -> VisualizationManager:
     """Creates visualization manager with KAN-specific plugins."""
-    # DECISION plan-2026-09-17T052443-2c932602/D-002
-    # Anchor "results" at the repo root instead of passing a bare relative
-    # string. `REPO_ROOT` (module-level, see its definition) reaches the repo
-    # root the same way `train.common.args.resolved_run_dir()` does from
-    # src/train/common/args.py. Do NOT call `resolved_run_dir()` itself here:
-    # it returns `<root>/<output_dir>/<experiment_name>`, but
-    # VisualizationManager/VisualizationContext ALSO appends
-    # `experiment_name` internally (core.py's `get_save_path`), so piping its
-    # result through as `output_dir` would double-nest
-    # `results/kan_regression/kan_regression/<timestamp>/`. Only the bare
-    # "results" root is resolved here; `experiment_name` is still passed to
-    # VisualizationManager separately, unchanged. Do NOT re-derive the repo
-    # root without checking this file's depth: a wrong index does not raise,
-    # it silently writes under the wrong directory (see decisions.md D-002).
-    output_dir = REPO_ROOT / "results"
+    # DECISION plan-2026-09-17-0d194df2/D-004
+    # Supersedes plan-2026-09-17T052443-2c932602/D-002, which anchored
+    # `output_dir` at the bare "results" root and passed a non-empty
+    # `experiment_name` to avoid double-nesting under THAT plan's split
+    # layout (a separately-timestamped `results/kan_regression/<ts>/` dir,
+    # disconnected from the model/config artifacts). Since Step 1/2 of this
+    # plan unified everything under one `run_dir` (already unique: it embeds
+    # its own timestamp via `default_experiment_name()`), the only way to
+    # land PNGs at exactly `run_dir / "visualizations" / <name>.png` with no
+    # second nested subdirectory is to make BOTH of
+    # `VisualizationContext.get_save_path()`'s own extra path segments
+    # (`dl_techniques/visualization/core.py:206-217`) inert:
+    #   save_dir = output_dir
+    #   if experiment_name: save_dir = save_dir / experiment_name   # skip
+    #   if timestamp:       save_dir = save_dir / timestamp          # skip
+    # `experiment_name=""` is falsy so the first append is skipped;
+    # `VisualizationManager.__init__`'s `timestamp` parameter defaults to
+    # `None`, which lets `VisualizationContext`'s own dataclass default
+    # MINT A SECOND, DIFFERENT timestamp (`datetime.now()` at construction
+    # time, not `run_dir`'s) unless overridden. Passing `timestamp=""`
+    # explicitly (its documented case: "save directly into `output_dir`
+    # without a timestamp subdirectory") skips the second append too. Do NOT
+    # drop either kwarg, and do NOT re-add a non-empty `experiment_name` or
+    # rely on `timestamp`'s default — either alone reintroduces exactly the
+    # double-nesting hazard this decision exists to close (see decisions.md
+    # D-004).
     viz_manager = VisualizationManager(
-        experiment_name=experiment_name,
-        output_dir=output_dir
+        experiment_name="",
+        output_dir=run_dir / "visualizations",
+        timestamp="",
     )
     viz_manager.register_template("training_curves", TrainingCurvesVisualization)
     viz_manager.register_template("function_approximation", FunctionApproximationVisualization)
@@ -517,7 +530,7 @@ def main() -> None:
     logger.info(f"Saved trained model to {model_path}")
 
     # Visualization
-    viz_manager = create_visualization_manager(EXPERIMENT_NAME)
+    viz_manager = create_visualization_manager(run_dir)
     plot_results(history, model, viz_manager, show=args.show_plots)
 
 
