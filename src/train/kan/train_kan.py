@@ -35,7 +35,9 @@ from train.common import (
     create_base_argument_parser,
     default_experiment_name,
     prepare_run_dir,
+    save_training_history_json,
 )
+from train.common.callbacks import best_checkpoint_path
 
 
 # Resolved once and reused by both `create_visualization_manager()` (D-002)
@@ -469,6 +471,20 @@ def main() -> None:
 
     # Training
     logger.info("Starting training...")
+    # DECISION plan-2026-09-17-0d194df2/D-001
+    # `ModelCheckpoint`/`CSVLogger` are added directly here, NOT via
+    # `train.common.create_callbacks()`. The prior plan's D-004 (superseded
+    # by this one) rejected `create_callbacks()` wholesale because its
+    # defaults (`monitor='val_accuracy'`, `include_analyzer=True`) target
+    # Pattern-1 classification; this plan's D-001 narrows that to: the
+    # DEFAULTS were the problem, not the function, but a customized
+    # `create_callbacks(monitor='val_loss', include_analyzer=False, ...)`
+    # call would still pull in `EarlyStopping`/`patience` surface area that
+    # D-005 (prior plan) already pruned as dead for this short-smoke-scale
+    # trainer. So checkpoint/logging wiring is hand-rolled from the lower-
+    # level `best_checkpoint_path()` primitive instead, matching bfunet's
+    # artifact names (`best_model.keras`, `training_log.csv`) without
+    # reopening the EarlyStopping question. See decisions.md D-001.
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
@@ -476,6 +492,12 @@ def main() -> None:
         batch_size=args.batch_size,
         callbacks=[
             KANGridUpdateCallback(X_train[:500], update_freq=args.grid_update_freq),
+            keras.callbacks.ModelCheckpoint(
+                best_checkpoint_path(str(run_dir)),
+                monitor='val_loss',
+                save_best_only=True,
+            ),
+            keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
         ],
         verbose=1
     )
@@ -483,25 +505,14 @@ def main() -> None:
     logger.info("Training complete.")
     final_loss = history.history['val_loss'][-1]
     logger.info(f"Final Validation MSE: {final_loss:.6f}")
+    save_training_history_json(history, run_dir)
 
-    # DECISION plan-2026-09-17T052443-2c932602/D-004
-    # Persist the trained model so a run leaves an inspectable artifact
-    # (previously the ONLY outputs were 3 PNGs from `plot_results()`, nothing
-    # a caller could reload). Deliberately `model.save()` only, NOT
-    # `train.common.create_callbacks()`'s EarlyStopping/ModelCheckpoint/
-    # CSVLogger/EpochAnalyzerCallback triad: that helper's defaults
-    # (`monitor='val_accuracy'`) target Pattern-1 classification, this script
-    # is a regression smoke test with no accuracy metric at all, and
-    # `include_analyzer=True` by default would pull in `EpochAnalyzerCallback`
-    # machinery built for classification-shaped outputs -- scope creep this
-    # step's own text rules out ("do not import the full Pattern-1
-    # evaluate/visualize pipeline"). Do NOT swap this for
-    # `create_callbacks()` without first re-deriving a `monitor='val_loss'`
-    # call and confirming the analyzer callback tolerates a single-array
-    # regression output; see decisions.md D-004.
-    model_dir = REPO_ROOT / "results" / EXPERIMENT_NAME
-    model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / "kan_model.keras"
+    # Persist the final (not necessarily best) model so a run leaves an
+    # inspectable artifact even when `save_best_only=True` never fired (e.g.
+    # a run with no improving epoch). Named `final_model.keras` to sit
+    # alongside `best_model.keras` in the unified `run_dir`, matching the
+    # bfunet convention (see decisions.md D-001).
+    model_path = run_dir / "final_model.keras"
     model.save(model_path)
     logger.info(f"Saved trained model to {model_path}")
 
