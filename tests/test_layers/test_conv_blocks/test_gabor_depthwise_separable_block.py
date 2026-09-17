@@ -608,18 +608,23 @@ class TestGaborIdentity:
     """The built depthwise kernel IS the Gabor bank for the block's own kwargs."""
 
     def test_default_kwargs_kernel_is_the_gabor_bank(self):
-        """Kernel == GaborFiltersInitializer(<defaults>)((K, K, 3, M)) at atol=1e-6.
+        """Kernel == GaborFiltersInitializer(<defaults>, depthwise=True)((K, K, 3, M))
+        at atol=1e-6.
 
         The reference is constructed from the literal kwargs the block was
         given, independently of the block, so a block that silently stopped
-        using a Gabor initializer would redden this.
+        using a Gabor initializer would redden this. `depthwise=True` matches
+        the block's own `create_gabor_depthwise_conv2d`-built kernel, whose
+        true fan-in is `kh*kw` (no cross-channel summation).
         """
         block = _built_block(DEFAULT_GABOR_KWARGS, "identity_default")
         kernel = _kernel(block)
         assert kernel.shape == (K, K, 3, M)
 
         expected = np.asarray(
-            GaborFiltersInitializer(**DEFAULT_GABOR_KWARGS)((K, K, 3, M))
+            GaborFiltersInitializer(**DEFAULT_GABOR_KWARGS, depthwise=True)(
+                (K, K, 3, M)
+            )
         )
         np.testing.assert_allclose(kernel, expected, atol=GABOR_IDENTITY_ATOL)
 
@@ -665,14 +670,18 @@ class TestGaborIdentity:
         kernel = _kernel(block)
 
         expected = np.asarray(
-            GaborFiltersInitializer(**NON_DEFAULT_GABOR_KWARGS)((K, K, 3, M))
+            GaborFiltersInitializer(**NON_DEFAULT_GABOR_KWARGS, depthwise=True)(
+                (K, K, 3, M)
+            )
         )
         np.testing.assert_allclose(kernel, expected, atol=GABOR_IDENTITY_ATOL)
 
         # Anti-vacuity: the non-default bank must NOT equal the default bank,
         # otherwise a dropped kwarg would be invisible to the assertion above.
         default_bank = np.asarray(
-            GaborFiltersInitializer(**DEFAULT_GABOR_KWARGS)((K, K, 3, M))
+            GaborFiltersInitializer(**DEFAULT_GABOR_KWARGS, depthwise=True)(
+                (K, K, 3, M)
+            )
         )
         assert float(np.max(np.abs(kernel - default_bank))) > 1e-2
 

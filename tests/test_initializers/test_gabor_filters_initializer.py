@@ -772,7 +772,7 @@ class TestCreateGaborDepthwiseConv2D:
         kernel = np.asarray(layer.kernel)
         assert kernel.shape == (kh, kw, in_ch, filters)
         expected = np.asarray(
-            GaborFiltersInitializer()((kh, kw, in_ch, filters))
+            GaborFiltersInitializer(depthwise=True)((kh, kw, in_ch, filters))
         )
         np.testing.assert_allclose(kernel, expected, atol=1e-6)
         # Same 2D bank replicated across input channels (per-channel application).

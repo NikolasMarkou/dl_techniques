@@ -113,10 +113,14 @@ class TestTheDepthwiseStem:
         """The stem's kernel IS the Gabor bank, not merely a depthwise conv of the
         right shape. Mirrors `test_bfconvunext_gabor`'s check on the Conv2D arm: the
         builder threads none of the Gabor shaping parameters, so the expected bank is
-        `GaborFiltersInitializer()` evaluated at the stem's own kernel shape."""
+        `GaborFiltersInitializer(depthwise=True)` evaluated at the stem's own kernel
+        shape -- the stem is built via `create_gabor_depthwise_conv2d`, whose true
+        fan-in is `kh*kw` (no cross-channel summation), not `kh*kw*in_ch`."""
         kernel = np.asarray(_build().get_layer('gabor_stem').kernel)
         expected = np.asarray(
-            GaborFiltersInitializer()((KERNEL, KERNEL, CHANNELS, PER_CHANNEL))
+            GaborFiltersInitializer(depthwise=True)(
+                (KERNEL, KERNEL, CHANNELS, PER_CHANNEL)
+            )
         )
         np.testing.assert_allclose(kernel, expected, atol=1e-6, rtol=0)
 
