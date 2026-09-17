@@ -451,6 +451,18 @@ class TestKANInitSchemeMechanics:
             "a non-degenerate base_scaler -- the round trip must reproduce "
             "KANLinear's bare constructor default exactly"
         )
+        # [Concern 6/D-011] Criterion 2's other half: kernel_initializer must
+        # still resolve to GlorotUniform at kan_init_scheme=None -- a
+        # regression that injects only the base_scaler half (or that starts
+        # injecting the spline half unconditionally) would pass the assertion
+        # above alone.
+        assert isinstance(
+            rebuilt.key.kernel_initializer, keras.initializers.GlorotUniform
+        ), (
+            "a rebuilt kan_init_scheme=None layer's key_kan.kernel_initializer "
+            "must still resolve to KANLinear's own bare default (GlorotUniform), "
+            "not silently drift to something else"
+        )
 
     def test_injected_scheme_reduces_corner_magnitude_and_de_degenerates_base_scaler(self):
         """The measured, non-obvious effect this fix actually has at Site 2

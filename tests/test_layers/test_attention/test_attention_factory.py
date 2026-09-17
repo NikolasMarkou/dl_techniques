@@ -15,6 +15,8 @@ import inspect
 import typing
 import re
 import pytest
+import numpy as np
+import keras
 
 from dl_techniques.layers.attention.factory import (
     ATTENTION_REGISTRY,
@@ -222,6 +224,53 @@ class TestParamPassthroughFCT:
         )
         assert layer.qk_norm_type == 'rms_norm'
         assert layer.probability_type == 'softmax'
+
+
+class TestKanKeyInitSchemeReachability:
+    """D-010 (plan-2026-09-17T194331-3ce35186): ``kan_init_scheme``/
+    ``kan_init_seed`` must be reachable through ``create_attention_layer``
+    for every registry entry that already forwards ``kan_grid_size`` etc. —
+    before this fix, all 4 (``single_window``, ``window``, ``window_zigzag``,
+    ``window_band``) raised ``ValueError`` on ``kan_init_scheme`` as an
+    'unsupported parameter' (``findings/review-iter-1.md`` Concern 2).
+    """
+
+    def test_window_kan_key_init_scheme_reaches_key_kan_and_de_degenerates_base_scaler(self):
+        """Regression for D-010: this used to raise ValueError."""
+        layer = create_attention_layer(
+            'window',
+            dim=32,
+            window_size=4,
+            num_heads=4,
+            attention_mode='kan_key',
+            kan_init_scheme='glorot_inspired',
+            kan_init_seed=7,
+        )
+        x = keras.random.normal((1, 20, 32))
+        _ = layer(x)  # trigger build
+
+        base_scaler = keras.ops.convert_to_numpy(layer.attention.key.base_scaler)
+        assert len(np.unique(base_scaler)) > 1, (
+            "create_attention_layer('window', ..., kan_init_scheme=...) must "
+            "reach the internal key_kan KANLinear and produce a non-degenerate "
+            "base_scaler, not silently leave it at KANLinear's bare 'ones' default"
+        )
+
+    @pytest.mark.parametrize(
+        'attn_type', ['single_window', 'window', 'window_zigzag', 'window_band']
+    )
+    def test_kan_init_scheme_no_longer_raises_for_any_kan_key_entry(self, attn_type):
+        """All 4 entries D-010 touched must accept the 2 new keys, not just 'window'."""
+        layer = create_attention_layer(
+            attn_type,
+            dim=32,
+            window_size=4,
+            num_heads=4,
+            attention_mode='kan_key',
+            kan_init_scheme='glorot_inspired',
+            kan_init_seed=7,
+        )
+        assert layer is not None
 
 
 class TestFactoryHelpers:
