@@ -508,6 +508,7 @@ class TestGaborFiltersInitializer:
             sweep="diagonal",
             n_filters=6,
             normalize=False,
+            depthwise=True,
         )
         config = original.get_config()
 
@@ -520,6 +521,7 @@ class TestGaborFiltersInitializer:
             "sweep",
             "n_filters",
             "normalize",
+            "depthwise",
         ):
             assert key in config
 
@@ -533,6 +535,7 @@ class TestGaborFiltersInitializer:
         assert reconstructed.sweep == original.sweep
         assert reconstructed.n_filters == original.n_filters
         assert reconstructed.normalize == original.normalize
+        assert reconstructed.depthwise == original.depthwise is True
 
         shape = (5, 5, 3, 8)
         np.testing.assert_array_equal(
@@ -547,6 +550,7 @@ class TestGaborFiltersInitializer:
 
         assert reconstructed.sigma_range is None
         assert reconstructed.lambda_range is None
+        assert reconstructed.depthwise is original.depthwise is False
         np.testing.assert_array_equal(
             np.asarray(original((7, 7, 2, 8))),
             np.asarray(reconstructed((7, 7, 2, 8))),
@@ -632,6 +636,57 @@ class TestGaborFiltersInitializer:
                 rtol=1e-6,
                 atol=1e-6,
             )
+
+
+class TestDepthwiseFanIn:
+    """RED-proof guard for the depthwise-vs-cross-channel fan-in split.
+
+    ``create_gabor_depthwise_conv2d`` hands its own ``GaborFiltersInitializer``
+    to a ``keras.layers.DepthwiseConv2D``, which does not sum across input
+    channels: the true fan-in there is ``kh * kw``, not ``kh * kw * in_ch``.
+    Pinned at the diagnosed run's exact shape (``--gabor-kernel-size 11
+    --channels 3 --gabor-filters-per-channel 22``).
+    """
+
+    SHAPE = (11, 11, 3, 22)  # (kh, kw, in_ch, out_ch)
+
+    def test_depthwise_true_uses_kh_kw_fan_in(self):
+        """depthwise=True normalizes to sqrt(2 / (kh*kw)), ignoring in_ch."""
+        kh, kw, _, _ = self.SHAPE
+        weights = np.asarray(GaborFiltersInitializer(depthwise=True)(self.SHAPE))
+
+        assert weights.std() == pytest.approx(np.sqrt(2.0 / (kh * kw)), rel=1e-4)
+
+    def test_depthwise_false_is_unchanged_cross_channel(self):
+        """depthwise=False (default) stays at sqrt(2 / (kh*kw*in_ch)) at this shape.
+
+        This is the pre-existing cross-channel regression guard already
+        exercised by ``test_normalization_equalizes_energy_and_removes_dc``,
+        made explicit at the diagnosed run's own shape.
+        """
+        kh, kw, in_ch, _ = self.SHAPE
+        weights = np.asarray(GaborFiltersInitializer(depthwise=False)(self.SHAPE))
+
+        assert weights.std() == pytest.approx(np.sqrt(2.0 / (kh * kw * in_ch)), rel=1e-4)
+
+    def test_the_two_banks_measurably_differ(self):
+        """Anti-vacuity: the two conventions are not numerically indistinguishable.
+
+        Guards against a mutation where the ``depthwise`` branch is dead (e.g.
+        an ``if`` that never actually executes): the RMS ratio must be
+        ``sqrt(in_ch) = sqrt(3)``, and the raw banks must not be close.
+        """
+        _, _, in_ch, _ = self.SHAPE
+        depthwise = np.asarray(GaborFiltersInitializer(depthwise=True)(self.SHAPE))
+        cross_channel = np.asarray(GaborFiltersInitializer(depthwise=False)(self.SHAPE))
+
+        ratio = depthwise.std() / cross_channel.std()
+        assert ratio == pytest.approx(np.sqrt(in_ch), rel=1e-4)
+        assert not np.allclose(depthwise, cross_channel, atol=1e-6, rtol=0)
+
+    def test_depthwise_defaults_to_false(self):
+        """The default constructor leaves depthwise=False (no behavior change)."""
+        assert GaborFiltersInitializer().depthwise is False
 
 
 class TestCreateGaborDepthwiseConv2D:
