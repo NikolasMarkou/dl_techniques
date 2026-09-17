@@ -333,6 +333,14 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
     ``kh * kw``) and leave the default ``depthwise=False`` for the
     cross-channel ``Conv2D`` case (fan-in ``kh * kw * in_ch``).
 
+    Residual risk: the two factory functions in this module are the only
+    audited callers, and both set ``depthwise`` correctly. A ``DepthwiseConv2D``
+    built elsewhere that resolves this class by NAME (e.g. a string-based
+    ``depthwise_initializer`` config or CLI flag passed through
+    ``keras.initializers.get()``) is not covered by that audit and would
+    construct with the default ``depthwise=False``, silently reproducing the
+    pre-fix cross-channel fan-in on a per-channel layer.
+
     :param sigma_range: ``(min, max)`` interval for the Gaussian envelope width
         ``sigma``; ``min`` must be strictly positive. ``None`` resolves at call
         time to ``(0.30 * k, 0.60 * k)`` with ``k = min(kh, kw)``, because a
@@ -644,6 +652,14 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         ) * np.cos(2.0 * np.pi * x_theta / lambda_ + psi)
 
         if self.normalize:
+            # DECISION plan-2026-09-17T111913-932b1348/D-001: per-consumer
+            # fan-in, not shape inference. Do not assume the fan-in convention
+            # can be inferred from `shape` alone: a Conv2D kernel and a
+            # DepthwiseConv2D kernel share the identical 4D
+            # (kh, kw, in_ch, out_or_multiplier) shape, so it cannot. Any new
+            # direct construction of this class for a DepthwiseConv2D consumer
+            # MUST pass depthwise=True explicitly, or it silently reproduces
+            # the pre-fix cross-channel (WRONG) fan-in. See D-001.
             fan_in = (kh * kw) if self.depthwise else (kh * kw * in_ch)
             bank = self._normalize_bank(bank, fan_in=fan_in)
 
@@ -980,9 +996,10 @@ def create_gabor_conv2d(
 
     Constructs its ``GaborFiltersInitializer`` with the default
     ``depthwise=False``, so normalization uses the cross-channel
-    ``fan_in = kh * kw * in_ch``, correct for this layer's true summation
-    across input channels. See :func:`create_gabor_depthwise_conv2d` for the
-    per-channel ``fan_in = kh * kw`` counterpart.
+    ``fan_in = kh * kw * in_ch``, correct under the standard independent-fan-in
+    (He/Kaiming) convention this class targets, for this layer's true
+    summation across input channels. See :func:`create_gabor_depthwise_conv2d`
+    for the per-channel ``fan_in = kh * kw`` counterpart.
 
     :param filters: Number of output channels, which is also the number of Gabor
         filters. Must be >= 1.

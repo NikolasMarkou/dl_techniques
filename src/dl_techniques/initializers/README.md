@@ -347,8 +347,15 @@ is retained only for reproducing the paper's exact construction.
 ### Normalization
 
 With `normalize=True` (the default) each 2D filter has its DC component removed
-and is scaled to a per-element RMS of `sqrt(2 / fan_in)`, `fan_in = kh*kw*in_ch`.
-This is what makes the bank usable as an initializer. Measured on
+and is scaled to a per-element RMS of `sqrt(2 / fan_in)`. Which `fan_in` is
+targeted depends on the `depthwise` argument (default `False`), since a 4D
+kernel shape `(kh, kw, in_ch, out_or_multiplier)` is identical in rank and axis
+order for both consumers and cannot disambiguate them on its own:
+`depthwise=False` targets the cross-channel `Conv2D` fan-in
+`fan_in = kh*kw*in_ch` (used by `create_gabor_conv2d`), and `depthwise=True`
+targets the `DepthwiseConv2D` fan-in `fan_in = kh*kw`, with no cross-channel
+summation (used by `create_gabor_depthwise_conv2d`). This is what makes the
+bank usable as an initializer. Measured on
 `(11, 11, 3, 96)` with the old un-normalized defaults, per-filter L2 norms spanned
 **0.12 to 4.60** (38x) and per-output-channel gain `sum |w|` spanned **0.54 to
 100.3** — two orders of magnitude of activation scale at initialization, with the
@@ -372,6 +379,11 @@ DC component left in so many filters acted as biased blob detectors.
 - `n_filters` — number of **distinct** filters; `None` (default) means `out_ch`.
   A smaller value tiles the bank cyclically across the output channels.
 - `normalize` — DC-remove and energy-normalize each filter. Default `True`.
+- `depthwise` — which fan-in convention `normalize` targets. Default `False`
+  (cross-channel `Conv2D` fan-in `kh*kw*in_ch`, used by `create_gabor_conv2d`).
+  Pass `True` for a `DepthwiseConv2D` consumer (fan-in `kh*kw`, used by
+  `create_gabor_depthwise_conv2d`) — the 4D shape alone cannot tell the two
+  consumers apart, so the caller must set this explicitly.
 
 All bounds must be finite: a `nan` bound passes every naive comparison
 (`nan > hi` and `nan <= 0` are both `False`) and is rejected up front. The
