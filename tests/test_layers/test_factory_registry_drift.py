@@ -154,6 +154,14 @@ WHAT THIS GUARD DOES **NOT** SEE (stated, not hidden)
 7. **Params a wrapper pins POSITIONALLY.** A positional pin raises the same TypeError only if
    the wrapper also forwards `**kwargs` into that call; a wrapper that binds the value some
    other way is unseen. None exists in this repo today.
+8. **A registry key that is a factory-only dispatch param, never forwarded to the target at
+   all.** The PLACEMENT check (`_ctor_required_but_optional`) infers "ctor requires this" from
+   "no default found in the signature" -- which is also true of a key the target's constructor
+   never names, because the factory's own dispatch pops it out of `final_params` before
+   construction (e.g. `ffn:kan`'s `init_scheme`/`init_seed`, consumed by `create_ffn_layer`'s
+   'kan'-specific branch to decide whether to call `create_kan_initializers(...)`, never passed
+   to `KANLinear`). Recorded in `FACTORY_SYNTHETIC_PARAMS`, with the same written-reason +
+   anti-rot discipline as `SENTINEL_RESOLUTIONS`/`INTENTIONAL_OVERRIDES`.
 """
 
 import collections
@@ -793,6 +801,27 @@ def test_no_stale_exemptions():
             f"is a silenced bug, not a resolved one."
         )
 
+    # `FACTORY_SYNTHETIC_PARAMS` guards the PLACEMENT direction, not VALUE -- a different
+    # classifier (`_ctor_required_but_optional`, not `_classify`), so it needs its own
+    # exercised-set computation rather than reusing `_classified_pairs()` above.
+    placement_flagged = {
+        (factory, type_name, param)
+        for factory, type_name, target, info in ENTRIES
+        for param in _ctor_required_but_optional(target, info)
+    }
+    stale_synthetic = sorted(set(FACTORY_SYNTHETIC_PARAMS) - placement_flagged)
+    assert not stale_synthetic, (
+        f"FACTORY_SYNTHETIC_PARAMS has {len(stale_synthetic)} entry/entries the PLACEMENT guard "
+        f"(_ctor_required_but_optional) no longer flags: {stale_synthetic}. Either the target "
+        f"constructor gained that named parameter, or the registry entry stopped declaring it "
+        f"under optional_params -- either way the exemption is obsolete. Delete the stale key."
+    )
+    for key, reason in FACTORY_SYNTHETIC_PARAMS.items():
+        assert reason and reason.strip(), (
+            f"FACTORY_SYNTHETIC_PARAMS entry {key} has an empty reason. An exemption without a "
+            f"written justification is a silenced bug, not a resolved one."
+        )
+
 
 # ---------------------------------------------------------------------
 # REQUIRED/OPTIONAL PLACEMENT drift (the fourth direction)
@@ -809,6 +838,46 @@ def test_no_stale_exemptions():
 # when the class cannot be built without it. This is the blind spot D-001 closes.
 
 
+# (factory, type_name, param) -> reason
+#
+# A registered `optional_params` key that is NOT a constructor parameter of the target AT ALL
+# -- not named, not even `**kwargs`-swallowed-and-forwarded -- because the factory's OWN
+# dispatch pops it out of `final_params` before calling `target(**final_params)`. It exists
+# purely to drive the factory's dispatch logic itself (e.g. "should I auto-inject an
+# initializer pair"), never to reach the class.
+#
+# `_ctor_required_but_optional` cannot tell that apart from a genuine PLACEMENT bug: both read
+# as `defaults.get(param, _EMPTY) is _EMPTY`, because `_effective_defaults`/`_named_defaults`
+# only returns a default for a parameter the signature NAMES, and a factory-synthetic key is,
+# by definition, never named. Declaring it under `required_params` instead would be wrong in
+# the OTHER direction -- `create_*`'s required-params guard would then force every caller to
+# supply it, defeating the whole point of an opt-in, defaults-to-`None` knob. Requires a
+# written reason, the same discipline as `SENTINEL_RESOLUTIONS`/`INTENTIONAL_OVERRIDES` above;
+# `test_no_stale_exemptions` proves each entry is still genuinely flagged by the PLACEMENT
+# check it exempts, so a class that later gains the named parameter (making the exemption
+# obsolete) is caught, not silently kept.
+#
+# DECISION plan-2026-09-17T194331-3ce35186/D-007
+# Do NOT "fix" this by declaring `init_scheme`/`init_seed` on `KANLinear.__init__` itself --
+# that reopens the immediately-prior plan's deliberate D-006 scope call ("KANLinear itself is
+# untouched", restated as this plan's own D-001) purely to satisfy a test's introspection
+# model. The guard is what needs to learn about factory-synthetic dispatch keys; the class is
+# not wrong. See decisions.md D-007.
+FACTORY_SYNTHETIC_PARAMS = {
+    ("ffn", "kan", "init_scheme"): (
+        "create_ffn_layer's 'kan'-specific injection branch (layers/ffn/factory.py, "
+        "immediately before ffn_class(**final_params)) pops init_scheme out of final_params "
+        "and never forwards it to KANLinear -- KANLinear has no such constructor parameter. "
+        "It exists only to opt the factory's own dispatch into calling "
+        "create_kan_initializers(...). plan-2026-09-17T194331-3ce35186/D-007."
+    ),
+    ("ffn", "kan", "init_seed"): (
+        "Same mechanism as init_scheme immediately above -- popped by the same injection "
+        "branch, never a KANLinear constructor parameter. plan-2026-09-17T194331-3ce35186/D-007."
+    ),
+}
+
+
 def _ctor_required_but_optional(target, info):
     """Params declared under `optional_params` that the constructor actually REQUIRES.
 
@@ -822,6 +891,12 @@ def _ctor_required_but_optional(target, info):
     `required_params` (e.g. the opposite-direction case
     `activations:hierarchical_routing.output_dim`, required-in-registry but ctor-defaulted).
     That case is a different, non-crashing defect class and is out of scope by construction.
+
+    Does NOT consult `FACTORY_SYNTHETIC_PARAMS` -- that filtering happens at the call site
+    (the parametrized test below), exactly like `_classify` staying pure and letting its own
+    caller apply SENTINEL_RESOLUTIONS/INTENTIONAL_OVERRIDES. Keeping this function pure is what
+    lets `test_required_optional_guard_detects_synthetic_misregistration` exercise it directly
+    without threading an exemption table through a fabricated dummy that has no registry entry.
     """
     defaults = _effective_defaults(target)
     return sorted(
@@ -854,8 +929,18 @@ def test_registry_required_params_include_all_ctor_required(
     real offenders. The check loops `optional_params` only, so it cannot fire on the
     opposite-direction `required_params` case (F6) -- verified by that param never appearing
     in a failure here.
+
+    A param listed in `FACTORY_SYNTHETIC_PARAMS` is excluded: it is not a misregistration, it
+    is a factory-only dispatch key the target's constructor was never meant to see (see that
+    table's docstring). `test_no_stale_exemptions` proves each exemption is still genuinely
+    flagged by `_ctor_required_but_optional` before this filter removes it, so the exclusion
+    cannot silently outlive the condition that justified it.
     """
-    misregistered = _ctor_required_but_optional(target, info)
+    misregistered = [
+        param
+        for param in _ctor_required_but_optional(target, info)
+        if (factory, type_name, param) not in FACTORY_SYNTHETIC_PARAMS
+    ]
     assert not misregistered, (
         f"{factory} registry entry '{type_name}' "
         f"({getattr(target, '__name__', target)}) declares {misregistered} under "
@@ -863,8 +948,9 @@ def test_registry_required_params_include_all_ctor_required(
         f"INJECTS the optional default and silently substitutes it for the omitted required "
         f"argument, so a DIRECT constructor call raises 'missing N required positional "
         f"arguments' while get_{factory}_info() reports these as optional-with-default. Move "
-        f"them into 'required_params' (dropping the now-inert optional default) so omission "
-        f"raises a clear ValueError instead."
+        f"them into 'required_params' (dropping the now-inert optional default), OR, if this "
+        f"key is a factory-only dispatch param never meant to reach the constructor, record it "
+        f"in FACTORY_SYNTHETIC_PARAMS with a written reason."
     )
 
 

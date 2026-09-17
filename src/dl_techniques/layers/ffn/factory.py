@@ -47,6 +47,7 @@ from .gated_mlp import GatedMLP
 from .orthoglu_ffn import OrthoGLUFFN
 from .power_mlp_layer import PowerMLPLayer
 from .kan_linear import KANLinear
+from dl_techniques.initializers.kan_initializer import create_kan_initializers, VALID_KAN_SCHEMES
 from .tversky_projection import (
     TverskyProjectionLayer,
     VALID_INTERSECTION_REDUCTIONS,
@@ -275,7 +276,9 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'spline_trainable': True,
             'kernel_initializer': 'glorot_uniform',
             'base_scaler_initializer': 'ones',
-            'epsilon': 1e-7
+            'epsilon': 1e-7,
+            'init_scheme': None,
+            'init_seed': None
         },
         'use_case': 'Learnable per-connection univariate activations via B-splines (Kolmogorov-Arnold)'
     },
@@ -881,6 +884,44 @@ def create_ffn_layer(
                 logger.info(f"  {param_name}: None")
             else:
                 logger.info(f"  {param_name}: {param_value}")
+
+        if ffn_type == 'kan':
+            # `init_scheme`/`init_seed` are factory-only synthetic keys: KANLinear.__init__
+            # has no such parameters (D-001 keeps it untouched, matching the immediately-prior
+            # plan's model.py D-006 scope precedent), so they must never reach
+            # `ffn_class(**final_params)` below -- pop them out first.
+            init_scheme = final_params.pop('init_scheme', None)
+            init_seed = final_params.pop('init_seed', None)
+            if init_scheme is not None and init_scheme not in VALID_KAN_SCHEMES:
+                raise ValueError(
+                    f"create_ffn_layer('kan'): init_scheme must be one of "
+                    f"{sorted(VALID_KAN_SCHEMES)} or None, got {init_scheme!r}"
+                )
+
+            # DECISION plan-2026-09-17T194331-3ce35186/D-006
+            # Per-key injection (D-003): `inject_base`/`inject_spline` are computed
+            # independently against the CALLER's raw `kwargs`, never against `final_params`
+            # (which always carries the registry default for both keys regardless of what the
+            # caller passed). Do NOT collapse this to a single
+            # `if init_scheme is not None: inject both` rule -- that is exactly the
+            # all-or-nothing shape `model.py`'s own D-006 review caught as a defect: a caller
+            # who explicitly set only `kernel_initializer` while also setting `init_scheme`
+            # would silently keep KANLinear's degenerate `base_scaler_initializer='ones'`
+            # instead of getting it auto-injected. See decisions.md D-006.
+            inject_base = init_scheme is not None and 'base_scaler_initializer' not in kwargs
+            inject_spline = init_scheme is not None and 'kernel_initializer' not in kwargs
+            if inject_base or inject_spline:
+                base_init, spline_init = create_kan_initializers(
+                    grid_size=final_params['grid_size'],
+                    spline_order=final_params['spline_order'],
+                    scheme=init_scheme,
+                    grid_range=final_params['grid_range'],
+                    seed=init_seed,
+                )
+                if inject_base:
+                    final_params['base_scaler_initializer'] = base_init
+                if inject_spline:
+                    final_params['kernel_initializer'] = spline_init
 
         ffn_layer = ffn_class(**final_params)
 
