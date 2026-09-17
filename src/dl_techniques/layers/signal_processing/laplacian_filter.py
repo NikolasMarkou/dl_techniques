@@ -29,7 +29,6 @@ from typing import Tuple, Union, List, Optional, Sequence, Any, Dict, Literal
 # ---------------------------------------------------------------------
 
 from .gaussian_filter import GaussianFilter
-from dl_techniques.layers.pooling.blur_pool import BlurPool2D
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -475,10 +474,6 @@ class LaplacianPyramidLevel(keras.layers.Layer):
                 │   ┌───────────────────┐
                 │   │ GaussianFilter    │
                 │   └─────────┬─────────┘
-                │             ▼
-                │   ┌───────────────────┐
-                │   │ BlurPool2D(2)     │
-                │   └─────────┬─────────┘
                 │             ├────► low [B, H/2, W/2, C]
                 │             ▼
                 │   ┌───────────────────┐
@@ -573,12 +568,11 @@ class LaplacianPyramidLevel(keras.layers.Layer):
         # Sublayers created here and built explicitly in build().
         self.blur = GaussianFilter(
             kernel_size=blur_kernel_size,
-            strides=(1, 1),
+            strides=(2, 2),
             sigma=blur_sigma,
             padding="same",
             trainable=blur_trainable,
         )
-        self.down = BlurPool2D(strides=2)
         self.up = keras.layers.UpSampling2D(size=(2, 2), interpolation="bilinear")
 
     def build(self, input_shape) -> None:
@@ -587,10 +581,14 @@ class LaplacianPyramidLevel(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        h, w = input_shape[1], input_shape[2]
+        for name, dim in (("height", h), ("width", w)):
+            if dim is not None and dim % 2 != 0:
+                raise ValueError(
+                    f"input {name} must be even for a 2x pyramid level, got {dim}"
+                )
         self.blur.build(input_shape)
-        blur_out = self.blur.compute_output_shape(input_shape)
-        self.down.build(blur_out)
-        low_shape = self.down.compute_output_shape(blur_out)
+        low_shape = self.blur.compute_output_shape(input_shape)
         self.up.build(low_shape)
         super().build(input_shape)
 
@@ -603,7 +601,7 @@ class LaplacianPyramidLevel(keras.layers.Layer):
             ``high`` is ``(B, H, W, C)``.
         :rtype: tuple
         """
-        low = self.down(self.blur(x))
+        low = self.blur(x)
         high = keras.ops.subtract(x, self.up(low))
         return low, high
 
