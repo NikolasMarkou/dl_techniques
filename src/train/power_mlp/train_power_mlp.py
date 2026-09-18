@@ -10,11 +10,22 @@ NOT a layer, so the preset table below holds the hidden widths only and
 count. Labels stay integer end to end (``SparseCategoricalCrossentropy``), which
 is also what ``ModelAnalyzer`` feeds ``model.evaluate``.
 
-Input normalization: MNIST is one channel (``load_dataset('mnist')`` repeats it
-into 3 identical channels, so channel 0 is lossless) standardized with the
-canonical 0.1307 / 0.3081; CIFAR-10 is standardized per channel with
-``CIFAR10_MEAN`` / ``CIFAR10_STD``; both are then flattened. The validation split
-is a seeded shuffle of the training set and is never the test set.
+Input scaling (``--input-scaling``): ``standardize`` subtracts a mean and divides
+by a std (MNIST: 0.1307 / 0.3081 on one channel, since ``load_dataset('mnist')``
+repeats it into 3 identical channels and channel 0 is lossless; CIFAR-10: per
+channel ``CIFAR10_MEAN`` / ``CIFAR10_STD``); ``unit`` keeps the loader's plain
+``[0, 1]`` pixels. Both are then flattened. The validation split is a seeded
+shuffle of the training set and is never the test set.
+
+Initialization (``--kernel-initializer``): ReLU-k composes to degree ``k**depth``,
+so a gain above the fixed point blows the logits up doubly exponentially with
+depth. The pre-fit sanity evaluate therefore compares the untrained loss with
+``ln(num_classes)`` and logs a WARNING when the ratio exceeds
+``INITIAL_LOSS_WARN_FACTOR`` (it does not raise, a probe run may want the number);
+``results_summary.json`` records ``initial_loss_ratio`` and ``init_scale_warning``.
+
+Per-epoch ``ModelAnalyzer`` is opt-in (``--epoch-analysis``); the final
+``run_model_analysis`` always runs.
 
 Every run writes to ``<repo>/results/<experiment_name>/`` regardless of the
 current working directory (``train.common.resolved_run_dir``).
@@ -28,7 +39,10 @@ Usage:
 Results land in ``results/<experiment_name>/`` at the repository root (never
 under ``src/``): ``config.json``, ``training_log.csv`` (with ``lr``),
 ``training_history.json``, ``best_model.keras``, ``final_model.keras``,
-``results_summary.json``, ``visualizations/`` and ``model_analysis/``.
+``results_summary.json``, ``visualizations/`` and ``model_analysis/`` (plus
+``epoch_analysis/`` only with ``--epoch-analysis``). The CSV ``epoch`` column is
+0-based; ``best_epoch`` in the summary is 1-based (``best_epoch_csv_index`` is the
+0-based twin).
 """
 
 import argparse
@@ -95,6 +109,14 @@ WEIGHT_MISMATCH_TOLERANCE = 1e-6
 
 DATASETS: Tuple[str, ...] = ("mnist", "cifar10")
 OPTIMIZERS: Tuple[str, ...] = ("adam", "adamw", "sgd", "rmsprop")
+KERNEL_INITIALIZERS: Tuple[str, ...] = (
+    "glorot_normal", "he_normal", "lecun_normal", "glorot_uniform",
+)
+# ``standardize``: (x - mean) / std. ``unit``: the loader's plain [0, 1] pixels.
+INPUT_SCALINGS: Tuple[str, ...] = ("standardize", "unit")
+
+# ``_check_initial_loss`` warns when loss / ln(num_classes) is STRICTLY above this.
+INITIAL_LOSS_WARN_FACTOR = 10.0
 
 # Hidden widths ONLY. ``PowerMLP`` reads ``hidden_units[0]`` as the input width
 # and ``hidden_units[-1]`` as the class count, so neither belongs in this table;
@@ -146,6 +168,10 @@ class TrainingConfig:
     k: int = 2
     dropout_rate: float = 0.1
     batch_normalization: bool = False
+    # Provisional (iteration-1 behaviour); iteration 2 step 3 sets both from a
+    # measured 3-epoch MNIST grid.
+    kernel_initializer: str = "glorot_normal"
+    input_scaling: str = "standardize"
 
     # Training (defaults are this trainer's intentional historical values)
     epochs: int = 100
@@ -157,7 +183,7 @@ class TrainingConfig:
     seed: int = 42
 
     # Monitoring / output
-    epoch_analysis: bool = True
+    epoch_analysis: bool = False
     output_dir: str = "results"
     experiment_name: Optional[str] = None
 
@@ -176,6 +202,15 @@ class TrainingConfig:
             )
         if self.optimizer not in OPTIMIZERS:
             raise ValueError(f"optimizer must be one of {OPTIMIZERS}, got {self.optimizer!r}")
+        if self.kernel_initializer not in KERNEL_INITIALIZERS:
+            raise ValueError(
+                f"kernel_initializer must be one of {KERNEL_INITIALIZERS}, "
+                f"got {self.kernel_initializer!r}"
+            )
+        if self.input_scaling not in INPUT_SCALINGS:
+            raise ValueError(
+                f"input_scaling must be one of {INPUT_SCALINGS}, got {self.input_scaling!r}"
+            )
         if self.k < 1:
             raise ValueError(f"k must be >= 1, got {self.k}")
         if not 0.0 <= self.dropout_rate < 1.0:
@@ -226,6 +261,9 @@ def _build_parser() -> argparse.ArgumentParser:
     data = parser.add_argument_group("data")
     data.add_argument("--dataset", type=str, default=defaults.dataset, choices=DATASETS,
                       help="Dataset to train on.")
+    data.add_argument("--input-scaling", type=str, default=defaults.input_scaling,
+                      choices=INPUT_SCALINGS,
+                      help="'standardize' = (x - mean) / std; 'unit' = plain [0, 1] pixels.")
     data.add_argument("--validation-split", type=float, default=defaults.validation_split,
                       help="Fraction of the training set held out (seeded shuffle), "
                            "strictly inside (0, 1); never the test set.")
@@ -241,6 +279,10 @@ def _build_parser() -> argparse.ArgumentParser:
     model.add_argument("--batch-normalization", action="store_true",
                        default=defaults.batch_normalization,
                        help="Enable batch normalization after each hidden layer.")
+    model.add_argument("--kernel-initializer", type=str, default=defaults.kernel_initializer,
+                       choices=KERNEL_INITIALIZERS,
+                       help="Kernel initializer of every layer; it sets the initial logit "
+                            "scale (see the initial-loss WARNING).")
 
     train = parser.add_argument_group("training")
     train.add_argument("--epochs", type=int, default=defaults.epochs,
@@ -258,9 +300,10 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Early-stopping patience in epochs.")
     train.add_argument("--seed", type=int, default=defaults.seed,
                        help="Seed for weights, shuffling and the validation split.")
-    train.add_argument("--no-epoch-analysis", dest="epoch_analysis", action="store_false",
+    train.add_argument("--epoch-analysis", action="store_true",
                        default=defaults.epoch_analysis,
-                       help="Disable the per-epoch ModelAnalyzer callback.")
+                       help="Run the per-epoch ModelAnalyzer callback (off by default; the "
+                            "final analysis always runs).")
 
     out = parser.add_argument_group("output")
     out.add_argument("--output-dir", type=str, default=defaults.output_dir,
@@ -307,6 +350,8 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         k=args.k,
         dropout_rate=args.dropout_rate,
         batch_normalization=args.batch_normalization,
+        kernel_initializer=args.kernel_initializer,
+        input_scaling=args.input_scaling,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
@@ -360,32 +405,41 @@ def prepare_data(
         dataset: str,
         validation_split: float,
         seed: int,
+        input_scaling: str,
 ) -> Tuple[
     Tuple[np.ndarray, np.ndarray],
     Tuple[np.ndarray, np.ndarray],
     Tuple[np.ndarray, np.ndarray],
     Dict[str, Any],
 ]:
-    """Load, standardize, flatten and split a dataset for PowerMLP.
+    """Load, scale, flatten and split a dataset for PowerMLP.
 
     Args:
         dataset: ``"mnist"`` or ``"cifar10"``.
         validation_split: Fraction of the training set held out, strictly inside
             ``(0, 1)``.
         seed: Seeds the permutation that draws the validation set.
+        input_scaling: One of ``INPUT_SCALINGS``. Required (no default, so a
+            caller cannot silently inherit a second copy of the default).
 
     Returns:
         ``(train, val, test, info)``. ``train`` / ``val`` / ``test`` are
-        ``(x, y)`` with ``x`` float32 ``(N, input_dim)`` standardized and ``y``
+        ``(x, y)`` with ``x`` float32 ``(N, input_dim)`` scaled and ``y``
         int32 ``(N,)``. ``info`` holds ``image_shape`` (H, W, C as displayed:
-        MNIST is ``(28, 28, 1)``), ``input_dim``, ``num_classes``, and ``mean`` /
-        ``std`` (float32 arrays of shape ``(C,)``) to un-standardize for display.
+        MNIST is ``(28, 28, 1)``), ``input_dim``, ``num_classes``,
+        ``input_scaling``, and ``mean`` / ``std`` (float32 arrays of shape
+        ``(C,)``) to un-scale for display. For ``"unit"`` they are zeros / ones,
+        so un-scaling is the identity.
 
     Raises:
-        ValueError: If ``validation_split`` is not in ``(0, 1)`` or is so small
-            that no sample would be held out.
+        ValueError: If ``validation_split`` is not in ``(0, 1)``, is so small
+            that no sample would be held out, or ``input_scaling`` is unknown.
     """
     _validate_validation_split(validation_split)
+    if input_scaling not in INPUT_SCALINGS:
+        raise ValueError(
+            f"input_scaling must be one of {INPUT_SCALINGS}, got {input_scaling!r}"
+        )
     (x_train, y_train), (x_test, y_test), _, num_classes = load_dataset(dataset)
 
     if dataset == "mnist":
@@ -396,6 +450,8 @@ def prepare_data(
     else:
         mean = np.asarray(CIFAR10_MEAN, dtype=np.float32)
         std = np.asarray(CIFAR10_STD, dtype=np.float32)
+    if input_scaling == "unit":
+        mean, std = np.zeros_like(mean), np.ones_like(std)
 
     image_shape = tuple(int(d) for d in x_train.shape[1:])
     x_train = ((x_train - mean) / std).astype(np.float32).reshape(len(x_train), -1)
@@ -417,6 +473,7 @@ def prepare_data(
         "image_shape": image_shape,
         "input_dim": int(x_train.shape[1]),
         "num_classes": int(num_classes),
+        "input_scaling": input_scaling,
         "mean": mean,
         "std": std,
     }
@@ -466,11 +523,15 @@ def create_optimizer(
 # Training
 # ---------------------------------------------------------------------
 
-def _check_initial_loss(model: keras.Model, x: np.ndarray, y: np.ndarray) -> float:
-    """Evaluate the untrained model on a small slice and refuse a non-finite loss.
+def _check_initial_loss(
+        model: keras.Model, x: np.ndarray, y: np.ndarray
+) -> Tuple[float, float, bool]:
+    """Evaluate the untrained model on a small slice; refuse NaN, warn on a huge loss.
 
-    The value is logged so an audit can see the starting loss (glorot_normal +
-    ReLU-k on standardized input starts far above ``ln(num_classes)``).
+    The loss is compared with ``ln(num_classes)``, the loss of a uniform
+    prediction. ReLU-k composes to degree ``k**depth``, so a large init gain or an
+    unscaled input starts the run at ``loss / ln(C)`` in the tens to the millions
+    and the first epochs are spent recovering (iteration 1: 218.6 vs 2.30).
 
     Args:
         model: Built and compiled model.
@@ -478,23 +539,36 @@ def _check_initial_loss(model: keras.Model, x: np.ndarray, y: np.ndarray) -> flo
         y: Integer labels ``(N,)``.
 
     Returns:
-        The finite scalar loss on ``x``.
+        ``(loss, ratio, warned)``: the finite scalar loss on ``x``, ``loss /
+        ln(num_classes)``, and whether ``ratio > INITIAL_LOSS_WARN_FACTOR``
+        (strict) so a WARNING naming ``--kernel-initializer`` /
+        ``--input-scaling`` was logged. It does not raise on a large loss.
 
     Raises:
         RuntimeError: If the loss is NaN or infinite. Raising (not returning)
             is deliberate: a silent return would leave an empty run directory.
     """
     loss = float(model.evaluate(x, y, batch_size=SANITY_SAMPLES, verbose=0, return_dict=True)["loss"])
+    uniform_loss = float(np.log(model.hidden_units[-1]))
     logger.info(
         f"Sanity evaluate BEFORE fit: initial loss {loss:.4f} on {len(x)} train samples "
-        f"(uniform-prediction loss would be {float(np.log(model.hidden_units[-1])):.4f})"
+        f"(uniform-prediction loss would be {uniform_loss:.4f})"
     )
     if not np.isfinite(loss):
         raise RuntimeError(
             f"Initial loss is {loss} on {len(x)} samples: the model diverges before "
-            "training. Check k, the initializer and the input scaling."
+            "training. Check k, --kernel-initializer and --input-scaling."
         )
-    return loss
+    ratio = loss / uniform_loss
+    warned = ratio > INITIAL_LOSS_WARN_FACTOR
+    if warned:
+        logger.warning(
+            f"Initial loss {loss:.4f} is {ratio:.1f}x ln(num_classes)={uniform_loss:.4f} "
+            f"(warn above {INITIAL_LOSS_WARN_FACTOR:g}x): the initial logit scale is far "
+            "too large and early epochs will be spent recovering. Try a different "
+            "--kernel-initializer (e.g. lecun_normal) or --input-scaling unit."
+        )
+    return loss, ratio, warned
 
 
 def _evaluate(model: keras.Model, x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
@@ -629,7 +703,7 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
     logger.info(f"Run directory: {run_dir}")
 
     train, val, test, info = prepare_data(
-        config.dataset, config.validation_split, config.seed
+        config.dataset, config.validation_split, config.seed, config.input_scaling
     )
     (x_train, y_train), (x_val, y_val), (x_test, y_test) = train, val, test
 
@@ -643,7 +717,7 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         dropout_rate=config.dropout_rate,
         batch_normalization=config.batch_normalization,
         output_activation="softmax",
-        kernel_initializer="glorot_normal",
+        kernel_initializer=config.kernel_initializer,
         bias_initializer="zeros",
     )
     model.build((None, info["input_dim"]))
@@ -667,7 +741,9 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         f"Weight decay: {config.weight_decay}, Params: {params:,}"
     )
 
-    initial_loss = _check_initial_loss(model, x_train[:SANITY_SAMPLES], y_train[:SANITY_SAMPLES])
+    initial_loss, initial_loss_ratio, init_scale_warning = _check_initial_loss(
+        model, x_train[:SANITY_SAMPLES], y_train[:SANITY_SAMPLES]
+    )
 
     callbacks, _ = create_callbacks(
         model_name=config.experiment_name,
@@ -747,7 +823,10 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
     notes: List[str] = [
         f"expected hidden widths {widths}, built {effective_units[1:-1]}: "
         f"{'match' if widths == effective_units[1:-1] else 'MISMATCH'}",
-        f"initial loss {initial_loss:.4f} vs uniform ln(C)={np.log(info['num_classes']):.4f}",
+        f"initial loss {initial_loss:.4f} vs uniform ln(C)={np.log(info['num_classes']):.4f} "
+        f"(ratio {initial_loss_ratio:.2f}, warn above {INITIAL_LOSS_WARN_FACTOR:g})",
+        "CSV `epoch` column is 0-based, `best_epoch` is 1-based "
+        "(`best_epoch_csv_index` = `best_epoch` - 1)",
         "analyzer accuracy is on the first 1000 test samples only, not the full test set",
         f"final weights vs best_model.keras: "
         f"{'not compared' if test_metrics_best is None else 'compared, see test_metrics_*'}",
@@ -762,6 +841,8 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         "k": config.k,
         "dropout_rate": config.dropout_rate,
         "batch_normalization": config.batch_normalization,
+        "kernel_initializer": config.kernel_initializer,
+        "input_scaling": config.input_scaling,
         "optimizer": config.optimizer,
         "learning_rate": config.learning_rate,
         "weight_decay": config.weight_decay,
@@ -775,6 +856,7 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         "stopped_early": epochs_run < config.epochs,
         "monitor": MONITOR,
         "best_epoch": best_epoch,
+        "best_epoch_csv_index": best_i,
         "best_val_metrics": {k: hist[k][best_i] for k in val_keys},
         "final_val_metrics": {k: hist[k][final_i] for k in val_keys},
         "test_metrics_final": test_metrics_final,
@@ -785,6 +867,8 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
             "loss": initial_loss, "n_samples": int(min(SANITY_SAMPLES, len(x_train))),
             "split": "train", "before_fit": True,
         },
+        "initial_loss_ratio": initial_loss_ratio,
+        "init_scale_warning": init_scale_warning,
         "ece": visualizations["ece"],
         "visualizations": visualizations,
         "model_loading_validated": load_check,
