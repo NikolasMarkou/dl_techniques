@@ -80,9 +80,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "train_hebbian() method."
         ),
     )
+    # DECISION plan-2026-09-18T060057-c1cfc3d3/D-009
+    # 16000 is NOT the model's own constructor default (that was 2000) and NOT an
+    # arbitrarily-larger round number picked to "match the README range" — it is the
+    # value the pre-registered decision rule in decisions.md D-009 committed to before the
+    # data existed. Do NOT lower this back toward 2000 without re-running
+    # multiseed_sweep.py; a single anecdotal run is exactly the n=1 evidence this rule
+    # replaced (see D-009's Context: a prior n=1 claim was refuted by same-config noise).
     parser.add_argument(
-        "--mb-units", type=int, default=2000,
-        help="Number of Mushroom Body units (default: 2000, matches MothNet's own default).",
+        "--mb-units", type=int, default=16000,
+        help=(
+            "Number of Mushroom Body units (default: 16000, raised from 2000 per the "
+            "8-seed paired mb_units sweep in decisions.md D-009: p=0.0086, "
+            "mean_diff(val_accuracy)=0.1633, n_pairs=8)."
+        ),
     )
     parser.add_argument(
         "--mb-sparsity", type=float, default=0.1,
