@@ -84,17 +84,17 @@ class MothNet(keras.Model):
         │  Antennal Lobe (AL)     │  competitive inhibition
         │  [B, al_units]          │
         └────────────┬────────────┘
-                      ▼
+                     ▼
         ┌─────────────────────────┐
         │  Mushroom Body (MB)     │  frozen sparse projection, top-k
         │  [B, mb_units]          │
         └────────────┬────────────┘
-                      ▼
+                     ▼
         ┌─────────────────────────┐
         │  Hebbian Readout        │  trained by train_hebbian, not fit()
         │  [B, num_classes]       │
         └────────────┬────────────┘
-                      ▼
+                     ▼
         Class logits, or features for create_cyborg_features
 
     :param num_classes: Number of output classes.
