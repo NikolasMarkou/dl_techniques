@@ -176,6 +176,11 @@ class TestMixerBlock:
         with pytest.raises(ValueError, match="dropout_rate must be"):
             MixerBlock(tokens_mlp_dim=32, channels_mlp_dim=128, dropout_rate=1.1)
 
+        # D-012: dropout_rate == 1.0 must be rejected -- keras.layers.Dropout
+        # itself rejects rate==1.0. Guards D-012 from being re-widened.
+        with pytest.raises(ValueError, match="dropout_rate must be"):
+            MixerBlock(tokens_mlp_dim=32, channels_mlp_dim=128, dropout_rate=1.0)
+
     def test_factory_creation(self, sample_input_3d: keras.KerasTensor) -> None:
         """Test creation through the FFN factory (catches param-drop trap)."""
         layer = create_ffn_layer('mixer', tokens_mlp_dim=32, channels_mlp_dim=128)

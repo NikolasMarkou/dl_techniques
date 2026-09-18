@@ -121,6 +121,11 @@ class TestSwiGLUFFN:
         with pytest.raises(ValueError, match="dropout_rate must be in \\[0, 1\\]"):
             SwiGLUFFN(output_dim=512, dropout_rate=1.5)
 
+        # D-006: dropout_rate == 1.0 must be rejected -- keras.layers.Dropout
+        # itself rejects rate==1.0. Guards D-006 from being re-widened.
+        with pytest.raises(ValueError, match="dropout_rate must be in \\[0, 1\\]"):
+            SwiGLUFFN(output_dim=512, dropout_rate=1.0)
+
     def test_hidden_dimension_calculation(self):
         """Test hidden dimension calculation follows 2/3 rule and rounding."""
         test_cases = [

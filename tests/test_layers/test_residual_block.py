@@ -110,6 +110,13 @@ class TestResidualBlock:
         with pytest.raises(ValueError, match="dropout_rate must be between 0 and 1"):
             ResidualBlock(hidden_dim=64, output_dim=32, dropout_rate=1.5)
 
+        # D-002: dropout_rate == 1.0 must be rejected -- keras.layers.Dropout
+        # itself rejects rate==1.0, so a bound of [0.0, 1.0] silently built a
+        # layer that crashed at the first training-mode forward pass instead
+        # of at construction. This guards D-002 from being re-widened.
+        with pytest.raises(ValueError, match="dropout_rate must be between 0 and 1"):
+            ResidualBlock(hidden_dim=64, output_dim=32, dropout_rate=1.0)
+
     def test_build_process(self, sample_input, layer_config):
         """Test that the layer builds properly following modern patterns."""
         layer = ResidualBlock(**layer_config)

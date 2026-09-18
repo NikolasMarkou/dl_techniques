@@ -101,6 +101,11 @@ class TestSwinMLP:
         with pytest.raises(ValueError, match="dropout_rate must be between 0.0 and 1.0"):
             SwinMLP(hidden_dim=64, dropout_rate=1.5)
 
+        # D-011: dropout_rate == 1.0 must be rejected -- keras.layers.Dropout
+        # itself rejects rate==1.0. Guards D-011 from being re-widened.
+        with pytest.raises(ValueError, match="dropout_rate must be between 0.0 and 1.0"):
+            SwinMLP(hidden_dim=64, dropout_rate=1.0)
+
         # Test invalid output_dim when specified
         with pytest.raises(ValueError, match="output_dim must be positive when specified"):
             SwinMLP(hidden_dim=64, output_dim=0)

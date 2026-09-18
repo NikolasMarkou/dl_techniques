@@ -219,6 +219,11 @@ class TestOrthoGLUFFN:
         with pytest.raises(ValueError, match="dropout_rate must be between 0 and 1"):
             OrthoGLUFFN(hidden_dim=32, output_dim=16, dropout_rate=1.5)
 
+        # D-005: dropout_rate == 1.0 must be rejected -- keras.layers.Dropout
+        # itself rejects rate==1.0. Guards D-005 from being re-widened.
+        with pytest.raises(ValueError, match="dropout_rate must be between 0 and 1"):
+            OrthoGLUFFN(hidden_dim=32, output_dim=16, dropout_rate=1.0)
+
         layer = OrthoGLUFFN(hidden_dim=32, output_dim=16)
         with pytest.raises(ValueError, match="Last dimension of input must be defined"):
             layer.build((None, None))

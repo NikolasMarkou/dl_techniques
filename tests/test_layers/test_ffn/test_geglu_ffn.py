@@ -236,6 +236,11 @@ class TestGeGLUFFN:
         with pytest.raises(ValueError, match="dropout_rate must be between 0 and 1"):
             GeGLUFFN(hidden_dim=32, output_dim=16, dropout_rate=1.1)
 
+        # D-004: dropout_rate == 1.0 must be rejected -- keras.layers.Dropout
+        # itself rejects rate==1.0. Guards D-004 from being re-widened.
+        with pytest.raises(ValueError, match="dropout_rate must be between 0 and 1"):
+            GeGLUFFN(hidden_dim=32, output_dim=16, dropout_rate=1.0)
+
         # Test undefined input shape
         layer = GeGLUFFN(hidden_dim=32, output_dim=16)
         with pytest.raises(ValueError, match="Last dimension of input must be defined"):

@@ -335,6 +335,12 @@ class TestFFNFactory:
         with pytest.raises(ValueError):
             create_ffn_layer('mlp', hidden_dim=512, output_dim=256, dropout_rate=2.0)
 
+        # D-015: dropout_rate == 1.0 must be rejected at the factory's own
+        # validate_ffn_config gate, before ever reaching a class constructor
+        # -- keras.layers.Dropout itself rejects rate==1.0. Guards D-015.
+        with pytest.raises(ValueError):
+            create_ffn_layer('mlp', hidden_dim=512, output_dim=256, dropout_rate=1.0)
+
         # Test zero dimensions
         with pytest.raises(ValueError):
             create_ffn_layer('swiglu', output_dim=0)
