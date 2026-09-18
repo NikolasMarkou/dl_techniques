@@ -34,7 +34,9 @@ import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.general_purpose.mothnet.model import MothNet
-from train.common import default_experiment_name, prepare_run_dir
+from train.common import (
+    default_experiment_name, prepare_run_dir, save_training_history_json,
+)
 from train.common.callbacks import best_checkpoint_path
 
 
@@ -492,6 +494,24 @@ def main(argv=None) -> int:
                 f"Epoch {epoch}/{args.epochs - 1} — loss={loss:.4f}, "
                 f"train_accuracy={train_accuracy:.4f}, val_accuracy={val_accuracy:.4f}"
             )
+
+    # Unconditional final-model save — independent of whether any epoch ever improved
+    # on `best_val_accuracy` (plan.md invariant 8 / Step 7). `model` was explicitly
+    # built before the loop (Step 3), so this save is always valid even under
+    # `--epochs 1` or a loop that never beat the `-1.0` sentinel.
+    final_model_path = run_dir / "final_model.keras"
+    model.save(final_model_path)
+    logger.info(f"Saved final model to {final_model_path}")
+
+    save_training_history_json(history, run_dir)
+
+    logger.info(
+        f"Run complete — run_dir={run_dir}, epochs={args.epochs}, "
+        f"best_val_accuracy={best_val_accuracy:.4f}, "
+        f"final_epoch_loss={history['loss'][-1]:.4f}, "
+        f"final_epoch_train_accuracy={history['train_accuracy'][-1]:.4f}, "
+        f"final_epoch_val_accuracy={history['val_accuracy'][-1]:.4f}"
+    )
 
     return 0
 
