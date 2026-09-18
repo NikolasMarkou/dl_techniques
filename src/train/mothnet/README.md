@@ -26,7 +26,7 @@ implies for the periodic plot.
 Always run with a non-interactive matplotlib backend and from the repo root:
 
 ```bash
-# Plain invocation — CLI defaults (3 epochs, 2000 train / 500 val samples)
+# Plain invocation — CLI defaults (3 epochs, full MNIST: 60000 train / 10000 val samples)
 MPLBACKEND=Agg .venv/bin/python -m train.mothnet.train_mothnet
 
 # Custom experiment name
@@ -65,8 +65,8 @@ optimizer/LR-schedule/patience/dataset-choice surface for that shared parser to 
 | `--output-dir` | `None` | Output directory for run artifacts; `None` means repo-root `results/`, resolved at run time |
 | `--experiment-name` | `None` | Experiment name; `None` means auto-generated via `default_experiment_name` |
 | `--seed` | `42` | Seed, routed through `train.common.set_seeds()` in `build_model()` and through `load_mnist_data`'s own `np.random.default_rng(config.seed)` — see "What `--seed` covers, and what it does not" below |
-| `--num-train-samples` | `2000` | Number of MNIST training samples to subsample |
-| `--num-val-samples` | `500` | Number of MNIST validation samples to subsample |
+| `--num-train-samples` | `60000` | Number of MNIST training samples to subsample (full MNIST train split size; previously defaulted to `2000` as a fast-iteration toy subsample) |
+| `--num-val-samples` | `10000` | Number of MNIST validation samples to subsample (full MNIST test split size; previously defaulted to `500` as a fast-iteration toy subsample) |
 
 ---
 
@@ -173,11 +173,12 @@ rendering defect.
 
 **Small `--num-train-samples` can produce flat, at-chance results.** Measured at Step 7:
 `--num-train-samples 500 --num-val-samples 200` produced degenerate `val_accuracy`
-(0.09 → 0.09 → 0.10, at the 0.10 MNIST chance baseline) across 3 epochs, while the CLI
-default of `2000` train / `500` val samples reached `val_accuracy` 0.114 → 0.150 → 0.198
-over the same 3 epochs. If you pass a much smaller `--num-train-samples` than the
-default and see a flat accuracy curve, this sample-count sensitivity — not a wiring bug
-— is the likely explanation.
+(0.09 → 0.09 → 0.10, at the 0.10 MNIST chance baseline) across 3 epochs, while the
+then-current CLI default of `2000` train / `500` val samples (since raised to the full
+MNIST split, `60000`/`10000` — see the CLI flags table above) reached `val_accuracy`
+0.114 → 0.150 → 0.198 over the same 3 epochs. If you pass a much smaller
+`--num-train-samples` than the full-MNIST default and see a flat accuracy curve, this
+sample-count sensitivity — not a wiring bug — is the likely explanation.
 
 ---
 

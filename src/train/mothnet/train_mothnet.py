@@ -159,12 +159,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Seed for NumPy's global RNG (default: 42).",
     )
     parser.add_argument(
-        "--num-train-samples", type=int, default=2000,
-        help="Number of MNIST training samples to subsample (default: 2000).",
+        "--num-train-samples", type=int, default=60000,
+        help=(
+            "Number of MNIST training samples to subsample (default: 60000, the "
+            "full MNIST train split size). Previously defaulted to 2000 as a "
+            "fast-iteration toy subsample; pass a smaller value explicitly to "
+            "restore that toy-scale behavior."
+        ),
     )
     parser.add_argument(
-        "--num-val-samples", type=int, default=500,
-        help="Number of MNIST validation samples to subsample (default: 500).",
+        "--num-val-samples", type=int, default=10000,
+        help=(
+            "Number of MNIST validation samples to subsample (default: 10000, "
+            "the full MNIST test split size). Previously defaulted to 500 as a "
+            "fast-iteration toy subsample; pass a smaller value explicitly to "
+            "restore that toy-scale behavior."
+        ),
     )
     # DECISION plan-2026-09-18T080513-debe8b11/D-005: a dedicated eval-chunking flag,
     # NOT a reuse of --batch-size. --batch-size is train_hebbian's own training
