@@ -16,8 +16,10 @@ surface with the shared ``tests/test_train/_cli_contract.py`` driver:
   the wrong field;
 - ``--gpu`` is not a config field; it is checked on the namespace AND through
   ``main()`` into ``setup_gpu`` (the mothnet D-011 defect class);
-- the three removed flags are absent from the parser and rejected;
-- an unknown ``--optimizer`` exits 2 (there is no silent fall-back to Adam);
+- the four removed flags (``--image-size``, ``--lr-schedule``, ``--show-plots``,
+  ``--no-epoch-analysis``) are absent from the parser and rejected;
+- an unknown ``--optimizer``, ``--kernel-initializer`` or ``--input-scaling`` exits 2
+  (there is no silent fall-back to a default);
 - ``--help`` prints ``usage:`` and reaches no expensive call.
 
 Nothing here trains, loads a dataset or allocates a GPU.
@@ -53,6 +55,13 @@ POWER_MLP_ROWS: Tuple[Row, ...] = (
         ("--batch-normalization",), ("--batch-normalization",),
         "batch_normalization", True,
     ),
+    # Probes differ from the measured defaults (lecun_normal / unit) and are not in
+    # the grid that chose them, so a cross-wire or a dropped forward is visible.
+    Row(
+        ("--kernel-initializer",), ("--kernel-initializer", "glorot_uniform"),
+        "kernel_initializer", "glorot_uniform",
+    ),
+    Row(("--input-scaling",), ("--input-scaling", "standardize"), "input_scaling", "standardize"),
     Row(("--epochs",), ("--epochs", "7"), "epochs", 7),
     Row(("--batch-size",), ("--batch-size", "96"), "batch_size", 96),
     Row(("--learning-rate",), ("--learning-rate", "1.5e-3"), "learning_rate", 1.5e-3),
@@ -60,7 +69,8 @@ POWER_MLP_ROWS: Tuple[Row, ...] = (
     Row(("--weight-decay",), ("--weight-decay", "0.02"), "weight_decay", 0.02),
     Row(("--patience",), ("--patience", "9"), "patience", 9),
     Row(("--seed",), ("--seed", "1234"), "seed", 1234),
-    Row(("--no-epoch-analysis",), ("--no-epoch-analysis",), "epoch_analysis", False),
+    # Opt-in (default False): the probe is the non-default True.
+    Row(("--epoch-analysis",), ("--epoch-analysis",), "epoch_analysis", True),
     Row(
         ("--output-dir",), ("--output-dir", "/probe/power-mlp-out"),
         "output_dir", "/probe/power-mlp-out",
@@ -122,8 +132,9 @@ def test_parser_defaults_equal_the_config_defaults() -> None:
     default = tpm.TrainingConfig()
     for name in (
         "dataset", "validation_split", "architecture", "k", "dropout_rate",
-        "batch_normalization", "epochs", "batch_size", "learning_rate", "optimizer",
-        "weight_decay", "patience", "seed", "epoch_analysis", "output_dir",
+        "batch_normalization", "kernel_initializer", "input_scaling", "epochs",
+        "batch_size", "learning_rate", "optimizer", "weight_decay", "patience", "seed",
+        "epoch_analysis", "output_dir",
     ):
         assert getattr(config, name) == getattr(default, name), name
     assert config.experiment_name.startswith("powermlp_mnist_default_")
@@ -176,6 +187,9 @@ def test_help_prints_usage_and_reaches_no_expensive_call(monkeypatch, capsys) ->
     out = capsys.readouterr().out
     assert out.lstrip().startswith("usage:"), out[:200]
     assert "--optimizer" in out and "--weight-decay" in out
+    for flag in ("--kernel-initializer", "--input-scaling", "--epoch-analysis"):
+        assert flag in out, f"{flag} is not advertised by --help"
+    assert "--no-epoch-analysis" not in out
     assert touched == []
 
 
@@ -185,8 +199,9 @@ def test_help_prints_usage_and_reaches_no_expensive_call(monkeypatch, capsys) ->
         ("--image-size", "64"),
         ("--lr-schedule", "cosine"),
         ("--show-plots",),
+        ("--no-epoch-analysis",),
     ],
-    ids=["--image-size", "--lr-schedule", "--show-plots"],
+    ids=["--image-size", "--lr-schedule", "--show-plots", "--no-epoch-analysis"],
 )
 def test_removed_flags_are_absent_and_rejected(monkeypatch, argv) -> None:
     """Dead inherited flags are gone: not declared, and argparse refuses them."""
@@ -205,6 +220,32 @@ def test_unknown_optimizer_exits_2_before_any_expensive_call(monkeypatch) -> Non
         tpm.main(["--optimizer", "lion"])
     assert exc.value.code == 2
     assert touched == []
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("--kernel-initializer", "orthogonal"),
+        ("--input-scaling", "whiten"),
+    ],
+    ids=["--kernel-initializer", "--input-scaling"],
+)
+def test_a_value_outside_the_choices_exits_2_before_any_expensive_call(
+        monkeypatch, argv) -> None:
+    """Both new flags are closed sets: argparse refuses anything else."""
+    touched = _forbid_expensive_calls(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        tpm.main(list(argv))
+    assert exc.value.code == 2
+    assert touched == []
+
+
+def test_every_listed_choice_is_accepted_by_the_parser() -> None:
+    """The choices tuples the trainer validates against are the ones argparse offers."""
+    for name in tpm.KERNEL_INITIALIZERS:
+        assert tpm.parse_arguments(["--kernel-initializer", name]).kernel_initializer == name
+    for name in tpm.INPUT_SCALINGS:
+        assert tpm.parse_arguments(["--input-scaling", name]).input_scaling == name
 
 
 @pytest.mark.parametrize("split", ["0", "0.0", "1", "1.0", "-0.1"])

@@ -119,7 +119,7 @@ def test_unknown_architecture_or_dataset_raises() -> None:
 
 
 def test_prepare_data_shapes_dtypes_and_integer_labels(synthetic_mnist) -> None:
-    (xt, yt), (xv, yv), (xs, ys), info = tpm.prepare_data("mnist", 0.1, 0)
+    (xt, yt), (xv, yv), (xs, ys), info = tpm.prepare_data("mnist", 0.1, 0, "unit")
     assert xt.shape == (576, 784) and xv.shape == (64, 784) and xs.shape == (1200, 784)
     assert xt.dtype == np.float32
     for y in (yt, yv, ys):
@@ -139,7 +139,7 @@ def test_prepare_data_standardizes_with_the_mnist_constants(monkeypatch) -> None
         return (x, y), (x[:4].copy(), y[:4].copy()), (28, 28, 3), 10
 
     monkeypatch.setattr(tpm, "load_dataset", load)
-    (xt, _), (xv, _), (xs, _), info = tpm.prepare_data("mnist", 0.5, 0)
+    (xt, _), (xv, _), (xs, _), info = tpm.prepare_data("mnist", 0.5, 0, "standardize")
     everything = np.concatenate([xt, xv])
     values = np.unique(np.round(everything, 4))
     assert set(values.tolist()) == {0.0, 1.0}
@@ -149,7 +149,7 @@ def test_prepare_data_standardizes_with_the_mnist_constants(monkeypatch) -> None
 
 
 def _split_identities(synthetic_split_seed: int):
-    (xt, yt), (xv, yv), _, _ = tpm.prepare_data("mnist", 0.1, synthetic_split_seed)
+    (xt, yt), (xv, yv), _, _ = tpm.prepare_data("mnist", 0.1, synthetic_split_seed, "unit")
     return xt, xv
 
 
@@ -169,7 +169,7 @@ def test_split_is_disjoint_seed_deterministic_and_seed_dependent(synthetic_mnist
 
 
 def test_validation_is_never_the_test_set(synthetic_mnist) -> None:
-    (_, _), (xv, _), (xs, _), _ = tpm.prepare_data("mnist", 0.1, 0)
+    (_, _), (xv, _), (xs, _), _ = tpm.prepare_data("mnist", 0.1, 0, "unit")
     test_rows = {row.tobytes() for row in xs}
     assert not any(row.tobytes() in test_rows for row in xv)
 
@@ -177,14 +177,14 @@ def test_validation_is_never_the_test_set(synthetic_mnist) -> None:
 @pytest.mark.parametrize("split", [0.0, 1.0, 1.5, -0.2])
 def test_out_of_range_validation_split_raises(synthetic_mnist, split) -> None:
     with pytest.raises(ValueError, match="validation_split"):
-        tpm.prepare_data("mnist", split, 0)
+        tpm.prepare_data("mnist", split, 0, "unit")
     with pytest.raises(ValueError, match="validation_split"):
         tpm.TrainingConfig(validation_split=split)
 
 
 def test_a_split_that_holds_out_zero_samples_raises(synthetic_mnist) -> None:
     with pytest.raises(ValueError, match="0 of"):
-        tpm.prepare_data("mnist", 1e-6, 0)
+        tpm.prepare_data("mnist", 1e-6, 0, "unit")
 
 
 @pytest.mark.skipif(
@@ -207,7 +207,7 @@ def test_real_mnist_is_784_features_standardized_and_channels_are_identical(monk
         return out
 
     monkeypatch.setattr(tpm, "load_dataset", spy)
-    (xt, yt), (xv, yv), (xs, ys), info = tpm.prepare_data("mnist", 0.1, 0)
+    (xt, yt), (xv, yv), (xs, ys), info = tpm.prepare_data("mnist", 0.1, 0, "standardize")
 
     assert seen["channels_equal"], "loader no longer triplicates the channel: channel 0 is lossy"
     assert (len(xt), len(xv), len(xs)) == (54000, 6000, 10000)
@@ -303,7 +303,7 @@ def test_train_model_hands_the_repo_root_path_to_prepare_run_dir(monkeypatch, tm
 
 @pytest.fixture(scope="module")
 def smoke(tmp_path_factory):
-    """One real 2-epoch run, epoch analysis off, FINAL ``run_model_analysis`` on.
+    """One real 2-epoch run on the DEFAULTS (lecun_normal, unit, epoch analysis off, FINAL ``run_model_analysis`` on).
 
     ``load_dataset`` is patched to synthetic arrays; nothing else is mocked.
     ``compile`` and ``fit`` are wrapped (call-through) only to record what the trainer really passed.
@@ -334,11 +334,13 @@ def smoke(tmp_path_factory):
 
         config = tpm.config_from_args(tpm.parse_arguments([
             "--epochs", "2", "--batch-size", "64", "--seed", "3",
-            "--no-epoch-analysis", "--output-dir", str(out_root),
+            "--output-dir", str(out_root),
             "--experiment-name", "smoke_run",
         ]))
         summary = tpm.train_model(config)
-        data = tpm.prepare_data("mnist", config.validation_split, config.seed)
+        data = tpm.prepare_data(
+            "mnist", config.validation_split, config.seed, config.input_scaling
+        )
     finally:
         mp.undo()
     return types.SimpleNamespace(
@@ -364,6 +366,9 @@ def test_smoke_run_directory_inventory(smoke) -> None:
     assert missing == [], f"missing from the run dir: {missing}"
     for name in expected:
         assert (run / name).stat().st_size > 0, name
+    assert not (run / "epoch_analysis").exists(), (
+        "the per-epoch analyzer is opt-in (--epoch-analysis); the default run must not create it"
+    )
     assert not (run / "training_history.png").exists()
     assert not (run / "training_summary.txt").exists()
     assert list(run.glob("powermlp_*_final.keras")) == []
@@ -437,6 +442,38 @@ def test_smoke_summary_is_self_consistent(smoke) -> None:
     assert config["epochs"] == 2 and config["experiment_name"] == "smoke_run"
 
 
+def test_smoke_records_the_init_scale_diagnostics(smoke) -> None:
+    """The defaults start near ``ln(C)``: ratio == loss / ln(10), and no warning."""
+    on_disk = json.loads((smoke.run_dir / "results_summary.json").read_text())
+    loss = on_disk["initial_loss_sanity_eval"]["loss"]
+    assert on_disk["initial_loss_ratio"] == pytest.approx(loss / np.log(10.0), rel=1e-9)
+    assert on_disk["init_scale_warning"] is False
+    assert 0.5 < on_disk["initial_loss_ratio"] <= 3.0, on_disk["initial_loss_ratio"]
+    assert on_disk["kernel_initializer"] == smoke.config.kernel_initializer == "lecun_normal"
+    assert on_disk["input_scaling"] == smoke.config.input_scaling == "unit"
+    config = json.loads((smoke.run_dir / "config.json").read_text())
+    assert config["kernel_initializer"] == "lecun_normal"
+    assert config["input_scaling"] == "unit"
+    assert config["epoch_analysis"] is False
+
+
+def test_smoke_best_epoch_csv_index_is_the_zero_based_csv_row(smoke) -> None:
+    """``best_epoch`` is 1-based, the CSV ``epoch`` column is 0-based; the summary
+    carries both and says so."""
+    on_disk = json.loads((smoke.run_dir / "results_summary.json").read_text())
+    with open(smoke.run_dir / "training_log.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    val_losses = [float(r["val_loss"]) for r in rows]
+    argmin = int(np.argmin(val_losses))
+
+    assert on_disk["best_epoch_csv_index"] == argmin
+    assert on_disk["best_epoch"] == on_disk["best_epoch_csv_index"] + 1
+    assert int(rows[on_disk["best_epoch_csv_index"]]["epoch"]) == argmin, (
+        "the CSV `epoch` column must be 0-based for best_epoch_csv_index to index it"
+    )
+    assert any("0-based" in note for note in on_disk["notes"]), on_disk["notes"]
+
+
 def test_smoke_no_model_layer_carries_a_kernel_regularizer(smoke) -> None:
     """Weight decay lives in the optimizer only; a regularizer would double it."""
     model = keras.models.load_model(smoke.run_dir / "final_model.keras")
@@ -462,14 +499,31 @@ def _history(n: int) -> dict:
     }
 
 
+class CapturedFigure:
+    """What one figure looked like at the moment it was about to be saved.
+
+    Read INSIDE the spy: ``_save_and_close`` closes the figure, so nothing can be
+    inspected afterwards. ``axes`` keeps ``(title, has_data)`` for every axes
+    (twin and colorbar axes have an empty title); the dicts are keyed by the
+    non-empty axes title.
+    """
+
+    def __init__(self, fig) -> None:
+        self.axes = [(ax.get_title(), ax.has_data()) for ax in fig.axes]
+        titled = [ax for ax in fig.axes if ax.get_title()]
+        self.ylim = {ax.get_title(): tuple(ax.get_ylim()) for ax in titled}
+        self.axes_texts = {ax.get_title(): [t.get_text() for t in ax.texts] for ax in titled}
+        self.fig_texts = [t.get_text() for t in fig.texts]
+
+
 @pytest.fixture
 def captured_figures(monkeypatch):
-    """Record the axes of every figure the dashboard is about to save."""
+    """Record every figure the visualization module is about to save."""
     figures = []
     real = viz._save_and_close
 
     def spy(fig, out_path):
-        figures.append([(ax.get_title(), ax.has_data()) for ax in fig.axes])
+        figures.append(CapturedFigure(fig))
         return real(fig, out_path)
 
     monkeypatch.setattr(viz, "_save_and_close", spy)
@@ -488,7 +542,8 @@ def test_dashboard_smoothed_loss_panel_iff_more_than_five_epochs(
     assert ("Smoothed loss" in titles) == (n_epochs > 5), titles
     assert {"Loss", "Accuracy", "Learning rate", "Generalization gap", "Per-epoch time"} <= set(titles)
 
-    (axes,) = captured_figures
+    (figure,) = captured_figures
+    axes = figure.axes
     drawn = [title for title, _ in axes if title]
     assert drawn == titles, "the returned titles must be the panels actually drawn"
     blank = [title or "<twin axis>" for title, has_data in axes if not has_data]
@@ -500,7 +555,97 @@ def test_dashboard_draws_only_panels_that_have_data(tmp_path, captured_figures) 
     history = {k: v for k, v in _history(3).items() if k != "lr"}
     titles = viz.render_training_dashboard(history, tmp_path / "d.png")
     assert titles == ["Loss", "Accuracy", "Generalization gap"]
-    assert all(has_data for _, has_data in captured_figures[0])
+    assert all(has_data for _, has_data in captured_figures[0].axes)
+
+
+@pytest.mark.parametrize("n_epochs", [1, 3, 7])
+def test_dashboard_carries_the_train_vs_val_caption(
+        tmp_path, captured_figures, n_epochs) -> None:
+    """Train metrics are a running mean over the epoch, val is measured at its end;
+    the caption says so on the figure itself, whatever the panel layout."""
+    viz.render_training_dashboard(_history(n_epochs), tmp_path / "cap.png", "t")
+    (figure,) = captured_figures
+    assert viz.TRAIN_METRIC_CAPTION in figure.fig_texts, figure.fig_texts
+    assert "running mean" in viz.TRAIN_METRIC_CAPTION
+    assert "end of epoch" in viz.TRAIN_METRIC_CAPTION
+
+
+def _near_one_history() -> dict:
+    """Curves that hug 1.0 (max 1.1), like a real run after a huge epoch-0 loss."""
+    history = _history(3)
+    history["loss"] = [1.0, 0.95, 0.9]
+    history["val_loss"] = [1.1, 1.0, 0.95]
+    return history
+
+
+def _loss_panel(tmp_path, captured_figures, baseline) -> CapturedFigure:
+    viz.render_training_dashboard(
+        _near_one_history(), tmp_path / f"d{len(captured_figures)}.png", "t",
+        epoch_times=[1.0] * 3, baseline=baseline,
+    )
+    return captured_figures[-1]
+
+
+def test_an_extreme_epoch_0_baseline_is_clipped_and_annotated_with_its_true_value(
+        tmp_path, captured_figures) -> None:
+    """Iteration 1: an init loss of 218.6 over curves near 1.0 flattened the log axis."""
+    figure = _loss_panel(tmp_path, captured_figures, {"loss": 218.6, "accuracy": 0.1})
+    low, high = figure.ylim["Loss"]
+    curve_max = 1.1
+
+    assert high <= viz.BASELINE_CLIP_FACTOR * curve_max * 1.5, (
+        f"Loss axis reaches {high:.1f}: the 218.6 baseline flattened the curves"
+    )
+    assert low > 0.0
+    annotations = figure.axes_texts["Loss"]
+    assert any("218.6" in t and "clipped" in t for t in annotations), annotations
+    assert figure.axes_texts["Accuracy"] == [], "an accuracy of 0.1 is never clipped"
+
+
+def test_an_ordinary_epoch_0_baseline_is_drawn_exactly_as_before(
+        tmp_path, captured_figures, monkeypatch) -> None:
+    """A baseline below the ceiling is untouched: same limits as with the clip disabled."""
+    baseline = {"loss": 2.5, "accuracy": 0.1}
+    clipped_run = _loss_panel(tmp_path, captured_figures, baseline)
+    monkeypatch.setattr(viz, "BASELINE_CLIP_FACTOR", 1e12)
+    unclipped_run = _loss_panel(tmp_path, captured_figures, baseline)
+
+    assert 2.5 < viz.BASELINE_CLIP_FACTOR
+    low, high = clipped_run.ylim["Loss"]
+    assert low < 2.5 < high, "the true baseline must be inside the axis"
+    for panel in ("Loss", "Accuracy"):
+        assert clipped_run.ylim[panel] == unclipped_run.ylim[panel], panel
+        assert clipped_run.axes_texts[panel] == unclipped_run.axes_texts[panel] == [], panel
+
+
+def _figure_from_counts(counts: np.ndarray):
+    """Labels whose confusion matrix is exactly ``counts`` (rows true, columns predicted)."""
+    y_true = np.repeat(np.arange(len(counts)), counts.sum(axis=1))
+    y_pred = np.concatenate([np.repeat(np.arange(len(counts)), row) for row in counts])
+    return y_true, y_pred
+
+
+def test_the_normalized_confusion_panel_hides_cells_at_or_below_half_a_percent(
+        tmp_path, captured_figures) -> None:
+    """``f"{0.003:.0%}"`` is ``"0%"``: a normalized panel that annotates every cell prints
+    a wall of them. Cells > 0.5% keep their text; 0.5% itself (5 of 1000) also formats
+    as "0%" (round half to even), so the floor is strict."""
+    counts = np.array([
+        [990, 5, 3, 2],     # 99%, then 0.5% (boundary), 0.3%, 0.2%: only 99% is annotated
+        [6, 940, 54, 0],    # 0.6% -> "1%", 94%, 5.4% -> "5%"
+        [0, 0, 100, 0],     # 100%
+        [0, 0, 2, 98],      # 2%, 98%
+    ])
+    y_true, y_pred = _figure_from_counts(counts)
+    cm = viz.plot_confusion_matrix(y_true, y_pred, list("abcd"), tmp_path / "cm.png")
+    np.testing.assert_array_equal(cm, counts)
+
+    (figure,) = captured_figures
+    normalized = figure.axes_texts["Row-normalized (recall per true class)"]
+    assert "0%" not in normalized, normalized
+    assert sorted(normalized) == sorted(["99%", "1%", "94%", "5%", "100%", "2%", "98%"]), normalized
+    assert len(figure.axes_texts["Counts"]) == 16, "the counts panel annotates every cell"
+    assert "0" in figure.axes_texts["Counts"]
 
 
 def test_dashboard_with_no_epochs_writes_nothing(tmp_path) -> None:
