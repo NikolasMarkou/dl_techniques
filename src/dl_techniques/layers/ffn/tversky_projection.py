@@ -676,8 +676,18 @@ class TverskyProjectionLayer(keras.layers.Layer):
         eps = keras.ops.cast(1e-6, y.dtype)
         above = y > eps
         # Clip the argument fed to log(expm1(...)) so the untaken branch
-        # never evaluates it outside its domain (y <= 0 there gives NaN with
-        # a runtime warning, even though `where` discards the result).
+        # never evaluates it outside its domain: for y <= 0, expm1(y) is
+        # negative and log(expm1(y)) is NaN, which `where` discards from the
+        # OUTPUT but which was still computed. MEASURED (an iteration-1
+        # adversarial review's own control): on this repo's TensorFlow
+        # backend this specific NaN raises no runtime warning either guarded
+        # or unguarded, and produces bit-identical values and gradients both
+        # ways -- so this guard is not observably load-bearing here. It is
+        # kept anyway because computing a transform outside its declared
+        # domain in a discarded branch is undefined behavior in general (a
+        # different backend, or a future TF version, is not guaranteed to
+        # stay silent about it), and the guard costs one extra `where` with
+        # no measured downside.
         y_safe = keras.ops.where(above, y, eps)
         return keras.ops.where(
             above,
@@ -695,7 +705,14 @@ class TverskyProjectionLayer(keras.layers.Layer):
         set measures. Free scalars can cross zero during training, at which
         point the layer starts rewarding distinctive features, is no longer
         the contrast model, and the interpretability that justifies its cost
-        is silently void. softplus makes that unreachable.
+        is silently void. softplus keeps them non-negative and makes exact
+        zero unreachable from a finite pre-activation -- but a pre-activation
+        below roughly -88 saturates ``softplus`` to exactly ``0.0`` in
+        float32 (a property of ``softplus`` itself, not of this layer),
+        which an extreme ``contrast_initializer`` (e.g. ``Constant(-100.0)``)
+        can reach directly from ``__init__``. That reduces to the same "no
+        longer the contrast model" state this note warns about, just
+        approached from below rather than crossed from above.
 
         :return: The three scalars, non-negative when
             ``non_negative_contrast``.

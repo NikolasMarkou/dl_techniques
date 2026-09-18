@@ -336,12 +336,16 @@ class CountingFFN(keras.layers.Layer):
         lowers to a ``tf.while_loop`` on the TensorFlow backend (see the
         D-010 anchor in ``_decay_accumulate`` for why this replaced a
         parallel ``associative_scan``). MEASURED: differentiating that
-        ``while_loop`` under GPU + XLA at Keras's default
-        ``jit_compile="auto"`` raises ``InvalidArgumentError: XLA
+        ``while_loop`` under XLA raises ``InvalidArgumentError: XLA
         compilation requires a fixed tensor list size`` during
-        ``model.fit()``. Pass ``jit_compile=False`` to ``model.compile()``
-        when training this layer on GPU; CPU training and non-XLA GPU
-        inference are unaffected.
+        ``model.fit()`` -- the trigger is XLA, not the device: this
+        reproduces identically with ``jit_compile=True`` on CPU-only
+        hardware (``CUDA_VISIBLE_DEVICES=""``), not just on GPU. Keras's
+        default ``jit_compile="auto"`` happens not to enable XLA on CPU,
+        which is why CPU training looks unaffected -- it is not that CPU is
+        actually safe from this. Pass ``jit_compile=False`` explicitly to
+        ``model.compile()`` on any device or backend where XLA might be
+        selected; non-XLA training and inference are unaffected.
     """
 
     def __init__(
@@ -681,11 +685,14 @@ class CountingFFN(keras.layers.Layer):
         # it, and verified to run under a compiled `model.fit(jit_compile=
         # False)` where the old code raised. CAVEAT (found by an iteration-1
         # adversarial review, not by this fix's own original verification):
-        # this sequential scan still does NOT run under GPU + XLA at Keras's
-        # default `jit_compile="auto"` -- differentiating the `tf.while_loop`
-        # it lowers to raises a SEPARATE, unrelated `InvalidArgumentError:
-        # XLA compilation requires a fixed tensor list size`. Callers training
-        # this layer on GPU must pass `jit_compile=False`; see the class
+        # this sequential scan still does NOT run under XLA -- differentiating
+        # the `tf.while_loop` it lowers to raises a SEPARATE, unrelated
+        # `InvalidArgumentError: XLA compilation requires a fixed tensor list
+        # size`. This is triggered by XLA, NOT by the device: a second
+        # adversarial pass MEASURED the identical failure with
+        # `jit_compile=True` on CPU-only hardware, refuting an earlier
+        # GPU-only wording here. Callers must pass `jit_compile=False`
+        # explicitly wherever XLA might be selected; see the class
         # docstring's own Note on this. See decisions.md D-010 for the full
         # derivation.
         combined_decay = keras.ops.moveaxis(

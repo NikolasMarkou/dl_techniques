@@ -377,6 +377,12 @@ class SwiGLUFFN(keras.layers.Layer):
         # dropout_rate=1.0 passed this check but crashed keras.layers.Dropout.call()
         # under training=True. Do not widen this back to closed [0.0, 1.0]. See decisions.md.
         if not 0.0 <= dropout_rate < 1.0:
+            # Message text kept as "[0, 1]" (closed) although the predicate
+            # above is half-open -- deliberate, not a fresh error: widening
+            # the text to "[0, 1)" here would also require updating
+            # test_swiglu_ffn.py's match= regex, and the D-006 fix's own
+            # scope was the numeric bound, not this pre-existing wording
+            # mismatch. Tracked, not silently inconsistent.
             raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
 
     def _calculate_hidden_dim(self) -> int:

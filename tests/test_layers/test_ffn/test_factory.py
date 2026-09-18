@@ -338,7 +338,20 @@ class TestFFNFactory:
         # D-015: dropout_rate == 1.0 must be rejected at the factory's own
         # validate_ffn_config gate, before ever reaching a class constructor
         # -- keras.layers.Dropout itself rejects rate==1.0. Guards D-015.
-        with pytest.raises(ValueError):
+        #
+        # match= is required, not decorative: MLPBlock's OWN constructor
+        # independently rejects dropout_rate=1.0 too ("must be in [0.0,
+        # 1.0)"), and create_ffn_layer wraps every constructor ValueError
+        # into the same generic ValueError shape -- a bare pytest.raises
+        # here cannot distinguish "the factory's own gate caught it" from
+        # "the factory's gate was silently reverted and the class caught it
+        # instead", which would make this guard vacuous against exactly the
+        # regression it exists to catch (measured: a bare version of this
+        # assertion stays green even with validate_ffn_config's own
+        # dropout_rate check disabled). validate_ffn_config's message
+        # survives verbatim in create_ffn_layer's wrapped "Original error:"
+        # tail, so matching it here pins the FACTORY's predicate specifically.
+        with pytest.raises(ValueError, match=r"dropout_rate must be between 0\.0 and 1\.0"):
             create_ffn_layer('mlp', hidden_dim=512, output_dim=256, dropout_rate=1.0)
 
         # Test zero dimensions
