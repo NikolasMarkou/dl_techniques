@@ -531,11 +531,11 @@ def main(argv=None) -> int:
                 best_val_accuracy = val_accuracy
                 model.save(best_checkpoint_path(str(run_dir)))
                 logger.info(
-                    f"Epoch {epoch}: new best val_accuracy={val_accuracy:.4f} "
+                    f"Epoch {epoch + 1}: new best val_accuracy={val_accuracy:.4f} "
                     f"— saved {best_checkpoint_path(str(run_dir))}"
                 )
 
-            csv_writer.writerow([epoch, loss, train_accuracy, val_accuracy])
+            csv_writer.writerow([epoch + 1, loss, train_accuracy, val_accuracy])
             csv_file.flush()
 
             history["epoch"].append(epoch)
@@ -564,7 +564,7 @@ def main(argv=None) -> int:
                     )
 
             logger.info(
-                f"Epoch {epoch}/{args.epochs - 1} — loss={loss:.4f}, "
+                f"Epoch {epoch + 1}/{args.epochs} — loss={loss:.4f}, "
                 f"train_accuracy={train_accuracy:.4f}, val_accuracy={val_accuracy:.4f}"
             )
 
