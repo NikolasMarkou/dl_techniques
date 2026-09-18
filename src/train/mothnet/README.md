@@ -248,6 +248,16 @@ exactly; passing a non-positive value directly to `MothNet(readout_weight_bound=
 (library use, not via this CLI) raises `ValueError` instead, since that path has
 no ergonomic-sentinel convention to honor.
 
+**`B = 2.7858` was derived for numerical stability, not shown to be
+accuracy-optimal (`decisions.md` D-008).** An adversarial review's post-hoc
+clipping of an already-trained checkpoint (no retraining) found accuracy
+climbing substantially higher at a bound roughly 30-50x tighter than the
+shipped default — but that is inference-time clipping of a finished model, a
+different regime from training with a tight bound engaged from epoch 1 (which
+could rail the tensor early and hurt learning instead of helping). This is
+open, disclosed follow-up work — a real training-time bound sweep — not yet
+done.
+
 **`mb_units` default is now 16000, backed by a measured A/B comparison, not a guess.**
 The MothNet model's own README (`src/dl_techniques/models/general_purpose/mothnet/
 README.md` §7/§12) recommends `mb_units` be 20-50x the input dimension (784 for

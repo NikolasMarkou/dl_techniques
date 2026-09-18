@@ -278,6 +278,15 @@ The `MothNet` model is configured via its constructor. Key parameters include:
 > does not exist — it means the ~0.561 figure was not a clean measurement of it.
 > Measured at one seed, one run, one dataset scale; reported as measured, not
 > extrapolated further.
+>
+> **`B = 2.7858` is a numerical-stability bound, not shown to be
+> accuracy-optimal (`decisions.md` D-008).** Post-hoc clipping of an
+> already-trained checkpoint (no retraining) found accuracy climbing
+> substantially higher at a bound roughly 30-50x tighter — but that measures
+> inference-time clipping of a finished model, not training with a tight
+> bound engaged from epoch 1, which could rail the tensor early and hurt
+> learning instead of helping. This is open, disclosed follow-up work (a
+> real training-time bound sweep), not yet done.
 
 ---
 

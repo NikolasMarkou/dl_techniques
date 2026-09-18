@@ -40,7 +40,14 @@ constraint confirmed actively engaging (`max(|readout_weights|)` pinned
 exactly at the configured bound). This was measured at one seed, one run,
 one dataset scale, not established as a universal guarantee; see
 `plans/plan-2026-09-18T110506-e42a44c7/decisions.md` D-007 for the full
-measurement and the likely mechanism.
+measurement and the likely mechanism. The shipped bound itself was derived
+for numerical stability, not shown to be accuracy-optimal: post-hoc
+clipping of an already-trained checkpoint found accuracy climbing
+substantially higher at a bound roughly 30-50x tighter, but that is
+inference-time clipping of a finished model, a different regime from
+training with a tight bound engaged from epoch 1 (which could rail the
+tensor early and hurt learning instead of helping) — a real training-time
+sweep is open, disclosed follow-up work, not yet done (D-008).
 
 References:
     - Delahunt & Kutz, 2019. Putting a bug in ML: The moth olfactory network learns
@@ -148,7 +155,15 @@ class MothNet(keras.Model):
         matched epoch, +11.2 percentage points), not merely a stabilized
         loss curve — measured at one seed/run/dataset scale, not a universal
         guarantee; see
-        ``plans/plan-2026-09-18T110506-e42a44c7/decisions.md`` D-007.
+        ``plans/plan-2026-09-18T110506-e42a44c7/decisions.md`` D-007. The
+        shipped default was derived for numerical stability, not shown to be
+        accuracy-optimal: post-hoc clipping of an already-trained checkpoint
+        found accuracy climbing substantially higher at a bound roughly
+        30-50x tighter, but that is inference-time clipping of a finished
+        model, a different regime from training with a tight bound engaged
+        from epoch 1 (which could rail the tensor early and hurt learning
+        instead of helping) — a real training-time sweep is open, disclosed
+        follow-up work, not yet done (D-008).
     :type readout_weight_bound: Optional[float]
     :param kwargs: Additional keyword arguments for the base ``keras.Model``.
 

@@ -141,6 +141,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "epoch, +11.2 percentage points), not just a stabilized loss curve — "
             "measured at one seed/run/dataset scale, not a universal guarantee "
             "(see README's corrected accuracy-ceiling note and decisions.md D-007). "
+            "This default was derived for numerical stability, not shown to be "
+            "accuracy-optimal: post-hoc clipping of an already-trained checkpoint "
+            "found accuracy climbing substantially higher at a bound roughly "
+            "30-50x tighter, but that is inference-time clipping of a finished "
+            "model, a different regime from training with a tight bound engaged "
+            "from epoch 1 -- a real training-time sweep is open, disclosed "
+            "follow-up work, not yet done (decisions.md D-008). "
             "Pass a value <= 0 to disable and reproduce the original unbounded "
             "behavior."
         ),
