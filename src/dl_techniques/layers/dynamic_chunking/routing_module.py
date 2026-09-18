@@ -64,7 +64,7 @@ class RoutingModule(keras.layers.Layer):
          │ q_proj(h[:, :-1]) │     │ k_proj(h[:, 1:])  │
          │ identity init     │     │ identity init     │
          └─────────┬─────────┘     └─────────┬─────────┘
-                   │                         │
+                   ▼                         ▼
          ┌───────────────────┐     ┌───────────────────┐
          │ L2 normalize      │     │ L2 normalize      │
          └─────────┬─────────┘     └─────────┬─────────┘
