@@ -319,6 +319,68 @@ def test_render_mb_sparsity_handles_mb_units_not_divisible_by_bin_count(
     assert out_path.stat().st_size > 0
 
 
+def test_render_mb_sparsity_states_fixed_sparsity_once_in_title_and_plain_digit_yticks(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Step 6.1 completion-fix (`plan-2026-09-18T080513-debe8b11` D-009,
+    adversarial-review finding 5, WARNING): the per-class sparsity annotation
+    was ARCHITECTURALLY CONSTANT — every class read the same fixed top-k
+    fraction, since `MushroomBodyLayer` enforces a fixed top-k regardless of
+    class — so repeating it on all ten y-ticks was misleading (reads like
+    broken output). The fixed value must now appear exactly ONCE, in the
+    title, and each y-tick label must be a bare class digit with no repeated
+    percentage.
+
+    Captures the real ``Axes`` object ``render_mb_sparsity`` builds by
+    wrapping ``matplotlib.pyplot.subplots`` (record-then-call-through, the
+    same wrap-and-record shape this module's other tests use) rather than
+    mocking rendering away — the real heatmap still gets drawn and saved;
+    only the returned ``(fig, ax)`` pair is additionally stashed here so the
+    test can inspect the title/tick text AFTER the function returns
+    (``plt.close(fig)`` inside the function only detaches it from
+    pyplot's global figure registry, it does not invalidate the Python
+    object this test still holds a reference to).
+    """
+    args = train_mothnet.parse_arguments(["--mb-units", "200", "--al-units", "64"])
+    model = train_mothnet.build_model(args, input_dim=64)
+
+    rng = np.random.default_rng(3)
+    class_indices = np.repeat(np.arange(10), 3)
+    x_sample = rng.random((len(class_indices), 64)).astype("float32")
+    y_sample = _one_hot(class_indices, num_classes=10)
+
+    captured_axes: list = []
+    _real_subplots = train_mothnet.plt.subplots
+
+    def _capturing_subplots(*subplot_args, **subplot_kwargs):
+        fig, ax = _real_subplots(*subplot_args, **subplot_kwargs)
+        captured_axes.append(ax)
+        return fig, ax
+
+    monkeypatch.setattr(train_mothnet.plt, "subplots", _capturing_subplots)
+
+    out_path = tmp_path / "epoch_004_mb_sparsity.png"
+    train_mothnet.render_mb_sparsity(model, x_sample, y_sample, out_path)
+
+    assert len(captured_axes) == 1
+    ax = captured_axes[0]
+
+    title = ax.get_title()
+    expected_pct = f"{model.mb_sparsity * 100:.1f}%"
+    assert title.count(expected_pct) == 1, (
+        "expected the fixed sparsity value to appear exactly once in the "
+        f"title, got title={title!r}"
+    )
+
+    ytick_labels = [label.get_text() for label in ax.get_yticklabels()]
+    assert ytick_labels == [str(c) for c in range(10)], (
+        "y-tick labels must be plain class digits with no per-row "
+        f"percentage annotation, got {ytick_labels}"
+    )
+    for label in ytick_labels:
+        assert "%" not in label, f"y-tick label still carries a percentage: {label!r}"
+
+
 def test_render_mb_sparsity_no_longer_calls_plt_spy() -> None:
     """Mechanical regression guard for plan.md Success Criterion 6: the old
     binary presence/absence scatter must be gone, not just superseded.

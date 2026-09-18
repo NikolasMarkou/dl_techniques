@@ -560,13 +560,16 @@ def render_mb_sparsity(
     Groups `x_sample` by its true class (`argmax(y_sample)`), averages each class's
     MB codes into one row, column-bins the result to at most 200 bins for legibility
     at `mb_units=16000`, and plots the binned `(10, num_bins)` matrix as a heatmap
-    with a colorbar. Each row is also annotated with that class's mean sparsity
-    fraction. A pure function — no training-loop state beyond
-    `model`/`x_sample`/`y_sample`/`out_path`.
+    with a colorbar. Y-tick labels are plain class digits (`"0"`..`"9"`); the MB
+    sparsity fraction — architecturally CONSTANT across classes, since
+    `MushroomBodyLayer` enforces a fixed top-k regardless of class
+    (`decisions.md` D-009) — is stated exactly ONCE, in the plot title, read
+    directly off `model.mb_sparsity` rather than repeated per class. A pure
+    function — no training-loop state beyond `model`/`x_sample`/`y_sample`/
+    `out_path`.
 
     A class absent from `x_sample` (possible at a small `--num-val-samples`) gets an
-    all-zero activation row and a `0.0` sparsity fraction rather than raising or
-    producing NaN.
+    all-zero activation row rather than raising or producing NaN.
 
     Called periodically by `main()`'s training loop (every `args.viz_freq` epochs,
     `<= 0` disables), wrapped in `try/except Exception: logger.warning(...)` at the
@@ -588,26 +591,36 @@ def render_mb_sparsity(
     num_classes = y_sample.shape[1]
 
     class_matrix = np.zeros((num_classes, mb_units), dtype=np.float32)
-    sparsity_by_class = np.zeros(num_classes, dtype=np.float32)
     for c in range(num_classes):
         class_mask = true_classes == c
         if np.any(class_mask):
-            class_codes = mb_codes[class_mask]
-            class_matrix[c] = class_codes.mean(axis=0)
-            sparsity_by_class[c] = np.mean((class_codes > 0).mean(axis=-1))
+            class_matrix[c] = mb_codes[class_mask].mean(axis=0)
 
     binned = _bin_activation_columns(class_matrix, max_bins=200)
     num_bins = binned.shape[1]
 
+    # DECISION plan-2026-09-18T080513-debe8b11/D-009: the MB sparsity fraction
+    # is stated ONCE, in the title, read directly off `model.mb_sparsity` —
+    # NOT re-derived per class from the data (e.g. `sparsity_by_class[c]`,
+    # the prior approach). `MushroomBodyLayer` enforces a FIXED top-k
+    # regardless of class, so a per-class re-derivation would, at best,
+    # repeat the same number ten times (the defect this fixes — review
+    # finding 5) and, at worst, silently mask a genuine future regression
+    # where per-class sparsity actually started to vary, by averaging it
+    # away into one indistinguishable-looking number. Do not reintroduce a
+    # per-row sparsity annotation without re-reading decisions.md D-009.
     fig, ax = plt.subplots(figsize=(10, 5))
     im = ax.imshow(binned, aspect="auto", cmap="viridis")
     fig.colorbar(im, ax=ax, label="Mean MB activation")
     ax.set_yticks(range(num_classes))
-    ax.set_yticklabels(
-        [f"{c} ({sparsity_by_class[c] * 100:.1f}% active)" for c in range(num_classes)]
-    )
+    ax.set_yticklabels([str(c) for c in range(num_classes)])
+    ax.set_ylabel("Class")
     ax.set_xlabel(f"MB neuron bin index (~{mb_units // num_bins} units/bin)")
-    ax.set_title("Mushroom Body Activation by Class")
+    ax.set_title(
+        "Mushroom Body Activation by Class\n"
+        f"(fixed sparsity: {model.mb_sparsity * 100:.1f}% active per --mb-sparsity, "
+        "same for every class by architecture)"
+    )
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
