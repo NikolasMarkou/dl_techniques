@@ -143,7 +143,7 @@ class SwiGLUFFN(keras.layers.Layer):
         Ignored when ``hidden_dim`` is given.
     :type ffn_multiple_of: int
     :param dropout_rate: Dropout rate applied to the output, after
-        ``down_proj``, in ``[0.0, 1.0]``. At 0.0 no Dropout layer is created.
+        ``down_proj``, in ``[0.0, 1.0)``. At 0.0 no Dropout layer is created.
         Defaults to 0.0.
     :type dropout_rate: float
     :param use_bias: Whether the three projections carry a bias. Defaults to
@@ -202,7 +202,7 @@ class SwiGLUFFN(keras.layers.Layer):
 
     :raises ValueError: If ``output_dim``, ``ffn_expansion_factor`` or
         ``ffn_multiple_of`` is not positive, if ``dropout_rate`` is outside
-        ``[0.0, 1.0]``, or if ``hidden_dim`` is given and not positive.
+        ``[0.0, 1.0)``, or if ``hidden_dim`` is given and not positive.
     :raises ValueError: If a sub-layer constructor fails. The constructor
         catches any exception from sub-layer creation and re-raises it as
         ``ValueError``.
@@ -251,7 +251,7 @@ class SwiGLUFFN(keras.layers.Layer):
 
         :raises ValueError: If ``output_dim``, ``ffn_expansion_factor`` or
             ``ffn_multiple_of`` is not positive, if ``dropout_rate`` is outside
-            ``[0.0, 1.0]``, if ``hidden_dim`` is given and not positive, or if
+            ``[0.0, 1.0)``, if ``hidden_dim`` is given and not positive, or if
             a sub-layer constructor fails.
         """
         super().__init__(**kwargs)
@@ -361,7 +361,7 @@ class SwiGLUFFN(keras.layers.Layer):
         :type ffn_expansion_factor: int
         :param ffn_multiple_of: Rounding multiple. Must be positive.
         :type ffn_multiple_of: int
-        :param dropout_rate: Dropout rate. Must be in ``[0.0, 1.0]``.
+        :param dropout_rate: Dropout rate. Must be in ``[0.0, 1.0)``.
         :type dropout_rate: float
         :return: ``None``. The function is called for its exceptions.
         :rtype: None
@@ -373,7 +373,10 @@ class SwiGLUFFN(keras.layers.Layer):
             raise ValueError(f"ffn_expansion_factor must be positive, got {ffn_expansion_factor}")
         if ffn_multiple_of <= 0:
             raise ValueError(f"ffn_multiple_of must be positive, got {ffn_multiple_of}")
-        if not 0.0 <= dropout_rate <= 1.0:
+        # DECISION plan-2026-09-18-1f3c0ce8/D-006: half-open upper bound --
+        # dropout_rate=1.0 passed this check but crashed keras.layers.Dropout.call()
+        # under training=True. Do not widen this back to closed [0.0, 1.0]. See decisions.md.
+        if not 0.0 <= dropout_rate < 1.0:
             raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
 
     def _calculate_hidden_dim(self) -> int:
@@ -423,13 +426,21 @@ class SwiGLUFFN(keras.layers.Layer):
         self.gate_proj.build(input_shape)
         self.up_proj.build(input_shape)
 
-        # down_proj and dropout see (..., hidden_dim).
+        # down_proj sees (..., hidden_dim).
         down_input_shape = list(input_shape)
         down_input_shape[-1] = self.hidden_dim
         self.down_proj.build(tuple(down_input_shape))
 
+        # DECISION plan-2026-09-18-1f3c0ce8/D-006: dropout sits AFTER
+        # down_proj in call() (it wraps `output`, not `hidden`), so it sees
+        # (..., output_dim), not (..., hidden_dim) -- unlike glu_ffn.py's
+        # sibling build(), where dropout precedes the final projection and
+        # (..., hidden_dim) is correct there. Copying that sibling shape here
+        # would silently re-mismatch this call() order. See decisions.md.
         if self.dropout is not None:
-            self.dropout.build(tuple(down_input_shape))
+            output_shape = list(input_shape)
+            output_shape[-1] = self.output_dim
+            self.dropout.build(tuple(output_shape))
 
         # Keras requires the parent build() call last.
         super().build(input_shape)
