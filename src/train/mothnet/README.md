@@ -148,8 +148,11 @@ test_al_features_failure_is_independently_fail_soft_from_confusion_matrix`).
   result to `min(mb_units, 200)` bins (`np.array_split`, so an `mb_units` not
   evenly divisible by the bin count never raises). Plots the binned
   `(10, num_bins)` matrix via `imshow` with a colorbar labeled "Mean MB
-  activation"; each class's y-tick is annotated with its mean sparsity
-  fraction (e.g. `"3 (9.8% active)"`). A class absent from the sample gets an
+  activation"; y-ticks are plain class digits (`"0"`..`"9"`) and the MB
+  sparsity fraction — architecturally constant across classes, since
+  `MushroomBodyLayer` enforces a fixed top-k regardless of class — is stated
+  exactly once, in the plot title, read directly off `model.mb_sparsity`
+  rather than repeated per class. A class absent from the sample gets an
   all-zero row rather than raising or producing NaN.
 - **`epoch_{NNN}_al_mb_activations_distribution.png`** and
   **`epoch_{NNN}_al_mb_activations_heatmap.png`** — rendered via the repo's
