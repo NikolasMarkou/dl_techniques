@@ -16,7 +16,6 @@ References:
 
 import keras
 from typing import Callable, Optional, Union, Any, Dict, Tuple
-from keras import layers, initializers, regularizers, activations
 
 # ---------------------------------------------------------------------
 # local imports
@@ -148,7 +147,7 @@ class MixerBlock(keras.layers.Layer):
     :param activation: Activation used inside both mixing MLPs. A Keras name
         ('gelu', 'relu', ...) or a callable. Defaults to 'gelu'.
     :type activation: Union[str, Callable]
-    :param dropout_rate: Rate for both dropouts, in ``[0, 1]``. The dropouts
+    :param dropout_rate: Rate for both dropouts, in ``[0, 1)``. The dropouts
         sit after the activation in each MLP. Defaults to 0.0.
     :type dropout_rate: float
     :param use_bias: Whether the four Dense layers carry a bias. Defaults to
@@ -157,16 +156,16 @@ class MixerBlock(keras.layers.Layer):
     :param kernel_initializer: Initializer for all four Dense kernels. Each
         of the four receives its own clone of it. Defaults to
         'glorot_uniform'.
-    :type kernel_initializer: Union[str, initializers.Initializer]
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for all four Dense biases, cloned
         per layer in the same way. Defaults to 'zeros'.
-    :type bias_initializer: Union[str, initializers.Initializer]
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for all Dense kernels. Defaults to
         None.
-    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Regularizer for all Dense biases. Defaults to
         None.
-    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
         ``dtype``, and so on).
     :type kwargs: Any
@@ -184,14 +183,14 @@ class MixerBlock(keras.layers.Layer):
     :ivar kernel_initializer: The resolved kernel initializer. It is the
         source the four per-layer clones are rebuilt from, and is not handed
         to any Dense layer itself.
-    :vartype kernel_initializer: initializers.Initializer
+    :vartype kernel_initializer: keras.initializers.Initializer
     :ivar bias_initializer: The resolved bias initializer, cloned per layer
         in the same way.
-    :vartype bias_initializer: initializers.Initializer
+    :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
-    :vartype kernel_regularizer: Optional[regularizers.Regularizer]
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
-    :vartype bias_regularizer: Optional[regularizers.Regularizer]
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar _dense_kwargs: The keyword dict handed to every Dense layer. Kept
         so ``build()`` can construct the two back-projections the same way
         ``__init__`` constructed the two hidden projections.
@@ -217,7 +216,7 @@ class MixerBlock(keras.layers.Layer):
 
     :raises ValueError: If ``tokens_mlp_dim`` or ``channels_mlp_dim`` is not
         a positive int.
-    :raises ValueError: If ``dropout_rate`` is outside ``[0, 1]``.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0, 1)``.
     :raises ValueError: At build time, if the input is not rank 3, or if
         ``S`` or ``C`` is ``None``.
 
@@ -255,10 +254,10 @@ class MixerBlock(keras.layers.Layer):
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'gelu',
         dropout_rate: float = 0.0,
         use_bias: bool = True,
-        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
         """Validate the configuration and create the sub-layers.
@@ -282,25 +281,25 @@ class MixerBlock(keras.layers.Layer):
         :type channels_mlp_dim: int
         :param activation: Activation used inside both mixing MLPs.
         :type activation: Union[str, Callable]
-        :param dropout_rate: Rate for both dropouts. Must be in ``[0, 1]``.
+        :param dropout_rate: Rate for both dropouts. Must be in ``[0, 1)``.
         :type dropout_rate: float
         :param use_bias: Whether the four Dense layers carry a bias.
         :type use_bias: bool
         :param kernel_initializer: Initializer for all four kernels, cloned
             once per kernel.
-        :type kernel_initializer: Union[str, initializers.Initializer]
+        :type kernel_initializer: Union[str, keras.initializers.Initializer]
         :param bias_initializer: Initializer for all four biases, cloned once
             per bias.
-        :type bias_initializer: Union[str, initializers.Initializer]
+        :type bias_initializer: Union[str, keras.initializers.Initializer]
         :param kernel_regularizer: Regularizer for all kernels, or ``None``.
-        :type kernel_regularizer: Optional[regularizers.Regularizer]
+        :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
         :param bias_regularizer: Regularizer for all biases, or ``None``.
-        :type bias_regularizer: Optional[regularizers.Regularizer]
+        :type bias_regularizer: Optional[keras.regularizers.Regularizer]
         :param kwargs: Extra arguments for ``keras.layers.Layer``.
         :type kwargs: Any
 
         :raises ValueError: If ``tokens_mlp_dim`` or ``channels_mlp_dim`` is
-            not a positive int, or if ``dropout_rate`` is outside ``[0, 1]``.
+            not a positive int, or if ``dropout_rate`` is outside ``[0, 1)``.
         """
         super().__init__(**kwargs)
 
@@ -308,18 +307,22 @@ class MixerBlock(keras.layers.Layer):
             raise ValueError(f"tokens_mlp_dim must be a positive integer, got {tokens_mlp_dim}")
         if not isinstance(channels_mlp_dim, int) or channels_mlp_dim <= 0:
             raise ValueError(f"channels_mlp_dim must be a positive integer, got {channels_mlp_dim}")
-        if not isinstance(dropout_rate, (int, float)) or not (0.0 <= dropout_rate <= 1.0):
+        # DECISION plan-2026-09-18-1f3c0ce8/D-012: half-open, not closed -- do
+        # not re-widen to `<= 1.0`. `dropout_rate=1.0` passes this check but
+        # keras.layers.Dropout.call() rejects rate==1.0 under training=True
+        # with "rate must be ... in the range [0, 1)"; see decisions.md D-012.
+        if not isinstance(dropout_rate, (int, float)) or not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
         self.tokens_mlp_dim = tokens_mlp_dim
         self.channels_mlp_dim = channels_mlp_dim
-        self.activation = activations.get(activation)
+        self.activation = keras.activations.get(activation)
         self.dropout_rate = float(dropout_rate)
         self.use_bias = bool(use_bias)
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # The stashed dict carries no initializer. Each of the four Dense
         # layers takes its own clone instead; see glu_ffn.py decisions.md
@@ -332,11 +335,11 @@ class MixerBlock(keras.layers.Layer):
         self._dense_kwargs = dense_kwargs
 
         # Pre-LN for each residual sub-block.
-        self.token_norm = layers.LayerNormalization(name="token_norm")
-        self.channel_norm = layers.LayerNormalization(name="channel_norm")
+        self.token_norm = keras.layers.LayerNormalization(name="token_norm")
+        self.channel_norm = keras.layers.LayerNormalization(name="channel_norm")
 
         # Token-mixing MLP hidden projection (units = tokens_mlp_dim, known now).
-        self.token_mlp_hidden = layers.Dense(
+        self.token_mlp_hidden = keras.layers.Dense(
             self.tokens_mlp_dim,
             activation=None,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -345,7 +348,7 @@ class MixerBlock(keras.layers.Layer):
             **dense_kwargs
         )
         # Channel-mixing MLP hidden projection (units = channels_mlp_dim, known now).
-        self.channel_mlp_hidden = layers.Dense(
+        self.channel_mlp_hidden = keras.layers.Dense(
             self.channels_mlp_dim,
             activation=None,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -355,8 +358,8 @@ class MixerBlock(keras.layers.Layer):
         )
 
         # Dropout (rate known now). One per mixing MLP for clean serialization.
-        self.token_dropout = layers.Dropout(rate=self.dropout_rate, name="token_dropout")
-        self.channel_dropout = layers.Dropout(rate=self.dropout_rate, name="channel_dropout")
+        self.token_dropout = keras.layers.Dropout(rate=self.dropout_rate, name="token_dropout")
+        self.channel_dropout = keras.layers.Dropout(rate=self.dropout_rate, name="channel_dropout")
 
         # units = S (tokens) and units = C (channels). Neither is known yet.
         self.token_mlp_out = None
@@ -405,7 +408,7 @@ class MixerBlock(keras.layers.Layer):
             )
 
         # Create the dimension-dependent back-projections now that S, C are known.
-        self.token_mlp_out = layers.Dense(
+        self.token_mlp_out = keras.layers.Dense(
             seq_len,
             activation=None,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -413,7 +416,7 @@ class MixerBlock(keras.layers.Layer):
             name="token_mlp_out",
             **self._dense_kwargs
         )
-        self.channel_mlp_out = layers.Dense(
+        self.channel_mlp_out = keras.layers.Dense(
             channels,
             activation=None,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -512,13 +515,13 @@ class MixerBlock(keras.layers.Layer):
         config.update({
             'tokens_mlp_dim': self.tokens_mlp_dim,
             'channels_mlp_dim': self.channels_mlp_dim,
-            'activation': activations.serialize(self.activation),
+            'activation': keras.activations.serialize(self.activation),
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
