@@ -29,11 +29,18 @@ through `extract_mb_features`.
 The additive Hebbian rule above has no decay or bound of its own, so
 `readout_weights` grows unboundedly over long training runs; the optional
 `readout_weight_bound` constructor parameter clips it symmetrically after
-every update. That fixes the weight-growth instability only — it does not
-touch the antennal lobe or mushroom body, both of which stay frozen at
+every update. That fixes the weight-growth instability directly — it does
+not touch the antennal lobe or mushroom body, both of which stay frozen at
 random initialization for the entire run (see `extract_mb_features`/
-`extract_al_features`), so it is not expected to move the model's
-accuracy ceiling.
+`extract_al_features`). **Corrected understanding**: a real 40-epoch
+verification run measured this bound also producing a substantial
+`val_accuracy` improvement, not just a stabilized loss curve — 0.6736 vs.
+0.5614 at matched epoch (a +11.2 percentage-point gain), with the
+constraint confirmed actively engaging (`max(|readout_weights|)` pinned
+exactly at the configured bound). This was measured at one seed, one run,
+one dataset scale, not established as a universal guarantee; see
+`plans/plan-2026-09-18T110506-e42a44c7/decisions.md` D-007 for the full
+measurement and the likely mechanism.
 
 References:
     - Delahunt & Kutz, 2019. Putting a bug in ML: The moth olfactory network learns
@@ -134,9 +141,14 @@ class MothNet(keras.Model):
         max_value=readout_weight_bound)``. Defaults to ``None``, which
         reproduces today's unbounded-growth behavior exactly. This fixes a
         real weight-growth instability in the additive Hebbian update rule;
-        it does not address the model's separate, architectural accuracy
-        ceiling, since the antennal lobe and mushroom body are both frozen
-        at random initialization for the whole run.
+        it does not touch the antennal lobe or mushroom body, which stay
+        frozen at random initialization for the whole run either way. A real
+        40-epoch verification run measured this bound also producing a
+        substantial ``val_accuracy`` improvement (0.6736 vs. 0.5614 at a
+        matched epoch, +11.2 percentage points), not merely a stabilized
+        loss curve — measured at one seed/run/dataset scale, not a universal
+        guarantee; see
+        ``plans/plan-2026-09-18T110506-e42a44c7/decisions.md`` D-007.
     :type readout_weight_bound: Optional[float]
     :param kwargs: Additional keyword arguments for the base ``keras.Model``.
 

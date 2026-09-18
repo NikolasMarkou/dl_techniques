@@ -135,10 +135,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "Hebbian update (default: 2.7858, empirically derived from a fresh "
             "short reproduction and a killed 100-epoch run's own checkpoint — "
             "see decisions.md D-005). Fixes an unbounded weight-growth bug that "
-            "otherwise makes the reported loss diverge past its epoch~7 minimum; "
-            "val_accuracy is essentially unaffected either way (see README's "
-            "architectural-ceiling note). Pass a value <= 0 to disable and "
-            "reproduce the original unbounded behavior."
+            "otherwise makes the reported loss diverge past its epoch~7 minimum. "
+            "A real 40-epoch verification run measured this also producing a "
+            "substantial val_accuracy improvement (0.6736 vs. 0.5614 at a matched "
+            "epoch, +11.2 percentage points), not just a stabilized loss curve — "
+            "measured at one seed/run/dataset scale, not a universal guarantee "
+            "(see README's corrected accuracy-ceiling note and decisions.md D-007). "
+            "Pass a value <= 0 to disable and reproduce the original unbounded "
+            "behavior."
         ),
     )
     parser.add_argument(
