@@ -509,3 +509,77 @@ def test_al_features_failure_is_independently_fail_soft_from_confusion_matrix(
     # rather than the confusion-matrix assertion above passing by coincidence.
     assert not (viz_dir / "epoch_002_al_mb_activations_distribution.png").exists()
     assert not (viz_dir / "epoch_002_al_mb_activations_heatmap.png").exists()
+
+
+@pytest.mark.integration
+def test_heatmap_activation_call_receives_column_binned_mushroom_body_data(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Step 5.1 completion-fix (`plan-2026-09-18T080513-debe8b11` D-008,
+    adversarial-review finding 1, CRITICAL): the HEATMAP
+    ``viz_manager.visualize(...)`` call must receive a ``mushroom_body``
+    activations array with <=200 columns, not the raw ``(N, mb_units)``
+    array — ``ActivationVisualization``'s heatmap branch (``data_nn.py``)
+    does ``ax.imshow(activations[:100])`` with no column-binning of its own,
+    so an unbinned ``mb_units=16000`` array renders as a solid black
+    rectangle. The DISTRIBUTION call must still receive the UNBINNED array
+    (histograms have no column-count legibility problem, so only the
+    heatmap-specific call is binned).
+
+    Wraps ``VisualizationManager.visualize`` (record-then-call-through, the
+    same wrap-and-record shape this module's other tests use for
+    ``build_model``/``load_mnist_data``) rather than mocking it away, so the
+    real plugin still runs and a genuinely broken heatmap call would still
+    surface as an exception here, not just as a shape mismatch.
+
+    Run at ``--mb-units 16000`` (the shipped default) — not a small
+    fixture value — since the CRITICAL this proof targets specifically
+    concerns the default-scale render.
+    """
+    captured_calls: list = []
+    _real_visualize = train_mothnet.VisualizationManager.visualize
+
+    def _capturing_visualize(
+        self, data, plugin_name=None, save=True, show=False, filename=None, **kwargs
+    ):
+        captured_calls.append((plugin_name, kwargs.get("plot_type"), data))
+        return _real_visualize(
+            self, data, plugin_name=plugin_name, save=save, show=show,
+            filename=filename, **kwargs,
+        )
+
+    monkeypatch.setattr(
+        train_mothnet.VisualizationManager, "visualize", _capturing_visualize
+    )
+
+    argv = [
+        "--mb-units", "16000",
+        "--al-units", "64",
+        "--epochs", "1",
+        "--num-train-samples", "100",
+        "--num-val-samples", "50",
+        "--batch-size", "32",
+        "--viz-freq", "1",
+        "--output-dir", str(tmp_path),
+        "--experiment-name", "mothnet_heatmap_binning_check",
+    ]
+    exit_code = train_mothnet.main(argv)
+    assert exit_code == 0
+
+    heatmap_calls = [call for call in captured_calls if call[1] == "heatmap"]
+    assert len(heatmap_calls) == 1, f"expected exactly 1 heatmap call, got {captured_calls}"
+    _, _, heatmap_data = heatmap_calls[0]
+    assert heatmap_data.activations["mushroom_body"].shape[1] <= 200, (
+        "heatmap call's mushroom_body activations were not column-binned — "
+        f"shape={heatmap_data.activations['mushroom_body'].shape}"
+    )
+
+    distribution_calls = [call for call in captured_calls if call[1] == "distribution"]
+    assert len(distribution_calls) == 1, (
+        f"expected exactly 1 distribution call, got {captured_calls}"
+    )
+    _, _, distribution_data = distribution_calls[0]
+    assert distribution_data.activations["mushroom_body"].shape[1] == 16000, (
+        "distribution call's mushroom_body activations must stay UNBINNED "
+        f"(raw mb_units) — shape={distribution_data.activations['mushroom_body'].shape}"
+    )

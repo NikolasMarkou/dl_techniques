@@ -393,6 +393,45 @@ def _predict_in_batches(model: MothNet, x: np.ndarray, batch_size: int) -> np.nd
     return np.concatenate(chunk_outputs, axis=0)
 
 
+def _bin_activation_columns(matrix: np.ndarray, max_bins: int = 200) -> np.ndarray:
+    """Column-bin `matrix` to at most `max_bins` columns via mean-pooling.
+
+    Shared by `render_mb_sparsity` (Step 6) and the AL/MB activation-heatmap
+    call site in `main()` (Step 5.1, `decisions.md` D-008) — both need to
+    compress a `(rows, mb_units)` array's COLUMN count down to something a
+    matplotlib panel can render legibly at `mb_units=16000`; `ax.imshow` on
+    16000 raw columns renders as a visually blurred/solid-colour panel
+    (`decisions.md` D-006, D-008).
+
+    Splits `matrix`'s columns into `min(matrix.shape[1], max_bins)`
+    (near-)equal-width groups via `np.array_split(matrix, num_bins, axis=1)`
+    and mean-pools each group along the column axis. Handles `matrix.shape[1]`
+    not evenly divisible by `num_bins` (`np.array_split` produces
+    near-equal-size groups rather than raising).
+
+    Interface contract (2+ callers — `render_mb_sparsity`,
+    `main()`'s heatmap block): pass any 2D float array; returns a same-dtype
+    array with the same row count and `min(original_columns, max_bins)`
+    columns; never raises for `matrix.shape[1] >= 1`.
+
+    :param matrix: 2D array, shape `(rows, num_columns)`.
+    :param max_bins: Upper bound on the output column count (default 200,
+        `render_mb_sparsity`'s original legibility-tuned choice).
+    :return: Array of shape `(rows, min(num_columns, max_bins))`.
+    """
+    # DECISION plan-2026-09-18T080513-debe8b11/D-008: shared column-binning
+    # helper, extracted once a SECOND call site (the heatmap block in
+    # main()) needed the exact same np.array_split-based binning
+    # render_mb_sparsity already used. Do not inline a second copy of this
+    # arithmetic at a THIRD call site — call this helper instead. See
+    # decisions.md D-008.
+    num_bins = min(matrix.shape[1], max_bins)
+    return np.stack(
+        [group.mean(axis=1) for group in np.array_split(matrix, num_bins, axis=1)],
+        axis=1,
+    )
+
+
 def _create_visualization_manager(viz_dir: Path) -> VisualizationManager:
     """Construct the `VisualizationManager` used for AL/MB-activation and
     confusion-matrix rendering.
@@ -557,11 +596,8 @@ def render_mb_sparsity(
             class_matrix[c] = class_codes.mean(axis=0)
             sparsity_by_class[c] = np.mean((class_codes > 0).mean(axis=-1))
 
-    num_bins = min(mb_units, 200)
-    binned = np.stack(
-        [group.mean(axis=1) for group in np.array_split(class_matrix, num_bins, axis=1)],
-        axis=1,
-    )
+    binned = _bin_activation_columns(class_matrix, max_bins=200)
+    num_bins = binned.shape[1]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     im = ax.imshow(binned, aspect="auto", cmap="viridis")
@@ -814,8 +850,35 @@ def main(argv=None) -> int:
                                 f"epoch_{epoch + 1:03d}_al_mb_activations_distribution"
                             ),
                         )
+
+                        # DECISION plan-2026-09-18T080513-debe8b11/D-008: a
+                        # SEPARATE, heatmap-only ActivationData with
+                        # `mushroom_body` column-binned to <=200 bins. The
+                        # DISTRIBUTION call above deliberately keeps the raw
+                        # `activation_data` (histograms have no column-count
+                        # problem); the HEATMAP plot_type's
+                        # `ax.imshow(activations[:100])` (`data_nn.py`) crams
+                        # all `mb_units` (16000 by default) raw columns into a
+                        # ~450px panel, which rendered as a solid black
+                        # rectangle — the exact "visual blur at 16000 columns"
+                        # defect decisions.md D-006 already fixed in
+                        # render_mb_sparsity, reintroduced here (review
+                        # finding 1). Do NOT pass the raw `mb_np` to this
+                        # heatmap call again, and do NOT bin `antennal_lobe`
+                        # — its panel is already legible at `al_units` scale.
+                        # See decisions.md D-008.
+                        heatmap_activation_data = ActivationData(
+                            layer_names=["antennal_lobe", "mushroom_body"],
+                            activations={
+                                "antennal_lobe": al_np,
+                                "mushroom_body": _bin_activation_columns(
+                                    mb_np, max_bins=200
+                                ),
+                            },
+                            model_name="MothNet",
+                        )
                         viz_manager.visualize(
-                            activation_data, plugin_name="activations",
+                            heatmap_activation_data, plugin_name="activations",
                             plot_type="heatmap",
                             filename=f"epoch_{epoch + 1:03d}_al_mb_activations_heatmap",
                         )
