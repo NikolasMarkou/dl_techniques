@@ -228,6 +228,17 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     if args.epochs < 1:
         parser.error(f"--epochs must be >= 1, got {args.epochs}")
 
+    # `--eval-batch-size <= 0` is unvalidated upstream — `range(0, len(x), 0)`
+    # raises `ValueError: range() arg 3 must not be zero` and a negative value
+    # raises `ValueError: need at least one array to concatenate` (an empty
+    # range), both inside `_predict_in_batches`, only AFTER a full training
+    # epoch has already run (review finding 7). Fail fast here instead,
+    # matching the `--epochs` pattern immediately above.
+    if args.eval_batch_size < 1:
+        parser.error(
+            f"--eval-batch-size must be >= 1, got {args.eval_batch_size}"
+        )
+
     return args
 
 

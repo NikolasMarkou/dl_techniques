@@ -874,3 +874,33 @@ def test_eval_batch_size_is_actually_forwarded_into_predict_in_batches(
         "--eval-batch-size 13 was not forwarded to BOTH _predict_in_batches "
         f"call sites — recorded batch_size values: {recorded_batch_sizes}"
     )
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1", "-100"])
+def test_eval_batch_size_below_one_fails_fast_at_parse_time(bad_value, capsys) -> None:
+    """Step 2.1 completion-fix (`plan-2026-09-18T080513-debe8b11`,
+    adversarial-review finding 7, NOTE): `--eval-batch-size <= 0` used to be
+    unvalidated and failed LATE, deep inside `_predict_in_batches`, only
+    after a full training epoch had already run — `batch_size=0` raises
+    `ValueError: range() arg 3 must not be zero`; a negative value raises
+    `ValueError: need at least one array to concatenate` (an empty range).
+    `--epochs < 1` already fails fast at parse time via `parser.error`; this
+    proves `--eval-batch-size` now follows the exact same pattern: a
+    `SystemExit` from `parse_arguments()` itself, before any dataset load,
+    GPU setup, or model construction ever runs.
+    """
+    with pytest.raises(SystemExit):
+        train_mothnet.parse_arguments(["--eval-batch-size", bad_value])
+
+    stderr = capsys.readouterr().err
+    assert "--eval-batch-size" in stderr
+    assert "must be >= 1" in stderr
+
+
+def test_eval_batch_size_of_one_is_accepted_at_parse_time() -> None:
+    """Boundary check complementing the parametrized failure test above —
+    `1` is the smallest VALID value and must parse cleanly, not be caught by
+    an off-by-one `<= 1` guard.
+    """
+    args = train_mothnet.parse_arguments(["--eval-batch-size", "1"])
+    assert args.eval_batch_size == 1
