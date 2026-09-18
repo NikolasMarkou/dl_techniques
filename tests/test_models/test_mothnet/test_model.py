@@ -13,6 +13,8 @@ import pytest
 import numpy as np
 
 from dl_techniques.models.general_purpose.mothnet.model import MothNet
+from dl_techniques.layers.mothnet_blocks import HebbianReadoutLayer
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 
 NUM_FEATURES = 64
 NUM_CLASSES = 10
@@ -290,3 +292,88 @@ class TestExtractALFeatures:
         assert all(
             np.array_equal(b, a) for b, a in zip(before, after)
         ), "extract_al_features mutated a weight array"
+
+
+# ---------------------------------------------------------------------
+# readout_weight_bound / kernel_constraint: backward compat + round trip
+# (plan-2026-09-18T110506-e42a44c7 step 6)
+# ---------------------------------------------------------------------
+
+
+class TestReadoutWeightBoundBackwardCompatibility:
+    """An old-shaped config dict (missing the new key) must still construct
+    via `from_config()`, defaulting the new attribute to its inert `None`
+    value -- required because real pre-fix `.keras` checkpoints already
+    exist under `results/` (plan.md's Problem Statement)."""
+
+    def test_mothnet_backward_compat_from_config_missing_readout_weight_bound_key(self):
+        config = MothNet(num_classes=NUM_CLASSES).get_config()
+        assert "readout_weight_bound" in config
+
+        del config["readout_weight_bound"]
+        model = MothNet.from_config(config)
+
+        assert model.readout_weight_bound is None
+
+    def test_hebbian_readout_layer_backward_compat_from_config_missing_kernel_constraint_key(self):
+        config = HebbianReadoutLayer(units=NUM_CLASSES).get_config()
+        assert "kernel_constraint" in config
+
+        del config["kernel_constraint"]
+        layer = HebbianReadoutLayer.from_config(config)
+
+        assert layer.kernel_constraint is None
+
+
+class TestReadoutWeightBoundSerializationRoundTrip:
+    """`get_config()` -> `from_config()` reproduces an equivalent
+    `ValueRangeConstraint`, and a full `.keras` save/load round trip keeps a
+    working (still-clipping) constraint on the reloaded model."""
+
+    def test_hebbian_readout_layer_kernel_constraint_round_trip(self):
+        original = HebbianReadoutLayer(
+            units=NUM_CLASSES,
+            kernel_constraint=ValueRangeConstraint(min_value=-1.0, max_value=1.0),
+        )
+
+        rebuilt = HebbianReadoutLayer.from_config(original.get_config())
+
+        assert isinstance(rebuilt.kernel_constraint, ValueRangeConstraint)
+        assert rebuilt.kernel_constraint.min_value == original.kernel_constraint.min_value
+        assert rebuilt.kernel_constraint.max_value == original.kernel_constraint.max_value
+
+    def test_mothnet_readout_weight_bound_keras_round_trip_keeps_a_working_constraint(
+        self, tmp_path
+    ):
+        model = MothNet(num_classes=NUM_CLASSES, readout_weight_bound=1.0)
+        model.build((None, NUM_FEATURES))
+
+        path = os.path.join(str(tmp_path), "mothnet_bounded.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert isinstance(loaded.readout.kernel_constraint, ValueRangeConstraint)
+        assert loaded.readout.kernel_constraint.min_value == -1.0
+        assert loaded.readout.kernel_constraint.max_value == 1.0
+
+        x = _features(batch=8)
+        y = keras.utils.to_categorical(
+            np.arange(8) % NUM_CLASSES, num_classes=NUM_CLASSES
+        ).astype("float32")
+        mb_output = loaded.mushroom_body(
+            loaded.antennal_lobe(x, training=False), training=False
+        )
+
+        # Drive the weights past the bound directly, so the clip proof does
+        # not depend on how large one real hebbian_update()'s own growth
+        # happens to be -- the reloaded constraint must clip regardless.
+        loaded.readout.readout_weights.assign(
+            keras.ops.ones_like(loaded.readout.readout_weights) * 5.0
+        )
+        loaded.readout.hebbian_update(mb_output, keras.ops.convert_to_tensor(y))
+
+        after = keras.ops.convert_to_numpy(loaded.readout.readout_weights)
+        assert float(np.max(np.abs(after))) <= 1.0 + 1e-6, (
+            "the reloaded model's kernel_constraint no longer clips after a "
+            "real .keras save/load round trip"
+        )
