@@ -818,3 +818,59 @@ def test_visualize_or_warn_does_not_warn_when_visualize_succeeds(caplog) -> None
         )
 
     assert caplog.text == ""
+
+
+@pytest.mark.integration
+def test_eval_batch_size_is_actually_forwarded_into_predict_in_batches(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Step 7.1 completion-fix (`plan-2026-09-18T080513-debe8b11`,
+    adversarial-review finding 6, NOTE): nothing previously proved `main()`
+    actually FORWARDS `args.eval_batch_size` into `_predict_in_batches` at
+    BOTH of its call sites (val-side and train-side accuracy computation) —
+    a hardcoded `5000` at either call site would have left every other test
+    in this suite green, since none of them pass a non-default
+    `--eval-batch-size` while also inspecting what `_predict_in_batches`
+    itself received.
+
+    Wraps `train_mothnet._predict_in_batches` (record-then-call-through, the
+    same shape this module's other tests use) and drives a real tiny `main()`
+    run with `--eval-batch-size 13` — a value distinct from the default
+    (`5000`), from `--batch-size` (`32`), and from every other probe value
+    used elsewhere in this test module/`test_cli_contract.py` — asserting
+    EVERY recorded call used `batch_size=13`, not the default.
+    """
+    recorded_batch_sizes: list = []
+    _real_predict_in_batches = train_mothnet._predict_in_batches
+
+    def _recording_predict_in_batches(model, x, batch_size):
+        recorded_batch_sizes.append(batch_size)
+        return _real_predict_in_batches(model, x, batch_size)
+
+    monkeypatch.setattr(
+        train_mothnet, "_predict_in_batches", _recording_predict_in_batches
+    )
+
+    argv = [
+        "--mb-units", "200",
+        "--al-units", "64",
+        "--epochs", "1",
+        "--num-train-samples", "100",
+        "--num-val-samples", "50",
+        "--batch-size", "32",
+        "--eval-batch-size", "13",
+        "--viz-freq", "0",
+        "--output-dir", str(tmp_path),
+        "--experiment-name", "mothnet_eval_batch_size_forwarding_check",
+    ]
+    exit_code = train_mothnet.main(argv)
+    assert exit_code == 0
+
+    assert len(recorded_batch_sizes) == 2, (
+        "expected exactly 2 _predict_in_batches calls (val-side + train-side "
+        f"accuracy computation) per epoch, got {recorded_batch_sizes}"
+    )
+    assert recorded_batch_sizes == [13, 13], (
+        "--eval-batch-size 13 was not forwarded to BOTH _predict_in_batches "
+        f"call sites — recorded batch_size values: {recorded_batch_sizes}"
+    )
