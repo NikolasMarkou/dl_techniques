@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from pathlib import Path
 
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -227,3 +228,102 @@ def test_predict_in_batches_matches_unbatched_on_a_non_divisible_fixture() -> No
 
     assert batched.shape == unbatched.shape == (23, 10)
     np.testing.assert_allclose(batched, unbatched, atol=1e-5, rtol=1e-5)
+
+
+def _one_hot(class_indices: np.ndarray, num_classes: int) -> np.ndarray:
+    """Local one-hot helper — avoids pulling in `keras.utils.to_categorical` for
+    a 2-line need in this test module."""
+    y = np.zeros((len(class_indices), num_classes), dtype=np.float32)
+    y[np.arange(len(class_indices)), class_indices] = 1.0
+    return y
+
+
+def test_render_mb_sparsity_runs_with_all_classes_represented(tmp_path: Path) -> None:
+    """`render_mb_sparsity` (plan-2026-09-18T080513-debe8b11 Step 6) must run to
+    completion and produce a non-empty PNG on a fixture where every one of the
+    model's 10 classes has at least one sample.
+
+    Uses SYNTHETIC labels constructed with an explicit, deterministic
+    class assignment (3 samples per class, all 10 classes) rather than a real
+    MNIST subsample — sidestepping the question of what class coverage an
+    actual MNIST subsample happens to have at a given sample count, since the
+    zero-sample-class edge case (the thing that coverage question actually
+    matters for) is covered explicitly and deterministically by the next test.
+    """
+    args = train_mothnet.parse_arguments(["--mb-units", "200", "--al-units", "64"])
+    model = train_mothnet.build_model(args, input_dim=64)
+
+    rng = np.random.default_rng(0)
+    class_indices = np.repeat(np.arange(10), 3)  # 3 samples/class, all 10 present
+    x_sample = rng.random((len(class_indices), 64)).astype("float32")
+    y_sample = _one_hot(class_indices, num_classes=10)
+
+    out_path = tmp_path / "epoch_001_mb_sparsity.png"
+    train_mothnet.render_mb_sparsity(model, x_sample, y_sample, out_path)
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
+def test_render_mb_sparsity_handles_a_class_with_zero_samples(tmp_path: Path) -> None:
+    """A class entirely absent from `x_sample`/`y_sample` (plausible at a small
+    `--num-val-samples`) must not raise and must still produce a well-formed
+    image — the all-zero-row/`0.0`-sparsity degrade-gracefully path plan.md's
+    Edge Cases section requires.
+
+    Runs with `warnings.simplefilter("error")` so that a regression which skips
+    the zero-sample-class guard (computing `.mean(axis=0)` over an EMPTY slice)
+    fails LOUDLY here as a raised `RuntimeWarning: Mean of empty slice`, rather
+    than silently degrading to a NaN row that still happens to produce a
+    non-empty PNG (mere file-existence would not catch that regression — see
+    this plan's RED-then-GREEN proof in the executor's report).
+    """
+    args = train_mothnet.parse_arguments(["--mb-units", "200", "--al-units", "64"])
+    model = train_mothnet.build_model(args, input_dim=64)
+
+    rng = np.random.default_rng(1)
+    # Classes 0-8 present, class 9 has ZERO rows.
+    class_indices = np.repeat(np.arange(9), 2)
+    x_sample = rng.random((len(class_indices), 64)).astype("float32")
+    y_sample = _one_hot(class_indices, num_classes=10)
+    assert not np.any(np.argmax(y_sample, axis=-1) == 9), "test setup: class 9 must be absent"
+
+    out_path = tmp_path / "epoch_002_mb_sparsity.png"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        train_mothnet.render_mb_sparsity(model, x_sample, y_sample, out_path)
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
+def test_render_mb_sparsity_handles_mb_units_not_divisible_by_bin_count(
+    tmp_path: Path,
+) -> None:
+    """`mb_units=37` does not evenly divide the 200-bin target — MEASURE that
+    `np.array_split`-based binning handles this rather than trusting the
+    reasoning that it must.
+    """
+    args = train_mothnet.parse_arguments(["--mb-units", "37", "--al-units", "16"])
+    model = train_mothnet.build_model(args, input_dim=32)
+
+    rng = np.random.default_rng(2)
+    class_indices = np.repeat(np.arange(10), 2)
+    x_sample = rng.random((len(class_indices), 32)).astype("float32")
+    y_sample = _one_hot(class_indices, num_classes=10)
+
+    out_path = tmp_path / "epoch_003_mb_sparsity.png"
+    train_mothnet.render_mb_sparsity(model, x_sample, y_sample, out_path)
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
+def test_render_mb_sparsity_no_longer_calls_plt_spy() -> None:
+    """Mechanical regression guard for plan.md Success Criterion 6: the old
+    binary presence/absence scatter must be gone, not just superseded.
+    """
+    import inspect
+
+    source = inspect.getsource(train_mothnet.render_mb_sparsity)
+    assert "spy" not in source

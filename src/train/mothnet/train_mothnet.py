@@ -504,33 +504,74 @@ def render_training_dashboard(history: Dict[str, List[float]], out_path: Path) -
     plt.close(fig)
 
 
-def render_mb_sparsity(model: MothNet, x_sample: np.ndarray, out_path: Path) -> None:
-    """Render a `plt.spy(...)` sparsity plot of the Mushroom Body's sparse codes.
+# DECISION plan-2026-09-18T080513-debe8b11/D-006: a per-class MEAN
+# activation-magnitude heatmap, NOT the old matplotlib "spy" presence/absence
+# scatter. That old plot showed only whether a code is nonzero, blurred into
+# visual noise at `mb_units=16000` columns, carried no sparsity annotation, and
+# drew from only 8 raw (class-mixed) sample rows — none of which tells a reader
+# "how do classes differ" at this scale. Do NOT revert to that scatter or to an
+# unbinned per-sample view; see decisions.md D-006 for the full trade-off (this
+# rework loses per-INDIVIDUAL-sample inspection, which `extract_mb_features`
+# still supports ad hoc elsewhere).
+def render_mb_sparsity(
+    model: MothNet, x_sample: np.ndarray, y_sample: np.ndarray, out_path: Path,
+) -> None:
+    """Render a per-class MEAN Mushroom Body activation-magnitude heatmap.
 
-    Reuses the MothNet README's own Example 2 pattern
-    (`src/dl_techniques/models/general_purpose/mothnet/README.md`, "Extracting and
-    Visualizing MB Sparse Codes"): `model.extract_mb_features(x_sample)` ->
-    `keras.ops.convert_to_numpy(...)` -> `plt.spy(...)`. A pure function — no
-    training-loop state beyond `model`/`x_sample`/`out_path`.
+    Groups `x_sample` by its true class (`argmax(y_sample)`), averages each class's
+    MB codes into one row, column-bins the result to at most 200 bins for legibility
+    at `mb_units=16000`, and plots the binned `(10, num_bins)` matrix as a heatmap
+    with a colorbar. Each row is also annotated with that class's mean sparsity
+    fraction. A pure function — no training-loop state beyond
+    `model`/`x_sample`/`y_sample`/`out_path`.
+
+    A class absent from `x_sample` (possible at a small `--num-val-samples`) gets an
+    all-zero activation row and a `0.0` sparsity fraction rather than raising or
+    producing NaN.
 
     Called periodically by `main()`'s training loop (every `args.viz_freq` epochs,
     `<= 0` disables), wrapped in `try/except Exception: logger.warning(...)` at the
-    call site — a render failure must never abort training (plan.md invariant 9).
+    call site — a render failure must never abort training (plan.md invariant 1).
 
     :param model: A built `MothNet` instance.
     :param x_sample: A small batch of input samples, shape `(N, input_dim)`.
+    :param y_sample: One-hot true labels for `x_sample`, shape `(N, num_classes)`.
+        Both `x_sample`/`y_sample` are argmax'd on the label side only (plan.md
+        invariant 3) — `x_sample` supplies inputs, never predicted labels.
     :param out_path: PNG destination, expected to be epoch-stamped by the caller
         (e.g. `visualizations/epoch_{epoch+1:03d}_mb_sparsity.png`) so periodic
         renders never overwrite each other.
     :return: None.
     """
     mb_codes = keras.ops.convert_to_numpy(model.extract_mb_features(x_sample))
+    true_classes = np.argmax(y_sample, axis=-1)
+    mb_units = mb_codes.shape[1]
+    num_classes = y_sample.shape[1]
 
-    fig = plt.figure(figsize=(10, 4))
-    plt.spy(mb_codes, markersize=2)
-    plt.title("Mushroom Body Sparse Codes")
-    plt.xlabel("MB Neuron Index")
-    plt.ylabel("Sample Index")
+    class_matrix = np.zeros((num_classes, mb_units), dtype=np.float32)
+    sparsity_by_class = np.zeros(num_classes, dtype=np.float32)
+    for c in range(num_classes):
+        class_mask = true_classes == c
+        if np.any(class_mask):
+            class_codes = mb_codes[class_mask]
+            class_matrix[c] = class_codes.mean(axis=0)
+            sparsity_by_class[c] = np.mean((class_codes > 0).mean(axis=-1))
+
+    num_bins = min(mb_units, 200)
+    binned = np.stack(
+        [group.mean(axis=1) for group in np.array_split(class_matrix, num_bins, axis=1)],
+        axis=1,
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    im = ax.imshow(binned, aspect="auto", cmap="viridis")
+    fig.colorbar(im, ax=ax, label="Mean MB activation")
+    ax.set_yticks(range(num_classes))
+    ax.set_yticklabels(
+        [f"{c} ({sparsity_by_class[c] * 100:.1f}% active)" for c in range(num_classes)]
+    )
+    ax.set_xlabel(f"MB neuron bin index (~{mb_units // num_bins} units/bin)")
+    ax.set_title("Mushroom Body Activation by Class")
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -735,8 +776,9 @@ def main(argv=None) -> int:
 
                 if args.viz_freq > 0 and (epoch + 1) % args.viz_freq == 0:
                     try:
+                        sparsity_sample_size = min(500, len(x_val))
                         render_mb_sparsity(
-                            model, x_val[:8],
+                            model, x_val[:sparsity_sample_size], y_val[:sparsity_sample_size],
                             viz_dir / f"epoch_{epoch + 1:03d}_mb_sparsity.png",
                         )
                     except Exception as render_error:
