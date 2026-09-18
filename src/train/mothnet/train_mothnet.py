@@ -483,100 +483,133 @@ def main(argv=None) -> int:
         # ...)` call. `train_hebbian` has no callback hook, so calling it once per
         # epoch (with `epochs=1`) is the ONLY way to get per-epoch checkpoint/CSV/viz
         # cadence matching bfunet's shape. See decisions.md D-002.
-        for epoch in range(args.epochs):
-            # DECISION plan-2026-09-18T045308-c89cdf76/D-005
-            # ORDERING DISCIPLINE for this loop body — do not reorder without
-            # re-reading decisions.md D-005 first.
-            #
-            # (a) train_hebbian(epochs=1, ...) below is the ONE weight-mutating
-            #     step this epoch — the only writer of `readout.readout_weights`
-            #     (findings/mothnet-architecture.md finding 4's mutation-kill test
-            #     confirms no other call site touches it).
-            # (b) val_accuracy/train_accuracy are computed strictly AFTER (a)
-            #     returns, never before — a genuine post-update read.
-            # (c) the checkpoint-save / CSV-row / history-append decision further
-            #     below uses that same post-update measurement.
-            #
-            # Why this is safe (and why it differs from train_kan.py's D-006
-            # hazard): `train_kan.py` shipped a bug where a weight-mutating Keras
-            # callback (`KANGridUpdateCallback`) ran BEFORE `ModelCheckpoint`/
-            # `CSVLogger` in an `on_epoch_end` callback list, so the checkpoint
-            # saved POST-mutation weights against a `val_loss` Keras had already
-            # measured PRE-mutation — a silent mismatch caught only by adversarial
-            # review (decisions.md D-006, that plan). This loop has no callback
-            # list and no second, later mutator: `train_hebbian` is the first
-            # statement in the epoch body, and everything after it only reads.
-            # That eliminates the D-006 hazard CLASS here — but only
-            # CONDITIONALLY, not absolutely: this reasoning holds PROVIDED the
-            # metric read in (b) always executes strictly after (a) returns,
-            # never reordered ahead of it or interleaved with it. Do not move the
-            # accuracy computation above the `train_hebbian` call, and do not add
-            # a second weight-mutating call anywhere in this loop without
-            # re-deriving this comment.
-            epoch_history = model.train_hebbian(
-                x_train, y_train, epochs=1, batch_size=args.batch_size, verbose=0,
-            )
-            loss = float(epoch_history["loss"][0])
+        try:
+            for epoch in range(args.epochs):
+                # DECISION plan-2026-09-18T045308-c89cdf76/D-005
+                # ORDERING DISCIPLINE for this loop body — do not reorder without
+                # re-reading decisions.md D-005 first.
+                #
+                # (a) train_hebbian(epochs=1, ...) below is the ONE weight-mutating
+                #     step this epoch — the only writer of `readout.readout_weights`
+                #     (findings/mothnet-architecture.md finding 4's mutation-kill test
+                #     confirms no other call site touches it).
+                # (b) val_accuracy/train_accuracy are computed strictly AFTER (a)
+                #     returns, never before — a genuine post-update read.
+                # (c) val_accuracy/train_accuracy are genuine post-update reads (see
+                #     (b)), and the checkpoint-save / CSV-row / history-append
+                #     decision further below uses THOSE. `loss`, written into that
+                #     same CSV row and history dict, is NOT a post-update read: it is
+                #     `epoch_history["loss"][0]`, a within-epoch MEAN over per-batch
+                #     losses computed against INTERMEDIATE weight states inside (a)
+                #     (`model.py`, unmodified) — never against the epoch-final
+                #     weights that (b)'s reads observe. See decisions.md D-007.
+                #
+                # Why this is safe (and why it differs from train_kan.py's D-006
+                # hazard): `train_kan.py` shipped a bug where a weight-mutating Keras
+                # callback (`KANGridUpdateCallback`) ran BEFORE `ModelCheckpoint`/
+                # `CSVLogger` in an `on_epoch_end` callback list, so the checkpoint
+                # saved POST-mutation weights against a `val_loss` Keras had already
+                # measured PRE-mutation — a silent mismatch caught only by adversarial
+                # review (decisions.md D-006, that plan). This loop has no callback
+                # list and no second, later mutator: `train_hebbian` is the first
+                # statement in the epoch body, and everything after it only reads.
+                # That eliminates the D-006 hazard CLASS here — but only
+                # CONDITIONALLY, not absolutely: this reasoning holds PROVIDED the
+                # metric read in (b) always executes strictly after (a) returns,
+                # never reordered ahead of it or interleaved with it. Do not move the
+                # accuracy computation above the `train_hebbian` call, and do not add
+                # a second weight-mutating call anywhere in this loop without
+                # re-deriving this comment.
+                #
+                # DECISION plan-2026-09-18T060057-c1cfc3d3/D-007: item (c) above was
+                # narrowed — it used to imply `loss` is a post-update measurement
+                # like val_accuracy/train_accuracy. It is not (see (c)). No
+                # checkpoint-selection logic depends on this distinction:
+                # `best_model.keras` already gates on val_accuracy only
+                # (`decisions.md` D-006 of plan-2026-09-18T045308-c89cdf76). This is
+                # a precision fix on the comment, not a behavior change. See
+                # decisions.md D-007 for the full trade-off.
+                epoch_history = model.train_hebbian(
+                    x_train, y_train, epochs=1, batch_size=args.batch_size, verbose=0,
+                )
+                loss = float(epoch_history["loss"][0])
 
-            val_logits = keras.ops.convert_to_numpy(model.extract_features(x_val))
-            val_accuracy = float(
-                np.mean(np.argmax(val_logits, axis=-1) == np.argmax(y_val, axis=-1))
-            )
-            train_logits = keras.ops.convert_to_numpy(model.extract_features(x_train))
-            train_accuracy = float(
-                np.mean(np.argmax(train_logits, axis=-1) == np.argmax(y_train, axis=-1))
-            )
-
-            if val_accuracy > best_val_accuracy:
-                best_val_accuracy = val_accuracy
-                model.save(best_checkpoint_path(str(run_dir)))
-                logger.info(
-                    f"Epoch {epoch + 1}: new best val_accuracy={val_accuracy:.4f} "
-                    f"— saved {best_checkpoint_path(str(run_dir))}"
+                val_logits = keras.ops.convert_to_numpy(model.extract_features(x_val))
+                val_accuracy = float(
+                    np.mean(np.argmax(val_logits, axis=-1) == np.argmax(y_val, axis=-1))
+                )
+                train_logits = keras.ops.convert_to_numpy(model.extract_features(x_train))
+                train_accuracy = float(
+                    np.mean(np.argmax(train_logits, axis=-1) == np.argmax(y_train, axis=-1))
                 )
 
-            csv_writer.writerow([epoch + 1, loss, train_accuracy, val_accuracy])
-            csv_file.flush()
-
-            history["epoch"].append(epoch)
-            history["loss"].append(loss)
-            history["train_accuracy"].append(train_accuracy)
-            history["val_accuracy"].append(val_accuracy)
-
-            # Both render calls are wrapped in try/except — a visualization failure
-            # must never abort training (plan.md invariant 9 / Constraints HARD list).
-            try:
-                render_training_dashboard(history, viz_dir / "training_dashboard.png")
-            except Exception as render_error:
-                logger.warning(
-                    f"Epoch {epoch}: render_training_dashboard failed: {render_error}"
-                )
-
-            if args.viz_freq > 0 and (epoch + 1) % args.viz_freq == 0:
-                try:
-                    render_mb_sparsity(
-                        model, x_val[:8],
-                        viz_dir / f"epoch_{epoch + 1:03d}_mb_sparsity.png",
+                if val_accuracy > best_val_accuracy:
+                    best_val_accuracy = val_accuracy
+                    model.save(best_checkpoint_path(str(run_dir)))
+                    logger.info(
+                        f"Epoch {epoch + 1}: new best val_accuracy={val_accuracy:.4f} "
+                        f"— saved {best_checkpoint_path(str(run_dir))}"
                     )
+
+                csv_writer.writerow([epoch + 1, loss, train_accuracy, val_accuracy])
+                csv_file.flush()
+
+                history["epoch"].append(epoch)
+                history["loss"].append(loss)
+                history["train_accuracy"].append(train_accuracy)
+                history["val_accuracy"].append(val_accuracy)
+
+                # Both render calls are wrapped in try/except — a visualization failure
+                # must never abort training (plan.md invariant 9 / Constraints HARD list).
+                try:
+                    render_training_dashboard(history, viz_dir / "training_dashboard.png")
                 except Exception as render_error:
                     logger.warning(
-                        f"Epoch {epoch}: render_mb_sparsity failed: {render_error}"
+                        f"Epoch {epoch}: render_training_dashboard failed: {render_error}"
                     )
 
-            logger.info(
-                f"Epoch {epoch + 1}/{args.epochs} — loss={loss:.4f}, "
-                f"train_accuracy={train_accuracy:.4f}, val_accuracy={val_accuracy:.4f}"
-            )
+                if args.viz_freq > 0 and (epoch + 1) % args.viz_freq == 0:
+                    try:
+                        render_mb_sparsity(
+                            model, x_val[:8],
+                            viz_dir / f"epoch_{epoch + 1:03d}_mb_sparsity.png",
+                        )
+                    except Exception as render_error:
+                        logger.warning(
+                            f"Epoch {epoch}: render_mb_sparsity failed: {render_error}"
+                        )
 
-    # Unconditional final-model save — independent of whether any epoch ever improved
-    # on `best_val_accuracy` (plan.md invariant 8 / Step 7). `model` was explicitly
-    # built before the loop (Step 3), so this save is always valid even under
-    # `--epochs 1` or a loop that never beat the `-1.0` sentinel.
-    final_model_path = run_dir / "final_model.keras"
-    model.save(final_model_path)
-    logger.info(f"Saved final model to {final_model_path}")
+                logger.info(
+                    f"Epoch {epoch + 1}/{args.epochs} — loss={loss:.4f}, "
+                    f"train_accuracy={train_accuracy:.4f}, val_accuracy={val_accuracy:.4f}"
+                )
+        finally:
+            # DECISION plan-2026-09-18T060057-c1cfc3d3/D-008: best-effort final-save
+            # net (Invariant 8) — ATTEMPT final_model.keras + training_history.json
+            # even when an exception propagated out of the loop body above (from
+            # train_hebbian/model.save()/extract_features). `model` was explicitly
+            # built before the loop (Step 3 of plan-2026-09-18T045308-c89cdf76), so
+            # this save is always valid even under `--epochs 1`, a loop that never
+            # beat the `-1.0` best_val_accuracy sentinel, or a loop that raised on
+            # its very first iteration. Each save below is wrapped in its OWN
+            # try/except so a save failure is logged via logger.error and does NOT
+            # mask the ORIGINAL exception — nothing here re-raises or swallows
+            # anything, so Python's normal try/finally semantics let that original
+            # exception propagate unchanged once this finally block finishes. See
+            # decisions.md D-008.
+            final_model_path = run_dir / "final_model.keras"
+            try:
+                model.save(final_model_path)
+                logger.info(f"Saved final model to {final_model_path}")
+            except Exception as save_error:
+                logger.error(
+                    f"Failed to save final model to {final_model_path}: {save_error}"
+                )
 
-    save_training_history_json(history, run_dir)
+            try:
+                save_training_history_json(history, run_dir)
+            except Exception as save_error:
+                logger.error(f"Failed to save training history JSON: {save_error}")
 
     logger.info(
         f"Run complete — run_dir={run_dir}, epochs={args.epochs}, "

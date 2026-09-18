@@ -119,3 +119,81 @@ def test_tiny_run_trains_and_checkpoint_round_trips(tmp_path: Path, monkeypatch)
 
     max_diff = float(np.max(np.abs(y_in_process - y_reloaded)))
     assert max_diff < 1e-4, f"Reload round-trip diff too large: {max_diff:.2e}"
+
+
+@pytest.mark.integration
+def test_final_save_attempted_on_mid_loop_exception(tmp_path: Path, monkeypatch) -> None:
+    """Invariant 8 (plan-2026-09-18T060057-c1cfc3d3 Step 7, ``decisions.md`` D-008):
+    a forced mid-loop exception must still leave ``final_model.keras`` and
+    ``training_history.json`` on disk — best-effort, attempted from the
+    ``finally`` clause wrapped around the epoch loop in ``main()``.
+
+    ``model.train_hebbian`` is overridden with an INSTANCE attribute (not a
+    class-level monkeypatch) that delegates to the real bound method for the
+    first call, then raises on the second — so epoch 1 genuinely trains (one
+    real ``train_hebbian`` call, proving this isn't a no-op stub) before the
+    forced failure aborts the loop on epoch 2 of a 3-epoch run. The forced
+    exception is asserted to be the ONE that propagates out of ``main()``
+    unchanged (not masked by a save failure — both real saves succeed here).
+    """
+    captured: dict = {}
+
+    _real_build_model = train_mothnet.build_model
+
+    def _build_model_with_forced_failure(args, input_dim):
+        model = _real_build_model(args, input_dim)
+        captured["model"] = model
+
+        real_train_hebbian = model.train_hebbian
+        call_count = {"n": 0}
+
+        def _train_hebbian_then_raise(*call_args, **call_kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("forced mid-loop failure (test)")
+            return real_train_hebbian(*call_args, **call_kwargs)
+
+        model.train_hebbian = _train_hebbian_then_raise
+        return model
+
+    monkeypatch.setattr(train_mothnet, "build_model", _build_model_with_forced_failure)
+
+    run_dir = tmp_path / "mothnet_exception_run"
+    argv = [
+        "--mb-units", "200",
+        "--al-units", "64",
+        "--epochs", "3",
+        "--num-train-samples", "100",
+        "--num-val-samples", "50",
+        "--batch-size", "32",
+        "--viz-freq", "1",
+        "--output-dir", str(tmp_path),
+        "--experiment-name", "mothnet_exception_run",
+    ]
+
+    # --- the ORIGINAL exception is the one that propagates out of main() ---
+    with pytest.raises(RuntimeError, match="forced mid-loop failure"):
+        train_mothnet.main(argv)
+
+    # --- best-effort final-save net still ran despite the exception --------
+    assert (run_dir / "final_model.keras").exists(), (
+        "final_model.keras missing after a mid-loop exception — invariant 8's "
+        "finally-clause save net did not run"
+    )
+    assert (run_dir / "training_history.json").exists(), (
+        "training_history.json missing after a mid-loop exception — invariant 8's "
+        "finally-clause save net did not run"
+    )
+
+    # Only epoch 1 completed (real train_hebbian call #1) before the forced
+    # raise on call #2 — the partial history is exactly what the finally
+    # block had available to save, not fabricated.
+    history = json.loads((run_dir / "training_history.json").read_text())
+    assert len(history["loss"]) == 1
+    assert np.isfinite(history["loss"][0])
+
+    # final_model.keras still round-trips (it captured whatever state `model`
+    # held at the moment of the forced failure — after 1 genuine train_hebbian
+    # call, not an untrained/unbuilt model).
+    reloaded = keras.models.load_model(str(run_dir / "final_model.keras"))
+    assert reloaded.built
