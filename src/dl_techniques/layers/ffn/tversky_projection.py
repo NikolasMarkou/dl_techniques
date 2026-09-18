@@ -676,13 +676,14 @@ class TverskyProjectionLayer(keras.layers.Layer):
         eps = keras.ops.cast(1e-6, y.dtype)
         above = y > eps
         # Clip the argument fed to log(expm1(...)) so the untaken branch
-        # never evaluates it outside its domain: for y <= 0, expm1(y) is
-        # negative and log(expm1(y)) is NaN, which `where` discards from the
-        # OUTPUT but which was still computed. MEASURED (an iteration-1
-        # adversarial review's own control): on this repo's TensorFlow
-        # backend this specific NaN raises no runtime warning either guarded
-        # or unguarded, and produces bit-identical values and gradients both
-        # ways -- so this guard is not observably load-bearing here. It is
+        # never evaluates it outside its domain: for y < 0, expm1(y) is
+        # negative and log(expm1(y)) is NaN (log(0) == -inf at the single
+        # point y == 0), which `where` discards from the OUTPUT but which
+        # was still computed. MEASURED (an iteration-1 adversarial review's
+        # own control): on this repo's TensorFlow backend neither the NaN
+        # nor the -inf raises a runtime warning, guarded or unguarded, and
+        # both produce bit-identical values and gradients either way -- so
+        # this guard is not observably load-bearing here. It is
         # kept anyway because computing a transform outside its declared
         # domain in a discarded branch is undefined behavior in general (a
         # different backend, or a future TF version, is not guaranteed to
