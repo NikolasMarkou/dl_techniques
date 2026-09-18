@@ -22,7 +22,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Optional, Any, Dict, Tuple
 
 # ---------------------------------------------------------------------
@@ -309,7 +308,7 @@ class GELUMLPFFN(keras.layers.Layer):
         """
         x = self.fc1(inputs)
         # Tanh approximation of GELU, not the exact-erf form.
-        x = ops.gelu(x, approximate=True)
+        x = keras.ops.gelu(x, approximate=True)
         x = self.dropout(x, training=training)
         x = self.fc2(x)
         return x
