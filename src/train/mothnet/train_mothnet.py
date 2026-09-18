@@ -36,6 +36,10 @@ import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.general_purpose.mothnet.model import MothNet
+from dl_techniques.visualization import (
+    VisualizationManager, PlotConfig, ActivationData, ActivationVisualization,
+    ClassificationResults, ConfusionMatrixVisualization,
+)
 from train.common import (
     default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
     setup_gpu,
@@ -389,6 +393,62 @@ def _predict_in_batches(model: MothNet, x: np.ndarray, batch_size: int) -> np.nd
     return np.concatenate(chunk_outputs, axis=0)
 
 
+def _create_visualization_manager(viz_dir: Path) -> VisualizationManager:
+    """Construct the `VisualizationManager` used for AL/MB-activation and
+    confusion-matrix rendering.
+
+    Registers two ALREADY-BUILT, already-tested library plugins —
+    `ActivationVisualization` as template `"activations"`,
+    `ConfusionMatrixVisualization` as template `"confusion_matrix"` — rather
+    than hand-rolling either from scratch. `render_training_dashboard`/
+    `render_mb_sparsity` remain hand-rolled pure functions, unchanged in kind
+    (`decisions.md` D-004 of the prior mothnet plan is not reversed by this).
+
+    Mirrors `src/train/kan/train_kan.py`'s `create_visualization_manager()`:
+    `experiment_name=""` and `timestamp=""` both skip
+    `VisualizationContext.get_save_path()`'s own extra path segments, so PNGs
+    land directly at `viz_dir / <name>.png` — no double-nested subdirectory,
+    and no divergence from `render_training_dashboard`/`render_mb_sparsity`'s
+    own direct-into-`viz_dir` writes.
+
+    :param viz_dir: The run's `visualizations/` directory (already created by
+        the caller).
+    :return: A `VisualizationManager` with `"activations"` and
+        `"confusion_matrix"` templates registered.
+    """
+    # DECISION plan-2026-09-18T080513-debe8b11/D-001: reuse the two EXISTING
+    # library plugins (`ActivationVisualization`, `ConfusionMatrixVisualization`)
+    # rather than hand-rolling a confusion-matrix renderer and an
+    # activation-histogram renderer from scratch. Do not "simplify" this by
+    # inlining `plt.hist`/`sklearn.metrics.confusion_matrix` calls directly in
+    # `main()` — that would reintroduce the exact duplication this decision
+    # exists to avoid (`src/train/power_mlp/train_power_mlp.py:227`'s
+    # hand-rolled confusion matrix). See decisions.md D-001.
+    #
+    # `save_dpi=150` is picked EXPLICITLY (not left at `PlotConfig`'s own
+    # default of 300, and not copied from `train.common.evaluation.
+    # setup_visualization_manager`'s Pattern-1-classification `dpi=300`) — a
+    # deliberate middle ground between this file's OTHER two renderers
+    # (`render_training_dashboard`/`render_mb_sparsity`, which never set a dpi
+    # at all and so fall back to matplotlib's own `figure.dpi` rcParam default,
+    # 100) and the heavier 300 used by the Pattern-1 vision-classification
+    # trainers. `save_dpi`, not `dpi`, is the field `VisualizationManager`
+    # actually applies at save time (`dl_techniques/visualization/core.py:303`);
+    # `PlotConfig.dpi` itself is unused by any current plugin's `save_figure`
+    # call, so setting `dpi=` alone would silently have no effect on the
+    # written PNG's resolution. Do not "fix" this by setting `dpi=` instead.
+    config = PlotConfig(save_dpi=150)
+    viz_manager = VisualizationManager(
+        experiment_name="",
+        output_dir=viz_dir,
+        config=config,
+        timestamp="",
+    )
+    viz_manager.register_template("activations", ActivationVisualization)
+    viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
+    return viz_manager
+
+
 # DECISION plan-2026-09-18T045308-c89cdf76/D-004: do NOT convert
 # `render_training_dashboard`/`render_mb_sparsity` into `VisualizationManager`
 # plugins. A plugin abstraction is earned only when >=2 concrete call sites need it
@@ -529,6 +589,12 @@ def main(argv=None) -> int:
     viz_dir = run_dir / "visualizations"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
+    # Constructed once, before the loop — registers the two reused library
+    # plugins (`ActivationVisualization`, `ConfusionMatrixVisualization`) that
+    # the periodic AL/MB-activation and confusion-matrix renders below call
+    # into (plan.md Step 5, decisions.md D-001).
+    viz_manager = _create_visualization_manager(viz_dir)
+
     # A rerun into the same `--experiment-name` must start `visualizations/` clean
     # of stale periodic PNGs from a PRIOR (possibly longer) run at that name —
     # matching every other artifact class's already-correct fresh-open/overwrite
@@ -538,6 +604,27 @@ def main(argv=None) -> int:
     # is overwritten in place every epoch and must be left untouched here
     # (plan-2026-09-18T060057-c1cfc3d3 Step 5 / F-05).
     for stale_png in viz_dir.glob("epoch_*_mb_sparsity.png"):
+        try:
+            stale_png.unlink()
+        except OSError as unlink_error:
+            logger.warning(f"Could not remove stale visualization {stale_png}: {unlink_error}")
+
+    # Same stale-cleanup shape as above, scoped to the three NEW periodic
+    # filename patterns this step introduces (plan.md Step 5, invariant 6 —
+    # must not silently collide with the existing mb_sparsity glob above).
+    for stale_png in viz_dir.glob("epoch_*_al_mb_activations_distribution.png"):
+        try:
+            stale_png.unlink()
+        except OSError as unlink_error:
+            logger.warning(f"Could not remove stale visualization {stale_png}: {unlink_error}")
+
+    for stale_png in viz_dir.glob("epoch_*_al_mb_activations_heatmap.png"):
+        try:
+            stale_png.unlink()
+        except OSError as unlink_error:
+            logger.warning(f"Could not remove stale visualization {stale_png}: {unlink_error}")
+
+    for stale_png in viz_dir.glob("epoch_*_confusion_matrix.png"):
         try:
             stale_png.unlink()
         except OSError as unlink_error:
@@ -655,6 +742,68 @@ def main(argv=None) -> int:
                     except Exception as render_error:
                         logger.warning(
                             f"Epoch {epoch}: render_mb_sparsity failed: {render_error}"
+                        )
+
+                    # Own try/except, independent of render_mb_sparsity's above and
+                    # of the confusion-matrix block below — one failing must not
+                    # skip the other (plan.md invariant 1 / Step 5.2c). A fixed
+                    # 1000-row subsample of x_val (min-guarded so a val set smaller
+                    # than 1000 rows, e.g. a tiny test-scale run, cannot index out
+                    # of bounds).
+                    try:
+                        viz_sample_size = min(1000, len(x_val))
+                        al_np = keras.ops.convert_to_numpy(
+                            model.extract_al_features(x_val[:viz_sample_size])
+                        )
+                        mb_np = keras.ops.convert_to_numpy(
+                            model.extract_mb_features(x_val[:viz_sample_size])
+                        )
+                        activation_data = ActivationData(
+                            layer_names=["antennal_lobe", "mushroom_body"],
+                            activations={
+                                "antennal_lobe": al_np, "mushroom_body": mb_np,
+                            },
+                            model_name="MothNet",
+                        )
+                        viz_manager.visualize(
+                            activation_data, plugin_name="activations",
+                            plot_type="distribution",
+                            filename=(
+                                f"epoch_{epoch + 1:03d}_al_mb_activations_distribution"
+                            ),
+                        )
+                        viz_manager.visualize(
+                            activation_data, plugin_name="activations",
+                            plot_type="heatmap",
+                            filename=f"epoch_{epoch + 1:03d}_al_mb_activations_heatmap",
+                        )
+                    except Exception as render_error:
+                        logger.warning(
+                            f"Epoch {epoch}: AL/MB activation visualization "
+                            f"failed: {render_error}"
+                        )
+
+                    # Own try/except (plan.md invariant 1 / Step 5.2c). Reuses
+                    # val_logits/y_val already computed above by Step 2's batched
+                    # accuracy pass rather than recomputing — both sides argmax'd
+                    # (plan.md invariant 3: no integer-label path exists anywhere
+                    # in this trainer).
+                    try:
+                        y_true = np.argmax(y_val, axis=-1)
+                        y_pred = np.argmax(val_logits, axis=-1)
+                        classification_results = ClassificationResults(
+                            y_true=y_true, y_pred=y_pred,
+                            class_names=[str(i) for i in range(10)],
+                            model_name="MothNet",
+                        )
+                        viz_manager.visualize(
+                            classification_results, plugin_name="confusion_matrix",
+                            filename=f"epoch_{epoch + 1:03d}_confusion_matrix",
+                        )
+                    except Exception as render_error:
+                        logger.warning(
+                            f"Epoch {epoch}: confusion_matrix visualization "
+                            f"failed: {render_error}"
                         )
 
                 logger.info(
