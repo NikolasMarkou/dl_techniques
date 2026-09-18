@@ -269,14 +269,25 @@ class TestDecoderDifferentialFFNActivation:
             f"DifferentialFFN takes `branch_activation`, not `activation`."
         )
 
-    def test_gate_activation_is_left_at_its_default(self):
-        """The site's generic `activation` must NOT be forwarded to the gate.
+    def test_differential_ffn_has_no_gate_activation_to_leak_into(self):
+        """DifferentialFFN has no gate at all; confirm nothing resurrects one.
 
-        Mirrors ``TransformerLayer._get_ffn_config``, which forwards only
-        ``branch_activation``: the sigmoid gate is DifferentialFFN's defining feature.
+        Was: "the site's generic `activation` must NOT be forwarded to the
+        gate" (`gate_activation` defaults to 'sigmoid'). DifferentialFFN was
+        redesigned to a gate-less push-pull architecture (no separate gate
+        Dense at all) -- `gate_activation` is not a constructor param and not
+        an attribute. This regression guard's ORIGINAL intent -- the site's
+        generic `activation` must not leak somewhere it doesn't belong --
+        still applies; it is now pinned by confirming the attribute the old
+        leak would have landed on does not exist, rather than checking its
+        value.
         """
         ffn = self._build().ffn_layer
-        assert keras.activations.serialize(ffn.gate_activation) == 'sigmoid'
+        assert not hasattr(ffn, 'gate_activation'), (
+            "DifferentialFFN unexpectedly has a 'gate_activation' attribute "
+            "again -- if a gate was reintroduced, restore the original "
+            "value-check assertion this test replaced."
+        )
 
     def test_no_dropped_key_for_this_construction(self):
         """Generalizes past this one parameter name: ZERO keys may be dropped.

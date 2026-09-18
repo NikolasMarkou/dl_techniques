@@ -9,7 +9,12 @@ entries), the pre-/post-norm combinations, and the dimension-changing
 
 Every entry of ``FFN_CASES`` below was measured against this tree on 2026-08-26,
 including the required input rank -- three of the 21 types are rank-restricted
-and one (``monarch``) constrains ``output_dim``.
+and one (``monarch``) constrains ``output_dim``. Re-measured 2026-09-18: ``counting``
+became a fourth rank-restricted type (a same-day redesign made rank-3 input mandatory,
+predating this correction) and the registry grew a 22nd type, ``gated_dconv`` (Restormer
+GDFN, rank-4 NHWC only) -- both were caught by an adversarial review of an unrelated
+`layers/ffn/` audit plan, not by this file's own coverage guard, which had been silently
+red for both gaps.
 """
 
 import keras
@@ -49,7 +54,9 @@ FFN_CASES = [
     ('orthoglu', {'hidden_dim': 6, 'output_dim': OUT}, R2, OUT),
     ('gelu_tanh', {'hidden_dim': 16, 'output_dim': OUT}, R2, OUT),
     ('swin_mlp', {'hidden_dim': 16, 'output_dim': OUT}, R2, OUT),
-    ('counting', {'output_dim': OUT, 'count_dim': 4}, R2, OUT),
+    # counting requires rank-3 input as of a same-day redesign (2026-09-17);
+    # R2 here was stale and silently untested until an adversarial review caught it.
+    ('counting', {'output_dim': OUT, 'count_dim': 4}, R3, OUT),
     ('logic', {'output_dim': OUT, 'logic_dim': 4}, R2, OUT),
     ('power_mlp', {'units': OUT}, R2, OUT),
     ('tversky', {'units': OUT, 'num_features': 4}, R2, OUT),
@@ -57,6 +64,9 @@ FFN_CASES = [
     ('monarch', {'hidden_dim': 16, 'output_dim': 8, 'nblocks': 2}, R2, 8),
     ('mixer', {'tokens_mlp_dim': 8, 'channels_mlp_dim': 16}, R3, D),
     ('gated_mlp', {'filters': OUT}, R4, OUT),
+    # gated_dconv (Restormer GDFN): rank-4 NHWC only, output_dim_param is None
+    # so output width == input width (D), not the OUT convention above.
+    ('gated_dconv', {'dim': D}, R4, D),
 ]
 
 FFN_IDS = [c[0] for c in FFN_CASES]

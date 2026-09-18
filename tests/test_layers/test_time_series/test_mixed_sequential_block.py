@@ -556,10 +556,23 @@ class TestMixedSequentialBlockFFNStrictness:
         default = DifferentialFFN(hidden_dim=32, output_dim=16)
         assert keras.activations.serialize(default.branch_activation) == 'gelu'
 
-    def test_the_gate_activation_is_left_alone(self) -> None:
-        """The generic activation must not be routed onto the sigmoid gate."""
+    def test_differential_ffn_has_no_gate_activation_to_leak_into(self) -> None:
+        """DifferentialFFN has no gate at all; confirm nothing resurrects one.
+
+        Was: "the generic activation must not be routed onto the sigmoid
+        gate" (`gate_activation` defaults to 'sigmoid'). DifferentialFFN was
+        redesigned to a gate-less push-pull architecture -- `gate_activation`
+        is not a constructor param and not an attribute any more. The
+        original intent (the site's generic activation must not leak
+        somewhere it doesn't belong) is now pinned by confirming the
+        attribute the old leak would have landed on does not exist.
+        """
         ffn = _build_block('differential', activation='relu').ffn_layer
-        assert keras.activations.serialize(ffn.gate_activation) == 'sigmoid'
+        assert not hasattr(ffn, 'gate_activation'), (
+            "DifferentialFFN unexpectedly has a 'gate_activation' attribute "
+            "again -- if a gate was reintroduced, restore the original "
+            "value-check assertion this test replaced."
+        )
 
     @pytest.mark.parametrize('ffn_type', ['gelu_tanh', 'squared_relu', 'swiglu'])
     def test_types_with_a_fixed_activation_discard_it(self, ffn_type) -> None:
