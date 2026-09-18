@@ -2,11 +2,12 @@
 MothNet Training Script
 ====================================================================
 
-Trains `MothNet` (`dl_techniques.models.general_purpose.mothnet.model`) on a small
-MNIST subsample via its hand-rolled `train_hebbian()` method — never `model.fit()`,
-since `HebbianReadoutLayer.readout_weights` is `trainable=False` and is updated only
-by a direct Hebbian `.assign()` inside `train_hebbian` (see
-`plans/plan-2026-09-18T045308-c89cdf76/decisions.md` D-001/D-002).
+Trains `MothNet` (`dl_techniques.models.general_purpose.mothnet.model`) on the full
+MNIST dataset by default (60000 train / 10000 val samples), or a smaller subsample via
+`--num-train-samples`/`--num-val-samples`, via its hand-rolled `train_hebbian()`
+method — never `model.fit()`, since `HebbianReadoutLayer.readout_weights` is
+`trainable=False` and is updated only by a direct Hebbian `.assign()` inside
+`train_hebbian` (see `plans/plan-2026-09-18T045308-c89cdf76/decisions.md` D-001/D-002).
 
 This module provides CLI argument parsing, seeded MNIST data loading/subsampling,
 model construction with an explicit pre-loop build, a unified `results/<run>/` output
@@ -165,6 +166,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--seed", type=int, default=42,
         help="Seed for NumPy's global RNG (default: 42).",
     )
+    # DECISION plan-2026-09-18T080513-debe8b11/D-010: full MNIST (60000/10000) is
+    # the default scale, NOT a partial/intermediate value chosen to save
+    # iteration time. This trainer's whole visualization suite (confusion matrix,
+    # AL/MB activation distribution/heatmap) is more meaningful measured at real
+    # scale than at the old 2000/500 toy subsample, and full-MNIST is the natural
+    # "no special-casing" default for a from-scratch trainer with no train/val
+    # split of its own. This is NOT free: Step 9's own measurement is
+    # ~28.5s/epoch at these defaults vs. ~1.3s/epoch at the old 2000/500 toy
+    # scale (`decisions.md` D-010) — do not raise these further, or lower them
+    # back toward the toy scale, without re-reading D-010's disclosed cost.
     parser.add_argument(
         "--num-train-samples", type=int, default=60000,
         help=(
