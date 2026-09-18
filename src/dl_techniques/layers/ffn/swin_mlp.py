@@ -95,7 +95,7 @@ class SwinMLP(keras.layers.Layer):
     :param activation: Activation applied after ``fc1``. A Keras name
         ('gelu', 'relu', 'swish') or a callable. Defaults to 'gelu'.
     :type activation: Union[str, Callable]
-    :param dropout_rate: Rate for both dropouts, in ``[0.0, 1.0]``. Defaults
+    :param dropout_rate: Rate for both dropouts, in ``[0.0, 1.0)``. Defaults
         to 0.0. The two layers always exist; at 0.0 they pass their input
         through.
     :type dropout_rate: float
@@ -159,7 +159,7 @@ class SwinMLP(keras.layers.Layer):
     :vartype fc2: Optional[keras.layers.Dense]
 
     :raises ValueError: If ``hidden_dim`` is not positive.
-    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0]``.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0)``.
     :raises ValueError: If ``output_dim`` is given and not positive.
     :raises ValueError: At build time, if the input is rank 1 or its last
         axis is ``None``.
@@ -227,7 +227,7 @@ class SwinMLP(keras.layers.Layer):
         :param activation: Activation name or callable, applied after ``fc1``.
         :type activation: Union[str, Callable]
         :param dropout_rate: Rate for both dropouts. Must be in
-            ``[0.0, 1.0]``.
+            ``[0.0, 1.0)``.
         :type dropout_rate: float
         :param kernel_initializer: Initializer for both kernels, cloned once
             per kernel.
@@ -246,7 +246,7 @@ class SwinMLP(keras.layers.Layer):
         :type kwargs: Any
 
         :raises ValueError: If ``hidden_dim`` is not positive, if
-            ``dropout_rate`` is outside ``[0.0, 1.0]``, or if ``output_dim``
+            ``dropout_rate`` is outside ``[0.0, 1.0)``, or if ``output_dim``
             is given and not positive.
         """
         super().__init__(**kwargs)
@@ -254,7 +254,13 @@ class SwinMLP(keras.layers.Layer):
         # Validate parameters
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
-        if not 0.0 <= dropout_rate <= 1.0:
+        # DECISION plan-2026-09-18-1f3c0ce8/D-011: half-open upper bound, not
+        # closed [0.0, 1.0] -- keras.layers.Dropout.call() rejects rate==1.0
+        # at training time ("rate must be ... in the range [0, 1)"), so a
+        # closed-range check here lets a config through construction that
+        # crashes on the first training-mode forward pass. Same bug class as
+        # D-002/D-003/D-004/D-005/D-006 in this package; do not re-widen.
+        if not 0.0 <= dropout_rate < 1.0:
             raise ValueError(f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}")
         if output_dim is not None and output_dim <= 0:
             raise ValueError(f"output_dim must be positive when specified, got {output_dim}")
