@@ -121,6 +121,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--hebbian-learning-rate", type=float, default=0.01,
         help="Learning rate used by the Hebbian readout update (default: 0.01).",
     )
+    # DECISION plan-2026-09-18T110506-e42a44c7/D-002: default ON at a real,
+    # measured bound (2.7858), not None. Do not revert this default to None
+    # "to preserve old behavior" without re-reading decisions.md D-002 — the
+    # disable sentinel (a value <= 0) already covers that use case, and a
+    # None default would leave the unbounded-growth defect this plan fixes
+    # active for every user who never discovers the flag. See decisions.md
+    # D-002 and D-005 (B's derivation).
+    parser.add_argument(
+        "--readout-weight-bound", type=float, default=2.7858,
+        help=(
+            "Symmetric hard clip on |readout_weights| entries, applied after each "
+            "Hebbian update (default: 2.7858, empirically derived from a fresh "
+            "short reproduction and a killed 100-epoch run's own checkpoint — "
+            "see decisions.md D-005). Fixes an unbounded weight-growth bug that "
+            "otherwise makes the reported loss diverge past its epoch~7 minimum; "
+            "val_accuracy is essentially unaffected either way (see README's "
+            "architectural-ceiling note). Pass a value <= 0 to disable and "
+            "reproduce the original unbounded behavior."
+        ),
+    )
     parser.add_argument(
         "--inhibition-strength", type=float, default=0.5,
         help="Antennal Lobe inhibition strength (default: 0.5).",
@@ -256,6 +276,19 @@ def parse_arguments(argv=None) -> argparse.Namespace:
             f"--num-val-samples must be >= 1, got {args.num_val_samples}"
         )
 
+    # DECISION plan-2026-09-18T110506-e42a44c7/D-002: `--readout-weight-bound
+    # <= 0` is a deliberate DISABLE sentinel, not an error — unlike the `< 1`
+    # `parser.error(...)` guards immediately above, this branch translates the
+    # CLI value into `None` (MothNet's own "no constraint" default) so a user
+    # can reproduce today's exact unbounded behavior with one flag. Do not
+    # change this to a `parser.error(...)` call — see decisions.md D-002.
+    if args.readout_weight_bound is not None and args.readout_weight_bound <= 0:
+        logger.info(
+            "--readout-weight-bound <= 0: disabling the readout weight bound, "
+            "reproducing original unbounded behavior"
+        )
+        args.readout_weight_bound = None
+
     return args
 
 
@@ -381,6 +414,7 @@ def build_model(args: argparse.Namespace, input_dim: int) -> MothNet:
         connection_sparsity=args.connection_sparsity,
         hebbian_learning_rate=args.hebbian_learning_rate,
         inhibition_strength=args.inhibition_strength,
+        readout_weight_bound=args.readout_weight_bound,
     )
     model.build((None, input_dim))
 
@@ -391,6 +425,7 @@ def build_model(args: argparse.Namespace, input_dim: int) -> MothNet:
         f"mb_sparsity={args.mb_sparsity}, connection_sparsity={args.connection_sparsity}, "
         f"hebbian_learning_rate={args.hebbian_learning_rate}, "
         f"inhibition_strength={args.inhibition_strength}, "
+        f"readout_weight_bound={args.readout_weight_bound}, "
         f"params={model.count_params()}."
     )
     return model

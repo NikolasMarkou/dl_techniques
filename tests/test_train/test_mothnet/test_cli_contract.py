@@ -164,6 +164,10 @@ MOTHNET_ROWS: Tuple[Row, ...] = (
         ("--eval-batch-size",), ("--eval-batch-size", "111"),
         "eval_batch_size", 111,
     ),
+    Row(
+        ("--readout-weight-bound",), ("--readout-weight-bound", "0.5"),
+        "readout_weight_bound", 0.5,
+    ),
     # Deliberately NOT a `field` row: `--gpu` is consumed once, in main(), by
     # setup_gpu(gpu_id=args.gpu) -- it is never stored as a durable config
     # attribute anywhere downstream. Proves parsing only; see
