@@ -15,7 +15,6 @@ References:
 
 import keras
 from typing import Callable, Optional, Union, Any, Dict, Tuple
-from keras import initializers, regularizers, activations
 
 # ---------------------------------------------------------------------
 # local imports
@@ -120,16 +119,16 @@ class MonarchFFN(keras.layers.Layer):
     :param kernel_initializer: Initializer for the Monarch factor weights.
         Each factor is drawn from its own clone of it. Defaults to
         'glorot_uniform'.
-    :type kernel_initializer: Union[str, initializers.Initializer]
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for the bias vectors. Each bias is
         drawn from its own clone of it. Defaults to 'zeros'.
-    :type bias_initializer: Union[str, initializers.Initializer]
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the Monarch factor weights.
         Defaults to None.
-    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Regularizer for the bias vectors.
         Defaults to None.
-    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
         ``dtype``, and so on).
     :type kwargs: Any
@@ -150,14 +149,14 @@ class MonarchFFN(keras.layers.Layer):
     :ivar kernel_initializer: The resolved factor initializer. It is the
         source the per-weight clones are rebuilt from, and is not handed to
         ``add_weight`` itself.
-    :vartype kernel_initializer: initializers.Initializer
+    :vartype kernel_initializer: keras.initializers.Initializer
     :ivar bias_initializer: The resolved bias initializer, cloned per bias
         in the same way.
-    :vartype bias_initializer: initializers.Initializer
+    :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved factor regularizer, or ``None``.
-    :vartype kernel_regularizer: Optional[regularizers.Regularizer]
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
-    :vartype bias_regularizer: Optional[regularizers.Regularizer]
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar dropout: ``Dropout(dropout_rate)``. Always present, even at rate 0.0.
     :vartype dropout: keras.layers.Dropout
     :ivar expand_l: Expand-map factor ``L``, shape
@@ -223,10 +222,10 @@ class MonarchFFN(keras.layers.Layer):
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'gelu',
         dropout_rate: float = 0.0,
         use_bias: bool = True,
-        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
         """Validate the configuration and create the dropout sub-layer.
@@ -267,13 +266,13 @@ class MonarchFFN(keras.layers.Layer):
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.nblocks = nblocks
-        self.activation = activations.get(activation)
+        self.activation = keras.activations.get(activation)
         self.dropout_rate = float(dropout_rate)
         self.use_bias = bool(use_bias)
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Sub-layers are created here, per the Keras 3 pattern. The Monarch
         # factor weights are not: their shapes need input_dim, so build() makes
@@ -514,13 +513,13 @@ class MonarchFFN(keras.layers.Layer):
             'hidden_dim': self.hidden_dim,
             'output_dim': self.output_dim,
             'nblocks': self.nblocks,
-            'activation': activations.serialize(self.activation),
+            'activation': keras.activations.serialize(self.activation),
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
