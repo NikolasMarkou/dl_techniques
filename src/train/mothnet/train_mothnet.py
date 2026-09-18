@@ -26,6 +26,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.models.general_purpose.mothnet.model import MothNet
 
 
 def parse_arguments(argv=None) -> argparse.Namespace:
@@ -199,6 +200,62 @@ def load_mnist_data(config: argparse.Namespace):
     return (x_train, y_train), (x_val, y_val)
 
 
+def build_model(args: argparse.Namespace, input_dim: int) -> MothNet:
+    """Construct and explicitly build a `MothNet` model.
+
+    Seeds NumPy's global RNG once, before construction, so both any model-init
+    randomness and `train_hebbian`'s own internal unseeded shuffle
+    (`model.py:308`, no `seed=` kwarg exists there) become reproducible across runs
+    for a fixed `--seed`. This is process-global `np.random.seed`, deliberately
+    separate from `load_mnist_data`'s own local `np.random.default_rng(config.seed)`
+    generator used for subsampling — both consume the same `args.seed` value, they
+    just use different RNG mechanisms (`decisions.md` D-009).
+
+    The model is explicitly `.build()`-built here, before the training loop ever
+    starts, rather than left to `train_hebbian`'s own `if not self.built:` self-build
+    guard (`model.py:295-299`, pinned by `# DECISION
+    plan-2026-08-17T183311-79c63e38/D-017`). Calling `build()` first makes that guard
+    a no-op on the model's first `train_hebbian` call, which is consistent with (not
+    a violation of) D-017's "don't rebuild and destroy learned weights" intent, since
+    no training has happened yet at build time. See `decisions.md` D-009.
+
+    :param args: Parsed CLI namespace (`parse_arguments`'s return value); reads
+        `args.al_units`, `args.mb_units`, `args.mb_sparsity`,
+        `args.connection_sparsity`, `args.hebbian_learning_rate`,
+        `args.inhibition_strength`, `args.seed`.
+    :param input_dim: Flattened input feature dimension (784 for MNIST).
+    :return: A built `MothNet` instance (`model.built is True`).
+    """
+    # DECISION plan-2026-09-18T045308-c89cdf76/D-009: explicit pre-loop build call.
+    # Do not remove this and rely solely on train_hebbian's own self-build guard —
+    # an --epochs 0 run (blocked at CLI-parse time, but also any early crash before
+    # the first train_hebbian call) would otherwise leave an unbuilt, unsavable
+    # model. See decisions.md D-009 for the full trade-off.
+    np.random.seed(args.seed)
+
+    model = MothNet(
+        num_classes=10,
+        al_units=args.al_units,
+        mb_units=args.mb_units,
+        mb_sparsity=args.mb_sparsity,
+        connection_sparsity=args.connection_sparsity,
+        hebbian_learning_rate=args.hebbian_learning_rate,
+        inhibition_strength=args.inhibition_strength,
+    )
+    model.build((None, input_dim))
+
+    resolved_al_units = model.antennal_lobe.units
+    logger.info(
+        f"Built MothNet — input_dim={input_dim}, al_units={resolved_al_units} "
+        f"(requested: {args.al_units}), mb_units={args.mb_units}, "
+        f"mb_sparsity={args.mb_sparsity}, connection_sparsity={args.connection_sparsity}, "
+        f"hebbian_learning_rate={args.hebbian_learning_rate}, "
+        f"inhibition_strength={args.inhibition_strength}, "
+        f"params={model.count_params()}."
+    )
+    return model
+
+
 def main(argv=None) -> int:
     """Entry point for the MothNet trainer.
 
@@ -211,6 +268,13 @@ def main(argv=None) -> int:
     args = parse_arguments(argv)
 
     logger.info(f"Parsed args: {args}")
+
+    # Smoke wire-up only (matches Step 2's own precedent) — the per-epoch training
+    # loop itself lands in Steps 4-5, not here.
+    (x_train, y_train), (x_val, y_val) = load_mnist_data(args)
+    model = build_model(args, input_dim=x_train.shape[1])
+    logger.info(f"Smoke check — model.built={model.built}, params={model.count_params()}")
+
     return 0
 
 
