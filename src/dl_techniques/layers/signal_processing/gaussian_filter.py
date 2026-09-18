@@ -4,8 +4,17 @@
 Implements a Gaussian filter for smoothing images and reducing high-frequency
 noise. The filtering is achieved by convolving the input with a kernel derived
 from the 2D Gaussian function G(x,y) = (1/(2*pi*sigma^2)) * exp(-(x^2+y^2) /
-(2*sigma^2)). The kernel is applied via depthwise convolution so each channel
-is filtered independently with the same kernel, preventing color bleeding.
+(2*sigma^2)), normalized to sum to one. The kernel is applied via depthwise
+convolution so each channel is filtered independently with the same kernel,
+preventing color bleeding.
+
+Note on ``sigma``: the kernel is sampled at ``linspace(-sigma, sigma, k)`` per
+axis, so ``sigma`` is the kernel's half-extent measured in standard
+deviations, NOT a standard deviation in pixels. The blur's standard deviation
+in pixels is about ``(k - 1) / (2 * sigma)`` (the untruncated limit, accurate for
+``sigma >= 3``; a truncated kernel is narrower) and a larger ``sigma`` blurs
+less. ``padding="same"`` zero-pads, so the border of a bright image is
+darkened and a difference against the input rings there.
 
 References:
     - Gonzalez, R. C., & Woods, R. E. "Digital Image Processing".
@@ -14,7 +23,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Tuple, Union, List, Optional, Sequence
 
 # ---------------------------------------------------------------------
@@ -59,9 +67,13 @@ class GaussianFilter(keras.layers.Layer):
     :type kernel_size: Tuple[int, int]
     :param strides: Strides of the convolution along height and width.
     :type strides: Union[Tuple[int, int], List[int]]
-    :param sigma: Standard deviation of the Gaussian distribution. If a single
-        value, same sigma for both dimensions. If a tuple, (sigma_h, sigma_w).
-        If -1 or None, sigma is calculated from kernel size.
+    :param sigma: Half-extent of the kernel in standard deviations (see the
+        module note): the blur's standard deviation in pixels is
+        about ``(kernel_size - 1) / (2 * sigma)`` per axis (accurate for
+        ``sigma >= 3``, narrower when truncated), so a larger value blurs less. If a single value, same sigma for both dimensions. If a tuple,
+        (sigma_h, sigma_w). If -1, None or any non-positive number, sigma is
+        ``(kernel_size - 1) / 2`` per axis, which is roughly a one-pixel standard
+        deviation.
     :type sigma: Union[float, Tuple[float, float]]
     :param padding: Either "valid" or "same" (case-insensitive).
     :type padding: str
@@ -168,7 +180,7 @@ class GaussianFilter(keras.layers.Layer):
         :return: Filtered tensor with the same shape as the input.
         :rtype: keras.KerasTensor
         """
-        outputs = ops.nn.depthwise_conv(
+        outputs = keras.ops.nn.depthwise_conv(
             inputs=inputs,
             kernel=self.kernel,
             strides=self.strides,

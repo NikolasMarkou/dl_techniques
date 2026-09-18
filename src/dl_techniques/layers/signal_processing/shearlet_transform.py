@@ -24,7 +24,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops, initializers
 from typing import List, Tuple, Optional, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -78,14 +77,19 @@ class ShearletTransform(keras.layers.Layer):
         analysis depth. Must be positive. Defaults to 4.
     :type scales: int
     :param directions: Number of directions per scale. Controls angular resolution.
-        Must be positive and preferably even. Defaults to 8.
+        Must be positive. The shear indices run over the symmetric range
+        ``-(directions // 2) .. directions // 2``, so an even count gives
+        ``directions + 1`` filters per scale and an odd count gives
+        ``directions``. The shears span at most +/-45 degrees of the horizontal
+        frequency axis (the horizontal cone); the vertical cone has no filters
+        of its own, and the bank normalization spreads what falls there over
+        all filters. Defaults to 8.
     :type directions: int
-    :param alpha: Anisotropy parameter controlling scale-direction sampling
-        relationship. Value of 0.5 provides parabolic scaling optimal for edge
-        detection. Must be in (0, 1]. Defaults to 0.5.
+    :param alpha: Validated to lie in (0, 1] and serialized, but currently
+        unused: the filter bank does not depend on it. Defaults to 0.5.
     :type alpha: float
-    :param high_freq: Whether to include high frequency components. When True,
-        captures fine details and noise. Defaults to True.
+    :param high_freq: Serialized, but currently unused: the filter bank always
+        includes every scale. Defaults to True.
     :type high_freq: bool
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any
@@ -156,7 +160,7 @@ class ShearletTransform(keras.layers.Layer):
         self.filter_bank_real = self.add_weight(
             name="filter_bank_real",
             shape=filters_real.shape,
-            initializer=initializers.Constant(filters_real),
+            initializer=keras.initializers.Constant(filters_real),
             trainable=False,
             dtype="float32",
             autocast=False,
@@ -165,7 +169,7 @@ class ShearletTransform(keras.layers.Layer):
         self.filter_bank_imag = self.add_weight(
             name="filter_bank_imag",
             shape=filters_imag.shape,
-            initializer=initializers.Constant(filters_imag),
+            initializer=keras.initializers.Constant(filters_imag),
             trainable=False,
             dtype="float32",
             autocast=False,
@@ -180,8 +184,12 @@ class ShearletTransform(keras.layers.Layer):
         :return: List of complex-valued filter arrays (centered frequency domain).
         :rtype: list[numpy.ndarray]
         """
-        fx = np.linspace(-0.5, 0.5, width)
-        fy = np.linspace(-0.5, 0.5, height)
+        # Centered DFT frequency grid, ``fftshift(fftfreq(n))``: spacing 1/n and
+        # exactly zero at index ``n // 2``, which ``ifftshift`` maps onto the
+        # DC bin. ``linspace(-0.5, 0.5, n)`` has spacing 1/(n - 1) and, for an
+        # even ``n``, no zero-frequency sample at all.
+        fx = (np.arange(width) - width // 2) / width
+        fy = (np.arange(height) - height // 2) / height
         freq_y, freq_x = np.meshgrid(fy, fx, indexing='ij')
 
         filters = []
@@ -206,19 +214,28 @@ class ShearletTransform(keras.layers.Layer):
                 min_response
             )
 
-            for k in range(-self.directions // 2, self.directions // 2 + 1):
+            for k in range(-(self.directions // 2), self.directions // 2 + 1):
                 shear = k / (self.directions / 2.0)
                 angle = np.arctan(shear)
 
+                # Orientation is defined modulo pi: the window must peak at
+                # both ``angle`` and ``angle + pi`` so the filter is symmetric
+                # under w -> -w. A one-lobe filter is not Hermitian, so on a
+                # real input the real part taken in ``call`` discards half of
+                # what the filter passes.
+                orientation_delta = (
+                    np.mod(theta - angle + 0.5 * np.pi, np.pi) - 0.5 * np.pi
+                )
                 dir_window = np.maximum(
                     self._meyer_window_numpy(
-                        (theta - angle) / (0.5 * np.pi),
+                        orientation_delta / (0.5 * np.pi),
                         a=2.0 / (self.directions + 2)
                     ),
                     min_response
                 )
 
                 shearlet = np.maximum(window_j * dir_window, min_response)
+                shearlet = self._symmetrize_numpy(shearlet)
 
                 norm = np.sqrt(np.mean(np.abs(shearlet) ** 2) + 1e-6)
                 shearlet = shearlet / norm
@@ -226,6 +243,25 @@ class ShearletTransform(keras.layers.Layer):
                 filters.append(shearlet.astype(np.complex64))
 
         return self._normalize_filter_bank_numpy(filters)
+
+    @staticmethod
+    def _symmetrize_numpy(f: np.ndarray) -> np.ndarray:
+        """Make a centered-layout filter exactly symmetric under ``w -> -w``.
+
+        For an even size the centered grid holds ``-0.5`` but not ``+0.5``, so
+        the Nyquist row/column has no mirror image and the orientation window
+        there is not symmetric. Averaging each bin with its mirror bin closes
+        that gap, so the real part taken in ``call`` loses nothing.
+
+        :param f: Real filter of shape ``(height, width)``.
+        :type f: numpy.ndarray
+        :return: The symmetrized filter.
+        :rtype: numpy.ndarray
+        """
+        height, width = f.shape
+        mirror_h = (2 * (height // 2) - np.arange(height)) % height
+        mirror_w = (2 * (width // 2) - np.arange(width)) % width
+        return 0.5 * (f + f[mirror_h][:, mirror_w])
 
     def _meyer_window_numpy(
             self,
@@ -295,56 +331,56 @@ class ShearletTransform(keras.layers.Layer):
         :return: Shearlet coefficients of shape ``[batch_size, height, width, num_filters * channels]``.
         :rtype: keras.KerasTensor
         """
-        inputs = ops.cast(inputs, "float32")
+        inputs = keras.ops.cast(inputs, "float32")
 
         if len(inputs.shape) == 3:
-            inputs = ops.expand_dims(inputs, axis=-1)
+            inputs = keras.ops.expand_dims(inputs, axis=-1)
 
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
         batch_size = input_shape[0]
         channels_dim = inputs.shape[-1]
 
         # FFT ops operate on the last 2 axes, so permute channels forward.
-        x = ops.transpose(inputs, axes=(0, 3, 1, 2))
+        x = keras.ops.transpose(inputs, axes=(0, 3, 1, 2))
 
         # Input is real, so imag part is zero.
-        x_imag = ops.zeros_like(x)
-        fft_r, fft_i = ops.fft2((x, x_imag))
+        x_imag = keras.ops.zeros_like(x)
+        fft_r, fft_i = keras.ops.fft2((x, x_imag))
 
-        f_r = ops.reshape(self.filter_bank_real, (1, 1, -1, self.height, self.width))
-        f_i = ops.reshape(self.filter_bank_imag, (1, 1, -1, self.height, self.width))
+        f_r = keras.ops.reshape(self.filter_bank_real, (1, 1, -1, self.height, self.width))
+        f_i = keras.ops.reshape(self.filter_bank_imag, (1, 1, -1, self.height, self.width))
 
-        fft_r = ops.expand_dims(fft_r, axis=2)
-        fft_i = ops.expand_dims(fft_i, axis=2)
+        fft_r = keras.ops.expand_dims(fft_r, axis=2)
+        fft_i = keras.ops.expand_dims(fft_i, axis=2)
 
         out_r = (fft_r * f_r) - (fft_i * f_i)
         out_i = (fft_r * f_i) + (fft_i * f_r)
 
-        # ifft2 availability varies; use IFFT(z) = conj(FFT(conj(z))) / N via fft2 instead.
-
+        # Inverse via IFFT(z) = conj(FFT(conj(z))) / N, so both transforms are
+        # forward ``fft2`` calls on the same float32 island.
         conj_in_r = out_r
         conj_in_i = -out_i
 
-        tmp_r, tmp_i = ops.fft2((conj_in_r, conj_in_i))
+        tmp_r, tmp_i = keras.ops.fft2((conj_in_r, conj_in_i))
 
 
-        N = ops.cast(self.height * self.width, "float32")
+        N = keras.ops.cast(self.height * self.width, "float32")
         coeffs = tmp_r / N
 
 
-        coeffs = ops.transpose(coeffs, axes=(0, 3, 4, 1, 2))
+        coeffs = keras.ops.transpose(coeffs, axes=(0, 3, 4, 1, 2))
 
-        num_base_filters = ops.shape(self.filter_bank_real)[0]
+        num_base_filters = keras.ops.shape(self.filter_bank_real)[0]
 
         if channels_dim is None:
-            out_ch = ops.shape(inputs)[3] * num_base_filters
+            out_ch = keras.ops.shape(inputs)[3] * num_base_filters
             final_shape = (batch_size, self.height, self.width, out_ch)
         else:
             out_ch = channels_dim * num_base_filters
             final_shape = (-1, self.height, self.width, out_ch)
 
         # Spectral island is float32 (see D-054 in build); cast to compute_dtype for the caller.
-        return ops.cast(ops.reshape(coeffs, final_shape), self.compute_dtype)
+        return keras.ops.cast(keras.ops.reshape(coeffs, final_shape), self.compute_dtype)
 
     def compute_output_shape(
             self,
@@ -356,9 +392,11 @@ class ShearletTransform(keras.layers.Layer):
 
         batch_size, height, width, channels = input_shape
 
-        # 1 low-pass filter, plus directions+1 directional filters per scale:
-        # the inclusive range -directions//2..directions//2 yields directions+1 filters.
-        filters_per_scale = (self.directions // 2 + 1) - (-self.directions // 2)
+        # 1 low-pass filter, plus one directional filter per shear index in the
+        # inclusive, symmetric range -(directions // 2)..directions // 2, that
+        # is ``directions + 1`` for an even count and ``directions`` for an odd
+        # one.
+        filters_per_scale = 2 * (self.directions // 2) + 1
         num_filters = 1 + self.scales * filters_per_scale
 
         if channels is not None:

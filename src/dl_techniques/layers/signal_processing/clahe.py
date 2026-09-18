@@ -157,10 +157,13 @@ class CLAHE(keras.layers.Layer):
         :rtype: tf.Tensor
         """
         # Note: tf.histogram_fixed_width is used as there is no Keras Ops equivalent.
+        # ``tile`` and everything below run in float32 whatever the compute
+        # dtype: the op has no float16 kernel, and float16 counts overflow for
+        # tiles above 255 x 255 pixels.
         hist = tf.histogram_fixed_width(
             tile, value_range=[0.0, 255.0], nbins=self.n_bins
         )
-        hist = keras.ops.cast(hist, self.compute_dtype)
+        hist = keras.ops.cast(hist, "float32")
 
         # Apply contrast limiting
         clip_val = self.clip_limit * keras.ops.mean(hist)
@@ -177,10 +180,17 @@ class CLAHE(keras.layers.Layer):
         cdf_normalized = (cdf - cdf_min) * 255.0 / denominator
 
         # Apply trainable mapping
-        cdf_mapped = cdf_normalized * keras.ops.sigmoid(self.mapping_kernel)
+        gate = keras.ops.cast(keras.ops.sigmoid(self.mapping_kernel), "float32")
+        cdf_mapped = cdf_normalized * gate
 
-        # Map input pixel values to the new CDF
-        indices = keras.ops.cast(keras.ops.round(tile), "int32")
+        # Map each pixel to its histogram bin, computed exactly as
+        # ``tf.histogram_fixed_width`` bins it (``cdf_mapped`` has ``n_bins``
+        # entries, so the raw 0-255 pixel value only indexes it when
+        # ``n_bins == 256``).
+        indices = keras.ops.cast(
+            keras.ops.floor(self.n_bins * (tile / 255.0)), "int32"
+        )
+        indices = keras.ops.clip(indices, 0, self.n_bins - 1)
         return keras.ops.take(cdf_mapped, indices)
 
     def call(self, inputs: tf.Tensor) -> tf.Tensor:
@@ -190,14 +200,16 @@ class CLAHE(keras.layers.Layer):
         data-dependent (a function of the runtime ``H``/``W``), so the nested
         Python tile loop is run eagerly rather than traced into a graph
         ``while_loop`` (graph tracing of the loop + ``tf.histogram_fixed_width``
-        is not supported — see the module-level accepted-exception note).
+        is not supported — see the module docstring).
 
-        :param inputs: Input image tensor of shape ``(H, W, 1)``.
+        :param inputs: Input image tensor of shape ``(H, W, 1)`` with values on
+            a 0-255 scale; values outside that range fall into the first or
+            last histogram bin.
         :type inputs: tf.Tensor
         :return: Enhanced image tensor of same shape.
         :rtype: tf.Tensor
         """
-        x = keras.ops.cast(inputs, self.compute_dtype)
+        x = keras.ops.cast(inputs, "float32")
         shape = keras.ops.shape(x)
         height, width = shape[0], shape[1]
 
@@ -225,7 +237,9 @@ class CLAHE(keras.layers.Layer):
         result = keras.ops.concatenate(processed_rows, axis=0)
         # Ensure final output has the original dimensions
         result = result[:height, :width]
-        return keras.ops.reshape(result, (height, width, 1))
+        return keras.ops.cast(
+            keras.ops.reshape(result, (height, width, 1)), self.compute_dtype
+        )
 
     def get_config(self) -> Dict[str, Any]:
         """Return the configuration of the layer for serialization.

@@ -331,17 +331,26 @@ def gaussian_kernel(
 
     Args:
         kernel_size (Tuple[int, int]): Size of the grid (height, width).
-        nsig (Tuple[float, float]): Standard deviation for x and y dimensions.
+        nsig (Tuple[float, float]): Half-extent of the grid along (height,
+            width), in units of the Gaussian's standard deviation: the kernel
+            samples ``exp(-t^2 / 2)`` at ``linspace(-nsig, nsig, size)`` per
+            axis, so the standard deviation in pixels is
+            about ``(size - 1) / (2 * nsig)`` (the untruncated limit, accurate
+            for ``nsig >= 3``; a truncated kernel is narrower) and a larger
+            ``nsig`` blurs less.
 
     Returns:
-        np.ndarray: 2D Gaussian kernel.
+        np.ndarray: 2D Gaussian kernel of shape ``kernel_size``.
     """
     if len(nsig) != 2 or len(kernel_size) != 2:
         raise ValueError("Both kernel_size and nsig must be tuples of length 2.")
 
     x = np.linspace(-nsig[0], nsig[0], kernel_size[0])
     y = np.linspace(-nsig[1], nsig[1], kernel_size[1])
-    x, y = np.meshgrid(x, y)
+    # ``ij`` indexing keeps axis 0 = height / ``nsig[0]``. The default ``xy``
+    # returns shape ``(width, height)`` with the two sigmas swapped, which made
+    # a non-square kernel_size fail to broadcast into ``(height, width)``.
+    x, y = np.meshgrid(x, y, indexing="ij")
 
     kernel = np.exp(-(x ** 2 + y ** 2) / 2)
     return kernel / np.sum(kernel)
@@ -362,7 +371,8 @@ def depthwise_gaussian_kernel(
     Args:
         channels (int): Number of input channels.
         kernel_size (Tuple[int, int]): Size of the kernel (height, width).
-        nsig (Tuple[float, float]): Standard deviation for x and y dimensions.
+        nsig (Tuple[float, float]): Half-extent of the grid along (height,
+            width) in standard deviations; see ``gaussian_kernel``.
         dtype (Optional[np.dtype]): Data type of the output kernel.
 
     Returns:

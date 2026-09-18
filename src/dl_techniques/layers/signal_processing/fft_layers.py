@@ -33,8 +33,11 @@ class FFTLayer(keras.layers.Layer):
     Transforms real-valued spatial domain features into the frequency domain via
     2D FFT, producing a single real-valued tensor where the real and imaginary
     components are concatenated along the channel axis. The output has shape
-    [batch, H, W, 2*C] with float32 dtype. This is a core component of the
-    Fourier-based token mixer in PW-FNet.
+    [batch, H, W, 2*C] in the layer's compute dtype (the transform itself runs
+    in float32). Under a float16 policy the returned spectrum overflows once a
+    coefficient exceeds 65504 (the DC term is the sum of the whole map, so a
+    256 x 256 map of ones already does); use a float32 policy for large maps.
+    This is a core component of the Fourier-based token mixer in PW-FNet.
 
     Architecture:
 
@@ -66,7 +69,7 @@ class FFTLayer(keras.layers.Layer):
         └──────────────────┬────────────────────┘
                            ▼
         ┌───────────────────────────────────────┐
-        │  Output [batch, H, W, 2*C] (float32)  │
+        │  Output [batch, H, W, 2*C]            │
         └───────────────────────────────────────┘
 
     :param kwargs: Additional keyword arguments for the Layer base class.
@@ -153,7 +156,7 @@ class IFFTLayer(keras.layers.Layer):
     .. code-block:: text
 
         ┌─────────────────────────────────────────┐
-        │  Input [batch, H, W, 2*C] (float32)     │
+        │  Input [batch, H, W, 2*C]               │
         └──────────────────┬──────────────────────┘
                            ▼
         ┌─────────────────────────────────────────┐
@@ -175,7 +178,7 @@ class IFFTLayer(keras.layers.Layer):
         └──────────────────┬──────────────────────┘
                            ▼
         ┌─────────────────────────────────────────┐
-        │  Output [batch, H, W, C] (float32)      │
+        │  Output [batch, H, W, C]                │
         └─────────────────────────────────────────┘
 
     :param kwargs: Additional keyword arguments for the Layer base class.

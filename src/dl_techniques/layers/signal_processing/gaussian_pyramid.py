@@ -14,7 +14,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Tuple, Union, Optional, Sequence, List, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -73,9 +72,13 @@ class GaussianPyramid(keras.layers.Layer):
     :type levels: int
     :param kernel_size: Height and width of the 2D Gaussian kernel.
     :type kernel_size: Tuple[int, int]
-    :param sigma: Standard deviation of the Gaussian. If a single value, same
-        for both dimensions. If tuple, (sigma_h, sigma_w). If -1 or None,
-        calculated from kernel size.
+    :param sigma: Half-extent of the Gaussian kernel in standard deviations, as
+        in :class:`GaussianFilter`: the blur's standard deviation in pixels is
+        about ``(kernel_size - 1) / (2 * sigma)`` (accurate for ``sigma >= 3``),
+        so a larger value blurs less. If a
+        single value, same for both dimensions. If tuple, (sigma_h, sigma_w).
+        If -1 or None, ``(kernel_size - 1) / 2`` per axis (roughly a one-pixel standard
+        deviation).
     :type sigma: Union[float, Tuple[float, float]]
     :param scale_factor: Downsampling factor between levels. Defaults to 2.
     :type scale_factor: int
@@ -202,7 +205,7 @@ class GaussianPyramid(keras.layers.Layer):
         if self.scale_factor == 1:
             return inputs
 
-        return ops.nn.average_pool(
+        return keras.ops.nn.average_pool(
             inputs=inputs,
             pool_size=(self.scale_factor, self.scale_factor),
             strides=(self.scale_factor, self.scale_factor),
@@ -247,7 +250,19 @@ class GaussianPyramid(keras.layers.Layer):
         output_shapes = []
         current_shape = input_shape
 
-        for i in range(self.levels):
+        for i, gaussian_filter in enumerate(self.gaussian_filters):
+            # Each level's output is the filter's, which shrinks the spatial
+            # dims by ``kernel_size - 1`` under ``'valid'`` padding.
+            current_shape = gaussian_filter.compute_output_shape(current_shape)
+            if any(
+                dim is not None and dim < 1
+                for dim in (current_shape[1:3] if self.data_format == "channels_last"
+                            else current_shape[2:4])
+            ):
+                raise ValueError(
+                    f"levels={self.levels} is too deep for input shape "
+                    f"{input_shape}: level {i} would have shape {current_shape}."
+                )
             output_shapes.append(current_shape)
             if i < self.levels - 1:  # Don't compute for the last level
                 current_shape = self._compute_downsampled_shape(current_shape)
@@ -292,8 +307,9 @@ def gaussian_pyramid(
     :param kernel_size: Height and width of the Gaussian kernel. Defaults to
         (5, 5).
     :type kernel_size: Tuple[int, int]
-    :param sigma: Standard deviation of the Gaussian. If -1, calculated from
-        kernel size.
+    :param sigma: Half-extent of the Gaussian kernel in standard deviations
+        (see :class:`GaussianFilter`). If -1, ``(kernel_size - 1) / 2`` per
+        axis.
     :type sigma: Union[float, Tuple[float, float]]
     :param scale_factor: Downsampling factor between levels. Defaults to 2.
     :type scale_factor: int

@@ -4,8 +4,9 @@
 The layer runs the classical five-stage algorithm — Gaussian smoothing,
 Sobel gradients, non-maximum suppression, double thresholding, and
 hysteresis tracking — as ordinary convolutions and a bounded morphological
-loop, so it composes into a Keras graph and differentiates through like
-any other layer, while contributing no trainable capacity.
+loop, so it composes into a Keras graph while contributing no trainable
+capacity. Its output is a hard threshold of the gradient field, so it passes
+no useful gradient back to its input.
 
 The forward path uses only `keras.ops` and is backend-agnostic. `keras.ops`
 has no generic grayscale-dilation primitive, but both dilation stages use
@@ -38,7 +39,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 class Canny(keras.layers.Layer):
     """Multi-stage Canny edge detection layer for single-channel images.
 
-    Applies the classical Canny algorithm as a differentiable Keras layer:
+    Applies the classical Canny algorithm as a Keras layer:
     Gaussian smoothing ``I_smooth = I * G(sigma)``, Sobel gradient computation
     ``G = sqrt(Gx^2 + Gy^2)``, non-maximum suppression along the gradient
     direction, double thresholding into strong/weak edges, and iterative
@@ -85,17 +86,20 @@ class Canny(keras.layers.Layer):
     :param sigma: Standard deviation for the Gaussian kernel. Must be >= 0.8.
         Defaults to 0.8.
     :type sigma: float
-    :param threshold_min: Lower threshold for double thresholding.
+    :param threshold_min: Lower threshold for double thresholding, on the
+        un-normalized Sobel gradient magnitude of an image on a 0-255 scale
+        (a unit-range image needs thresholds scaled down accordingly).
         Defaults to 50.
     :type threshold_min: int
-    :param threshold_max: Upper threshold for double thresholding.
-        Defaults to 80.
+    :param threshold_max: Upper threshold for double thresholding, same scale
+        as ``threshold_min``. Defaults to 80.
     :type threshold_max: int
-    :param tracking_connection: Connectivity kernel size for hysteresis
-        edge tracking. Defaults to 5.
+    :param tracking_connection: Side of the square window used to grow strong
+        edges into adjacent weak ones during hysteresis tracking. Must be >= 1;
+        use an odd value for a symmetric window. Defaults to 5.
     :type tracking_connection: int
-    :param tracking_iterations: Maximum number of hysteresis iterations.
-        Defaults to 3.
+    :param tracking_iterations: Maximum number of hysteresis iterations. Must
+        be >= 1. Defaults to 3.
     :type tracking_iterations: int
     :param kwargs: Additional arguments for the ``keras.layers.Layer`` base class.
     """
@@ -120,6 +124,14 @@ class Canny(keras.layers.Layer):
             raise ValueError(
                 f"threshold_min ({threshold_min}) must be less than "
                 f"threshold_max ({threshold_max})."
+            )
+        if tracking_connection < 1:
+            raise ValueError(
+                f"tracking_connection must be >= 1, got {tracking_connection}."
+            )
+        if tracking_iterations < 1:
+            raise ValueError(
+                f"tracking_iterations must be >= 1, got {tracking_iterations}."
             )
 
         # Store all configuration parameters
@@ -202,20 +214,30 @@ class Canny(keras.layers.Layer):
         original_dtype = inputs.dtype
 
         # Stage 1: Noise reduction
-        x_smooth = keras.ops.conv(inputs, self.gaussian_kernel, padding="same")
+        x_smooth = self._conv_symmetric(inputs, self.gaussian_kernel)
 
         # Stage 2: Gradient calculation
-        grad_xy = keras.ops.conv(x_smooth, self.sobel_kernel, padding="same")
+        grad_xy = self._conv_symmetric(x_smooth, self.sobel_kernel)
         grad_x, grad_y = keras.ops.split(grad_xy, 2, axis=-1)
 
+        # Magnitude in float32: a float16 square overflows past |g| = 255.
+        # It is deliberately NOT clipped: a clip at 255 turns every strong
+        # edge's ridge into a flat plateau, and non-maximum suppression keeps
+        # every pixel of a plateau, so edges would come out several pixels wide.
+        grad_x = keras.ops.cast(grad_x, "float32")
+        grad_y = keras.ops.cast(grad_y, "float32")
         theta = (keras.ops.arctan2(grad_y, grad_x) * (180 / np.pi) + 90) % 180
-        grad_mag = keras.ops.clip(
-            keras.ops.sqrt(grad_x ** 2 + grad_y ** 2), 0.0, 255.0
-        )
+        grad_mag = keras.ops.sqrt(grad_x ** 2 + grad_y ** 2)
 
         # Stage 3: Non-maximum suppression
         angle_responses = self._compute_angle_responses(theta, grad_mag)
-        max_pool_angle = self._directional_max(angle_responses)
+        # The neighbours are compared by their gradient MAGNITUDE, whatever
+        # orientation bin they fall in: reading them from ``angle_responses``
+        # would give 0 for a neighbour in another bin, and a much stronger
+        # neighbour across the edge could then never suppress the centre.
+        max_pool_angle = self._directional_max(
+            keras.ops.tile(grad_mag, [1, 1, 1, 4])
+        )
 
         # Stage 4: Double thresholding
         strong_edges, weak_edges = self._apply_double_threshold(
@@ -226,6 +248,29 @@ class Canny(keras.layers.Layer):
         final_edges = self._track_edges(strong_edges, weak_edges)
 
         return keras.ops.cast(final_edges, dtype=original_dtype)
+
+    @staticmethod
+    def _conv_symmetric(
+            inputs: keras.KerasTensor, kernel: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Convolve with ``'same'`` output size and mirrored borders.
+
+        Zero padding would turn every bright image border into a step edge
+        against the padding, so the border is mirrored instead.
+
+        :param inputs: Tensor of shape ``(B, H, W, 1)``.
+        :type inputs: keras.KerasTensor
+        :param kernel: Odd-sized kernel of shape ``(K, K, 1, C_out)``.
+        :type kernel: keras.KerasTensor
+        :return: Convolved tensor of shape ``(B, H, W, C_out)``.
+        :rtype: keras.KerasTensor
+        """
+        pad_h, pad_w = kernel.shape[0] // 2, kernel.shape[1] // 2
+        padded = keras.ops.pad(
+            inputs, [[0, 0], [pad_h, pad_h], [pad_w, pad_w], [0, 0]],
+            mode="symmetric"
+        )
+        return keras.ops.conv(padded, kernel, padding="valid")
 
     def _compute_angle_responses(
             self, theta: keras.KerasTensor, grad_mag: keras.KerasTensor
@@ -263,15 +308,18 @@ class Canny(keras.layers.Layer):
     def _directional_max(angle_responses: keras.KerasTensor) -> keras.KerasTensor:
         """Per-angle directional dilation over a fixed 3-pixel line footprint.
 
-        Reproduces ``tf.nn.dilation2d`` with the layer's former ``(3, 3, 4)``
-        angle kernel (values in ``{0, -inf}``): channel ``c`` is the max over
-        the 3 pixels lying on that channel's line through the center — 0°
-        horizontal, 90° vertical, 45° anti-diagonal, 135° main diagonal.
-        ``-inf`` padding reproduces ``dilation2d``'s ``'SAME'`` boundary
-        behaviour, since out-of-bounds taps never win a max.
+        Channel ``c`` holds responses for edges of orientation ``c`` and is
+        maxed over the 3 pixels lying on the line through the center that runs
+        *across* that edge, i.e. along the gradient direction, which is where
+        non-maximum suppression must compare neighbours: a 0° (horizontal)
+        edge is compared vertically, 90° horizontally, 45° along the main
+        diagonal and 135° along the anti-diagonal. Comparing along the edge
+        instead would keep every pixel of a ridge flank and thin nothing.
+        ``-inf`` padding means out-of-bounds taps never win a max.
 
-        :param angle_responses: Angle-weighted response tensor of shape
-            ``(B, H, W, 4)``, channel order ``[0°, 45°, 90°, 135°]``.
+        :param angle_responses: Tensor of shape ``(B, H, W, 4)`` whose channel
+            order is ``[0°, 45°, 90°, 135°]`` of the edge orientation. ``call``
+            passes the gradient magnitude tiled over the four channels.
         :type angle_responses: keras.KerasTensor
         :return: Directional max tensor of the same shape.
         :rtype: keras.KerasTensor
@@ -283,25 +331,27 @@ class Canny(keras.layers.Layer):
 
         c0, c45, c90, c135 = (padded[..., i:i + 1] for i in range(4))
 
-        # 0 degrees: horizontal line (mid row, left/mid/right column)
+        # 0 degree edge: gradient is vertical (top, mid, bottom row)
         out0 = keras.ops.maximum(
-            keras.ops.maximum(c0[:, 1:-1, :-2, :], c0[:, 1:-1, 1:-1, :]),
-            c0[:, 1:-1, 2:, :]
+            keras.ops.maximum(c0[:, :-2, 1:-1, :], c0[:, 1:-1, 1:-1, :]),
+            c0[:, 2:, 1:-1, :]
         )
-        # 45 degrees: anti-diagonal (top-right, mid, bottom-left)
+        # 45 degree edge (anti-diagonal): gradient runs along the main
+        # diagonal (top-left, mid, bottom-right)
         out45 = keras.ops.maximum(
-            keras.ops.maximum(c45[:, :-2, 2:, :], c45[:, 1:-1, 1:-1, :]),
-            c45[:, 2:, :-2, :]
+            keras.ops.maximum(c45[:, :-2, :-2, :], c45[:, 1:-1, 1:-1, :]),
+            c45[:, 2:, 2:, :]
         )
-        # 90 degrees: vertical line (mid column, top/mid/bottom row)
+        # 90 degree edge: gradient is horizontal (left, mid, right column)
         out90 = keras.ops.maximum(
-            keras.ops.maximum(c90[:, :-2, 1:-1, :], c90[:, 1:-1, 1:-1, :]),
-            c90[:, 2:, 1:-1, :]
+            keras.ops.maximum(c90[:, 1:-1, :-2, :], c90[:, 1:-1, 1:-1, :]),
+            c90[:, 1:-1, 2:, :]
         )
-        # 135 degrees: main diagonal (top-left, mid, bottom-right)
+        # 135 degree edge (main diagonal): gradient runs along the
+        # anti-diagonal (top-right, mid, bottom-left)
         out135 = keras.ops.maximum(
-            keras.ops.maximum(c135[:, :-2, :-2, :], c135[:, 1:-1, 1:-1, :]),
-            c135[:, 2:, 2:, :]
+            keras.ops.maximum(c135[:, :-2, 2:, :], c135[:, 1:-1, 1:-1, :]),
+            c135[:, 2:, :-2, :]
         )
 
         return keras.ops.concatenate([out0, out45, out90, out135], axis=-1)
@@ -321,8 +371,17 @@ class Canny(keras.layers.Layer):
         :return: Tuple of ``(strong_edges, weak_edges)`` binary masks.
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
+        # Only a pixel's own-angle channel is non-zero in ``angle_responses``.
+        # ``max_pool_angle`` holds the largest magnitude on each channel's
+        # across-edge line, so a pixel survives when its own magnitude is that
+        # maximum. The ``> 0`` term stops the other, all-zero channels passing
+        # on ``0 >= 0``, which would suppress nothing.
         suppressed = keras.ops.where(
-            keras.ops.equal(max_pool_angle, angle_responses), grad_mag, 0.0
+            keras.ops.logical_and(
+                keras.ops.greater_equal(angle_responses, max_pool_angle),
+                keras.ops.greater(angle_responses, 0.0)
+            ),
+            angle_responses, 0.0
         )
         edge_candidates = keras.ops.expand_dims(
             keras.ops.max(suppressed, axis=-1), axis=-1
@@ -387,8 +446,16 @@ class Canny(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "sigma": self.sigma,
-            "threshold_min": int(self.threshold_min),
-            "threshold_max": int(self.threshold_max),
+            # ``int()`` would truncate a fractional threshold, so the round trip
+            # could reorder or collapse the pair; keep it whole when integral.
+            "threshold_min": (
+                int(self.threshold_min)
+                if self.threshold_min.is_integer() else self.threshold_min
+            ),
+            "threshold_max": (
+                int(self.threshold_max)
+                if self.threshold_max.is_integer() else self.threshold_max
+            ),
             "tracking_connection": self.tracking_connection,
             "tracking_iterations": self.tracking_iterations,
         })

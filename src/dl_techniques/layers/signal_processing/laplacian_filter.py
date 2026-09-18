@@ -6,12 +6,16 @@ input and subtracts the blur from the original,
     laplacian = scale_factor * (blurred - input)
 
 which gives a bright spot a negative response. ``AdvancedLaplacianFilter``
-reaches the same operator three ways: that Difference of Gaussians, a
+reaches a Laplacian-like operator three ways: that Difference of Gaussians, a
 convolution with a Laplacian of Gaussian kernel, or a convolution with a small
-fixed stencil. ``LaplacianPyramidLevel`` does something different. It splits an
-image into a downsampled low band and a same-resolution high band, and adding
-the two back reconstructs the input to float precision, because the high band
-is defined as the difference rather than estimated.
+fixed stencil. The three are approximations of one another, not identical: they
+differ in overall scale and support, and ``sigma`` does not mean the same thing
+in the Difference of Gaussians path as in the Laplacian of Gaussian path (see
+the ``sigma`` parameter of each class). ``LaplacianPyramidLevel`` does
+something different. It splits an image into a downsampled low band and a
+same-resolution high band, and adding the two back reconstructs the input to
+float precision, because the high band is defined as the difference rather than
+estimated.
 
 No kernel here is learned; each one comes from a formula. The blur inside
 ``LaplacianPyramidLevel`` can be made trainable and is not by default. Both edge
@@ -70,9 +74,14 @@ class LaplacianFilter(keras.layers.Layer):
         always runs at ``(1, 1)``, so this does not change the output shape.
         Defaults to ``(1, 1)``.
     :type strides: Union[Tuple[int, int], List[int]]
-    :param sigma: Standard deviation of the Gaussian. A float applies to both
-        axes; a pair is ``(sigma_h, sigma_w)``. ``None`` or a non-positive value
-        derives it from ``kernel_size`` as ``(k - 1) / 2`` per axis.
+    :param sigma: Blur scale, with the meaning it has in
+        :class:`GaussianFilter`: the half-extent of the kernel in standard
+        deviations, so the blur's standard deviation in pixels is
+        about ``(k - 1) / (2 * sigma)`` (accurate for ``sigma >= 3``) and a
+        larger value blurs less. A float applies
+        to both axes; a pair is ``(sigma_h, sigma_w)``. ``None`` or a
+        non-positive value derives it from ``kernel_size`` as ``(k - 1) / 2``
+        per axis, roughly a one-pixel standard deviation.
     :type sigma: Optional[Union[float, Tuple[float, float]]]
     :param scale_factor: Multiplier on the Laplacian response. Defaults to
         ``1.0``.
@@ -90,8 +99,9 @@ class LaplacianFilter(keras.layers.Layer):
     Output shape:
         ``(batch_size, height, width, channels)``, unchanged.
 
-    :raises ValueError: If ``kernel_size`` is not length 2, or ``sigma`` is
-        neither a number nor a length-2 sequence.
+    :raises ValueError: If ``kernel_size`` is not length 2 or has an entry that
+        is not a positive odd integer, or ``sigma`` is neither a number nor a
+        length-2 sequence.
     """
 
     def __init__(
@@ -108,12 +118,18 @@ class LaplacianFilter(keras.layers.Layer):
 
         if len(kernel_size) != 2:
             raise ValueError("kernel_size must be length 2")
+        # An even kernel is not centred on a pixel, so ``blurred - input``
+        # would compare samples half a pixel apart.
+        if any(int(k) != k or k < 1 or k % 2 == 0 for k in kernel_size):
+            raise ValueError(
+                f"kernel_size entries must be positive odd integers, got {kernel_size}"
+            )
 
         self.kernel_size = kernel_size
         self.strides = tuple(strides) if isinstance(strides, list) else strides
         self.scale_factor = scale_factor
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         if (sigma is None or
                 (isinstance(sigma, (float, int)) and sigma <= 0.0)):
@@ -245,8 +261,14 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         ``'kernel'``; the ``'dog'`` blur is pinned to ``(1, 1)``. Defaults to
         ``(1, 1)``.
     :type strides: Union[Tuple[int, int], List[int]]
-    :param sigma: Standard deviation of the Gaussian. A float applies to both
-        axes; a pair is ``(sigma_h, sigma_w)``. Defaults to ``1.0``.
+    :param sigma: Must be positive. A float applies to both axes; a pair is
+        ``(sigma_h, sigma_w)``. Defaults to ``1.0``. It is NOT on the same scale
+        across methods: ``'log'`` reads it as a standard deviation in pixels,
+        while ``'dog'`` passes it to :class:`GaussianFilter`, where it is the
+        kernel's half-extent in standard deviations (standard deviation in
+        pixels about ``(k - 1) / (2 * sigma)``, larger blurs less).
+        ``'kernel'`` uses
+        it only in its non-``(3, 3)`` Laplacian of Gaussian fallback.
     :type sigma: Union[float, Tuple[float, float]]
     :param scale_factor: Multiplier on the Laplacian response. Defaults to
         ``1.0``.
@@ -267,8 +289,9 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         stride-reduced spatial size with ``'same'`` padding.
 
     :raises ValueError: If ``method`` is not one of the three names, if
-        ``sigma`` is neither a number nor a length-2 sequence, or, at build
-        time, if the channel axis is undefined.
+        ``kernel_size`` is not length 2, if ``sigma`` is neither a positive
+        number nor a length-2 sequence of positive numbers, or, at build time,
+        if the channel axis is undefined.
     """
 
     def __init__(
@@ -287,12 +310,15 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         if method not in ['dog', 'log', 'kernel']:
             raise ValueError(f"Method '{method}' not supported. Use 'dog', 'log', or 'kernel'.")
 
+        if len(kernel_size) != 2:
+            raise ValueError("kernel_size must be length 2")
+
         self.method = method
         self.kernel_size = kernel_size
         self.strides = tuple(strides) if isinstance(strides, list) else strides
         self.scale_factor = scale_factor
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         if isinstance(sigma, (int, float)):
             self.sigma = (float(sigma), float(sigma))
@@ -300,6 +326,9 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
             self.sigma = (float(sigma[0]), float(sigma[1]))
         else:
             raise ValueError(f"Invalid sigma value: {sigma}")
+        if min(self.sigma) <= 0.0:
+            # The Laplacian of Gaussian kernel divides by sigma squared.
+            raise ValueError(f"sigma must be positive, got {sigma}")
 
         if self.method == 'dog':
             # Stride (1, 1) keeps the blur the same shape as the input, which
@@ -316,15 +345,16 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         # Deferred to build(), where the channel count is known.
         self.filter_kernel = None
 
-    def _create_laplacian_kernel(self, channels: int) -> keras.KerasTensor:
+    def _create_laplacian_kernel(self, channels: int) -> np.ndarray:
         """Create a discrete Laplacian kernel.
 
         :param channels: Number of input channels.
         :type channels: int
-        :return: Laplacian kernel tensor.
-        :rtype: keras.KerasTensor
+        :return: Laplacian kernel array of shape ``(kh, kw, channels, 1)``.
+        :rtype: np.ndarray
         """
-        if self.kernel_size == (3, 3):
+        # ``tuple`` because a deserialized ``kernel_size`` may be a list.
+        if tuple(self.kernel_size) == (3, 3):
             kernel_2d = np.array([
                 [0, 1, 0],
                 [1, -4, 1],
@@ -338,7 +368,7 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         for i in range(channels):
             kernel[:, :, i, 0] = kernel_2d
 
-        return keras.ops.convert_to_tensor(kernel, dtype=self.compute_dtype)
+        return kernel
 
     def _create_log_kernel(self) -> np.ndarray:
         """Create a Laplacian of Gaussian (LoG) kernel.
@@ -346,7 +376,8 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         :return: LoG kernel as numpy array.
         :rtype: np.ndarray
         """
-        sigma_x, sigma_y = self.sigma
+        # ``sigma`` is (sigma_h, sigma_w); ``y`` is the row axis, ``x`` the column.
+        sigma_y, sigma_x = self.sigma
         height, width = self.kernel_size
 
         y, x = np.mgrid[-(height // 2):((height + 1) // 2), -(width // 2):((width + 1) // 2)]
@@ -380,9 +411,15 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
                 self.gaussian_filter.build(input_shape)
         elif self.method == 'log':
             log_kernel = self._create_log_kernel().reshape(*self.kernel_size, 1, 1)
-            kernel_tensor = keras.ops.convert_to_tensor(log_kernel, dtype=self.compute_dtype)
-            # One copy per channel, since the convolution is depthwise.
-            self.filter_kernel = keras.ops.tile(kernel_tensor, [1, 1, channels, 1])
+            # DECISION plan-2026-09-18T201158-0aaa1f30/D-008: do NOT turn this
+            # back into a tensor (keras.ops.tile). One copy per channel, since
+            # the convolution is depthwise. Kept as
+            # a NumPy array, not a tensor: ``build`` may run inside a
+            # ``tf.function`` (first call of a subclassed model), and a tensor
+            # made there is out of scope in every later trace.
+            self.filter_kernel = np.tile(
+                log_kernel, (1, 1, channels, 1)
+            ).astype(np.float32)
         else:
             self.filter_kernel = self._create_laplacian_kernel(channels)
 
@@ -411,7 +448,9 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         else:
             conv_result = keras.ops.depthwise_conv(
                 inputs=inputs,
-                kernel=self.filter_kernel,
+                kernel=keras.ops.convert_to_tensor(
+                    self.filter_kernel, dtype=self.compute_dtype
+                ),
                 strides=self.strides,
                 padding="same"
             )
@@ -429,8 +468,14 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
             return input_shape
 
         # 'same' padding, so the spatial size is the stride-rounded input size.
-        output_h = (input_shape[1] + self.strides[0] - 1) // self.strides[0]
-        output_w = (input_shape[2] + self.strides[1] - 1) // self.strides[1]
+        output_h = (
+            None if input_shape[1] is None
+            else (input_shape[1] + self.strides[0] - 1) // self.strides[0]
+        )
+        output_w = (
+            None if input_shape[2] is None
+            else (input_shape[2] + self.strides[1] - 1) // self.strides[1]
+        )
         return input_shape[0], output_h, output_w, input_shape[3]
 
     def get_config(self) -> Dict[str, Any]:
@@ -506,8 +551,9 @@ class LaplacianPyramidLevel(keras.layers.Layer):
     :param blur_kernel_size: Height and width of the Gaussian blur kernel, as a
         length-2 sequence of positive ints. Defaults to ``(5, 5)``.
     :type blur_kernel_size: Tuple[int, int]
-    :param blur_sigma: Gaussian sigma. ``-1`` derives it from the kernel size.
-        Defaults to ``-1``.
+    :param blur_sigma: Gaussian scale, read as in :class:`GaussianFilter` (the
+        kernel's half-extent in standard deviations; larger blurs less). ``-1``
+        derives it from the kernel size. Defaults to ``-1``.
     :type blur_sigma: float
     :param blur_trainable: Make the blur kernel learnable. Defaults to
         ``False``, which keeps the split a fixed signal operation.

@@ -28,7 +28,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Dict, Tuple, Any, Optional
 
 # ---------------------------------------------------------------------
@@ -82,7 +81,9 @@ class StrongAugmentation(keras.layers.Layer):
 
     :param cutmix_prob: Probability of applying CutMix augmentation.
     :type cutmix_prob: float
-    :param cutmix_ratio_range: Range for CutMix cut ratio ``(min, max)``.
+    :param cutmix_ratio_range: Range for the CutMix cut ratio ``(min, max)``.
+        The ratio is the fraction of each image SIDE that is cut, so the pasted
+        area is the square of the ratio.
     :type cutmix_ratio_range: tuple[float, float]
     :param color_jitter_strength: Strength of color jittering.
     :type color_jitter_strength: float
@@ -210,9 +211,9 @@ class StrongAugmentation(keras.layers.Layer):
         if mix is None:
             return target
         mix_mask, perm_indices = mix
-        mask = ops.cast(mix_mask, target.dtype)
-        target_perm = ops.take(target, perm_indices, axis=0)
-        return ops.multiply(target, ops.subtract(1.0, mask)) + ops.multiply(
+        mask = keras.ops.cast(mix_mask, target.dtype)
+        target_perm = keras.ops.take(target, perm_indices, axis=0)
+        return keras.ops.multiply(target, keras.ops.subtract(1.0, mask)) + keras.ops.multiply(
             target_perm, mask
         )
 
@@ -225,32 +226,33 @@ class StrongAugmentation(keras.layers.Layer):
         :return: Color-jittered images tensor.
         :rtype: keras.KerasTensor
         """
-        # Per-sample factor (B, 1, 1, 1) broadcasts over (H, W, C). See
-        # README Known Issues #9.
-        batch_size = ops.shape(x)[0]
+        # Per-sample factor (B, 1, 1, 1) broadcasts over (H, W, C). The factors
+        # are cast to ``x``'s dtype: a float32 factor would silently promote a
+        # float16 batch to float32 on the training path only.
+        batch_size = keras.ops.shape(x)[0]
         per_sample_shape = (batch_size, 1, 1, 1)
 
         # Brightness adjustment
-        brightness_factor = keras.random.uniform(
+        brightness_factor = keras.ops.cast(keras.random.uniform(
             shape=per_sample_shape,
             minval=1.0 - self.color_jitter_strength,
             maxval=1.0 + self.color_jitter_strength
-        )
-        x = ops.multiply(x, brightness_factor)
+        ), x.dtype)
+        x = keras.ops.multiply(x, brightness_factor)
 
         # Contrast adjustment (per-sample)
-        contrast_factor = keras.random.uniform(
+        contrast_factor = keras.ops.cast(keras.random.uniform(
             shape=per_sample_shape,
             minval=1.0 - self.color_jitter_strength,
             maxval=1.0 + self.color_jitter_strength
-        )
-        mean_val = ops.mean(x, axis=[1, 2, 3], keepdims=True)
-        x = ops.multiply(ops.subtract(x, mean_val), contrast_factor) + mean_val
+        ), x.dtype)
+        mean_val = keras.ops.mean(x, axis=[1, 2, 3], keepdims=True)
+        x = keras.ops.multiply(keras.ops.subtract(x, mean_val), contrast_factor) + mean_val
 
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-014: clip into the declared
         # range only -- an unconditional [0, 1] clip zeroes `depth_anything`'s [-1, +1] inputs during training only.
         if self.input_value_range is not None:
-            x = ops.clip(x, self.input_value_range[0], self.input_value_range[1])
+            x = keras.ops.clip(x, self.input_value_range[0], self.input_value_range[1])
 
         return x
 
@@ -272,14 +274,14 @@ class StrongAugmentation(keras.layers.Layer):
         # Apply CutMix with probability. Use a symbolic gate (no Python `if`)
         # so the layer is graph-traceable inside `model.fit`.
         should_apply = keras.random.uniform(shape=()) < self.cutmix_prob
-        gate = ops.cast(should_apply, "float32")  # 0.0 or 1.0
+        gate = keras.ops.cast(should_apply, "float32")  # 0.0 or 1.0
 
-        batch_size = ops.shape(x)[0]
-        height, width = ops.shape(x)[1], ops.shape(x)[2]
+        batch_size = keras.ops.shape(x)[0]
+        height, width = keras.ops.shape(x)[1], keras.ops.shape(x)[2]
 
         # Generate random permutation
-        perm_indices = keras.random.shuffle(ops.arange(batch_size))
-        x_perm = ops.take(x, perm_indices, axis=0)
+        perm_indices = keras.random.shuffle(keras.ops.arange(batch_size))
+        x_perm = keras.ops.take(x, perm_indices, axis=0)
 
         # Generate random cut ratio
         cut_ratio = keras.random.uniform(
@@ -289,31 +291,31 @@ class StrongAugmentation(keras.layers.Layer):
         )
 
         # Calculate cut dimensions
-        cut_h = ops.cast(ops.cast(height, "float32") * cut_ratio, "int32")
-        cut_w = ops.cast(ops.cast(width, "float32") * cut_ratio, "int32")
+        cut_h = keras.ops.cast(keras.ops.cast(height, "float32") * cut_ratio, "int32")
+        cut_w = keras.ops.cast(keras.ops.cast(width, "float32") * cut_ratio, "int32")
 
         # Cut position: draw float in [0, 1) and cast to int32, since
         # keras.random.uniform requires a floating dtype. (D-005 follow-up.)
         cut_y_f = keras.random.uniform(shape=(), minval=0.0, maxval=1.0)
         cut_x_f = keras.random.uniform(shape=(), minval=0.0, maxval=1.0)
-        cut_y = ops.cast(cut_y_f * ops.cast(height - cut_h, "float32"), "int32")
-        cut_x = ops.cast(cut_x_f * ops.cast(width - cut_w, "float32"), "int32")
+        cut_y = keras.ops.cast(cut_y_f * keras.ops.cast(height - cut_h, "float32"), "int32")
+        cut_x = keras.ops.cast(cut_x_f * keras.ops.cast(width - cut_w, "float32"), "int32")
 
         # Create mask
-        mask = ops.zeros((height, width, 1))
+        mask = keras.ops.zeros((height, width, 1))
 
-        mask = ops.where(
-            ops.logical_and(
-                ops.logical_and(
-                    ops.arange(height)[:, None] >= cut_y,
-                    ops.arange(height)[:, None] < cut_y + cut_h
+        mask = keras.ops.where(
+            keras.ops.logical_and(
+                keras.ops.logical_and(
+                    keras.ops.arange(height)[:, None] >= cut_y,
+                    keras.ops.arange(height)[:, None] < cut_y + cut_h
                 ),
-                ops.logical_and(
-                    ops.arange(width)[None, :] >= cut_x,
-                    ops.arange(width)[None, :] < cut_x + cut_w
+                keras.ops.logical_and(
+                    keras.ops.arange(width)[None, :] >= cut_x,
+                    keras.ops.arange(width)[None, :] < cut_x + cut_w
                 )
             )[:, :, None],
-            ops.ones_like(mask),
+            keras.ops.ones_like(mask),
             mask
         )
 
@@ -322,8 +324,10 @@ class StrongAugmentation(keras.layers.Layer):
         mask = mask * gate
 
         # Mix images
-        mask_x = ops.cast(mask, x.dtype)
-        x = ops.multiply(x, ops.subtract(1.0, mask_x)) + ops.multiply(x_perm, mask_x)
+        mask_x = keras.ops.cast(mask, x.dtype)
+        x = keras.ops.multiply(x, keras.ops.subtract(1.0, mask_x)) + keras.ops.multiply(
+            x_perm, mask_x
+        )
 
         return x, mask, perm_indices
 

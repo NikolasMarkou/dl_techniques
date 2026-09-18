@@ -16,7 +16,6 @@ their own input length.
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -158,17 +157,17 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         """
         details = []
         approximation = inputs
-        sqrt2 = ops.sqrt(ops.cast(2.0, inputs.dtype))
+        sqrt2 = keras.ops.sqrt(keras.ops.cast(2.0, inputs.dtype))
 
         for _ in range(self.num_levels):
-            seq_len = ops.shape(approximation)[1]
+            seq_len = keras.ops.shape(approximation)[1]
             even_len = (seq_len // 2) * 2
 
             x = approximation[:, :even_len, :]
-            batch_size = ops.shape(x)[0]
-            channels = ops.shape(x)[-1]
+            batch_size = keras.ops.shape(x)[0]
+            channels = keras.ops.shape(x)[-1]
 
-            x_reshaped = ops.reshape(
+            x_reshaped = keras.ops.reshape(
                 x,
                 (batch_size, even_len // 2, 2, channels)
             )
@@ -194,10 +193,10 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         """
         details = []
         approximation = inputs
-        sqrt2 = ops.sqrt(ops.cast(2.0, inputs.dtype))
+        sqrt2 = keras.ops.sqrt(keras.ops.cast(2.0, inputs.dtype))
 
         for _ in range(self.num_levels):
-            shape = ops.shape(approximation)
+            shape = keras.ops.shape(approximation)
             height = shape[1]
             width = shape[2]
 
@@ -205,11 +204,11 @@ class HaarWaveletDecomposition(keras.layers.Layer):
             even_w = (width // 2) * 2
 
             x = approximation[:, :even_h, :even_w, :]
-            batch_size = ops.shape(x)[0]
-            channels = ops.shape(x)[-1]
+            batch_size = keras.ops.shape(x)[0]
+            channels = keras.ops.shape(x)[-1]
 
             # Reshape for row-wise transform: [batch, h//2, 2, w, c]
-            x_rows = ops.reshape(
+            x_rows = keras.ops.reshape(
                 x,
                 (batch_size, even_h // 2, 2, even_w, channels)
             )
@@ -217,7 +216,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
             high_rows = (x_rows[:, :, 0, :, :] - x_rows[:, :, 1, :, :]) / sqrt2
 
             # Reshape for column-wise transform on low_rows: [batch, h//2, w//2, 2, c]
-            low_cols = ops.reshape(
+            low_cols = keras.ops.reshape(
                 low_rows,
                 (batch_size, even_h // 2, even_w // 2, 2, channels)
             )
@@ -225,7 +224,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
             lh = (low_cols[:, :, :, 0, :] - low_cols[:, :, :, 1, :]) / sqrt2
 
             # Reshape for column-wise transform on high_rows: [batch, h//2, w//2, 2, c]
-            high_cols = ops.reshape(
+            high_cols = keras.ops.reshape(
                 high_rows,
                 (batch_size, even_h // 2, even_w // 2, 2, channels)
             )
@@ -251,10 +250,10 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         """
         details = []
         approximation = inputs
-        sqrt2 = ops.sqrt(ops.cast(2.0, inputs.dtype))
+        sqrt2 = keras.ops.sqrt(keras.ops.cast(2.0, inputs.dtype))
 
         for _ in range(self.num_levels):
-            shape = ops.shape(approximation)
+            shape = keras.ops.shape(approximation)
             depth = shape[1]
             height = shape[2]
             width = shape[3]
@@ -264,11 +263,11 @@ class HaarWaveletDecomposition(keras.layers.Layer):
             even_w = (width // 2) * 2
 
             x = approximation[:, :even_d, :even_h, :even_w, :]
-            batch_size = ops.shape(x)[0]
-            channels = ops.shape(x)[-1]
+            batch_size = keras.ops.shape(x)[0]
+            channels = keras.ops.shape(x)[-1]
 
             # Reshape for depth-wise: [batch, d//2, 2, h, w, c]
-            x_depth = ops.reshape(
+            x_depth = keras.ops.reshape(
                 x,
                 (batch_size, even_d // 2, 2, even_h, even_w, channels)
             )
@@ -276,7 +275,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
             high_d = (x_depth[:, :, 0, :, :, :] - x_depth[:, :, 1, :, :, :]) / sqrt2
 
             # Process low_d for height: [batch, d//2, h//2, 2, w, c]
-            low_d_h = ops.reshape(
+            low_d_h = keras.ops.reshape(
                 low_d,
                 (batch_size, even_d // 2, even_h // 2, 2, even_w, channels)
             )
@@ -284,7 +283,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
             lh_d = (low_d_h[:, :, :, 0, :, :] - low_d_h[:, :, :, 1, :, :]) / sqrt2
 
             # Process high_d for height
-            high_d_h = ops.reshape(
+            high_d_h = keras.ops.reshape(
                 high_d,
                 (batch_size, even_d // 2, even_h // 2, 2, even_w, channels)
             )
@@ -293,7 +292,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
 
             # Process for width dimension
             # ll_d -> lll, llh
-            ll_d_w = ops.reshape(
+            ll_d_w = keras.ops.reshape(
                 ll_d,
                 (batch_size, even_d // 2, even_h // 2, even_w // 2, 2, channels)
             )
@@ -301,7 +300,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
             llh = (ll_d_w[:, :, :, :, 0, :] - ll_d_w[:, :, :, :, 1, :]) / sqrt2
 
             # lh_d -> lhl, lhh
-            lh_d_w = ops.reshape(
+            lh_d_w = keras.ops.reshape(
                 lh_d,
                 (batch_size, even_d // 2, even_h // 2, even_w // 2, 2, channels)
             )
@@ -309,7 +308,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
             lhh = (lh_d_w[:, :, :, :, 0, :] - lh_d_w[:, :, :, :, 1, :]) / sqrt2
 
             # hl_d -> hll, hlh
-            hl_d_w = ops.reshape(
+            hl_d_w = keras.ops.reshape(
                 hl_d,
                 (batch_size, even_d // 2, even_h // 2, even_w // 2, 2, channels)
             )
@@ -317,7 +316,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
             hlh = (hl_d_w[:, :, :, :, 0, :] - hl_d_w[:, :, :, :, 1, :]) / sqrt2
 
             # hh_d -> hhl, hhh
-            hh_d_w = ops.reshape(
+            hh_d_w = keras.ops.reshape(
                 hh_d,
                 (batch_size, even_d // 2, even_h // 2, even_w // 2, 2, channels)
             )
@@ -370,22 +369,23 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         seq_len = input_shape[1]
         channels = input_shape[2]
 
-        shapes: List[Tuple[Optional[int], ...]] = []
+        # Each level floor-halves the length, so a detail band has the length of
+        # the approximation its level produced, not twice the next coarser
+        # one: an odd intermediate length is truncated before halving.
+        level_lens: List[Optional[int]] = []
         current_len = seq_len
-
-        # Compute final approximation length
         for _ in range(self.num_levels):
             if current_len is not None:
-                current_len = (current_len // 2) * 2 // 2
+                current_len = current_len // 2
+            level_lens.append(current_len)
 
-        shapes.append((batch_size, current_len, channels))
+        shapes: List[Tuple[Optional[int], ...]] = [
+            (batch_size, level_lens[-1], channels)
+        ]
 
         # Detail shapes from coarsest to finest
-        detail_len = current_len
-        for _ in range(self.num_levels):
-            shapes.append((batch_size, detail_len, channels))
-            if detail_len is not None:
-                detail_len = detail_len * 2
+        for length in reversed(level_lens):
+            shapes.append((batch_size, length, channels))
 
         return shapes
 
@@ -405,29 +405,26 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         width = input_shape[2]
         channels = input_shape[3]
 
-        shapes: List[Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]] = []
+        # A detail band has the size of the approximation its level produced;
+        # see ``_compute_output_shape_1d``.
+        level_sizes: List[Tuple[Optional[int], Optional[int]]] = []
         current_h = height
         current_w = width
-
-        # Compute final approximation dimensions
         for _ in range(self.num_levels):
             if current_h is not None:
-                current_h = (current_h // 2) * 2 // 2
+                current_h = current_h // 2
             if current_w is not None:
-                current_w = (current_w // 2) * 2 // 2
+                current_w = current_w // 2
+            level_sizes.append((current_h, current_w))
 
-        shapes.append((batch_size, current_h, current_w, channels))
+        shapes: List[Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]] = [
+            (batch_size, level_sizes[-1][0], level_sizes[-1][1], channels)
+        ]
 
         # Detail shapes from coarsest to finest (each is a tuple of 3)
-        detail_h = current_h
-        detail_w = current_w
-        for _ in range(self.num_levels):
-            detail_shape = (batch_size, detail_h, detail_w, channels)
+        for level_h, level_w in reversed(level_sizes):
+            detail_shape = (batch_size, level_h, level_w, channels)
             shapes.append((detail_shape, detail_shape, detail_shape))
-            if detail_h is not None:
-                detail_h = detail_h * 2
-            if detail_w is not None:
-                detail_w = detail_w * 2
 
         return shapes
 
@@ -448,35 +445,29 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         width = input_shape[3]
         channels = input_shape[4]
 
-        shapes: List[Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]] = []
+        # A detail band has the size of the approximation its level produced;
+        # see ``_compute_output_shape_1d``.
+        level_sizes: List[Tuple[Optional[int], Optional[int], Optional[int]]] = []
         current_d = depth
         current_h = height
         current_w = width
-
-        # Compute final approximation dimensions
         for _ in range(self.num_levels):
             if current_d is not None:
-                current_d = (current_d // 2) * 2 // 2
+                current_d = current_d // 2
             if current_h is not None:
-                current_h = (current_h // 2) * 2 // 2
+                current_h = current_h // 2
             if current_w is not None:
-                current_w = (current_w // 2) * 2 // 2
+                current_w = current_w // 2
+            level_sizes.append((current_d, current_h, current_w))
 
-        shapes.append((batch_size, current_d, current_h, current_w, channels))
+        shapes: List[Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]] = [
+            (batch_size, *level_sizes[-1], channels)
+        ]
 
         # Detail shapes from coarsest to finest (each is a tuple of 7)
-        detail_d = current_d
-        detail_h = current_h
-        detail_w = current_w
-        for _ in range(self.num_levels):
-            detail_shape = (batch_size, detail_d, detail_h, detail_w, channels)
+        for level_d, level_h, level_w in reversed(level_sizes):
+            detail_shape = (batch_size, level_d, level_h, level_w, channels)
             shapes.append(tuple(detail_shape for _ in range(7)))
-            if detail_d is not None:
-                detail_d = detail_d * 2
-            if detail_h is not None:
-                detail_h = detail_h * 2
-            if detail_w is not None:
-                detail_w = detail_w * 2
 
         return shapes
 
