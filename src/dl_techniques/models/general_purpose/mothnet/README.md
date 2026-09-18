@@ -256,6 +256,28 @@ The `MothNet` model is configured via its constructor. Key parameters include:
 | `hebbian_learning_rate`| `float` | `0.01`| Learning rate for the Hebbian updates. |
 | `al_units` | `int` | `None` | Neurons in the AL. `None` defaults to the input dimension. |
 | `inhibition_strength`|`float` | `0.5` | Strength of competition in the AL. |
+| `readout_weight_bound` | `Optional[float]` | `None` | Symmetric hard clip on `\|readout_weights\|`, applied inside `HebbianReadoutLayer.hebbian_update()` after every additive update, as `ValueRangeConstraint(min_value=-readout_weight_bound, max_value=readout_weight_bound)`. `None` (the constructor default) reproduces the original unbounded-growth behavior exactly, byte-for-byte — a non-positive value raises `ValueError` here (library use); the CLI trainer (`src/train/mothnet/README.md`) treats `<= 0` as an ergonomic disable sentinel instead and defaults this **ON** at `2.7858`, an empirically-derived value (`decisions.md` D-005). See "Frozen layers and the accuracy ceiling" below for what this fixes and what it does not. |
+
+> **Frozen layers and the accuracy ceiling — corrected understanding.** The Antennal
+> Lobe and Mushroom Body layers are genuinely frozen at random initialization for the
+> entire run — see `extract_mb_features`/`extract_al_features` below, which read
+> those two layers' output directly and confirm nothing about them ever updates;
+> `readout_weights` is the only tensor `train_hebbian` ever mutates. That
+> architectural fact is real and is **not** changed by `readout_weight_bound`. What
+> is corrected here is a separate claim: a full-MNIST run measured *before*
+> `readout_weight_bound` existed plateaued at `val_accuracy ~0.561`, which was read
+> as evidence that the frozen AL/MB projection was itself the ceiling. A real
+> 40-epoch verification run with the bound active
+> (`plans/plan-2026-09-18T110506-e42a44c7/decisions.md` D-007) measured a real
+> **+11.2 percentage-point improvement** at the matched epoch (`val_accuracy=0.6648`
+> vs. the unfixed run's `0.5614` at epoch 38), with the bounded run's best checkpoint
+> reaching `0.6736` by epoch 40 while still climbing. So the previously-measured
+> ~0.561 number was itself partly an artifact of the (now-fixable) unbounded
+> weight-growth bug in the additive Hebbian update rule, not purely a hard ceiling
+> imposed by the frozen projection. This does not mean the frozen-projection ceiling
+> does not exist — it means the ~0.561 figure was not a clean measurement of it.
+> Measured at one seed, one run, one dataset scale; reported as measured, not
+> extrapolated further.
 
 ---
 
@@ -318,6 +340,11 @@ al_features_numpy = keras.ops.convert_to_numpy(al_features)
 
 print(f"AL feature shape: {al_features_numpy.shape}")
 ```
+
+> Both `extract_mb_features` and `extract_al_features` read layers that never
+> update after construction — see "Frozen layers and the accuracy ceiling" in
+> §7 above for what that architectural fact does, and does not, explain about
+> previously-measured accuracy numbers.
 
 ---
 

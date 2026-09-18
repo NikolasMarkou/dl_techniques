@@ -57,6 +57,7 @@ optimizer/LR-schedule/patience/dataset-choice surface for that shared parser to 
 | `--al-units` | `None` | Number of Antennal Lobe units; `None` lets MothNet infer it from the input dimension |
 | `--connection-sparsity` | `0.1` | Mushroom Body projection connection sparsity |
 | `--hebbian-learning-rate` | `0.01` | Learning rate used by the Hebbian readout update |
+| `--readout-weight-bound` | `2.7858` | Symmetric hard clip on `\|readout_weights\|` entries (`ValueRangeConstraint(min_value=-B, max_value=B)`), applied inside `HebbianReadoutLayer.hebbian_update()` immediately after each additive Hebbian update, before the `.assign()` call. Fixes a real bug: the update rule is purely additive with no decay/normalization, so weights grow unboundedly over long runs. Default **ON** (a real, measured bound), not `None` — see "Known limitation" below for the judgment call and its consequences. Pass a value `<= 0` to disable and reproduce the original unbounded-growth behavior exactly |
 | `--inhibition-strength` | `0.5` | Antennal Lobe inhibition strength |
 | `--epochs` | `3` | Number of training epochs; each epoch is one `train_hebbian(epochs=1)` call. Validated `>= 1` at parse time |
 | `--batch-size` | `32` | Mini-batch size passed to `train_hebbian` |
@@ -190,6 +191,62 @@ each independently cleaned of stale files from a prior run at the same
 ---
 
 ## MothNet-specific caveats
+
+**Known limitation: the Antennal Lobe and Mushroom Body layers are frozen for the
+entire run — but the previously-measured accuracy ceiling was NOT purely due to
+that fact.** `AntennalLobeLayer` (competitive inhibition) and `MushroomBodyLayer`
+(fixed sparse random projection) never train — the only `.assign()` call anywhere
+in the AL/MB/readout stack is inside `HebbianReadoutLayer.hebbian_update()`, so
+only `readout_weights` ever changes across an entire run. **This architectural
+fact is unchanged by `--readout-weight-bound` and remains true today.** What
+changed is the accuracy number measured against it: before this fix landed, a
+100-epoch run (`results/mothnet_100epoch_fullmnist_run/`) plateaued at
+`val_accuracy ~0.561` while its `training_log.csv` `loss` column climbed
+monotonically past its own epoch-7 minimum (1.4628) to 4.0083 by the epoch it was
+killed at (38) — this was read, at PLAN time, as evidence of a purely
+architectural ceiling independent of the readout's numerical stability. A real
+40-epoch verification run with the bound active
+(`results/mothnet_hebbian_bound_verification_run/`, `decisions.md` D-007)
+measured otherwise: at the same epoch 38, `val_accuracy=0.6648` vs. the unfixed
+run's `0.5614` — **a real +11.2 percentage-point improvement**, and the fixed
+run's own best checkpoint reached `val_accuracy=0.6736` by epoch 40 while still
+climbing (the unfixed run's `train_accuracy` had been flat at ~0.547 for its
+entire 38-epoch run). The likely mechanism (offered as a plausible explanation in
+`decisions.md` D-007, not independently re-verified beyond this one run):
+unbounded weight growth does not just inflate the monitoring-only `loss` metric —
+a few dominant, fastest-growing entries increasingly swamp the logit comparison,
+degrading the readout's own effective discriminative resolution over time; bounding
+lets the constrained entries' relative structure keep differentiating classes as
+training continues. **This is measured at one seed, one 40-epoch run, one dataset
+scale — not a universal guarantee across every config/seed** — but it is reported
+here exactly as measured, not softened back toward the original (now-refuted)
+prediction that this fix would be accuracy-neutral.
+
+**CLI default is ON (`--readout-weight-bound 2.7858`), not `None` — a deliberate
+judgment call (`decisions.md` D-002).** A new user gets the fixed, bounded
+behavior automatically; the original unbounded behavior is one flag away
+(`--readout-weight-bound -1`, or any value `<= 0`). The trade-off: a fresh run at
+CLI defaults is no longer bit-identical to the pre-fix code's output (or to
+`results/mothnet_100epoch_fullmnist_run/`) even with the flag never mentioned on
+the command line. This mirrors the precedent set by `--mb-units`'s own
+2000→16000 default raise below (`decisions.md` D-009): an evidence-backed default
+change, not an arbitrary one, disclosed prominently here for anyone diffing a new
+run against an old one.
+
+**`B = 2.7858` was measured, not guessed (`decisions.md` D-005).** Derived from
+two data points: (1) a fresh, faithful 15-epoch reproduction of
+`results/mothnet_100epoch_fullmnist_run/`'s own config/seed, read at the epoch
+matching that run's own `training_log.csv` loss minimum (epoch 7,
+`max(|readout_weights|)=1.3929`); (2) the same killed 100-epoch run's own
+`best_model.keras` checkpoint, already deep into the observed divergence
+(`max(|readout_weights|)=6.4134`). `B` is exactly 2x the epoch-7 value
+(`2.785794734954834`, rounded to `2.7858`) — comfortably above the epoch-7 value
+(leaving ~7 epochs of unclipped headroom past the loss minimum) and 56.6% below
+the diverged checkpoint's magnitude. Passing `--readout-weight-bound <= 0` at the
+CLI disables the constraint and reproduces the original unbounded behavior
+exactly; passing a non-positive value directly to `MothNet(readout_weight_bound=...)`
+(library use, not via this CLI) raises `ValueError` instead, since that path has
+no ergonomic-sentinel convention to honor.
 
 **`mb_units` default is now 16000, backed by a measured A/B comparison, not a guess.**
 The MothNet model's own README (`src/dl_techniques/models/general_purpose/mothnet/
