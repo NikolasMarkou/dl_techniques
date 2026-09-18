@@ -57,7 +57,14 @@ TRAIN_METRIC_CAPTION = "train: running mean over the epoch; val: end of epoch"
 # The epoch-0 baseline marker is drawn at most this many times the largest finite
 # plotted curve value; a larger baseline (an init loss of 218 over curves near 1)
 # is clipped there and annotated with its true value, so it cannot flatten the axis.
-BASELINE_CLIP_FACTOR = 4.0
+# 10.0, not 4.0: the healthy headline run has ln(10) = 2.31 over a curve max of
+# about 0.5 (ratio 4.65) and a factor of 4 clipped that correct baseline.
+BASELINE_CLIP_FACTOR = 10.0
+
+# The per-epoch-time panel draws a bar above this many times the median of epochs
+# >= 2 at that ceiling and annotates it with its true value. Epoch 1 pays the XLA
+# warmup (about 22 s against about 2 s) and would otherwise set the whole y-scale.
+TIME_CLIP_FACTOR = 3.0
 
 # The row-normalized confusion-matrix panel annotates only cells strictly ABOVE this
 # fraction. Strict, because 0.005 itself (5 of 1000) formats as "0%" (round half to
@@ -124,7 +131,9 @@ def render_training_dashboard(
     ``Learning rate`` (log axis; needs ``lr``), ``Generalization gap``
     (``val_loss - loss`` and ``accuracy - val_accuracy``), ``Per-epoch time``
     (needs ``epoch_times``) and ``Smoothed loss`` (only when at least
-    ``SMOOTHED_PANEL_MIN_EPOCHS`` epochs exist). The grid is built from the panels
+    ``SMOOTHED_PANEL_MIN_EPOCHS`` epochs exist). A ``Per-epoch time`` bar above
+    ``TIME_CLIP_FACTOR`` times the median of epochs >= 2 (the XLA warmup epoch)
+    is drawn at that ceiling, hatched, and annotated with its true value. The grid is built from the panels
     that exist, so a short run has no empty cells; a partly filled last row is
     centred. ``TRAIN_METRIC_CAPTION`` is written under the grid with ``fig.text``
     so it survives every panel layout.
@@ -141,7 +150,8 @@ def render_training_dashboard(
             validation curves. A value above ``BASELINE_CLIP_FACTOR`` times the
             largest finite plotted value is drawn AT that ceiling (upward
             triangle) and annotated with its true value; anything at or below
-            the ceiling is drawn exactly where it is.
+            the ceiling is drawn exactly where it is, and so is a baseline
+            when no plotted curve value is finite (there is no ceiling).
 
     Returns:
         The titles of the panels drawn, in order (empty, and nothing written,
@@ -169,7 +179,9 @@ def render_training_dashboard(
                 true_value = baseline[base_key]
                 curve_values = np.concatenate(
                     [c[np.isfinite(c)] for c in (train, val) if c is not None])
-                ceiling = BASELINE_CLIP_FACTOR * float(curve_values.max())
+                # No finite curve value (a diverged run) -> no ceiling to clip at.
+                ceiling = (BASELINE_CLIP_FACTOR * float(curve_values.max())
+                           if curve_values.size else np.inf)
                 clipped = true_value > ceiling
                 drawn = ceiling if clipped else true_value
                 ax.plot([0, 1], [drawn, val[0]], color=VAL_COLOR, lw=1.0,
@@ -223,7 +235,23 @@ def render_training_dashboard(
             ax.legend(fontsize=8)
 
     def _time(ax) -> None:
-        ax.bar(_x(times), times, color="#7f7f7f")
+        x = _x(times)
+        drawn = times
+        clipped = np.zeros(len(times), dtype=bool)
+        if len(times) > 1:
+            reference = float(np.median(times[1:]))  # epoch 1 carries the XLA warmup
+            if np.isfinite(reference) and reference > 0.0:
+                ceiling = TIME_CLIP_FACTOR * reference
+                clipped = times > ceiling
+                drawn = np.where(clipped, ceiling, times)
+        ax.bar(x, drawn, color="#7f7f7f")
+        if clipped.any():
+            ax.bar(x[clipped], drawn[clipped], color="#d9d9d9", edgecolor="#7f7f7f", hatch="//")
+            for xi, top, true_value in zip(x[clipped], drawn[clipped], times[clipped]):
+                ax.annotate(f"{true_value:.4g} s (clipped)", xy=(xi, top), xytext=(0, 3),
+                            textcoords="offset points", fontsize=8, color="#444444",
+                            ha="left" if xi <= (len(times) + 1) / 2 else "right", va="bottom")
+            ax.set_ylim(0.0, float(drawn.max()) * 1.25)  # room for the annotation
         ax.set_xlabel("epoch")
         ax.set_ylabel("seconds")
 
@@ -379,7 +407,11 @@ def plot_confusion_matrix(
 
     The row-normalized panel leaves cells at or below ``CONFUSION_MIN_ANNOTATION``
     (0.5%) unannotated so it never prints "0%"; the counts panel annotates every
-    cell.
+    cell. Grid lines are switched off explicitly on both image axes (measured:
+    matplotlib's colorbar axes never show one, so they need no call):
+    ``dl_techniques.visualization.core`` sets a whitegrid style at import
+    (``axes.grid`` True process-wide), so the look must not depend on which
+    module was imported first.
 
     Args:
         y_true: Integer true labels ``(N,)``.
@@ -407,6 +439,7 @@ def plot_confusion_matrix(
         ):
             im = ax.imshow(mat, cmap="Blues", vmin=0, vmax=max(float(mat.max()), 1e-9))
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+            ax.grid(False)
             ax.set_xticks(range(n))
             ax.set_yticks(range(n))
             ax.set_xticklabels(names, rotation=45, ha="right")

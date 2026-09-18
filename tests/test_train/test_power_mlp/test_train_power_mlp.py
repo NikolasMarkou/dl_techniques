@@ -30,6 +30,8 @@ from pathlib import Path
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import keras  # noqa: E402
+import matplotlib  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
@@ -514,6 +516,12 @@ class CapturedFigure:
         self.ylim = {ax.get_title(): tuple(ax.get_ylim()) for ax in titled}
         self.axes_texts = {ax.get_title(): [t.get_text() for t in ax.texts] for ax in titled}
         self.fig_texts = [t.get_text() for t in fig.texts]
+        # One entry per axes in ``fig.axes`` order (image axes AND colorbar axes,
+        # which have no title): does any x or y grid line show?
+        self.grid_visible = [
+            any(gl.get_visible() for gl in ax.get_xgridlines() + ax.get_ygridlines())
+            for ax in fig.axes
+        ]
 
 
 @pytest.fixture
@@ -578,9 +586,24 @@ def _near_one_history() -> dict:
     return history
 
 
-def _loss_panel(tmp_path, captured_figures, baseline) -> CapturedFigure:
+#: The SHIPPED headline shape (iteration-2 real run): epoch-1 running-mean loss
+#: 0.4972 and an epoch-0 baseline of ln(10) = 2.312, a ratio of 4.65. A clip
+#: factor of 4.0 mislabelled this correct baseline as clipped (review C3).
+SHIPPED_CURVE_MAX = 0.4972
+SHIPPED_BASELINE = 2.312
+
+
+def _shipped_history() -> dict:
+    history = _history(3)
+    history["loss"] = [SHIPPED_CURVE_MAX, 0.20, 0.12]
+    history["val_loss"] = [0.46, 0.19, 0.11]
+    return history
+
+
+def _loss_panel(tmp_path, captured_figures, baseline, history=None) -> CapturedFigure:
     viz.render_training_dashboard(
-        _near_one_history(), tmp_path / f"d{len(captured_figures)}.png", "t",
+        _near_one_history() if history is None else history,
+        tmp_path / f"d{len(captured_figures)}.png", "t",
         epoch_times=[1.0] * 3, baseline=baseline,
     )
     return captured_figures[-1]
@@ -602,20 +625,80 @@ def test_an_extreme_epoch_0_baseline_is_clipped_and_annotated_with_its_true_valu
     assert figure.axes_texts["Accuracy"] == [], "an accuracy of 0.1 is never clipped"
 
 
-def test_an_ordinary_epoch_0_baseline_is_drawn_exactly_as_before(
+def test_the_shipped_headline_baseline_is_drawn_where_it_is_and_not_annotated(
         tmp_path, captured_figures, monkeypatch) -> None:
-    """A baseline below the ceiling is untouched: same limits as with the clip disabled."""
-    baseline = {"loss": 2.5, "accuracy": 0.1}
-    clipped_run = _loss_panel(tmp_path, captured_figures, baseline)
-    monkeypatch.setattr(viz, "BASELINE_CLIP_FACTOR", 1e12)
-    unclipped_run = _loss_panel(tmp_path, captured_figures, baseline)
+    """The healthy run (baseline ln(10) over a curve max of about 0.5) is untouched:
+    same limits as with the clip disabled, the true baseline inside the axis, and no
+    "(clipped)" annotation. A factor below the shipped ratio 4.65 (the old 4.0) fails
+    here, so the arm is not vacuous."""
+    baseline = {"loss": SHIPPED_BASELINE, "accuracy": 0.1}
+    history = _shipped_history()
+    assert SHIPPED_BASELINE / SHIPPED_CURVE_MAX > 4.0, "the shape must stay above the old factor"
 
-    assert 2.5 < viz.BASELINE_CLIP_FACTOR
+    clipped_run = _loss_panel(tmp_path, captured_figures, baseline, history)
+    monkeypatch.setattr(viz, "BASELINE_CLIP_FACTOR", 1e12)
+    unclipped_run = _loss_panel(tmp_path, captured_figures, baseline, history)
+
     low, high = clipped_run.ylim["Loss"]
-    assert low < 2.5 < high, "the true baseline must be inside the axis"
+    assert low < SHIPPED_BASELINE < high, "the true baseline must be inside the axis"
     for panel in ("Loss", "Accuracy"):
         assert clipped_run.ylim[panel] == unclipped_run.ylim[panel], panel
         assert clipped_run.axes_texts[panel] == unclipped_run.axes_texts[panel] == [], panel
+
+
+def test_a_history_with_no_finite_value_still_draws_the_baseline(
+        tmp_path, captured_figures) -> None:
+    """A diverged run: every plotted curve value is NaN, so there is no ceiling to clip
+    at. The baseline branch used to take ``max()`` of an empty array and raise."""
+    history = {"loss": [float("nan")] * 3, "val_loss": [float("nan")] * 3}
+    out = tmp_path / "nan.png"
+    titles = viz.render_training_dashboard(history, out, "t", baseline={"loss": 2.3})
+
+    assert out.stat().st_size > 0
+    assert titles == ["Loss", "Generalization gap"]
+    assert captured_figures[-1].axes_texts["Loss"] == [], "an unclipped baseline is not annotated"
+
+
+def _time_panel(tmp_path, captured_figures, times) -> CapturedFigure:
+    viz.render_training_dashboard(
+        _history(len(times)), tmp_path / f"t{len(captured_figures)}.png", "t",
+        epoch_times=times,
+    )
+    return captured_figures[-1]
+
+
+def test_a_warmup_epoch_time_is_clipped_and_annotated_with_its_true_value(
+        tmp_path, captured_figures) -> None:
+    """Epoch 1 pays the XLA warmup (about 22.8 s against 1.8 s). Unclipped, that one
+    bar sets the whole y-scale and the real per-epoch variation collapses."""
+    figure = _time_panel(tmp_path, captured_figures, [22.8] + [1.8] * 9)
+    low, high = figure.ylim["Per-epoch time"]
+
+    assert high <= viz.TIME_CLIP_FACTOR * 1.8 * 1.3, f"time axis reaches {high:.1f} s"
+    assert high > viz.TIME_CLIP_FACTOR * 1.8, "the clipped bar must fit under the top limit"
+    annotations = figure.axes_texts["Per-epoch time"]
+    assert len(annotations) == 1 and "22.8" in annotations[0] and "clipped" in annotations[0], annotations
+
+
+def test_ordinary_epoch_times_are_drawn_exactly_as_before(
+        tmp_path, captured_figures, monkeypatch) -> None:
+    """Times within ``TIME_CLIP_FACTOR`` x the median: same limits as with the clip
+    disabled and no annotation. A factor of 0.5 clips every bar and fails here."""
+    times = [2.4, 1.8, 2.0, 1.9, 2.1, 1.8]
+    clipped_run = _time_panel(tmp_path, captured_figures, times)
+    monkeypatch.setattr(viz, "TIME_CLIP_FACTOR", 1e12)
+    unclipped_run = _time_panel(tmp_path, captured_figures, times)
+
+    assert clipped_run.ylim["Per-epoch time"] == unclipped_run.ylim["Per-epoch time"]
+    assert clipped_run.axes_texts["Per-epoch time"] == unclipped_run.axes_texts["Per-epoch time"] == []
+
+
+def test_a_single_epoch_time_has_no_reference_and_is_not_clipped(
+        tmp_path, captured_figures) -> None:
+    """The reference is the median of epochs >= 2: with one epoch there is none."""
+    figure = _time_panel(tmp_path, captured_figures, [22.8])
+    assert figure.ylim["Per-epoch time"][1] >= 22.8
+    assert figure.axes_texts["Per-epoch time"] == []
 
 
 def _figure_from_counts(counts: np.ndarray):
@@ -646,6 +729,30 @@ def test_the_normalized_confusion_panel_hides_cells_at_or_below_half_a_percent(
     assert sorted(normalized) == sorted(["99%", "1%", "94%", "5%", "100%", "2%", "98%"]), normalized
     assert len(figure.axes_texts["Counts"]) == 16, "the counts panel annotates every cell"
     assert "0" in figure.axes_texts["Counts"]
+
+
+def test_confusion_matrix_grid_lines_are_off_whatever_the_ambient_style_says(
+        tmp_path, captured_figures) -> None:
+    """``dl_techniques.visualization.core`` sets a whitegrid style at import, making
+    ``axes.grid`` True process-wide, and the grid then cut through the cell text (review
+    C7). The function must switch the lines off itself on both image axes; the two
+    colorbar axes (four axes in all) are asserted too, so a matplotlib that grids them
+    would fail here."""
+    counts = np.array([[9, 1], [2, 8]])
+    y_true, y_pred = _figure_from_counts(counts)
+    with matplotlib.rc_context({"axes.grid": True}):
+        # Control: the ambient setting really does grid a plain axes, so a passing
+        # assertion below is not a consequence of the context doing nothing.
+        control_fig, control_ax = plt.subplots()
+        control_ax.plot([0, 1])
+        control_grid = any(gl.get_visible() for gl in control_ax.get_xgridlines())
+        plt.close(control_fig)
+        viz.plot_confusion_matrix(y_true, y_pred, ["a", "b"], tmp_path / "cm_grid.png")
+
+    assert control_grid is True
+    (figure,) = captured_figures
+    assert len(figure.grid_visible) == 4, "two image axes and two colorbar axes"
+    assert figure.grid_visible == [False] * 4, figure.grid_visible
 
 
 def test_dashboard_with_no_epochs_writes_nothing(tmp_path) -> None:
