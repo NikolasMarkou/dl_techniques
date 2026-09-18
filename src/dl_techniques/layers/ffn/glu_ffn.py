@@ -230,7 +230,7 @@ class GLUFFN(keras.layers.Layer):
             raise ValueError(f"hidden_dim must be a positive integer, got {hidden_dim}")
         if not isinstance(output_dim, int) or output_dim <= 0:
             raise ValueError(f"output_dim must be a positive integer, got {output_dim}")
-        # DECISION plan-2026-09-18-1f3c0ce8/D-003: dropout_rate == 1.0 passed
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-003: dropout_rate == 1.0 passed
         # this check before, but keras.layers.Dropout.call() rejects rate==1.0
         # ("must be ... in the range [0, 1)") -- so the layer built fine and
         # only exploded on the first training-mode forward pass (same bug class

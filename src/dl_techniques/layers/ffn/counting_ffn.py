@@ -648,7 +648,7 @@ class CountingFFN(keras.layers.Layer):
         numerator = keys
         denominator = keras.ops.ones_like(keys) * mask
 
-        # DECISION plan-2026-09-18-1f3c0ce8/D-010: sequential keras.ops.scan,
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-010: sequential keras.ops.scan,
         # not keras.ops.associative_scan. Do NOT change this back to the
         # parallel associative_scan this file used to call: on the
         # TensorFlow backend it MEASURABLY breaks two separate ways, neither

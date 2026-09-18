@@ -254,7 +254,7 @@ class SwinMLP(keras.layers.Layer):
         # Validate parameters
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
-        # DECISION plan-2026-09-18-1f3c0ce8/D-011: half-open upper bound, not
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-011: half-open upper bound, not
         # closed [0.0, 1.0] -- keras.layers.Dropout.call() rejects rate==1.0
         # at training time ("rate must be ... in the range [0, 1)"), so a
         # closed-range check here lets a config through construction that

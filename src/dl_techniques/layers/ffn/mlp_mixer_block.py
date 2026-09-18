@@ -307,7 +307,7 @@ class MixerBlock(keras.layers.Layer):
             raise ValueError(f"tokens_mlp_dim must be a positive integer, got {tokens_mlp_dim}")
         if not isinstance(channels_mlp_dim, int) or channels_mlp_dim <= 0:
             raise ValueError(f"channels_mlp_dim must be a positive integer, got {channels_mlp_dim}")
-        # DECISION plan-2026-09-18-1f3c0ce8/D-012: half-open, not closed -- do
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-012: half-open, not closed -- do
         # not re-widen to `<= 1.0`. `dropout_rate=1.0` passes this check but
         # keras.layers.Dropout.call() rejects rate==1.0 under training=True
         # with "rate must be ... in the range [0, 1)"; see decisions.md D-012.

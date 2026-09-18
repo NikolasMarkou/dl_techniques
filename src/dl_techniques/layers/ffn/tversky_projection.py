@@ -646,7 +646,7 @@ class TverskyProjectionLayer(keras.layers.Layer):
         which matches the floor's value and slope at ``y == 1e-6`` and stays
         strictly increasing below it, rather than a flat ``max(y, 1e-6)``.
 
-        # DECISION plan-2026-09-18-1f3c0ce8/D-013: do not revert this to
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-013: do not revert this to
         # keras.ops.maximum(y, 1e-6). A hard floor collapses every
         # non-positive y to the SAME pre-activation value: MEASURED, an
         # unseeded zero-mean contrast_initializer made theta/alpha/beta

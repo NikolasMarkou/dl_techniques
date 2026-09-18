@@ -214,7 +214,7 @@ class ResidualBlock(keras.layers.Layer):
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
-        # DECISION plan-2026-09-18-1f3c0ce8/D-002: dropout_rate == 1.0 passed
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-002: dropout_rate == 1.0 passed
         # this check before, but keras.layers.Dropout.call() rejects rate==1.0
         # ("must be ... in the range [0, 1)") -- so the layer built fine and
         # only exploded on the first training-mode forward pass. Upper bound

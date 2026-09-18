@@ -237,7 +237,7 @@ class OrthoGLUFFN(keras.layers.Layer):
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
-        # DECISION plan-2026-09-18-1f3c0ce8/D-005: half-open, not closed, at 1.0.
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-005: half-open, not closed, at 1.0.
         # keras.layers.Dropout.call() rejects rate==1.0 under training=True
         # ("rate must be ... in the range [0, 1)"); a closed-range check here
         # let that config pass construction and only fail on first training

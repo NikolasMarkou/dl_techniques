@@ -101,7 +101,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': 'Feed-Forward Network that learns to count features in a sequence',
         'required_params': ['output_dim', 'count_dim'],
         'output_dim_param': 'output_dim',
-        # DECISION plan-2026-09-18-1f3c0ce8/D-014: default is 'causal', matching
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-014: default is 'causal', matching
         # CountingFFN's OWN current default. CountingFFN's default used to be
         # 'local' and was deliberately changed to 'causal' because 'local' is
         # bidirectional and silently breaks autoregressive models (see
@@ -126,7 +126,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': 'Differential Feed-Forward Network with dual-pathway processing',
         'required_params': ['hidden_dim', 'output_dim'],
         'output_dim_param': 'output_dim',
-        # DECISION plan-2026-09-18-1f3c0ce8/D-014: no 'gate_activation' key here.
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-014: no 'gate_activation' key here.
         # DifferentialFFN was redesigned to a gate-less push-pull architecture
         # (plan-2026-09-01T201957-15d7a40e/D-002) and its __init__ no longer
         # accepts that parameter at all. Re-adding it (e.g. to "restore" a
@@ -595,7 +595,7 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
     # Validate common parameter constraints
     if 'dropout_rate' in kwargs:
         dropout_rate = kwargs['dropout_rate']
-        # DECISION plan-2026-09-18-1f3c0ce8/D-015: half-open bound, not
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-015: half-open bound, not
         # [0.0, 1.0]. Every FFN type behind this factory whose class carries
         # a Dropout sublayer (D-002 through D-006, D-011, D-012 in this
         # plan's own decisions.md) crashes keras.layers.Dropout.call() under
