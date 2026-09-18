@@ -164,7 +164,7 @@ features (B, h, w, C_in)
 `1`; `DepthAnything` passes `upsample_factor=encoder_stride` so the decoder
 lifts features back to input resolution.
 
-### `StrongAugmentation` (in `dl_techniques.layers.strong_augmentation`)
+### `StrongAugmentation` (in `dl_techniques.layers.signal_processing.strong_augmentation`)
 
 CutMix + color jitter. Used by `DepthAnything` from inside `train_step`, not
 from `call`.
@@ -180,6 +180,10 @@ from `call`.
   standardized or `[-1, +1]` images need — `src/train/depth_anything/` sets it,
   since `src/train/common/megadepth.py` emits RGB in `[-1, +1]` and clipping
   those to `[0, 1]` would zero every negative pixel on the training path only.
+* Colour jitter is dtype-preserving: the per-sample factors are cast to the
+  batch dtype, so a float16 batch stays float16 on the training path.
+* `cutmix_ratio_range` is the fraction of each image *side* that is cut, so the
+  pasted area is the ratio squared.
 * `keras.random.uniform/shuffle` is used in place of the nonexistent
   `keras.ops.random.*`.
 * Cutmix gating uses a symbolic mask multiplier (no Python `if`), so the

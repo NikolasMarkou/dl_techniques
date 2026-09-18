@@ -31,6 +31,7 @@ from typing import Optional, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from .gaussian_filter import symmetric_same_pad
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -265,11 +266,10 @@ class Canny(keras.layers.Layer):
         :return: Convolved tensor of shape ``(B, H, W, C_out)``.
         :rtype: keras.KerasTensor
         """
-        pad_h, pad_w = kernel.shape[0] // 2, kernel.shape[1] // 2
-        padded = keras.ops.pad(
-            inputs, [[0, 0], [pad_h, pad_h], [pad_w, pad_w], [0, 0]],
-            mode="symmetric"
-        )
+        # Odd kernel, stride 1: the shared helper pads (K - 1) / 2 on each side.
+        padded = symmetric_same_pad(inputs, kernel.shape[:2], (1, 1))
+        if padded is None:  # image narrower than the pad: zero padding instead
+            return keras.ops.conv(inputs, kernel, padding="same")
         return keras.ops.conv(padded, kernel, padding="valid")
 
     def _compute_angle_responses(

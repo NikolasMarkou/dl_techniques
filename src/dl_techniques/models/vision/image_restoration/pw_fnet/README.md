@@ -86,7 +86,10 @@ Output features (spatial)
 The FFT and IFFT are a **float32 island**: both cast their input to float32 because
 `keras.ops.fft2` has no float16 kernel, and cast the result back to the layer's compute
 dtype. Mixed precision therefore works, but the transform itself is never run in half
-precision.
+precision. The cast back saturates at the float16 maximum (65504) instead of producing
+`inf`, so a spectrum coefficient beyond that range (the DC term is the sum of the whole
+map: a 256 x 256 map of ones exceeds it) comes back wrong; use a float32 policy for such
+inputs.
 
 ### The complete data flow
 
@@ -211,7 +214,7 @@ print([r.shape for r in restored])
 | `create_pw_fnet` | `...pw_fnet.model` | Thin factory over the constructor with the reference defaults. |
 | `PW_FNet_Block` | `...pw_fnet.model` | Token mixer plus FFN. Shape-preserving. |
 | `PWFNetDownsample` / `PWFNetUpsample` | `...pw_fnet.model` | Learned 2x scaling. |
-| `FFTLayer` / `IFFTLayer` | `dl_techniques.layers.fft_layers` | 2D FFT to concatenated real/imag channels, and back. |
+| `FFTLayer` / `IFFTLayer` | `dl_techniques.layers.signal_processing.fft_layers` | 2D FFT to concatenated real/imag channels, and back. |
 
 All five are re-exported from the package `__init__`.
 
@@ -324,8 +327,8 @@ model = create_pw_fnet(width=16, enc_blk_nums=[1, 1], dec_blk_nums=[1, 1])
 ```
 
 The three outputs come back as float16. The FFT and IFFT stay in float32 internally (see
-section 3), so expect one cast in and one cast out per block — the transform is exact
-either way.
+section 3), so expect one cast in and one cast out per block. The transform is exact for
+coefficients inside the float16 range and saturated beyond it (see section 3).
 
 Restoration is normally trained on crops. Because the model is fully convolutional, a model
 trained on 128x128 patches runs unchanged on full images at inference; the only constraint

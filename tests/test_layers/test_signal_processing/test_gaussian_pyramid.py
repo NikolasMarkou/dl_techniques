@@ -353,7 +353,7 @@ class TestGaussianPyramid:
             GaussianPyramid(scale_factor=-1)
 
         # Test invalid padding
-        with pytest.raises(ValueError, match="padding must be 'valid' or 'same'"):
+        with pytest.raises(ValueError, match="padding must be 'valid', 'same' or 'symmetric'"):
             GaussianPyramid(padding="invalid")
 
         # Test invalid data format
@@ -446,9 +446,8 @@ class TestGaussianPyramid:
         """Test automatic sigma calculation when sigma=-1."""
         layer = GaussianPyramid(levels=2, kernel_size=(7, 7), sigma=-1)
 
-        # Should auto-calculate sigma based on kernel size
-        expected_sigma = ((7 - 1) / 2, (7 - 1) / 2)
-        assert layer.sigma == expected_sigma
+        # A non-positive sigma means a one-pixel standard deviation
+        assert layer.sigma == (1.0, 1.0)
 
         # Should still work
         outputs = layer(sample_input_channels_last)
@@ -458,9 +457,8 @@ class TestGaussianPyramid:
         """Test automatic sigma calculation when sigma=None."""
         layer = GaussianPyramid(levels=2, kernel_size=(5, 5), sigma=None)
 
-        # Should auto-calculate sigma based on kernel size
-        expected_sigma = ((5 - 1) / 2, (5 - 1) / 2)
-        assert layer.sigma == expected_sigma
+        # None means a one-pixel standard deviation
+        assert layer.sigma == (1.0, 1.0)
 
         # Should still work
         outputs = layer(sample_input_channels_last)

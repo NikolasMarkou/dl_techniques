@@ -84,11 +84,9 @@ def test_gaussian_filter_invalid_kernel_size():
 
 
 def test_gaussian_filter_auto_sigma():
-    """Test automatic sigma calculation."""
-    kernel_size = (5, 5)
-    layer = GaussianFilter(kernel_size=kernel_size, sigma=-1)
-    expected_sigma = ((kernel_size[0] - 1) / 2, (kernel_size[1] - 1) / 2)
-    assert layer.sigma == expected_sigma
+    """A non-positive sigma means a one-pixel standard deviation."""
+    layer = GaussianFilter(kernel_size=(5, 5), sigma=-1)
+    assert layer.sigma == (1.0, 1.0)
 
 
 def test_gaussian_filter_output_shape(sample_image):

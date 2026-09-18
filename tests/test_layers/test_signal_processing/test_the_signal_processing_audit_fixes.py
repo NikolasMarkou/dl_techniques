@@ -12,7 +12,11 @@ import tensorflow as tf
 
 from dl_techniques.layers.signal_processing.canny import Canny
 from dl_techniques.layers.signal_processing.clahe import CLAHE
-from dl_techniques.layers.signal_processing.gaussian_filter import GaussianFilter
+from dl_techniques.layers.signal_processing.fft_layers import FFTLayer, IFFTLayer
+from dl_techniques.layers.signal_processing.gaussian_filter import (
+    GaussianFilter,
+    symmetric_same_pad,
+)
 from dl_techniques.layers.signal_processing.gaussian_pyramid import GaussianPyramid
 from dl_techniques.layers.signal_processing.haar_wavelet_decomposition import (
     HaarWaveletDecomposition,
@@ -153,14 +157,178 @@ class TestGaussianKernelAxes:
 
     def test_sigma_pair_is_height_then_width(self):
         """Pre-fix the two sigmas were swapped: axis 0 used sigma_w."""
-        layer = GaussianFilter(kernel_size=(5, 5), sigma=(1.0, 4.0))
+        layer = GaussianFilter(kernel_size=(9, 9), sigma=(1.0, 4.0))
         layer.build((None, 16, 16, 1))
         kernel = np.array(layer.kernel)[:, :, 0, 0]
-        along_height, along_width = kernel.sum(axis=1), kernel.sum(axis=0)
-        # sigma_h = 1 samples the Gaussian out to +-1 std: a flat profile;
-        # sigma_w = 4 samples out to +-4 std: a sharp one.
-        assert along_height.max() < 0.3
-        assert along_width.max() > 0.7
+        offsets = np.arange(9) - 4
+        std_h = np.sqrt((kernel.sum(axis=1) * offsets ** 2).sum())
+        std_w = np.sqrt((kernel.sum(axis=0) * offsets ** 2).sum())
+        assert std_h < std_w
+
+
+class TestSigmaIsAPixelStandardDeviation:
+    """Pre-fix sigma was the kernel half-extent in stds: sigma=1 on a 21 px
+    kernel blurred with std 10 px, and a LARGER sigma blurred LESS."""
+
+    @pytest.mark.parametrize("sigma", [1.0, 2.0, 3.0])
+    def test_measured_standard_deviation_equals_sigma(self, sigma):
+        layer = GaussianFilter(kernel_size=(21, 21), sigma=sigma)
+        layer.build((None, 32, 32, 1))
+        kernel = np.array(layer.kernel)[:, :, 0, 0]
+        offsets = np.arange(21) - 10
+        std = np.sqrt((kernel.sum(axis=0) * offsets ** 2).sum())
+        assert std == pytest.approx(sigma, abs=0.02)
+
+    @pytest.mark.parametrize("kernel, sigma", [(5, 1.5), (5, 2.0), (3, 1.0), (9, 3.0)])
+    def test_truncated_kernel_is_the_normalized_truncated_gaussian(self, kernel, sigma):
+        """The documented truncation: taps are exp(-x^2 / 2 sigma^2) at integer
+        offsets, renormalized, so the realized std is below sigma."""
+        layer = GaussianFilter(kernel_size=(kernel, kernel), sigma=sigma)
+        layer.build((None, 16, 16, 1))
+        offsets = np.arange(kernel) - (kernel - 1) / 2
+        taps = np.exp(-offsets ** 2 / (2 * sigma ** 2))
+        taps /= taps.sum()
+        np.testing.assert_allclose(np.array(layer.kernel)[:, :, 0, 0], np.outer(taps, taps), atol=1e-6)
+
+    def test_sigma_validation(self):
+        for bad in (True, 0.0 + -1e-9, (1.0, 0.0), (1.0, -2.0), "1.0"):
+            if bad == -1e-9:
+                continue
+            with pytest.raises(ValueError):
+                GaussianFilter(sigma=bad)
+        assert GaussianFilter(sigma=np.float32(1.5)).sigma == (1.5, 1.5)
+
+    def test_larger_sigma_blurs_more(self):
+        impulse = np.zeros((1, 15, 15, 1), np.float32)
+        impulse[0, 7, 7, 0] = 1.0
+        peaks = [
+            float(np.array(GaussianFilter(kernel_size=(9, 9), sigma=s)(impulse)).max())
+            for s in (0.8, 1.5, 3.0)
+        ]
+        assert peaks[0] > peaks[1] > peaks[2]
+
+    def test_default_is_the_one_pixel_kernel(self):
+        layer = GaussianFilter(kernel_size=(5, 5))
+        layer.build((None, 8, 8, 1))
+        taps = np.exp(-((np.arange(5) - 2) ** 2) / 2.0)
+        taps /= taps.sum()
+        np.testing.assert_allclose(np.array(layer.kernel)[:, :, 0, 0], np.outer(taps, taps), atol=1e-6)
+
+    @pytest.mark.parametrize("kernel, low, high", [(9, 1.8, 2.1), (5, 1.4, 2.0)])
+    def test_log_is_up_to_twice_dog_on_a_smooth_image(self, kernel, low, high):
+        """Blur minus input is ~sigma^2/2 times the Laplacian and the
+        scale-normalized LoG kernel is sigma^2 times it, so on a smooth image
+        LoG ~ 2 * DoG when both read sigma as a pixel std (module docstring).
+        Pre-fix the default DoG blur was 2 px wide against a 1 px LoG, which
+        gave a ratio near 0.3."""
+        yy, xx = np.mgrid[0:41, 0:41]
+        bump = np.exp(-((xx - 20) ** 2 + (yy - 20) ** 2) / (2 * 6.0 ** 2)).astype(np.float32)[None, :, :, None]
+
+        def core(method):
+            layer = AdvancedLaplacianFilter(method=method, kernel_size=(kernel, kernel), sigma=1.0)
+            return np.array(layer(bump))[0, 8:-8, 8:-8, 0]
+
+        dog, log = core("dog"), core("log")
+        assert low < (log * dog).sum() / (dog * dog).sum() < high
+        assert np.corrcoef(dog.ravel(), log.ravel())[0, 1] > 0.999
+
+
+class TestSymmetricPadding:
+    def test_constant_image_has_no_border_ring(self):
+        ones = np.ones((1, 16, 16, 2), np.float32)
+        same = np.array(GaussianFilter(kernel_size=(5, 5), sigma=1.5, padding="same")(ones))
+        mirrored = np.array(GaussianFilter(kernel_size=(5, 5), sigma=1.5, padding="symmetric")(ones))
+        assert same.min() < 0.6  # zero padding darkens the border
+        np.testing.assert_allclose(mirrored, 1.0, atol=1e-6)
+
+    @pytest.mark.parametrize("stride", [1, 2, 3])
+    def test_matches_same_padding_in_shape_and_interior(self, stride):
+        x = np.random.default_rng(0).random((1, 17, 19, 1)).astype("float32")
+        same = np.array(GaussianFilter(strides=(stride, stride), padding="same")(x))
+        mirrored = np.array(GaussianFilter(strides=(stride, stride), padding="symmetric")(x))
+        assert same.shape == mirrored.shape
+        inner = slice(2, -2) if stride == 1 else slice(2, -2)
+        np.testing.assert_allclose(same[:, inner, inner], mirrored[:, inner, inner], atol=1e-6)
+
+    def test_dynamic_spatial_dims(self):
+        assert GaussianFilter(padding="symmetric")(keras.Input((None, None, 3))).shape == (None, None, None, 3)
+
+    def test_falls_back_to_zero_padding_when_it_cannot_mirror(self):
+        """A pad wider than its axis cannot be mirrored (TF raises); the
+        layers must fall back instead of crashing where 'same' worked."""
+        tiny = np.ones((1, 2, 2, 1), np.float32)
+        assert GaussianFilter(kernel_size=(7, 7), padding="symmetric")(tiny).shape == (1, 2, 2, 1)
+        assert LaplacianFilter(kernel_size=(7, 7))(tiny).shape == (1, 2, 2, 1)
+        assert AdvancedLaplacianFilter(method="log", kernel_size=(7, 7))(tiny).shape == (1, 2, 2, 1)
+        assert Canny()(tiny).shape == (1, 2, 2, 1)
+
+    def test_dynamic_axis_with_stride_falls_back_to_same(self):
+        spec = tf.TensorSpec([None, None, None, 1], tf.float32)
+        layer = GaussianFilter(strides=(2, 2), padding="symmetric")
+        fn = tf.function(lambda v: layer(v), input_signature=[spec])
+        x = np.random.default_rng(0).random((1, 16, 16, 1)).astype("float32")
+        reference = np.array(GaussianFilter(strides=(2, 2), padding="same")(x))
+        np.testing.assert_allclose(np.array(fn(x)), reference, atol=1e-6)
+
+    def test_channels_first_pad_widths_land_on_the_spatial_axes(self):
+        """The channels_first branch cannot run a depthwise conv on CPU, so
+        exercise the pad itself."""
+        x = np.random.default_rng(0).random((1, 3, 8, 10)).astype("float32")
+        padded = np.array(symmetric_same_pad(x, (5, 3), (1, 1), "channels_first"))
+        assert padded.shape == (1, 3, 12, 12)
+        np.testing.assert_array_equal(padded[:, :, 2:-2, 1:-1], x)
+
+    def test_symmetric_survives_save_and_load(self, tmp_path):
+        """Pre-fix: a saved GaussianFilter model could not be reloaded
+        (TrackedList strides)."""
+        inputs = keras.Input((12, 12, 2))
+        model = keras.Model(inputs, GaussianFilter(kernel_size=(5, 3), sigma=(1.5, 1.0), strides=(2, 2), padding="symmetric")(inputs))
+        path = str(tmp_path / "gauss.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+        x = np.random.default_rng(0).random((2, 12, 12, 2)).astype("float32")
+        np.testing.assert_allclose(np.array(model(x)), np.array(reloaded(x)), atol=1e-6)
+
+    @pytest.mark.parametrize("method, ks", [("dog", (5, 5)), ("log", (5, 5)), ("log", (7, 3)), ("kernel", (3, 3))])
+    def test_laplacian_of_a_constant_image_is_zero_everywhere(self, method, ks):
+        """Pre-fix: border |response| 0.35-0.61 on an all-ones image."""
+        ones = np.ones((1, 16, 16, 1), np.float32)
+        out = np.array(AdvancedLaplacianFilter(method=method, kernel_size=ks, sigma=1.0)(ones))
+        assert np.abs(out).max() < 1e-5
+
+    def test_laplacian_filter_of_a_constant_image_is_zero_everywhere(self):
+        out = np.array(LaplacianFilter()(np.ones((1, 16, 16, 1), np.float32)))
+        assert np.abs(out).max() < 1e-5
+
+
+class TestFftFloat16Saturates:
+    def test_large_map_stays_finite(self, restore_dtype_policy):
+        """Pre-fix: DC = inf for a 256 x 256 map of ones, round trip all NaN."""
+        keras.config.set_dtype_policy("mixed_float16")
+        spectrum = FFTLayer()(np.ones((1, 256, 256, 1), np.float32))
+        assert np.isfinite(np.array(spectrum, dtype=np.float32)).all()
+        assert np.isfinite(np.array(IFFTLayer()(spectrum), dtype=np.float32)).all()
+
+    def test_saturation_keeps_the_gradient(self, restore_dtype_policy):
+        """A plain clip has zero gradient beyond the limit, silencing exactly
+        the largest coefficients."""
+        keras.config.set_dtype_policy("mixed_float16")
+        layer = FFTLayer()
+        x = tf.constant(np.ones((1, 256, 256, 1), np.float32))
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            dc = layer(x)[0, 0, 0, 0]
+        gradient = tape.gradient(dc, x)
+        assert gradient is not None and float(tf.reduce_max(tf.abs(gradient))) > 0.5
+
+
+class TestShearletInertKnobsAreLoud:
+    def test_bank_is_independent_of_alpha_and_high_freq(self):
+        default = ShearletTransform(scales=2, directions=4)
+        other = ShearletTransform(scales=2, directions=4, alpha=0.9, high_freq=False)
+        default.build((None, 8, 8, 1))
+        other.build((None, 8, 8, 1))
+        np.testing.assert_array_equal(np.array(default.filter_bank_real), np.array(other.filter_bank_real))
 
 
 class TestPyramidReportsRealShapes:

@@ -13,6 +13,8 @@ References:
       Image Code". https://doi.org/10.1109/T-C.1983.225452
 """
 
+import numbers
+
 import keras
 from typing import Tuple, Union, Optional, Sequence, List, Dict, Any
 
@@ -72,17 +74,14 @@ class GaussianPyramid(keras.layers.Layer):
     :type levels: int
     :param kernel_size: Height and width of the 2D Gaussian kernel.
     :type kernel_size: Tuple[int, int]
-    :param sigma: Half-extent of the Gaussian kernel in standard deviations, as
-        in :class:`GaussianFilter`: the blur's standard deviation in pixels is
-        about ``(kernel_size - 1) / (2 * sigma)`` (accurate for ``sigma >= 3``),
-        so a larger value blurs less. If a
-        single value, same for both dimensions. If tuple, (sigma_h, sigma_w).
-        If -1 or None, ``(kernel_size - 1) / 2`` per axis (roughly a one-pixel standard
-        deviation).
+    :param sigma: Standard deviation of the Gaussian in pixels, as in
+        :class:`GaussianFilter`. If a single value, same for both dimensions.
+        If tuple, (sigma_h, sigma_w). If -1 or None, ``(1.0, 1.0)``.
     :type sigma: Union[float, Tuple[float, float]]
     :param scale_factor: Downsampling factor between levels. Defaults to 2.
     :type scale_factor: int
-    :param padding: Either "valid" or "same" (case-insensitive).
+    :param padding: ``"valid"``, ``"same"`` or ``"symmetric"`` (case-insensitive),
+        as in :class:`GaussianFilter`.
     :type padding: str
     :param data_format: Either "channels_last" or "channels_first".
     :type data_format: Optional[str]
@@ -116,19 +115,21 @@ class GaussianPyramid(keras.layers.Layer):
         self.scale_factor = scale_factor
 
         if (sigma is None or
-                (isinstance(sigma, (float, int)) and sigma <= 0)):
-            # No explicit sigma: derive it from kernel size.
-            self.sigma = ((kernel_size[0] - 1) / 2, (kernel_size[1] - 1) / 2)
+                (isinstance(sigma, numbers.Real) and sigma <= 0)):
+            # No explicit sigma: a one-pixel standard deviation.
+            self.sigma = (1.0, 1.0)
         elif isinstance(sigma, Sequence) and len(sigma) == 2:
             self.sigma = (float(sigma[0]), float(sigma[1]))
-        elif isinstance(sigma, (float, int)):
+        elif isinstance(sigma, numbers.Real):
             self.sigma = (float(sigma), float(sigma))
         else:
             raise ValueError(f"Invalid sigma value: {sigma}")
 
         self.padding = padding.lower()
-        if self.padding not in {"valid", "same"}:
-            raise ValueError(f"padding must be 'valid' or 'same', got {padding}")
+        if self.padding not in {"valid", "same", "symmetric"}:
+            raise ValueError(
+                f"padding must be 'valid', 'same' or 'symmetric', got {padding}"
+            )
 
         self.data_format = keras.config.image_data_format() if data_format is None else data_format
         if self.data_format not in {"channels_first", "channels_last"}:
@@ -307,13 +308,12 @@ def gaussian_pyramid(
     :param kernel_size: Height and width of the Gaussian kernel. Defaults to
         (5, 5).
     :type kernel_size: Tuple[int, int]
-    :param sigma: Half-extent of the Gaussian kernel in standard deviations
-        (see :class:`GaussianFilter`). If -1, ``(kernel_size - 1) / 2`` per
-        axis.
+    :param sigma: Standard deviation of the Gaussian in pixels (see
+        :class:`GaussianFilter`). If -1, ``(1.0, 1.0)``.
     :type sigma: Union[float, Tuple[float, float]]
     :param scale_factor: Downsampling factor between levels. Defaults to 2.
     :type scale_factor: int
-    :param padding: Either "valid" or "same". Defaults to "same".
+    :param padding: ``"valid"``, ``"same"`` or ``"symmetric"``. Defaults to "same".
     :type padding: str
     :param data_format: Either "channels_last" or "channels_first". If None,
         uses Keras default.

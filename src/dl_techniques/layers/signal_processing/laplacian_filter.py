@@ -8,11 +8,19 @@ input and subtracts the blur from the original,
 which gives a bright spot a negative response. ``AdvancedLaplacianFilter``
 reaches a Laplacian-like operator three ways: that Difference of Gaussians, a
 convolution with a Laplacian of Gaussian kernel, or a convolution with a small
-fixed stencil. The three are approximations of one another, not identical: they
-differ in overall scale and support, and ``sigma`` does not mean the same thing
-in the Difference of Gaussians path as in the Laplacian of Gaussian path (see
-the ``sigma`` parameter of each class). ``LaplacianPyramidLevel`` does
-something different. It splits an image into a downsampled low band and a
+fixed stencil. ``sigma`` is a standard deviation in pixels in the first two (before
+truncation to ``kernel_size``), so both describe the same blur scale, but the
+three still differ in overall magnitude: blur minus input is about
+``sigma^2 / 2`` times the Laplacian, the Laplacian of Gaussian kernel here is
+scale-normalized (``sigma^2`` times it), and the stencil is the bare Laplacian.
+So the Laplacian of Gaussian output approaches twice the Difference of Gaussians
+output on smooth input as ``kernel_size`` grows (measured 1.96x at (9, 9), 1.6x
+at the default (5, 5), where truncation cuts the Gaussian short). Both edge
+filters mirror the border instead of zero-padding it, so a constant image gives
+a zero response everywhere, as long as the input is at least half the kernel
+wide (otherwise, or with a stride above 1 on a dynamic axis, they fall back to
+zero padding and log a warning). ``LaplacianPyramidLevel`` does something
+different. It splits an image into a downsampled low band and a
 same-resolution high band, and adding the two back reconstructs the input to
 float precision, because the high band is defined as the difference rather than
 estimated.
@@ -24,6 +32,8 @@ filters hold the blur at stride ``(1, 1)`` so the subtraction lines up, so
 methods.
 """
 
+import numbers
+
 import keras
 import numpy as np
 from typing import Tuple, Union, List, Optional, Sequence, Any, Dict, Literal
@@ -32,7 +42,7 @@ from typing import Tuple, Union, List, Optional, Sequence, Any, Dict, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from .gaussian_filter import GaussianFilter
+from .gaussian_filter import GaussianFilter, symmetric_same_pad
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -74,14 +84,9 @@ class LaplacianFilter(keras.layers.Layer):
         always runs at ``(1, 1)``, so this does not change the output shape.
         Defaults to ``(1, 1)``.
     :type strides: Union[Tuple[int, int], List[int]]
-    :param sigma: Blur scale, with the meaning it has in
-        :class:`GaussianFilter`: the half-extent of the kernel in standard
-        deviations, so the blur's standard deviation in pixels is
-        about ``(k - 1) / (2 * sigma)`` (accurate for ``sigma >= 3``) and a
-        larger value blurs less. A float applies
+    :param sigma: Standard deviation of the Gaussian in pixels. A float applies
         to both axes; a pair is ``(sigma_h, sigma_w)``. ``None`` or a
-        non-positive value derives it from ``kernel_size`` as ``(k - 1) / 2``
-        per axis, roughly a one-pixel standard deviation.
+        non-positive value uses ``(1.0, 1.0)``.
     :type sigma: Optional[Union[float, Tuple[float, float]]]
     :param scale_factor: Multiplier on the Laplacian response. Defaults to
         ``1.0``.
@@ -132,11 +137,11 @@ class LaplacianFilter(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         if (sigma is None or
-                (isinstance(sigma, (float, int)) and sigma <= 0.0)):
-            self.sigma = ((kernel_size[0] - 1) / 2, (kernel_size[1] - 1) / 2)
+                (isinstance(sigma, numbers.Real) and sigma <= 0.0)):
+            self.sigma = (1.0, 1.0)
         elif isinstance(sigma, Sequence) and len(sigma) == 2:
             self.sigma = (float(sigma[0]), float(sigma[1]))
-        elif isinstance(sigma, (float, int)):
+        elif isinstance(sigma, numbers.Real):
             self.sigma = (float(sigma), float(sigma))
         else:
             raise ValueError(f"Invalid sigma value: {sigma}")
@@ -146,6 +151,10 @@ class LaplacianFilter(keras.layers.Layer):
             kernel_size=self.kernel_size,
             strides=(1, 1),
             sigma=self.sigma,
+            # DECISION plan-2026-09-18T211047-6ac2fa02/D-002: mirrored border, so
+            # a constant image has a zero Laplacian. LaplacianPyramidLevel keeps
+            # 'same' on purpose (exact merge, trained checkpoints).
+            padding="symmetric",
             name="gaussian_filter"
         )
 
@@ -261,14 +270,10 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         ``'kernel'``; the ``'dog'`` blur is pinned to ``(1, 1)``. Defaults to
         ``(1, 1)``.
     :type strides: Union[Tuple[int, int], List[int]]
-    :param sigma: Must be positive. A float applies to both axes; a pair is
-        ``(sigma_h, sigma_w)``. Defaults to ``1.0``. It is NOT on the same scale
-        across methods: ``'log'`` reads it as a standard deviation in pixels,
-        while ``'dog'`` passes it to :class:`GaussianFilter`, where it is the
-        kernel's half-extent in standard deviations (standard deviation in
-        pixels about ``(k - 1) / (2 * sigma)``, larger blurs less).
-        ``'kernel'`` uses
-        it only in its non-``(3, 3)`` Laplacian of Gaussian fallback.
+    :param sigma: Standard deviation of the Gaussian in pixels; must be
+        positive. A float applies to both axes; a pair is ``(sigma_h,
+        sigma_w)``. Defaults to ``1.0``. ``'kernel'`` uses it only in its
+        non-``(3, 3)`` Laplacian of Gaussian fallback.
     :type sigma: Union[float, Tuple[float, float]]
     :param scale_factor: Multiplier on the Laplacian response. Defaults to
         ``1.0``.
@@ -320,7 +325,7 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        if isinstance(sigma, (int, float)):
+        if isinstance(sigma, numbers.Real):
             self.sigma = (float(sigma), float(sigma))
         elif isinstance(sigma, Sequence) and len(sigma) == 2:
             self.sigma = (float(sigma[0]), float(sigma[1]))
@@ -337,6 +342,7 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
                 kernel_size=self.kernel_size,
                 strides=(1, 1),
                 sigma=self.sigma,
+                padding="symmetric",
                 name="gaussian_filter"
             )
         else:
@@ -446,13 +452,17 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
             result = keras.ops.subtract(blurred, inputs)
             return keras.ops.multiply(self.scale_factor, result)
         else:
+            # Mirror the border (zero padding would ring against a constant
+            # image); fall back to zero padding only when the pad widths are
+            # unknown (stride above 1 on a dynamic axis).
+            padded = symmetric_same_pad(inputs, self.kernel_size, self.strides)
             conv_result = keras.ops.depthwise_conv(
-                inputs=inputs,
+                inputs=inputs if padded is None else padded,
                 kernel=keras.ops.convert_to_tensor(
                     self.filter_kernel, dtype=self.compute_dtype
                 ),
                 strides=self.strides,
-                padding="same"
+                padding="same" if padded is None else "valid"
             )
             return keras.ops.multiply(self.scale_factor, conv_result)
 
@@ -551,9 +561,10 @@ class LaplacianPyramidLevel(keras.layers.Layer):
     :param blur_kernel_size: Height and width of the Gaussian blur kernel, as a
         length-2 sequence of positive ints. Defaults to ``(5, 5)``.
     :type blur_kernel_size: Tuple[int, int]
-    :param blur_sigma: Gaussian scale, read as in :class:`GaussianFilter` (the
-        kernel's half-extent in standard deviations; larger blurs less). ``-1``
-        derives it from the kernel size. Defaults to ``-1``.
+    :param blur_sigma: Standard deviation of the blur in pixels, as in
+        :class:`GaussianFilter`; ``-1`` uses ``(1.0, 1.0)``. The blur zero-pads
+        its border (``"same"``), which keeps ``merge(split(x))`` exact and
+        leaves a border ring in the high band. Defaults to ``-1``.
     :type blur_sigma: float
     :param blur_trainable: Make the blur kernel learnable. Defaults to
         ``False``, which keeps the split a fixed signal operation.

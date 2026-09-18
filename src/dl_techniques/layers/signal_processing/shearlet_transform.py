@@ -30,9 +30,12 @@ from typing import List, Tuple, Optional, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
+
+_INERT_WARNED = set()
 
 @register_dl_technique("dl_techniques.layers.signal_processing.shearlet_transform")
 class ShearletTransform(keras.layers.Layer):
@@ -86,10 +89,12 @@ class ShearletTransform(keras.layers.Layer):
         all filters. Defaults to 8.
     :type directions: int
     :param alpha: Validated to lie in (0, 1] and serialized, but currently
-        unused: the filter bank does not depend on it. Defaults to 0.5.
+        unused: the filter bank does not depend on it, and a non-default value
+        logs a warning saying so. Defaults to 0.5.
     :type alpha: float
     :param high_freq: Serialized, but currently unused: the filter bank always
-        includes every scale. Defaults to True.
+        includes every scale, and ``False`` logs a warning saying so. Defaults
+        to True.
     :type high_freq: bool
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any
@@ -111,6 +116,17 @@ class ShearletTransform(keras.layers.Layer):
             raise ValueError(f"directions must be positive, got {directions}")
         if not (0 < alpha <= 1):
             raise ValueError(f"alpha must be in (0, 1], got {alpha}")
+
+        inert = [
+            name for name, changed in (("alpha", alpha != 0.5), ("high_freq", not high_freq))
+            if changed
+        ]
+        if inert and not _INERT_WARNED:
+            _INERT_WARNED.add(True)
+            logger.warning(
+                f"ShearletTransform: {' and '.join(inert)} do not change the filter "
+                "bank; a non-default value builds the same bank as the default."
+            )
 
         self.scales = scales
         self.directions = directions

@@ -15,6 +15,7 @@ dtype policy: neither `fft2` nor `ifft2` has a float16 kernel.
 """
 
 import keras
+import numpy as np
 from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -25,6 +26,26 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
+def _cast_to_compute_dtype(x: keras.KerasTensor, compute_dtype: str) -> keras.KerasTensor:
+    """Cast a float32 result to ``compute_dtype``, saturating for float16.
+
+    A plain cast to float16 turns every value beyond 65504 into ``inf``, and the
+    next ``inf - inf`` is ``NaN``. The DC term of a spectrum is the sum of the
+    whole map, so this is reached by a 256 x 256 map of ones. Clipping first
+    keeps the result finite; it is still wrong for those coefficients, which is
+    why a float32 policy is the answer for large maps.
+    """
+    if compute_dtype == "float16":
+        # DECISION plan-2026-09-18T211047-6ac2fa02/D-003: saturate, do not let
+        # the cast produce inf; keep the gradient straight-through.
+        limit = float(np.finfo(np.float16).max)
+        # Straight-through: the forward value saturates, the gradient does not.
+        # A plain clip has zero gradient beyond the limit, which would silently
+        # stop training signal through exactly the largest coefficients.
+        x = x + keras.ops.stop_gradient(keras.ops.clip(x, -limit, limit) - x)
+    return keras.ops.cast(x, compute_dtype)
+
+
 @register_dl_technique("dl_techniques.layers.signal_processing.fft_layers")
 class FFTLayer(keras.layers.Layer):
     """
@@ -34,9 +55,10 @@ class FFTLayer(keras.layers.Layer):
     2D FFT, producing a single real-valued tensor where the real and imaginary
     components are concatenated along the channel axis. The output has shape
     [batch, H, W, 2*C] in the layer's compute dtype (the transform itself runs
-    in float32). Under a float16 policy the returned spectrum overflows once a
-    coefficient exceeds 65504 (the DC term is the sum of the whole map, so a
-    256 x 256 map of ones already does); use a float32 policy for large maps.
+    in float32). Under a float16 policy a coefficient beyond 65504 saturates at
+    the float16 maximum instead of becoming ``inf`` (the DC term is the sum of the
+    whole map, so a 256 x 256 map of ones already exceeds it); the saturated
+    coefficients are wrong, so use a float32 policy for large maps.
     This is a core component of the Fourier-based token mixer in PW-FNet.
 
     Architecture:
@@ -105,7 +127,7 @@ class FFTLayer(keras.layers.Layer):
         fft_real_permuted = keras.ops.transpose(fft_real, [0, 2, 3, 1])
         fft_imag_permuted = keras.ops.transpose(fft_imag, [0, 2, 3, 1])
 
-        return keras.ops.cast(
+        return _cast_to_compute_dtype(
             keras.ops.concatenate(
                 [fft_real_permuted, fft_imag_permuted], axis=-1
             ),
@@ -213,7 +235,7 @@ class IFFTLayer(keras.layers.Layer):
 
         ifft_permuted = keras.ops.transpose(ifft_real, [0, 2, 3, 1])
 
-        return keras.ops.cast(ifft_permuted, self.compute_dtype)
+        return _cast_to_compute_dtype(ifft_permuted, self.compute_dtype)
 
     def compute_output_shape(
             self,
