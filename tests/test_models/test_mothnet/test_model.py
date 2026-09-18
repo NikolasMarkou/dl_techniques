@@ -370,10 +370,36 @@ class TestReadoutWeightBoundSerializationRoundTrip:
         loaded.readout.readout_weights.assign(
             keras.ops.ones_like(loaded.readout.readout_weights) * 5.0
         )
+
+        # DECISION plan-2026-09-18T110506-e42a44c7/D-008
+        # Before D-008, this test asserted the bound over the WHOLE tensor
+        # (`assert max(|after|) <= 1.0`), which happened to pass only
+        # because the old whole-tensor clip moved every row, including
+        # silent ones -- a real D-018 violation `findings/review-iter-1.md`
+        # Concern 2 pointed out this exact test "already drives". The
+        # row-scoped fix means a silent row keeps its pre-existing 5.0
+        # (out-of-range) value untouched; only FIRED rows are grown and
+        # clipped to the bound. Assert both halves explicitly rather than
+        # a single blanket bound check.
+        mb_output_np = keras.ops.convert_to_numpy(mb_output)
+        silent = np.all(mb_output_np == 0.0, axis=0)
+        assert silent.any(), (
+            "precondition: some MB units must be silent for this batch, or "
+            "this round trip does not exercise the row-scoped constraint"
+        )
+
         loaded.readout.hebbian_update(mb_output, keras.ops.convert_to_tensor(y))
 
         after = keras.ops.convert_to_numpy(loaded.readout.readout_weights)
-        assert float(np.max(np.abs(after))) <= 1.0 + 1e-6, (
-            "the reloaded model's kernel_constraint no longer clips after a "
-            "real .keras save/load round trip"
+        assert float(np.max(np.abs(after[~silent]))) <= 1.0 + 1e-6, (
+            "the reloaded model's kernel_constraint no longer clips a fired "
+            "row after a real .keras save/load round trip"
+        )
+        np.testing.assert_array_equal(
+            after[silent], np.full_like(after[silent], 5.0),
+            err_msg=(
+                "a silent row's pre-existing out-of-range value was "
+                "modified after a real .keras save/load round trip -- "
+                "D-018 violated (see D-008)"
+            ),
         )
