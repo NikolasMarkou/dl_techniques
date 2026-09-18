@@ -37,9 +37,9 @@ class TestDifferentialFFN:
             'hidden_dim': 512,
             'output_dim': 256,
             'branch_activation': 'swish',
-            'gate_activation': 'sigmoid',
             'dropout_rate': 0.2,
             'use_bias': True,
+            'tie_branches': False,
             'kernel_initializer': 'he_normal',
             'bias_initializer': 'ones',
             'kernel_regularizer': keras.regularizers.L2(1e-4),
@@ -54,9 +54,11 @@ class TestDifferentialFFN:
         assert layer.hidden_dim == 128
         assert layer.output_dim == 64
         assert layer.branch_activation.__name__ == 'gelu'
-        assert layer.gate_activation.__name__ == 'sigmoid'
         assert layer.dropout_rate == 0.0
         assert layer.use_bias is True
+        # tie_branches defaults to True -- the only setting that yields the
+        # push-pull odd-symmetry guarantee (see diff_ffn.py module docstring).
+        assert layer.tie_branches is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
         # No kernel regularizer by default -- None means OFF, not "substitute one".
@@ -66,23 +68,21 @@ class TestDifferentialFFN:
         # Check that layer is not built yet
         assert not layer.built
 
-        # Check that all sub-layers are created but not built
-        assert layer.positive_dense is not None
-        assert layer.layer_norm_pos is not None
-        assert layer.positive_proj is not None
-        assert layer.negative_dense is not None
-        assert layer.layer_norm_neg is not None
-        assert layer.negative_proj is not None
-        assert layer.layer_norm_diff is not None
+        # Check that the shared-branch sub-layers are created but not built.
+        # With tie_branches=True (the default), there is no separate "negative"
+        # Dense/LayerNorm pair -- both polarities traverse branch_dense/branch_norm.
+        assert layer.branch_dense is not None
+        assert layer.branch_norm is not None
+        assert layer.branch_dense_neg is None
+        assert layer.branch_norm_neg is None
+        assert layer.norm_diff is not None
         assert layer.dropout is not None
         assert layer.output_proj is not None
 
         # Sub-layers should not be built yet (but should exist)
-        assert hasattr(layer.positive_dense, 'built')
-        assert hasattr(layer.negative_dense, 'built')
+        assert hasattr(layer.branch_dense, 'built')
         assert hasattr(layer.output_proj, 'built')
-        assert not layer.positive_dense.built
-        assert not layer.negative_dense.built
+        assert not layer.branch_dense.built
         assert not layer.output_proj.built
 
     def test_initialization_custom(self, custom_layer_config):
@@ -94,13 +94,17 @@ class TestDifferentialFFN:
         assert layer.output_dim == 256
         # Note: 'swish' is internally converted to 'silu' in newer Keras versions
         assert layer.branch_activation.__name__ in ['swish', 'silu']
-        assert layer.gate_activation.__name__ == 'sigmoid'
         assert layer.dropout_rate == 0.2
         assert layer.use_bias is True
+        assert layer.tie_branches is False
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)
         assert isinstance(layer.kernel_regularizer, keras.regularizers.L2)
         assert isinstance(layer.bias_regularizer, keras.regularizers.L1)
+
+        # tie_branches=False must actually create the untied ablation pair.
+        assert layer.branch_dense_neg is not None
+        assert layer.branch_norm_neg is not None
 
     def test_parameter_validation(self):
         """Test that invalid parameters raise appropriate errors."""
@@ -111,8 +115,13 @@ class TestDifferentialFFN:
         with pytest.raises(ValueError, match="hidden_dim must be positive"):
             DifferentialFFN(hidden_dim=-10, output_dim=32)
 
-        with pytest.raises(ValueError, match="hidden_dim must be divisible by 2"):
-            DifferentialFFN(hidden_dim=15, output_dim=32)  # Odd number
+        # hidden_dim has NO parity requirement in the current push-pull design:
+        # both polarities traverse the same shared branch map and land on the
+        # same width by construction (see class docstring, "D = hidden_dim,
+        # unconstrained"). An odd hidden_dim must build and run cleanly.
+        odd_layer = DifferentialFFN(hidden_dim=15, output_dim=32)
+        odd_output = odd_layer(keras.ops.ones((2, 4)))
+        assert odd_output.shape == (2, 32)
 
         # Test invalid output_dim values
         with pytest.raises(ValueError, match="output_dim must be positive"):
@@ -121,12 +130,16 @@ class TestDifferentialFFN:
         with pytest.raises(ValueError, match="output_dim must be positive"):
             DifferentialFFN(hidden_dim=128, output_dim=-5)
 
-        # Test invalid dropout_rate values
-        with pytest.raises(ValueError, match="dropout_rate must be between 0.0 and 1.0"):
+        # Test invalid dropout_rate values -- half-open [0.0, 1.0), matching
+        # what keras.layers.Dropout.call() itself accepts under training=True.
+        with pytest.raises(ValueError, match="dropout_rate must be in"):
             DifferentialFFN(hidden_dim=128, output_dim=64, dropout_rate=-0.1)
 
-        with pytest.raises(ValueError, match="dropout_rate must be between 0.0 and 1.0"):
+        with pytest.raises(ValueError, match="dropout_rate must be in"):
             DifferentialFFN(hidden_dim=128, output_dim=64, dropout_rate=1.5)
+
+        with pytest.raises(ValueError, match="dropout_rate must be in"):
+            DifferentialFFN(hidden_dim=128, output_dim=64, dropout_rate=1.0)
 
     def test_forward_pass_basic(self, sample_input, layer_config):
         """Test basic forward pass functionality."""
@@ -144,9 +157,10 @@ class TestDifferentialFFN:
 
         # Check that layer is now built
         assert layer.built
-        assert layer.positive_dense.built
-        assert layer.negative_dense.built
+        assert layer.branch_dense.built
         assert layer.output_proj.built
+        # tie_branches defaults to True, so there is no separate negative branch.
+        assert layer.branch_dense_neg is None
         # Note: LayerNormalization and Dropout layers don't have explicit built checks
 
     def test_forward_pass_deterministic(self):
@@ -156,14 +170,11 @@ class TestDifferentialFFN:
             hidden_dim=16,
             output_dim=8,
             branch_activation='linear',
-            gate_activation='linear',
             dropout_rate=0.0,
             kernel_initializer='ones',
             bias_initializer='zeros',
-            # None SELECTS the default SoftOrthonormalConstraintRegularizer
-            # (diff_ffn.py: `if kernel_regularizer is None:` installs one) -- it
-            # does NOT disable it. Harmless here: a regularizer only adds losses,
-            # it does not alter the forward output this test asserts on.
+            # None is a true off switch here: no regularizer is installed or
+            # substituted (see test_kernel_regularizer_none_is_a_true_off_switch).
             kernel_regularizer=None
         )
 
@@ -182,7 +193,6 @@ class TestDifferentialFFN:
             hidden_dim=4,
             output_dim=2,
             branch_activation='linear',
-            gate_activation='linear',
             dropout_rate=0.0,
             kernel_initializer='ones',
             bias_initializer='zeros',
@@ -192,48 +202,50 @@ class TestDifferentialFFN:
         test_input = keras.ops.ones([1, 1, 4])
         output = layer(test_input)
 
-        # Since we're using linear activations and ones initialization,
-        # the differential should be computed as pos_branch - neg_branch
+        # Since we're using a linear branch activation and ones initialization,
+        # the differential should be computed as push - pull (see module
+        # docstring). With an all-ones input, x_neg = ReLU(-1) = 0, so pull
+        # collapses to the branch map evaluated at zero -- a nonzero constant
+        # here because branch_dense carries a bias (use_bias defaults True).
         assert output.shape == (1, 1, 2)
         assert not keras.ops.any(keras.ops.isnan(output))
 
     def test_different_activations(self, sample_input):
-        """Test layer with various activation functions."""
+        """Test layer with various branch activation functions.
+
+        `gate_activation` does not exist on this layer -- there is no gate.
+        The current design applies one shared `branch_activation` to both
+        polarities (see module docstring); this only needs to vary that one
+        parameter, not a cross product with a nonexistent second one.
+        """
         branch_activations = ['relu', 'gelu', 'swish', 'tanh', 'linear', 'selu']
-        gate_activations = ['sigmoid', 'tanh', 'linear']
 
         for branch_act in branch_activations:
-            for gate_act in gate_activations:
-                layer = DifferentialFFN(
-                    hidden_dim=64,
-                    output_dim=32,
-                    branch_activation=branch_act,
-                    gate_activation=gate_act
-                )
-                output = layer(sample_input)
+            layer = DifferentialFFN(
+                hidden_dim=64,
+                output_dim=32,
+                branch_activation=branch_act
+            )
+            output = layer(sample_input)
 
-                # Verify output is valid
-                assert output.shape == (*sample_input.shape[:-1], 32)
-                assert not keras.ops.any(keras.ops.isnan(output))
+            # Verify output is valid
+            assert output.shape == (*sample_input.shape[:-1], 32)
+            assert not keras.ops.any(keras.ops.isnan(output))
 
-                # Verify activations are set (handle swish->silu conversion)
-                expected_branch_names = [branch_act] if branch_act != 'swish' else ['swish', 'silu']
-                assert layer.branch_activation.__name__ in expected_branch_names
+            # Verify activations are set (handle swish->silu conversion)
+            expected_branch_names = [branch_act] if branch_act != 'swish' else ['swish', 'silu']
+            assert layer.branch_activation.__name__ in expected_branch_names
 
     def test_custom_activation_callable(self, sample_input):
-        """Test with custom activation functions as callables."""
+        """Test with a custom branch activation function as a callable."""
 
         def custom_branch_activation(x):
             return keras.ops.relu(x) * 0.5
 
-        def custom_gate_activation(x):
-            return keras.ops.sigmoid(x) * 0.8
-
         layer = DifferentialFFN(
             hidden_dim=64,
             output_dim=32,
-            branch_activation=custom_branch_activation,
-            gate_activation=custom_gate_activation
+            branch_activation=custom_branch_activation
         )
         output = layer(sample_input)
 
@@ -284,20 +296,25 @@ class TestDifferentialFFN:
         layer = DifferentialFFN(**custom_layer_config)
         config = layer.get_config()
 
-        # Verify all custom parameters are in config
+        # Verify all custom parameters are in config. No 'gate_activation' key
+        # exists on this layer -- there is no gate in the current push-pull
+        # design (see module docstring).
         expected_keys = {
-            'hidden_dim', 'output_dim', 'branch_activation', 'gate_activation',
-            'dropout_rate', 'use_bias', 'kernel_initializer', 'bias_initializer',
+            'hidden_dim', 'output_dim', 'branch_activation',
+            'dropout_rate', 'use_bias', 'tie_branches', 'epsilon',
+            'kernel_initializer', 'bias_initializer',
             'kernel_regularizer', 'bias_regularizer'
         }
 
         config_keys = set(config.keys())
         assert expected_keys.issubset(config_keys)
+        assert 'gate_activation' not in config_keys
 
         # Verify specific values
         assert config['hidden_dim'] == 512
         assert config['output_dim'] == 256
         assert config['dropout_rate'] == 0.2
+        assert config['tie_branches'] is False
 
     def test_serialization_cycle(self, layer_config, sample_input):
         """CRITICAL TEST: Full serialization cycle following modern patterns."""
@@ -307,11 +324,12 @@ class TestDifferentialFFN:
         outputs = layer_instance(inputs)
         model = keras.Model(inputs, outputs)
 
-        # Ensure the layer is properly built
+        # Ensure the layer is properly built. layer_config uses tie_branches'
+        # default (True), so branch_dense_neg stays None -- only branch_dense
+        # and output_proj are real sub-layers to check here.
         assert layer_instance.built, "Layer should be built after model creation"
         assert all(layer.built for layer in [
-            layer_instance.positive_dense,
-            layer_instance.negative_dense,
+            layer_instance.branch_dense,
             layer_instance.output_proj
         ]), "All sub-layers should be built"
 
@@ -343,13 +361,9 @@ class TestDifferentialFFN:
                 print(f"Layer built: {layer_instance.built}")
                 print("Sub-layer build status:")
                 for name, sublayer in [
-                    ('positive_dense', layer_instance.positive_dense),
-                    ('layer_norm_pos', layer_instance.layer_norm_pos),
-                    ('positive_proj', layer_instance.positive_proj),
-                    ('negative_dense', layer_instance.negative_dense),
-                    ('layer_norm_neg', layer_instance.layer_norm_neg),
-                    ('negative_proj', layer_instance.negative_proj),
-                    ('layer_norm_diff', layer_instance.layer_norm_diff),
+                    ('branch_dense', layer_instance.branch_dense),
+                    ('branch_norm', layer_instance.branch_norm),
+                    ('norm_diff', layer_instance.norm_diff),
                     ('dropout', layer_instance.dropout),
                     ('output_proj', layer_instance.output_proj),
                 ]:
@@ -464,8 +478,7 @@ class TestDifferentialFFN:
         layer = DifferentialFFN(
             hidden_dim=64,
             output_dim=32,
-            branch_activation='gelu',
-            gate_activation='sigmoid'
+            branch_activation='gelu'
         )
 
         # Test different input value ranges
@@ -502,7 +515,7 @@ def test_kernel_regularizer_none_is_a_true_off_switch():
 
     layer(keras.random.normal([2, 3, 6]))
     assert layer.losses == []
-    for sub in (layer.positive_dense, layer.negative_dense, layer.output_proj):
+    for sub in (layer.branch_dense, layer.output_proj):
         assert sub.kernel_regularizer is None
 
 
@@ -528,7 +541,7 @@ class TestDifferentialFFNEdgeCases:
 
     def test_minimal_dimensions(self):
         """Test with minimal viable dimensions."""
-        layer = DifferentialFFN(hidden_dim=2, output_dim=1)  # Minimum hidden_dim is 2 (must be even)
+        layer = DifferentialFFN(hidden_dim=2, output_dim=1)  # Minimal positive hidden_dim; no parity constraint
         test_input = keras.random.normal([2, 3, 4])
 
         output = layer(test_input)
@@ -588,20 +601,40 @@ class TestDifferentialFFNEdgeCases:
         assert not keras.ops.any(keras.ops.isnan(output2))
 
     def test_branch_symmetry(self):
-        """Test that positive and negative branches are structured symmetrically."""
-        layer = DifferentialFFN(hidden_dim=128, output_dim=64)
+        """Test the push-pull branch relationship the current design actually has.
+
+        The old "Dense(D) -> Dense(D/2) projection per polarity" architecture
+        is gone (see module docstring, "Differences from the earlier untied,
+        gated design"); there is no `positive_proj`/`negative_proj` bottleneck
+        to compare units on. What must actually hold: `tie_branches=True`
+        (the default) means both polarities share ONE branch map -- no second
+        Dense/LayerNorm pair is even created -- and `tie_branches=False`
+        creates a structurally matching but independently-initialized pair
+        (same bug class as the GatedMLP gate/value tie fixed elsewhere in
+        this package; verified here by measurement, not by reading).
+        """
+        tied = DifferentialFFN(hidden_dim=128, output_dim=64, tie_branches=True)
         test_input = keras.random.normal([2, 4, 32])
+        tied(test_input)
 
-        # Build the layer
-        layer(test_input)
+        # tie_branches=True: no independent negative branch exists at all.
+        assert tied.branch_dense_neg is None
+        assert tied.branch_norm_neg is None
 
-        # Check that positive and negative branches have same structure
-        assert layer.positive_dense.units == layer.negative_dense.units
-        assert layer.positive_proj.units == layer.negative_proj.units
+        untied = DifferentialFFN(hidden_dim=128, output_dim=64, tie_branches=False)
+        untied(test_input)
 
-        # Both should project to hidden_dim // 2
-        assert layer.positive_proj.units == 128 // 2
-        assert layer.negative_proj.units == 128 // 2
+        # tie_branches=False: a structurally matching pair is created ...
+        assert untied.branch_dense_neg is not None
+        assert untied.branch_norm_neg is not None
+        assert untied.branch_dense.units == untied.branch_dense_neg.units
+
+        # ... but the two kernels must be genuinely independent draws, not
+        # tied by a shared initializer instance (max|delta| must never be 0.0).
+        kernel_pos = keras.ops.convert_to_numpy(untied.branch_dense.kernel)
+        kernel_neg = keras.ops.convert_to_numpy(untied.branch_dense_neg.kernel)
+        max_delta = float(np.max(np.abs(kernel_pos - kernel_neg)))
+        assert max_delta > 0.0, "untied branch kernels must not be tied"
 
     def test_no_bias_configuration(self):
         """Test layer with bias disabled."""
@@ -609,10 +642,8 @@ class TestDifferentialFFNEdgeCases:
             hidden_dim=64,
             output_dim=32,
             use_bias=False,
-            # None SELECTS the default SoftOrthonormalConstraintRegularizer
-            # (diff_ffn.py: `if kernel_regularizer is None:` installs one) -- it
-            # does NOT disable it. Harmless here: a regularizer only adds losses,
-            # it does not alter the forward output this test asserts on.
+            # None is a true off switch here: no regularizer is installed or
+            # substituted (see test_kernel_regularizer_none_is_a_true_off_switch).
             kernel_regularizer=None
         )
         test_input = keras.random.normal([2, 4, 16])
@@ -623,7 +654,8 @@ class TestDifferentialFFNEdgeCases:
         assert output.shape == (2, 4, 32)
         assert not keras.ops.any(keras.ops.isnan(output))
 
-        # Check that bias is disabled in sub-layers
-        assert not layer.positive_dense.use_bias
-        assert not layer.negative_dense.use_bias
+        # use_bias governs the shared branch Dense; output_proj is
+        # unconditionally bias-free regardless of use_bias (structural
+        # requirement for the odd-symmetry proof, see module docstring).
+        assert not layer.branch_dense.use_bias
         assert not layer.output_proj.use_bias
