@@ -458,6 +458,22 @@ class HebbianReadoutLayer(keras.layers.Layer):
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for readout weights. Defaults to None.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kernel_constraint: Constraint applied to ``readout_weights`` after
+        every ``hebbian_update()`` call. Defaults to None, which reproduces
+        today's unbounded-growth behavior exactly (byte-for-byte, since the
+        constraint call is skipped entirely). The additive Hebbian rule above
+        has no decay or bound of its own, so ``readout_weights`` grows without
+        limit over long training runs; the cited source paper's own rule
+        (Delahunt & Kutz 2019, Neural Networks 118, Eq. (3)) pairs this
+        update with a proportional decay for inactive synapses plus hard
+        upper/lower weight rails. This parameter supplies the hard-rail half
+        of that design as an opt-in, Keras-idiomatic
+        ``keras.constraints.Constraint`` (a plain callable, applied manually
+        here rather than by an optimizer) instead of a literal port of the
+        decay term, which would conflict with the pinned
+        ``delta[silent_MB_unit] == 0.0`` invariant
+        (`# DECISION plan-2026-08-19T070627-a616f581/D-018`).
+    :type kernel_constraint: Optional[keras.constraints.Constraint]
     :param use_bias: Whether to include bias terms. Defaults to True.
     :type use_bias: bool
     :param kwargs: Additional keyword arguments for the base Layer class.
@@ -469,6 +485,7 @@ class HebbianReadoutLayer(keras.layers.Layer):
         learning_rate: float = 0.01,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        kernel_constraint: Optional[keras.constraints.Constraint] = None,
         use_bias: bool = True,
         **kwargs
     ):
@@ -477,6 +494,7 @@ class HebbianReadoutLayer(keras.layers.Layer):
         self.learning_rate = learning_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.kernel_constraint = keras.constraints.get(kernel_constraint)
         self.use_bias = use_bias
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -494,6 +512,7 @@ class HebbianReadoutLayer(keras.layers.Layer):
             shape=(input_dim, self.units),
             initializer=self.kernel_initializer,
             regularizer=self.kernel_regularizer,
+            constraint=self.kernel_constraint,
             trainable=False,  # Updated via Hebbian rule, not backprop
         )
 
@@ -551,6 +570,26 @@ class HebbianReadoutLayer(keras.layers.Layer):
 
         # Apply Hebbian update: W_new = W_old + α·ΔW
         new_weights = self.readout_weights + self.learning_rate * weight_update
+
+        # DECISION plan-2026-09-18T110506-e42a44c7/D-006
+        # Applying the constraint HERE -- after the additive growth, on the
+        # WHOLE tensor -- is what keeps the pinned D-018 invariant
+        # (`delta[silent_MB_unit] == 0.0`,
+        # `# DECISION plan-2026-08-19T070627-a616f581/D-018` in
+        # tests/test_models/test_mothnet/test_model.py) intact. A silent MB
+        # unit's row is unchanged by `weight_update` above (its outer-product
+        # column is exactly zero), so `new_weights` for that row equals
+        # `self.readout_weights` for that row exactly. A hard clip is
+        # idempotent on a value that is already inside `[min_value,
+        # max_value]` and did not move -- it is a no-op on that row, not a
+        # second mutation. Do NOT scope this call to only the rows that
+        # changed (e.g. via a boolean mask): that would be equivalent in
+        # behavior but adds complexity for zero benefit, since an unmoved,
+        # already-in-range value clips to itself either way. See
+        # decisions.md D-006.
+        if self.kernel_constraint is not None:
+            new_weights = self.kernel_constraint(new_weights)
+
         self.readout_weights.assign(new_weights)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
@@ -577,6 +616,7 @@ class HebbianReadoutLayer(keras.layers.Layer):
             'learning_rate': self.learning_rate,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'kernel_constraint': keras.constraints.serialize(self.kernel_constraint),
             'use_bias': self.use_bias,
         })
         return config
