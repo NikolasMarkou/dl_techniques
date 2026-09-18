@@ -571,26 +571,44 @@ class HebbianReadoutLayer(keras.layers.Layer):
         # Apply Hebbian update: W_new = W_old + α·ΔW
         new_weights = self.readout_weights + self.learning_rate * weight_update
 
-        # DECISION plan-2026-09-18T110506-e42a44c7/D-006
-        # Applying the constraint HERE -- after the additive growth, on the
-        # WHOLE tensor -- is what keeps the pinned D-018 invariant
-        # (`delta[silent_MB_unit] == 0.0`,
-        # `# DECISION plan-2026-08-19T070627-a616f581/D-018` in
-        # tests/test_models/test_mothnet/test_model.py) intact. A silent MB
-        # unit's row is unchanged by `weight_update` above (its outer-product
-        # column is exactly zero), so `new_weights` for that row equals
-        # `self.readout_weights` for that row exactly. A hard clip is
-        # idempotent on a value that is already inside `[min_value,
-        # max_value]` and did not move -- it is a no-op on that row, not a
-        # second mutation. Do NOT scope this call to only the rows that
-        # changed (e.g. via a boolean mask): that would be equivalent in
-        # behavior but adds complexity for zero benefit, since an unmoved,
-        # already-in-range value clips to itself either way. See
-        # decisions.md D-006.
         if self.kernel_constraint is not None:
             new_weights = self.kernel_constraint(new_weights)
 
-        self.readout_weights.assign(new_weights)
+        # DECISION plan-2026-09-18T110506-e42a44c7/D-008
+        # This site previously carried D-006, which applied the constraint to
+        # the WHOLE tensor and argued that could never violate the pinned
+        # D-018 invariant (`delta[silent_MB_unit] == 0.0`,
+        # `# DECISION plan-2026-08-19T070627-a616f581/D-018` in
+        # tests/test_models/test_mothnet/test_model.py), reasoning that a
+        # silent row's `new_weights` is bit-identical to `self.readout_weights`
+        # (its outer-product column is exactly zero) so clipping it is a
+        # idempotent no-op. An adversarial review
+        # (`findings/review-iter-1.md` Concern 1) MEASURED that reasoning
+        # false whenever a silent row is already OUTSIDE `[min_value,
+        # max_value]` *before* this call: the whole-tensor clip then moves
+        # that row toward the rail even though it never "grew" -- e.g.
+        # `HebbianReadoutLayer(units=3, kernel_constraint=
+        # ValueRangeConstraint(-1, 1))` with a silent row `[3.0, -3.0, 0.05]`
+        # measured `max|delta[silent]|=2.0`. This is reachable via a
+        # `readout_weight_bound` tighter than the realized
+        # `kernel_initializer` range, or an externally assigned/loaded
+        # out-of-range weight -- NOT a hypothetical edge case (see D-008).
+        # D-006 also called a per-row-masked clip "equivalent in behavior,
+        # just more code" -- that claim is refuted by the same measurement:
+        # a masked clip does NOT move an unmoved, out-of-range row, while the
+        # whole-tensor clip does. Do NOT revert to an unconditional
+        # `self.readout_weights.assign(self.kernel_constraint(new_weights))`:
+        # write only the rows that actually fired this batch, and leave every
+        # silent row as `self.readout_weights` UNCHANGED, regardless of that
+        # row's pre-existing value (in-range or not). See decisions.md D-008.
+        fired = keras.ops.any(keras.ops.greater(pre_synaptic, 0.0), axis=0)
+        final_weights = keras.ops.where(
+            keras.ops.expand_dims(fired, axis=-1),
+            new_weights,
+            self.readout_weights,
+        )
+
+        self.readout_weights.assign(final_weights)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape for this layer.
