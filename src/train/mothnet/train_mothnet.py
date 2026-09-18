@@ -8,8 +8,9 @@ since `HebbianReadoutLayer.readout_weights` is `trainable=False` and is updated 
 by a direct Hebbian `.assign()` inside `train_hebbian` (see
 `plans/plan-2026-09-18T045308-c89cdf76/decisions.md` D-001/D-002).
 
-This module currently only wires CLI argument parsing (plan Step 1). Data loading,
-model construction, the training loop, and visualization land in later plan steps.
+This module currently wires CLI argument parsing (plan Step 1) and MNIST data loading
+(plan Step 2). Model construction, the training loop, and visualization land in later
+plan steps.
 
 Usage:
     python -m train.mothnet.train_mothnet --help
@@ -19,6 +20,8 @@ Usage:
 
 import argparse
 
+import keras
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 
@@ -130,6 +133,70 @@ def parse_arguments(argv=None) -> argparse.Namespace:
         parser.error(f"--epochs must be >= 1, got {args.epochs}")
 
     return args
+
+
+def load_mnist_data(config: argparse.Namespace):
+    """Load, normalize, flatten, and one-hot-encode MNIST, then subsample.
+
+    Mirrors `src/train/som_nd_soft/train_mnist.py`'s `load_mnist_data` normalization
+    pipeline exactly (`astype("float32")/255.0` -> `reshape(-1, 784)` ->
+    `keras.utils.to_categorical(y, 10)`). The training subsample is drawn from MNIST's
+    own train split; the validation subsample is drawn from MNIST's own held-out test
+    split (never a further split of the training pool) — matching `train_kan.py`'s
+    train/val split pattern.
+
+    Both subsamples are drawn via a `config.seed`-seeded shuffle, applied BEFORE
+    `train_hebbian`'s own internal unseeded shuffle ever runs (that internal shuffle is
+    out of this function's scope — see plan.md Step 2).
+
+    :param config: Parsed CLI namespace (`parse_arguments`'s return value); reads
+        `config.num_train_samples`, `config.num_val_samples`, `config.seed`.
+    :return: `(x_train, y_train), (x_val, y_val)` as numpy arrays — `x_*` shape
+        `(N, 784)` float32 in `[0, 1]`, `y_*` shape `(N, 10)` one-hot float32.
+    """
+    logger.info("Loading MNIST dataset...")
+    (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
+
+    x_train = x_train.astype("float32") / 255.0
+    x_test = x_test.astype("float32") / 255.0
+    x_train = x_train.reshape(-1, 784)
+    x_test = x_test.reshape(-1, 784)
+    y_train = keras.utils.to_categorical(y_train, 10)
+    y_test = keras.utils.to_categorical(y_test, 10)
+
+    num_train_samples = config.num_train_samples
+    if num_train_samples > x_train.shape[0]:
+        logger.warning(
+            f"--num-train-samples {num_train_samples} exceeds the available MNIST "
+            f"train set size ({x_train.shape[0]}); clipping to {x_train.shape[0]}."
+        )
+        num_train_samples = x_train.shape[0]
+
+    num_val_samples = config.num_val_samples
+    if num_val_samples > x_test.shape[0]:
+        logger.warning(
+            f"--num-val-samples {num_val_samples} exceeds the available MNIST "
+            f"test set size ({x_test.shape[0]}); clipping to {x_test.shape[0]}."
+        )
+        num_val_samples = x_test.shape[0]
+
+    # Seeded shuffle for the subsample selection — independent of, and applied before,
+    # train_hebbian's own internal unseeded shuffle (see docstring above and
+    # plan.md Step 2's scope note).
+    rng = np.random.default_rng(config.seed)
+    train_indices = rng.permutation(x_train.shape[0])[:num_train_samples]
+    val_indices = rng.permutation(x_test.shape[0])[:num_val_samples]
+
+    x_train = x_train[train_indices]
+    y_train = y_train[train_indices]
+    x_val = x_test[val_indices]
+    y_val = y_test[val_indices]
+
+    logger.info(
+        f"Subsampled MNIST — train: x={x_train.shape}, y={y_train.shape}; "
+        f"val: x={x_val.shape}, y={y_val.shape}"
+    )
+    return (x_train, y_train), (x_val, y_val)
 
 
 def main(argv=None) -> int:
