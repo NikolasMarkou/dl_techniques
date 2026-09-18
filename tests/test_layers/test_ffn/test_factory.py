@@ -288,7 +288,9 @@ class TestFFNFactory:
             hidden_dim=512,
             output_dim=256,
             branch_activation='relu',
-            gate_activation='sigmoid', # Corrected from combination_activation
+            # No 'gate_activation': DifferentialFFN was redesigned to a
+            # gate-less push-pull architecture and its __init__ no longer
+            # accepts that parameter (see factory.py D-014).
             dropout_rate=0.15
         )
 

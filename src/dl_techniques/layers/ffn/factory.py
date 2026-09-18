@@ -101,8 +101,17 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': 'Feed-Forward Network that learns to count features in a sequence',
         'required_params': ['output_dim', 'count_dim'],
         'output_dim_param': 'output_dim',
+        # DECISION plan-2026-09-18-1f3c0ce8/D-014: default is 'causal', matching
+        # CountingFFN's OWN current default. CountingFFN's default used to be
+        # 'local' and was deliberately changed to 'causal' because 'local' is
+        # bidirectional and silently breaks autoregressive models (see
+        # counting_ffn.py's own `counting_scope` docstring) -- this registry
+        # entry still said 'local' after that redesign, silently reintroducing
+        # the unsafe default for every caller that reaches CountingFFN through
+        # create_ffn_layer('counting', ...) without naming counting_scope
+        # explicitly. Do not revert this to 'local'. See decisions.md D-014.
         'optional_params': {
-            'counting_scope': 'local',
+            'counting_scope': 'causal',
             'activation': 'gelu',
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
@@ -117,9 +126,17 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': 'Differential Feed-Forward Network with dual-pathway processing',
         'required_params': ['hidden_dim', 'output_dim'],
         'output_dim_param': 'output_dim',
+        # DECISION plan-2026-09-18-1f3c0ce8/D-014: no 'gate_activation' key here.
+        # DifferentialFFN was redesigned to a gate-less push-pull architecture
+        # (plan-2026-09-01T201957-15d7a40e/D-002) and its __init__ no longer
+        # accepts that parameter at all. Re-adding it (e.g. to "restore" a
+        # documented default) makes create_ffn_layer('differential', ...) pass
+        # an unrecognized kwarg to DifferentialFFN on EVERY call, since it is
+        # always injected from optional_params unless overridden -- this was a
+        # real, unconditional TypeError-at-construction defect (13 failing
+        # tests) until removed here. See decisions.md D-014.
         'optional_params': {
             'branch_activation': 'gelu',
-            'gate_activation': 'sigmoid',
             'dropout_rate': 0.0,
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
@@ -578,7 +595,16 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
     # Validate common parameter constraints
     if 'dropout_rate' in kwargs:
         dropout_rate = kwargs['dropout_rate']
-        if not (0.0 <= dropout_rate <= 1.0):
+        # DECISION plan-2026-09-18-1f3c0ce8/D-015: half-open bound, not
+        # [0.0, 1.0]. Every FFN type behind this factory whose class carries
+        # a Dropout sublayer (D-002 through D-006, D-011, D-012 in this
+        # plan's own decisions.md) crashes keras.layers.Dropout.call() under
+        # training=True at dropout_rate=1.0 with "rate must be ... in the
+        # range [0, 1)". This factory-level check ran BEFORE each per-class
+        # fix and re-widening it back to closed [0.0, 1.0] resurrects the
+        # same class of latent crash at the dispatch layer, for every type at
+        # once. See decisions.md D-015.
+        if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}")
 
     positive_dims = ['hidden_dim', 'output_dim', 'count_dim', 'logic_dim', 'filters', 'units', 'features', 'num_features', 'tokens_mlp_dim', 'channels_mlp_dim']
