@@ -451,6 +451,20 @@ def main(argv=None) -> int:
     viz_dir = run_dir / "visualizations"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
+    # A rerun into the same `--experiment-name` must start `visualizations/` clean
+    # of stale periodic PNGs from a PRIOR (possibly longer) run at that name —
+    # matching every other artifact class's already-correct fresh-open/overwrite
+    # behavior (the CSV below is opened in "w" mode, `best_model.keras`/
+    # `final_model.keras` are overwritten by `model.save()`). Scoped to EXACTLY
+    # this filename pattern — never a broader glob — since `training_dashboard.png`
+    # is overwritten in place every epoch and must be left untouched here
+    # (plan-2026-09-18T060057-c1cfc3d3 Step 5 / F-05).
+    for stale_png in viz_dir.glob("epoch_*_mb_sparsity.png"):
+        try:
+            stale_png.unlink()
+        except OSError as unlink_error:
+            logger.warning(f"Could not remove stale visualization {stale_png}: {unlink_error}")
+
     # Opened once, before the loop, in write mode (never append: `prepare_run_dir`
     # creates the run directory with `exist_ok=True`, so a rerun into the same
     # directory — e.g. a fixed `--experiment-name` — must start a fresh log, matching
