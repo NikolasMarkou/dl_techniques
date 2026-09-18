@@ -18,7 +18,6 @@ References:
 """
 
 import keras
-from keras import ops, layers, activations
 from typing import Optional, Union, Any, Dict, Callable, Tuple
 
 # ---------------------------------------------------------------------
@@ -105,7 +104,8 @@ class OrthoGLUFFN(keras.layers.Layer):
                        ▼
               SoftOrthonormalConstraintRegularizer
                 lambda = ortho_reg_factor
-                l1     = 1e-5   (fixed inside OrthoBlock)
+                l1     = 0.0    (OrthoBlock's own default;
+                                 not overridden here)
                        │
                        ▼
               added to the layer's regularization losses,
@@ -118,10 +118,15 @@ class OrthoGLUFFN(keras.layers.Layer):
                                              ▼
                                       block output
 
-        The regularizer is always attached. `ortho_reg_factor`
-        only sets its lambda. At 0.0 the orthonormal term
-        vanishes and the fixed l1 term remains, so 0.0 does not
-        turn the penalty off.
+        The regularizer is always attached, but `ortho_reg_factor`
+        is the only nonzero coefficient reaching it from here: the
+        `ortho_l1_factor`/`ortho_l2_factor` OrthoBlock accepts are
+        never passed by OrthoGLUFFN, so they stay at OrthoBlock's
+        own 0.0 default. MEASURED: at ortho_reg_factor=0.0 this
+        regularizer's loss is exactly 0.0 for each block, so 0.0
+        DOES turn its penalty off (an earlier revision of this
+        docstring claimed a "fixed l1 = 1e-5" floor here; that was
+        never true of OrthoBlock's defaults and has been corrected).
 
         Both OrthoBlocks are built with activation=None, so
         OrthoBlock's own activation stage is inert here and the
@@ -138,7 +143,7 @@ class OrthoGLUFFN(keras.layers.Layer):
         ('gelu', 'relu') or a callable. Defaults to 'gelu'.
     :type activation: Union[str, Callable]
     :param dropout_rate: Dropout rate applied to the gated tensor, in
-        ``[0.0, 1.0]``. Active only when ``training=True``. Defaults to 0.0.
+        ``[0.0, 1.0)``. Active only when ``training=True``. Defaults to 0.0.
     :type dropout_rate: float
     :param use_bias: Whether the output ``OrthoBlock`` carries a bias. The
         input block is constructed with ``use_bias=False`` whatever this says.
@@ -173,10 +178,10 @@ class OrthoGLUFFN(keras.layers.Layer):
     :ivar output_proj_ortho: ``OrthoBlock(output_dim)``, the final projection.
     :vartype output_proj_ortho: OrthoBlock
     :ivar dropout: ``Dropout(dropout_rate)``, applied to the gated tensor.
-    :vartype dropout: layers.Dropout
+    :vartype dropout: keras.layers.Dropout
 
     :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not positive, or
-        ``dropout_rate`` is outside ``[0.0, 1.0]``.
+        ``dropout_rate`` is outside ``[0.0, 1.0)``.
     :raises ValueError: From ``OrthoBlock``, if a resolved
         ``ortho_reg_factor`` is negative or not a number.
     :raises ValueError: From ``build()``, if the last axis of the input shape
@@ -221,7 +226,7 @@ class OrthoGLUFFN(keras.layers.Layer):
         layer behind.
 
         :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not
-            positive, or ``dropout_rate`` is outside ``[0.0, 1.0]``.
+            positive, or ``dropout_rate`` is outside ``[0.0, 1.0)``.
         :raises ValueError: From ``OrthoBlock``, if a resolved
             ``ortho_reg_factor`` is negative or not a number.
         """
@@ -232,7 +237,12 @@ class OrthoGLUFFN(keras.layers.Layer):
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
-        if not (0.0 <= dropout_rate <= 1.0):
+        # DECISION plan-2026-09-18-1f3c0ce8/D-005: half-open, not closed, at 1.0.
+        # keras.layers.Dropout.call() rejects rate==1.0 under training=True
+        # ("rate must be ... in the range [0, 1)"); a closed-range check here
+        # let that config pass construction and only fail on first training
+        # forward pass. Do not widen this back to `<= 1.0`. See decisions.md D-005.
+        if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(
                 f"dropout_rate must be between 0 and 1, got {dropout_rate}"
             )
@@ -240,7 +250,7 @@ class OrthoGLUFFN(keras.layers.Layer):
         # Store every constructor argument; get_config() returns all of them.
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
-        self.activation = activations.get(activation)
+        self.activation = keras.activations.get(activation)
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.ortho_reg_factor = ortho_reg_factor
@@ -275,7 +285,7 @@ class OrthoGLUFFN(keras.layers.Layer):
             name="output_proj_ortho",
         )
 
-        self.dropout = layers.Dropout(dropout_rate, name="dropout")
+        self.dropout = keras.layers.Dropout(dropout_rate, name="dropout")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -331,7 +341,7 @@ class OrthoGLUFFN(keras.layers.Layer):
         gate_and_value = self.input_proj_ortho(inputs, training=training)
 
         # Split in half; only the gate half gets the activation.
-        gate, value = ops.split(gate_and_value, indices_or_sections=2, axis=-1)
+        gate, value = keras.ops.split(gate_and_value, indices_or_sections=2, axis=-1)
         activated_gate = self.activation(gate)
         gated_value = activated_gate * value
 
@@ -374,7 +384,7 @@ class OrthoGLUFFN(keras.layers.Layer):
             {
                 "hidden_dim": self.hidden_dim,
                 "output_dim": self.output_dim,
-                "activation": activations.serialize(self.activation),
+                "activation": keras.activations.serialize(self.activation),
                 "dropout_rate": self.dropout_rate,
                 "use_bias": self.use_bias,
                 "ortho_reg_factor": self.ortho_reg_factor
