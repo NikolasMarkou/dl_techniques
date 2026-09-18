@@ -21,13 +21,20 @@ current working directory (``train.common.resolved_run_dir``).
 
 Usage:
     python -m train.power_mlp.train_power_mlp --help
-    python -m train.power_mlp.train_power_mlp --dataset mnist --epochs 3 --seed 0 --gpu 1
+    python -m train.power_mlp.train_power_mlp --dataset mnist --epochs 50 --architecture default --k 2
     python -m train.power_mlp.train_power_mlp --dataset cifar10 --architecture large \\
         --k 2 --dropout-rate 0.2 --batch-normalization
+
+Results land in ``results/<experiment_name>/`` at the repository root (never
+under ``src/``): ``config.json``, ``training_log.csv`` (with ``lr``),
+``training_history.json``, ``best_model.keras``, ``final_model.keras``,
+``results_summary.json``, ``visualizations/`` and ``model_analysis/``.
 """
 
 import argparse
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import keras
@@ -42,14 +49,26 @@ from train.common import (
     CIFAR10_STD,
     create_callbacks,
     default_experiment_name,
+    get_class_names,
+    json_numpy_default,
     load_dataset,
     prepare_run_dir,
+    resolve_monitor_mode,
     resolved_run_dir,
+    run_model_analysis,
     save_training_history_json,
     set_seeds,
     setup_gpu,
+    validate_model_loading,
 )
-from train.common.callbacks import LearningRateLogger
+from train.common.callbacks import LearningRateLogger, best_checkpoint_path
+from train.power_mlp.visualization import (
+    TrainingDashboardCallback,
+    plot_calibration,
+    plot_confident_errors,
+    plot_confusion_matrix,
+    plot_per_class_metrics,
+)
 
 
 # ---------------------------------------------------------------------
@@ -64,6 +83,15 @@ MNIST_STD = 0.3081
 # (degree k**depth) in the deeper presets. Passed to ``optimizer_builder`` as
 # ``gradient_clipping_by_norm_local``, which renames it to Keras' ``clipnorm``.
 GRADIENT_CLIP_NORM = 1.0
+
+# The metric that drives early stopping, the best checkpoint and best_epoch.
+MONITOR = "val_loss"
+
+# Samples used by the pre-fit sanity evaluate and by validate_model_loading.
+SANITY_SAMPLES = 1024
+LOAD_CHECK_SAMPLES = 64
+# Best-checkpoint vs in-memory final weights should be identical (D-011).
+WEIGHT_MISMATCH_TOLERANCE = 1e-6
 
 DATASETS: Tuple[str, ...] = ("mnist", "cifar10")
 OPTIMIZERS: Tuple[str, ...] = ("adam", "adamw", "sgd", "rmsprop")
@@ -438,19 +466,166 @@ def create_optimizer(
 # Training
 # ---------------------------------------------------------------------
 
+def _check_initial_loss(model: keras.Model, x: np.ndarray, y: np.ndarray) -> float:
+    """Evaluate the untrained model on a small slice and refuse a non-finite loss.
+
+    The value is logged so an audit can see the starting loss (glorot_normal +
+    ReLU-k on standardized input starts far above ``ln(num_classes)``).
+
+    Args:
+        model: Built and compiled model.
+        x: Inputs ``(N, input_dim)``.
+        y: Integer labels ``(N,)``.
+
+    Returns:
+        The finite scalar loss on ``x``.
+
+    Raises:
+        RuntimeError: If the loss is NaN or infinite. Raising (not returning)
+            is deliberate: a silent return would leave an empty run directory.
+    """
+    loss = float(model.evaluate(x, y, batch_size=SANITY_SAMPLES, verbose=0, return_dict=True)["loss"])
+    logger.info(
+        f"Sanity evaluate BEFORE fit: initial loss {loss:.4f} on {len(x)} train samples "
+        f"(uniform-prediction loss would be {float(np.log(model.hidden_units[-1])):.4f})"
+    )
+    if not np.isfinite(loss):
+        raise RuntimeError(
+            f"Initial loss is {loss} on {len(x)} samples: the model diverges before "
+            "training. Check k, the initializer and the input scaling."
+        )
+    return loss
+
+
+def _evaluate(model: keras.Model, x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
+    """``model.evaluate`` as a plain ``{metric: float}`` dict."""
+    metrics = model.evaluate(x, y, batch_size=1024, verbose=0, return_dict=True)
+    return {k: float(v) for k, v in metrics.items()}
+
+
+def _best_epoch(history: Dict[str, List[float]]) -> int:
+    """1-based epoch that is best under ``MONITOR`` (direction from ``resolve_monitor_mode``)."""
+    values = np.asarray(history[MONITOR], dtype=np.float64)
+    mode = resolve_monitor_mode(MONITOR)
+    return int(np.argmin(values) if mode == "min" else np.argmax(values)) + 1
+
+
+def _load_best_metrics(
+        run_dir: Path, x: np.ndarray, y: np.ndarray
+) -> Tuple[Optional[Dict[str, float]], Optional[str]]:
+    """Evaluate the reloaded ``best_model.keras``.
+
+    Returns:
+        ``(metrics, None)`` on success, ``(None, error_text)`` if the checkpoint
+        is missing or does not load.
+    """
+    path = best_checkpoint_path(str(run_dir))
+    try:
+        best_model = keras.models.load_model(path)
+        return _evaluate(best_model, x, y), None
+    except Exception as e:  # noqa: BLE001 - reported, not fatal
+        logger.warning(f"Could not evaluate best checkpoint {path}: {e}")
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _write_visualizations(
+        vis_dir: Path,
+        x_test: np.ndarray,
+        y_test: np.ndarray,
+        probs: np.ndarray,
+        class_names: List[str],
+        info: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Render the four end-of-run figures and the classification report.
+
+    Each figure is independent: a failure logs a warning and the others still
+    render.
+
+    Returns:
+        ``{"files": [names written], "ece": float | None, "failed": [names]}``.
+    """
+    y_pred = np.argmax(probs, axis=-1)
+    out: Dict[str, Any] = {"files": [], "ece": None, "failed": []}
+
+    def _attempt(name: str, fn) -> Any:
+        try:
+            result = fn()
+            out["files"].append(name)
+            return result
+        except Exception as e:  # noqa: BLE001 - a figure must not fail the run
+            logger.warning(f"Visualization {name} failed: {e}")
+            out["failed"].append(name)
+            return None
+
+    _attempt("confusion_matrix.png", lambda: plot_confusion_matrix(
+        y_test, y_pred, class_names, vis_dir / "confusion_matrix.png"))
+    report = _attempt("per_class_metrics.png", lambda: plot_per_class_metrics(
+        y_test, y_pred, class_names, vis_dir / "per_class_metrics.png"))
+    out["ece"] = _attempt("confidence_calibration.png", lambda: plot_calibration(
+        y_test, probs, vis_dir / "confidence_calibration.png"))
+    _attempt("misclassifications.png", lambda: plot_confident_errors(
+        x_test, y_test, probs, vis_dir / "misclassifications.png",
+        info["image_shape"], info["mean"], info["std"], class_names=class_names))
+
+    if report is not None:
+        try:
+            with open(vis_dir / "classification_report.json", "w") as f:
+                json.dump(report, f, indent=2, default=json_numpy_default)
+            out["files"].append("classification_report.json")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"classification_report.json failed: {e}")
+            out["failed"].append("classification_report.json")
+    return out
+
+
+def _read_analysis_status(run_dir: Path, model_name: str) -> Dict[str, Any]:
+    """Read ``model_analysis/analysis_results.json`` back from disk.
+
+    ``run_model_analysis`` swallows evaluation errors and logs "completed
+    successfully" regardless, so the file is the only trustworthy source.
+
+    Returns:
+        ``{"status", "loss", "accuracy", "error", "n_samples"}`` for
+        ``model_name``; ``{"status": "missing", ...}`` if the file, the key or
+        the JSON is unusable.
+    """
+    path = run_dir / "model_analysis" / "analysis_results.json"
+    missing: Dict[str, Any] = {"status": "missing", "loss": None, "accuracy": None,
+                               "error": None, "path": str(path)}
+    try:
+        with open(path) as f:
+            metrics = json.load(f)["model_metrics"][model_name]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not read analyzer status from {path}: {e}")
+        missing["error"] = f"{type(e).__name__}: {e}"
+        return missing
+    return {
+        "status": metrics.get("status", "missing"),
+        "loss": metrics.get("loss"),
+        "accuracy": metrics.get("accuracy"),
+        "error": metrics.get("error"),
+        "path": str(path),
+    }
+
+
 def train_model(config: TrainingConfig) -> Dict[str, Any]:
-    """Train PowerMLP and evaluate it on the test set.
+    """Train PowerMLP, evaluate it, write every artifact and return the summary.
 
     Args:
         config: A validated :class:`TrainingConfig`.
 
     Returns:
-        A dict with ``run_dir``, ``effective_hidden_units``, ``params`` and the
-        final-weights ``test_metrics``.
+        The dict also written to ``<run_dir>/results_summary.json`` (see the
+        keys assembled at the bottom of this function).
+
+    Raises:
+        RuntimeError: If the initial loss before fitting is NaN or infinite.
     """
     logger.info("Starting PowerMLP training")
     set_seeds(config.seed)
-    run_dir = prepare_run_dir(config, output_dir=resolved_run_dir(config))
+    run_dir = Path(prepare_run_dir(config, output_dir=resolved_run_dir(config))).resolve()
+    vis_dir = run_dir / "visualizations"
+    vis_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Run directory: {run_dir}")
 
     train, val, test, info = prepare_data(
@@ -477,18 +652,28 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
         metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
     )
-    logger.info(f"  Architecture: {hidden_units}, k={config.k}")
+    # Read off the BUILT model, not the config: the input width is the shape the
+    # model was built at, the rest are the layers' own widths.
+    effective_units = [
+        info["input_dim"],
+        *[int(layer.units) for layer in model.hidden_layers],
+        int(model.output_layer.units),
+    ]
+    params = int(model.count_params())
+    logger.info(f"  Architecture: {effective_units}, k={config.k}")
     logger.info(f"  Dropout: {config.dropout_rate}, BatchNorm: {config.batch_normalization}")
     logger.info(
         f"  LR: {config.learning_rate}, Optimizer: {config.optimizer}, "
-        f"Weight decay: {config.weight_decay}, Params: {model.count_params():,}"
+        f"Weight decay: {config.weight_decay}, Params: {params:,}"
     )
+
+    initial_loss = _check_initial_loss(model, x_train[:SANITY_SAMPLES], y_train[:SANITY_SAMPLES])
 
     callbacks, _ = create_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix="powermlp",
         run_dir=str(run_dir),
-        monitor="val_loss",
+        monitor=MONITOR,
         patience=config.patience,
         use_lr_schedule=False,  # ReduceLROnPlateau, no external schedule
         include_terminate_on_nan=True,
@@ -496,6 +681,13 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
     )
     # Index 0: `lr` must be in `logs` before CSVLogger reads it.
     callbacks.insert(0, LearningRateLogger())
+    # Last: it reads `logs['lr']`, written by LearningRateLogger above.
+    dashboard = TrainingDashboardCallback(
+        out_path=vis_dir / "training_dashboard.png",
+        baseline_data=(x_val, y_val),
+        title=f"{config.experiment_name} (seed {config.seed})",
+    )
+    callbacks.append(dashboard)
 
     history = model.fit(
         x_train, y_train,
@@ -506,15 +698,103 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         verbose=1,
     )
     save_training_history_json(history, str(run_dir))
+    hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
+    epochs_run = len(hist[MONITOR])
 
-    test_metrics = model.evaluate(x_test, y_test, verbose=0, return_dict=True)
-    logger.info(f"Test results: {test_metrics}")
-    return {
+    # Final (in-memory) weights vs the reloaded best checkpoint. Keras 3.8
+    # EarlyStopping restores the best weights at every train end, so equality is
+    # expected (D-011) and a difference is a bug signal.
+    test_metrics_final = _evaluate(model, x_test, y_test)
+    logger.info(f"Test results (final weights): {test_metrics_final}")
+    test_metrics_best, best_load_error = _load_best_metrics(run_dir, x_test, y_test)
+    if test_metrics_best is not None:
+        logger.info(f"Test results (best_model.keras): {test_metrics_best}")
+        diffs = {k: abs(test_metrics_final[k] - test_metrics_best[k])
+                 for k in test_metrics_final if k in test_metrics_best}
+        if any(d > WEIGHT_MISMATCH_TOLERANCE for d in diffs.values()):
+            logger.warning(
+                f"Final weights and best_model.keras disagree on the test set: {diffs}. "
+                "EarlyStopping should have restored the best weights (D-011)."
+            )
+
+    final_path = run_dir / "final_model.keras"
+    model.save(final_path)
+    load_check: Optional[bool] = None
+    try:
+        sample = x_val[:LOAD_CHECK_SAMPLES]
+        load_check = bool(validate_model_loading(
+            str(final_path), sample, model.predict(sample, verbose=0)
+        ))
+    except Exception as e:  # noqa: BLE001 - log-only
+        logger.warning(f"validate_model_loading raised: {e}")
+
+    probs = model.predict(x_test, batch_size=1024, verbose=0)
+    visualizations = _write_visualizations(
+        vis_dir, x_test, y_test, probs,
+        get_class_names(config.dataset, info["num_classes"]), info,
+    )
+
+    run_model_analysis(
+        model, (x_test, y_test), history, config.experiment_name, str(run_dir)
+    )
+    analysis = _read_analysis_status(run_dir, config.experiment_name)
+    logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
+
+    best_epoch = _best_epoch(hist)
+    best_i, final_i = best_epoch - 1, epochs_run - 1
+    val_keys = [k for k in hist if k.startswith("val_")]
+    widths = ARCHITECTURE_HIDDEN_WIDTHS[config.architecture][config.dataset]
+    notes: List[str] = [
+        f"expected hidden widths {widths}, built {effective_units[1:-1]}: "
+        f"{'match' if widths == effective_units[1:-1] else 'MISMATCH'}",
+        f"initial loss {initial_loss:.4f} vs uniform ln(C)={np.log(info['num_classes']):.4f}",
+        "analyzer accuracy is on the first 1000 test samples only, not the full test set",
+        f"final weights vs best_model.keras: "
+        f"{'not compared' if test_metrics_best is None else 'compared, see test_metrics_*'}",
+    ]
+    summary: Dict[str, Any] = {
         "run_dir": str(run_dir),
-        "effective_hidden_units": hidden_units,
-        "params": int(model.count_params()),
-        "test_metrics": test_metrics,
+        "experiment_name": config.experiment_name,
+        "dataset": config.dataset,
+        "architecture": config.architecture,
+        "effective_hidden_units": effective_units,
+        "params": params,
+        "k": config.k,
+        "dropout_rate": config.dropout_rate,
+        "batch_normalization": config.batch_normalization,
+        "optimizer": config.optimizer,
+        "learning_rate": config.learning_rate,
+        "weight_decay": config.weight_decay,
+        "batch_size": config.batch_size,
+        "seed": config.seed,
+        "input_normalization": {
+            "mean": info["mean"], "std": info["std"], "input_dim": info["input_dim"],
+        },
+        "epochs_requested": config.epochs,
+        "epochs_run": epochs_run,
+        "stopped_early": epochs_run < config.epochs,
+        "monitor": MONITOR,
+        "best_epoch": best_epoch,
+        "best_val_metrics": {k: hist[k][best_i] for k in val_keys},
+        "final_val_metrics": {k: hist[k][final_i] for k in val_keys},
+        "test_metrics_final": test_metrics_final,
+        "test_metrics_best": test_metrics_best,
+        "best_checkpoint_load_error": best_load_error,
+        "epoch_times": list(dashboard.epoch_times),
+        "initial_loss_sanity_eval": {
+            "loss": initial_loss, "n_samples": int(min(SANITY_SAMPLES, len(x_train))),
+            "split": "train", "before_fit": True,
+        },
+        "ece": visualizations["ece"],
+        "visualizations": visualizations,
+        "model_loading_validated": load_check,
+        "analyzer": analysis,
+        "notes": notes,
     }
+    with open(run_dir / "results_summary.json", "w") as f:
+        json.dump(summary, f, indent=2, default=json_numpy_default)
+    logger.info(f"Wrote {run_dir / 'results_summary.json'}")
+    return summary
 
 
 # ---------------------------------------------------------------------
