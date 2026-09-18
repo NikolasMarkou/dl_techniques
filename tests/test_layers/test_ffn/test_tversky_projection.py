@@ -244,3 +244,34 @@ class TestTverskyReductionValidation:
                     'tversky', units=4, num_features=4,
                     intersection_reduction=bad,
                 )
+
+
+class TestInverseSoftplusStaysFiniteAndInjective:
+    """
+    Pins the D-013 fix: `_inverse_softplus` must never collapse two distinct
+    non-positive targets to the same (or a non-finite) pre-activation value.
+
+    An intermediate exponential-continuation fix for this same bug
+    (superseded before release) was itself measured to underflow to exactly
+    `-inf` for inputs below roughly -85 in float32, silently reintroducing
+    the identical-value collapse this method exists to prevent -- these
+    tests pin that regime directly, not just the near-zero one the original
+    bug affected.
+    """
+
+    def test_stays_finite_for_extreme_negative_targets(self) -> None:
+        y = layer_module.TverskyProjectionLayer._inverse_softplus
+        for value in (-1.0, -50.0, -85.0, -100.0, -200.0, -1_000_000.0):
+            out = y(keras.ops.convert_to_tensor(value, dtype="float32"))
+            assert bool(keras.ops.isfinite(out)), (
+                f"_inverse_softplus({value}) is not finite: {float(out)}"
+            )
+
+    def test_distinct_extreme_targets_stay_distinct(self) -> None:
+        y = layer_module.TverskyProjectionLayer._inverse_softplus
+        out_a = float(y(keras.ops.convert_to_tensor(-100.0, dtype="float32")))
+        out_b = float(y(keras.ops.convert_to_tensor(-200.0, dtype="float32")))
+        assert out_a != out_b, (
+            "two distinct extreme non-positive targets collapsed to the "
+            "same pre-activation value"
+        )

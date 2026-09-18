@@ -642,18 +642,31 @@ class TverskyProjectionLayer(keras.layers.Layer):
         Uses ``log(expm1(y))``, which is stable for small positive ``y`` where
         ``log(exp(y) - 1)`` loses all its significant digits. Softplus has no
         non-positive image, so a ``y <= 1e-6`` cannot invert exactly; it is
-        replaced by the exponential continuation ``1e-6 * exp(y - 1e-6)``,
-        which matches the floor's value and slope at ``y == 1e-6`` and stays
-        strictly increasing below it, rather than a flat ``max(y, 1e-6)``.
+        replaced by the linear continuation ``log(1e-6) + (y - 1e-6)``, the
+        asymptote ``log(expm1(y)) -> log(y)`` converges to as ``y -> 0+``.
+        This matches the true branch's VALUE at ``y == 1e-6`` (not its slope
+        -- the true inverse softplus has an unbounded derivative as
+        ``y -> 0+``, so no finite continuation can match it there; measured
+        slopes at the junction: true branch ~1e6, this continuation exactly
+        ``1.0``) and, unlike an exponential continuation, never underflows:
+        it stays finite and strictly increasing all the way to the float
+        dtype's own minimum, rather than collapsing back to one shared value
+        once the argument to an inner ``exp``/``log`` underflows to zero.
 
-        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-013: do not revert this to
-        # keras.ops.maximum(y, 1e-6). A hard floor collapses every
-        # non-positive y to the SAME pre-activation value: MEASURED, an
-        # unseeded zero-mean contrast_initializer made theta/alpha/beta
-        # bit-identical in ~20-25% of builds (each scalar has ~50% odds of
-        # drawing <= 0, so two of three colliding at the shared floor is
-        # common), defeating the "each takes its own clone" independence
-        # this layer's own docstring promises. See decisions.md D-013.
+        # DECISION plan-2026-09-18T154913-1f3c0ce8/D-013: do not revert this
+        # to keras.ops.maximum(y, 1e-6), and do not replace it with an
+        # exponential continuation (eps * exp(y - eps)) either. A hard floor
+        # collapses every non-positive y to the SAME pre-activation value:
+        # MEASURED, an unseeded zero-mean contrast_initializer made
+        # theta/alpha/beta bit-identical in ~20-25% of builds. The
+        # exponential continuation looked like a fix but reintroduces the
+        # IDENTICAL collapse further out: MEASURED, log(expm1(eps*exp(y-eps)))
+        # underflows to exactly -inf for y <~ -85 in float32 (e.g.
+        # _inverse_softplus(-100.0) == _inverse_softplus(-200.0) == -inf),
+        # because eps*exp(y-eps) itself underflows to 0.0 first. The LINEAR
+        # continuation below never routes through an inner exp()/expm1() for
+        # y <= eps, so it has no underflow path -- MEASURED finite and
+        # distinct at y = -100, -200, -1e6. See decisions.md D-013.
 
         :param y: Target post-softplus value.
         :type y: keras.KerasTensor
@@ -661,8 +674,16 @@ class TverskyProjectionLayer(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         eps = keras.ops.cast(1e-6, y.dtype)
-        floored = keras.ops.where(y > eps, y, eps * keras.ops.exp(y - eps))
-        return keras.ops.log(keras.ops.expm1(floored))
+        above = y > eps
+        # Clip the argument fed to log(expm1(...)) so the untaken branch
+        # never evaluates it outside its domain (y <= 0 there gives NaN with
+        # a runtime warning, even though `where` discards the result).
+        y_safe = keras.ops.where(above, y, eps)
+        return keras.ops.where(
+            above,
+            keras.ops.log(keras.ops.expm1(y_safe)),
+            keras.ops.log(eps) + (y - eps),
+        )
 
     def _contrast_weights(
         self,
