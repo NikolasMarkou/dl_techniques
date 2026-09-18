@@ -22,7 +22,6 @@ References:
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers, activations
 from typing import Optional, Union, Any, Dict, Callable, Tuple
 
 # ---------------------------------------------------------------------
@@ -102,7 +101,7 @@ class GeGLUFFN(keras.layers.Layer):
 
         input_proj output  [..., 2H]
         │
-        │  ops.split(x, 2, axis=-1)
+        │  keras.ops.split(x, 2, axis=-1)
         │
         ├── first half  ──► gate   [..., H] ──► activation
         │                                            │
@@ -128,24 +127,24 @@ class GeGLUFFN(keras.layers.Layer):
         ('gelu', 'relu', 'swish') or a callable. Defaults to 'gelu'.
     :type activation: Union[str, Callable]
     :param dropout_rate: Dropout rate applied to the gated tensor, in
-        ``[0.0, 1.0]``. Active only when ``training=True``. Defaults to 0.0.
+        ``[0.0, 1.0)``. Active only when ``training=True``. Defaults to 0.0.
     :type dropout_rate: float
     :param use_bias: Whether both Dense layers carry a bias. Defaults to True.
     :type use_bias: bool
     :param kernel_initializer: Initializer for the kernels of both Dense
         layers. Each layer receives its own clone of it. Defaults to
         'glorot_uniform'.
-    :type kernel_initializer: Union[str, initializers.Initializer]
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for the biases of both Dense layers,
         cloned per layer in the same way. Used only when ``use_bias=True``.
         Defaults to 'zeros'.
-    :type bias_initializer: Union[str, initializers.Initializer]
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels of both Dense
         layers. Defaults to None.
-    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Regularizer for the biases of both Dense layers.
         Used only when ``use_bias=True``. Defaults to None.
-    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
         ``dtype``, and so on).
     :type kwargs: Any
@@ -164,23 +163,23 @@ class GeGLUFFN(keras.layers.Layer):
     :ivar kernel_initializer: The resolved kernel initializer. It is the
         source the per-layer clones are rebuilt from, and is not handed to
         either Dense layer itself.
-    :vartype kernel_initializer: initializers.Initializer
+    :vartype kernel_initializer: keras.initializers.Initializer
     :ivar bias_initializer: The resolved bias initializer, cloned per layer
         in the same way.
-    :vartype bias_initializer: initializers.Initializer
+    :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
-    :vartype kernel_regularizer: Optional[regularizers.Regularizer]
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
-    :vartype bias_regularizer: Optional[regularizers.Regularizer]
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar input_proj: ``Dense(2 * hidden_dim)``, split in ``call()``.
-    :vartype input_proj: layers.Dense
+    :vartype input_proj: keras.layers.Dense
     :ivar output_proj: ``Dense(output_dim)``, the final projection.
-    :vartype output_proj: layers.Dense
+    :vartype output_proj: keras.layers.Dense
     :ivar dropout: ``Dropout(dropout_rate)``, applied to the gated tensor.
-    :vartype dropout: layers.Dropout
+    :vartype dropout: keras.layers.Dropout
 
     :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not positive, or
-        ``dropout_rate`` is outside ``[0.0, 1.0]``, or a sub-layer constructor
+        ``dropout_rate`` is outside ``[0.0, 1.0)``, or a sub-layer constructor
         fails. The constructor catches any exception from sub-layer creation
         and re-raises it as ``ValueError``.
     :raises ValueError: From ``build()``, if the last axis of the input shape
@@ -213,10 +212,10 @@ class GeGLUFFN(keras.layers.Layer):
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'gelu',
         dropout_rate: float = 0.0,
         use_bias: bool = True,
-        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any,
     ) -> None:
         """Validate the configuration and create the two Dense projections.
@@ -226,7 +225,7 @@ class GeGLUFFN(keras.layers.Layer):
         layer behind.
 
         :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not
-            positive, or ``dropout_rate`` is outside ``[0.0, 1.0]``, or a
+            positive, or ``dropout_rate`` is outside ``[0.0, 1.0)``, or a
             sub-layer constructor fails.
         """
         super().__init__(**kwargs)
@@ -236,7 +235,13 @@ class GeGLUFFN(keras.layers.Layer):
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
-        if not (0.0 <= dropout_rate <= 1.0):
+        # DECISION plan-2026-09-18-1f3c0ce8/D-004: dropout_rate == 1.0 passed
+        # this check before, but keras.layers.Dropout.call() rejects rate==1.0
+        # ("must be ... in the range [0, 1)") -- so the layer built fine and
+        # only exploded on the first training-mode forward pass (same bug class
+        # as residual_block.py D-002 and glu_ffn.py D-003; keep the upper bound
+        # exclusive here too).
+        if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(
                 f"dropout_rate must be between 0 and 1, got {dropout_rate}"
             )
@@ -244,13 +249,13 @@ class GeGLUFFN(keras.layers.Layer):
         # Store every constructor argument; get_config() returns all of them.
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
-        self.activation = activations.get(activation)
+        self.activation = keras.activations.get(activation)
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Create every sub-layer here, unbuilt. build() builds them.
         # A failure below is re-raised as ValueError so callers see one
@@ -265,7 +270,7 @@ class GeGLUFFN(keras.layers.Layer):
             }
 
             # input_dim -> hidden_dim * 2; call() splits this in half.
-            self.input_proj = layers.Dense(
+            self.input_proj = keras.layers.Dense(
                 units=hidden_dim * 2,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=clone_initializer(self.bias_initializer),
@@ -274,7 +279,7 @@ class GeGLUFFN(keras.layers.Layer):
             )
 
             # hidden_dim -> output_dim.
-            self.output_proj = layers.Dense(
+            self.output_proj = keras.layers.Dense(
                 units=output_dim,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=clone_initializer(self.bias_initializer),
@@ -282,7 +287,7 @@ class GeGLUFFN(keras.layers.Layer):
                 **dense_kwargs
             )
 
-            self.dropout = layers.Dropout(dropout_rate, name="dropout")
+            self.dropout = keras.layers.Dropout(dropout_rate, name="dropout")
 
         except Exception as e:
             logger.error(f"Failed to create GeGLUFFN sub-layers: {e}")
@@ -338,7 +343,7 @@ class GeGLUFFN(keras.layers.Layer):
         """
         # One projection to 2 * hidden_dim, then split in half.
         gate_and_value = self.input_proj(inputs)
-        gate, value = ops.split(gate_and_value, 2, axis=-1)
+        gate, value = keras.ops.split(gate_and_value, 2, axis=-1)
 
         # Only the gate half is passed through the activation.
         activated_gate = self.activation(gate)
@@ -376,13 +381,13 @@ class GeGLUFFN(keras.layers.Layer):
         config.update({
             'hidden_dim': self.hidden_dim,
             'output_dim': self.output_dim,
-            'activation': activations.serialize(self.activation),
+            'activation': keras.activations.serialize(self.activation),
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
