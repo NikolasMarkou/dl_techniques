@@ -299,6 +299,14 @@ plt.xlabel("MB Neuron Index")
 plt.show()
 ```
 
+> **This `plt.spy()` view only scales to a single ad hoc sample.** At large `mb_units`
+> (e.g. the 20-50x-input-dimension range this README recommends in §7/§12 — 16,000+ for
+> flattened MNIST), plotting more than one or two rows this way blurs into visual noise.
+> For anything beyond a single sample, `src/train/mothnet/train_mothnet.py`'s own
+> `render_mb_sparsity()` (in its `visualizations/epoch_{NNN}_mb_sparsity.png` output) is
+> the more legible option — a per-class, column-binned mean-activation heatmap built
+> specifically to stay readable at `mb_units=16000`.
+
 ### Example 3: Extracting Antennal Lobe Features
 
 The Antennal Lobe's competitive-inhibition output is available in isolation, before it reaches the Mushroom Body.
