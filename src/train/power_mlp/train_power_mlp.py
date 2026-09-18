@@ -14,8 +14,8 @@ Input scaling (``--input-scaling``): ``standardize`` subtracts a mean and divide
 by a std (MNIST: 0.1307 / 0.3081 on one channel, since ``load_dataset('mnist')``
 repeats it into 3 identical channels and channel 0 is lossless; CIFAR-10: per
 channel ``CIFAR10_MEAN`` / ``CIFAR10_STD``); ``unit`` keeps the loader's plain
-``[0, 1]`` pixels. Both are then flattened. The validation split is a seeded
-shuffle of the training set and is never the test set.
+``[0, 1]`` pixels (the default). Both are then flattened. The validation split is
+a seeded shuffle of the training set and is never the test set.
 
 Initialization (``--kernel-initializer``): ReLU-k composes to degree ``k**depth``,
 so a gain above the fixed point blows the logits up doubly exponentially with
@@ -23,6 +23,8 @@ depth. The pre-fit sanity evaluate therefore compares the untrained loss with
 ``ln(num_classes)`` and logs a WARNING when the ratio exceeds
 ``INITIAL_LOSS_WARN_FACTOR`` (it does not raise, a probe run may want the number);
 ``results_summary.json`` records ``initial_loss_ratio`` and ``init_scale_warning``.
+The default is ``lecun_normal`` on ``unit`` inputs (measured initial loss about
+``ln(C)``); ``glorot_normal`` on ``standardize`` inputs starts about 95x above it.
 
 Per-epoch ``ModelAnalyzer`` is opt-in (``--epoch-analysis``); the final
 ``run_model_analysis`` always runs.
@@ -168,10 +170,10 @@ class TrainingConfig:
     k: int = 2
     dropout_rate: float = 0.1
     batch_normalization: bool = False
-    # Provisional (iteration-1 behaviour); iteration 2 step 3 sets both from a
-    # measured 3-epoch MNIST grid.
-    kernel_initializer: str = "glorot_normal"
-    input_scaling: str = "standardize"
+    # Chosen by the pre-registered rule (plan D-014, recorded in D-018) from a
+    # measured 3-epoch MNIST grid: lecun_normal + unit was the only eligible arm.
+    kernel_initializer: str = "lecun_normal"
+    input_scaling: str = "unit"
 
     # Training (defaults are this trainer's intentional historical values)
     epochs: int = 100
@@ -263,7 +265,8 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Dataset to train on.")
     data.add_argument("--input-scaling", type=str, default=defaults.input_scaling,
                       choices=INPUT_SCALINGS,
-                      help="'standardize' = (x - mean) / std; 'unit' = plain [0, 1] pixels.")
+                      help="'standardize' = (x - mean) / std; 'unit' = plain [0, 1] pixels "
+                           "(default: unit).")
     data.add_argument("--validation-split", type=float, default=defaults.validation_split,
                       help="Fraction of the training set held out (seeded shuffle), "
                            "strictly inside (0, 1); never the test set.")
