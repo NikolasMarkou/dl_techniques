@@ -645,3 +645,124 @@ def test_heatmap_activation_call_receives_column_binned_mushroom_body_data(
         "distribution call's mushroom_body activations must stay UNBINNED "
         f"(raw mb_units) — shape={distribution_data.activations['mushroom_body'].shape}"
     )
+
+
+@pytest.mark.integration
+def test_confusion_matrix_class_names_match_the_classes_actually_present(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Step 5.2 completion-fix (`plan-2026-09-18T080513-debe8b11` D-007,
+    adversarial-review finding 2, WARNING): the confusion-matrix render must
+    not silently mislabel its axes when a class is absent from BOTH
+    ``y_true`` and ``y_pred`` in the val subsample.
+
+    ``ConfusionMatrixVisualization`` calls
+    ``sklearn.metrics.confusion_matrix(y_true, y_pred)`` with no ``labels=``
+    argument — sklearn's own default there orders the matrix by the SORTED
+    UNION of values appearing at least once in ``y_true`` or ``y_pred``. A
+    hardcoded ``class_names=[str(i) for i in range(10)]`` therefore silently
+    mismatches the matrix's actual size the moment any class is absent from
+    both arrays. This test forces classes 3 and 7 out of BOTH sides:
+
+    - ``load_mnist_data`` is wrapped (real call, then filtered) to drop every
+      TRUE class-3/class-7 row from the val split, so ``y_true`` genuinely
+      never contains 3 or 7.
+    - ``_predict_in_batches`` is wrapped (real call, then masked) to set
+      columns 3 and 7 to ``-inf`` before the caller's own ``argmax``, so
+      ``y_pred`` genuinely never contains 3 or 7 either — this mirrors the
+      review's own exact reproduction (classes absent from BOTH arrays, not
+      just one).
+
+    ``VisualizationManager.visualize`` is wrapped (record-then-call-through,
+    the same shape ``test_heatmap_activation_call_receives_column_binned_
+    mushroom_body_data`` above uses) to capture the ``ClassificationResults``
+    object actually passed to the ``confusion_matrix`` plugin. The proof:
+    independently recomputing ``sklearn.metrics.confusion_matrix(y_true,
+    y_pred)`` (no ``labels=``) on that SAME data must yield a matrix whose
+    row/column count equals ``len(classification_results.class_names)`` — a
+    fixed, hardcoded-10 ``class_names`` would fail this under the forced
+    8-class scenario, since the real matrix collapses to 8x8.
+    """
+    from sklearn.metrics import confusion_matrix as sklearn_confusion_matrix
+
+    _real_load_mnist_data = train_mothnet.load_mnist_data
+
+    def _load_data_without_classes_3_and_7_in_val(config):
+        (x_train, y_train), (x_val, y_val) = _real_load_mnist_data(config)
+        val_true_classes = np.argmax(y_val, axis=-1)
+        keep_mask = ~np.isin(val_true_classes, [3, 7])
+        return (x_train, y_train), (x_val[keep_mask], y_val[keep_mask])
+
+    _real_predict_in_batches = train_mothnet._predict_in_batches
+
+    def _predict_forcing_predictions_away_from_3_and_7(model, x, batch_size):
+        logits = _real_predict_in_batches(model, x, batch_size).copy()
+        logits[:, [3, 7]] = -np.inf
+        return logits
+
+    monkeypatch.setattr(
+        train_mothnet, "load_mnist_data", _load_data_without_classes_3_and_7_in_val
+    )
+    monkeypatch.setattr(
+        train_mothnet, "_predict_in_batches",
+        _predict_forcing_predictions_away_from_3_and_7,
+    )
+
+    captured_calls: list = []
+    _real_visualize = train_mothnet.VisualizationManager.visualize
+
+    def _capturing_visualize(
+        self, data, plugin_name=None, save=True, show=False, filename=None, **kwargs
+    ):
+        captured_calls.append((plugin_name, data))
+        return _real_visualize(
+            self, data, plugin_name=plugin_name, save=save, show=show,
+            filename=filename, **kwargs,
+        )
+
+    monkeypatch.setattr(
+        train_mothnet.VisualizationManager, "visualize", _capturing_visualize
+    )
+
+    argv = [
+        "--mb-units", "200",
+        "--al-units", "64",
+        "--epochs", "1",
+        "--num-train-samples", "100",
+        "--num-val-samples", "200",
+        "--batch-size", "32",
+        "--viz-freq", "1",
+        "--output-dir", str(tmp_path),
+        "--experiment-name", "mothnet_cm_absent_class_check",
+    ]
+    exit_code = train_mothnet.main(argv)
+    assert exit_code == 0
+
+    cm_calls = [
+        call for call in captured_calls if call[0] == "confusion_matrix"
+    ]
+    assert len(cm_calls) == 1, f"expected exactly 1 confusion_matrix call, got {captured_calls}"
+    _, classification_results = cm_calls[0]
+
+    assert not np.any(np.isin(classification_results.y_true, [3, 7])), (
+        "test setup: class 3/7 must be absent from y_true"
+    )
+    assert not np.any(np.isin(classification_results.y_pred, [3, 7])), (
+        "test setup: class 3/7 must be absent from y_pred"
+    )
+
+    actual_cm = sklearn_confusion_matrix(
+        classification_results.y_true, classification_results.y_pred
+    )
+    assert actual_cm.shape[0] == len(classification_results.class_names), (
+        "class_names length does not match the ACTUAL confusion-matrix size "
+        f"sklearn produced — matrix is {actual_cm.shape}, "
+        f"class_names={classification_results.class_names!r} "
+        "(this is the exact silent axis-mislabeling defect)"
+    )
+    assert "3" not in classification_results.class_names, (
+        "class_names still includes an absent class — not dynamically derived"
+    )
+    assert "7" not in classification_results.class_names, (
+        "class_names still includes an absent class — not dynamically derived"
+    )

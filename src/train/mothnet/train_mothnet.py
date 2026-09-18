@@ -909,9 +909,25 @@ def main(argv=None) -> int:
                     try:
                         y_true = np.argmax(y_val, axis=-1)
                         y_pred = np.argmax(val_logits, axis=-1)
+                        # DECISION plan-2026-09-18T080513-debe8b11/D-007: class_names
+                        # is derived from the classes ACTUALLY PRESENT in y_true/
+                        # y_pred, NOT a hardcoded range(10). `ConfusionMatrixVisualization`
+                        # calls `sklearn.metrics.confusion_matrix(y_true, y_pred)` with
+                        # no `labels=` argument and no kwarg passthrough to force one
+                        # (`dl_techniques/visualization/classification.py:122`) — sklearn's
+                        # own default there is "sorted union of values that appear at
+                        # least once in y_true or y_pred", so a class absent from BOTH
+                        # arrays (plausible at a small --num-val-samples) shrinks the
+                        # returned matrix below 10x10 while a hardcoded `range(10)` label
+                        # list stays fixed at 10, silently shifting every axis tick past
+                        # the missing class (review finding 2). Do NOT revert this to
+                        # `[str(i) for i in range(10)]` — see decisions.md D-007.
+                        present_classes = sorted(
+                            set(np.unique(y_true)) | set(np.unique(y_pred))
+                        )
                         classification_results = ClassificationResults(
                             y_true=y_true, y_pred=y_pred,
-                            class_names=[str(i) for i in range(10)],
+                            class_names=[str(c) for c in present_classes],
                             model_name="MothNet",
                         )
                         viz_manager.visualize(
