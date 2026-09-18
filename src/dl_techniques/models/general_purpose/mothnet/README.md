@@ -299,6 +299,18 @@ plt.xlabel("MB Neuron Index")
 plt.show()
 ```
 
+### Example 3: Extracting Antennal Lobe Features
+
+The Antennal Lobe's competitive-inhibition output is available in isolation, before it reaches the Mushroom Body.
+
+```python
+# After training...
+al_features = mothnet.extract_al_features(x_test)
+al_features_numpy = keras.ops.convert_to_numpy(al_features)
+
+print(f"AL feature shape: {al_features_numpy.shape}")
+```
+
 ---
 
 ## 9. Training and Best Practices

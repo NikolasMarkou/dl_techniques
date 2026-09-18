@@ -237,3 +237,56 @@ class TestHebbianUpdateAndWinnerTakeAllAreLoadBearing:
             f"(counts {fired}); the winner-take-all step is not being applied"
         )
         assert np.all(fired > 0), f"no unit fired at all (counts {fired})"
+
+
+# ---------------------------------------------------------------------
+# extract_al_features (plan-2026-09-18T080513-debe8b11 step 4)
+# ---------------------------------------------------------------------
+
+
+class TestExtractALFeatures:
+    """`extract_al_features()` mirrors `extract_mb_features()`'s own tested
+    shape: output shape, dtype, exact value match against a manual
+    `antennal_lobe(x, training=False)` call, and no weight mutation.
+    """
+
+    def test_extract_al_features_output_shape(self):
+        model = MothNet(num_classes=NUM_CLASSES, al_units=32)
+        model.build((None, NUM_FEATURES))
+
+        x = _features(batch=5)
+        al_features = model.extract_al_features(x)
+
+        assert tuple(al_features.shape) == (5, 32)
+
+    def test_extract_al_features_dtype_matches_model_compute_dtype(self):
+        model = MothNet(num_classes=NUM_CLASSES, al_units=32)
+        model.build((None, NUM_FEATURES))
+
+        al_features = model.extract_al_features(_features())
+
+        assert keras.backend.standardize_dtype(al_features.dtype) == model.compute_dtype
+
+    def test_extract_al_features_matches_a_manual_antennal_lobe_call(self):
+        model = MothNet(num_classes=NUM_CLASSES, al_units=32)
+        model.build((None, NUM_FEATURES))
+
+        x = _features(batch=4)
+        via_method = keras.ops.convert_to_numpy(model.extract_al_features(x))
+        via_manual_call = keras.ops.convert_to_numpy(
+            model.antennal_lobe(x, training=False)
+        )
+
+        np.testing.assert_allclose(via_method, via_manual_call, atol=0.0, rtol=0.0)
+
+    def test_extract_al_features_does_not_mutate_weights(self):
+        model = MothNet(num_classes=NUM_CLASSES, al_units=32)
+        model.build((None, NUM_FEATURES))
+
+        before = [w.copy() for w in model.get_weights()]
+        model.extract_al_features(_features())
+        after = model.get_weights()
+
+        assert all(
+            np.array_equal(b, a) for b, a in zip(before, after)
+        ), "extract_al_features mutated a weight array"

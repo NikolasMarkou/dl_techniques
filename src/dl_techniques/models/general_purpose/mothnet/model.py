@@ -260,6 +260,20 @@ class MothNet(keras.Model):
         mb_output = self.mushroom_body(al_output, training=False)
         return mb_output
 
+    # DECISION plan-2026-09-18T080513-debe8b11/D-003
+    # Do not reach into `model.antennal_lobe` directly from a caller — a documented,
+    # symmetric extraction method matching `extract_mb_features()` is the established
+    # convention for exposing an intermediate representation. See decisions.md D-003.
+    def extract_al_features(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Return the Antennal Lobe's own output, before the Mushroom Body.
+
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :return: Feature tensor of shape ``(batch_size, al_units)``.
+        :rtype: keras.KerasTensor
+        """
+        return self.antennal_lobe(inputs, training=False)
+
     def train_hebbian(
         self,
         x: np.ndarray,
