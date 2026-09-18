@@ -401,11 +401,15 @@ def main(argv=None) -> int:
     viz_dir = run_dir / "visualizations"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
-    # Opened once, before the loop, in append mode with the header written here and
-    # every row flushed immediately after it's written (never batched) — a crash
-    # after N completed epochs must leave exactly N complete CSV rows, per plan.md's
-    # edge-case requirement.
-    with open(csv_path, "a", newline="") as csv_file:
+    # Opened once, before the loop, in write mode (never append: `prepare_run_dir`
+    # creates the run directory with `exist_ok=True`, so a rerun into the same
+    # directory — e.g. a fixed `--experiment-name` — must start a fresh log, matching
+    # how `model.save()` overwrites `best_model.keras`/`final_model.keras` on rerun
+    # rather than accumulating a duplicate header + stale rows from a prior run) with
+    # the header written here and every row flushed immediately after it's written
+    # (never batched) — a crash after N completed epochs must leave exactly N complete
+    # CSV rows, per plan.md's edge-case requirement.
+    with open(csv_path, "w", newline="") as csv_file:
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(["epoch", "loss", "train_accuracy", "val_accuracy"])
         csv_file.flush()
