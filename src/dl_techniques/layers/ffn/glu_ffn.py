@@ -18,7 +18,6 @@ References:
 
 import keras
 from typing import Callable, Optional, Union, Any, Dict, Tuple
-from keras import layers, initializers, regularizers, activations
 
 # ---------------------------------------------------------------------
 # local imports
@@ -120,7 +119,7 @@ class GLUFFN(keras.layers.Layer):
         Defaults to 'swish'.
     :type activation: Union[str, Callable]
     :param dropout_rate: Dropout rate applied to the gated tensor, in
-        ``[0.0, 1.0]``. Active only when ``training=True``. Defaults to 0.0.
+        ``[0.0, 1.0)``. Active only when ``training=True``. Defaults to 0.0.
     :type dropout_rate: float
     :param use_bias: Whether all three Dense projections carry a bias.
         Defaults to True.
@@ -128,17 +127,17 @@ class GLUFFN(keras.layers.Layer):
     :param kernel_initializer: Initializer for the kernels of all three Dense
         layers. Each layer receives its own clone of it, never the resolved
         instance itself. Defaults to 'glorot_uniform'.
-    :type kernel_initializer: Union[str, initializers.Initializer]
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for the biases of all three Dense
         layers. Cloned per layer in the same way as the kernel initializer.
         Defaults to 'zeros'.
-    :type bias_initializer: Union[str, initializers.Initializer]
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels of all three Dense
         layers. Defaults to None.
-    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Regularizer for the biases of all three Dense
         layers. Defaults to None.
-    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
         ``dtype``, and so on).
     :type kwargs: Any
@@ -157,25 +156,25 @@ class GLUFFN(keras.layers.Layer):
     :ivar kernel_initializer: The resolved kernel initializer. It is the
         source the three per-layer clones are rebuilt from, and is not
         handed to any Dense layer itself.
-    :vartype kernel_initializer: initializers.Initializer
+    :vartype kernel_initializer: keras.initializers.Initializer
     :ivar bias_initializer: The resolved bias initializer, cloned per Dense
         layer in the same way.
-    :vartype bias_initializer: initializers.Initializer
+    :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
-    :vartype kernel_regularizer: Optional[regularizers.Regularizer]
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
-    :vartype bias_regularizer: Optional[regularizers.Regularizer]
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar gate_proj: ``Dense(hidden_dim)``, the gate branch.
-    :vartype gate_proj: layers.Dense
+    :vartype gate_proj: keras.layers.Dense
     :ivar value_proj: ``Dense(hidden_dim)``, the value branch.
-    :vartype value_proj: layers.Dense
+    :vartype value_proj: keras.layers.Dense
     :ivar output_proj: ``Dense(output_dim)``, the final projection.
-    :vartype output_proj: layers.Dense
+    :vartype output_proj: keras.layers.Dense
     :ivar dropout: ``Dropout(dropout_rate)``, applied to the gated tensor.
-    :vartype dropout: layers.Dropout
+    :vartype dropout: keras.layers.Dropout
 
     :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not a positive
-        ``int``, or ``dropout_rate`` is not a number in ``[0.0, 1.0]``.
+        ``int``, or ``dropout_rate`` is not a number in ``[0.0, 1.0)``.
     :raises ValueError: From ``build()``, if the last axis of the input shape
         is ``None``.
 
@@ -208,10 +207,10 @@ class GLUFFN(keras.layers.Layer):
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'swish',
         dropout_rate: float = 0.0,
         use_bias: bool = True,
-        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
         """Validate the configuration and create the three Dense projections.
@@ -222,7 +221,7 @@ class GLUFFN(keras.layers.Layer):
 
         :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not a
             positive ``int``, or ``dropout_rate`` is not a number in
-            ``[0.0, 1.0]``.
+            ``[0.0, 1.0)``.
         """
         super().__init__(**kwargs)
 
@@ -231,19 +230,24 @@ class GLUFFN(keras.layers.Layer):
             raise ValueError(f"hidden_dim must be a positive integer, got {hidden_dim}")
         if not isinstance(output_dim, int) or output_dim <= 0:
             raise ValueError(f"output_dim must be a positive integer, got {output_dim}")
-        if not isinstance(dropout_rate, (int, float)) or not (0.0 <= dropout_rate <= 1.0):
+        # DECISION plan-2026-09-18-1f3c0ce8/D-003: dropout_rate == 1.0 passed
+        # this check before, but keras.layers.Dropout.call() rejects rate==1.0
+        # ("must be ... in the range [0, 1)") -- so the layer built fine and
+        # only exploded on the first training-mode forward pass (same bug class
+        # as residual_block.py D-002; keep the upper bound exclusive here too).
+        if not isinstance(dropout_rate, (int, float)) or not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
         # Store every constructor argument; get_config() returns all of them.
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
-        self.activation = activations.get(activation)
+        self.activation = keras.activations.get(activation)
         self.dropout_rate = float(dropout_rate)
         self.use_bias = bool(use_bias)
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
 
         # Create every sub-layer here, unbuilt. build() builds them.
@@ -255,7 +259,7 @@ class GLUFFN(keras.layers.Layer):
             "bias_regularizer": self.bias_regularizer,
         }
 
-        self.gate_proj = layers.Dense(
+        self.gate_proj = keras.layers.Dense(
             self.hidden_dim,
             # The gate activation is applied in call(), not here.
             activation=None,
@@ -265,7 +269,7 @@ class GLUFFN(keras.layers.Layer):
             **dense_kwargs
         )
 
-        self.value_proj = layers.Dense(
+        self.value_proj = keras.layers.Dense(
             self.hidden_dim,
             activation=None,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -274,7 +278,7 @@ class GLUFFN(keras.layers.Layer):
             **dense_kwargs
         )
 
-        self.output_proj = layers.Dense(
+        self.output_proj = keras.layers.Dense(
             self.output_dim,
             activation=None,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -283,7 +287,7 @@ class GLUFFN(keras.layers.Layer):
             **dense_kwargs
         )
 
-        self.dropout = layers.Dropout(
+        self.dropout = keras.layers.Dropout(
             rate=self.dropout_rate,
             name="dropout"
         )
@@ -378,13 +382,13 @@ class GLUFFN(keras.layers.Layer):
         config.update({
             'hidden_dim': self.hidden_dim,
             'output_dim': self.output_dim,
-            'activation': activations.serialize(self.activation),
+            'activation': keras.activations.serialize(self.activation),
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
