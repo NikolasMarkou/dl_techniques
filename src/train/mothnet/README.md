@@ -16,8 +16,8 @@ this trainer calls `model.train_hebbian(x_train, y_train, epochs=1, batch_size=.
 verbose=0)` — the ONE weight-mutating step, updating only the `HebbianReadoutLayer`'s
 `readout_weights` via a local Hebbian rule (`ΔW = α · (1/N) · Σ(x_i ⊗ y_i)`). The
 Antennal Lobe (competitive inhibition) and Mushroom Body (fixed sparse random
-projection) layers never train — see "MB-sparsity visualization" below for what that
-implies for the periodic plot.
+projection) layers never train — see "MothNet-specific caveats" below for what that
+implies for the periodic MB-sparsity plot.
 
 ---
 
@@ -60,13 +60,14 @@ optimizer/LR-schedule/patience/dataset-choice surface for that shared parser to 
 | `--inhibition-strength` | `0.5` | Antennal Lobe inhibition strength |
 | `--epochs` | `3` | Number of training epochs; each epoch is one `train_hebbian(epochs=1)` call. Validated `>= 1` at parse time |
 | `--batch-size` | `32` | Mini-batch size passed to `train_hebbian` |
-| `--viz-freq` | `2` | Render a periodic MB-sparsity visualization every N epochs; `<= 0` disables periodic visualization |
+| `--viz-freq` | `2` | Render the four periodic visualizations (MB-sparsity, AL/MB-activation distribution + heatmap, confusion matrix — see "Visualizations" below) every N epochs; `<= 0` disables all four |
 | `--gpu` | `0` | GPU index to use |
 | `--output-dir` | `None` | Output directory for run artifacts; `None` means repo-root `results/`, resolved at run time |
 | `--experiment-name` | `None` | Experiment name; `None` means auto-generated via `default_experiment_name` |
 | `--seed` | `42` | Seed, routed through `train.common.set_seeds()` in `build_model()` and through `load_mnist_data`'s own `np.random.default_rng(config.seed)` — see "What `--seed` covers, and what it does not" below |
 | `--num-train-samples` | `60000` | Number of MNIST training samples to subsample (full MNIST train split size; previously defaulted to `2000` as a fast-iteration toy subsample) |
 | `--num-val-samples` | `10000` | Number of MNIST validation samples to subsample (full MNIST test split size; previously defaulted to `500` as a fast-iteration toy subsample) |
+| `--eval-batch-size` | `5000` | Chunk size for the per-epoch accuracy computation's forward pass (`_predict_in_batches`), decoupled from `--batch-size` — a pure eval-chunking performance/memory knob with no effect on the computed accuracy value, since it does not change `train_hebbian`'s own training mini-batch |
 
 ---
 
@@ -82,9 +83,14 @@ results/<run>/
 ├── training_log.csv
 ├── training_history.json
 └── visualizations/
-    ├── training_dashboard.png
-    └── epoch_{NNN}_mb_sparsity.png   (one per --viz-freq interval, epoch-stamped)
+    ├── training_dashboard.png                              (per-epoch, overwritten)
+    ├── epoch_{NNN}_mb_sparsity.png                          (every --viz-freq epochs)
+    ├── epoch_{NNN}_al_mb_activations_distribution.png       (every --viz-freq epochs)
+    ├── epoch_{NNN}_al_mb_activations_heatmap.png            (every --viz-freq epochs)
+    └── epoch_{NNN}_confusion_matrix.png                     (every --viz-freq epochs)
 ```
+
+See "Visualizations" below for what each of the five files shows.
 
 - `best_model.keras` — saved via `best_checkpoint_path()` whenever an epoch's
   `val_accuracy` beats the best seen so far.
@@ -104,15 +110,71 @@ results/<run>/
   `Epoch {epoch+1}/{epochs}` logging convention and the PNG filenames below) — a
   breaking change to the CSV schema versus this trainer's earlier 0-based column for
   anyone parsing `training_log.csv` directly.
-- `visualizations/epoch_{NNN:03d}_mb_sparsity.png` — only written when `--viz-freq > 0`;
-  filenames are epoch-stamped (1-based, matching the CSV `epoch` column) so periodic
-  renders never overwrite each other. **A rerun into the same `--experiment-name`
-  starts `visualizations/` clean of stale periodic PNGs**: at run start, any
-  `epoch_*_mb_sparsity.png` left over from a prior (possibly longer) run at that same
-  name is deleted before the epoch loop begins — matching the fresh-open/overwrite
+- `visualizations/epoch_{NNN:03d}_<name>.png` (four families — `mb_sparsity`,
+  `al_mb_activations_distribution`, `al_mb_activations_heatmap`,
+  `confusion_matrix`) — only written when `--viz-freq > 0`; filenames are
+  epoch-stamped (1-based, matching the CSV `epoch` column) so periodic renders
+  never overwrite each other. **A rerun into the same `--experiment-name`
+  starts `visualizations/` clean of stale periodic PNGs**: at run start, each of
+  the four `epoch_*_<name>.png` glob patterns above is independently swept and
+  any file left over from a prior (possibly longer) run at that same name is
+  deleted before the epoch loop begins — matching the fresh-open/overwrite
   behavior every other artifact class here already had (`training_log.csv` opened in
   `"w"` mode; `best_model.keras`/`final_model.keras`/`training_dashboard.png`
-  overwritten in place by `model.save()`/`fig.savefig()`).
+  overwritten in place by `model.save()`/`fig.savefig()`). `training_dashboard.png`
+  is deliberately NOT globbed — it is overwritten in place every epoch, never
+  epoch-stamped, so there is nothing stale to clean.
+
+---
+
+## Visualizations
+
+`training_dashboard.png` renders every epoch, overwritten in place. Every
+`--viz-freq` epochs (`<= 0` disables all four of the following), four periodic,
+epoch-stamped PNGs render, each behind its OWN `try/except Exception:
+logger.warning(...)` at the call site — one failing never skips or aborts the
+others (a visualization failure must never abort training; RED-then-GREEN
+proven in `tests/test_train/test_mothnet/test_train_mothnet.py::
+test_al_features_failure_is_independently_fail_soft_from_confusion_matrix`).
+
+- **`training_dashboard.png`** (`render_training_dashboard`) — a 2-panel plot:
+  left panel is training loss vs. epoch; right panel is `train_accuracy` and
+  `val_accuracy` vs. epoch on shared axes with a legend.
+- **`epoch_{NNN}_mb_sparsity.png`** (`render_mb_sparsity`, reworked from a
+  `plt.spy()` presence/absence scatter — see "MothNet-specific caveats" below
+  for why) — a per-class Mushroom Body activation-magnitude heatmap. Groups a
+  500-row `x_val` sample by true class (`argmax(y_sample)`), averages each
+  class's MB codes (`extract_mb_features`) into one row, and column-bins the
+  result to `min(mb_units, 200)` bins (`np.array_split`, so an `mb_units` not
+  evenly divisible by the bin count never raises). Plots the binned
+  `(10, num_bins)` matrix via `imshow` with a colorbar labeled "Mean MB
+  activation"; each class's y-tick is annotated with its mean sparsity
+  fraction (e.g. `"3 (9.8% active)"`). A class absent from the sample gets an
+  all-zero row rather than raising or producing NaN.
+- **`epoch_{NNN}_al_mb_activations_distribution.png`** and
+  **`epoch_{NNN}_al_mb_activations_heatmap.png`** — rendered via the repo's
+  `ActivationVisualization` plugin (`dl_techniques.visualization`), reused
+  as-is rather than hand-rolled (`decisions.md` D-001), on a fixed 1000-row
+  `x_val` sample's `extract_al_features`/`extract_mb_features` output for both
+  the `antennal_lobe` and `mushroom_body` layers:
+  - `distribution` — one histogram per layer of that layer's flattened
+    activation values, each panel annotated with mean (μ), std (σ), and the
+    "% dead" fraction of exactly-zero activations.
+  - `heatmap` — one `imshow` panel per layer (`cmap="hot"`), rows are samples
+    (capped at 100), columns are neurons.
+- **`epoch_{NNN}_confusion_matrix.png`** — rendered via the repo's
+  `ConfusionMatrixVisualization` plugin, reused as-is (`decisions.md` D-001),
+  on the FULL val set — it reuses the val-accuracy pass's already-computed
+  `val_logits`/`y_val` rather than a separate forward pass, with both sides
+  `argmax`'d (`y_true`/`y_pred`, never an integer-label path). Row-normalized
+  (`normalize="true"`) 10x10 matrix with both percentages and raw counts
+  annotated per cell.
+
+The four periodic filename globs (`epoch_*_mb_sparsity.png`,
+`epoch_*_al_mb_activations_distribution.png`,
+`epoch_*_al_mb_activations_heatmap.png`, `epoch_*_confusion_matrix.png`) are
+each independently cleaned of stale files from a prior run at the same
+`--experiment-name` — see "Output layout" above.
 
 ---
 
@@ -140,6 +202,25 @@ an unmeasured toy-scale guess. Re-run or extend the comparison with
 `python -m train.mothnet.multiseed_sweep --help` (see "mb_units A/B sweep driver"
 below).
 
+**OUT OF SCOPE, disclosed gap: this sweep has never been re-run at the current
+full-MNIST default scale.** The 8-seed comparison above ran exclusively at the
+OLD `--num-train-samples 2000 --num-val-samples 500` toy scale — the sweep's
+own `multiseed_sweep.py` hard-codes that scale via its `_NUM_TRAIN_SAMPLES`/
+`_NUM_VAL_SAMPLES` module constants (see "mb_units A/B sweep driver" below),
+independent of `train_mothnet.py`'s own CLI defaults, so raising this trainer's
+defaults to `60000`/`10000` did NOT also raise the scale the sweep validates
+`mb_units=16000` against. Whether `mb_units=16000` remains the optimal choice
+at full-MNIST scale is genuinely unknown — plausible mechanisms exist in both
+directions (more training data could favor either a larger or a smaller
+expansion ratio) — and re-validating it there is explicitly OUT OF SCOPE for
+the plan that raised the dataset-scale defaults
+(`plan-2026-09-18T080513-debe8b11/decisions.md` D-004): a full-MNIST re-sweep
+is a materially larger, separately-scoped piece of work that would roughly
+double that plan's size and mixes two unrelated concerns (dataset scale vs.
+hyperparameter re-optimization) into one. This is a flagged, disclosed
+follow-up, not a silent assumption — `--mb-units 16000` remains the shipped
+default pending that future sweep.
+
 **What `--seed` covers, and what it does not.** `--seed` is routed through
 `train.common.set_seeds(args.seed)`, called once in `build_model()` strictly before
 `MothNet(...)` is constructed, plus `load_mnist_data`'s own separate
@@ -166,10 +247,14 @@ expected, not a bug.** `visualizations/epoch_{NNN}_mb_sparsity.png` renders
 `model.extract_mb_features(x_sample)`, which reads only the Antennal Lobe and Mushroom
 Body layers — both are architecturally frozen (fixed competitive inhibition, fixed
 sparse random projection) and never train; only the readout layer's weights change per
-epoch. Measured at Step 6: successive renders (`--epochs 4 --viz-freq 2`, epoch_002 vs.
-epoch_004) were byte-identical (`cmp` reported no difference). Do not expect this plot to
-change during a run; it reflects a real architectural property of MothNet, not a
-rendering defect.
+epoch. Originally measured against the pre-rework `plt.spy()` design
+(`plan-2026-09-18T060057-c1cfc3d3` Step 6: `--epochs 4 --viz-freq 2`, epoch_002 vs.
+epoch_004 byte-identical per `cmp`); re-confirmed against the CURRENT per-class
+binned-heatmap design (`plan-2026-09-18T080513-debe8b11` Step 6/8) with the same
+`--epochs 4 --viz-freq 2` shape — still byte-identical, as expected, since the
+rework changed only how frozen AL/MB output is presented, not which layers or
+samples it reads. Do not expect this plot to change during a run; it reflects a
+real architectural property of MothNet, not a rendering defect.
 
 **Small `--num-train-samples` can produce flat, at-chance results.** Measured at Step 7:
 `--num-train-samples 500 --num-val-samples 200` produced degenerate `val_accuracy`
@@ -185,13 +270,16 @@ sample-count sensitivity — not a wiring bug — is the likely explanation.
 ## Testing
 
 `tests/test_train/test_mothnet/` covers this trainer: a CLI-contract test proving all
-15 declared flags reach their destination (a config field, or — for `--gpu` — the
-`setup_gpu` call), and two `@pytest.mark.integration`-marked end-to-end tests that
-actually train a tiny real model — one proving the checkpoint round-trips, one
-proving `final_model.keras`/`training_history.json` still land after a forced
-mid-loop exception. This repo's pytest config does not deselect the `integration`
-marker by default, so the whole suite (34 tests, including both integration tests)
-runs with:
+16 declared flags reach their destination (a config field, or — for `--gpu` — the
+`setup_gpu` call), and five `@pytest.mark.integration`-marked end-to-end tests that
+actually train a tiny real model — checkpoint round-tripping; `final_model.keras`/
+`training_history.json` still landing after a forced mid-loop exception; all five
+periodic visualization files landing at the expected epoch-stamped names; stale
+periodic-visualization files from a prior run at the same `--experiment-name` being
+cleaned up; and the AL/MB-activation render block's failure being independently
+fail-soft from the confusion-matrix render block. This repo's pytest config does not
+deselect the `integration` marker by default, so the whole suite (44 tests,
+including all five integration tests) runs with:
 
 ```bash
 pytest tests/test_train/test_mothnet/ -v
