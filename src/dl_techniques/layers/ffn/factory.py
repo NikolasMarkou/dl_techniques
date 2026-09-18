@@ -672,7 +672,16 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
             )
 
     # Validate activation functions are valid strings
-    activation_params = ['activation', 'branch_activation', 'gate_activation', 'attention_activation', 'output_activation']
+    #
+    # DECISION plan-2026-09-18T154913-1f3c0ce8/D-018: 'gate_activation' was
+    # dropped from this list. It named no current FFN_REGISTRY entry's
+    # optional_params and no ffn/ class constructor accepts it any more
+    # (DifferentialFFN's gate was removed in D-009/D-014's redesign) --
+    # MEASURED via a full-package grep, 0 remaining sites. It had become a
+    # dead validation branch: a caller passing it here would pass this
+    # generic string check and then hit a clearer, more specific TypeError
+    # at the target class's own constructor anyway.
+    activation_params = ['activation', 'branch_activation', 'attention_activation', 'output_activation']
     for param in activation_params:
         if param in kwargs:
             activation = kwargs[param]

@@ -330,6 +330,18 @@ class CountingFFN(keras.layers.Layer):
         ``key_projection`` with a constant. The aggregate carries positional
         information in ``log1p(Z)`` even when the keys are uninformative, and
         the previous raw-sum version was 98% positional at ``t = 512``.
+
+    Note:
+        The decay recurrence runs as a sequential ``keras.ops.scan``, which
+        lowers to a ``tf.while_loop`` on the TensorFlow backend (see the
+        D-010 anchor in ``_decay_accumulate`` for why this replaced a
+        parallel ``associative_scan``). MEASURED: differentiating that
+        ``while_loop`` under GPU + XLA at Keras's default
+        ``jit_compile="auto"`` raises ``InvalidArgumentError: XLA
+        compilation requires a fixed tensor list size`` during
+        ``model.fit()``. Pass ``jit_compile=False`` to ``model.compile()``
+        when training this layer on GPU; CPU training and non-XLA GPU
+        inference are unaffected.
     """
 
     def __init__(
@@ -666,8 +678,16 @@ class CountingFFN(keras.layers.Layer):
         # no recursive base-case logic and no nested `tf.cond` tree to trace.
         # Verified equal to the old parallel scan to float32-rounding scale
         # (max|delta|=2.384e-07, both scan directions, T=7) before relying on
-        # it, and verified to run under a compiled `model.fit()` where the
-        # old code raised. See decisions.md D-010 for the full derivation.
+        # it, and verified to run under a compiled `model.fit(jit_compile=
+        # False)` where the old code raised. CAVEAT (found by an iteration-1
+        # adversarial review, not by this fix's own original verification):
+        # this sequential scan still does NOT run under GPU + XLA at Keras's
+        # default `jit_compile="auto"` -- differentiating the `tf.while_loop`
+        # it lowers to raises a SEPARATE, unrelated `InvalidArgumentError:
+        # XLA compilation requires a fixed tensor list size`. Callers training
+        # this layer on GPU must pass `jit_compile=False`; see the class
+        # docstring's own Note on this. See decisions.md D-010 for the full
+        # derivation.
         combined_decay = keras.ops.moveaxis(
             keras.ops.concatenate([decay, decay], axis=-1), 1, 0
         )
