@@ -640,15 +640,28 @@ class TverskyProjectionLayer(keras.layers.Layer):
         Invert softplus, so ``softplus(_inverse_softplus(y)) == y`` for y > 0.
 
         Uses ``log(expm1(y))``, which is stable for small positive ``y`` where
-        ``log(exp(y) - 1)`` loses all its significant digits. Non-positive
-        inputs are floored, since softplus has no non-positive image.
+        ``log(exp(y) - 1)`` loses all its significant digits. Softplus has no
+        non-positive image, so a ``y <= 1e-6`` cannot invert exactly; it is
+        replaced by the exponential continuation ``1e-6 * exp(y - 1e-6)``,
+        which matches the floor's value and slope at ``y == 1e-6`` and stays
+        strictly increasing below it, rather than a flat ``max(y, 1e-6)``.
+
+        # DECISION plan-2026-09-18-1f3c0ce8/D-013: do not revert this to
+        # keras.ops.maximum(y, 1e-6). A hard floor collapses every
+        # non-positive y to the SAME pre-activation value: MEASURED, an
+        # unseeded zero-mean contrast_initializer made theta/alpha/beta
+        # bit-identical in ~20-25% of builds (each scalar has ~50% odds of
+        # drawing <= 0, so two of three colliding at the shared floor is
+        # common), defeating the "each takes its own clone" independence
+        # this layer's own docstring promises. See decisions.md D-013.
 
         :param y: Target post-softplus value.
         :type y: keras.KerasTensor
         :return: The pre-activation value.
         :rtype: keras.KerasTensor
         """
-        floored = keras.ops.maximum(y, 1e-6)
+        eps = keras.ops.cast(1e-6, y.dtype)
+        floored = keras.ops.where(y > eps, y, eps * keras.ops.exp(y - eps))
         return keras.ops.log(keras.ops.expm1(floored))
 
     def _contrast_weights(
