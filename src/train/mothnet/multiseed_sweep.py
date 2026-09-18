@@ -362,7 +362,11 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mb-units-baseline", type=int, default=2000,
-        help="mb_units value for the baseline arm (default: 2000, the current CLI default).",
+        help=(
+            "mb_units value for the baseline arm (default: 2000 -- train_mothnet.py's "
+            "pre-D-009 CLI default; the current live default is 16000, see "
+            "--mb-units-candidate)."
+        ),
     )
     parser.add_argument(
         "--mb-units-candidate", type=int, default=16000,
