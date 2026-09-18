@@ -8,9 +8,9 @@ since `HebbianReadoutLayer.readout_weights` is `trainable=False` and is updated 
 by a direct Hebbian `.assign()` inside `train_hebbian` (see
 `plans/plan-2026-09-18T045308-c89cdf76/decisions.md` D-001/D-002).
 
-This module currently wires CLI argument parsing (plan Step 1) and MNIST data loading
-(plan Step 2). Model construction, the training loop, and visualization land in later
-plan steps.
+This module currently wires CLI argument parsing (plan Step 1), MNIST data loading
+(plan Step 2), model construction (plan Step 3), and the run directory / config.json
+preamble (plan Step 4). The training loop and visualization land in later plan steps.
 
 Usage:
     python -m train.mothnet.train_mothnet --help
@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+from pathlib import Path
 
 import keras
 import numpy as np
@@ -27,6 +28,14 @@ matplotlib.use("Agg")
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.general_purpose.mothnet.model import MothNet
+from train.common import default_experiment_name, prepare_run_dir
+
+
+# `parents[3]` reaches the repo root from THIS file
+# (src/train/mothnet/train_mothnet.py: [0] mothnet, [1] train, [2] src, [3] <repo>),
+# matching `src/train/kan/train_kan.py`'s own `REPO_ROOT` derivation exactly.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+EXPERIMENT_NAME = "mothnet"
 
 
 def parse_arguments(argv=None) -> argparse.Namespace:
@@ -269,8 +278,19 @@ def main(argv=None) -> int:
 
     logger.info(f"Parsed args: {args}")
 
-    # Smoke wire-up only (matches Step 2's own precedent) — the per-epoch training
-    # loop itself lands in Steps 4-5, not here.
+    # Unified run directory (matches `train_kan.py`'s own preamble): a single
+    # results/<run>/ directory, resolved once here, that `prepare_run_dir` both
+    # creates and writes config.json into. `--output-dir` overrides the
+    # repo-root `results/` base; `--experiment-name` overrides the timestamped
+    # default leaf name. This step only wires the directory + config.json —
+    # the training loop itself lands in Step 5.
+    base_dir = Path(args.output_dir) if args.output_dir else REPO_ROOT / "results"
+    run_dir = base_dir / (args.experiment_name or default_experiment_name(EXPERIMENT_NAME))
+    prepare_run_dir(args, output_dir=run_dir)
+    logger.info(f"Run directory: {run_dir}")
+
+    # Smoke wire-up only (matches Step 2/3's own precedent) — the per-epoch
+    # training loop itself lands in Step 5, not here.
     (x_train, y_train), (x_val, y_val) = load_mnist_data(args)
     model = build_model(args, input_dim=x_train.shape[1])
     logger.info(f"Smoke check — model.built={model.built}, params={model.count_params()}")
