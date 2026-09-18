@@ -239,6 +239,23 @@ def parse_arguments(argv=None) -> argparse.Namespace:
             f"--eval-batch-size must be >= 1, got {args.eval_batch_size}"
         )
 
+    # DECISION plan-2026-09-18T080513-debe8b11/D-011 (pass-2 NOTE 6): a
+    # zero-row `x`/`x_val` is ALSO reachable via `--num-train-samples 0` /
+    # `--num-val-samples 0` (not just `--eval-batch-size <= 0` above) —
+    # `_predict_in_batches` raises `ValueError: need at least one array to
+    # concatenate` from `np.concatenate([])`, only AFTER a full training
+    # epoch has already run, the exact late-opaque-failure shape this
+    # `parser.error` block exists to eliminate. Do not drop this check and
+    # rely on `_predict_in_batches` to guard itself — see decisions.md D-011.
+    if args.num_train_samples < 1:
+        parser.error(
+            f"--num-train-samples must be >= 1, got {args.num_train_samples}"
+        )
+    if args.num_val_samples < 1:
+        parser.error(
+            f"--num-val-samples must be >= 1, got {args.num_val_samples}"
+        )
+
     return args
 
 

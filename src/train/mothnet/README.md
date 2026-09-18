@@ -65,8 +65,8 @@ optimizer/LR-schedule/patience/dataset-choice surface for that shared parser to 
 | `--output-dir` | `None` | Output directory for run artifacts; `None` means repo-root `results/`, resolved at run time |
 | `--experiment-name` | `None` | Experiment name; `None` means auto-generated via `default_experiment_name` |
 | `--seed` | `42` | Seed, routed through `train.common.set_seeds()` in `build_model()` and through `load_mnist_data`'s own `np.random.default_rng(config.seed)` — see "What `--seed` covers, and what it does not" below |
-| `--num-train-samples` | `60000` | Number of MNIST training samples to subsample (full MNIST train split size; previously defaulted to `2000` as a fast-iteration toy subsample) |
-| `--num-val-samples` | `10000` | Number of MNIST validation samples to subsample (full MNIST test split size; previously defaulted to `500` as a fast-iteration toy subsample) |
+| `--num-train-samples` | `60000` | Number of MNIST training samples to subsample (full MNIST train split size; previously defaulted to `2000` as a fast-iteration toy subsample). Validated `>= 1` at parse time |
+| `--num-val-samples` | `10000` | Number of MNIST validation samples to subsample (full MNIST test split size; previously defaulted to `500` as a fast-iteration toy subsample). Validated `>= 1` at parse time |
 | `--eval-batch-size` | `5000` | Chunk size for the per-epoch accuracy computation's forward pass (`_predict_in_batches`), decoupled from `--batch-size` — a pure eval-chunking performance/memory knob with no effect on the computed accuracy value, since it does not change `train_hebbian`'s own training mini-batch |
 
 ---

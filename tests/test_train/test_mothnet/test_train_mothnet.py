@@ -921,3 +921,39 @@ def test_eval_batch_size_of_one_is_accepted_at_parse_time() -> None:
     """
     args = train_mothnet.parse_arguments(["--eval-batch-size", "1"])
     assert args.eval_batch_size == 1
+
+
+@pytest.mark.parametrize("flag", ["--num-train-samples", "--num-val-samples"])
+@pytest.mark.parametrize("bad_value", ["0", "-1", "-100"])
+def test_num_samples_below_one_fails_fast_at_parse_time(flag, bad_value, capsys) -> None:
+    """Step 2.2 completion-fix (`plan-2026-09-18T080513-debe8b11` D-011,
+    pass-2 adversarial-review NOTE 6): `--num-train-samples 0` /
+    `--num-val-samples 0` used to be unvalidated and failed LATE, deep
+    inside `_predict_in_batches`, only AFTER a full training epoch had
+    already run — `np.concatenate([])` on a zero-row input raises
+    `ValueError: need at least one array to concatenate`. MEASURED
+    (pre-fix): `--num-train-samples 100 --num-val-samples 0 --epochs 1
+    --viz-freq 0` ran the full epoch, saved `final_model.keras` in the
+    `finally` block, and only then raised that exact traceback out of
+    `main()`. This proves both flags now follow the exact same fail-fast
+    pattern `--epochs`/`--eval-batch-size` already use: a `SystemExit` from
+    `parse_arguments()` itself, before any dataset load, GPU setup, or model
+    construction ever runs.
+    """
+    with pytest.raises(SystemExit):
+        train_mothnet.parse_arguments([flag, bad_value])
+
+    stderr = capsys.readouterr().err
+    assert flag in stderr
+    assert "must be >= 1" in stderr
+
+
+@pytest.mark.parametrize("flag", ["--num-train-samples", "--num-val-samples"])
+def test_num_samples_of_one_is_accepted_at_parse_time(flag) -> None:
+    """Boundary check complementing the parametrized failure test above —
+    `1` is the smallest VALID value and must parse cleanly, not be caught by
+    an off-by-one `<= 1` guard.
+    """
+    args = train_mothnet.parse_arguments([flag, "1"])
+    attr = flag.lstrip("-").replace("-", "_")
+    assert getattr(args, attr) == 1
