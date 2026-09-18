@@ -83,8 +83,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # decisions.md D-003 for the full trade-off.
     parser = argparse.ArgumentParser(
         description=(
-            "Train MothNet on a small MNIST subsample via its hand-rolled "
-            "train_hebbian() method."
+            "Train MothNet on MNIST (full 60000/10000 train/val split by default) "
+            "via its hand-rolled train_hebbian() method."
         ),
     )
     # DECISION plan-2026-09-18T060057-c1cfc3d3/D-009
