@@ -164,7 +164,15 @@ test_al_features_failure_is_independently_fail_soft_from_confusion_matrix`).
     activation values, each panel annotated with mean (μ), std (σ), and the
     "% dead" fraction of exactly-zero activations.
   - `heatmap` — one `imshow` panel per layer (`cmap="hot"`), rows are samples
-    (capped at 100), columns are neurons.
+    (capped at 100). The `antennal_lobe` panel's columns are raw neurons; the
+    `mushroom_body` panel's columns are column-binned (same `_bin_activation_columns`
+    helper `render_mb_sparsity` uses, to at most 200 bins) rather than raw
+    neurons — the `ActivationVisualization` plugin titles each panel by its
+    data-dict key and hard-codes the x-axis label "Neurons" with no
+    per-panel override, so the `mushroom_body` panel's dict key itself carries
+    the bin-size annotation (e.g. `"mushroom_body (80-unit bin means)"`) to
+    disclose that its 200 x-axis positions are bin means, not individual
+    neurons.
 - **`epoch_{NNN}_confusion_matrix.png`** — rendered via the repo's
   `ConfusionMatrixVisualization` plugin, reused as-is (`decisions.md` D-001),
   on the FULL val set — it reuses the val-accuracy pass's already-computed

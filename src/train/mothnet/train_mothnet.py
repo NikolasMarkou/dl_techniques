@@ -950,13 +950,27 @@ def main(argv=None) -> int:
                         # heatmap call again, and do NOT bin `antennal_lobe`
                         # — its panel is already legible at `al_units` scale.
                         # See decisions.md D-008.
+                        #
+                        # DECISION plan-2026-09-18T080513-debe8b11/D-011 (pass-2
+                        # WARNING 2): `ActivationVisualization`'s heatmap branch
+                        # titles each panel by its `activations` dict KEY and
+                        # hard-codes the x-axis label "Neurons" (`data_nn.py`) —
+                        # with a bare `"mushroom_body"` key the shipped panel
+                        # falsely implies its 200 columns are individual
+                        # neurons, when they are `mb_units // num_bins`-unit
+                        # bin means. Do NOT revert this key to bare
+                        # `"mushroom_body"` — the bin-size annotation must
+                        # travel in the panel TITLE since the plugin's x-axis
+                        # label is not configurable from this call site. See
+                        # decisions.md D-011.
+                        mb_binned = _bin_activation_columns(mb_np, max_bins=200)
+                        mb_bin_size = mb_np.shape[1] // mb_binned.shape[1]
+                        mb_heatmap_key = f"mushroom_body ({mb_bin_size}-unit bin means)"
                         heatmap_activation_data = ActivationData(
-                            layer_names=["antennal_lobe", "mushroom_body"],
+                            layer_names=["antennal_lobe", mb_heatmap_key],
                             activations={
                                 "antennal_lobe": al_np,
-                                "mushroom_body": _bin_activation_columns(
-                                    mb_np, max_bins=200
-                                ),
+                                mb_heatmap_key: mb_binned,
                             },
                             model_name="MothNet",
                         )

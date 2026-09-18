@@ -632,9 +632,26 @@ def test_heatmap_activation_call_receives_column_binned_mushroom_body_data(
     heatmap_calls = [call for call in captured_calls if call[1] == "heatmap"]
     assert len(heatmap_calls) == 1, f"expected exactly 1 heatmap call, got {captured_calls}"
     _, _, heatmap_data = heatmap_calls[0]
-    assert heatmap_data.activations["mushroom_body"].shape[1] <= 200, (
+    # Step 5.4 completion-fix (D-011, pass-2 WARNING 2): the mushroom_body
+    # entry's dict KEY (not just its shape) must self-document the bin size,
+    # since `ActivationVisualization` titles each panel by its `activations`
+    # dict key and cannot otherwise disclose that these 200 columns are
+    # `mb_units // 200`-unit bin means rather than raw neurons — a bare
+    # `"mushroom_body"` key is a stale-doc trap, not merely a naming choice.
+    mb_heatmap_keys = [
+        key for key in heatmap_data.activations if key.startswith("mushroom_body")
+    ]
+    assert len(mb_heatmap_keys) == 1, (
+        f"expected exactly 1 mushroom_body-prefixed key, got {list(heatmap_data.activations)}"
+    )
+    mb_heatmap_key = mb_heatmap_keys[0]
+    assert mb_heatmap_key != "mushroom_body", (
+        "the heatmap-only mushroom_body key must carry a bin-size annotation, "
+        "not the bare layer name (misleadingly implies raw neurons)"
+    )
+    assert heatmap_data.activations[mb_heatmap_key].shape[1] <= 200, (
         "heatmap call's mushroom_body activations were not column-binned — "
-        f"shape={heatmap_data.activations['mushroom_body'].shape}"
+        f"shape={heatmap_data.activations[mb_heatmap_key].shape}"
     )
 
     distribution_calls = [call for call in captured_calls if call[1] == "distribution"]
