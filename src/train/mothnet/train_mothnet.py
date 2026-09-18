@@ -9,8 +9,10 @@ by a direct Hebbian `.assign()` inside `train_hebbian` (see
 `plans/plan-2026-09-18T045308-c89cdf76/decisions.md` D-001/D-002).
 
 This module currently wires CLI argument parsing (plan Step 1), MNIST data loading
-(plan Step 2), model construction (plan Step 3), and the run directory / config.json
-preamble (plan Step 4). The training loop and visualization land in later plan steps.
+(plan Step 2), model construction (plan Step 3), the run directory / config.json
+preamble (plan Step 4), and the core Hebbian training loop with its ordering-
+disciplined checkpoint/CSV writes (plan Step 5). Visualization and final-model/
+history-JSON finalization land in later plan steps.
 
 Usage:
     python -m train.mothnet.train_mothnet --help
@@ -19,7 +21,9 @@ Usage:
 """
 
 import argparse
+import csv
 from pathlib import Path
+from typing import Dict, List
 
 import keras
 import numpy as np
@@ -29,6 +33,7 @@ matplotlib.use("Agg")
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.general_purpose.mothnet.model import MothNet
 from train.common import default_experiment_name, prepare_run_dir
+from train.common.callbacks import best_checkpoint_path
 
 
 # `parents[3]` reaches the repo root from THIS file
@@ -289,11 +294,94 @@ def main(argv=None) -> int:
     prepare_run_dir(args, output_dir=run_dir)
     logger.info(f"Run directory: {run_dir}")
 
-    # Smoke wire-up only (matches Step 2/3's own precedent) — the per-epoch
-    # training loop itself lands in Step 5, not here.
     (x_train, y_train), (x_val, y_val) = load_mnist_data(args)
     model = build_model(args, input_dim=x_train.shape[1])
-    logger.info(f"Smoke check — model.built={model.built}, params={model.count_params()}")
+    logger.info(f"Model ready — model.built={model.built}, params={model.count_params()}")
+
+    # `history` mirrors Keras' own `History.history` shape (a dict of equal-length
+    # lists) so Step 6 (visualization) and Step 7 (`training_history.json`) can
+    # consume it unmodified — this step is the ONLY place these values are computed,
+    # so it owns creating and populating the dict even though nothing downstream
+    # reads it yet.
+    history: Dict[str, List[float]] = {
+        "epoch": [], "loss": [], "train_accuracy": [], "val_accuracy": [],
+    }
+    best_val_accuracy = -1.0
+    csv_path = run_dir / "training_log.csv"
+
+    # Opened once, before the loop, in append mode with the header written here and
+    # every row flushed immediately after it's written (never batched) — a crash
+    # after N completed epochs must leave exactly N complete CSV rows, per plan.md's
+    # edge-case requirement.
+    with open(csv_path, "a", newline="") as csv_file:
+        csv_writer = csv.writer(csv_file)
+        csv_writer.writerow(["epoch", "loss", "train_accuracy", "val_accuracy"])
+        csv_file.flush()
+
+        for epoch in range(args.epochs):
+            # DECISION plan-2026-09-18T045308-c89cdf76/D-005
+            # ORDERING DISCIPLINE for this loop body — do not reorder without
+            # re-reading decisions.md D-005 first.
+            #
+            # (a) train_hebbian(epochs=1, ...) below is the ONE weight-mutating
+            #     step this epoch — the only writer of `readout.readout_weights`
+            #     (findings/mothnet-architecture.md finding 4's mutation-kill test
+            #     confirms no other call site touches it).
+            # (b) val_accuracy/train_accuracy are computed strictly AFTER (a)
+            #     returns, never before — a genuine post-update read.
+            # (c) the checkpoint-save / CSV-row / history-append decision further
+            #     below uses that same post-update measurement.
+            #
+            # Why this is safe (and why it differs from train_kan.py's D-006
+            # hazard): `train_kan.py` shipped a bug where a weight-mutating Keras
+            # callback (`KANGridUpdateCallback`) ran BEFORE `ModelCheckpoint`/
+            # `CSVLogger` in an `on_epoch_end` callback list, so the checkpoint
+            # saved POST-mutation weights against a `val_loss` Keras had already
+            # measured PRE-mutation — a silent mismatch caught only by adversarial
+            # review (decisions.md D-006, that plan). This loop has no callback
+            # list and no second, later mutator: `train_hebbian` is the first
+            # statement in the epoch body, and everything after it only reads.
+            # That eliminates the D-006 hazard CLASS here — but only
+            # CONDITIONALLY, not absolutely: this reasoning holds PROVIDED the
+            # metric read in (b) always executes strictly after (a) returns,
+            # never reordered ahead of it or interleaved with it. Do not move the
+            # accuracy computation above the `train_hebbian` call, and do not add
+            # a second weight-mutating call anywhere in this loop without
+            # re-deriving this comment.
+            epoch_history = model.train_hebbian(
+                x_train, y_train, epochs=1, batch_size=args.batch_size, verbose=0,
+            )
+            loss = float(epoch_history["loss"][0])
+
+            val_logits = keras.ops.convert_to_numpy(model.extract_features(x_val))
+            val_accuracy = float(
+                np.mean(np.argmax(val_logits, axis=-1) == np.argmax(y_val, axis=-1))
+            )
+            train_logits = keras.ops.convert_to_numpy(model.extract_features(x_train))
+            train_accuracy = float(
+                np.mean(np.argmax(train_logits, axis=-1) == np.argmax(y_train, axis=-1))
+            )
+
+            if val_accuracy > best_val_accuracy:
+                best_val_accuracy = val_accuracy
+                model.save(best_checkpoint_path(str(run_dir)))
+                logger.info(
+                    f"Epoch {epoch}: new best val_accuracy={val_accuracy:.4f} "
+                    f"— saved {best_checkpoint_path(str(run_dir))}"
+                )
+
+            csv_writer.writerow([epoch, loss, train_accuracy, val_accuracy])
+            csv_file.flush()
+
+            history["epoch"].append(epoch)
+            history["loss"].append(loss)
+            history["train_accuracy"].append(train_accuracy)
+            history["val_accuracy"].append(val_accuracy)
+
+            logger.info(
+                f"Epoch {epoch}/{args.epochs - 1} — loss={loss:.4f}, "
+                f"train_accuracy={train_accuracy:.4f}, val_accuracy={val_accuracy:.4f}"
+            )
 
     return 0
 
