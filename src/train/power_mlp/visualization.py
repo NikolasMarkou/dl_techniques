@@ -50,6 +50,20 @@ ACCENT_COLOR = "#2ca02c"
 # The smoothed-loss panel is only informative once there are enough epochs.
 SMOOTHED_PANEL_MIN_EPOCHS = 6
 
+# Dashboard caption: what the two curve families measure (they are NOT the same
+# quantity, which makes the epoch-1 generalization gap look negative).
+TRAIN_METRIC_CAPTION = "train: running mean over the epoch; val: end of epoch"
+
+# The epoch-0 baseline marker is drawn at most this many times the largest finite
+# plotted curve value; a larger baseline (an init loss of 218 over curves near 1)
+# is clipped there and annotated with its true value, so it cannot flatten the axis.
+BASELINE_CLIP_FACTOR = 4.0
+
+# The row-normalized confusion-matrix panel annotates only cells strictly ABOVE this
+# fraction. Strict, because 0.005 itself (5 of 1000) formats as "0%" (round half to
+# even), the exact text this floor exists to remove.
+CONFUSION_MIN_ANNOTATION = 0.005
+
 
 # ---------------------------------------------------------------------
 # Helpers
@@ -112,7 +126,8 @@ def render_training_dashboard(
     (needs ``epoch_times``) and ``Smoothed loss`` (only when at least
     ``SMOOTHED_PANEL_MIN_EPOCHS`` epochs exist). The grid is built from the panels
     that exist, so a short run has no empty cells; a partly filled last row is
-    centred.
+    centred. ``TRAIN_METRIC_CAPTION`` is written under the grid with ``fig.text``
+    so it survives every panel layout.
 
     Args:
         history: Per-epoch lists with any of the keys ``loss``, ``val_loss``,
@@ -123,7 +138,10 @@ def render_training_dashboard(
         epoch_times: Wall-clock seconds per epoch.
         baseline: Epoch-0 metrics of the untrained model on the validation data
             (keys ``loss`` and/or ``accuracy``); drawn as a marker at x = 0 on the
-            validation curves.
+            validation curves. A value above ``BASELINE_CLIP_FACTOR`` times the
+            largest finite plotted value is drawn AT that ceiling (upward
+            triangle) and annotated with its true value; anything at or below
+            the ceiling is drawn exactly where it is.
 
     Returns:
         The titles of the panels drawn, in order (empty, and nothing written,
@@ -142,18 +160,33 @@ def render_training_dashboard(
         return np.arange(1, len(values) + 1)
 
     def _curves(ax, train, val, base_key: str, ylabel: str) -> None:
+        clipped = False
         if train is not None:
             ax.plot(_x(train), train, color=TRAIN_COLOR, lw=1.6, marker="o", ms=3, label="train")
         if val is not None:
             ax.plot(_x(val), val, color=VAL_COLOR, lw=1.6, marker="o", ms=3, label="val")
             if base_key in baseline and np.isfinite(baseline[base_key]):
-                ax.plot([0, 1], [baseline[base_key], val[0]], color=VAL_COLOR, lw=1.0,
+                true_value = baseline[base_key]
+                curve_values = np.concatenate(
+                    [c[np.isfinite(c)] for c in (train, val) if c is not None])
+                ceiling = BASELINE_CLIP_FACTOR * float(curve_values.max())
+                clipped = true_value > ceiling
+                drawn = ceiling if clipped else true_value
+                ax.plot([0, 1], [drawn, val[0]], color=VAL_COLOR, lw=1.0,
                         ls=":", alpha=0.7)
-                ax.scatter([0], [baseline[base_key]], marker="*", s=110, color=VAL_COLOR,
+                ax.scatter([0], [drawn], marker="^" if clipped else "*",
+                           s=70 if clipped else 110, color=VAL_COLOR,
                            edgecolor="black", zorder=5, label="epoch-0 baseline (val)")
+                if clipped:
+                    ax.annotate(f"epoch-0: {true_value:.4g} (clipped)", xy=(0, drawn),
+                                xytext=(8, 0), textcoords="offset points", va="center",
+                                fontsize=8, color=VAL_COLOR)
         ax.set_xlabel("epoch")
         ax.set_ylabel(ylabel)
-        ax.legend(fontsize=8)
+        # 'best' does not see annotations: with a clipped baseline the annotation sits
+        # top-left and the curves hug the bottom, so the legend goes to the empty
+        # middle of the right edge.
+        ax.legend(fontsize=8, loc="center right" if clipped else "best")
 
     def _loss(ax) -> None:
         _curves(ax, loss, val_loss, "loss", "loss")
@@ -238,6 +271,8 @@ def render_training_dashboard(
                 ax.grid(alpha=0.3)
         if title:
             fig.suptitle(title, fontsize=13, y=0.995)
+        fig.text(0.5, 0.0, TRAIN_METRIC_CAPTION, ha="center", va="top", fontsize=9,
+                 style="italic", color="#444444")
         _save_and_close(fig, out_path)
     finally:
         plt.close(fig)
@@ -342,6 +377,10 @@ def plot_confusion_matrix(
 ) -> np.ndarray:
     """Save a two-panel confusion matrix: raw counts and row-normalized recall.
 
+    The row-normalized panel leaves cells at or below ``CONFUSION_MIN_ANNOTATION``
+    (0.5%) unannotated so it never prints "0%"; the counts panel annotates every
+    cell.
+
     Args:
         y_true: Integer true labels ``(N,)``.
         y_pred: Integer predicted labels ``(N,)``.
@@ -361,9 +400,10 @@ def plot_confusion_matrix(
     size = max(6.0, 0.62 * n + 2.5)
     fig, axes = plt.subplots(1, 2, figsize=(2 * size + 1.0, size))
     try:
-        for ax, mat, label, fmt in (
-                (axes[0], cm, "Counts", lambda v: f"{int(v)}"),
-                (axes[1], norm, "Row-normalized (recall per true class)", lambda v: f"{v:.0%}"),
+        for ax, mat, label, fmt, floor in (
+                (axes[0], cm, "Counts", lambda v: f"{int(v)}", -1.0),
+                (axes[1], norm, "Row-normalized (recall per true class)",
+                 lambda v: f"{v:.0%}", CONFUSION_MIN_ANNOTATION),
         ):
             im = ax.imshow(mat, cmap="Blues", vmin=0, vmax=max(float(mat.max()), 1e-9))
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
@@ -377,6 +417,8 @@ def plot_confusion_matrix(
             cut = mat.max() / 2.0
             for i in range(n):
                 for j in range(n):
+                    if mat[i, j] <= floor:
+                        continue
                     ax.text(j, i, fmt(mat[i, j]), ha="center", va="center", fontsize=8,
                             color="white" if mat[i, j] > cut else "black")
         acc = float(np.trace(cm)) / max(int(cm.sum()), 1)
