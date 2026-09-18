@@ -53,7 +53,10 @@ class TestCountingFFN:
         # Check stored configuration
         assert layer.output_dim == 128
         assert layer.count_dim == 64
-        assert layer.counting_scope == "local"
+        # 'causal' is the current default, changed from 'local' because
+        # 'local' is bidirectional and silently breaks autoregressive use
+        # (see the class docstring's `counting_scope` param description).
+        assert layer.counting_scope == "causal"
         assert layer._activation_identifier == "gelu"
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
@@ -128,8 +131,13 @@ class TestCountingFFN:
         assert layer.count_transform.built
         assert layer.gate.built
 
-        # Verify weights were created
-        expected_weight_count = 6  # 3 Dense layers × 2 weights each (kernel + bias)
+        # Verify weights were created. The 3 Dense layers (key_projection,
+        # count_transform, gate) contribute 2 weights each (kernel + bias) =
+        # 6; count_norm is a LayerNormalization with its own trainable
+        # gamma + beta = 2 more; counting_scope != 'global' also adds the
+        # per-channel decay_logits weight = 1 more. output_dim == input_dim
+        # here (both 64), so no input_proj shortcut is created.
+        expected_weight_count = 9
         assert len(layer.weights) == expected_weight_count
 
         # Verify output shape matches expected
@@ -139,8 +147,10 @@ class TestCountingFFN:
         """Test build method input validation."""
         layer = CountingFFN(output_dim=64, count_dim=32)
 
-        # Test with invalid input shapes
-        with pytest.raises(ValueError, match="Input must be at least 2D"):
+        # Test with invalid input shapes. Aggregation happens on axis 1, so
+        # the current build() requires rank EXACTLY 3 (batch, sequence,
+        # features) and rejects any other rank, not just rank < 2.
+        with pytest.raises(ValueError, match="expects a rank-3 input"):
             layer.build((10,))  # 1D input
 
         with pytest.raises(ValueError, match="Input feature dimension must be specified"):
@@ -461,25 +471,30 @@ class TestCountingFFN:
         assert not keras.ops.any(keras.ops.isnan(output))
 
     def test_different_input_dimensions(self):
-        """Test layer with different input tensor dimensions."""
+        """Rank 3 is accepted; every other rank is rejected, not silently
+        aggregated over the wrong axis.
+
+        Aggregation reduces over axis 1. For a rank-2 input that axis is the
+        feature axis, so accepting it (the previous behavior this test used
+        to pin) would silently accumulate across channels, which the class
+        docstring's "Aggregation happens on axis 1... Rank 2 is rejected
+        rather than silently aggregating over the feature axis" explicitly
+        rules out. `build()` now requires rank exactly 3.
+        """
         layer = CountingFFN(output_dim=32, count_dim=16)
 
-        test_shapes = [
-            (4, 64),  # 2D input
-            (4, 16, 64),  # 3D input
-            (2, 8, 16, 64),  # 4D input
-            (1, 4, 8, 16, 64)  # 5D input
-        ]
+        good_shape = (4, 16, 64)  # 3D input: the only accepted rank
+        test_input = keras.random.normal(good_shape)
+        output = layer(test_input)
+        expected_shape = list(good_shape)
+        expected_shape[-1] = 32
+        assert output.shape == tuple(expected_shape)
+        assert not keras.ops.any(keras.ops.isnan(output))
 
-        for shape in test_shapes:
-            test_input = keras.random.normal(shape)
-            output = layer(test_input)
-
-            # Output should have same shape except last dimension
-            expected_shape = list(shape)
-            expected_shape[-1] = 32
-            assert output.shape == tuple(expected_shape)
-            assert not keras.ops.any(keras.ops.isnan(output))
+        for bad_shape in [(4, 64), (2, 8, 16, 64), (1, 4, 8, 16, 64)]:
+            rejecting_layer = CountingFFN(output_dim=32, count_dim=16)
+            with pytest.raises(ValueError, match="expects a rank-3 input"):
+                rejecting_layer(keras.random.normal(bad_shape))
 
     def test_numerical_stability(self):
         """Test layer stability with extreme input values."""
@@ -502,7 +517,19 @@ class TestCountingFFN:
             assert not keras.ops.any(keras.ops.isinf(output)), "Inf detected"
 
     def test_weight_structure_and_shapes(self, sample_input):
-        """Test that layer weights have correct structure and shapes."""
+        """Test that layer weights have correct structure and shapes.
+
+        Checks each named sub-layer's own weights directly rather than
+        asserting on `layer.weights`'s flattened list order, which is an
+        implementation detail of Keras's tracking, not a documented
+        contract. `count_transform`'s input width is
+        `_aggregate_feature_dim()` (`count_dim + 1` per direction, doubled
+        for 'local'), not `count_dim` -- the `+ 1` is the log-extent
+        channel concatenated onto the density channels. Since
+        `output_dim (128) != input_dim (64)` here, a bias-free `input_proj`
+        shortcut is also created, and `counting_scope != 'global'` also
+        creates the per-channel `decay_logits` weight.
+        """
         input_dim = sample_input.shape[-1]  # 64
         output_dim = 128
         count_dim = 32
@@ -510,33 +537,39 @@ class TestCountingFFN:
         layer = CountingFFN(output_dim=output_dim, count_dim=count_dim, counting_scope='local')
         layer(sample_input)  # Build the layer
 
-        # Should have exactly 6 weights: 3 Dense layers × 2 weights each
-        assert len(layer.weights) == 6
-        assert len(layer.trainable_variables) == 6
+        aggregate_dim = 2 * (count_dim + 1)  # 'local' runs both directions
 
-        # Verify weight shapes
-        expected_shapes = [
-            (input_dim, count_dim),  # key_projection kernel
-            (count_dim,),  # key_projection bias
-            (count_dim * 2, output_dim),  # count_transform kernel (local uses 2 × count_dim)
-            (output_dim,),  # count_transform bias
-            (input_dim, output_dim),  # gate kernel
-            (output_dim,)  # gate bias
-        ]
+        assert tuple(layer.key_projection.kernel.shape) == (input_dim, count_dim)
+        assert tuple(layer.key_projection.bias.shape) == (count_dim,)
+        assert tuple(layer.count_transform.kernel.shape) == (aggregate_dim, output_dim)
+        assert tuple(layer.count_transform.bias.shape) == (output_dim,)
+        assert tuple(layer.gate.kernel.shape) == (input_dim, output_dim)
+        assert tuple(layer.gate.bias.shape) == (output_dim,)
+        assert layer.input_proj is not None
+        assert tuple(layer.input_proj.kernel.shape) == (input_dim, output_dim)
+        assert layer.decay_logits is not None
+        assert tuple(layer.decay_logits.shape) == (count_dim,)
 
-        actual_shapes = [tuple(w.shape) for w in layer.weights]
-        assert actual_shapes == expected_shapes
+        # 3 Dense layers x 2 weights + count_norm's gamma/beta + input_proj
+        # (kernel only, bias-free) + decay_logits.
+        assert len(layer.weights) == 6 + 2 + 1 + 1
+        assert len(layer.trainable_variables) == len(layer.weights)
 
     def test_count_transform_input_dimension_logic(self, sample_input):
-        """Test that count_transform receives correct input dimensions for different scopes."""
+        """Test that count_transform receives correct input dimensions for different scopes.
+
+        Each direction contributes `count_dim` density channels plus ONE
+        log-extent channel (`_aggregate_feature_dim()`), not `count_dim`
+        alone; 'local' runs two directions.
+        """
         input_dim = sample_input.shape[-1]
         count_dim = 16
 
         # Test each scope
         scope_configs = {
-            'global': count_dim,  # Uses count_dim
-            'causal': count_dim,  # Uses count_dim
-            'local': count_dim * 2  # Uses count_dim * 2 (bidirectional)
+            'global': count_dim + 1,  # Uses count_dim + 1 (density + extent)
+            'causal': count_dim + 1,  # Uses count_dim + 1 (density + extent)
+            'local': (count_dim + 1) * 2  # bidirectional: two directions
         }
 
         for scope, expected_input_dim in scope_configs.items():
@@ -721,23 +754,29 @@ class TestCountingFFNHasNoDeadInputDimLocal:
         one fails if the surviving definition is lost.
         """
         sample = keras.random.normal([2, 6, 8])
+        # Each direction contributes count_dim density channels plus ONE
+        # log-extent channel (_aggregate_feature_dim()'s "+ 1"); 'local'
+        # doubles that for its two directions.
         for scope, factor in (("global", 1), ("causal", 1), ("local", 2)):
             layer = CountingFFN(output_dim=16, count_dim=4,
                                 counting_scope=scope)
             layer(sample)
-            assert layer.count_transform.kernel.shape[0] == 4 * factor, scope
+            assert layer.count_transform.kernel.shape[0] == (4 + 1) * factor, scope
 
 
 class TestCountingFFNInitializersAreNotShared:
     """The three Dense layers must not draw from one initializer instance.
 
-    ``count_transform`` and ``gate`` have the same shape whenever the
-    aggregated count width equals the input width -- ``output_dim=16`` with
-    ``count_dim=8`` under the 'local' default over a 16-wide input is the
-    smallest example. Every test here uses the DEFAULT (unseeded) kernel
-    initializer on purpose: a seeded initializer legitimately gives
-    ``max|delta| = 0.0`` even with ``clone_initializer`` in place, so a
-    seeded guard would pass both ways and prove nothing.
+    ``count_transform``'s input width is ``_aggregate_feature_dim()``:
+    ``count_dim + 1`` per direction (the ``+ 1`` is the log-extent channel),
+    doubled for ``counting_scope='local'``. ``count_transform`` and ``gate``
+    have the same shape whenever that aggregated width equals the input
+    width -- under the current 'causal' default, ``count_dim=15`` over a
+    16-wide input makes ``count_dim + 1 == 16``, the smallest such example.
+    Every test here uses the DEFAULT (unseeded) kernel initializer on
+    purpose: a seeded initializer legitimately gives ``max|delta| = 0.0``
+    even with ``clone_initializer`` in place, so a seeded guard would pass
+    both ways and prove nothing.
     """
 
     @staticmethod
@@ -746,7 +785,7 @@ class TestCountingFFNInitializersAreNotShared:
 
     def test_count_transform_and_gate_kernels_differ_at_build(self) -> None:
         """The reported pair, at the shape where it collides."""
-        layer = CountingFFN(output_dim=16, count_dim=8)
+        layer = CountingFFN(output_dim=16, count_dim=15, counting_scope="causal")
         layer.build((None, 10, 16))
 
         assert layer.count_transform.kernel.shape == layer.gate.kernel.shape
@@ -754,10 +793,12 @@ class TestCountingFFNInitializersAreNotShared:
                                layer.gate.kernel) > 0.0
 
     def test_key_projection_kernel_differs_when_it_can_collide(self) -> None:
-        """``key_projection`` collides too, at output_dim == count_dim."""
+        """``key_projection`` collides too, at ``input_dim == count_dim + 1``
+        under 'global' (whose aggregate width is also ``count_dim + 1``,
+        with no doubling since only one direction exists)."""
         layer = CountingFFN(output_dim=8, count_dim=8,
                             counting_scope="global")
-        layer.build((None, 10, 8))
+        layer.build((None, 10, 9))
 
         assert (layer.key_projection.kernel.shape
                 == layer.count_transform.kernel.shape)
@@ -792,9 +833,23 @@ class TestCountingFFNInitializersAreNotShared:
         """
         keras.utils.set_random_seed(0)
         inputs = keras.Input(shape=(10, 16))
-        layer = CountingFFN(output_dim=16, count_dim=8)
+        # count_dim=15 under 'causal' makes count_transform's aggregate
+        # width (count_dim + 1 == 16) collide with gate's input width (16),
+        # matching the build-time collision case above.
+        layer = CountingFFN(output_dim=16, count_dim=15, counting_scope="causal")
         model = keras.Model(inputs, layer(inputs))
-        model.compile(optimizer=keras.optimizers.SGD(0.1), loss="mse")
+        # jit_compile=False: the layer's recurrence runs on keras.ops.scan
+        # (a tf.while_loop on the TF backend). On a GPU device, compile()'s
+        # default jit_compile="auto" lets grappler auto-cluster the training
+        # step into XLA, and differentiating a while_loop under XLA without
+        # a bounded max iteration count fails with "XLA compilation requires
+        # a fixed tensor list size" -- MEASURED: identical model.fit() call
+        # passes on CPU (CUDA_VISIBLE_DEVICES="") and passes on GPU once
+        # jit_compile is pinned off, so this is a GPU+XLA compilation-mode
+        # interaction with any while_loop-based scan, not a CountingFFN
+        # defect (a standalone tf.function-wrapped keras.ops.scan call with
+        # no CountingFFN code reproduces the same failure under XLA).
+        model.compile(optimizer=keras.optimizers.SGD(0.1), loss="mse", jit_compile=False)
 
         x = np.random.RandomState(0).randn(16, 10, 16).astype("float32")
         y = np.random.RandomState(1).randn(16, 10, 16).astype("float32")
@@ -813,7 +868,8 @@ class TestCountingFFNInitializersAreNotShared:
         """
         layer = CountingFFN(
             output_dim=16,
-            count_dim=8,
+            count_dim=15,
+            counting_scope="causal",
             kernel_initializer=keras.initializers.GlorotUniform(seed=7),
         )
         layer.build((None, 10, 16))

@@ -589,28 +589,24 @@ class CountingFFN(keras.layers.Layer):
         super().build(input_shape)
 
     @staticmethod
-    def _scan_combine(
-        left: Tuple[keras.KerasTensor, keras.KerasTensor],
-        right: Tuple[keras.KerasTensor, keras.KerasTensor],
+    def _scan_step(
+        carry: keras.KerasTensor,
+        x: Tuple[keras.KerasTensor, keras.KerasTensor],
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Associative operator for the recurrence ``s_t = a_t * s_{t-1} + b_t``.
+        One step of the recurrence ``s_t = a_t * s_{t-1} + b_t``.
 
-        Applying ``left`` then ``right`` composes to
-        ``(a_l * a_r, a_r * b_l + b_r)``, which is associative, so a parallel
-        scan evaluates the whole sequence in ``O(log T)`` depth instead of
-        ``O(T)`` sequential steps.
-
-        :param left: ``(a, b)`` for the earlier span.
-        :type left: Tuple[keras.KerasTensor, keras.KerasTensor]
-        :param right: ``(a, b)`` for the later span.
-        :type right: Tuple[keras.KerasTensor, keras.KerasTensor]
-        :return: ``(a, b)`` for the concatenated span.
+        :param carry: ``s_{t-1}``, the running state.
+        :type carry: keras.KerasTensor
+        :param x: ``(a_t, b_t)`` for this position.
+        :type x: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :return: ``(s_t, s_t)`` -- the new carry, and the emitted output,
+            which are the same value for this recurrence.
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        a_l, b_l = left
-        a_r, b_r = right
-        return a_l * a_r, a_r * b_l + b_r
+        a_t, b_t = x
+        new_state = a_t * carry + b_t
+        return new_state, new_state
 
     def _directional_features(
         self,
@@ -652,15 +648,40 @@ class CountingFFN(keras.layers.Layer):
         numerator = keys
         denominator = keras.ops.ones_like(keys) * mask
 
-        _, accumulated = keras.ops.associative_scan(
-            self._scan_combine,
-            (
-                keras.ops.concatenate([decay, decay], axis=-1),
-                keras.ops.concatenate([numerator, denominator], axis=-1),
-            ),
-            axis=1,
+        # DECISION plan-2026-09-18-1f3c0ce8/D-010: sequential keras.ops.scan,
+        # not keras.ops.associative_scan. Do NOT change this back to the
+        # parallel associative_scan this file used to call: on the
+        # TensorFlow backend it MEASURABLY breaks two separate ways, neither
+        # of which is specific to this layer's own logic --
+        # (1) its recursive `_scan` helper has no base case for a length-1
+        # axis (only lengths 2 and 3 short-circuit; a length-1 input reduces
+        # to a length-0 array and recurses forever), so T == 1 -- ordinary
+        # for single-token decoding -- crashed with a bare RecursionError;
+        # (2) independently of sequence length, tracing it inside a
+        # `tf.function` (which is what `model.fit()` uses by default)
+        # crashed with a SECOND RecursionError, this time deep inside
+        # protobuf's GraphDef serialization, reproduced with a minimal
+        # `@tf.function`-wrapped `associative_scan` call carrying no
+        # CountingFFN code at all. A sequential scan sidesteps both: it has
+        # no recursive base-case logic and no nested `tf.cond` tree to trace.
+        # Verified equal to the old parallel scan to float32-rounding scale
+        # (max|delta|=2.384e-07, both scan directions, T=7) before relying on
+        # it, and verified to run under a compiled `model.fit()` where the
+        # old code raised. See decisions.md D-010 for the full derivation.
+        combined_decay = keras.ops.moveaxis(
+            keras.ops.concatenate([decay, decay], axis=-1), 1, 0
+        )
+        combined_values = keras.ops.moveaxis(
+            keras.ops.concatenate([numerator, denominator], axis=-1), 1, 0
+        )
+        initial_state = keras.ops.zeros_like(combined_values[0])
+        _, accumulated = keras.ops.scan(
+            self._scan_step,
+            initial_state,
+            (combined_decay, combined_values),
             reverse=reverse,
         )
+        accumulated = keras.ops.moveaxis(accumulated, 0, 1)
 
         events, slots = keras.ops.split(accumulated, 2, axis=-1)
 
