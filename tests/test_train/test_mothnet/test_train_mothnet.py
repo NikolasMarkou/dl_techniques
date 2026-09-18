@@ -35,6 +35,7 @@ hand-rolled loop is expected to surface here, not be swallowed.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import warnings
 from pathlib import Path
@@ -766,3 +767,54 @@ def test_confusion_matrix_class_names_match_the_classes_actually_present(
     assert "7" not in classification_results.class_names, (
         "class_names still includes an absent class — not dynamically derived"
     )
+
+
+def test_visualize_or_warn_logs_a_warning_when_visualize_returns_none(caplog) -> None:
+    """Step 5.3 completion-fix (`plan-2026-09-18T080513-debe8b11` D-007,
+    adversarial-review finding 4, WARNING): `VisualizationManager.visualize()`
+    (`dl_techniques/visualization/core.py`) already wraps its own internal
+    plugin call in a `try/except Exception: logger.error(...); return None` —
+    a plugin-internal failure never raises, it just returns `None` silently.
+    `_visualize_or_warn` must notice that and log a `logger.warning`, since
+    the trainer's own OUTER try/except blocks (wrapped around the whole
+    render call) can never observe a failure that `visualize()` itself
+    already swallowed.
+
+    Uses a bare stand-in object with a `.visualize()` method returning `None`
+    unconditionally — this test targets `_visualize_or_warn`'s own
+    None-handling logic in isolation, not the real `VisualizationManager` or
+    any real plugin, so no matplotlib/sklearn call happens here at all.
+    """
+
+    class _AlwaysNoneVizManager:
+        def visualize(self, data, **kwargs):
+            return None
+
+    with caplog.at_level(logging.WARNING, logger="dl"):
+        train_mothnet._visualize_or_warn(
+            _AlwaysNoneVizManager(), data=object(), epoch=0,
+            description="fake visualization", plugin_name="whatever",
+        )
+
+    assert "fake visualization" in caplog.text
+    assert "None" in caplog.text
+
+
+def test_visualize_or_warn_does_not_warn_when_visualize_succeeds(caplog) -> None:
+    """The complementary GREEN path: a real (non-`None`) return value from
+    `.visualize()` must NOT produce a warning — pins the `is None` check
+    against a coarser "warn whenever called" regression that would make the
+    log noisy on every successful periodic render.
+    """
+
+    class _AlwaysSucceedsVizManager:
+        def visualize(self, data, **kwargs):
+            return "not-none-sentinel"
+
+    with caplog.at_level(logging.WARNING, logger="dl"):
+        train_mothnet._visualize_or_warn(
+            _AlwaysSucceedsVizManager(), data=object(), epoch=0,
+            description="fake visualization", plugin_name="whatever",
+        )
+
+    assert caplog.text == ""

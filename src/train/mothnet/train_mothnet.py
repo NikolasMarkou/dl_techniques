@@ -13,9 +13,11 @@ model construction with an explicit pre-loop build, a unified `results/<run>/` o
 directory (`config.json`, `best_model.keras`, `final_model.keras`, `training_log.csv`,
 `training_history.json`, `visualizations/`), the core Hebbian training loop with its
 ordering-disciplined checkpoint/CSV writes, and per-epoch/periodic visualization
-rendering (`render_training_dashboard`, `render_mb_sparsity`) — the same output shape
-as `src/train/bfunet/` and `src/train/kan/train_kan.py`, hand-assembled around
-`train_hebbian()`'s loop rather than a Keras `Callback`/`fit()` event loop.
+rendering — two hand-rolled functions (`render_training_dashboard`,
+`render_mb_sparsity`) plus two reused `dl_techniques.visualization` plugins
+(AL/MB-activation distribution + heatmap, confusion matrix) — the same output
+shape as `src/train/bfunet/` and `src/train/kan/train_kan.py`, hand-assembled
+around `train_hebbian()`'s loop rather than a Keras `Callback`/`fit()` event loop.
 
 Usage:
     python -m train.mothnet.train_mothnet --help
@@ -136,8 +138,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--viz-freq", type=int, default=2,
         help=(
-            "Render a periodic MB-sparsity visualization every N epochs; "
-            "<= 0 disables periodic visualization (default: 2)."
+            "Render the four periodic visualizations (MB-sparsity, AL/MB-activation "
+            "distribution + heatmap, confusion matrix) every N epochs; <= 0 disables "
+            "all four (default: 2)."
         ),
     )
     parser.add_argument(
@@ -488,6 +491,48 @@ def _create_visualization_manager(viz_dir: Path) -> VisualizationManager:
     return viz_manager
 
 
+def _visualize_or_warn(
+    viz_manager: VisualizationManager, data, *, epoch: int, description: str, **kwargs,
+) -> None:
+    """Call `viz_manager.visualize(data, **kwargs)`; log a warning if it silently
+    returned `None` instead of raising.
+
+    Interface contract (3 callers — the AL/MB-activation distribution, AL/MB-
+    activation heatmap, and confusion-matrix call sites in `main()`): pass the
+    already-constructed data object plus every `viz_manager.visualize()` kwarg
+    (`plugin_name`, `filename`, optionally `plot_type`); returns `None`
+    unconditionally — this is a fire-and-log wrapper, not a value producer.
+
+    :param viz_manager: The `VisualizationManager` to call `.visualize()` on.
+    :param data: The data object to visualize (`ActivationData` or
+        `ClassificationResults`).
+    :param epoch: The current 0-based epoch index, used only in the warning message.
+    :param description: A short human-readable label for what failed to render,
+        used only in the warning message.
+    :param kwargs: Forwarded verbatim to `viz_manager.visualize(data, **kwargs)`.
+    :return: None.
+    """
+    # DECISION plan-2026-09-18T080513-debe8b11/D-007: check `visualize()`'s return
+    # value and warn on `None`. `VisualizationManager.visualize()` (`core.py`)
+    # already wraps `create_visualization`/`save_figure` in its OWN
+    # `try/except Exception: logger.error(...); return None` — so a plugin-internal
+    # failure (a bad kwarg, a data-shape mismatch inside the plugin, ...) never
+    # raises up to this file's own try/except blocks, it just returns `None` with
+    # no PNG written. Before this helper, those outer try/except blocks only ever
+    # caught failures strictly BEFORE `visualize()` was called (constructing
+    # `ActivationData`/`ClassificationResults`, calling `extract_al_features`,
+    # ...), so a silently-swallowed plugin failure produced no trainer-level log
+    # line at all (review finding 4). Do not remove this None-check and go back to
+    # calling `viz_manager.visualize(...)` bare — see decisions.md D-007.
+    result = viz_manager.visualize(data, **kwargs)
+    if result is None:
+        logger.warning(
+            f"Epoch {epoch}: {description} visualization returned None — "
+            "VisualizationManager already logged the underlying error via "
+            "logger.error above; the PNG was not written."
+        )
+
+
 # DECISION plan-2026-09-18T045308-c89cdf76/D-004: do NOT convert
 # `render_training_dashboard`/`render_mb_sparsity` into `VisualizationManager`
 # plugins. A plugin abstraction is earned only when >=2 concrete call sites need it
@@ -673,9 +718,11 @@ def main(argv=None) -> int:
     best_val_accuracy = -1.0
     csv_path = run_dir / "training_log.csv"
 
-    # Created once, before the loop — `render_training_dashboard` (every epoch) and
-    # `render_mb_sparsity` (every `--viz-freq` epochs) both write into this single
-    # subdirectory (plan.md Step 6).
+    # Created once, before the loop — `render_training_dashboard` (every epoch),
+    # `render_mb_sparsity` (every `--viz-freq` epochs), and the two reused
+    # `VisualizationManager` plugin renders (AL/MB-activation distribution +
+    # heatmap, confusion matrix — also every `--viz-freq` epochs) all write into
+    # this single subdirectory (plan.md Step 6, Step 5).
     viz_dir = run_dir / "visualizations"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
@@ -856,9 +903,10 @@ def main(argv=None) -> int:
                             },
                             model_name="MothNet",
                         )
-                        viz_manager.visualize(
-                            activation_data, plugin_name="activations",
-                            plot_type="distribution",
+                        _visualize_or_warn(
+                            viz_manager, activation_data, epoch=epoch,
+                            description="AL/MB activation distribution",
+                            plugin_name="activations", plot_type="distribution",
                             filename=(
                                 f"epoch_{epoch + 1:03d}_al_mb_activations_distribution"
                             ),
@@ -890,9 +938,10 @@ def main(argv=None) -> int:
                             },
                             model_name="MothNet",
                         )
-                        viz_manager.visualize(
-                            heatmap_activation_data, plugin_name="activations",
-                            plot_type="heatmap",
+                        _visualize_or_warn(
+                            viz_manager, heatmap_activation_data, epoch=epoch,
+                            description="AL/MB activation heatmap",
+                            plugin_name="activations", plot_type="heatmap",
                             filename=f"epoch_{epoch + 1:03d}_al_mb_activations_heatmap",
                         )
                     except Exception as render_error:
@@ -930,8 +979,10 @@ def main(argv=None) -> int:
                             class_names=[str(c) for c in present_classes],
                             model_name="MothNet",
                         )
-                        viz_manager.visualize(
-                            classification_results, plugin_name="confusion_matrix",
+                        _visualize_or_warn(
+                            viz_manager, classification_results, epoch=epoch,
+                            description="confusion matrix",
+                            plugin_name="confusion_matrix",
                             filename=f"epoch_{epoch + 1:03d}_confusion_matrix",
                         )
                     except Exception as render_error:
