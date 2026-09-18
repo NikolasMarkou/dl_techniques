@@ -8,12 +8,14 @@ since `HebbianReadoutLayer.readout_weights` is `trainable=False` and is updated 
 by a direct Hebbian `.assign()` inside `train_hebbian` (see
 `plans/plan-2026-09-18T045308-c89cdf76/decisions.md` D-001/D-002).
 
-This module currently wires CLI argument parsing (plan Step 1), MNIST data loading
-(plan Step 2), model construction (plan Step 3), the run directory / config.json
-preamble (plan Step 4), the core Hebbian training loop with its ordering-disciplined
-checkpoint/CSV writes (plan Step 5), and per-epoch/periodic visualization rendering
-(plan Step 6: `render_training_dashboard`, `render_mb_sparsity`). Final-model/
-history-JSON finalization lands in a later plan step.
+This module provides CLI argument parsing, seeded MNIST data loading/subsampling,
+model construction with an explicit pre-loop build, a unified `results/<run>/` output
+directory (`config.json`, `best_model.keras`, `final_model.keras`, `training_log.csv`,
+`training_history.json`, `visualizations/`), the core Hebbian training loop with its
+ordering-disciplined checkpoint/CSV writes, and per-epoch/periodic visualization
+rendering (`render_training_dashboard`, `render_mb_sparsity`) — the same output shape
+as `src/train/bfunet/` and `src/train/kan/train_kan.py`, hand-assembled around
+`train_hebbian()`'s loop rather than a Keras `Callback`/`fit()` event loop.
 
 Usage:
     python -m train.mothnet.train_mothnet --help
@@ -35,7 +37,7 @@ import matplotlib.pyplot as plt
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.general_purpose.mothnet.model import MothNet
 from train.common import (
-    default_experiment_name, prepare_run_dir, save_training_history_json,
+    default_experiment_name, prepare_run_dir, save_training_history_json, setup_gpu,
 )
 from train.common.callbacks import best_checkpoint_path
 
@@ -368,6 +370,14 @@ def main(argv=None) -> int:
     args = parse_arguments(argv)
 
     logger.info(f"Parsed args: {args}")
+
+    # DECISION plan-2026-09-18T045308-c89cdf76/D-011: `--gpu` was declared but never
+    # wired at Step 1, a REFLECT-adversarial-review CRITICAL finding — every trainer
+    # in this repo supports `--gpu` and calls `setup_gpu(args.gpu)`
+    # (`src/train/CLAUDE.md` § What lives in `train.common`); fixed here rather than
+    # deferred, since a stale README example (`README.md`'s "Larger-scale run") was
+    # already instructing users to pass `--gpu 1` with no effect.
+    setup_gpu(gpu_id=args.gpu)
 
     # Unified run directory (matches `train_kan.py`'s own preamble): a single
     # results/<run>/ directory, resolved once here, that `prepare_run_dir` both
