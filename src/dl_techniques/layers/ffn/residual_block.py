@@ -105,7 +105,7 @@ class ResidualBlock(keras.layers.Layer):
     :type hidden_dim: int
     :param output_dim: Integer, dimensionality of the output space. Must be positive.
     :type output_dim: int
-    :param dropout_rate: Dropout rate for regularization between 0 and 1.
+    :param dropout_rate: Dropout rate for regularization, in ``[0.0, 1.0)``.
         Defaults to 0.0 (no dropout).
     :type dropout_rate: float
     :param activation: Activation function for hidden layer.
@@ -162,7 +162,7 @@ class ResidualBlock(keras.layers.Layer):
 
     :raises ValueError: If ``hidden_dim`` is not positive.
     :raises ValueError: If ``output_dim`` is not positive.
-    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0]``.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0)``.
 
     Input shape:
         Tensor of shape ``(batch_size, ..., input_dim)``. Any rank of 2 or
@@ -205,7 +205,7 @@ class ResidualBlock(keras.layers.Layer):
         stays ``None`` and no dropout runs at all.
 
         :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not
-            positive, or if ``dropout_rate`` is outside ``[0.0, 1.0]``.
+            positive, or if ``dropout_rate`` is outside ``[0.0, 1.0)``.
         """
         super().__init__(**kwargs)
 
@@ -214,7 +214,12 @@ class ResidualBlock(keras.layers.Layer):
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
-        if not (0.0 <= dropout_rate <= 1.0):
+        # DECISION plan-2026-09-18-1f3c0ce8/D-001: dropout_rate == 1.0 passed
+        # this check before, but keras.layers.Dropout.call() rejects rate==1.0
+        # ("must be ... in the range [0, 1)") -- so the layer built fine and
+        # only exploded on the first training-mode forward pass. Upper bound
+        # is exclusive to match what Dropout actually accepts.
+        if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
         # Store configuration parameters
