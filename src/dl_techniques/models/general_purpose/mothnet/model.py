@@ -26,6 +26,15 @@ monitoring only and is not what drives the weight updates.
 conventional classifier. The wider sparse code is available separately
 through `extract_mb_features`.
 
+The additive Hebbian rule above has no decay or bound of its own, so
+`readout_weights` grows unboundedly over long training runs; the optional
+`readout_weight_bound` constructor parameter clips it symmetrically after
+every update. That fixes the weight-growth instability only — it does not
+touch the antennal lobe or mushroom body, both of which stay frozen at
+random initialization for the entire run (see `extract_mb_features`/
+`extract_al_features`), so it is not expected to move the model's
+accuracy ceiling.
+
 References:
     - Delahunt & Kutz, 2019. Putting a bug in ML: The moth olfactory network learns
       to read MNIST. Neural Networks 118, 54-64.
@@ -59,6 +68,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 
 # ---------------------------------------------------------------------
 
@@ -118,6 +128,16 @@ class MothNet(keras.Model):
     :type al_activation: str
     :param mb_activation: Activation function for the mushroom-body layer.
     :type mb_activation: str
+    :param readout_weight_bound: Symmetric hard clip applied to the readout's
+        weights after every :meth:`train_hebbian` update, as
+        ``ValueRangeConstraint(min_value=-readout_weight_bound,
+        max_value=readout_weight_bound)``. Defaults to ``None``, which
+        reproduces today's unbounded-growth behavior exactly. This fixes a
+        real weight-growth instability in the additive Hebbian update rule;
+        it does not address the model's separate, architectural accuracy
+        ceiling, since the antennal lobe and mushroom body are both frozen
+        at random initialization for the whole run.
+    :type readout_weight_bound: Optional[float]
     :param kwargs: Additional keyword arguments for the base ``keras.Model``.
 
     :ivar antennal_lobe: Competitive-inhibition layer.
@@ -156,9 +176,15 @@ class MothNet(keras.Model):
         inhibition_strength: float = 0.5,
         al_activation: str = 'relu',
         mb_activation: str = 'relu',
+        readout_weight_bound: Optional[float] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
+        if readout_weight_bound is not None and readout_weight_bound <= 0:
+            raise ValueError(
+                "readout_weight_bound must be a positive float, or None to "
+                f"disable the constraint entirely; got {readout_weight_bound}."
+            )
         self.num_classes = num_classes
         self.al_units = al_units
         self.mb_units = mb_units
@@ -168,6 +194,7 @@ class MothNet(keras.Model):
         self.inhibition_strength = inhibition_strength
         self.al_activation = deserialize_activation(al_activation)
         self.mb_activation = deserialize_activation(mb_activation)
+        self.readout_weight_bound = readout_weight_bound
 
         # Sub-layers will be initialized in build()
         self.antennal_lobe = None
@@ -203,9 +230,17 @@ class MothNet(keras.Model):
             name='mushroom_body'
         )
 
+        readout_constraint = (
+            None if self.readout_weight_bound is None
+            else ValueRangeConstraint(
+                min_value=-self.readout_weight_bound,
+                max_value=self.readout_weight_bound,
+            )
+        )
         self.readout = HebbianReadoutLayer(
             units=self.num_classes,
             learning_rate=self.hebbian_learning_rate,
+            kernel_constraint=readout_constraint,
             name='hebbian_readout'
         )
 
@@ -371,6 +406,7 @@ class MothNet(keras.Model):
             'inhibition_strength': self.inhibition_strength,
             'al_activation': serialize_activation(self.al_activation),
             'mb_activation': serialize_activation(self.mb_activation),
+            'readout_weight_bound': self.readout_weight_bound,
         })
         return config
 
