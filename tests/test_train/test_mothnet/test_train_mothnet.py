@@ -327,3 +327,185 @@ def test_render_mb_sparsity_no_longer_calls_plt_spy() -> None:
 
     source = inspect.getsource(train_mothnet.render_mb_sparsity)
     assert "spy" not in source
+
+
+# The three NEW periodic-visualization stale-cleanup glob patterns Step 5
+# introduced (`decisions.md` D-001), mirrored alongside the pre-existing
+# `epoch_*_mb_sparsity.png` pattern that `main()` has cleaned up since before
+# this plan (plan-2026-09-18T060057-c1cfc3d3 Step 5 / F-05).
+_NEW_PERIODIC_GLOB_PATTERNS = (
+    "epoch_*_al_mb_activations_distribution.png",
+    "epoch_*_al_mb_activations_heatmap.png",
+    "epoch_*_confusion_matrix.png",
+)
+_ALL_PERIODIC_GLOB_PATTERNS = _NEW_PERIODIC_GLOB_PATTERNS + ("epoch_*_mb_sparsity.png",)
+
+
+@pytest.mark.integration
+def test_periodic_visualization_files_land_at_the_expected_epoch_stamped_names(
+    tmp_path: Path,
+) -> None:
+    """plan.md Step 7 / Success Criterion 5: a tiny real `main()` run with
+    `--viz-freq 1` for 2 epochs must produce ALL FIVE periodic/per-epoch
+    visualization files, non-empty, at the exact names `main()`'s own loop
+    writes them under (confirmed by direct source read, not guessed):
+    `training_dashboard.png` (per-epoch, overwritten in place, never
+    epoch-stamped) plus the four `epoch_002_*` files from the FINAL
+    (`--epochs 2`) epoch — `mb_sparsity`, `al_mb_activations_distribution`,
+    `al_mb_activations_heatmap`, `confusion_matrix`.
+
+    Steps 5/6's own executor reports already MEASURED this via a real,
+    uncommitted `results/` probe run; this is the permanent, committed,
+    automated version of that same proof.
+    """
+    run_dir = tmp_path / "mothnet_periodic_viz_run"
+    argv = [
+        "--mb-units", "200",
+        "--al-units", "64",
+        "--epochs", "2",
+        "--num-train-samples", "100",
+        "--num-val-samples", "50",
+        "--batch-size", "32",
+        "--viz-freq", "1",
+        "--output-dir", str(tmp_path),
+        "--experiment-name", "mothnet_periodic_viz_run",
+    ]
+    exit_code = train_mothnet.main(argv)
+    assert exit_code == 0
+
+    viz_dir = run_dir / "visualizations"
+    expected_files = (
+        viz_dir / "training_dashboard.png",
+        viz_dir / "epoch_002_mb_sparsity.png",
+        viz_dir / "epoch_002_al_mb_activations_distribution.png",
+        viz_dir / "epoch_002_al_mb_activations_heatmap.png",
+        viz_dir / "epoch_002_confusion_matrix.png",
+    )
+    for expected_file in expected_files:
+        assert expected_file.exists(), f"missing periodic visualization file: {expected_file}"
+        assert expected_file.stat().st_size > 0, f"empty periodic visualization file: {expected_file}"
+
+
+@pytest.mark.integration
+def test_stale_periodic_visualization_files_are_cleaned_up_on_a_rerun(
+    tmp_path: Path,
+) -> None:
+    """A rerun into the SAME `--experiment-name` must leave exactly the NEW
+    run's periodic-visualization files behind, not an accumulation of the
+    PRIOR (here, longer) run's files at the same name — mirroring the shape
+    of the pre-existing `epoch_*_mb_sparsity.png` stale-cleanup behavior
+    (`main()`'s own comment: "must start visualizations/ clean of stale
+    periodic PNGs from a PRIOR (possibly longer) run at that name"), but
+    exercised here against the THREE NEW glob patterns Step 5 introduced,
+    which had no permanent test of this rerun-cleanup behavior until now.
+
+    Runs once at `--epochs 5` (5 periodic files per pattern expected), then
+    reruns into the identical `--output-dir`/`--experiment-name` at
+    `--epochs 2` (2 files per pattern expected) — proving the SECOND run's
+    stale-cleanup glob loops actually deleted the first run's leftover files,
+    not merely that a short run alone produces 2 files.
+    """
+    experiment_name = "mothnet_stale_cleanup_run"
+    run_dir = tmp_path / experiment_name
+    viz_dir = run_dir / "visualizations"
+    base_argv = [
+        "--mb-units", "200",
+        "--al-units", "64",
+        "--num-train-samples", "100",
+        "--num-val-samples", "50",
+        "--batch-size", "32",
+        "--viz-freq", "1",
+        "--output-dir", str(tmp_path),
+        "--experiment-name", experiment_name,
+    ]
+
+    exit_code_first = train_mothnet.main(base_argv + ["--epochs", "5"])
+    assert exit_code_first == 0
+    for pattern in _ALL_PERIODIC_GLOB_PATTERNS:
+        matches = sorted(p.name for p in viz_dir.glob(pattern))
+        assert len(matches) == 5, f"{pattern}: expected 5 files after first run, found {matches}"
+
+    exit_code_second = train_mothnet.main(base_argv + ["--epochs", "2"])
+    assert exit_code_second == 0
+    for pattern in _ALL_PERIODIC_GLOB_PATTERNS:
+        matches = sorted(p.name for p in viz_dir.glob(pattern))
+        assert len(matches) == 2, (
+            f"{pattern}: expected exactly 2 files after rerun (stale files from "
+            f"the first, longer run must be cleaned up), found {matches}"
+        )
+
+
+@pytest.mark.integration
+def test_al_features_failure_is_independently_fail_soft_from_confusion_matrix(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Step 5's two NEW periodic render blocks (AL/MB activations, confusion
+    matrix) each get their OWN `try/except Exception: logger.warning(...)`
+    (plan.md invariant 1 / Step 5.2c) — a failure in ONE must not skip the
+    OTHER. Step 5's own executor report proved this manually via a real,
+    uncommitted run; this is the permanent, committed, automated version of
+    that same proof, and the ONLY thing this step is required to add here
+    (the plan's other Step 7 items were already added in Steps 2/4/6).
+
+    `model.extract_al_features` is overridden with an INSTANCE attribute
+    (installed via a wrapped `build_model`, mirroring
+    `test_final_save_attempted_on_mid_loop_exception`'s own instance-override
+    shape above) that raises unconditionally — forcing the AL/MB
+    activation-visualization try/except to fail on every periodic epoch.
+
+    Asserts: (a) `main()` still returns 0, not propagating the injected
+    exception; (b) `final_model.keras` still exists; (c) the confusion-matrix
+    PNG — an INDEPENDENT try/except block that does not call
+    `extract_al_features` at all — still gets produced despite the injected
+    failure in the OTHER block; and, to prove the injection genuinely fired
+    rather than being silently routed around, (d) the AL/MB activation PNGs
+    themselves are ABSENT.
+    """
+    _real_build_model = train_mothnet.build_model
+
+    def _build_model_with_broken_al_features(args, input_dim):
+        model = _real_build_model(args, input_dim)
+
+        def _raise_extract_al_features(*_call_args, **_call_kwargs):
+            raise RuntimeError("injected extract_al_features failure (test)")
+
+        # Instance-level override — deliberately not a class-level monkeypatch,
+        # so only THIS model instance's calls fail (matches
+        # `test_final_save_attempted_on_mid_loop_exception`'s own
+        # `model.train_hebbian = ...` shape above).
+        model.extract_al_features = _raise_extract_al_features
+        return model
+
+    monkeypatch.setattr(train_mothnet, "build_model", _build_model_with_broken_al_features)
+
+    run_dir = tmp_path / "mothnet_fail_soft_run"
+    argv = [
+        "--mb-units", "200",
+        "--al-units", "64",
+        "--epochs", "2",
+        "--num-train-samples", "100",
+        "--num-val-samples", "50",
+        "--batch-size", "32",
+        "--viz-freq", "1",
+        "--output-dir", str(tmp_path),
+        "--experiment-name", "mothnet_fail_soft_run",
+    ]
+    exit_code = train_mothnet.main(argv)
+    assert exit_code == 0
+
+    assert (run_dir / "final_model.keras").exists()
+
+    viz_dir = run_dir / "visualizations"
+    confusion_png = viz_dir / "epoch_002_confusion_matrix.png"
+    assert confusion_png.exists(), (
+        "confusion-matrix PNG missing — the injected extract_al_features "
+        "failure incorrectly took down the INDEPENDENT confusion-matrix "
+        "render block too"
+    )
+    assert confusion_png.stat().st_size > 0
+
+    # The OTHER block's own outputs must be ABSENT — proving the injected
+    # failure genuinely prevented ITS OWN render (the mock had a real effect),
+    # rather than the confusion-matrix assertion above passing by coincidence.
+    assert not (viz_dir / "epoch_002_al_mb_activations_distribution.png").exists()
+    assert not (viz_dir / "epoch_002_al_mb_activations_heatmap.png").exists()
