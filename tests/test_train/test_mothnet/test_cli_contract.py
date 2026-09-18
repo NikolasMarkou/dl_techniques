@@ -18,7 +18,7 @@ Shape of this trainer, and why the contract looks the way it does
 downstream function (``build_model``, ``load_mnist_data``, ``main``) reads
 ``args.<field>`` directly off it — the Namespace IS the config, the same shape
 as ``train_kan.py`` (`plan-2026-09-18T060057-c1cfc3d3/decisions.md` D-003).
-14 of the 15 declared flags are therefore checked as ordinary ``field`` rows:
+15 of the 16 declared flags are therefore checked as ordinary ``field`` rows:
 the "config" `assert_row_reaches_config` reads from is just the parsed
 Namespace itself, via ``build_config = train_mothnet.parse_arguments``.
 
@@ -90,7 +90,7 @@ docstring for the full rationale), all exercised below:
    row` — reads the flags off the REAL parser via `declared_option_strings`,
    so a 16th flag added without a matching row fails loudly).
 3. VALUES MUST BE MUTUALLY DISTINCT (every probe value below is unique across
-   all 15 rows, so a cross-wired forward moves the wrong field and is still
+   all 16 rows, so a cross-wired forward moves the wrong field and is still
    caught).
 
 Nothing here trains, allocates a GPU, or touches MNIST: every row drives only
@@ -159,6 +159,10 @@ MOTHNET_ROWS: Tuple[Row, ...] = (
     Row(
         ("--num-val-samples",), ("--num-val-samples", "321"),
         "num_val_samples", 321,
+    ),
+    Row(
+        ("--eval-batch-size",), ("--eval-batch-size", "111"),
+        "eval_batch_size", 111,
     ),
     # Deliberately NOT a `field` row: `--gpu` is consumed once, in main(), by
     # setup_gpu(gpu_id=args.gpu) -- it is never stored as a durable config

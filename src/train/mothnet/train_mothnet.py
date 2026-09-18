@@ -57,7 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
     `plan-2026-09-18T060057-c1cfc3d3`) so `tests/test_train/test_mothnet/
     test_cli_contract.py` can drive the REAL parser directly (`_cli_contract.py`'s
     `Contract.build_parser` needs the raw `ArgumentParser`, not a parsed
-    `Namespace`) without duplicating its 15-flag definition. Pure extraction —
+    `Namespace`) without duplicating its 16-flag definition. Pure extraction —
     `parse_arguments()` below still does exactly what it did before, just by
     calling this helper first. No behavior change.
 
@@ -66,7 +66,7 @@ def _build_parser() -> argparse.ArgumentParser:
     dataset-choice surface for that shared parser to usefully cover
     (`decisions.md` D-003).
 
-    :return: An unparsed `argparse.ArgumentParser` with all 15 MothNet flags.
+    :return: An unparsed `argparse.ArgumentParser` with all 16 MothNet flags.
     """
     # DECISION plan-2026-09-18T045308-c89cdf76/D-003: fresh ArgumentParser, not
     # create_base_argument_parser(). That shared parser's surface (--dataset,
@@ -165,6 +165,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--num-val-samples", type=int, default=500,
         help="Number of MNIST validation samples to subsample (default: 500).",
+    )
+    # DECISION plan-2026-09-18T080513-debe8b11/D-005: a dedicated eval-chunking flag,
+    # NOT a reuse of --batch-size. --batch-size is train_hebbian's own training
+    # mini-batch — an algorithm-affecting parameter (the Hebbian update is computed
+    # per mini-batch). Reusing it here would silently couple two independent
+    # concerns: a user raising --batch-size for training-speed reasons would also,
+    # as an unintended side effect, change eval-chunk memory pressure. Do not merge
+    # these two flags without re-reading decisions.md D-005.
+    parser.add_argument(
+        "--eval-batch-size", type=int, default=5000,
+        help=(
+            "Chunk size for the per-epoch accuracy computation's forward pass "
+            "(default: 5000). Decoupled from --batch-size, which governs "
+            "train_hebbian's own training mini-batch and IS algorithm-affecting "
+            "(it changes what the Hebbian update computes); --eval-batch-size is a "
+            "pure eval-chunking performance/memory knob with no effect on the "
+            "computed accuracy value."
+        ),
     )
 
     return parser
@@ -320,6 +338,45 @@ def build_model(args: argparse.Namespace, input_dim: int) -> MothNet:
         f"params={model.count_params()}."
     )
     return model
+
+
+def _predict_in_batches(model: MothNet, x: np.ndarray, batch_size: int) -> np.ndarray:
+    """Run `model.extract_features` over `x` in fixed-size chunks.
+
+    Chunks `x` into `batch_size`-sized slices via plain Python slicing (the final,
+    possibly-partial chunk is included automatically — `range(0, len(x), batch_size)`
+    plus `x[start:start + batch_size]` never raises or drops rows when `len(x)` is not
+    evenly divisible by `batch_size`, and handles `batch_size >= len(x)` identically to
+    passing `x` directly, in one chunk). Calls `model.extract_features(chunk)` per
+    chunk — an inference-mode-only forward (`extract_features()` already calls
+    `self(inputs, training=False)` internally) — and concatenates the per-chunk numpy
+    results via `np.concatenate`.
+
+    Exists purely to bound the transient GPU memory of the per-epoch accuracy
+    computation at full-MNIST scale (Step 1 of this plan MEASURED a real
+    `ResourceExhaustedError` from the prior unbatched call); it is NOT a change to
+    `MothNet.extract_features()`'s own contract (`decisions.md` D-002).
+
+    :param model: A built `MothNet` instance.
+    :param x: Input array, shape `(N, input_dim)`.
+    :param batch_size: Number of rows per chunk; need not evenly divide `N`.
+    :return: Concatenated feature array, shape `(N, num_classes)`, as a numpy array.
+    """
+    # DECISION plan-2026-09-18T080513-debe8b11/D-002: a small, local batching helper
+    # inside train_mothnet.py — NOT a change to `MothNet.extract_features()` itself.
+    # Pushing batching down into the model would change `extract_features()`'s public
+    # contract for every consumer (including `create_cyborg_features`), a broader
+    # blast radius than this trainer's own OOM fix. This function must never call
+    # `train_hebbian` or anything else that mutates `readout_weights` — the only
+    # weight-mutating call site in this file's epoch loop stays `train_hebbian`
+    # itself (plan.md invariant 2). See decisions.md D-002.
+    chunk_outputs = []
+    for start in range(0, len(x), batch_size):
+        chunk = x[start:start + batch_size]
+        chunk_outputs.append(
+            keras.ops.convert_to_numpy(model.extract_features(chunk))
+        )
+    return np.concatenate(chunk_outputs, axis=0)
 
 
 # DECISION plan-2026-09-18T045308-c89cdf76/D-004: do NOT convert
@@ -545,11 +602,11 @@ def main(argv=None) -> int:
                 )
                 loss = float(epoch_history["loss"][0])
 
-                val_logits = keras.ops.convert_to_numpy(model.extract_features(x_val))
+                val_logits = _predict_in_batches(model, x_val, args.eval_batch_size)
                 val_accuracy = float(
                     np.mean(np.argmax(val_logits, axis=-1) == np.argmax(y_val, axis=-1))
                 )
-                train_logits = keras.ops.convert_to_numpy(model.extract_features(x_train))
+                train_logits = _predict_in_batches(model, x_train, args.eval_batch_size)
                 train_accuracy = float(
                     np.mean(np.argmax(train_logits, axis=-1) == np.argmax(y_train, axis=-1))
                 )

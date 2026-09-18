@@ -197,3 +197,33 @@ def test_final_save_attempted_on_mid_loop_exception(tmp_path: Path, monkeypatch)
     # call, not an untrained/unbuilt model).
     reloaded = keras.models.load_model(str(run_dir / "final_model.keras"))
     assert reloaded.built
+
+
+def test_predict_in_batches_matches_unbatched_on_a_non_divisible_fixture() -> None:
+    """`_predict_in_batches` (plan-2026-09-18T080513-debe8b11 Step 2) must agree
+    with an unbatched `model.extract_features(x)` call to float32 tolerance.
+
+    `batch_size=7` deliberately does NOT divide the fixture's 23 rows, so the
+    final chunk (`x[21:23]`, 2 rows) is genuinely partial — exercising the
+    exact edge case `_predict_in_batches`'s `range(0, len(x), batch_size)` +
+    plain-slice chunking must handle without raising or dropping rows.
+
+    Builds a real, small `MothNet` via `train_mothnet.build_model` (the same
+    construction path — parsed args + `build_model` — every other test in this
+    module already drives the model through), rather than instantiating
+    `MothNet` directly: this file has no existing bare-`MothNet` construction
+    pattern to match, and going through `build_model` exercises the trainer's
+    own seeding/build sequence instead of inventing a second one.
+    """
+    args = train_mothnet.parse_arguments([
+        "--mb-units", "200",
+        "--al-units", "64",
+    ])
+    x = np.random.default_rng(0).random((23, 64)).astype("float32")
+    model = train_mothnet.build_model(args, input_dim=x.shape[1])
+
+    batched = train_mothnet._predict_in_batches(model, x, batch_size=7)
+    unbatched = keras.ops.convert_to_numpy(model.extract_features(x))
+
+    assert batched.shape == unbatched.shape == (23, 10)
+    np.testing.assert_allclose(batched, unbatched, atol=1e-5, rtol=1e-5)
