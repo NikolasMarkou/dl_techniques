@@ -37,7 +37,8 @@ import matplotlib.pyplot as plt
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.general_purpose.mothnet.model import MothNet
 from train.common import (
-    default_experiment_name, prepare_run_dir, save_training_history_json, setup_gpu,
+    default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
+    setup_gpu,
 )
 from train.common.callbacks import best_checkpoint_path
 
@@ -223,13 +224,15 @@ def load_mnist_data(config: argparse.Namespace):
 def build_model(args: argparse.Namespace, input_dim: int) -> MothNet:
     """Construct and explicitly build a `MothNet` model.
 
-    Seeds NumPy's global RNG once, before construction, so both any model-init
-    randomness and `train_hebbian`'s own internal unseeded shuffle
-    (`model.py:308`, no `seed=` kwarg exists there) become reproducible across runs
-    for a fixed `--seed`. This is process-global `np.random.seed`, deliberately
-    separate from `load_mnist_data`'s own local `np.random.default_rng(config.seed)`
-    generator used for subsampling — both consume the same `args.seed` value, they
-    just use different RNG mechanisms (`decisions.md` D-009).
+    Seeds all RNGs (`train.common.set_seeds`) once, before construction, so both
+    Keras/TF-backed weight init and `train_hebbian`'s own internal unseeded shuffle
+    (`model.py:308`, no `seed=` kwarg exists there) become reproducible across
+    SEPARATE PROCESS invocations for a fixed `--seed` (`decisions.md` D-001).
+    Deliberately separate from `load_mnist_data`'s own local
+    `np.random.default_rng(config.seed)` generator used for subsampling — both
+    consume the same `args.seed` value, they just use different RNG mechanisms
+    (`decisions.md` D-009); `set_seeds()` also calls `np.random.seed(seed)`
+    internally, so no conflict arises between the two.
 
     The model is explicitly `.build()`-built here, before the training loop ever
     starts, rather than left to `train_hebbian`'s own `if not self.built:` self-build
@@ -251,7 +254,22 @@ def build_model(args: argparse.Namespace, input_dim: int) -> MothNet:
     # an --epochs 0 run (blocked at CLI-parse time, but also any early crash before
     # the first train_hebbian call) would otherwise leave an unbuilt, unsavable
     # model. See decisions.md D-009 for the full trade-off.
-    np.random.seed(args.seed)
+    #
+    # DECISION plan-2026-09-18T060057-c1cfc3d3/D-001: seeding now routes through
+    # train.common.set_seeds() (was: np.random.seed(args.seed) alone), called here
+    # in the SAME position — strictly before MothNet(...) construction below.
+    # MEASURED: Keras' RandomInitializer (base of GlorotUniform, the default
+    # kernel_initializer for AntennalLobeLayer/HebbianReadoutLayer) draws its
+    # per-instance seed from Python's stdlib `random` module at object-CONSTRUCTION
+    # time, not from `np.random` — so np.random.seed alone never made weight init
+    # reproducible across separate process invocations. set_seeds() also calls
+    # np.random.seed(seed) internally, so D-009's original "seeds train_hebbian's own
+    # unseeded shuffle" rationale stays covered unchanged; this is a strict widening
+    # of what gets seeded, not a narrowing. D-009's own text above is NOT edited (its
+    # "two-separate-RNG-mechanism" framing is now partially superseded — see
+    # decisions.md D-001 for the full trade-off; do not re-narrow this back to a bare
+    # np.random.seed call).
+    set_seeds(args.seed)
 
     model = MothNet(
         num_classes=10,
