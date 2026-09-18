@@ -163,7 +163,12 @@ class MothNet(keras.Model):
         model, a different regime from training with a tight bound engaged
         from epoch 1 (which could rail the tensor early and hurt learning
         instead of helping) — a real training-time sweep is open, disclosed
-        follow-up work, not yet done (D-008).
+        follow-up work, not yet done (D-008). This bound is a
+        construction-time config carried in the model's saved
+        ``get_config()``: reloading a ``.keras`` checkpoint saved before this
+        parameter existed leaves the bound disabled (``None``) regardless of
+        the current CLI default, since ``from_config()`` reads the value the
+        checkpoint itself recorded, not today's default.
     :type readout_weight_bound: Optional[float]
     :param kwargs: Additional keyword arguments for the base ``keras.Model``.
 
@@ -257,6 +262,13 @@ class MothNet(keras.Model):
             name='mushroom_body'
         )
 
+        # DECISION plan-2026-09-18T110506-e42a44c7/D-003
+        # Symmetric [-B, B] rail, deliberately deviating from the cited
+        # paper's literal [0, w_max] shape: `readout_weights` initializes via
+        # `glorot_uniform` (signed), and a [0, B] rail would clip every
+        # negative-initialized entry to 0 on the very first hebbian_update()
+        # call. Do NOT change this to an asymmetric [0, B] rail without
+        # re-deriving the initializer interaction -- see decisions.md D-003.
         readout_constraint = (
             None if self.readout_weight_bound is None
             else ValueRangeConstraint(

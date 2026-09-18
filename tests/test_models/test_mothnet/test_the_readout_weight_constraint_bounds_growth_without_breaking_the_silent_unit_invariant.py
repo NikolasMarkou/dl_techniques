@@ -321,3 +321,161 @@ class TestTheConstraintBoundsMagnitudeAcrossSyntheticUpdates:
             "comparative proof requires a genuine separation, not a "
             "coincidental one"
         )
+
+
+class TestTheFiredCriterionMatchesD018sOwnSilentDefinition:
+    """Test (c) — added at Step 9.2, D-009.
+
+    # DECISION plan-2026-09-18T110506-e42a44c7/D-009
+    D-008's row-scoped fix used ``keras.ops.greater(pre_synaptic, 0.0)`` to
+    decide which MB units "fired". A second adversarial review
+    (`findings/review-iter-1-pass2.md` Concern 1) measured that criterion
+    WRONG: `# DECISION plan-2026-08-19T070627-a616f581/D-018`'s own pinned
+    test (``test_model.py``) defines "silent" as ``np.all(x == 0.0, axis=0)``
+    -- i.e. "fired" is ``!= 0.0``, not ``> 0.0``. For any non-ReLU
+    ``mb_activation`` (tanh/gelu/linear), a unit can produce a genuine
+    nonzero NEGATIVE activation; the old ``greater`` criterion misclassified
+    that unit as silent and silently DISCARDED its real Hebbian update. This
+    test constructs exactly that case directly against ``HebbianReadoutLayer``
+    (no MothNet/tanh plumbing needed -- a negative, nonzero column in
+    ``pre_synaptic`` is the whole reproduction) and asserts the fired row's
+    update is present and bit-identical to the unmasked reference outer
+    product, while a genuinely silent (all-zero) row stays untouched.
+
+    RED-then-GREEN proof (performed by hand at authoring time): temporarily
+    reverted the D-009 fix in ``src/dl_techniques/layers/mothnet_blocks.py``
+    (restored ``keras.ops.greater(pre_synaptic, 0.0)`` in place of
+    ``keras.ops.not_equal(pre_synaptic, 0.0)``) --
+    ``test_negative_but_nonzero_pre_synaptic_still_receives_its_hebbian_update``
+    went RED (the negative-activation row's delta was ``0.0`` instead of the
+    real, nonzero reference update). Restored ``not_equal``; the test is
+    GREEN again, confirmed via ``git diff`` showing zero remaining change to
+    the source file.
+    """
+
+    def test_negative_but_nonzero_pre_synaptic_still_receives_its_hebbian_update(self):
+        units = 3
+        input_dim = 2
+        learning_rate = 0.5
+        # Wide enough that the constraint never clips in this test -- this
+        # test isolates the CRITERION fix (D-009), not the row-scoping
+        # itself (already covered above) or the clip's magnitude behavior.
+        layer = HebbianReadoutLayer(
+            units=units,
+            learning_rate=learning_rate,
+            kernel_constraint=ValueRangeConstraint(min_value=-100.0, max_value=100.0),
+        )
+        layer.build((None, input_dim))
+        before = np.array(
+            keras.ops.convert_to_numpy(layer.readout_weights), copy=True
+        )
+
+        batch_size = 4
+        pre_synaptic_np = np.zeros((batch_size, input_dim), dtype="float32")
+        # Column 0: genuinely NEGATIVE (not zero) for every sample in the
+        # batch -- e.g. a tanh/gelu/linear unit that "fired" negatively.
+        # D-018's own criterion (`!= 0.0`) calls this FIRED; the old, wrong
+        # `> 0.0` criterion called it SILENT.
+        pre_synaptic_np[:, 0] = -0.5
+        # Column 1: genuinely all-zero -- the real silent unit this test
+        # uses as its negative control.
+        pre_synaptic_np[:, 1] = 0.0
+        pre_synaptic = keras.ops.convert_to_tensor(pre_synaptic_np)
+
+        labels = np.arange(batch_size) % units
+        post_synaptic_np = keras.utils.to_categorical(
+            labels, num_classes=units
+        ).astype("float32")
+        post_synaptic = keras.ops.convert_to_tensor(post_synaptic_np)
+
+        # Unmasked reference: the exact formula `hebbian_update` computes
+        # before any row-scoping/clip is applied -- since the constraint's
+        # bound (100.0) is never reached here, this is also the fully
+        # correct post-clip value.
+        reference_update = (
+            (pre_synaptic_np.T @ post_synaptic_np) / batch_size
+        ) * learning_rate
+        reference_after = before + reference_update
+
+        layer.hebbian_update(pre_synaptic, post_synaptic)
+        after = keras.ops.convert_to_numpy(layer.readout_weights)
+
+        np.testing.assert_array_equal(
+            after[0], reference_after[0],
+            err_msg=(
+                "a unit with genuine nonzero NEGATIVE pre_synaptic activation "
+                "did not receive its real Hebbian update -- the `fired` mask "
+                "is using the wrong criterion (D-009: must be `!= 0.0`, not "
+                "`> 0.0`)"
+            ),
+        )
+        assert float(np.max(np.abs(after[0] - before[0]))) > 0.0, (
+            "the negative-activation row's update was dropped entirely -- "
+            "delta is exactly zero, matching the pre-D-009 bug"
+        )
+        np.testing.assert_array_equal(
+            after[1], before[1],
+            err_msg=(
+                "a genuinely silent (all-zero) row was modified -- D-018 "
+                "violated"
+            ),
+        )
+
+
+class TestTheNoneConstraintPathIsStructurallyByteIdenticalToThePreD008Formula:
+    """Test (d) — added at Step 9.2, D-009 Concern 2.
+
+    # DECISION plan-2026-09-18T110506-e42a44c7/D-009
+    D-008's first cut ran the `fired`/`keras.ops.where` block
+    UNCONDITIONALLY, even when ``kernel_constraint is None`` -- breaking the
+    byte-for-byte backward-compatibility guarantee asserted in
+    ``mothnet_blocks.py``'s own docstring, both READMEs, and the CLI help
+    text. D-009 moved that block inside
+    ``if self.kernel_constraint is not None:``, so the ``None`` path is now
+    STRUCTURALLY identical to the original pre-D-006 formula (no `fired`
+    computation, no `where` call at all) rather than merely producing an
+    equal result by coincidence of ``not_equal`` making the mask a no-op.
+    This test proves byte-identity against a hand-computed reference using
+    the exact original formula, on the reviewer's own negative-``pre_synaptic``
+    counterexample (`findings/review-iter-1-pass2.md` Concern 2).
+    """
+
+    def test_none_constraint_path_matches_the_original_unclipped_formula_exactly(self):
+        units = 3
+        input_dim = 3
+        learning_rate = 0.01  # HebbianReadoutLayer's own default.
+
+        layer = HebbianReadoutLayer(units=units, kernel_constraint=None)
+        layer.build((None, input_dim))
+        before = np.array(
+            keras.ops.convert_to_numpy(layer.readout_weights), copy=True
+        )
+
+        # The reviewer's own counterexample: negative pre_synaptic values.
+        pre_synaptic_np = np.array(
+            [[-1.0, 0.0, 1.0], [-2.0, 0.0, 0.5]], dtype="float32"
+        )
+        post_synaptic_np = keras.utils.to_categorical(
+            np.array([0, 1]), num_classes=units
+        ).astype("float32")
+
+        # The ORIGINAL pre-D-006 formula, computed by hand: no constraint,
+        # no `fired` mask, no `keras.ops.where` -- literally
+        # `W_new = W_old + learning_rate * (x^T @ y) / batch_size`.
+        batch_size = pre_synaptic_np.shape[0]
+        reference_update = (
+            (pre_synaptic_np.T @ post_synaptic_np) / batch_size
+        ) * learning_rate
+        reference_after = before + reference_update
+
+        layer.hebbian_update(
+            keras.ops.convert_to_tensor(pre_synaptic_np),
+            keras.ops.convert_to_tensor(post_synaptic_np),
+        )
+        after = keras.ops.convert_to_numpy(layer.readout_weights)
+
+        assert np.array_equal(after, reference_after), (
+            "kernel_constraint=None must be BYTE-IDENTICAL to the original "
+            "pre-plan formula (no fired/where logic at all) -- the "
+            "documented backward-compatibility guarantee is broken"
+        )
