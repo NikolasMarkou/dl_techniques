@@ -34,7 +34,7 @@ Why the symmetry holds (this is the whole design):
 
         y(-x) = W_out . LN_diff(d(-x)) = -W_out . LN_diff(d(x)) = -y(x)
 
-Three conditions produce this, and nothing else does:
+Three conditions produce this:
 
 1. The two branches share weights (``tie_branches=True``). The symmetry comes
    from the *swap*, not from ``f`` being odd, so ``f`` is free to carry
