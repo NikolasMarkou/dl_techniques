@@ -50,16 +50,23 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 EXPERIMENT_NAME = "mothnet"
 
 
-def parse_arguments(argv=None) -> argparse.Namespace:
-    """Parse CLI arguments for the MothNet trainer.
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct the MothNet trainer's `argparse.ArgumentParser`, unparsed.
+
+    Split out of `parse_arguments()` (Step 2,
+    `plan-2026-09-18T060057-c1cfc3d3`) so `tests/test_train/test_mothnet/
+    test_cli_contract.py` can drive the REAL parser directly (`_cli_contract.py`'s
+    `Contract.build_parser` needs the raw `ArgumentParser`, not a parsed
+    `Namespace`) without duplicating its 15-flag definition. Pure extraction —
+    `parse_arguments()` below still does exactly what it did before, just by
+    calling this helper first. No behavior change.
 
     Built as a fresh, purpose-built `argparse.ArgumentParser` rather than
     `create_base_argument_parser()` — MothNet has no optimizer/LR-schedule/patience/
     dataset-choice surface for that shared parser to usefully cover
     (`decisions.md` D-003).
 
-    :param argv: Argument list to parse; ``None`` defers to ``sys.argv[1:]``.
-    :return: Parsed arguments namespace.
+    :return: An unparsed `argparse.ArgumentParser` with all 15 MothNet flags.
     """
     # DECISION plan-2026-09-18T045308-c89cdf76/D-003: fresh ArgumentParser, not
     # create_base_argument_parser(). That shared parser's surface (--dataset,
@@ -149,6 +156,16 @@ def parse_arguments(argv=None) -> argparse.Namespace:
         help="Number of MNIST validation samples to subsample (default: 500).",
     )
 
+    return parser
+
+
+def parse_arguments(argv=None) -> argparse.Namespace:
+    """Parse CLI arguments for the MothNet trainer.
+
+    :param argv: Argument list to parse; ``None`` defers to ``sys.argv[1:]``.
+    :return: Parsed arguments namespace.
+    """
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     if args.epochs < 1:
@@ -294,6 +311,11 @@ def build_model(args: argparse.Namespace, input_dim: int) -> MothNet:
     return model
 
 
+# DECISION plan-2026-09-18T045308-c89cdf76/D-004: do NOT convert
+# `render_training_dashboard`/`render_mb_sparsity` into `VisualizationManager`
+# plugins. A plugin abstraction is earned only when >=2 concrete call sites need it
+# (`references/complexity-control.md`); this trainer has exactly one dashboard. See
+# decisions.md D-004.
 def render_training_dashboard(history: Dict[str, List[float]], out_path: Path) -> None:
     """Render a 2-panel training dashboard PNG from the in-memory `history` dict.
 
@@ -442,6 +464,11 @@ def main(argv=None) -> int:
         csv_writer.writerow(["epoch", "loss", "train_accuracy", "val_accuracy"])
         csv_file.flush()
 
+        # DECISION plan-2026-09-18T045308-c89cdf76/D-002: do NOT collapse this outer
+        # loop into a single `model.train_hebbian(x_train, y_train, epochs=args.epochs,
+        # ...)` call. `train_hebbian` has no callback hook, so calling it once per
+        # epoch (with `epochs=1`) is the ONLY way to get per-epoch checkpoint/CSV/viz
+        # cadence matching bfunet's shape. See decisions.md D-002.
         for epoch in range(args.epochs):
             # DECISION plan-2026-09-18T045308-c89cdf76/D-005
             # ORDERING DISCIPLINE for this loop body — do not reorder without
