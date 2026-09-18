@@ -10,9 +10,10 @@ by a direct Hebbian `.assign()` inside `train_hebbian` (see
 
 This module currently wires CLI argument parsing (plan Step 1), MNIST data loading
 (plan Step 2), model construction (plan Step 3), the run directory / config.json
-preamble (plan Step 4), and the core Hebbian training loop with its ordering-
-disciplined checkpoint/CSV writes (plan Step 5). Visualization and final-model/
-history-JSON finalization land in later plan steps.
+preamble (plan Step 4), the core Hebbian training loop with its ordering-disciplined
+checkpoint/CSV writes (plan Step 5), and per-epoch/periodic visualization rendering
+(plan Step 6: `render_training_dashboard`, `render_mb_sparsity`). Final-model/
+history-JSON finalization lands in a later plan step.
 
 Usage:
     python -m train.mothnet.train_mothnet --help
@@ -29,6 +30,7 @@ import keras
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.general_purpose.mothnet.model import MothNet
@@ -270,6 +272,88 @@ def build_model(args: argparse.Namespace, input_dim: int) -> MothNet:
     return model
 
 
+def render_training_dashboard(history: Dict[str, List[float]], out_path: Path) -> None:
+    """Render a 2-panel training dashboard PNG from the in-memory `history` dict.
+
+    Left panel: loss vs. epoch. Right panel: train_accuracy and val_accuracy vs.
+    epoch, on shared axes with a legend. A pure function — no model/filesystem state
+    beyond writing `out_path` — mirroring `train/bfunet/common.py`'s
+    `render_training_dashboard` shape (plain dict in, PNG out) without adopting any of
+    its image-denoising-specific content (`decisions.md` D-004: hand-rolled function,
+    not a `VisualizationManager` plugin).
+
+    Called every epoch by `main()`'s training loop, wrapped in `try/except Exception:
+    logger.warning(...)` at the call site — a render failure must never abort training
+    (plan.md invariant 9).
+
+    :param history: Per-epoch scalar lists with keys `epoch`, `loss`,
+        `train_accuracy`, `val_accuracy` (the exact shape Step 5's loop builds).
+    :param out_path: PNG destination (typically
+        `run_dir / "visualizations" / "training_dashboard.png"`).
+    :return: None.
+    """
+    epochs = history["epoch"]
+
+    fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    ax_loss.plot(epochs, history["loss"], color="#d62728", marker="o", markersize=3)
+    ax_loss.set_title("Training loss")
+    ax_loss.set_xlabel("epoch")
+    ax_loss.set_ylabel("loss")
+    ax_loss.grid(True, alpha=0.3)
+
+    ax_acc.plot(
+        epochs, history["train_accuracy"], label="train_accuracy",
+        color="#1f77b4", marker="o", markersize=3,
+    )
+    ax_acc.plot(
+        epochs, history["val_accuracy"], label="val_accuracy",
+        color="#2ca02c", marker="o", markersize=3,
+    )
+    ax_acc.set_title("Accuracy")
+    ax_acc.set_xlabel("epoch")
+    ax_acc.set_ylabel("accuracy")
+    ax_acc.set_ylim(0.0, 1.0)
+    ax_acc.grid(True, alpha=0.3)
+    ax_acc.legend(loc="lower right", fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def render_mb_sparsity(model: MothNet, x_sample: np.ndarray, out_path: Path) -> None:
+    """Render a `plt.spy(...)` sparsity plot of the Mushroom Body's sparse codes.
+
+    Reuses the MothNet README's own Example 2 pattern
+    (`src/dl_techniques/models/general_purpose/mothnet/README.md`, "Extracting and
+    Visualizing MB Sparse Codes"): `model.extract_mb_features(x_sample)` ->
+    `keras.ops.convert_to_numpy(...)` -> `plt.spy(...)`. A pure function — no
+    training-loop state beyond `model`/`x_sample`/`out_path`.
+
+    Called periodically by `main()`'s training loop (every `args.viz_freq` epochs,
+    `<= 0` disables), wrapped in `try/except Exception: logger.warning(...)` at the
+    call site — a render failure must never abort training (plan.md invariant 9).
+
+    :param model: A built `MothNet` instance.
+    :param x_sample: A small batch of input samples, shape `(N, input_dim)`.
+    :param out_path: PNG destination, expected to be epoch-stamped by the caller
+        (e.g. `visualizations/epoch_{epoch+1:03d}_mb_sparsity.png`) so periodic
+        renders never overwrite each other.
+    :return: None.
+    """
+    mb_codes = keras.ops.convert_to_numpy(model.extract_mb_features(x_sample))
+
+    fig = plt.figure(figsize=(10, 4))
+    plt.spy(mb_codes, markersize=2)
+    plt.title("Mushroom Body Sparse Codes")
+    plt.xlabel("MB Neuron Index")
+    plt.ylabel("Sample Index")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 def main(argv=None) -> int:
     """Entry point for the MothNet trainer.
 
@@ -308,6 +392,12 @@ def main(argv=None) -> int:
     }
     best_val_accuracy = -1.0
     csv_path = run_dir / "training_log.csv"
+
+    # Created once, before the loop — `render_training_dashboard` (every epoch) and
+    # `render_mb_sparsity` (every `--viz-freq` epochs) both write into this single
+    # subdirectory (plan.md Step 6).
+    viz_dir = run_dir / "visualizations"
+    viz_dir.mkdir(parents=True, exist_ok=True)
 
     # Opened once, before the loop, in append mode with the header written here and
     # every row flushed immediately after it's written (never batched) — a crash
@@ -377,6 +467,26 @@ def main(argv=None) -> int:
             history["loss"].append(loss)
             history["train_accuracy"].append(train_accuracy)
             history["val_accuracy"].append(val_accuracy)
+
+            # Both render calls are wrapped in try/except — a visualization failure
+            # must never abort training (plan.md invariant 9 / Constraints HARD list).
+            try:
+                render_training_dashboard(history, viz_dir / "training_dashboard.png")
+            except Exception as render_error:
+                logger.warning(
+                    f"Epoch {epoch}: render_training_dashboard failed: {render_error}"
+                )
+
+            if args.viz_freq > 0 and (epoch + 1) % args.viz_freq == 0:
+                try:
+                    render_mb_sparsity(
+                        model, x_val[:8],
+                        viz_dir / f"epoch_{epoch + 1:03d}_mb_sparsity.png",
+                    )
+                except Exception as render_error:
+                    logger.warning(
+                        f"Epoch {epoch}: render_mb_sparsity failed: {render_error}"
+                    )
 
             logger.info(
                 f"Epoch {epoch}/{args.epochs - 1} — loss={loss:.4f}, "
