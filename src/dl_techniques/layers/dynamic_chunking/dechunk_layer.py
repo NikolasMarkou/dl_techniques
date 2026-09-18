@@ -67,7 +67,7 @@ class DeChunkLayer(keras.layers.Layer):
                                         │
                                 keep [B, L] bool
                                         │
-                                  ┌─────────┴─────────┐
+                                  ┌─────┴─────────────┐
                                   ▼                   │
                     ┌───────────────────┐             │
                     │ stable partition, │             │
