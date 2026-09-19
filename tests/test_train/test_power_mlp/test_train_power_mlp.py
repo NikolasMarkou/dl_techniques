@@ -899,6 +899,118 @@ def test_a_raising_renderer_does_not_abort_on_epoch_end(monkeypatch, tmp_path) -
     assert cb.history["loss"] == [1.0]
 
 
+def _drive_dashboard(monkeypatch, tmp_path, planned, run, with_params=True):
+    """Run a stubbed callback for ``run`` epochs; return the epoch counts it drew.
+
+    ``render_training_dashboard`` is replaced by a spy that records how many epochs
+    the history held at each call, so a draw at epoch ``n`` shows up as ``n``.
+    """
+    drawn: list[int] = []
+
+    def spy(history, out_path, title="", epoch_times=None, baseline=None):
+        assert len(epoch_times) == len(history["loss"]), "every epoch is accumulated"
+        drawn.append(len(history["loss"]))
+        return ["Loss"]
+
+    monkeypatch.setattr(viz, "render_training_dashboard", spy)
+    cb = viz.TrainingDashboardCallback(tmp_path / "c.png")
+    if with_params:
+        cb.set_params({"epochs": planned, "steps": 5, "verbose": 0})
+    cb.on_train_begin()
+    for epoch in range(run):
+        cb.on_epoch_begin(epoch)
+        cb.on_epoch_end(epoch, {"loss": 1.0 / (epoch + 1), "val_loss": 1.0, "lr": 3e-4})
+    cb.on_train_end()
+    return drawn, cb
+
+
+@pytest.mark.parametrize(
+    "planned, run, expected",
+    [
+        (3, 3, [1, 2, 3]),  # 3 // 20 = 0 -> every epoch
+        (10, 10, list(range(1, 11))),  # 10 // 20 = 0 -> every epoch
+        (39, 39, list(range(1, 40))),  # 39 // 20 = 1 -> every epoch
+        (40, 40, [1] + list(range(2, 41, 2))),  # interval 2
+        # Early stop at 37 of 100: interval 5, so 35 is the last cadence draw and the
+        # final state (37) is drawn by on_train_end.
+        (100, 37, [1, 5, 10, 15, 20, 25, 30, 35, 37]),
+        # Full 100 epochs: 21 draws, epoch 100 is on the cadence so no extra draw.
+        (100, 100, [1] + list(range(5, 101, 5))),
+    ],
+)
+def test_dashboard_draws_on_a_cadence_and_always_shows_the_final_state(
+        monkeypatch, tmp_path, planned, run, expected) -> None:
+    drawn, _ = _drive_dashboard(monkeypatch, tmp_path, planned, run)
+    assert drawn == expected, drawn
+    assert drawn[0] == 1 and drawn[-1] == run, "epoch 1 first, the final state last"
+
+
+def test_dashboard_without_planned_epochs_draws_every_epoch(monkeypatch, tmp_path) -> None:
+    drawn, _ = _drive_dashboard(monkeypatch, tmp_path, None, 25, with_params=False)
+    assert drawn == list(range(1, 26))
+    drawn, _ = _drive_dashboard(monkeypatch, tmp_path, None, 7)  # params present, epochs None
+    assert drawn == list(range(1, 8))
+
+
+def test_a_hundred_epoch_run_draws_21_times_not_100(monkeypatch, tmp_path) -> None:
+    """The saving: 79 renders of about 1.1-1.7 s each (measured on this machine)."""
+    drawn, cb = _drive_dashboard(monkeypatch, tmp_path, 100, 100)
+    assert len(drawn) == 21 and len(cb.epoch_times) == 100
+
+
+def test_the_final_draw_is_skipped_only_when_the_last_epoch_is_already_on_disk(
+        monkeypatch, tmp_path) -> None:
+    """``on_train_end`` must draw when the last epoch is off-cadence, and must not
+    draw a second identical image when it is on it. A run with no epochs draws
+    nothing."""
+    drawn, _ = _drive_dashboard(monkeypatch, tmp_path, 100, 37)
+    assert drawn.count(37) == 1 and drawn[-1] == 37
+    drawn, _ = _drive_dashboard(monkeypatch, tmp_path, 100, 100)
+    assert drawn.count(100) == 1
+    drawn, _ = _drive_dashboard(monkeypatch, tmp_path, 100, 0)
+    assert drawn == []
+
+
+def test_a_failed_draw_is_retried_in_on_train_end_and_never_raises(
+        monkeypatch, tmp_path) -> None:
+    calls = []
+
+    def flaky(history, out_path, title="", epoch_times=None, baseline=None):
+        calls.append(len(history["loss"]))
+        if len(calls) == 1:
+            raise RuntimeError("first render fails")
+        return ["Loss"]
+
+    monkeypatch.setattr(viz, "render_training_dashboard", flaky)
+    cb = viz.TrainingDashboardCallback(tmp_path / "f.png")
+    cb.set_params({"epochs": 100})
+    cb.on_epoch_begin(0)
+    cb.on_epoch_end(0, {"loss": 1.0, "val_loss": 1.0})  # draws, raises inside, is caught
+    cb.on_train_end()  # the PNG never showed epoch 1, so it is drawn again
+    assert calls == [1, 1]
+
+
+def test_real_fit_hands_the_callback_its_planned_epoch_count(monkeypatch, tmp_path) -> None:
+    """``keras.Model.fit`` must put ``epochs`` in ``callback.params`` under the key the
+    callback reads, or the cadence silently degrades to every-epoch (and the saving
+    disappears without any test on the stub path noticing)."""
+    drawn: list[int] = []
+
+    def spy(history, out_path, title="", epoch_times=None, baseline=None):
+        drawn.append(len(history["loss"]))
+        return ["Loss"]
+
+    monkeypatch.setattr(viz, "render_training_dashboard", spy)
+    model = keras.Sequential([keras.layers.Input((4,)), keras.layers.Dense(2, activation="softmax")])
+    model.compile(optimizer="adam", loss=keras.losses.SparseCategoricalCrossentropy())
+    rng = np.random.default_rng(0)
+    x, y = rng.normal(size=(16, 4)).astype("float32"), rng.integers(0, 2, 16)
+    cb = viz.TrainingDashboardCallback(tmp_path / "r.png")
+    model.fit(x, y, validation_data=(x, y), epochs=40, batch_size=16, verbose=0, callbacks=[cb])
+    assert cb.params["epochs"] == 40
+    assert drawn == [1] + list(range(2, 41, 2)), drawn
+
+
 def test_dashboard_callback_evaluates_the_epoch_0_baseline(tmp_path) -> None:
     model = keras.Sequential([keras.layers.Input((6,)), keras.layers.Dense(3, activation="softmax")])
     model.compile(optimizer="adam", loss=keras.losses.SparseCategoricalCrossentropy(),

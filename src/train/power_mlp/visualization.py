@@ -8,7 +8,8 @@ saved at ``dpi=120`` with a tight bounding box, and closed on every path.
 Contents:
 
 - :func:`render_training_dashboard` / :class:`TrainingDashboardCallback` - one
-  overwritten multi-panel PNG of the per-epoch curves, redrawn every epoch, with
+  overwritten multi-panel PNG of the per-epoch curves, redrawn on a cadence that
+  scales with the planned epoch count (see :data:`DASHBOARD_TARGET_DRAWS`), with
   an epoch-0 baseline marker. Only panels that have data are drawn (no blank
   cells).
 - :func:`plot_confusion_matrix` - counts and row-normalized side by side. A local
@@ -46,6 +47,23 @@ DPI = 120
 TRAIN_COLOR = "#d62728"
 VAL_COLOR = "#1f77b4"
 ACCENT_COLOR = "#2ca02c"
+
+# DECISION plan-2026-09-18T213948-68dcb72c/D-027: do NOT go back to redrawing the
+# dashboard after every epoch "so the PNG is always live": that cost 40% of a
+# 100-epoch run (decisions.md D-027, finding F1). Epoch 1 and the final state are
+# always drawn; guards: test_dashboard_draws_on_a_cadence_and_always_shows_the_final_state.
+# The dashboard is redrawn about this many times per run, not once per epoch: a render
+# costs 1.1-1.7 s (CPU, measured) against a 1.8 s MNIST training epoch, so drawing
+# every epoch of a 100-epoch run spent about 40% of the wall-clock on plotting
+# (run wall 348 s vs 196 s of summed epoch times). The cadence is
+# ``max(1, planned_epochs // DASHBOARD_TARGET_DRAWS)`` epochs; epoch 1 and the final
+# state are always drawn.
+DASHBOARD_TARGET_DRAWS = 20
+
+# Reliability-diagram bins holding fewer samples than this are drawn hatched and
+# lighter and annotated with their n: a bin of 3 samples has an accuracy of 0, 1/3,
+# 2/3 or 1 and must not read as evidence.
+CALIBRATION_MIN_BIN_SAMPLES = 20
 
 # The smoothed-loss panel is only informative once there are enough epochs.
 SMOOTHED_PANEL_MIN_EPOCHS = 6
@@ -308,18 +326,26 @@ def render_training_dashboard(
 
 
 class TrainingDashboardCallback(keras.callbacks.Callback):
-    """Redraws the training dashboard after every epoch, overwriting one PNG.
+    """Redraws the training dashboard on a cadence, overwriting one PNG.
 
     Keeps its own accumulated history (so it needs no ``History`` callback),
-    including the learning rate, and its own per-epoch wall times. If
-    ``baseline_data`` is given, the untrained model is evaluated on it in
-    ``on_train_begin`` and drawn as the epoch-0 marker. Every evaluation and
-    render is wrapped so a plotting failure logs a warning and never aborts
-    training. Place it AFTER ``LearningRateLogger`` so ``logs['lr']`` exists;
-    otherwise the rate is read off the optimizer.
+    including the learning rate, and its own per-epoch wall times (accumulated on
+    EVERY epoch, drawn or not). If ``baseline_data`` is given, the untrained model
+    is evaluated on it in ``on_train_begin`` and drawn as the epoch-0 marker.
+    Every evaluation and render is wrapped so a plotting failure logs a warning
+    and never aborts training. Place it AFTER ``LearningRateLogger`` so
+    ``logs['lr']`` exists; otherwise the rate is read off the optimizer.
+
+    Draw schedule (see :data:`DASHBOARD_TARGET_DRAWS`): after epoch 1 (so the
+    baseline and the first point exist), then after every
+    ``max(1, planned_epochs // 20)``-th epoch, and once more in ``on_train_end`` if
+    the last completed epoch was not already drawn (an early stop or a run whose
+    length is off the cadence), so the file always shows the final state. The
+    planned epoch count comes from ``self.params['epochs']``; if it is missing the
+    dashboard is drawn every epoch.
 
     Args:
-        out_path: PNG destination, overwritten each epoch.
+        out_path: PNG destination, overwritten on each draw.
         baseline_data: Optional ``(x_val, y_val)`` for the epoch-0 baseline.
         title: Figure suptitle.
         batch_size: Batch size for the baseline evaluation.
@@ -347,6 +373,8 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         self.epoch_times: List[float] = []
         self.baseline: Optional[Dict[str, float]] = None
         self._epoch_start = 0.0
+        # Number of completed epochs the PNG on disk shows (0 = nothing drawn yet).
+        self._drawn_epochs = 0
 
     def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
         """Evaluate the untrained model on ``baseline_data`` (epoch 0)."""
@@ -374,8 +402,28 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         except Exception:  # noqa: BLE001
             return None
 
+    def _draw_interval(self) -> int:
+        """Epochs between redraws: ``max(1, planned // 20)``, or 1 if unknown."""
+        planned = (self.params or {}).get("epochs")
+        try:
+            return max(1, int(planned) // DASHBOARD_TARGET_DRAWS)
+        except (TypeError, ValueError):
+            return 1
+
+    def _draw(self) -> None:
+        """Render the dashboard from the accumulated state; never raises."""
+        completed = len(self.epoch_times)
+        try:
+            render_training_dashboard(
+                self.history, self.out_path, self.title,
+                epoch_times=self.epoch_times, baseline=self.baseline,
+            )
+            self._drawn_epochs = completed
+        except Exception as e:  # noqa: BLE001 - never abort training for a plot
+            logger.warning(f"Dashboard render failed at epoch {completed}: {e}")
+
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        """Accumulate this epoch's logs and redraw the dashboard."""
+        """Accumulate this epoch's logs; redraw if this epoch is on the cadence."""
         logs = logs or {}
         try:
             self.epoch_times.append(time.perf_counter() - self._epoch_start)
@@ -385,12 +433,18 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
             lr = self._current_lr(logs)
             if lr is not None:
                 self.history.setdefault("lr", []).append(lr)
-            render_training_dashboard(
-                self.history, self.out_path, self.title,
-                epoch_times=self.epoch_times, baseline=self.baseline,
-            )
         except Exception as e:  # noqa: BLE001 - never abort training for a plot
-            logger.warning(f"Dashboard render failed at epoch {epoch + 1}: {e}")
+            logger.warning(f"Dashboard accumulation failed at epoch {epoch + 1}: {e}")
+            return
+        completed = len(self.epoch_times)
+        if completed == 1 or completed % self._draw_interval() == 0:
+            self._draw()
+
+    def on_train_end(self, logs: Optional[Dict[str, Any]] = None) -> None:
+        """Draw the final state unless the last completed epoch is already on disk."""
+        completed = len(self.epoch_times)
+        if completed and self._drawn_epochs != completed:
+            self._draw()
 
 
 # ---------------------------------------------------------------------
