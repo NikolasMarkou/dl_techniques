@@ -227,7 +227,7 @@ Notes on individual files:
   epochs, plus once more when training ends if the last epoch was not on the cadence. A
   100-epoch run draws 21 times, not 100. Mid-run the PNG on disk is therefore up to
   `max(1, planned_epochs // 20) - 1` epochs stale (4 epochs behind on a 100-epoch run); a
-  process killed between two draws leaves the last cadence draw, not the last epoch. A render costs about 1.0 to 1.2 s (measured, CPU)
+  process killed between two draws leaves the last cadence draw, not the last epoch. A render costs about 1.0 to 1.7 s (measured, CPU)
   against a training epoch of about 1.8 s; drawing every epoch made a 100-epoch run take
   348 s of wall-clock instead of 259 s with identical metrics.
 - **`confidence_calibration.png`**: bins with fewer than 20 samples are drawn hatched, pale
@@ -338,33 +338,48 @@ trajectory for a batch-normalized run. Details of the final run:
 
 The MNIST batch-normalization default rests on a 10-epoch margin of +0.00243. This control
 trains both arms for 100 epochs at HEAD (`cc050e3a0`), GPU 1, one job at a time, from the
-repository root. The batch-normalized command was run twice: "final" is the earlier run
-(before the epoch-0 baseline change), "final2" is the same command at HEAD.
+repository root. The batch-normalized command was run three times: "final" is the earlier
+run (before the epoch-0 baseline change), "final2" is the same command at `cc050e3a0`, and
+"final3" is the same command after the baseline pass was made side-effect free (`39dbfdd69`,
+D-031: the pass now restores the dropout seed-generator states as well as the weights).
 
 | run | batch norm | best epoch | test accuracy | test loss | best `val_loss` | last-epoch `val_loss` | wall-clock |
 |---|---|---|---|---|---|---|---|
 | `powermlp_mnist_100ep_final_seed0` (earlier code) | on | 22 | 0.9836 | 0.0681 | 0.0626 | 0.0648 | 259 s |
-| `powermlp_mnist_100ep_final2_seed0` (HEAD) | on | 8 | 0.9797 | 0.0664 | 0.0615 | 0.0657 | 292 s |
+| `powermlp_mnist_100ep_final2_seed0` (`cc050e3a0`) | on | 8 | 0.9797 | 0.0664 | 0.0615 | 0.0657 | 292 s |
+| `powermlp_mnist_100ep_final3_seed0` (`39dbfdd69`) | on | 14 | 0.9829 | 0.0577 | 0.0621 | 0.0630 | 280 s |
 | `powermlp_mnist_100ep_nobn_seed0` (HEAD) | off | 13 | 0.9806 | 0.0784 | 0.0923 | 0.1255 | 262 s |
 
 Honest reading:
 
-- The two batch-normalized runs have the same configuration and seed and differ by 0.0039
-  test accuracy (0.9836 vs 0.9797). The cause that was measured: the trainer's epoch-0
-  baseline pass runs the batch-normalized model in training mode, which draws dropout masks
-  and advances the model's three dropout seed generators (CPU probe: 3 of 3 change), so a
-  batch-normalized run starts `fit` from a different dropout stream than before; a
-  non-batch-normalized run uses `model.evaluate` (dropout off) and is unaffected. That the
-  accuracy difference comes from this stream change is an inference: the earlier code is
-  bit-identical run to run (runs B and "final"), and no run isolates the cause.
+- The three batch-normalized runs have the same configuration and seed and give test
+  accuracy 0.9836, 0.9797 and 0.9829 (a spread of 0.0039), best epochs 22, 8 and 14. The
+  runs differ only in the dropout stream `fit` starts from, and the stream depends on how
+  many training-mode diagnostic passes ran before `fit` without restoring the dropout seed
+  generators: "final" ran one (the initial-loss guard; its dashboard baseline was
+  `model.evaluate`, dropout off), "final2" ran two (the guard and the new training-mode
+  dashboard baseline), "final3" runs none (D-031 restores the generator states, so the
+  diagnostics leave the stream as they found it). A training-mode pass advances all three
+  dropout seed generators (CPU probe: 3 of 3 change); a non-batch-normalized run uses
+  `model.evaluate` and is unaffected.
+- **"final" is not reproduced by HEAD, and that is the intended outcome, not a failure.**
+  "final3" is not bit-identical to "final" (epoch-0 training loss 0.4580 against 0.4571,
+  best epoch 14 against 22). Two 2-epoch GPU diagnostics (seed 0, same command) locate
+  the difference: the code of "final" (`40583618d`) reproduces the first two epochs of the
+  "final" `training_log.csv` bit for bit, so the GPU run is repeatable; and HEAD with the
+  guard pass deliberately left unrestored (only the dashboard baseline restoring) also
+  reproduces those two epochs bit for bit. So "final" trained from the stream advanced once
+  by the guard's own unrestored pass, and "final3" is the first batch-normalized run whose
+  stream is untouched by any diagnostic. The two diagnostics cover epochs 0 to 1 only, not
+  all 100.
 - So the seed-0 test accuracy of one configuration moves by about 0.004 with the dropout
   stream, which is larger than the batch-normalization effect measured at 10 epochs (+0.0024)
-  and larger than the 100-epoch gaps here: +0.0030 (earlier run) and -0.0009 (HEAD run)
-  against the non-batch-normalized run. **At 100 epochs the accuracy benefit of batch
+  and larger than the 100-epoch gaps here: +0.0030 ("final"), -0.0009 ("final2") and +0.0023
+  ("final3") against the non-batch-normalized run. **At 100 epochs the accuracy benefit of batch
   normalization is neither confirmed nor refuted by one seed.**
-- What is consistent across both batch-normalized runs is the loss: best `val_loss` 0.0615
-  and 0.0626 against 0.0923, test loss 0.0664 and 0.0681 against 0.0784, and a last-epoch
-  `val_loss` of 0.066 against 0.126 (the non-batch-normalized run overfits more: training
+- What is consistent across all three batch-normalized runs is the loss: best `val_loss`
+  0.0615, 0.0621 and 0.0626 against 0.0923, test loss 0.0577, 0.0664 and 0.0681 against
+  0.0784, and a last-epoch `val_loss` of 0.063 to 0.066 against 0.126 (the non-batch-normalized run overfits more: training
   loss 5.1e-3 against 1.3e-3 to 1.4e-3 at epoch 100). Test loss is at the
   `val_loss`-selected weights, so this is the selection metric's own advantage.
 - The default is unchanged: the control does not reverse the pre-registered 10-epoch,
@@ -460,7 +475,7 @@ Each item is backed by a measurement above or a test.
 7. **Per-dataset batch-normalization default.** MNIST on, CIFAR-10 off, each from its own
    grid (above). The MNIST evidence is thin (+0.00243 against a 0.002 bar, 3 seeds, a
    10-epoch horizon); the 100-epoch control does not settle it in accuracy (one seed, the
-   same batch-normalized configuration ranges over 0.9797 to 0.9836 against 0.9806 without)
+   same batch-normalized configuration ranges over 0.9797 to 0.9836 in three runs against 0.9806 without)
    but favours batch normalization consistently in loss. Override with `--batch-normalization` / `--no-batch-normalization`; the resolved value is in
    `config.json` and the summary.
 8. **Shared writers.** `training_log.csv` and `training_history.json` come from

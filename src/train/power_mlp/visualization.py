@@ -53,7 +53,7 @@ ACCENT_COLOR = "#2ca02c"
 # 100-epoch run (decisions.md D-027, finding F1). Epoch 1 and the final state are
 # always drawn; guards: test_dashboard_draws_on_a_cadence_and_always_shows_the_final_state.
 # The dashboard is redrawn about this many times per run, not once per epoch: a render
-# costs 1.1-1.7 s (CPU, measured) against a 1.8 s MNIST training epoch, so drawing
+# costs 1.0-1.7 s (CPU, measured) against a 1.8 s MNIST training epoch, so drawing
 # every epoch of a 100-epoch run spent about 40% of the wall-clock on plotting
 # (run wall 348 s vs 196 s of summed epoch times). The cadence is
 # ``max(1, planned_epochs // DASHBOARD_TARGET_DRAWS)`` epochs; epoch 1 and the final
