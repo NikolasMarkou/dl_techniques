@@ -140,12 +140,28 @@ INPUT_SCALINGS: Tuple[str, ...] = ("standardize", "unit")
 # ``_check_initial_loss`` warns when loss / ln(num_classes) is STRICTLY above this.
 INITIAL_LOSS_WARN_FACTOR = 10.0
 
+# The remedy named by the initial-loss WARNING and by both divergence errors (review
+# iteration 3, C6: the old hint named only the two knobs already at their shipped
+# values in every hazardous default run and omitted the one measured to fix them all).
+REMEDY_HINT = (
+    "Try --kernel-initializer lecun_normal and --input-scaling unit; if you are already "
+    "on lecun_normal + unit, try --batch-normalization (it starts every preset and "
+    "k in {2, 3} at 1.05-1.22x ln(num_classes)), or lower --k."
+)
+
 # ``results_summary.json["status"]``: the run finished / stopped on a non-finite loss.
 STATUS_OK = "ok"
 STATUS_DIVERGED = "diverged"
 
 # The run's own narrative: the ``dl`` logger, tee'd into ``<run_dir>/run.log``.
 RUN_LOG_NAME = "run.log"
+
+# Files whose presence means an experiment directory already holds a run:
+# ``train_model`` refuses to start there (review iteration 3, C3: a reused
+# ``--experiment-name`` used to merge two runs into one directory).
+RUN_ARTIFACT_NAMES: Tuple[str, ...] = (
+    "results_summary.json", "config.json", "best_model.keras", RUN_LOG_NAME, "training_log.csv",
+)
 
 # DECISION plan-2026-09-18T213948-68dcb72c/D-028: BN is ON for MNIST (D-025) and OFF for
 # CIFAR-10, each from its own pre-registered 3-seed x 10-epoch grid (CIFAR-10: BN mean
@@ -587,6 +603,61 @@ def create_optimizer(
 # Training
 # ---------------------------------------------------------------------
 
+# DECISION plan-2026-09-18T213948-68dcb72c/D-029: the epoch-0 numbers (initial-loss guard
+# AND the dashboard baseline star) come from THIS one function. Do NOT let the dashboard
+# callback call ``model.evaluate`` itself "because it is simpler": under batch
+# normalization that is the inference-mode pass (9.7e10 where the guard reads 2.68 on
+# the same model) and the star and the summary disagree. Guards:
+# test_a_batch_normalized_dashboard_baseline_equals_the_guard_not_the_inference_value.
+def _untrained_metrics(
+        model: keras.Model, x: np.ndarray, y: np.ndarray, batch_size: int = SANITY_SAMPLES
+) -> Tuple[Dict[str, float], str]:
+    """``loss`` and ``accuracy`` of the UNTRAINED model on ``(x, y)`` and the mode used.
+
+    The single measurement behind both epoch-0 numbers (the initial-loss guard and
+    the dashboard's baseline star), so the two cannot disagree (review iteration 3,
+    C2: the dashboard used ``model.evaluate`` and read 9.7e10 where the guard read
+    2.68 on the same batch-normalized model).
+
+    A model with batch normalization is measured in TRAINING mode: at init the
+    moving statistics are (0, 1), so an inference-mode pass sees un-normalized
+    activations (measured 4.2e11 where the first training step, which uses batch
+    statistics, sees 2.7). The pass runs in chunks of ``batch_size`` rows (each
+    chunk normalized by its own batch statistics, like a training step; ``x`` no
+    larger than ``batch_size`` is one pass), assigns the moving statistics, so the
+    weights are snapshotted before and restored after; the model is left exactly as
+    it was. Dropout stays active (the regime of the first training step). A model
+    without batch normalization keeps ``model.evaluate`` (inference mode).
+
+    Args:
+        model: Built and compiled model (``batch_normalization`` attribute set).
+        x: Inputs ``(N, input_dim)``.
+        y: Integer labels ``(N,)``.
+        batch_size: Rows per pass.
+
+    Returns:
+        ``({"loss": ..., "accuracy": ...}, mode)`` with ``mode`` ``"training"`` or
+        ``"inference"``. The values are not checked for finiteness here.
+    """
+    if not model.batch_normalization:
+        metrics = model.evaluate(x, y, batch_size=batch_size, verbose=0, return_dict=True)
+        return {k: float(v) for k, v in metrics.items()}, "inference"
+    snapshot = model.get_weights()
+    loss_sum, correct = 0.0, 0
+    try:
+        for start in range(0, len(x), batch_size):
+            probabilities = model(x[start:start + batch_size], training=True)
+            per_sample = keras.ops.convert_to_numpy(
+                keras.losses.sparse_categorical_crossentropy(y[start:start + batch_size], probabilities)
+            )
+            loss_sum += float(np.sum(per_sample, dtype=np.float64))
+            predicted = np.argmax(keras.ops.convert_to_numpy(probabilities), axis=-1)
+            correct += int(np.sum(predicted == y[start:start + batch_size]))
+    finally:
+        model.set_weights(snapshot)  # undo the moving-statistics update
+    return {"loss": loss_sum / len(x), "accuracy": correct / len(x)}, "training"
+
+
 def _check_initial_loss(
         model: keras.Model, x: np.ndarray, y: np.ndarray
 ) -> Tuple[float, float, bool, str]:
@@ -595,17 +666,9 @@ def _check_initial_loss(
     The loss is compared with ``ln(num_classes)``, the loss of a uniform
     prediction. ReLU-k composes to degree ``k**depth``, so a large init gain or an
     unscaled input starts the run at ``loss / ln(C)`` in the tens to the millions
-    and the first epochs are spent recovering (iteration 1: 218.6 vs 2.30).
-
-    A model with batch normalization is evaluated in TRAINING mode: at init the
-    moving statistics are (0, 1), so an inference-mode pass sees un-normalized
-    activations (measured 4.2e11 where the first training step, which uses batch
-    statistics, sees 2.7) and would warn on a healthy run. The training-mode pass
-    assigns the moving statistics, so the weights are snapshotted before and
-    restored after; the model is left exactly as it was. Dropout stays active in
-    that pass (the regime of the first training step). A model without batch
-    normalization keeps ``model.evaluate`` (inference mode), so its recorded
-    numbers are unchanged.
+    and the first epochs are spent recovering (iteration 1: 218.6 vs 2.30). The
+    measurement (and the batch-normalization training-mode rule) is
+    :func:`_untrained_metrics`.
 
     Args:
         model: Built and compiled model.
@@ -615,27 +678,17 @@ def _check_initial_loss(
     Returns:
         ``(loss, ratio, warned, mode)``: the finite scalar loss on ``x``,
         ``loss / ln(num_classes)``, whether ``ratio > INITIAL_LOSS_WARN_FACTOR``
-        (strict) so a WARNING naming ``--kernel-initializer`` /
-        ``--input-scaling`` was logged, and how the loss was measured
-        (``"inference"`` or ``"training"``). It does not raise on a large loss.
+        (strict) so a WARNING naming the remedies (``--kernel-initializer``,
+        ``--input-scaling``, ``--batch-normalization``) was logged, and how the loss
+        was measured (``"inference"`` or ``"training"``). It does not raise on a
+        large loss.
 
     Raises:
         RuntimeError: If the loss is NaN or infinite. Raising (not returning)
             is deliberate: a silent return would leave an empty run directory.
     """
-    if model.batch_normalization:
-        mode = "training"
-        snapshot = model.get_weights()
-        try:
-            probabilities = model(x, training=True)
-            loss = float(keras.ops.convert_to_numpy(
-                keras.ops.mean(keras.losses.sparse_categorical_crossentropy(y, probabilities))
-            ))
-        finally:
-            model.set_weights(snapshot)  # undo the moving-statistics update
-    else:
-        mode = "inference"
-        loss = float(model.evaluate(x, y, batch_size=SANITY_SAMPLES, verbose=0, return_dict=True)["loss"])
+    metrics, mode = _untrained_metrics(model, x, y)
+    loss = metrics["loss"]
     uniform_loss = float(np.log(model.hidden_units[-1]))
     logger.info(
         f"Sanity evaluate BEFORE fit ({mode} mode): initial loss {loss:.4f} on {len(x)} "
@@ -644,7 +697,7 @@ def _check_initial_loss(
     if not np.isfinite(loss):
         raise RuntimeError(
             f"Initial loss is {loss} on {len(x)} samples: the model diverges before "
-            "training. Check k, --kernel-initializer and --input-scaling."
+            f"training. {REMEDY_HINT}"
         )
     ratio = loss / uniform_loss
     warned = ratio > INITIAL_LOSS_WARN_FACTOR
@@ -652,8 +705,7 @@ def _check_initial_loss(
         logger.warning(
             f"Initial loss {loss:.4f} is {ratio:.1f}x ln(num_classes)={uniform_loss:.4f} "
             f"(warn above {INITIAL_LOSS_WARN_FACTOR:g}x): the initial logit scale is far "
-            "too large and early epochs will be spent recovering. Try a different "
-            "--kernel-initializer (e.g. lecun_normal) or --input-scaling unit."
+            f"too large and early epochs will be spent recovering. {REMEDY_HINT}"
         )
     return loss, ratio, warned, mode
 
@@ -835,6 +887,30 @@ def _read_analysis_status(run_dir: Path, model_name: str) -> Dict[str, Any]:
     }
 
 
+# DECISION plan-2026-09-18T213948-68dcb72c/D-029: a reused --experiment-name is REFUSED,
+# never merged, overwritten, deleted or auto-suffixed (``_r2``): results/ is gitignored,
+# so an overwrite is unrecoverable and a silent rename changes the name the user asked
+# for. Guard: test_a_reused_experiment_name_is_refused_and_the_first_run_is_byte_identical.
+def _refuse_existing_run(run_dir: Path) -> None:
+    """Raise ``FileExistsError`` when ``run_dir`` already holds a run's files.
+
+    Nothing is written, overwritten or deleted, ever: results are unrecoverable
+    (gitignored). A missing or empty directory, or one holding only unrelated
+    files, is fine.
+
+    Raises:
+        FileExistsError: Naming ``run_dir`` and the files found, and telling the
+            caller to choose a new ``--experiment-name``.
+    """
+    found = [name for name in RUN_ARTIFACT_NAMES if (run_dir / name).exists()]
+    if found:
+        raise FileExistsError(
+            f"Experiment directory {run_dir} already holds a run ({', '.join(found)}). "
+            "Nothing was written. Choose a new --experiment-name (or omit it for a "
+            "timestamped name); existing results are never overwritten or deleted."
+        )
+
+
 def train_model(config: TrainingConfig) -> Dict[str, Any]:
     """Train PowerMLP, evaluate it, write every artifact and return the summary.
 
@@ -851,16 +927,20 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         (``status`` is ``"ok"``; see the keys assembled at the bottom).
 
     Raises:
+        FileExistsError: If the experiment directory already holds a run (see
+            :func:`_refuse_existing_run`); raised before anything is written.
         RuntimeError: If the initial loss before fitting is NaN or infinite, or
             (after ``results_summary.json`` with ``status: "diverged"`` was
             written) if any epoch ``loss`` / ``val_loss`` is non-finite.
     """
     logger.info("Starting PowerMLP training")
+    resolved = Path(resolved_run_dir(config))
+    _refuse_existing_run(resolved)
     set_seeds(config.seed)
-    run_dir = Path(prepare_run_dir(config, output_dir=resolved_run_dir(config))).resolve()
+    run_dir = Path(prepare_run_dir(config, output_dir=resolved)).resolve()
     vis_dir = run_dir / "visualizations"
     vis_dir.mkdir(parents=True, exist_ok=True)
-    run_log = logging.FileHandler(run_dir / RUN_LOG_NAME)
+    run_log = logging.FileHandler(run_dir / RUN_LOG_NAME, mode="w")
     run_log.setFormatter(logging.Formatter(LOGGER_FORMAT))
     logger.addHandler(run_log)
     try:
@@ -955,7 +1035,8 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         # Last: it reads `logs['lr']`, written by LearningRateLogger above.
         dashboard = TrainingDashboardCallback(
             out_path=vis_dir / "training_dashboard.png",
-            baseline_data=(x_val, y_val),
+            baseline_fn=lambda m: _untrained_metrics(m, x_val, y_val)[0],
+            baseline_mode=initial_loss_mode,
             title=f"{config.experiment_name} (seed {config.seed})",
         )
         callbacks.append(dashboard)
@@ -971,7 +1052,7 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         save_training_history_json(history, str(run_dir))
         hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
         epochs_run = len(hist.get(MONITOR, []))
-        stopped_early = epochs_run < config.epochs
+        non_finite = _non_finite_metrics(hist)
 
         # What Keras prints to stdout (never to the logger), derived from the history.
         lr_reduction_epochs = _lr_reduction_epochs(hist.get("lr", []))
@@ -980,34 +1061,42 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
                 f"ReduceLROnPlateau: learning rate {hist['lr'][epoch - 2]:.3g} -> "
                 f"{hist['lr'][epoch - 1]:.3g} from epoch {epoch}"
             )
-        if stopped_early:
-            logger.info(
-                f"EarlyStopping: stopped after epoch {epochs_run} of {config.epochs} "
-                f"(patience {config.patience} on {MONITOR}); the best weights were restored"
-            )
 
-        non_finite = _non_finite_metrics(hist)
         if non_finite:
+            # TerminateOnNaN ended the run: fewer epochs than requested is NOT an early
+            # stop and no best weights were restored (review iteration 3, C1), so
+            # ``stopped_early`` is unknown and the EarlyStopping line is not logged.
             message = (
                 f"Training diverged: {non_finite} hold a non-finite or missing value after "
                 f"{epochs_run} epoch(s); no evaluation, figures, analysis or final_model.keras "
-                f"were produced. Check k, --kernel-initializer, --input-scaling and the "
-                f"initial-loss ratio ({initial_loss_ratio:.3g})."
+                f"were produced. Initial-loss ratio was {initial_loss_ratio:.3g}. {REMEDY_HINT}"
             )
             logger.error(message)
             _write_summary(run_dir, {
                 "status": STATUS_DIVERGED,
                 **summary_head,
                 "epochs_run": epochs_run,
-                "stopped_early": stopped_early,
+                "stopped_early": None,
                 "best_epoch": None,
                 "non_finite_metrics": non_finite,
                 "lr_reduction_epochs": lr_reduction_epochs,
                 "history": hist,
                 "epoch_times": list(dashboard.epoch_times),
-                "notes": [message, "non-finite values are written as null (strict JSON)"],
+                "notes": [
+                    message,
+                    "non-finite values are written as null (strict JSON)",
+                    "`stopped_early` is null: the run was ended by a non-finite loss "
+                    "(TerminateOnNaN), not by EarlyStopping, and no best weights were restored",
+                ],
             })
             raise RuntimeError(message)
+
+        stopped_early = epochs_run < config.epochs
+        if stopped_early:
+            logger.info(
+                f"EarlyStopping: stopped after epoch {epochs_run} of {config.epochs} "
+                f"(patience {config.patience} on {MONITOR}); the best weights were restored"
+            )
 
         # Final (in-memory) weights vs the reloaded best checkpoint. Keras 3.8
         # EarlyStopping restores the best weights at every train end, so equality is

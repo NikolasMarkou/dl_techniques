@@ -90,8 +90,9 @@ def test_a_non_finite_history_writes_a_diverged_summary_then_raises(monkeypatch,
         loss=[nan], val_loss=[nan], accuracy=[0.1], val_accuracy=[0.1], lr=[3e-4]))
     run_dir = tmp_path / "diverged_stub"
 
-    with pytest.raises(RuntimeError, match="diverged"):
+    with pytest.raises(RuntimeError, match="diverged") as raised:
         tpm.train_model(_config(tmp_path, "diverged_stub", batch_normalization=False))
+    assert "--batch-normalization" in str(raised.value), "review iteration 3, C6"
 
     summary = _strict((run_dir / "results_summary.json").read_text())
     assert summary["status"] == "diverged" == tpm.STATUS_DIVERGED
@@ -100,6 +101,11 @@ def test_a_non_finite_history_writes_a_diverged_summary_then_raises(monkeypatch,
     assert summary["history"]["loss"] == [None] and summary["history"]["val_loss"] == [None]
     assert summary["epochs_run"] == 1 and summary["epochs_requested"] == 5
     assert summary["initial_loss_mode"] == "inference"
+    # Review iteration 3, C1: TerminateOnNaN ended it, EarlyStopping did not, and no
+    # best weights exist to have been "restored".
+    assert summary["stopped_early"] is None
+    assert any("stopped_early" in note and "not by EarlyStopping" in note for note in summary["notes"])
+    assert "EarlyStopping" not in (run_dir / "run.log").read_text()
     assert "test_metrics_final" not in summary, "no evaluation of NaN weights"
     assert not (run_dir / "final_model.keras").exists()
     assert not (run_dir / "visualizations" / "confusion_matrix.png").exists()
@@ -130,6 +136,8 @@ def test_a_diverged_run_still_leaves_its_run_log_and_no_handler(monkeypatch, tmp
 
     text = (tmp_path / "diverged_log" / "run.log").read_text()
     assert "Run directory" in text and "Training diverged" in text
+    assert "EarlyStopping" not in text and "best weights were restored" not in text, text
+    assert _strict((tmp_path / "diverged_log" / "results_summary.json").read_text())["stopped_early"] is None
     assert _file_handlers() == []
 
 
@@ -203,6 +211,89 @@ def test_a_real_tiny_deep_k3_run_diverges_and_is_reported_as_diverged(tmp_path) 
     assert summary["status"] == "diverged"
     assert summary["best_epoch"] is None
     assert summary["init_scale_warning"] is True and summary["initial_loss_ratio"] > 10.0
+    assert summary["stopped_early"] is None
+    assert "EarlyStopping" not in (run_dir / "run.log").read_text()
     assert not (run_dir / "final_model.keras").exists()
     assert (run_dir / "run.log").is_file()
     assert _file_handlers() == []
+
+
+# ---------------------------------------------------------------------
+# Experiment-directory reuse is refused (review iteration 3, C3)
+# ---------------------------------------------------------------------
+
+
+def _ok_history():
+    return _history(
+        loss=[2.0, 1.0], val_loss=[2.0, 1.0], accuracy=[0.3, 0.6], val_accuracy=[0.3, 0.6],
+        lr=[3e-4, 3e-4])
+
+
+def _snapshot(directory: Path) -> dict:
+    """``{relative path: bytes}`` of every file under ``directory``."""
+    return {str(p.relative_to(directory)): p.read_bytes()
+            for p in sorted(directory.rglob("*")) if p.is_file()}
+
+
+def test_a_reused_experiment_name_is_refused_and_the_first_run_is_byte_identical(
+        monkeypatch, tmp_path) -> None:
+    """Before this guard a second run under the same name merged into the first
+    directory: one run.log narrating two runs, a summary of only the second, stale
+    figures of the first. Now the second raises before writing anything."""
+    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    _stub_fit(monkeypatch, _ok_history())
+    tpm.train_model(_config(tmp_path, "reused", epochs=2))
+    first = _snapshot(tmp_path / "reused")
+    assert "results_summary.json" in first and "run.log" in first
+
+    with pytest.raises(FileExistsError) as raised:
+        tpm.train_model(_config(tmp_path, "reused", epochs=2, seed=2))
+
+    text = str(raised.value)
+    assert str(tmp_path / "reused") in text and "--experiment-name" in text, text
+    assert _snapshot(tmp_path / "reused") == first, "the refusal wrote or deleted something"
+    assert _file_handlers() == [], "no handler may be attached before the refusal"
+
+
+def test_a_fresh_experiment_name_and_an_empty_existing_directory_still_work(
+        monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    _stub_fit(monkeypatch, _ok_history())
+    (tmp_path / "prepared_but_empty").mkdir()
+    (tmp_path / "prepared_but_unrelated").mkdir()
+    (tmp_path / "prepared_but_unrelated" / "notes.txt").write_text("keep me")
+
+    tpm.train_model(_config(tmp_path, "brand_new", epochs=2))
+    tpm.train_model(_config(tmp_path, "prepared_but_empty", epochs=2))
+    tpm.train_model(_config(tmp_path, "prepared_but_unrelated", epochs=2))
+
+    for name in ("brand_new", "prepared_but_empty", "prepared_but_unrelated"):
+        assert (tmp_path / name / "results_summary.json").is_file(), name
+    assert (tmp_path / "prepared_but_unrelated" / "notes.txt").read_text() == "keep me"
+
+
+@pytest.mark.parametrize("artifact", tpm.RUN_ARTIFACT_NAMES)
+def test_any_single_run_artifact_is_enough_to_refuse(tmp_path, artifact) -> None:
+    directory = tmp_path / "half_written"
+    directory.mkdir()
+    (directory / artifact).write_text("x")
+
+    with pytest.raises(FileExistsError, match=artifact):
+        tpm._refuse_existing_run(directory)
+
+    assert _snapshot(directory) == {artifact: b"x"}
+
+
+def test_the_run_log_is_opened_in_write_mode(monkeypatch, tmp_path) -> None:
+    """Belt and braces next to the refusal: a handler must never append to an old file."""
+    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    modes = []
+
+    def fit(self, *args, **kwargs):
+        modes.extend(h.mode for h in _file_handlers())
+        return _ok_history()
+
+    monkeypatch.setattr(keras.Model, "fit", fit)
+    tpm.train_model(_config(tmp_path, "log_mode", epochs=2))
+
+    assert modes == ["w"], modes

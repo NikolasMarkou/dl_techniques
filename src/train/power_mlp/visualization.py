@@ -27,7 +27,7 @@ abort a training run.
 
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import matplotlib
 
@@ -71,6 +71,9 @@ SMOOTHED_PANEL_MIN_EPOCHS = 6
 # Dashboard caption: what the two curve families measure (they are NOT the same
 # quantity, which makes the epoch-1 generalization gap look negative).
 TRAIN_METRIC_CAPTION = "train: running mean over the epoch; val: end of epoch"
+
+# Legend text of the epoch-0 marker for a baseline measured with ``model.evaluate``.
+BASELINE_LABEL = "epoch-0 baseline (val)"
 
 # The epoch-0 baseline marker is drawn at most this many times the largest finite
 # plotted curve value; a larger baseline (an init loss of 218 over curves near 1)
@@ -142,6 +145,7 @@ def render_training_dashboard(
         title: str = "",
         epoch_times: Optional[Sequence[float]] = None,
         baseline: Optional[Dict[str, float]] = None,
+        baseline_label: str = BASELINE_LABEL,
 ) -> List[str]:
     """Render the per-epoch training dashboard to a single PNG.
 
@@ -170,6 +174,8 @@ def render_training_dashboard(
             triangle) and annotated with its true value; anything at or below
             the ceiling is drawn exactly where it is, and so is a baseline
             when no plotted curve value is finite (there is no ceiling).
+        baseline_label: Legend text of the baseline marker (the callback names the
+            measurement mode, e.g. ``"epoch-0 baseline (val, training mode)"``).
 
     Returns:
         The titles of the panels drawn, in order (empty, and nothing written,
@@ -206,7 +212,7 @@ def render_training_dashboard(
                         ls=":", alpha=0.7)
                 ax.scatter([0], [drawn], marker="^" if clipped else "*",
                            s=70 if clipped else 110, color=VAL_COLOR,
-                           edgecolor="black", zorder=5, label="epoch-0 baseline (val)")
+                           edgecolor="black", zorder=5, label=baseline_label)
                 if clipped:
                     ax.annotate(f"epoch-0: {true_value:.4g} (clipped)", xy=(0, drawn),
                                 xytext=(8, 0), textcoords="offset points", va="center",
@@ -330,8 +336,11 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
 
     Keeps its own accumulated history (so it needs no ``History`` callback),
     including the learning rate, and its own per-epoch wall times (accumulated on
-    EVERY epoch, drawn or not). If ``baseline_data`` is given, the untrained model
-    is evaluated on it in ``on_train_begin`` and drawn as the epoch-0 marker.
+    EVERY epoch, drawn or not). If ``baseline_fn`` or ``baseline_data`` is given,
+    the untrained model is measured in ``on_train_begin`` and drawn as the epoch-0
+    marker: ``baseline_fn(model)`` when given (the trainer passes the SAME
+    measurement its initial-loss guard uses, so the two cannot disagree under batch
+    normalization), else ``model.evaluate`` on ``baseline_data``.
     Every evaluation and render is wrapped so a plotting failure logs a warning
     and never aborts training. Place it AFTER ``LearningRateLogger`` so
     ``logs['lr']`` exists; otherwise the rate is read off the optimizer.
@@ -346,9 +355,16 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
 
     Args:
         out_path: PNG destination, overwritten on each draw.
-        baseline_data: Optional ``(x_val, y_val)`` for the epoch-0 baseline.
+        baseline_data: Optional ``(x_val, y_val)`` for the epoch-0 baseline
+            (``model.evaluate``; ignored when ``baseline_fn`` is given).
         title: Figure suptitle.
-        batch_size: Batch size for the baseline evaluation.
+        batch_size: Batch size for the ``baseline_data`` evaluation.
+        baseline_fn: Optional ``model -> {"loss": ..., "accuracy": ...}`` returning
+            the epoch-0 metrics; it must leave the model unchanged. This module
+            imports nothing from the trainer, the trainer injects the function.
+        baseline_mode: How ``baseline_fn`` measured (``"training"`` or
+            ``"inference"``); a mode other than ``"inference"`` is named in the
+            marker's legend text.
 
     Attributes:
         history: Accumulated per-epoch metrics (``loss``, ``val_loss``, ...,
@@ -363,10 +379,17 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
             baseline_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
             title: str = "",
             batch_size: int = 1024,
+            baseline_fn: Optional[Callable[[keras.Model], Dict[str, float]]] = None,
+            baseline_mode: str = "inference",
     ) -> None:
         super().__init__()
         self.out_path = Path(out_path)
         self.baseline_data = baseline_data
+        self.baseline_fn = baseline_fn
+        self.baseline_label = (
+            BASELINE_LABEL if baseline_mode == "inference"
+            else f"epoch-0 baseline (val, {baseline_mode} mode)"
+        )
         self.title = title
         self.batch_size = batch_size
         self.history: Dict[str, List[float]] = {}
@@ -377,14 +400,17 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         self._drawn_epochs = 0
 
     def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
-        """Evaluate the untrained model on ``baseline_data`` (epoch 0)."""
-        if self.baseline_data is None:
+        """Measure the untrained model (epoch 0): ``baseline_fn`` or ``baseline_data``."""
+        if self.baseline_fn is None and self.baseline_data is None:
             return
         try:
-            x, y = self.baseline_data
-            metrics = self.model.evaluate(
-                x, y, batch_size=self.batch_size, verbose=0, return_dict=True
-            )
+            if self.baseline_fn is not None:
+                metrics = self.baseline_fn(self.model)
+            else:
+                x, y = self.baseline_data
+                metrics = self.model.evaluate(
+                    x, y, batch_size=self.batch_size, verbose=0, return_dict=True
+                )
             self.baseline = {k: float(v) for k, v in metrics.items()}
         except Exception as e:  # noqa: BLE001 - never abort training for a plot
             logger.warning(f"Dashboard epoch-0 baseline failed: {e}")
@@ -417,6 +443,7 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
             render_training_dashboard(
                 self.history, self.out_path, self.title,
                 epoch_times=self.epoch_times, baseline=self.baseline,
+                baseline_label=self.baseline_label,
             )
             self._drawn_epochs = completed
         except Exception as e:  # noqa: BLE001 - never abort training for a plot

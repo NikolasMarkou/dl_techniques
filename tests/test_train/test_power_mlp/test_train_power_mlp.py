@@ -1002,7 +1002,7 @@ def _drive_dashboard(monkeypatch, tmp_path, planned, run, with_params=True):
     """
     drawn: list[int] = []
 
-    def spy(history, out_path, title="", epoch_times=None, baseline=None):
+    def spy(history, out_path, title="", epoch_times=None, baseline=None, **kwargs):
         assert len(epoch_times) == len(history["loss"]), "every epoch is accumulated"
         drawn.append(len(history["loss"]))
         return ["Loss"]
@@ -1070,7 +1070,7 @@ def test_a_failed_draw_is_retried_in_on_train_end_and_never_raises(
         monkeypatch, tmp_path) -> None:
     calls = []
 
-    def flaky(history, out_path, title="", epoch_times=None, baseline=None):
+    def flaky(history, out_path, title="", epoch_times=None, baseline=None, **kwargs):
         calls.append(len(history["loss"]))
         if len(calls) == 1:
             raise RuntimeError("first render fails")
@@ -1091,7 +1091,7 @@ def test_real_fit_hands_the_callback_its_planned_epoch_count(monkeypatch, tmp_pa
     disappears without any test on the stub path noticing)."""
     drawn: list[int] = []
 
-    def spy(history, out_path, title="", epoch_times=None, baseline=None):
+    def spy(history, out_path, title="", epoch_times=None, baseline=None, **kwargs):
         drawn.append(len(history["loss"]))
         return ["Loss"]
 

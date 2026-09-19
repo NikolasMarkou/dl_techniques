@@ -55,6 +55,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 import train.power_mlp.train_power_mlp as tpm  # noqa: E402
+import train.power_mlp.visualization as viz  # noqa: E402
 
 REAL_MNIST_CACHED = (Path.home() / ".keras" / "datasets" / "mnist.npz").exists()
 
@@ -177,6 +178,10 @@ def test_initial_loss_guard_fires_on_the_iteration_1_configuration(
     text = recorded_warnings[0]
     assert "--kernel-initializer" in text and "--input-scaling" in text, text
     assert f"{loss:.4f}" in text and f"{ratio:.1f}x" in text, text
+    # Review iteration 3, C6: the one knob measured to fix every hazardous default
+    # configuration, and no advice to switch to values the user already has.
+    assert "--batch-normalization" in text, text
+    assert "if you are already on lecun_normal + unit, try --batch-normalization" in text, text
 
 
 @pytest.mark.parametrize("regime", REGIMES)
@@ -582,3 +587,164 @@ def test_the_real_trainer_logs_the_init_scale_warning_once(iteration_1_run) -> N
     init_warnings = [w for w in iteration_1_run.warnings if "--kernel-initializer" in w]
     assert len(init_warnings) == 1, iteration_1_run.warnings
     assert "--input-scaling" in init_warnings[0]
+
+
+# ---------------------------------------------------------------------
+# Review iteration 3, C6: the non-finite RuntimeError names the same remedies
+# ---------------------------------------------------------------------
+
+
+def test_a_non_finite_initial_loss_error_names_every_remedy_including_batch_norm() -> None:
+    """A model whose pre-fit loss is infinite raises; the text must carry the same
+    remedies as the WARNING (``REMEDY_HINT``), ``--batch-normalization`` included."""
+    x, y = np.zeros((4, 784), np.float32), np.zeros(4, np.int32)
+
+    with pytest.raises(RuntimeError) as raised:
+        tpm._check_initial_loss(_StubModel(float("inf")), x, y)
+
+    text = str(raised.value)
+    assert "--kernel-initializer" in text and "--input-scaling" in text, text
+    assert "--batch-normalization" in text, text
+    assert "if you are already on lecun_normal + unit, try --batch-normalization" in text, text
+    assert tpm.REMEDY_HINT in text
+
+
+# ---------------------------------------------------------------------
+# Review iteration 3, C2: the dashboard's epoch-0 baseline is the guard's measurement
+# ---------------------------------------------------------------------
+
+
+def _baseline_of(model: keras.Model, x, y, tmp_path: Path, mode: str) -> Dict[str, float]:
+    """What the dashboard callback stores as its epoch-0 baseline, the way the trainer wires it."""
+    callback = viz.TrainingDashboardCallback(
+        tmp_path / "dash.png",
+        baseline_fn=lambda m: tpm._untrained_metrics(m, x, y)[0],
+        baseline_mode=mode,
+    )
+    callback.set_model(model)
+    callback.on_train_begin()
+    assert callback.baseline is not None
+    return callback.baseline
+
+
+@pytest.mark.parametrize("regime", REGIMES)
+def test_a_batch_normalized_dashboard_baseline_equals_the_guard_not_the_inference_value(
+        regime, tmp_path) -> None:
+    """The pathological configuration of the review (default preset, k=3,
+    glorot_normal + standardize, BN on): guard 2.676 vs ``evaluate`` 9.7e10 on real MNIST.
+    Two identically seeded models, one measured by the guard, one by the callback."""
+    x, y = _guard_slice(regime, "standardize")
+    keras.utils.set_random_seed(0)
+    guard_loss, guard_ratio, warned, mode = tpm._check_initial_loss(
+        _build_model("glorot_normal", k=3, batch_normalization=True), x, y)
+    keras.utils.set_random_seed(0)
+    model = _build_model("glorot_normal", k=3, batch_normalization=True)
+
+    baseline = _baseline_of(model, x, y, tmp_path, mode)
+
+    assert mode == "training" and warned is False
+    assert baseline["loss"] == pytest.approx(guard_loss, rel=1e-5)
+    assert baseline["loss"] < 100.0, "the inference-mode value on this model is ~1e8-1e11"
+    assert 0.0 <= baseline["accuracy"] <= 1.0
+    # Discriminating control: the old measurement really is a different, huge number.
+    inference_loss = float(model.evaluate(x, y, batch_size=1024, verbose=0, return_dict=True)["loss"])
+    assert inference_loss > 1e3 * baseline["loss"], (inference_loss, baseline["loss"])
+
+
+@pytest.mark.parametrize("regime", REGIMES)
+def test_the_dashboard_baseline_leaves_every_weight_bit_identical(regime, tmp_path) -> None:
+    keras.utils.set_random_seed(0)
+    x, y = _guard_slice(regime, "standardize")
+    model = _build_model("glorot_normal", k=3, batch_normalization=True)
+    before = model.get_weights()
+
+    _baseline_of(model, x, y, tmp_path, "training")
+
+    after = model.get_weights()
+    assert len(after) == len(before)
+    for i, (a, b) in enumerate(zip(before, after)):
+        np.testing.assert_array_equal(a, b, err_msg=f"weight {i} changed by the baseline")
+
+
+def test_the_baseline_pass_is_chunked_by_batch_statistics_and_row_weighted() -> None:
+    """1500 rows = a 1024 chunk + a 476 chunk, each normalized by its OWN batch
+    statistics (a training step's regime). With dropout off the result is exactly the
+    row-weighted mean of the two chunk losses, and the accuracy a count over all rows."""
+    x, y = _guard_slice("synthetic", "unit")
+    x2, y2 = np.concatenate([x, x[:476]]), np.concatenate([y, y[:476]])
+    assert len(x2) == 1500
+    keras.utils.set_random_seed(0)
+    model = tpm.PowerMLP(
+        hidden_units=tpm.effective_hidden_units("mnist", "default", 784, 10), k=2,
+        dropout_rate=0.0, batch_normalization=True, output_activation="softmax",
+        kernel_initializer="lecun_normal", bias_initializer="zeros",
+    )
+    model.build((None, 784))
+    before = model.get_weights()
+    expected_loss, expected_correct = 0.0, 0
+    for lo, hi in ((0, 1024), (1024, 1500)):
+        p = keras.ops.convert_to_numpy(model(x2[lo:hi], training=True))
+        expected_loss += float(np.sum(-np.log(p[np.arange(hi - lo), y2[lo:hi]]), dtype=np.float64))
+        expected_correct += int(np.sum(p.argmax(-1) == y2[lo:hi]))
+    model.set_weights(before)
+
+    metrics, mode = tpm._untrained_metrics(model, x2, y2)
+
+    assert mode == "training"
+    assert metrics["loss"] == pytest.approx(expected_loss / 1500, rel=1e-4)
+    assert metrics["accuracy"] == expected_correct / 1500
+    for a, b in zip(before, model.get_weights()):
+        np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("regime", REGIMES)
+def test_a_non_batch_normalized_baseline_is_model_evaluate_and_the_label_is_unchanged(
+        regime, tmp_path) -> None:
+    keras.utils.set_random_seed(0)
+    x, y = _guard_slice(regime, "unit")
+    model = _build_model("lecun_normal")
+
+    baseline = _baseline_of(model, x, y, tmp_path, "inference")
+    reference = model.evaluate(x, y, batch_size=tpm.SANITY_SAMPLES, verbose=0, return_dict=True)
+
+    assert baseline["loss"] == float(reference["loss"])
+    assert baseline["accuracy"] == float(reference["accuracy"])
+    callback = viz.TrainingDashboardCallback(tmp_path / "d.png", baseline_mode="inference")
+    assert callback.baseline_label == "epoch-0 baseline (val)" == viz.BASELINE_LABEL
+
+
+def test_the_baseline_star_is_labelled_with_its_measurement_mode(tmp_path) -> None:
+    callback = viz.TrainingDashboardCallback(tmp_path / "d.png", baseline_mode="training")
+    assert callback.baseline_label == "epoch-0 baseline (val, training mode)"
+
+
+def test_the_real_trainer_hands_the_dashboard_the_guard_consistent_baseline(
+        monkeypatch, tmp_path) -> None:
+    """End to end through ``train_model`` (real 1-epoch fit): a batch-normalized run
+    on the pathological pair hands the renderer a finite, small baseline and the
+    training-mode legend text; without BN the plain label and the huge value stay."""
+    monkeypatch.setattr(tpm, "load_dataset", _synthetic_load_dataset())
+    drawn = []
+
+    def spy(history, out_path, title="", epoch_times=None, baseline=None, **kwargs):
+        drawn.append((baseline, kwargs.get("baseline_label")))
+        return []
+
+    monkeypatch.setattr(viz, "render_training_dashboard", spy)
+
+    def run(name: str, batch_normalization: bool):
+        drawn.clear()
+        tpm.train_model(tpm.TrainingConfig(
+            epochs=1, batch_size=64, seed=3, k=3, output_dir=str(tmp_path), experiment_name=name,
+            kernel_initializer="glorot_normal", input_scaling="standardize",
+            batch_normalization=batch_normalization,
+        ))
+        return drawn[0]
+
+    bn_baseline, bn_label = run("baseline_bn", True)
+    plain_baseline, plain_label = run("baseline_plain", False)
+
+    assert bn_label == "epoch-0 baseline (val, training mode)"
+    assert np.isfinite(bn_baseline["loss"]) and bn_baseline["loss"] < 100.0, bn_baseline
+    assert plain_label == viz.BASELINE_LABEL
+    assert plain_baseline["loss"] > 1e3, plain_baseline
