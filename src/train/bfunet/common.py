@@ -41,6 +41,7 @@ from dl_techniques.utils.multiplicative_miyasawa import (
     apply_multiplicative_gaussian,
     apply_composite_gaussian,
 )
+from dl_techniques.optimization.optimizer import OptimizerType
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
@@ -1440,6 +1441,103 @@ class BFUnetTrainingConfig:
                 "Jacobian-symmetry penalty requires a single-tensor model output, but "
                 "deep supervision returns a list of outputs. Disable one of them "
                 "(set symmetry_weight=0 or enable_deep_supervision=False)."
+            )
+        # DECISION plan-2026-09-19T131351-b8d39688/D-002: every rule below is a PURE VALUE
+        # check (no filesystem, no model), so a config is the same object on every machine
+        # and a bad invocation is refused before any run directory exists. Do NOT add a
+        # directory-exists check here (that belongs to the preflight in train()) and do NOT
+        # drop a rule because build_model/train() has a backstop: the backstop fires after
+        # the run name is burned. Placed AFTER the symmetry-vs-deep-supervision check above
+        # so that older, more specific message still wins for that combination.
+        if self.enable_deep_supervision:
+            raise ValueError(
+                "enable_deep_supervision is not wired in this trainer: the model would "
+                "return several outputs but no multi-scale targets, per-output loss dict or "
+                "weight scheduler exist, so fit would crash. Remove --deep-supervision "
+                "(full support is deferred; see plan_2026-06-20_0433c2f2/D-002)."
+            )
+        if self.mixed_precision and self.expose_bottleneck:
+            raise ValueError(
+                "mixed_precision is not supported together with expose_bottleneck: "
+                "expose_bottleneck rewrites the output set the fp32 output cast is built "
+                "on. Run with only one of them."
+            )
+        # `epochs` is checked before everything derived from it (curriculum_epochs and
+        # warmup_epochs default to it above), so epochs=0 names `epochs`, not a derivative.
+        for name in ("batch_size", "epochs", "curriculum_epochs", "patches_per_image",
+                     "viz_freq", "viz_samples"):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
+        # A cap of 0 files or 0 steps is not "unlimited": it used to be swallowed by an
+        # `or <default>` in main() (so --max-val-files 0 silently meant 500). None is the
+        # only way to say "not set".
+        for name in ("steps_per_epoch", "validation_steps", "max_train_files",
+                     "max_val_files"):
+            value = getattr(self, name)
+            if value is not None and value < 1:
+                raise ValueError(f"{name} must be >= 1 when set (None = unset), got {value}")
+        if self.learning_rate <= 0:
+            raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
+        if self.weight_decay < 0:
+            raise ValueError(f"weight_decay must be >= 0, got {self.weight_decay}")
+        if self.gradient_clipping < 0:
+            raise ValueError(
+                f"gradient_clipping must be >= 0 (0 = off), got {self.gradient_clipping}"
+            )
+        if not 0.0 <= self.self_iterate_mix_ratio <= 1.0:
+            raise ValueError(
+                f"self_iterate_mix_ratio must be in [0, 1], got {self.self_iterate_mix_ratio}"
+            )
+        if self.noise_sigma_min > self.sigma_max_start:
+            raise ValueError(
+                f"noise_sigma_min ({self.noise_sigma_min}) must not exceed sigma_max_start "
+                f"({self.sigma_max_start}): the epoch-0 sampling range would be inverted."
+            )
+        if self.curriculum_schedule not in ("linear", "cosine", "exp"):
+            raise ValueError(
+                "curriculum_schedule must be 'linear', 'cosine' or 'exp', got "
+                f"{self.curriculum_schedule!r}"
+            )
+        if self.curriculum_schedule == "exp" and self.sigma_max_start <= 0:
+            raise ValueError(
+                "curriculum_schedule='exp' interpolates geometrically and needs "
+                f"sigma_max_start > 0, got {self.sigma_max_start}"
+            )
+        # DECISION plan-2026-09-19T131351-b8d39688/D-003: only "cosine_decay" is accepted.
+        # train() feeds learning_rate_schedule_builder decay_steps and alpha only, so
+        # "exponential_decay" fails late on a missing decay_rate and "constant"/"cosine"
+        # are not names it knows -- all after the run directory and the model exist. Do
+        # NOT widen this to the builder's own name set without also passing what each
+        # schedule needs, and do NOT change the cosine default's shape (published runs).
+        if str(self.lr_schedule_type).strip().lower() != "cosine_decay":
+            raise ValueError(
+                "lr_schedule_type must be 'cosine_decay' (the only schedule this trainer "
+                f"feeds the parameters it needs), got {self.lr_schedule_type!r}"
+            )
+        # The set is the builder's own enum, so a new optimizer it learns is not refused
+        # here by a stale copy of the list (it builds sgld/vsgd/gefen as well as the five
+        # classic names, and all of them take the same three config keys train() passes).
+        if str(self.optimizer_type).strip().lower() not in {t.value for t in OptimizerType}:
+            raise ValueError(
+                f"optimizer_type must be one of {sorted(t.value for t in OptimizerType)}, "
+                f"got {self.optimizer_type!r}"
+            )
+        # DECISION plan-2026-09-19T131351-b8d39688/D-004: warmup_epochs == epochs is
+        # ACCEPTED (with a warning) and only warmup_epochs > epochs is refused. Do NOT
+        # tighten this to `>=` the way the ConvNeXt trainer does: the derived default is
+        # max(1, round(0.1 * epochs)), which equals epochs for `--epochs 1`, so `>=` would
+        # break the one-epoch run unless the derivation changed too.
+        if self.warmup_epochs < 0:
+            raise ValueError(f"warmup_epochs must be >= 0, got {self.warmup_epochs}")
+        if self.warmup_epochs > self.epochs:
+            raise ValueError(
+                f"warmup_epochs ({self.warmup_epochs}) must not exceed epochs "
+                f"({self.epochs}): the run would end inside the warmup ramp."
+            )
+        if self.warmup_epochs == self.epochs:
+            logger.warning(
+                f"warmup_epochs ({self.warmup_epochs}) equals epochs ({self.epochs}): the "
+                "whole run is warmup and the cosine decay never starts."
             )
         if not self.train_image_dirs or not self.val_image_dirs:
             raise ValueError("train/val image dirs must be non-empty")

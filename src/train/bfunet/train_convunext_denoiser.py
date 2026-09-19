@@ -226,11 +226,76 @@ class TrainingConfig(BFUnetTrainingConfig):
                 f"bottleneck_attention_heads must be >= 1, got "
                 f"{self.bottleneck_attention_heads}"
             )
+        # DECISION plan-2026-09-19T131351-b8d39688/D-002: model rules that need only values
+        # are checked here so a bad invocation is refused before a run directory exists.
+        # Do NOT delete the build_model calls of the same helpers as "now redundant": they
+        # are the backstop for a config mutated after construction, and the two call sites
+        # are ONE implementation, so they cannot drift.
+        if not self.trainable_gabor_stem and not self.use_gabor_stem:
+            raise ValueError(
+                "A frozen Gabor stem was requested (trainable_gabor_stem=False / "
+                "--freeze-gabor-stem) but this model has no 'gabor_stem' layer because "
+                "use_gabor_stem=False (--no-gabor-stem). Drop one of them."
+            )
+        initial_filters = _resolved_initial_filters(self)
+        _validate_stem_width(self, initial_filters)
+        _resolve_final_projection_groups(self, initial_filters)
 
 
 # ---------------------------------------------------------------------
 # MODEL
 # ---------------------------------------------------------------------
+
+
+def _resolved_initial_filters(config: "TrainingConfig") -> int:
+    """The level-0 width the model will really be built with.
+
+    Interface contract: pure, no I/O. ``config.initial_filters`` when set, else the
+    variant's ``initial_filters``. The width rules below must read THIS and never the
+    variant default, or ``--initial-filters`` would be validated against a width the
+    model does not have. Requires ``config.variant`` to be a known variant (the config
+    checks that first).
+    """
+    if config.initial_filters is not None:
+        return config.initial_filters
+    return CONVUNEXT_CONFIGS[config.variant]["initial_filters"]
+
+
+def _validate_stem_width(config: "TrainingConfig", initial_filters: int) -> None:
+    """Refuse a no-projection Gabor stem whose width cannot reach ``initial_filters``.
+
+    Interface contract: raises ``ValueError`` (message names ``gabor_filters`` or
+    ``gabor_filters_per_channel``) and returns ``None`` otherwise; it is
+    ``validate_gabor_stem_channels`` bound to this config's fields, so the rule lives in
+    that one shared predicate.
+    """
+    validate_gabor_stem_channels(
+        use_gabor_stem=config.use_gabor_stem,
+        gabor_stem_projection=config.gabor_stem_projection,
+        gabor_filters=config.gabor_filters,
+        initial_filters=initial_filters,
+        # Selects the depthwise arm of the width rule (channels * per-channel count),
+        # which is a DIFFERENT rule from the cross-channel one -- see the predicate.
+        gabor_filters_per_channel=config.gabor_filters_per_channel,
+        channels=config.channels,
+    )
+
+
+def _resolve_final_projection_groups(config: "TrainingConfig", initial_filters: int) -> int:
+    """Resolve ``final_projection_groups`` (-1 = one group per output channel) and check it.
+
+    Interface contract: returns the resolved group count. Raises ``ValueError`` (message
+    names ``final_projection_groups``) when a count above 1 divides neither
+    ``initial_filters`` nor ``channels``.
+    """
+    groups = config.channels if config.final_projection_groups == -1 else config.final_projection_groups
+    if groups > 1 and (initial_filters % groups != 0 or config.channels % groups != 0):
+        raise ValueError(
+            f"final_projection_groups ({config.final_projection_groups}) resolved to "
+            f"{groups}, which must divide BOTH initial_filters({initial_filters}) and "
+            f"channels({config.channels})."
+        )
+    return groups
 
 
 def _resolve_depthwise_initializer(name: Optional[str]):
@@ -261,32 +326,12 @@ def build_model(config: TrainingConfig) -> keras.Model:
         cfg["blocks_per_level"] = config.blocks_per_level  # override variant blocks/level
     # No-projection Gabor stem requires an exact channel match; fail early with a clear
     # message before the factory builds (the factory also validates as a backstop).
-    # One shared predicate, so the two trainers cannot drift apart on the rule.
-    validate_gabor_stem_channels(
-        use_gabor_stem=config.use_gabor_stem,
-        gabor_stem_projection=config.gabor_stem_projection,
-        gabor_filters=config.gabor_filters,
-        initial_filters=cfg["initial_filters"],
-        # Selects the depthwise arm of the width rule (channels * per-channel count),
-        # which is a DIFFERENT rule from the cross-channel one -- see the predicate.
-        gabor_filters_per_channel=config.gabor_filters_per_channel,
-        channels=config.channels,
-    )
+    # One shared predicate, so the two trainers cannot drift apart on the rule; the config
+    # already ran the same helpers at construction.
+    _validate_stem_width(config, cfg["initial_filters"])
     # Resolve the final-projection group count: -1 means one group per output channel
     # (groups == channels), so each output channel reads a disjoint feature group.
-    final_projection_groups = (
-        config.channels if config.final_projection_groups == -1
-        else config.final_projection_groups
-    )
-    if final_projection_groups > 1 and (
-        cfg["initial_filters"] % final_projection_groups != 0
-        or config.channels % final_projection_groups != 0
-    ):
-        raise ValueError(
-            f"--final-projection-groups resolved to {final_projection_groups}, which must "
-            f"divide BOTH initial_filters({cfg['initial_filters']}) and "
-            f"channels({config.channels})."
-        )
+    final_projection_groups = _resolve_final_projection_groups(config, cfg["initial_filters"])
     input_shape = (config.patch_size, config.patch_size, config.channels)
     # DECISION plan_2026-06-21_eb7fd829/D-003: the bare "leaky_relu" string resolves to
     # slope 0.2 in Keras, so DO NOT pass the string when alpha 0.1 is wanted. Construct an
