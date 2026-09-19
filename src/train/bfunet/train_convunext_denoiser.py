@@ -103,13 +103,14 @@ Kept as an option for higher-res / other GPUs / a future XLA-clean upsample.
 import keras
 import argparse
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from train.common import setup_gpu
+from train.common.run_io import default_experiment_name
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
 from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
@@ -440,7 +441,43 @@ def train(config: TrainingConfig) -> keras.Model:
 # ---------------------------------------------------------------------
 
 
-def parse_arguments() -> argparse.Namespace:
+# DECISION plan-2026-09-19T131351-b8d39688/D-013: only this trainer's CLI is reworked; the unet
+# and bfcnn mains keep their own two-branch smoke. The preset lives in ONE table keyed by
+# argparse dest, applied only to dests the user did NOT type (see _parse_with_explicit), so
+# ``--smoke --epochs 3`` runs 3 epochs. Do NOT decide "typed" by comparing with the parser
+# default: a value typed equal to the default is still typed (plans/LESSONS.md, the smoke
+# preset trap), and the default is the value a user is most likely to type.
+SMOKE_PRESET: Dict[str, Any] = {
+    "variant": "tiny",
+    "epochs": 2,
+    "batch_size": 2,
+    "patch_size": 64,
+    "patches_per_image": 2,
+    "max_train_files": 8,
+    "max_val_files": 8,  # >= viz_samples so the smoke grid also shows 8 columns
+    "steps_per_epoch": 3,
+    "validation_steps": 2,
+    "warmup_epochs": 0,
+    "viz_freq": 1,
+    "gabor_filters": 8,
+    # Restated although equal to today's parser defaults: the preset is a fixed mechanism
+    # check and must not drift when a default is retuned. curriculum_epochs is left to the
+    # config (None -> epochs) so ``--epochs 3`` widens the curriculum with it.
+    "learning_rate": 1e-3,
+    "sigma_max_start": 0.025,
+    "sigma_max_end": 0.25,
+    "curriculum_schedule": "linear",
+    # A SMALL self-iterate pool (>= the smoke batch size) so a smoke run exercises >= 1
+    # regeneration cheaply; regen_freq 1 makes the single epoch boundary trigger one.
+    "self_iterate_pool_size": 32,
+    "self_iterate_regen_freq": 1,
+}
+
+# Sentinel for "the user did not type this dest" (a value no flag can produce).
+_NOT_TYPED = object()
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train bias-free ConvUNeXt denoiser (Gabor stem + noise curriculum)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -503,10 +540,44 @@ def parse_arguments() -> argparse.Namespace:
         help="num_heads for the bottleneck linear-attention blocks (bottleneck_filters "
              "must be divisible by this when blocks>0).",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def parse_arguments_with_explicit(
+    argv: Optional[Sequence[str]] = None,
+) -> Tuple[argparse.Namespace, FrozenSet[str]]:
+    """Parse ``argv`` and report which dests the user actually typed.
+
+    Interface contract: ``argv`` is a list of argument strings, or ``None`` for
+    ``sys.argv[1:]``. Returns ``(args, explicit)``: ``args`` carries every dest (typed
+    value, else the parser default), ``explicit`` is the frozenset of dests that appeared
+    on the command line, INCLUDING one typed equal to its default. Detection parses into a
+    namespace pre-populated with a sentinel for every dest, so argparse never applies a
+    default and "typed" is read off the sentinel, not inferred from a value. ``--help``
+    and parse errors exit inside argparse before anything else runs. Raises ``SystemExit``
+    on a parse error or a parse-time guard.
+    """
+    parser = _build_parser()
+    defaults = vars(parser.parse_args([]))
+    namespace = argparse.Namespace(**{dest: _NOT_TYPED for dest in defaults})
+    parser.parse_args(argv, namespace=namespace)
+    explicit = frozenset(dest for dest in defaults if getattr(namespace, dest) is not _NOT_TYPED)
+    args = argparse.Namespace(
+        **{dest: getattr(namespace, dest) if dest in explicit else defaults[dest]
+           for dest in defaults}
+    )
     reject_self_iterate_with_nonadditive(parser, args)
     reject_conflicting_gabor_stem_counts(parser, args)
-    return args
+    return args, explicit
+
+
+def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    """Parse ``argv`` (default ``sys.argv[1:]``) into the argument namespace.
+
+    Thin view of :func:`parse_arguments_with_explicit` for callers that do not need the
+    explicit-flag set; ``--help`` prints usage and exits 0 without side effects.
+    """
+    return parse_arguments_with_explicit(argv)[0]
 
 
 def reject_conflicting_gabor_stem_counts(parser, args) -> None:
@@ -550,8 +621,126 @@ def reject_conflicting_gabor_stem_counts(parser, args) -> None:
         )
 
 
-def main():
-    args = parse_arguments()
+def config_from_args(args: argparse.Namespace, explicit: FrozenSet[str]) -> TrainingConfig:
+    """Build the ONE ``TrainingConfig`` for ``args``, applying the smoke preset if asked.
+
+    Interface contract: ``args`` and ``explicit`` come from
+    :func:`parse_arguments_with_explicit`. With ``--smoke``, every ``SMOKE_PRESET`` dest
+    NOT in ``explicit`` takes the preset value; a typed dest always keeps its typed value.
+    ``--max-train-files`` / ``--max-val-files`` / ``--validation-steps`` left as ``None``
+    are not forwarded, so the config default (10000 / 500 / 100) applies; ``0`` is
+    forwarded and refused by the config. The smoke experiment name is
+    ``default_experiment_name("convunext_denoiser_smoke")`` (timestamped, never a fixed
+    name) unless ``--experiment-name`` was typed. Raises ``ValueError`` from the config.
+    """
+    v = dict(vars(args))
+    if args.smoke:
+        for dest, value in SMOKE_PRESET.items():
+            if dest not in explicit:
+                v[dest] = value
+        if v["experiment_name"] is None:
+            v["experiment_name"] = default_experiment_name("convunext_denoiser_smoke")
+    # None means "use the config default" for these three (their config defaults are not None).
+    defaulted = {
+        name: v[name] for name in ("max_train_files", "max_val_files", "validation_steps")
+        if v[name] is not None
+    }
+    config = TrainingConfig(
+        variant=v["variant"],
+        convnext_version=v["convnext_version"],
+        use_gabor_stem=not v["no_gabor_stem"],
+        trainable_gabor_stem=not v["freeze_gabor_stem"],
+        use_laplacian_pyramid=v["laplacian_pyramid"],
+        clip_noise=not v["no_clip"],
+        symmetry_weight=v["symmetry_weight"],
+        symmetry_probes=v["symmetry_probes"],
+        high_freq_blocks=v["high_freq_blocks"],
+        bottleneck_attention_blocks=v["bottleneck_attention_blocks"],
+        bottleneck_attention_heads=v["bottleneck_attention_heads"],
+        zero_pad_channels=v["zero_pad_channels"],
+        extra_zero_output_channels=v["extra_zero_output_channels"],
+        downsample_pool_type=("average" if v["mean_pooling"] else "max"),
+        expose_bottleneck=v["expose_bottleneck"],
+        enable_analyzer=v["analyzer"],
+        analyzer_freq=v["analyzer_freq"],
+        gabor_filters=v["gabor_filters"],
+        gabor_filters_per_channel=v["gabor_filters_per_channel"],
+        gabor_kernel_size=v["gabor_kernel_size"],
+        gabor_activation=v["gabor_activation"],
+        gabor_stem_projection=not v["no_gabor_projection"],
+        initial_filters=v["initial_filters"],
+        filter_multiplier=v["filter_multiplier"],
+        depth=v["depth"],
+        blocks_per_level=v["blocks_per_level"],
+        final_projection_groups=v["final_projection_groups"],
+        enable_deep_supervision=v["deep_supervision"],
+        epochs=v["epochs"],
+        curriculum_epochs=v["curriculum_epochs"],
+        batch_size=v["batch_size"],
+        patch_size=v["patch_size"],
+        channels=v["channels"],
+        patches_per_image=v["patches_per_image"],
+        mixed_precision=v["mixed_precision"],
+        learning_rate=v["learning_rate"],
+        weight_decay=v["weight_decay"],
+        optimizer_type=v["optimizer_type"],
+        lr_schedule_type=v["lr_schedule_type"],
+        gradient_clipping=v["gradient_clipping"],
+        early_stopping_patience=v["early_stopping_patience"],
+        augment_data=not v["no_augment"],
+        noise_sigma_min=v["noise_sigma_min"],
+        analyzer_start_epoch=v["analyzer_start_epoch"],
+        seed=v["seed"],
+        dataset_shuffle_buffer=v["dataset_shuffle_buffer"],
+        patch_shuffle_buffer=v["patch_shuffle_buffer"],
+        ww_pgd_warmup_epochs=v["ww_pgd_warmup_epochs"],
+        ww_pgd_ramp_epochs=v["ww_pgd_ramp_epochs"],
+        ww_pgd_apply_every_epochs=v["ww_pgd_apply_every_epochs"],
+        ww_pgd_q=v["ww_pgd_q"],
+        ww_pgd_blend_eta=v["ww_pgd_blend_eta"],
+        ww_pgd_cayley_eta=v["ww_pgd_cayley_eta"],
+        ww_pgd_min_tail=v["ww_pgd_min_tail"],
+        warmup_epochs=v["warmup_epochs"],  # None -> 10% of epochs
+        sigma_max_start=v["sigma_max_start"],
+        sigma_max_end=v["sigma_max_end"],
+        curriculum_schedule=v["curriculum_schedule"],
+        noise_type=(
+            "composite" if v["composite_noise"]
+            else "multiplicative" if v["multiplicative_noise"]
+            else "additive"
+        ),
+        composite_additive_ratio=v["composite_additive_ratio"],
+        self_iterate=v["self_iterate"],
+        self_iterate_pool_size=v["self_iterate_pool_size"],
+        self_iterate_regen_freq=v["self_iterate_regen_freq"],
+        self_iterate_mix_ratio=v["self_iterate_mix_ratio"],
+        ww_pgd=v["ww_pgd"],
+        ww_pgd_log_alpha=v["ww_pgd_log_alpha"],
+        init_from=v["init_from"],
+        depthwise_initializer=v["depthwise_initializer"],
+        depthwise_l2=v["depthwise_l2"],
+        block_activation=v["block_activation"],
+        block_activation_alpha=v["block_activation_alpha"],
+        dropout_rate=v["dropout"],
+        block_normalization=v["block_normalization"],
+        steps_per_epoch=v["steps_per_epoch"],
+        viz_freq=v["viz_freq"],
+        viz_samples=v["viz_samples"],
+        test_eval=v["test_eval"],
+        test_num_samples=v["test_num_samples"],
+        output_dir=v["output_dir"],
+        experiment_name=v["experiment_name"],
+        **defaulted,
+    )
+    # --ww-pgd-log-alpha implies --ww-pgd: enabling the alpha trajectory log turns
+    # on the projection it instruments (so the flag is usable standalone).
+    if config.ww_pgd_log_alpha:
+        config.ww_pgd = True
+    return config
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    args, explicit = parse_arguments_with_explicit(argv)
 
     # Standalone dashboard rebuild (no training, no GPU needed): regenerate the
     # combined per-epoch dashboard from an experiment dir's CSV + config.
@@ -561,194 +750,7 @@ def main():
 
     setup_gpu(gpu_id=args.gpu)
 
-    if args.smoke:
-        # Mechanism check: tiny, fast, constant LR (avoid cosine collapse at 2 epochs).
-        config = TrainingConfig(
-            variant="tiny",
-            convnext_version=args.convnext_version,
-            use_gabor_stem=not args.no_gabor_stem,
-            trainable_gabor_stem=not args.freeze_gabor_stem,
-            use_laplacian_pyramid=args.laplacian_pyramid,
-            clip_noise=not args.no_clip,
-            symmetry_weight=args.symmetry_weight,
-            symmetry_probes=args.symmetry_probes,
-            high_freq_blocks=args.high_freq_blocks,
-            bottleneck_attention_blocks=args.bottleneck_attention_blocks,
-            bottleneck_attention_heads=args.bottleneck_attention_heads,
-            zero_pad_channels=args.zero_pad_channels,
-            extra_zero_output_channels=args.extra_zero_output_channels,
-            downsample_pool_type=("average" if args.mean_pooling else "max"),
-            expose_bottleneck=args.expose_bottleneck,
-            enable_deep_supervision=args.deep_supervision,
-            enable_analyzer=args.analyzer,
-            analyzer_freq=args.analyzer_freq,
-            depth=args.depth,
-            blocks_per_level=args.blocks_per_level,
-            gabor_filters=8,
-            gabor_filters_per_channel=args.gabor_filters_per_channel,
-            gabor_kernel_size=args.gabor_kernel_size,
-            gabor_activation=args.gabor_activation,
-            epochs=2,
-            curriculum_epochs=2,
-            batch_size=2,
-            patch_size=64,
-            channels=3,
-            patches_per_image=2,
-            max_train_files=8,
-            max_val_files=8,  # >= viz_samples so the smoke grid also shows 8 columns
-            steps_per_epoch=3,
-            validation_steps=2,
-            warmup_epochs=0,
-            # Mechanism check only; cosine_decay is the default schedule
-            # (builder has no 'constant'). 2-epoch PSNR quality is NOT asserted.
-            # Now CLI-settable (default unchanged: "cosine_decay").
-            lr_schedule_type=args.lr_schedule_type,
-            learning_rate=1e-3,
-            weight_decay=args.weight_decay,
-            optimizer_type=args.optimizer_type,
-            gradient_clipping=args.gradient_clipping,
-            early_stopping_patience=args.early_stopping_patience,
-            augment_data=not args.no_augment,
-            noise_sigma_min=args.noise_sigma_min,
-            analyzer_start_epoch=args.analyzer_start_epoch,
-            seed=args.seed,
-            dataset_shuffle_buffer=args.dataset_shuffle_buffer,
-            patch_shuffle_buffer=args.patch_shuffle_buffer,
-            ww_pgd_warmup_epochs=args.ww_pgd_warmup_epochs,
-            ww_pgd_ramp_epochs=args.ww_pgd_ramp_epochs,
-            ww_pgd_apply_every_epochs=args.ww_pgd_apply_every_epochs,
-            ww_pgd_q=args.ww_pgd_q,
-            ww_pgd_blend_eta=args.ww_pgd_blend_eta,
-            ww_pgd_cayley_eta=args.ww_pgd_cayley_eta,
-            ww_pgd_min_tail=args.ww_pgd_min_tail,
-            sigma_max_start=0.025,
-            sigma_max_end=0.25,
-            curriculum_schedule="linear",
-            noise_type=(
-                "composite" if args.composite_noise
-                else "multiplicative" if args.multiplicative_noise
-                else "additive"
-            ),
-            composite_additive_ratio=args.composite_additive_ratio,
-            # Self-iterate: SMALL pool so a smoke run exercises >=1 regeneration cheaply.
-            # Cap at 32 (>= smoke batch_size 2) and force regen_freq=1 so the single
-            # epoch boundary triggers a regeneration; mix_ratio is honored from args.
-            self_iterate=args.self_iterate,
-            self_iterate_pool_size=min(args.self_iterate_pool_size, 32),
-            self_iterate_regen_freq=1,
-            self_iterate_mix_ratio=args.self_iterate_mix_ratio,
-            ww_pgd=args.ww_pgd,
-            ww_pgd_log_alpha=args.ww_pgd_log_alpha,
-            init_from=args.init_from,
-            depthwise_initializer=args.depthwise_initializer,
-            depthwise_l2=args.depthwise_l2,
-            block_activation=args.block_activation,
-            block_activation_alpha=args.block_activation_alpha,
-            dropout_rate=args.dropout,
-            block_normalization=args.block_normalization,
-            viz_freq=1,
-            viz_samples=args.viz_samples,
-            test_eval=args.test_eval,
-            test_num_samples=args.test_num_samples,
-            mixed_precision=args.mixed_precision,
-            output_dir=args.output_dir,
-            experiment_name=args.experiment_name or "convunext_denoiser_smoke",
-        )
-    else:
-        config = TrainingConfig(
-            variant=args.variant,
-            convnext_version=args.convnext_version,
-            use_gabor_stem=not args.no_gabor_stem,
-            trainable_gabor_stem=not args.freeze_gabor_stem,
-            use_laplacian_pyramid=args.laplacian_pyramid,
-            clip_noise=not args.no_clip,
-            symmetry_weight=args.symmetry_weight,
-            symmetry_probes=args.symmetry_probes,
-            high_freq_blocks=args.high_freq_blocks,
-            bottleneck_attention_blocks=args.bottleneck_attention_blocks,
-            bottleneck_attention_heads=args.bottleneck_attention_heads,
-            zero_pad_channels=args.zero_pad_channels,
-            extra_zero_output_channels=args.extra_zero_output_channels,
-            downsample_pool_type=("average" if args.mean_pooling else "max"),
-            expose_bottleneck=args.expose_bottleneck,
-            enable_analyzer=args.analyzer,
-            analyzer_freq=args.analyzer_freq,
-            gabor_filters=args.gabor_filters,
-            gabor_filters_per_channel=args.gabor_filters_per_channel,
-            gabor_kernel_size=args.gabor_kernel_size,
-            gabor_activation=args.gabor_activation,
-            gabor_stem_projection=not args.no_gabor_projection,
-            initial_filters=args.initial_filters,
-            filter_multiplier=args.filter_multiplier,
-            depth=args.depth,
-            blocks_per_level=args.blocks_per_level,
-            final_projection_groups=args.final_projection_groups,
-            enable_deep_supervision=args.deep_supervision,
-            epochs=args.epochs,
-            curriculum_epochs=args.curriculum_epochs,
-            batch_size=args.batch_size,
-            patch_size=args.patch_size,
-            channels=args.channels,
-            patches_per_image=args.patches_per_image,
-            mixed_precision=args.mixed_precision,
-            learning_rate=args.learning_rate,
-            weight_decay=args.weight_decay,
-            optimizer_type=args.optimizer_type,
-            lr_schedule_type=args.lr_schedule_type,
-            gradient_clipping=args.gradient_clipping,
-            early_stopping_patience=args.early_stopping_patience,
-            augment_data=not args.no_augment,
-            noise_sigma_min=args.noise_sigma_min,
-            analyzer_start_epoch=args.analyzer_start_epoch,
-            seed=args.seed,
-            dataset_shuffle_buffer=args.dataset_shuffle_buffer,
-            patch_shuffle_buffer=args.patch_shuffle_buffer,
-            ww_pgd_warmup_epochs=args.ww_pgd_warmup_epochs,
-            ww_pgd_ramp_epochs=args.ww_pgd_ramp_epochs,
-            ww_pgd_apply_every_epochs=args.ww_pgd_apply_every_epochs,
-            ww_pgd_q=args.ww_pgd_q,
-            ww_pgd_blend_eta=args.ww_pgd_blend_eta,
-            ww_pgd_cayley_eta=args.ww_pgd_cayley_eta,
-            ww_pgd_min_tail=args.ww_pgd_min_tail,
-            warmup_epochs=args.warmup_epochs,  # None -> 10% of epochs
-            sigma_max_start=args.sigma_max_start,
-            sigma_max_end=args.sigma_max_end,
-            curriculum_schedule=args.curriculum_schedule,
-            noise_type=(
-                "composite" if args.composite_noise
-                else "multiplicative" if args.multiplicative_noise
-                else "additive"
-            ),
-            composite_additive_ratio=args.composite_additive_ratio,
-            self_iterate=args.self_iterate,
-            self_iterate_pool_size=args.self_iterate_pool_size,
-            self_iterate_regen_freq=args.self_iterate_regen_freq,
-            self_iterate_mix_ratio=args.self_iterate_mix_ratio,
-            ww_pgd=args.ww_pgd,
-            ww_pgd_log_alpha=args.ww_pgd_log_alpha,
-            init_from=args.init_from,
-            depthwise_initializer=args.depthwise_initializer,
-            depthwise_l2=args.depthwise_l2,
-            block_activation=args.block_activation,
-            block_activation_alpha=args.block_activation_alpha,
-            dropout_rate=args.dropout,
-            block_normalization=args.block_normalization,
-            max_train_files=args.max_train_files or 10000,
-            max_val_files=args.max_val_files or 500,
-            steps_per_epoch=args.steps_per_epoch,
-            validation_steps=args.validation_steps if args.validation_steps is not None else 100,
-            viz_freq=args.viz_freq,
-            viz_samples=args.viz_samples,
-            test_eval=args.test_eval,
-            test_num_samples=args.test_num_samples,
-            output_dir=args.output_dir,
-            experiment_name=args.experiment_name,
-        )
-
-    # --ww-pgd-log-alpha implies --ww-pgd: enabling the alpha trajectory log turns
-    # on the projection it instruments (so the flag is usable standalone).
-    if config.ww_pgd_log_alpha:
-        config.ww_pgd = True
+    config = config_from_args(args, explicit)
 
     if config.gabor_filters_per_channel is None:
         gabor_desc = f"{config.use_gabor_stem}"

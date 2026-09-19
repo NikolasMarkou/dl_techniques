@@ -3418,7 +3418,10 @@ def add_common_arguments(parser) -> None:
     )
     parser.add_argument(
         "--smoke", action="store_true",
-        help="Tiny end-to-end mechanism check (few steps/epochs, constant LR).",
+        help="Tiny end-to-end mechanism check: a small preset (2 epochs, 3 steps, 64 px "
+             "patches, batch 2, 8 files, cosine schedule with no warmup). On the ConvUNeXt "
+             "trainer every flag you type explicitly overrides the preset, the run gets a "
+             "timestamped name, and any flag you leave alone takes the preset value.",
     )
 
 
