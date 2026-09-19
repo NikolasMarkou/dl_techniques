@@ -15,6 +15,7 @@ imported from the code under test.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import time
@@ -190,3 +191,113 @@ def test_final_model_reloads_and_denoises_a_patch(e2e) -> None:
     out = np.asarray(e2e.final.predict(patch.astype("float32"), verbose=0))
     assert out.shape == (1, PATCH, PATCH, 3)
     assert np.all(np.isfinite(out))
+
+
+# ---------------------------------------------------------------------
+# iter-1/step-3 (plan-2026-09-19T131351-b8d39688/D-002): run-directory order
+# ---------------------------------------------------------------------
+
+# The repo root, derived from this file's location (tests/test_train/test_bfunet/<file>),
+# never from the trainer's own helper: the test must fail if the helper is not used.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _snapshot(run_dir: Path) -> Dict[str, str]:
+    """``{relative path: sha256}`` of every file under ``run_dir``."""
+    return {
+        str(path.relative_to(run_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(run_dir.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_a_reused_experiment_name_is_refused_and_the_first_run_is_byte_identical(e2e) -> None:
+    """A second run under the same name used to merge into the first directory."""
+    before = _snapshot(e2e.run_dir)
+    assert "config.json" in before and "training_log.csv" in before
+
+    with pytest.raises(FileExistsError) as raised:
+        run_train(_tiny_config(e2e.root, EXPERIMENT))
+
+    text = str(raised.value)
+    assert str(e2e.run_dir) in text and "--experiment-name" in text, text
+    assert _snapshot(e2e.run_dir) == before, "the refusal wrote or deleted something"
+
+
+class _Probe(Exception):
+    """Raised by the spy to stop ``train()`` right where it creates the run directory."""
+
+
+def test_a_relative_output_dir_is_anchored_at_the_repo_root_not_the_cwd(
+        monkeypatch, tmp_path_factory) -> None:
+    """The wiring, not the helper: ``train()`` hands the repo-root path to ``prepare_run_dir``."""
+    root = tmp_path_factory.mktemp("bfunet_relative")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    elsewhere = tmp_path_factory.mktemp("bfunet_elsewhere")
+    monkeypatch.chdir(elsewhere)
+    seen: Dict[str, object] = {}
+
+    def spy(config, output_dir=None, **kwargs):
+        seen["output_dir"] = output_dir
+        raise _Probe
+
+    monkeypatch.setattr(common, "prepare_run_dir", spy)
+    config = _tiny_config(root, "relative_probe", output_dir="relative_probe_root")
+    with pytest.raises(_Probe):
+        run_train(config)
+
+    assert seen["output_dir"] is not None, "prepare_run_dir was called without the resolved path"
+    assert Path(seen["output_dir"]) == REPO_ROOT / "relative_probe_root" / "relative_probe"
+    assert list(elsewhere.iterdir()) == [], "something was created in the working directory"
+    assert not (REPO_ROOT / "relative_probe_root").exists()
+
+
+@pytest.fixture(scope="module")
+def unset_steps_run(tmp_path_factory) -> SimpleNamespace:
+    """One-epoch run with ``steps_per_epoch`` left unset (the floor rule resolves it)."""
+    root = tmp_path_factory.mktemp("bfunet_unset_steps")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    # max_train_files caps the worklist at the 6 generated images (the default of 10000
+    # wraps them around to 10000 paths, i.e. 10000 steps of a tiny model).
+    config = _tiny_config(
+        root, "unset_steps", epochs=1, steps_per_epoch=None, max_train_files=N_TRAIN)
+    run_train(config)
+    return SimpleNamespace(config=config, run_dir=root / "out" / "unset_steps")
+
+
+def test_config_json_records_the_resolved_steps_per_epoch(unset_steps_run) -> None:
+    """6 images x 2 patches // batch 2 = 6 is below the floor of 100, so 100 is what ran."""
+    written = json.loads((unset_steps_run.run_dir / "config.json").read_text())
+    assert written["steps_per_epoch"] == 100
+
+
+def test_the_write_back_does_not_mutate_the_callers_config(unset_steps_run) -> None:
+    assert unset_steps_run.config.steps_per_epoch is None
+
+
+def test_config_json_keeps_an_explicit_steps_per_epoch(e2e) -> None:
+    written = json.loads((e2e.run_dir / "config.json").read_text())
+    assert written["steps_per_epoch"] == 3
+
+
+@pytest.fixture(scope="module")
+def pool_run(tmp_path_factory) -> SimpleNamespace:
+    """Self-iterate run: the finite pool (4 patches, batch 2) decides ``steps_per_epoch``."""
+    root = tmp_path_factory.mktemp("bfunet_pool")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    config = _tiny_config(
+        root, "pool_steps", epochs=1, steps_per_epoch=None,
+        self_iterate=True, self_iterate_pool_size=4,
+    )
+    run_train(config)
+    return SimpleNamespace(config=config, run_dir=root / "out" / "pool_steps")
+
+
+def test_config_json_records_the_pool_steps_per_epoch_under_self_iterate(pool_run) -> None:
+    """4 pooled patches // batch 2 = 2 steps, not the 100 of the streaming floor."""
+    written = json.loads((pool_run.run_dir / "config.json").read_text())
+    assert written["steps_per_epoch"] == 2
+    assert pool_run.config.steps_per_epoch is None

@@ -111,3 +111,75 @@ class TestInitFromWarmStart:
                 results_dir_prefix="test",
             )
         assert not (tmp_path / "out").exists()
+
+
+class TestEveryRefusalPrecedesTheRunDirectory:
+    """iter-1/step-3 (plan-2026-09-19T131351-b8d39688/D-002): a preflight failure burns no name.
+
+    ``train()`` used to call ``prepare_run_dir`` before it looked at the image
+    directories, so a nonexistent or empty directory left ``config.json`` behind and the
+    experiment name unusable. The legacy ``init_from`` case above is the same rule for
+    the provenance gate; these are the image-directory cases.
+    """
+
+    @staticmethod
+    def _config(tmp_path, **overrides) -> BFUnetTrainingConfig:
+        (tmp_path / "empty").mkdir(exist_ok=True)
+        fields = dict(
+            experiment_name="preflight_test",
+            output_dir=str(tmp_path / "out"),
+            train_image_dirs=[str(tmp_path / "empty")],
+            val_image_dirs=[str(tmp_path / "empty")],
+            dataset_weights=None,
+        )
+        fields.update(overrides)
+        return BFUnetTrainingConfig(**fields)
+
+    @staticmethod
+    def _run(config) -> None:
+        def _never_called(*args, **kwargs):
+            raise AssertionError("train() must refuse BEFORE building anything")
+
+        train(
+            config,
+            build_model_fn=_never_called,
+            verify_fn=_never_called,
+            model_label="test",
+            results_dir_prefix="test",
+        )
+
+    @pytest.mark.parametrize(
+        "overrides, fragment",
+        [
+            pytest.param(
+                {"train_image_dirs": ["{tmp}/nonexistent_train"]},
+                "No training images found",
+                id="nonexistent_train_dir",
+            ),
+            pytest.param({}, "No training images found", id="empty_train_dir"),
+            pytest.param(
+                {"val_image_dirs": ["{tmp}/nonexistent_val"]},
+                "No validation images found",
+                id="nonexistent_val_dir",
+            ),
+        ],
+    )
+    def test_a_bad_image_directory_leaves_no_output_dir(
+        self, tmp_path, overrides, fragment
+    ):
+        overrides = {
+            key: [item.replace("{tmp}", str(tmp_path)) for item in value]
+            for key, value in overrides.items()
+        }
+        if "val_image_dirs" in overrides:
+            # a valid train dir so the refusal is unambiguously about the val dir
+            from PIL import Image
+
+            good = tmp_path / "good_train"
+            good.mkdir()
+            Image.new("RGB", (8, 8)).save(good / "a.png")
+            overrides["train_image_dirs"] = [str(good)]
+        config = self._config(tmp_path, **overrides)
+        with pytest.raises(ValueError, match=fragment):
+            self._run(config)
+        assert not (tmp_path / "out").exists()

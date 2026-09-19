@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless: avoid X11 crashes (LESSON)
 import matplotlib.pyplot as plt
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -25,6 +25,9 @@ from train.common import (
     validate_model_loading,
     collect_image_paths,
 )
+from train.common.args import resolved_run_dir
+from train.common.config_io import save_config_json
+from train.common.run_artifacts import refuse_existing_run
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.superpoint.homographic_adaptation import select_weighted_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -2181,9 +2184,44 @@ def train(
     if config.init_from is not None:
         require_unit_domain_checkpoint(config.init_from)
 
-    output_dir = prepare_run_dir(config)
+    # DECISION plan-2026-09-19T131351-b8d39688/D-002: every refusal that needs no built
+    # model happens BEFORE the run directory exists, so a bad invocation burns no
+    # experiment name: (1) the provenance gate above, (2) this preflight (the image
+    # directories exist and yield paths, collected ONCE and reused below), (3) a reused
+    # name is refused, and only then (4) the directory and config.json are written, at
+    # the repo-root-anchored path (a relative --output-dir never follows the cwd). Do NOT
+    # move ``prepare_run_dir`` back above the preflight: it made the name unusable after
+    # a typo'd directory, and its ``exist_ok=True`` silently merged a reused name into the
+    # old run. Refusals that need the built model (init_from layer mismatch) stay after the
+    # directory exists on purpose; ``run.log`` records why.
+    resolved = Path(resolved_run_dir(config))
 
+    # Seed BEFORE the collection: the val listing shuffles with the global numpy RNG when
+    # ``max_val_files`` caps it, so the seed decides WHICH files are validated.
     set_seeds(config.seed)  # reproducible weight init (H8)
+
+    train_paths = collect_training_paths(config)
+    val_paths = collect_image_paths(
+        config.val_image_dirs,
+        extensions=config.image_extensions,
+        max_files=config.max_val_files,
+    )
+    if not train_paths:
+        raise ValueError(
+            f"No training images found under {list(config.train_image_dirs)}: every "
+            "directory is missing or holds no matching file. Nothing was written."
+        )
+    if not val_paths:
+        raise ValueError(
+            f"No validation images found under {list(config.val_image_dirs)}: every "
+            "directory is missing or holds no matching file. Nothing was written."
+        )
+    logger.info(
+        f"Sourced {len(train_paths)} train / {len(val_paths)} val image paths"
+    )
+
+    refuse_existing_run(resolved)
+    output_dir = prepare_run_dir(config, output_dir=resolved)
 
     # DECISION plan_2026-06-20_0433c2f2/D-002: --deep-supervision is NOT wired in this
     # trainer (no multi-scale targets, no per-output loss dict, no weight scheduler), so a
@@ -2215,16 +2253,6 @@ def train(
             "[0, 1] independently of make_curriculum_noise_fn. Only the (unused-in-"
             "self-iterate) streaming train/val noise honours clip_noise=False here."
         )
-
-    train_paths = collect_training_paths(config)
-    val_paths = collect_image_paths(
-        config.val_image_dirs,
-        extensions=config.image_extensions,
-        max_files=config.max_val_files,
-    )
-    logger.info(
-        f"Sourced {len(train_paths)} train / {len(val_paths)} val image paths"
-    )
 
     # Validation pipeline is identical in BOTH branches (streaming, fixed-sigma
     # noise on a fixed val set); only the TRAIN source differs.
@@ -2299,6 +2327,14 @@ def train(
 
     logger.info(
         f"steps_per_epoch={steps_per_epoch}, validation_steps={validation_steps}"
+    )
+
+    # config.json was written before the data pipeline existed, so it holds the UNRESOLVED
+    # ``steps_per_epoch`` (None = derive). Rewrite it with the value that actually runs, from
+    # a copy: the caller's config object is not touched. ``--dashboard`` rebuilds the
+    # learning-rate panel from this field and needs it (plan-2026-09-19T131351-b8d39688).
+    save_config_json(
+        replace(config, steps_per_epoch=int(steps_per_epoch)), str(output_dir), "config.json"
     )
 
     # Mixed precision must be set BEFORE the model is built so every layer adopts the
