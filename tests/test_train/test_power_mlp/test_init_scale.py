@@ -748,3 +748,68 @@ def test_the_real_trainer_hands_the_dashboard_the_guard_consistent_baseline(
     assert np.isfinite(bn_baseline["loss"]) and bn_baseline["loss"] < 100.0, bn_baseline
     assert plain_label == viz.BASELINE_LABEL
     assert plain_baseline["loss"] > 1e3, plain_baseline
+
+
+# ---------------------------------------------------------------------
+# D-031: the epoch-0 diagnostic leaves the dropout stream of the run it measures alone
+# ---------------------------------------------------------------------
+
+
+def _seed_states(model: keras.Model) -> list:
+    return [g.state.numpy().tobytes() for g in tpm._seed_generators(model)]
+
+
+def _two_epoch_losses(measure_first: bool) -> Tuple[list, list, list]:
+    """Seed, build the BN + dropout 0.1 model, optionally take the baseline measurement,
+    then fit 2 epochs. Returns ``(epoch losses, states before the call, states after)``."""
+    keras.utils.set_random_seed(0)
+    x, y = _guard_slice("synthetic", "unit")
+    model = _build_model("lecun_normal", k=2, batch_normalization=True)
+    before = _seed_states(model)
+    if measure_first:
+        tpm._untrained_metrics(model, x, y)
+    after = _seed_states(model)
+    history = model.fit(x, y, batch_size=128, epochs=2, shuffle=False, verbose=0)
+    return history.history["loss"], before, after
+
+
+def test_the_baseline_pass_finds_every_dropout_seed_generator() -> None:
+    """The restore is only as good as the set it covers: default preset = 3 Dropout layers."""
+    keras.utils.set_random_seed(0)
+    model = _build_model("lecun_normal", k=2, batch_normalization=True)
+    generators = tpm._seed_generators(model)
+    assert len(generators) == 3
+    assert len({id(g) for g in generators}) == 3
+    # ``model.variables`` lists exactly these states (the tracked ones) and nothing else.
+    assert sum("seed_generator" in v.path for v in model.variables) == 3
+
+
+def test_the_baseline_pass_leaves_the_dropout_stream_and_the_epoch_losses_untouched() -> None:
+    """Same seed, same data, 2 epochs: the run that took the training-mode baseline pass
+    first and the run that did not have identical epoch losses, and every seed-generator
+    state is byte-identical before and after the call.
+
+    Control, so equality is a statement about the restore: a bare training-mode call DOES
+    advance every generator, and a fit that starts from those advanced states DOES give
+    different losses."""
+    x, y = _guard_slice("synthetic", "unit")
+    with_pass, before, after = _two_epoch_losses(measure_first=True)
+    without_pass, before_ref, after_ref = _two_epoch_losses(measure_first=False)
+
+    assert before == before_ref and len(before) == 3
+    assert after == before, "the baseline pass advanced a dropout seed generator"
+    assert after_ref == before_ref
+    assert with_pass == without_pass, (with_pass, without_pass)
+
+    # Control: WITHOUT the restore the stream differs and so do the losses.
+    keras.utils.set_random_seed(0)
+    model = _build_model("lecun_normal", k=2, batch_normalization=True)
+    start = _seed_states(model)
+    weights = model.get_weights()
+    model(x, training=True)
+    assert _seed_states(model) != start, "a training-mode call must advance the generators"
+    assert all(a != b for a, b in zip(_seed_states(model), start))
+    model.set_weights(weights)
+    keras.utils.set_random_seed(0)
+    advanced = model.fit(x, y, batch_size=128, epochs=2, shuffle=False, verbose=0).history["loss"]
+    assert advanced != without_pass, "the control must differ or the equality proves nothing"

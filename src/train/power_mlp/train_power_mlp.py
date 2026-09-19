@@ -603,12 +603,39 @@ def create_optimizer(
 # Training
 # ---------------------------------------------------------------------
 
+def _seed_generators(model: keras.Model) -> list:
+    """Every ``keras.random.SeedGenerator`` reachable from ``model``.
+
+    Keras 3.8 registers a layer's generators in ``Layer._seed_generators`` (a Dropout
+    layer owns one; ``model.variables`` lists their ``state`` variables). Reached by
+    walking ``model._flatten_layers()``, which recurses through sublayers.
+
+    Returns:
+        The generators, deduplicated by identity; empty when the model has no
+        stochastic layer.
+    """
+    found, seen = [], set()
+    for layer in model._flatten_layers():
+        for generator in layer._seed_generators:
+            if id(generator) not in seen:
+                seen.add(id(generator))
+                found.append(generator)
+    return found
+
+
 # DECISION plan-2026-09-18T213948-68dcb72c/D-029: the epoch-0 numbers (initial-loss guard
 # AND the dashboard baseline star) come from THIS one function. Do NOT let the dashboard
 # callback call ``model.evaluate`` itself "because it is simpler": under batch
 # normalization that is the inference-mode pass (9.7e10 where the guard reads 2.68 on
 # the same model) and the star and the summary disagree. Guards:
 # test_a_batch_normalized_dashboard_baseline_equals_the_guard_not_the_inference_value.
+# DECISION plan-2026-09-18T213948-68dcb72c/D-031: the training-mode pass advances every
+# dropout SeedGenerator, so a diagnostic that only restored the WEIGHTS still shifted the
+# dropout stream of the run it measures (same seed, 0.9836 before the change, 0.9797
+# after). The generator states are restored too. Do NOT drop that restore because "the
+# weights are already restored": the run is no longer reproducible against runs made
+# without the diagnostic. Guard:
+# test_the_baseline_pass_leaves_the_dropout_stream_and_the_epoch_losses_untouched.
 def _untrained_metrics(
         model: keras.Model, x: np.ndarray, y: np.ndarray, batch_size: int = SANITY_SAMPLES
 ) -> Tuple[Dict[str, float], str]:
@@ -626,8 +653,11 @@ def _untrained_metrics(
     chunk normalized by its own batch statistics, like a training step; ``x`` no
     larger than ``batch_size`` is one pass), assigns the moving statistics, so the
     weights are snapshotted before and restored after; the model is left exactly as
-    it was. Dropout stays active (the regime of the first training step). A model
-    without batch normalization keeps ``model.evaluate`` (inference mode).
+    it was. Dropout stays active (the regime of the first training step), which
+    advances every dropout seed generator: their states are snapshotted and restored
+    as well, so the diagnostic does not shift the dropout stream of the run it
+    measures (D-031). A model without batch normalization keeps ``model.evaluate``
+    (inference mode).
 
     Args:
         model: Built and compiled model (``batch_normalization`` attribute set).
@@ -643,6 +673,8 @@ def _untrained_metrics(
         metrics = model.evaluate(x, y, batch_size=batch_size, verbose=0, return_dict=True)
         return {k: float(v) for k, v in metrics.items()}, "inference"
     snapshot = model.get_weights()
+    generators = _seed_generators(model)
+    generator_states = [generator.state.numpy() for generator in generators]
     loss_sum, correct = 0.0, 0
     try:
         for start in range(0, len(x), batch_size):
@@ -655,6 +687,8 @@ def _untrained_metrics(
             correct += int(np.sum(predicted == y[start:start + batch_size]))
     finally:
         model.set_weights(snapshot)  # undo the moving-statistics update
+        for generator, state in zip(generators, generator_states):
+            generator.state.assign(state)  # undo the dropout-stream advance
     return {"loss": loss_sum / len(x), "accuracy": correct / len(x)}, "training"
 
 
