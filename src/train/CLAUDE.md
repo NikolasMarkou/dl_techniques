@@ -20,7 +20,7 @@ Six shapes. Pick the closest exemplar and copy it; do not re-derive the scaffold
 
 | Pattern | Used by | Exemplar to copy | Monitor |
 |---|---|---|---|
-| **Pattern 1: Vision classification** — `load_dataset()` + `create_base_argument_parser()` + the full evaluation pipeline | ConvNeXt, CapsNet, CoshNet, CliffordNet, PowerMLP, KAN, ViT, SOM, MobileNet | `src/train/vit/train_vit.py` | `val_accuracy` |
+| **Pattern 1: Vision classification** — `load_dataset()` + `create_base_argument_parser()` + the full evaluation pipeline | ConvNeXt, CapsNet, CoshNet, CliffordNet, PowerMLP (`load_dataset()` and the evaluation pipeline, but its own parser, not `create_base_argument_parser()`; see `src/train/power_mlp/README.md`), KAN, ViT, SOM, MobileNet | `src/train/vit/train_vit.py` | `val_accuracy` |
 | **Pattern 2: Time-series / probabilistic** — synthetic generators, local argparse (the base parser's `--dataset` choices do not apply), `include_terminate_on_nan=True`, analyzer behind a `--deep-analysis` flag | N-BEATS, PRISM, TiRex, MDN | `src/train/time_series/nbeats/` | `val_loss` |
 | **Pattern 3: NLP pretrain/finetune** — `train.common.nlp` for tokenization, text datasets, warmup LR, callbacks; model code stays local | BERT, FNet, tree_transformer, GPT-2, wave_field | `src/train/bert/pretrain.py`, `src/train/bert/finetune.py` | `val_loss` |
 | **Pattern 4: Denoising / detection** — file-based datasets, domain callbacks appended to a `create_callbacks()` wrapper | BFCNN, BFUNet, YOLO12-COCO, ResNet, DarkIR | `src/train/bfunet/train_bfcnn_denoiser.py` | `val_loss` / `val_psnr` |

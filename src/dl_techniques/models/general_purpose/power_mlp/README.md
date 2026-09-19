@@ -4,7 +4,18 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18+-orange.svg)](https://www.tensorflow.org/)
 
-A Keras 3 implementation of **PowerMLP**, a dual-branch feedforward network that replaces KAN's B-spline edge functions with `ReLU-k` activations, recovering dense GEMM-shaped compute. This implementation has not been trained or benchmarked here; no accuracy or speed number is claimed for it.
+A Keras 3 implementation of **PowerMLP**, a dual-branch feedforward network that replaces KAN's B-spline edge functions with `ReLU-k` activations, recovering dense GEMM-shaped compute.
+
+## Trainer results
+
+A training script for this model exists at `src/train/power_mlp/` (MNIST and CIFAR-10, flattened inputs, one PowerMLP with the `default` preset and `k=2`). Numbers below were copied from the `results_summary.json` files it wrote; they cover only that script, those two datasets and that preset, and no comparison with any other model is made.
+
+- MNIST, 100 epochs, batch normalization on, seed 0: test accuracy 0.9836 (best validation epoch 22, 486,218 parameters).
+- MNIST, 10 epochs, 3 seeds: mean test accuracy 0.98007 with batch normalization against 0.97763 without.
+- CIFAR-10, 10 epochs, 3 seeds: mean test accuracy 0.51023 without batch normalization against 0.47907 with it (3,475,594 parameters without), so the trainer's batch-normalization default is per dataset.
+- Speed: about 1.8 s per epoch on MNIST after a first epoch of about 15 s (XLA warmup), on one RTX 4070; a 100-epoch run took 259 s of wall-clock in total.
+
+The trainer's README (`src/train/power_mlp/README.md`) has the full tables, the flags, the run-directory layout and the known limits, including that `deep` and `k=3` can diverge without batch normalization.
 
 ---
 
