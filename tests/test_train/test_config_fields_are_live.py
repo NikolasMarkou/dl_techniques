@@ -118,6 +118,8 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/mini_vec2vec/train_mini_vec2vec.py", "MiniVec2VecTrainingConfig"),
     ("train/power_mlp/train_power_mlp.py", "TrainingConfig"),
     ("train/convnext/common.py", "TrainingConfig"),
+    ("train/bfunet/common.py", "BFUnetTrainingConfig"),
+    ("train/bfunet/train_convunext_denoiser.py", "TrainingConfig"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
