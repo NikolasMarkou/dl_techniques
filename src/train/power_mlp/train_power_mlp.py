@@ -145,8 +145,8 @@ INITIAL_LOSS_WARN_FACTOR = 10.0
 # values in every hazardous default run and omitted the one measured to fix them all).
 REMEDY_HINT = (
     "Try --kernel-initializer lecun_normal and --input-scaling unit; if you are already "
-    "on lecun_normal + unit, try --batch-normalization (it starts every preset and "
-    "k in {2, 3} at 1.05-1.22x ln(num_classes)), or lower --k."
+    "on lecun_normal + unit, try --batch-normalization (measured: every preset and "
+    "k in {2, 3} then starts at about 1.05-1.25x ln(num_classes)), or lower --k."
 )
 
 # ``results_summary.json["status"]``: the run finished / stopped on a non-finite loss.
@@ -240,8 +240,8 @@ class TrainingConfig:
     # pin is test_training_config_defaults_are_the_d025_outcome.
     # None -> BATCH_NORMALIZATION_BY_DATASET[dataset] in __post_init__ (D-028).
     batch_normalization: Optional[bool] = None
-    # Chosen by the pre-registered rule (plan D-014, recorded in D-018) from a
-    # measured 3-epoch MNIST grid: lecun_normal + unit was the only eligible arm.
+    # Both defaults are explained by the D-025 anchor above; the literal pin is
+    # test_training_config_defaults_are_the_d025_outcome.
     kernel_initializer: str = "lecun_normal"
     input_scaling: str = "unit"
 
