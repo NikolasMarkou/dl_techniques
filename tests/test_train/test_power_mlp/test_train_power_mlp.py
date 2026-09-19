@@ -36,6 +36,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
+import train.common.classification_viz as shared_viz  # noqa: E402
+import train.common.run_artifacts as run_artifacts  # noqa: E402
 import train.power_mlp.train_power_mlp as tpm  # noqa: E402
 import train.power_mlp.visualization as viz  # noqa: E402
 from dl_techniques.models.general_purpose.power_mlp.model import PowerMLP  # noqa: E402
@@ -576,7 +578,7 @@ def test_smoke_no_model_layer_carries_a_kernel_regularizer(smoke) -> None:
 # ---------------------------------------------------------------------
 
 
-def test_write_summary_is_strict_json_and_turns_every_non_finite_value_into_null(tmp_path) -> None:
+def test_write_summary_json_is_strict_json_and_turns_every_non_finite_value_into_null(tmp_path) -> None:
     """``json.dump`` writes ``NaN`` tokens by default and jq / most non-Python readers
     reject them. numpy scalars and arrays must still serialize."""
     summary = {
@@ -587,7 +589,7 @@ def test_write_summary_is_strict_json_and_turns_every_non_finite_value_into_null
         "ok": np.float32(0.5),
         "text": "x",
     }
-    written = tpm._write_summary(tmp_path, summary)
+    written = run_artifacts.write_summary_json(tmp_path, summary)
 
     text = (tmp_path / "results_summary.json").read_text()
     parsed = json.loads(text, parse_constant=_no_constants)
@@ -600,7 +602,7 @@ def test_write_summary_is_strict_json_and_turns_every_non_finite_value_into_null
 
 
 def test_a_nan_test_metric_reaches_the_summary_file_as_null(tmp_path) -> None:
-    tpm._write_summary(tmp_path, {"test_metrics_final": {"loss": float("nan"), "accuracy": 0.9}})
+    run_artifacts.write_summary_json(tmp_path, {"test_metrics_final": {"loss": float("nan"), "accuracy": 0.9}})
     parsed = json.loads((tmp_path / "results_summary.json").read_text(), parse_constant=_no_constants)
     assert parsed["test_metrics_final"] == {"loss": None, "accuracy": 0.9}
 
@@ -1198,3 +1200,73 @@ def test_write_visualizations_isolates_a_failing_figure(monkeypatch, tmp_path) -
     assert {"per_class_metrics.png", "confidence_calibration.png",
             "misclassifications.png", "classification_report.json"} <= set(out["files"])
     assert not (tmp_path / "confusion_matrix.png").exists()
+
+
+# ---------------------------------------------------------------------
+# Shared helpers promoted to train/common/ (run_artifacts, classification_viz)
+# ---------------------------------------------------------------------
+
+
+def test_the_power_mlp_visualization_module_is_the_shared_module() -> None:
+    """A copy of the names would let ``monkeypatch.setattr(viz, ...)`` patch a name the
+    dashboard code never reads (D-010). Identity, not equality."""
+    assert viz is shared_viz
+    assert viz.TrainingDashboardCallback is shared_viz.TrainingDashboardCallback
+
+
+def test_write_summary_json_writes_nothing_when_a_non_finite_value_survives_sanitizing(
+        monkeypatch, tmp_path) -> None:
+    """``allow_nan=False`` is the second line of defence behind the sanitizing pass: with
+    the sanitizer defeated, a NaN must raise and must not leave a half-written file."""
+    monkeypatch.setattr(run_artifacts, "np", types.SimpleNamespace(isfinite=lambda value: True))
+    with pytest.raises(ValueError):
+        run_artifacts.write_summary_json(tmp_path, {"loss": float("nan")})
+    assert not (tmp_path / "results_summary.json").exists()
+
+
+def test_attach_run_log_tees_the_logger_in_write_mode_and_detaches_on_exit(tmp_path) -> None:
+    log = tmp_path / "run.log"
+    log.write_text("stale line from an earlier run\n")
+
+    with run_artifacts.attach_run_log(tmp_path) as handler:
+        assert handler in tpm.logger.handlers
+        assert handler.mode == "w"
+        tpm.logger.info("inside the block")
+    assert handler not in tpm.logger.handlers
+
+    text = log.read_text()
+    assert "inside the block" in text and "stale line" not in text
+    assert "INFO" in text  # the repo LOGGER_FORMAT, not a bare message
+
+
+def test_attach_run_log_detaches_when_the_block_raises(tmp_path) -> None:
+    with pytest.raises(RuntimeError, match="boom"):
+        with run_artifacts.attach_run_log(tmp_path) as handler:
+            raise RuntimeError("boom")
+    assert handler not in tpm.logger.handlers
+    assert handler.stream is None  # closed
+
+
+def test_confident_errors_accepts_nhwc_images_and_matches_the_flat_rendering(tmp_path) -> None:
+    rng = np.random.default_rng(0)
+    y, pred, probs = _predictions(rng, n=60, c=10, accuracy=0.7)
+    nhwc = rng.random((60, 8, 8, 3)).astype("float32")
+    flat = nhwc.reshape(60, -1)
+    mean, std = np.zeros(3, "float32"), np.ones(3, "float32")
+
+    a = viz.plot_confident_errors(nhwc, y, probs, tmp_path / "nhwc.png")
+    b = viz.plot_confident_errors(flat, y, probs, tmp_path / "flat.png", (8, 8, 3), mean, std)
+
+    # An NHWC input is used as it is: a stale ``image_shape`` must not be consulted.
+    c = viz.plot_confident_errors(nhwc, y, probs, tmp_path / "nhwc_stale_shape.png", (1, 1, 1))
+
+    assert a is not None and b is not None and c is not None
+    assert (tmp_path / "nhwc.png").read_bytes() == (tmp_path / "flat.png").read_bytes()
+    assert (tmp_path / "nhwc_stale_shape.png").read_bytes() == (tmp_path / "flat.png").read_bytes()
+
+
+def test_confident_errors_flat_input_without_image_shape_is_an_error(tmp_path) -> None:
+    rng = np.random.default_rng(0)
+    y, pred, probs = _predictions(rng, n=20, c=10, accuracy=0.5)
+    with pytest.raises(ValueError, match="image_shape"):
+        viz.plot_confident_errors(rng.random((20, 192)).astype("float32"), y, probs, tmp_path / "x.png")

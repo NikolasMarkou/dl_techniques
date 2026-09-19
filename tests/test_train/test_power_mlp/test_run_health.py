@@ -31,6 +31,7 @@ import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
+import train.common.run_artifacts as run_artifacts  # noqa: E402
 import train.power_mlp.train_power_mlp as tpm  # noqa: E402
 
 REAL_MNIST_CACHED = (Path.home() / ".keras" / "datasets" / "mnist.npz").exists()
@@ -272,14 +273,14 @@ def test_a_fresh_experiment_name_and_an_empty_existing_directory_still_work(
     assert (tmp_path / "prepared_but_unrelated" / "notes.txt").read_text() == "keep me"
 
 
-@pytest.mark.parametrize("artifact", tpm.RUN_ARTIFACT_NAMES)
+@pytest.mark.parametrize("artifact", run_artifacts.RUN_ARTIFACT_NAMES)
 def test_any_single_run_artifact_is_enough_to_refuse(tmp_path, artifact) -> None:
     directory = tmp_path / "half_written"
     directory.mkdir()
     (directory / artifact).write_text("x")
 
     with pytest.raises(FileExistsError, match=artifact):
-        tpm._refuse_existing_run(directory)
+        run_artifacts.refuse_existing_run(directory)
 
     assert _snapshot(directory) == {artifact: b"x"}
 

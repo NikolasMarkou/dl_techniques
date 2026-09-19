@@ -68,7 +68,6 @@ under ``src/``): ``config.json``, ``training_log.csv`` (with ``lr``),
 
 import argparse
 import json
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -78,17 +77,19 @@ import numpy as np
 
 from dl_techniques.models.general_purpose.power_mlp.model import PowerMLP
 from dl_techniques.optimization import optimizer_builder
-from dl_techniques.utils.logger import LOGGER_FORMAT, logger
+from dl_techniques.utils.logger import logger
 
 from train.common import (
     CIFAR10_MEAN,
     CIFAR10_STD,
+    attach_run_log,
     create_callbacks,
     default_experiment_name,
     get_class_names,
     json_numpy_default,
     load_dataset,
     prepare_run_dir,
+    refuse_existing_run,
     resolve_monitor_mode,
     resolved_run_dir,
     run_model_analysis,
@@ -96,9 +97,10 @@ from train.common import (
     set_seeds,
     setup_gpu,
     validate_model_loading,
+    write_summary_json,
 )
 from train.common.callbacks import LearningRateLogger, best_checkpoint_path
-from train.power_mlp.visualization import (
+from train.common.classification_viz import (
     TrainingDashboardCallback,
     plot_calibration,
     plot_confident_errors,
@@ -152,16 +154,6 @@ REMEDY_HINT = (
 # ``results_summary.json["status"]``: the run finished / stopped on a non-finite loss.
 STATUS_OK = "ok"
 STATUS_DIVERGED = "diverged"
-
-# The run's own narrative: the ``dl`` logger, tee'd into ``<run_dir>/run.log``.
-RUN_LOG_NAME = "run.log"
-
-# Files whose presence means an experiment directory already holds a run:
-# ``train_model`` refuses to start there (review iteration 3, C3: a reused
-# ``--experiment-name`` used to merge two runs into one directory).
-RUN_ARTIFACT_NAMES: Tuple[str, ...] = (
-    "results_summary.json", "config.json", "best_model.keras", RUN_LOG_NAME, "training_log.csv",
-)
 
 # DECISION plan-2026-09-18T213948-68dcb72c/D-028: BN is ON for MNIST (D-025) and OFF for
 # CIFAR-10, each from its own pre-registered 3-seed x 10-epoch grid (CIFAR-10: BN mean
@@ -791,38 +783,6 @@ def _lr_reduction_epochs(lrs: Sequence[float]) -> List[int]:
     return [i + 1 for i in range(1, len(lrs)) if lrs[i] < lrs[i - 1]]
 
 
-def _write_summary(run_dir: Path, summary: Dict[str, Any]) -> Dict[str, Any]:
-    """Write ``results_summary.json`` as STRICT JSON and return what was written.
-
-    Every summary (normal or diverged) goes through here. The dict is
-    round-tripped through ``json`` (numpy values via ``json_numpy_default``),
-    every non-finite float becomes ``None`` (``null``), and the dump uses
-    ``allow_nan=False`` so a ``NaN`` / ``Infinity`` token can never reach the
-    file (jq and most non-Python readers reject them).
-
-    Args:
-        run_dir: Existing run directory.
-        summary: The summary dict (may hold numpy scalars / arrays).
-
-    Returns:
-        The sanitized, pure-JSON dict that was written.
-    """
-    def clean(value: Any) -> Any:
-        if isinstance(value, float):
-            return value if np.isfinite(value) else None
-        if isinstance(value, dict):
-            return {k: clean(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [clean(v) for v in value]
-        return value
-
-    written = clean(json.loads(json.dumps(summary, default=json_numpy_default)))
-    with open(run_dir / "results_summary.json", "w") as f:
-        json.dump(written, f, indent=2, allow_nan=False)
-    logger.info(f"Wrote {run_dir / 'results_summary.json'}")
-    return written
-
-
 def _load_best_metrics(
         run_dir: Path, x: np.ndarray, y: np.ndarray
 ) -> Tuple[Optional[Dict[str, float]], Optional[str]]:
@@ -921,30 +881,6 @@ def _read_analysis_status(run_dir: Path, model_name: str) -> Dict[str, Any]:
     }
 
 
-# DECISION plan-2026-09-18T213948-68dcb72c/D-029: a reused --experiment-name is REFUSED,
-# never merged, overwritten, deleted or auto-suffixed (``_r2``): results/ is gitignored,
-# so an overwrite is unrecoverable and a silent rename changes the name the user asked
-# for. Guard: test_a_reused_experiment_name_is_refused_and_the_first_run_is_byte_identical.
-def _refuse_existing_run(run_dir: Path) -> None:
-    """Raise ``FileExistsError`` when ``run_dir`` already holds a run's files.
-
-    Nothing is written, overwritten or deleted, ever: results are unrecoverable
-    (gitignored). A missing or empty directory, or one holding only unrelated
-    files, is fine.
-
-    Raises:
-        FileExistsError: Naming ``run_dir`` and the files found, and telling the
-            caller to choose a new ``--experiment-name``.
-    """
-    found = [name for name in RUN_ARTIFACT_NAMES if (run_dir / name).exists()]
-    if found:
-        raise FileExistsError(
-            f"Experiment directory {run_dir} already holds a run ({', '.join(found)}). "
-            "Nothing was written. Choose a new --experiment-name (or omit it for a "
-            "timestamped name); existing results are never overwritten or deleted."
-        )
-
-
 def train_model(config: TrainingConfig) -> Dict[str, Any]:
     """Train PowerMLP, evaluate it, write every artifact and return the summary.
 
@@ -962,22 +898,19 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
 
     Raises:
         FileExistsError: If the experiment directory already holds a run (see
-            :func:`_refuse_existing_run`); raised before anything is written.
+            :func:`train.common.refuse_existing_run`); raised before anything is written.
         RuntimeError: If the initial loss before fitting is NaN or infinite, or
             (after ``results_summary.json`` with ``status: "diverged"`` was
             written) if any epoch ``loss`` / ``val_loss`` is non-finite.
     """
     logger.info("Starting PowerMLP training")
     resolved = Path(resolved_run_dir(config))
-    _refuse_existing_run(resolved)
+    refuse_existing_run(resolved)
     set_seeds(config.seed)
     run_dir = Path(prepare_run_dir(config, output_dir=resolved)).resolve()
     vis_dir = run_dir / "visualizations"
     vis_dir.mkdir(parents=True, exist_ok=True)
-    run_log = logging.FileHandler(run_dir / RUN_LOG_NAME, mode="w")
-    run_log.setFormatter(logging.Formatter(LOGGER_FORMAT))
-    logger.addHandler(run_log)
-    try:
+    with attach_run_log(run_dir):
         logger.info(f"Run directory: {run_dir}")
 
         train, val, test, info = prepare_data(
@@ -1106,7 +1039,7 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
                 f"were produced. Initial-loss ratio was {initial_loss_ratio:.3g}. {REMEDY_HINT}"
             )
             logger.error(message)
-            _write_summary(run_dir, {
+            write_summary_json(run_dir, {
                 "status": STATUS_DIVERGED,
                 **summary_head,
                 "epochs_run": epochs_run,
@@ -1215,10 +1148,7 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
             "analyzer": analysis,
             "notes": notes,
         }
-        return _write_summary(run_dir, summary)
-    finally:
-        logger.removeHandler(run_log)
-        run_log.close()
+        return write_summary_json(run_dir, summary)
 
 
 # ---------------------------------------------------------------------

@@ -66,6 +66,22 @@ from train.common.run_io import (
     prepare_run_dir,
     save_training_history_json,
 )
+from train.common.run_artifacts import (
+    RESULTS_SUMMARY_NAME,
+    RUN_ARTIFACT_NAMES,
+    RUN_LOG_NAME,
+    attach_run_log,
+    refuse_existing_run,
+    write_summary_json,
+)
+from train.common.classification_viz import (
+    TrainingDashboardCallback,
+    plot_calibration,
+    plot_confident_errors,
+    plot_confusion_matrix,
+    plot_per_class_metrics,
+    render_training_dashboard,
+)
 from train.common.stats import (
     mean_std,
     bootstrap_ci,
@@ -119,6 +135,7 @@ from train.common.token_superposition import (
 # 'imported but unused' warning -- that is the intended enforcement, not noise.
 __all__ = [
     "apply_tst",
+    "attach_run_log",
     "augment_and_normalize",
     "augment_pair",
     "augment_patch",
@@ -195,6 +212,10 @@ __all__ = [
     "mean_std",
     "MegaDepthDataset",
     "paired_permutation_test",
+    "plot_calibration",
+    "plot_confident_errors",
+    "plot_confusion_matrix",
+    "plot_per_class_metrics",
     "plot_step_metrics",
     "prepare_run_dir",
     "_prepare_viz_data_from_processor",
@@ -202,7 +223,12 @@ __all__ = [
     "preprocess_mlm_dataset",
     "read_decode_resize_uint8",
     "read_tfrecord_dataset",
+    "refuse_existing_run",
     "resolved_run_dir",
+    "RESULTS_SUMMARY_NAME",
+    "render_training_dashboard",
+    "RUN_ARTIFACT_NAMES",
+    "RUN_LOG_NAME",
     "run_model_analysis",
     "run_timestamp",
     "save_config_json",
@@ -216,6 +242,7 @@ __all__ = [
     "StepPlotCallback",
     "SUPPORTED_DATASETS",
     "TimeSeriesPerformanceCallback",
+    "TrainingDashboardCallback",
     "TIMESTAMP_FORMAT",
     "tokenize_captions",
     "tst_phase1_transform",
@@ -227,5 +254,6 @@ __all__ = [
     "TSTState",
     "validate_model_loading",
     "WindowedTimeSeriesProcessor",
+    "write_summary_json",
     "write_tfrecord_shards",
 ]
