@@ -228,9 +228,10 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
     assert summary["gpu_name"] is None or isinstance(summary["gpu_name"], str)
     assert summary["epochs_run"] == EPOCHS and len(summary["epoch_times"]) == EPOCHS
     assert all(t > 0.0 for t in summary["epoch_times"])
-    # 240-sample cap, 10% validation: 216 train / 24 val, 240 test; ceil(216/32) = 7.
+    # 240-sample cap, 10% validation: 216 train / 24 val, 240 test; 216 // 32 = 6 (the
+    # incomplete last batch is dropped, D-021).
     assert (summary["n_train"], summary["n_val"], summary["n_test"]) == (216, 24, 240)
-    assert summary["steps_per_epoch"] == 7
+    assert summary["steps_per_epoch"] == 6
     assert summary["stage_feature_map_sizes"] == [[8, 8], [2, 2]]
     assert summary["initial_loss_ratio"] == pytest.approx(
         summary["initial_loss_sanity_eval"]["loss"] / np.log(10))
@@ -256,6 +257,31 @@ def _schedule_values(config, steps_per_epoch):
     schedule = common.build_lr_schedule(config, steps_per_epoch)
     total = config.epochs * steps_per_epoch
     return steps_per_epoch, [float(schedule(step)) for step in range(total + 1)]
+
+
+def test_the_train_pipeline_yields_exactly_steps_per_epoch_full_batches() -> None:
+    """F1 / D-021: no incomplete last batch, and the schedule's step count is the real one.
+
+    An incomplete last batch is a second input shape, which made XLA recompile the whole
+    train step at the end of epoch 1 (20.7 s of an 80 s first epoch on the 4090). Every
+    batch must have the static batch dimension, and the number of batches must equal
+    ``steps_per_epoch_for`` (which the cosine's ``decay_steps`` is built from).
+    """
+    n, batch = 100, 32
+    x = np.zeros((n, 8, 8, 3), np.float32)
+    y = np.zeros((n,), np.int32)
+    ds = common.make_train_dataset(x, y, batch, seed=0, flip=True)
+    assert ds.element_spec[0].shape[0] == batch, "batch dimension must be static (no partial batch)"
+    for _ in range(2):  # a second pass: the reshuffled epoch yields the same count
+        sizes = [int(images.shape[0]) for images, _ in ds]
+        assert sizes == [batch] * common.steps_per_epoch_for(n, batch)
+    assert common.steps_per_epoch_for(n, batch) == 3
+    assert common.steps_per_epoch_for(64, 64) == 1
+
+
+def test_a_batch_larger_than_the_train_pool_is_refused() -> None:
+    with pytest.raises(ValueError, match="exceeds the 10 train samples"):
+        common.steps_per_epoch_for(10, 64)
 
 
 def test_the_cosine_spans_the_whole_run() -> None:

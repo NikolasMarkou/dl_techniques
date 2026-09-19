@@ -161,8 +161,8 @@ and were removed; the driver below is how to measure it again.
 - Loss `SparseCategoricalCrossentropy(from_logits=True)`: the V1/V2 head is a bare
   `Dense(num_classes)` and emits logits. Metrics are `accuracy`, plus `top_5_accuracy` (a metric
   object, not the unresolvable string alias) when there are more than 10 classes.
-- **The cosine spans the whole run.** `steps_per_epoch = ceil(n_train / batch_size)` is always
-  passed to the schedule. Without it the library counts optimizer steps against
+- **The cosine spans the whole run.** `steps_per_epoch = n_train // batch_size` (the train pipeline drops the incomplete last
+  batch, see "First epoch" under Measured results) is always passed to the schedule. Without it the library counts optimizer steps against
   `decay_steps = epochs` and the cosine reaches its 1% floor after `epochs` batches: the old
   trainers trained at about `1e-5` from the second epoch on. A guard pins this.
 - **Warmup** is engaged through `warmup_steps = warmup_epochs * steps_per_epoch` (the library's
@@ -431,8 +431,26 @@ is named too: numbers from earlier code states are kept only when labelled as su
 |---|---|---|---|---|---|---|
 | `convnext_v1_cifar10_cifar10_iter1_run1` | `train_convnext_v1 --dataset cifar10 --variant cifar10 --epochs 5` (2.23M params, strides 4, feature maps 8x8 then 2x2, batch 64, cosine 1e-3) | 0.6148 | 1.0911 | 0.0124 | 84.0, 13.1, 11.9, 12.2, 12.4 | Code state of the iteration-1 audit. Val acc 0.6078. Best epoch = last epoch (5), loss still falling. Wall 198 s: fit 138 s, post-fit 41 s. |
 
-Reading the epoch times: epoch 1 carries about 50 s that is not step time (steady state is 18 to
-20 ms per step at batch 64), so per-epoch cost comparisons must use epochs 2 onward until the cause
-is fixed. The console progress bar's train metrics are a second average of the running mean and read
+Reading the epoch times: epoch 1 is much slower than the rest because the XLA-compiled train step
+is built on the first batch, and it is not step time (steady state is 17 to 18 ms per step at batch
+64), so per-epoch cost comparisons use epochs 2 onward. The run-1 row above predates the fix
+described next.
+
+**First epoch (measured, GPU 0, 2-epoch probes on the full CIFAR-10 data, cifar10 variant, batch
+64, seed 42, `findings/iter2-f1-epoch1.md`).** Keras compiles the train step with XLA by default
+here. The first epoch cost 80.5 s against 12.1 s for the second, in two parts: 47.5 s before the
+first train step returned (the XLA compile of the whole step) and 20.7 s at the very last step of
+the epoch, when the incomplete 8-sample batch (45000 % 64) forced a second compile. The train
+pipeline therefore drops the incomplete last batch (`steps_per_epoch = n_train // batch_size`, 703
+here; the pool is reshuffled every epoch so no sample is permanently left out), which brought epoch
+1 to 58.0 s. What remains is the one-time compile of the first step, about 45 s, and it is a fixed
+cost of the run, not a per-epoch one. Ruled out by measurement: the input pipeline (0.4 s to the
+first batch on CPU, 0.6 s per epoch), the end-of-epoch validation (0.2 s), cuDNN autotuning
+(`TF_CUDNN_USE_AUTOTUNE=0` and `XLA_FLAGS=--xla_gpu_autotune_level=0` left the first step at 46.5 s
+and 44.8 s), and turning XLA off (`jit_compile=False`: 30 s to the first step but 89 ms per step
+for the whole run, five times slower). GPU utilization is about 1 percent during the compile and
+15 to 20 percent in steady state (a small model at batch 64 is launch bound, not compute bound).
+
+The console progress bar's train metrics are a second average of the running mean and read
 lower than `training_log.csv` (epoch 1: bar 0.3152 vs CSV 0.3709 accuracy); the CSV, the summary and
 the dashboard are the reference.

@@ -564,6 +564,37 @@ def prepare_data(config: TrainingConfig) -> SplitData:
     return data
 
 
+def steps_per_epoch_for(n_train: int, batch_size: int) -> int:
+    """Optimizer steps per epoch of :func:`make_train_dataset`: ``n_train // batch_size``.
+
+    The train pipeline drops the remainder, so this is the exact number of batches one
+    epoch yields and the value the LR schedule must be built with.
+
+    Args:
+        n_train: Number of train samples.
+        batch_size: Training batch size.
+
+    Returns:
+        The step count, at least 1.
+
+    Raises:
+        ValueError: If ``n_train < batch_size`` (a remainder-dropping pipeline would
+            yield no batch at all).
+    """
+    if n_train < batch_size:
+        raise ValueError(
+            f"batch_size {batch_size} exceeds the {n_train} train samples: the train "
+            f"pipeline drops the incomplete last batch and would yield no step. "
+            f"Use a batch size of at most {n_train}."
+        )
+    return n_train // batch_size
+
+
+# DECISION plan-2026-09-19T040641-db6932ec/D-021: the train pipeline DROPS the incomplete
+# last batch. Do NOT remove ``drop_remainder=True`` to "use every sample": the smaller
+# final batch is a second input shape, so XLA recompiled the whole train step once, at
+# the end of epoch 1 (measured 20.7 s of an 80 s first epoch, findings/iter2-f1-epoch1.md).
+# The pool is reshuffled every epoch, so no sample is permanently excluded.
 def make_train_dataset(
         x: np.ndarray, y: np.ndarray, batch_size: int, seed: int, flip: bool
 ) -> "tf.data.Dataset":
@@ -577,7 +608,8 @@ def make_train_dataset(
     Args:
         x: Standardized NHWC float32 images.
         y: Integer labels.
-        batch_size: Batch size; the last batch is kept (no ``drop_remainder``).
+        batch_size: Batch size; the incomplete last batch is dropped
+            (``drop_remainder=True``), so an epoch yields :func:`steps_per_epoch_for` batches.
         seed: Shuffle seed.
         flip: Whether to flip horizontally.
 
@@ -596,7 +628,7 @@ def make_train_dataset(
         tf.data.Dataset.from_tensor_slices((x, y))
         .shuffle(len(x), seed=seed, reshuffle_each_iteration=True)
         .map(augment, num_parallel_calls=tf.data.AUTOTUNE)
-        .batch(batch_size)
+        .batch(batch_size, drop_remainder=True)
         .prefetch(tf.data.AUTOTUNE)
     )
 
@@ -1012,7 +1044,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
         )
 
         data = prepare_data(config)
-        steps_per_epoch = math.ceil(len(data.x_train) / config.batch_size)
+        steps_per_epoch = steps_per_epoch_for(len(data.x_train), config.batch_size)
         train_ds = make_train_dataset(
             data.x_train, data.y_train, config.batch_size, config.seed,
             flip=config.dataset in FLIP_DATASETS,
