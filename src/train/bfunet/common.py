@@ -12,7 +12,7 @@ matplotlib.use("Agg")  # headless: avoid X11 crashes (LESSON)
 import matplotlib.pyplot as plt
 from pathlib import Path
 from dataclasses import dataclass, field, replace
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -25,10 +25,11 @@ from train.common import (
     validate_model_loading,
     collect_image_paths,
 )
+from train.common import run_summary
 from train.common.args import resolved_run_dir
 from train.common.callbacks import EpochLogLine, LearningRateLogger
 from train.common.config_io import save_config_json
-from train.common.run_artifacts import attach_run_log, refuse_existing_run
+from train.common.run_artifacts import attach_run_log, refuse_existing_run, write_summary_json
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.superpoint.homographic_adaptation import select_weighted_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -2251,6 +2252,77 @@ def train(
         )
 
 
+def _summary_head(
+    config: "BFUnetTrainingConfig",
+    output_dir: Path,
+    *,
+    params: int,
+    steps_per_epoch: int,
+    lr_schedule,
+    init_from_block: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Keys every ``results_summary.json`` carries, whether the run finished or diverged.
+
+    Interface contract: pure (reads ``lr_schedule`` at one step, no I/O). ``params`` is the
+    model's parameter count, ``steps_per_epoch`` the RESOLVED value, ``lr_schedule`` the
+    schedule handed to the optimizer, ``init_from_block`` the ``{path, loaded,
+    missing_in_source, shape_mismatch}`` record (``None`` without ``--init-from``). Returns a
+    plain dict; :func:`write_summary_json` sanitizes it. Both the diverged and the finished
+    summary are built from this head, so a key is added here once (plan step 8 extends it).
+    """
+    last_step = steps_per_epoch * config.epochs - 1
+    return {
+        "run_dir": str(output_dir),
+        "experiment_name": config.experiment_name,
+        "variant": getattr(config, "variant", None),
+        "params": int(params),
+        "learning_rate": config.learning_rate,
+        "warmup_epochs": config.warmup_epochs,
+        "steps_per_epoch": int(steps_per_epoch),
+        "lr_last_step": float(keras.ops.convert_to_numpy(lr_schedule(last_step))),
+        "epochs_requested": config.epochs,
+        "init_from": init_from_block,
+    }
+
+
+def _write_diverged_summary(
+    output_dir: Path,
+    head: Dict[str, Any],
+    hist: Dict[str, List[float]],
+    *,
+    non_finite: List[str],
+    fit_wall_seconds: float,
+    message: str,
+) -> Dict[str, Any]:
+    """Write ``results_summary.json`` for a run whose ``loss`` / ``val_loss`` went non-finite.
+
+    Interface contract: ``head`` comes from :func:`_summary_head`, ``hist`` is the Keras
+    history dict, ``non_finite`` the names from ``run_summary.non_finite_metrics``. Returns
+    the strict-JSON dict written (every non-finite float is ``null``). ``stopped_early`` and
+    ``best_epoch`` are ``None``: the run was ended by a non-finite loss, not by
+    EarlyStopping, and no best epoch can be named from a history holding a NaN.
+    """
+    lrs = hist.get("lr", [])
+    return write_summary_json(output_dir, {
+        "status": "diverged",
+        **head,
+        "epochs_run": len(hist.get("loss", [])),
+        "stopped_early": None,
+        "best_epoch": None,
+        "non_finite_metrics": non_finite,
+        "lr_first_epoch": lrs[0] if lrs else None,
+        "lr_last_epoch": lrs[-1] if lrs else None,
+        "history": {k: [float(v) for v in vals] for k, vals in hist.items()},
+        "fit_wall_seconds": fit_wall_seconds,
+        "notes": [
+            message,
+            "non-finite values are written as null (strict JSON)",
+            "`stopped_early` is null: the run was ended by a non-finite loss, not by "
+            "EarlyStopping, and no best epoch can be named from a history holding a NaN",
+        ],
+    })
+
+
 def _train_in_run_dir(
     config: "BFUnetTrainingConfig",
     build_model_fn,
@@ -2407,6 +2479,7 @@ def _train_in_run_dir(
     # fine-tuning on top of a normally-trained denoiser). The functional model is
     # already built, so layer-by-layer transfer works. skip_prefixes=() loads ALL
     # layers -- the denoiser is single-output and has no head_ layers to skip.
+    init_from_block: Optional[Dict[str, Any]] = None
     if config.init_from is not None:
         # Its [0,1] provenance was already gated at the top of train() — a legacy-domain
         # checkpoint never reaches this transfer (D-005).
@@ -2427,11 +2500,35 @@ def _train_in_run_dir(
             f"missing_in_source {len(report.missing_in_source)}, "
             f"shape_mismatch {len(report.shape_mismatch)}."
         )
+        # DECISION plan-2026-09-19T131351-b8d39688/D-011: a same-name layer with a different
+        # shape is a wrong checkpoint (another --variant or width flag), not a partial warm
+        # start: it would train from random init while the log says "warm start". Refuse and
+        # name the layers. Do NOT downgrade this to a warning again, and do NOT refuse
+        # ``missing_in_source`` too: extra layers on top of a smaller trained model are a
+        # plausible fine-tune, so they only warn (with a count and the names).
         if report.shape_mismatch:
-            logger.warning(
-                f"init_from: {len(report.shape_mismatch)} layer(s) had shape "
-                "mismatches and were left at init — check architecture flags."
+            listed = "; ".join(
+                f"{name}: target {tgt} vs checkpoint {src}"
+                for name, tgt, src in report.shape_mismatch
             )
+            raise ValueError(
+                f"init_from {config.init_from}: {len(report.shape_mismatch)} layer(s) have the "
+                f"same name but a different shape (shape_mismatch), so they would train from "
+                f"random init: {listed}. Ensure --variant/--patch-size and the model-specific "
+                "flags match the checkpoint's architecture."
+            )
+        if report.missing_in_source:
+            logger.warning(
+                f"init_from: {len(report.missing_in_source)} layer(s) are absent from the "
+                f"checkpoint (missing_in_source) and stay at random init: "
+                f"{', '.join(report.missing_in_source)}"
+            )
+        init_from_block = {
+            "path": config.init_from,
+            "loaded": len(report.loaded),
+            "missing_in_source": len(report.missing_in_source),
+            "shape_mismatch": len(report.shape_mismatch),
+        }
         verify_fn(model)  # re-check: transfer must not introduce bias
 
     # Under mixed_float16 the final Conv2D emits fp16; cast the model output(s) back to
@@ -2600,6 +2697,18 @@ def _train_in_run_dir(
             "Early stopping disabled (early_stopping_patience <= 0); "
             "training the full schedule."
         )
+    # DECISION plan-2026-09-19T131351-b8d39688/D-005: Keras 3.8 ``EarlyStopping`` with
+    # ``restore_best_weights=True`` (what ``create_common_callbacks`` builds) copies the best
+    # weights back into the model at every train end, so under ``--early-stopping-patience N``
+    # the in-memory model, and with it ``final_model.keras``, was the BEST epoch while the log
+    # said "last-epoch". The best epoch already lives on disk (``best_model.keras``, the
+    # ModelCheckpoint), so the restore is switched off and the in-memory model stays the real
+    # last epoch. Do NOT set it back to True, and do NOT save ``final_model.keras`` from a
+    # restored model: best and final would be the same file. Pinned by
+    # test_train_bfunet_run.py::test_final_model_holds_the_last_epochs_weights_*.
+    for cb in callbacks:
+        if isinstance(cb, keras.callbacks.EarlyStopping):
+            cb.restore_best_weights = False
     # Prepend so it runs BEFORE CSVLogger -> 'lr' lands in training_log.csv.
     # DECISION plan-2026-09-19T131351-b8d39688/D-006: the SHARED logger in start-of-epoch
     # mode, so the CSV ``lr`` is the rate the epoch's first step used (epoch 1 = the warmup
@@ -2733,6 +2842,35 @@ def _train_in_run_dir(
     logger.info(f"Training completed in {time.time() - start:.2f}s")
 
     save_training_history_json(history, output_dir)
+
+    # ``TerminateOnNaN`` ends a run whose loss went non-finite, but ``fit`` then returns
+    # normally, so everything below (final save, the trainer's "Training completed
+    # successfully!") used to run on NaN weights. Record the divergence and raise BEFORE any
+    # final artifact is written; do NOT move this after the save, ``final_model.keras`` would
+    # exist for a run that failed.
+    hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
+    non_finite = run_summary.non_finite_metrics(hist, "val_loss")
+    if non_finite:
+        epochs_run = len(hist.get("loss", []))
+        message = (
+            f"Training diverged: {non_finite} hold a non-finite or missing value after "
+            f"{epochs_run} epoch(s); results_summary.json was written with status "
+            "'diverged' and final_model.keras was NOT saved."
+        )
+        logger.error(message)
+        _write_diverged_summary(
+            output_dir,
+            _summary_head(
+                config, output_dir, params=model.count_params(),
+                steps_per_epoch=steps_per_epoch, lr_schedule=lr_schedule,
+                init_from_block=init_from_block,
+            ),
+            hist,
+            non_finite=non_finite,
+            fit_wall_seconds=time.time() - start,
+            message=message,
+        )
+        raise RuntimeError(message)
 
     if config.expose_bottleneck:
         full_path = output_dir / "final_model_bottleneck.keras"

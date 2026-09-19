@@ -597,3 +597,242 @@ def test_the_default_schedule_warms_up_to_the_configured_rate_over_the_warmup_st
     """The warmup feed: 1e-8 at step 0, exactly the peak 1e-3 where the 10 warmup epochs end."""
     assert _rate(schedule_e100, 0) == pytest.approx(1e-8, rel=1e-3)
     assert _rate(schedule_e100, 10 * 400) == pytest.approx(1e-3, rel=1e-6)
+
+
+# ---------------------------------------------------------------------
+# iter-1/step-7 (plan-2026-09-19T131351-b8d39688/D-005, D-011): the final model is the LAST
+# epoch, divergence is recorded, a partial warm start is refused
+# ---------------------------------------------------------------------
+
+class _WeightRecorder(keras.callbacks.Callback):
+    """Copies every weight tensor at the end of each epoch that actually runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.weights: List[List[np.ndarray]] = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.weights.append([np.array(w) for w in self.model.get_weights()])
+
+
+class _ScriptedValLoss(keras.callbacks.Callback):
+    """Overwrites the epoch ``val_loss`` so the best epoch is deterministic, not a noise draw.
+
+    Placed BEFORE EarlyStopping / ModelCheckpoint / CSVLogger, which all read ``logs``.
+    """
+
+    def __init__(self, values: List[float]) -> None:
+        super().__init__()
+        self.values = values
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs["val_loss"] = self.values[epoch]
+
+
+class _NanLossAtEpoch(keras.callbacks.Callback):
+    """A NaN epoch loss followed by the stop TerminateOnNaN issues after a NaN batch.
+
+    A real divergence is not reproducible on demand, so this injects its two observable
+    effects: the NaN in the epoch ``logs`` (which History and CSVLogger record) and
+    ``stop_training``. It runs BEFORE CSVLogger, so the NaN reaches every record.
+    """
+
+    def __init__(self, epoch_index: int) -> None:
+        super().__init__()
+        self.epoch_index = epoch_index
+
+    def on_epoch_end(self, epoch, logs=None):
+        if epoch == self.epoch_index:
+            logs["loss"] = float("nan")
+            self.model.stop_training = True
+
+
+def _run_with_callbacks(config: TrainingConfig, front=(), back=()) -> keras.Model:
+    """``run_train`` with test callbacks put in front of / behind the stock callback list."""
+    original = common.create_common_callbacks
+
+    def patched(*args, **kwargs):
+        callbacks, results_dir = original(*args, **kwargs)
+        return [*front, *callbacks, *back], results_dir
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "create_common_callbacks", patched)
+        return run_train(config)
+
+
+def _weights_of(path: Path) -> List[np.ndarray]:
+    return [np.array(w) for w in keras.models.load_model(path).get_weights()]
+
+
+def _same_tensors(left: List[np.ndarray], right: List[np.ndarray]) -> bool:
+    return len(left) == len(right) and all(np.array_equal(a, b) for a, b in zip(left, right))
+
+
+@pytest.fixture(scope="module")
+def early_stop_run(tmp_path_factory) -> SimpleNamespace:
+    """Patience 1, scripted val_loss [1.0, 0.5, 0.9, 0.8]: best is epoch 2, the run stops after 3."""
+    root = tmp_path_factory.mktemp("bfunet_early_stop")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    recorder = _WeightRecorder()
+    config = _tiny_config(root, "early_stop", epochs=4, early_stopping_patience=1)
+    _run_with_callbacks(
+        config, front=[_ScriptedValLoss([1.0, 0.5, 0.9, 0.8])], back=[recorder])
+    run_dir = root / "out" / "early_stop"
+    return SimpleNamespace(
+        run_dir=run_dir,
+        recorded=recorder.weights,
+        best=_weights_of(run_dir / "best_model.keras"),
+        final=_weights_of(run_dir / "final_model.keras"),
+    )
+
+
+def test_the_early_stopping_scenario_stops_after_the_epoch_following_the_best(early_stop_run) -> None:
+    """Anti-vacuity: 3 epochs ran of 4, the best (epoch 2) is not the last."""
+    assert len(early_stop_run.recorded) == 3
+    assert [float(r["val_loss"]) for r in _csv_rows(early_stop_run.run_dir)] == [1.0, 0.5, 0.9]
+
+
+def test_best_model_holds_the_best_epochs_weights(early_stop_run) -> None:
+    assert _same_tensors(early_stop_run.best, early_stop_run.recorded[1])
+    assert not _same_tensors(early_stop_run.best, early_stop_run.recorded[2])
+
+
+def test_final_model_holds_the_last_epochs_weights_not_the_best_ones(early_stop_run) -> None:
+    """Keras EarlyStopping(restore_best_weights=True) used to make this the best epoch's."""
+    assert _same_tensors(early_stop_run.final, early_stop_run.recorded[-1])
+    assert not _same_tensors(early_stop_run.final, early_stop_run.best)
+
+
+@pytest.fixture(scope="module")
+def default_run(tmp_path_factory) -> SimpleNamespace:
+    """Default path (no early stopping), 2 epochs, with the last epoch's weights recorded."""
+    root = tmp_path_factory.mktemp("bfunet_default_final")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    recorder = _WeightRecorder()
+    config = _tiny_config(root, "default_final", epochs=2)
+    _run_with_callbacks(config, back=[recorder])
+    run_dir = root / "out" / "default_final"
+    return SimpleNamespace(
+        run_dir=run_dir, recorded=recorder.weights,
+        final=_weights_of(run_dir / "final_model.keras"),
+    )
+
+
+def test_the_default_path_final_model_is_the_last_epoch(default_run) -> None:
+    assert len(default_run.recorded) == 2
+    assert _same_tensors(default_run.final, default_run.recorded[-1])
+
+
+@pytest.fixture(scope="module")
+def diverged_run(tmp_path_factory) -> SimpleNamespace:
+    """A run whose epoch 2 loss is NaN, driven through the trainer's own ``main()``.
+
+    ``main()`` builds its config from argv (data directories are hard-coded to the HDD),
+    so ``train`` is replaced by a stub that runs the REAL ``common.train`` on the tiny
+    generated config instead; ``main()``'s own try/except and its logging are what is under
+    test. The NaN is injected as described on ``_NanLossAtEpoch``.
+    """
+    import sys
+
+    import train.bfunet.train_convunext_denoiser as trainer
+
+    root = tmp_path_factory.mktemp("bfunet_diverged")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    config = _tiny_config(root, "diverged", epochs=3)
+    records: List[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Capture(level=logging.INFO)
+    logging.getLogger("dl").addHandler(handler)
+    raised = None
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(trainer, "setup_gpu", lambda gpu_id=None: None)
+        patch.setattr(
+            trainer, "train",
+            lambda _main_config: _run_with_callbacks(config, front=[_NanLossAtEpoch(1)]),
+        )
+        patch.setattr(sys, "argv", ["train_convunext_denoiser"])
+        try:
+            trainer.main()
+        except RuntimeError as error:
+            raised = error
+        finally:
+            logging.getLogger("dl").removeHandler(handler)
+    return SimpleNamespace(
+        run_dir=root / "out" / "diverged", raised=raised,
+        messages=[(r.levelno, r.getMessage()) for r in records],
+    )
+
+
+def test_a_nan_loss_raises_runtime_error_out_of_main(diverged_run) -> None:
+    assert isinstance(diverged_run.raised, RuntimeError)
+    assert "diverged" in str(diverged_run.raised)
+
+
+def test_a_diverged_run_writes_no_final_model(diverged_run) -> None:
+    assert not (diverged_run.run_dir / "final_model.keras").exists()
+    assert (diverged_run.run_dir / "training_history.json").stat().st_size > 0
+
+
+def test_main_logs_a_failure_and_never_reports_success_for_a_diverged_run(diverged_run) -> None:
+    texts = [text for _, text in diverged_run.messages]
+    assert any(
+        level == logging.ERROR and text.startswith("Training failed") and "diverged" in text
+        for level, text in diverged_run.messages
+    ), texts
+    assert not any("Training completed successfully" in text for text in texts), texts
+
+
+def _strict_json(path: Path) -> Dict:
+    def refuse(token):
+        raise AssertionError(f"non-strict JSON token {token} in {path}")
+
+    return json.loads(path.read_text(), parse_constant=refuse)
+
+
+def test_a_diverged_run_records_a_strict_diverged_summary(diverged_run) -> None:
+    summary = _strict_json(diverged_run.run_dir / "results_summary.json")
+    assert summary["status"] == "diverged"
+    assert summary["experiment_name"] == "diverged"
+    assert summary["epochs_requested"] == 3
+    assert summary["epochs_run"] == 2
+    assert summary["stopped_early"] is None
+    assert summary["best_epoch"] is None
+    assert summary["non_finite_metrics"] == ["loss"]
+    assert summary["history"]["loss"][1] is None       # the NaN, written as null
+
+
+# --- init_from --------------------------------------------------------------
+
+def test_init_from_a_checkpoint_of_another_variant_is_refused_naming_the_layers(e2e) -> None:
+    """tiny (32 filters) -> small (48): the same layer names with different shapes."""
+    config = _tiny_config(
+        e2e.root, "init_variant_mismatch", variant="small",
+        init_from=str(e2e.run_dir / "final_model.keras"))
+    with pytest.raises(ValueError) as raised:
+        run_train(config)
+    text = str(raised.value)
+    assert "shape" in text and "encoder_level_0_convnext_v1_block_0" in text, text
+    assert "bottleneck_convnext_v1_block_0" in text, text
+    assert not (e2e.root / "out" / "init_variant_mismatch" / "final_model.keras").exists()
+
+
+def test_a_missing_in_source_layer_only_warns_and_is_counted(e2e) -> None:
+    """blocks_per_level 1 -> 2 adds 5 layers the checkpoint has never seen; same shapes elsewhere."""
+    config = _tiny_config(
+        e2e.root, "init_missing", blocks_per_level=2, epochs=1,
+        init_from=str(e2e.run_dir / "final_model.keras"))
+    run_train(config)
+    warnings = [
+        line for line in (e2e.root / "out" / "init_missing" / "run.log").read_text().splitlines()
+        if "WARNING" in line and "init_from" in line and "missing_in_source" in line
+    ]
+    assert len(warnings) == 1, warnings
+    assert "5 layer(s)" in warnings[0] and "encoder_level_0_convnext_v1_block_1" in warnings[0]
+    assert (e2e.root / "out" / "init_missing" / "final_model.keras").stat().st_size > 0
