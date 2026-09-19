@@ -38,6 +38,7 @@ import pytest  # noqa: E402
 
 import train.common.classification_viz as shared_viz  # noqa: E402
 import train.common.run_artifacts as run_artifacts  # noqa: E402
+from train.common import run_summary  # noqa: E402
 import train.power_mlp.train_power_mlp as tpm  # noqa: E402
 import train.power_mlp.visualization as viz  # noqa: E402
 from dl_techniques.models.general_purpose.power_mlp.model import PowerMLP  # noqa: E402
@@ -376,8 +377,15 @@ def smoke(tmp_path_factory):
             seen.setdefault("y_ndim", np.asarray(y).ndim)
             return real_fit(self, x, y, *args, **kwargs)
 
+        real_grid = run_summary.plot_confident_errors
+
+        def grid_spy(x, y_true, probs, out_path, image_shape=None, mean=None, std=None, *a, **k):
+            seen["grid"] = (image_shape, mean, std)
+            return real_grid(x, y_true, probs, out_path, image_shape, mean, std, *a, **k)
+
         mp.setattr(Trainer, "compile", compile_spy)
         mp.setattr(keras.Model, "fit", fit_spy)
+        mp.setattr(run_summary, "plot_confident_errors", grid_spy)
 
         config = tpm.config_from_args(tpm.parse_arguments([
             "--epochs", "2", "--batch-size", "64", "--seed", "3",
@@ -394,6 +402,17 @@ def smoke(tmp_path_factory):
         out_root=out_root, run_dir=out_root / "smoke_run", summary=summary,
         config=config, seen=seen, data=data,
     )
+
+
+def test_smoke_hands_the_shared_figure_writer_the_data_shape_and_statistics(smoke) -> None:
+    """The trainer must forward ``image_shape``, ``mean`` and ``std`` (flat rows need the
+    shape; the mean and std un-standardize the grid)."""
+    image_shape, mean, std = smoke.seen["grid"]
+    assert image_shape == (28, 28, 1)
+    assert mean is not None and std is not None
+    info = smoke.data[3]
+    np.testing.assert_array_equal(mean, info["mean"])
+    np.testing.assert_array_equal(std, info["std"])
 
 
 def test_smoke_run_directory_inventory(smoke) -> None:
@@ -605,25 +624,6 @@ def test_a_nan_test_metric_reaches_the_summary_file_as_null(tmp_path) -> None:
     run_artifacts.write_summary_json(tmp_path, {"test_metrics_final": {"loss": float("nan"), "accuracy": 0.9}})
     parsed = json.loads((tmp_path / "results_summary.json").read_text(), parse_constant=_no_constants)
     assert parsed["test_metrics_final"] == {"loss": None, "accuracy": 0.9}
-
-
-def test_best_epoch_picks_the_lowest_val_loss_one_based() -> None:
-    assert tpm._best_epoch({"val_loss": [0.9, 0.5, 0.7]}) == 2
-
-
-@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
-def test_best_epoch_refuses_a_non_finite_history(bad) -> None:
-    """``np.argmin([nan, 1.0, 0.5]) == 0``: the NaN epoch would be reported as the best."""
-    assert int(np.argmin([float("nan"), 1.0, 0.5])) == 0
-    with pytest.raises(ValueError, match="non-finite"):
-        tpm._best_epoch({"val_loss": [bad, 1.0, 0.5]})
-
-
-def test_non_finite_metrics_names_the_offending_keys() -> None:
-    assert tpm._non_finite_metrics({"loss": [1.0, 0.5], "val_loss": [1.1, 0.6]}) == []
-    assert tpm._non_finite_metrics({"loss": [float("nan")], "val_loss": [1.0]}) == ["loss"]
-    assert tpm._non_finite_metrics({"loss": [1.0], "val_loss": [float("inf")]}) == ["val_loss"]
-    assert tpm._non_finite_metrics({}) == ["loss", "val_loss"], "no epoch at all is not a finite run"
 
 
 # ---------------------------------------------------------------------
@@ -1233,25 +1233,6 @@ def test_confident_errors_grid_renders_and_is_skipped_without_errors(tmp_path) -
     assert viz.plot_confident_errors(x, y, perfect, tmp_path / "none.png",
                                      (28, 28, 1), mean, std) is None
     assert not (tmp_path / "none.png").exists()
-
-
-def test_write_visualizations_isolates_a_failing_figure(monkeypatch, tmp_path) -> None:
-    """One figure failing logs a warning; the others still render."""
-    rng = np.random.default_rng(0)
-    y, pred, probs = _predictions(rng, n=80, c=10, accuracy=0.7)
-    x = rng.normal(size=(80, 784)).astype("float32")
-
-    def boom(*a, **k):
-        raise RuntimeError("cm exploded")
-
-    monkeypatch.setattr(tpm, "plot_confusion_matrix", boom)
-    info = {"image_shape": (28, 28, 1), "mean": np.array([0.1307], "float32"),
-            "std": np.array([0.3081], "float32")}
-    out = tpm._write_visualizations(tmp_path, x, y, probs, [str(i) for i in range(10)], info)
-    assert out["failed"] == ["confusion_matrix.png"]
-    assert {"per_class_metrics.png", "confidence_calibration.png",
-            "misclassifications.png", "classification_report.json"} <= set(out["files"])
-    assert not (tmp_path / "confusion_matrix.png").exists()
 
 
 # ---------------------------------------------------------------------

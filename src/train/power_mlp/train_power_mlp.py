@@ -67,7 +67,6 @@ under ``src/``): ``config.json``, ``training_log.csv`` (with ``lr``),
 """
 
 import argparse
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -86,11 +85,9 @@ from train.common import (
     create_callbacks,
     default_experiment_name,
     get_class_names,
-    json_numpy_default,
     load_dataset,
     prepare_run_dir,
     refuse_existing_run,
-    resolve_monitor_mode,
     resolved_run_dir,
     run_model_analysis,
     save_training_history_json,
@@ -99,14 +96,9 @@ from train.common import (
     validate_model_loading,
     write_summary_json,
 )
-from train.common.callbacks import LearningRateLogger, best_checkpoint_path
-from train.common.classification_viz import (
-    TrainingDashboardCallback,
-    plot_calibration,
-    plot_confident_errors,
-    plot_confusion_matrix,
-    plot_per_class_metrics,
-)
+from train.common import run_summary
+from train.common.callbacks import LearningRateLogger
+from train.common.classification_viz import TrainingDashboardCallback
 
 
 # ---------------------------------------------------------------------
@@ -742,145 +734,6 @@ def _evaluate(model: keras.Model, x: np.ndarray, y: np.ndarray) -> Dict[str, flo
     return {k: float(v) for k, v in metrics.items()}
 
 
-def _best_epoch(history: Dict[str, List[float]]) -> int:
-    """1-based epoch that is best under ``MONITOR`` (direction from ``resolve_monitor_mode``).
-
-    Raises:
-        ValueError: If any monitored value is NaN or infinite. ``np.argmin`` of a
-            list holding a NaN returns the NaN's index, so a diverged run would
-            otherwise report its NaN epoch as the best one.
-    """
-    values = np.asarray(history[MONITOR], dtype=np.float64)
-    if not np.all(np.isfinite(values)):
-        raise ValueError(f"cannot pick a best epoch: {MONITOR} has non-finite values {values.tolist()}")
-    mode = resolve_monitor_mode(MONITOR)
-    return int(np.argmin(values) if mode == "min" else np.argmax(values)) + 1
-
-
-def _non_finite_metrics(history: Dict[str, List[float]]) -> List[str]:
-    """Names among ``loss`` and ``MONITOR`` that are empty or hold a NaN / infinity."""
-    return [
-        key for key in dict.fromkeys(("loss", MONITOR))
-        if not history.get(key) or not np.all(np.isfinite(history[key]))
-    ]
-
-
-def _lr_reduction_epochs(lrs: Sequence[float]) -> List[int]:
-    """1-based epochs whose learning rate is lower than the previous epoch's.
-
-    ``lrs`` is the ``lr`` history (``LearningRateLogger`` writes the rate used
-    DURING each epoch), so an entry ``e`` means ``ReduceLROnPlateau`` acted
-    after epoch ``e - 1`` and epoch ``e`` was the first one trained at the lower
-    rate. Keras prints that message to stdout, not to the logger, so this is how
-    the run's own log and summary learn about it.
-
-    Args:
-        lrs: Per-epoch learning rates, epoch 1 first.
-
-    Returns:
-        The reduction epochs in ascending order (empty for a constant rate).
-    """
-    return [i + 1 for i in range(1, len(lrs)) if lrs[i] < lrs[i - 1]]
-
-
-def _load_best_metrics(
-        run_dir: Path, x: np.ndarray, y: np.ndarray
-) -> Tuple[Optional[Dict[str, float]], Optional[str]]:
-    """Evaluate the reloaded ``best_model.keras``.
-
-    Returns:
-        ``(metrics, None)`` on success, ``(None, error_text)`` if the checkpoint
-        is missing or does not load.
-    """
-    path = best_checkpoint_path(str(run_dir))
-    try:
-        best_model = keras.models.load_model(path)
-        return _evaluate(best_model, x, y), None
-    except Exception as e:  # noqa: BLE001 - reported, not fatal
-        logger.warning(f"Could not evaluate best checkpoint {path}: {e}")
-        return None, f"{type(e).__name__}: {e}"
-
-
-def _write_visualizations(
-        vis_dir: Path,
-        x_test: np.ndarray,
-        y_test: np.ndarray,
-        probs: np.ndarray,
-        class_names: List[str],
-        info: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Render the four end-of-run figures and the classification report.
-
-    Each figure is independent: a failure logs a warning and the others still
-    render.
-
-    Returns:
-        ``{"files": [names written], "ece": float | None, "failed": [names]}``.
-    """
-    y_pred = np.argmax(probs, axis=-1)
-    out: Dict[str, Any] = {"files": [], "ece": None, "failed": []}
-
-    def _attempt(name: str, fn) -> Any:
-        try:
-            result = fn()
-            out["files"].append(name)
-            return result
-        except Exception as e:  # noqa: BLE001 - a figure must not fail the run
-            logger.warning(f"Visualization {name} failed: {e}")
-            out["failed"].append(name)
-            return None
-
-    _attempt("confusion_matrix.png", lambda: plot_confusion_matrix(
-        y_test, y_pred, class_names, vis_dir / "confusion_matrix.png"))
-    report = _attempt("per_class_metrics.png", lambda: plot_per_class_metrics(
-        y_test, y_pred, class_names, vis_dir / "per_class_metrics.png"))
-    out["ece"] = _attempt("confidence_calibration.png", lambda: plot_calibration(
-        y_test, probs, vis_dir / "confidence_calibration.png"))
-    _attempt("misclassifications.png", lambda: plot_confident_errors(
-        x_test, y_test, probs, vis_dir / "misclassifications.png",
-        info["image_shape"], info["mean"], info["std"], class_names=class_names))
-
-    if report is not None:
-        try:
-            with open(vis_dir / "classification_report.json", "w") as f:
-                json.dump(report, f, indent=2, default=json_numpy_default)
-            out["files"].append("classification_report.json")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"classification_report.json failed: {e}")
-            out["failed"].append("classification_report.json")
-    return out
-
-
-def _read_analysis_status(run_dir: Path, model_name: str) -> Dict[str, Any]:
-    """Read ``model_analysis/analysis_results.json`` back from disk.
-
-    ``run_model_analysis`` swallows evaluation errors and logs "completed
-    successfully" regardless, so the file is the only trustworthy source.
-
-    Returns:
-        ``{"status", "loss", "accuracy", "error", "n_samples"}`` for
-        ``model_name``; ``{"status": "missing", ...}`` if the file, the key or
-        the JSON is unusable.
-    """
-    path = run_dir / "model_analysis" / "analysis_results.json"
-    missing: Dict[str, Any] = {"status": "missing", "loss": None, "accuracy": None,
-                               "error": None, "path": str(path)}
-    try:
-        with open(path) as f:
-            metrics = json.load(f)["model_metrics"][model_name]
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Could not read analyzer status from {path}: {e}")
-        missing["error"] = f"{type(e).__name__}: {e}"
-        return missing
-    return {
-        "status": metrics.get("status", "missing"),
-        "loss": metrics.get("loss"),
-        "accuracy": metrics.get("accuracy"),
-        "error": metrics.get("error"),
-        "path": str(path),
-    }
-
-
 def train_model(config: TrainingConfig) -> Dict[str, Any]:
     """Train PowerMLP, evaluate it, write every artifact and return the summary.
 
@@ -1019,10 +872,10 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         save_training_history_json(history, str(run_dir))
         hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
         epochs_run = len(hist.get(MONITOR, []))
-        non_finite = _non_finite_metrics(hist)
+        non_finite = run_summary.non_finite_metrics(hist, MONITOR)
 
         # What Keras prints to stdout (never to the logger), derived from the history.
-        lr_reduction_epochs = _lr_reduction_epochs(hist.get("lr", []))
+        lr_reduction_epochs = run_summary.lr_reduction_epochs(hist.get("lr", []))
         for epoch in lr_reduction_epochs:
             logger.info(
                 f"ReduceLROnPlateau: learning rate {hist['lr'][epoch - 2]:.3g} -> "
@@ -1070,7 +923,8 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         # expected (D-011) and a difference is a bug signal.
         test_metrics_final = _evaluate(model, x_test, y_test)
         logger.info(f"Test results (final weights): {test_metrics_final}")
-        test_metrics_best, best_load_error = _load_best_metrics(run_dir, x_test, y_test)
+        test_metrics_best, best_load_error = run_summary.load_best_metrics(
+            run_dir, lambda m: _evaluate(m, x_test, y_test))
         if test_metrics_best is not None:
             logger.info(f"Test results (best_model.keras): {test_metrics_best}")
             diffs = {k: abs(test_metrics_final[k] - test_metrics_best[k])
@@ -1093,18 +947,19 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
             logger.warning(f"validate_model_loading raised: {e}")
 
         probs = model.predict(x_test, batch_size=1024, verbose=0)
-        visualizations = _write_visualizations(
+        visualizations = run_summary.write_classification_figures(
             vis_dir, x_test, y_test, probs,
-            get_class_names(config.dataset, info["num_classes"]), info,
+            get_class_names(config.dataset, info["num_classes"]),
+            info["image_shape"], info["mean"], info["std"],
         )
 
         run_model_analysis(
             model, (x_test, y_test), history, config.experiment_name, str(run_dir)
         )
-        analysis = _read_analysis_status(run_dir, config.experiment_name)
+        analysis = run_summary.read_analysis_status(run_dir, config.experiment_name)
         logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
 
-        best_epoch = _best_epoch(hist)
+        best_epoch = run_summary.best_epoch(hist, MONITOR)
         best_i, final_i = best_epoch - 1, epochs_run - 1
         val_keys = [k for k in hist if k.startswith("val_")]
         widths = ARCHITECTURE_HIDDEN_WIDTHS[config.architecture][config.dataset]

@@ -41,6 +41,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 import train.convnext.common as common  # noqa: E402
+from train.common import json_numpy_default, run_summary  # noqa: E402
 
 N_TRAIN, N_TEST, MAX_SAMPLES = 400, 400, 240
 EPOCHS = 3
@@ -162,7 +163,7 @@ def e2e(tmp_path_factory):
                 logs["val_loss"] = float(logs["val_loss"]) + LAST_EPOCH_PENALTY
 
     real_fit = keras.Model.fit
-    real_calibration = common.plot_calibration
+    real_calibration = run_summary.plot_calibration
 
     def fit(self, *args, **kwargs):
         kwargs["callbacks"] = [LastEpochPenalty(), *kwargs.get("callbacks", []), Recorder()]
@@ -172,10 +173,17 @@ def e2e(tmp_path_factory):
         seen["calibration_probs"] = np.array(probs)
         return real_calibration(y_true, probs, out_path, *args, **kwargs)
 
+    real_grid = run_summary.plot_confident_errors
+
+    def grid(x, y_true, probs, out_path, image_shape=None, mean=None, std=None, *args, **kwargs):
+        seen["grid"] = (x.shape, image_shape, mean, std)
+        return real_grid(x, y_true, probs, out_path, image_shape, mean, std, *args, **kwargs)
+
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(common, "load_dataset", _fake_loader(10))
         mp.setattr(keras.Model, "fit", fit)
-        mp.setattr(common, "plot_calibration", calibration)
+        mp.setattr(run_summary, "plot_calibration", calibration)
+        mp.setattr(run_summary, "plot_confident_errors", grid)
         config = _config(out, "e2e")
         summary = common.train(config)
         data = common.prepare_data(config)
@@ -199,6 +207,15 @@ FIGURES = (
 )
 
 
+def test_the_misclassification_grid_gets_the_split_statistics_and_image_batches(e2e) -> None:
+    """ConvNeXt feeds NHWC images (no flat shape) and the standardization statistics of its
+    own training split, so the grid shows real pixel values."""
+    x_shape, image_shape, mean, std = e2e.grid
+    assert len(x_shape) == 4 and image_shape is None
+    np.testing.assert_array_equal(mean, e2e.data.mean)
+    np.testing.assert_array_equal(std, e2e.data.std)
+
+
 def test_the_run_writes_the_full_artifact_set(e2e) -> None:
     for name in ARTIFACTS:
         assert (e2e.run_dir / name).stat().st_size > 0, name
@@ -217,7 +234,7 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
     text = (e2e.run_dir / "results_summary.json").read_text()
     summary = _strict(text)
     assert summary["status"] == "ok"
-    assert summary == _strict(json.dumps(e2e.summary, default=common.json_numpy_default))
+    assert summary == _strict(json.dumps(e2e.summary, default=json_numpy_default))
     for key in (
         "initial_loss_ratio", "initial_loss_sanity_eval", "stage_feature_map_sizes",
         "test_metrics_best", "test_metrics_final", "epoch_times", "gpu_name",
@@ -606,7 +623,7 @@ def test_a_100_class_run_reports_top_5_accuracy(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(common, "run_model_analysis", lambda *a, **k: None)
     # A 100x100 confusion matrix costs ~30 s on CPU and is not what this guard is about.
     monkeypatch.setattr(
-        common, "_write_visualizations",
+        run_summary, "write_classification_figures",
         lambda *a, **k: {"files": [], "ece": None, "failed": []})
     config = _config(tmp_path, "wide", dataset="cifar100", epochs=1, max_samples=200,
                      learning_rate=1e-3)

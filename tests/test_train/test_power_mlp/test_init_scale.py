@@ -347,15 +347,6 @@ def test_a_model_without_batch_norm_keeps_model_evaluate_bit_identically(
     assert warned is False
 
 
-def test_lr_reduction_epochs_are_the_epochs_trained_at_a_lower_rate() -> None:
-    """1-based; ``lr`` is the rate USED in each epoch, so a drop at index i (0-based)
-    is reported as epoch i + 1."""
-    assert tpm._lr_reduction_epochs([3e-4, 3e-4, 1.5e-4, 1.5e-4, 7.5e-5]) == [3, 5]
-    assert tpm._lr_reduction_epochs([3e-4] * 6) == []
-    assert tpm._lr_reduction_epochs([]) == [] and tpm._lr_reduction_epochs([3e-4]) == []
-    assert tpm._lr_reduction_epochs([1e-3, 5e-4]) == [2]
-
-
 class _StubModel:
     """Just what ``_check_initial_loss`` reads: ``evaluate``, ``hidden_units`` and
     ``batch_normalization`` (False: the inference-mode ``evaluate`` path)."""
