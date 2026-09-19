@@ -61,6 +61,8 @@ def _rows(variant_probe: str) -> Tuple[Row, ...]:
         Row(("--batch-size",), ("--batch-size", "96"), "batch_size", 96),
         Row(("--learning-rate",), ("--learning-rate", "1.5e-3"), "learning_rate", 1.5e-3),
         Row(("--weight-decay",), ("--weight-decay", "0.02"), "weight_decay", 0.02),
+        # Opt-in (default 0.0, the stock loss): the probe is a non-default value.
+        Row(("--label-smoothing",), ("--label-smoothing", "0.08"), "label_smoothing", 0.08),
         Row(("--lr-schedule",), ("--lr-schedule", "exponential"), "lr_schedule", "exponential"),
         Row(("--warmup-epochs",), ("--warmup-epochs", "3"), "warmup_epochs", 3),
         Row(("--patience",), ("--patience", "9"), "patience", 9),
@@ -165,7 +167,7 @@ def test_parser_defaults_equal_the_config_defaults() -> None:
         for name in (
             "variant", "kernel_size", "strides", "drop_path_rate", "stochastic_mode",
             "dropout_rate", "use_gamma", "dataset", "validation_split", "max_samples",
-            "epochs", "batch_size", "learning_rate", "weight_decay", "lr_schedule",
+            "epochs", "batch_size", "learning_rate", "weight_decay", "label_smoothing", "lr_schedule",
             "warmup_epochs", "patience", "seed", "epoch_analysis", "model_analysis",
             "output_dir",
         ):
@@ -265,8 +267,11 @@ def test_imagenet_is_refused_with_the_explicit_message_before_any_expensive_call
         (("--lr-schedule", "exponential", "--warmup-epochs", "1"), "warmup_epochs"),
         (("--epochs", "3", "--warmup-epochs", "3"), "warmup_epochs"),
         (("--drop-path-rate", "1.0"), "drop_path_rate"),
+        (("--label-smoothing", "1.0"), "label_smoothing"),
+        (("--label-smoothing=-0.1",), "label_smoothing"),
     ],
-    ids=["split0", "split1", "epochs0", "warmup-non-cosine", "warmup-ge-epochs", "droppath1"],
+    ids=["split0", "split1", "epochs0", "warmup-non-cosine", "warmup-ge-epochs", "droppath1",
+         "smoothing1", "smoothing-negative"],
 )
 def test_an_out_of_range_value_raises_before_gpu_setup(monkeypatch, argv, message) -> None:
     """A bad combination is refused by the config, before ``setup_gpu`` / training."""

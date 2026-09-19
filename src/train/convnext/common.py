@@ -22,7 +22,9 @@ Optimization: ONE optimizer, ``AdamW(learning_rate=<schedule>, weight_decay=wd,
 clipnorm=1.0)``, identical for V1 and V2 and never combined with an L2 regularizer
 (decoupled decay is applied once). The schedule is a cosine over the WHOLE run
 (``steps_per_epoch`` is passed, without it the cosine collapses to its floor within
-``epochs`` optimizer steps), optionally preceded by a linear warmup.
+``epochs`` optimizer steps), optionally preceded by a linear warmup. The loss is the
+stock ``SparseCategoricalCrossentropy(from_logits=True)`` unless ``--label-smoothing`` is
+above 0 (opt-in, see :func:`build_loss`).
 
 Health: the untrained model is evaluated on the validation split before ``fit``
 (ConvNeXt is LayerNorm-only, so a plain ``evaluate`` is the true epoch-0 loss); the
@@ -228,6 +230,7 @@ class TrainingConfig:
     batch_size: int = 64
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
+    label_smoothing: float = 0.0
     lr_schedule: str = "cosine"
     warmup_epochs: int = 0
     patience: int = 50
@@ -285,6 +288,8 @@ class TrainingConfig:
             raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
         if self.weight_decay < 0.0:
             raise ValueError(f"weight_decay must be >= 0, got {self.weight_decay}")
+        if not 0.0 <= self.label_smoothing < 1.0:
+            raise ValueError(f"label_smoothing must be in [0, 1), got {self.label_smoothing}")
         if self.patience < 1:
             raise ValueError(f"patience must be >= 1, got {self.patience}")
         if not 0.0 < self.validation_split < 1.0:
@@ -399,6 +404,12 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
                        help="Peak learning rate.")
     train.add_argument("--weight-decay", type=float, default=defaults.weight_decay,
                        help="Decoupled AdamW weight decay (never also an L2 regularizer).")
+    train.add_argument("--label-smoothing", type=float, default=defaults.label_smoothing,
+                       help="Label smoothing in [0, 1): the target is (1 - a) on the true class "
+                            "plus a / C on every class (Keras convention). 0 uses the stock "
+                            "SparseCategoricalCrossentropy. Above 0, val_loss and test_loss "
+                            "include the smoothing and are not comparable with unsmoothed runs; "
+                            "accuracy, top-5 and ECE keep their definitions.")
     train.add_argument("--lr-schedule", type=str, default=defaults.lr_schedule,
                        choices=LR_SCHEDULES,
                        help="Learning-rate schedule over the whole run; 'constant' adds "
@@ -726,6 +737,74 @@ def build_metrics(num_classes: int) -> List[keras.metrics.Metric]:
     return metrics
 
 
+@keras.saving.register_keras_serializable(package="dl_techniques.train.convnext")
+class SmoothedSparseCategoricalCrossentropy(keras.losses.Loss):
+    """Cross-entropy of LOGITS against smoothed targets, from sparse integer labels.
+
+    The target of a sample of class ``y`` over ``C`` classes is
+    ``onehot(y) * (1 - a) + a / C`` (the ``keras.losses.CategoricalCrossentropy``
+    convention: the smoothing mass is spread over EVERY class, the true one included), so
+    ``loss = -sum_c target_c * log_softmax(logits)_c
+    = (1 - a) * CE(y) + a * mean_c(-log_softmax_c)``. With uniform logits it equals
+    ``ln(C)`` for every ``a``, which keeps the initial-loss guard (ratio to ``ln(C)``) valid.
+
+    Keras 3.8's ``SparseCategoricalCrossentropy`` has no ``label_smoothing`` argument, and
+    one-hot labels would force the pipeline, the sparse accuracy metrics and every figure
+    onto a second label format; this class is the one call site's alternative.
+
+    Args:
+        label_smoothing: ``a`` in ``[0, 1)``; ``0`` is the plain cross-entropy.
+        reduction: Keras loss reduction (default ``"sum_over_batch_size"``, the mean).
+        name: Loss name.
+
+    Raises:
+        ValueError: If ``label_smoothing`` is outside ``[0, 1)``.
+
+    Interface contract: ``y_true`` is integer class ids ``(B,)`` or ``(B, 1)``, ``y_pred``
+    logits ``(B, C)``; ``call`` returns the per-sample loss ``(B,)`` and Keras applies the
+    reduction. Only logits are supported: the input is never a probability.
+    """
+
+    def __init__(self, label_smoothing: float = 0.1, reduction: str = "sum_over_batch_size",
+                 name: str = "smoothed_sparse_categorical_crossentropy") -> None:
+        super().__init__(name=name, reduction=reduction)
+        if not 0.0 <= label_smoothing < 1.0:
+            raise ValueError(f"label_smoothing must be in [0, 1), got {label_smoothing}")
+        self.label_smoothing = float(label_smoothing)
+
+    def call(self, y_true: Any, y_pred: Any) -> Any:
+        num_classes = y_pred.shape[-1]
+        if len(y_true.shape) == len(y_pred.shape):
+            y_true = keras.ops.squeeze(y_true, axis=-1)
+        target = keras.ops.one_hot(keras.ops.cast(y_true, "int32"), num_classes, dtype=y_pred.dtype)
+        target = target * (1.0 - self.label_smoothing) + self.label_smoothing / num_classes
+        return -keras.ops.sum(target * keras.ops.log_softmax(y_pred, axis=-1), axis=-1)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config["label_smoothing"] = self.label_smoothing
+        return config
+
+
+def build_loss(label_smoothing: float) -> keras.losses.Loss:
+    """The training loss: the stock sparse cross-entropy, or the smoothed one above 0.
+
+    Args:
+        label_smoothing: ``config.label_smoothing`` in ``[0, 1)``.
+
+    Returns:
+        A loss over logits and sparse integer labels.
+    """
+    # DECISION plan-2026-09-19T040641-db6932ec/D-040: with 0.0 the STOCK
+    # ``SparseCategoricalCrossentropy(from_logits=True)`` is returned, not the smoothed
+    # class with a = 0. Do NOT route every run through the custom class "for uniformity":
+    # every number measured before this option existed (runs 1 to 3e2) was produced by the
+    # stock loss, and the default path must stay that object.
+    if label_smoothing == 0.0:
+        return keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    return SmoothedSparseCategoricalCrossentropy(label_smoothing=label_smoothing)
+
+
 class _LastEpochWeights(keras.callbacks.Callback):
     """Keeps a copy of the weights at the end of the most recent completed epoch.
 
@@ -868,6 +947,26 @@ def _check_best_checkpoint(
     return reloaded, None, gap
 
 
+def _label_smoothing_notes(label_smoothing: float) -> List[str]:
+    """The ``notes`` line about a smoothed loss (empty when smoothing is off).
+
+    Args:
+        label_smoothing: ``config.label_smoothing``.
+
+    Returns:
+        One plain-language line above 0, none at 0.
+    """
+    if label_smoothing == 0.0:
+        return []
+    return [
+        f"label_smoothing={label_smoothing:g}: `val_loss`, `test_loss` and the training loss "
+        "include the smoothing (a smoothed target cannot be fit to zero loss) and are NOT "
+        "comparable with unsmoothed runs; accuracy, top-5 accuracy and ECE keep their "
+        "definitions; the initial-loss ratio is unchanged in meaning (uniform logits give "
+        "ln(C) for any smoothing)"
+    ]
+
+
 def _analyzer_notes(ran: bool) -> List[str]:
     """The ``notes`` lines about ``model_analysis/``: what it measured, or that it was skipped.
 
@@ -932,6 +1031,7 @@ def _summary_head(
         "warmup_epochs": config.warmup_epochs,
         "steps_per_epoch": steps_per_epoch,
         "weight_decay": config.weight_decay,
+        "label_smoothing": config.label_smoothing,
         "batch_size": config.batch_size,
         "seed": config.seed,
         "validation_split": config.validation_split,
@@ -1025,7 +1125,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
                 weight_decay=config.weight_decay,
                 clipnorm=GRADIENT_CLIP_NORM,
             ),
-            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+            loss=build_loss(config.label_smoothing),
             metrics=build_metrics(data.num_classes),
         )
         model.build((None, *data.input_shape))
@@ -1231,6 +1331,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
                 "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` the "
                 "last epoch's weights (final_model.keras); figures and model_analysis/ use the "
                 "best weights; the test set never influenced selection",
+                *_label_smoothing_notes(config.label_smoothing),
                 *_analyzer_notes(config.model_analysis),
                 "`fit_wall_seconds` minus the sum of `epoch_times` is time outside the epoch "
                 "clock (dashboard redraws, checkpoint saves, train-end restore)",

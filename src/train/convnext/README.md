@@ -96,6 +96,7 @@ it). Both wrappers have the same flags; only `--variant` differs.
 | `--batch-size` | `64` | Training batch size. |
 | `--learning-rate` | `0.001` | Peak learning rate. |
 | `--weight-decay` | `0.0001` | Decoupled AdamW weight decay (never combined with an L2 regularizer). |
+| `--label-smoothing` | `0.0` | Opt-in label smoothing `a` in `[0, 1)`; anything else is refused at config time. `0.0` keeps the stock loss; above 0 see "Label smoothing" under Optimization. |
 | `--lr-schedule {cosine,exponential,constant}` | `cosine` | Schedule over the whole run. `constant` passes a plain float and adds `ReduceLROnPlateau` (factor 0.5, patience 5, on `val_loss`). |
 | `--warmup-epochs` | `0` | Linear warmup epochs before the cosine. Only valid with `cosine` and strictly below `--epochs`; otherwise refused at config time. |
 | `--patience` | `50` | Early-stopping patience in epochs, on `val_loss`. |
@@ -160,9 +161,25 @@ and were removed; the driver below is how to measure it again.
 - One optimizer, identical for V1 and V2: `AdamW(learning_rate=<schedule>, weight_decay=wd,
   clipnorm=1.0)`. The model is built without a kernel regularizer, so decay is applied exactly
   once.
-- Loss `SparseCategoricalCrossentropy(from_logits=True)`: the V1/V2 head is a bare
-  `Dense(num_classes)` and emits logits. Metrics are `accuracy`, plus `top_5_accuracy` (a metric
+- Loss `SparseCategoricalCrossentropy(from_logits=True)` (unless `--label-smoothing` is above
+  0, next bullet): the V1/V2 head is a bare `Dense(num_classes)` and emits logits. Metrics are `accuracy`, plus `top_5_accuracy` (a metric
   object, not the unresolvable string alias) when there are more than 10 classes.
+- **Label smoothing (opt-in, `--label-smoothing a`, default 0.0).** Trains against a softened
+  target instead of a hard one, which discourages over-confident logits. The convention is the
+  one of `keras.losses.CategoricalCrossentropy(label_smoothing=a)`: the target of a sample of
+  class `y` over `C` classes is `onehot(y) * (1 - a) + a / C`, so every class, the true one
+  included, gets `a / C`, and `loss = (1 - a) * CE(y) + a * mean over classes of (-log_softmax)`.
+  With `a = 0` the loss is exactly the stock `SparseCategoricalCrossentropy(from_logits=True)`
+  object and nothing else changes. Above 0 it is `SmoothedSparseCategoricalCrossentropy`
+  (in `common.py`, registered and serializable, sparse labels and logits, XLA-compatible), so the
+  pipeline, the sparse `accuracy` / `top_5_accuracy` metrics and every figure are untouched, and
+  `best_model.keras` / `final_model.keras` reload with the compile state. The summary records
+  `label_smoothing` and, above 0, a note: `val_loss`, `test_loss` and the training loss include
+  the smoothing (a smoothed target cannot be fit to zero loss, so the loss floor is above 0) and
+  are **not comparable with unsmoothed rows**, while accuracy, top-5 and ECE keep their
+  definitions. The initial-loss guard stays valid: uniform logits give `ln(C)` for any `a`.
+  No effect of smoothing is claimed here; measured rows appear in "Measured results" only after
+  runs 4a and 4b.
 - **The cosine spans the whole run.** `steps_per_epoch = n_train // batch_size` (the train pipeline drops the incomplete last
   batch, see "First epoch" under Measured results) is always passed to the schedule. Without it the library counts optimizer steps against
   `decay_steps = epochs` and the cosine reaches its 1% floor after `epochs` batches: the old
@@ -330,7 +347,7 @@ EVERY summary (also `diverged`), from `_summary_head`:
 | `strides`, `kernel_size`, `drop_path_rate`, `stochastic_mode`, `dropout_rate`, `use_gamma` | The model configuration actually used (the rates are the resolved per-dataset values). |
 | `input_shape`, `num_classes` | Data geometry. |
 | `stage_feature_map_sizes` | Spatial size of the map each stage runs on, stage 0 first. |
-| `optimizer`, `gradient_clip_norm`, `learning_rate`, `lr_schedule`, `warmup_epochs`, `steps_per_epoch`, `weight_decay`, `batch_size`, `seed` | Optimization. |
+| `optimizer`, `gradient_clip_norm`, `learning_rate`, `lr_schedule`, `warmup_epochs`, `steps_per_epoch`, `weight_decay`, `label_smoothing`, `batch_size`, `seed` | Optimization (`label_smoothing` is 0.0 for the stock loss). |
 | `validation_split`, `max_samples`, `n_train`, `n_val`, `n_test`, `input_normalization` | Data split sizes and the mean / std applied. |
 | `epochs_requested`, `monitor` | Requested epochs; the monitored metric (`val_loss`). |
 | `initial_loss_sanity_eval`, `initial_loss_ratio`, `init_scale_warning` | The pre-fit guard: loss on the validation split (with `n_samples`, `split`, `before_fit`), its ratio to `ln(C)`, and whether the ratio exceeded 10. |
