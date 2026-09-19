@@ -2478,6 +2478,13 @@ def _train_in_run_dir(
     else:
         train_model = model
 
+    # DECISION plan-2026-09-19T131351-b8d39688/D-003: decay_steps is the WHOLE horizon
+    # while the builder feeds the cosine `step - warmup_steps`, so the decay stops at
+    # (E-W)/E of its length and the last step sits above the alpha floor (E=100, W=10,
+    # spe=400: 3.42e-5 against 1e-5). The published bfunet runs used exactly this. Do NOT
+    # switch to decay_steps = (E-W)*steps_per_epoch here: that changes every default run;
+    # a decay-to-end schedule must be an opt-in decided in decisions.md. Pinned by
+    # test_train_bfunet_run.py::test_the_default_schedule_ends_at_3_42e_minus_5_*.
     lr_schedule = learning_rate_schedule_builder(
         {
             "type": config.lr_schedule_type,

@@ -538,3 +538,62 @@ def test_a_rebuilt_dashboard_clips_its_lr_axis_the_same_way(lr_run) -> None:
     low, _ = lr_run.rebuilt_panel["ylim"]
     assert low >= 1e-6 * (1.0 - 1e-9)
     assert any("1e-08" in t for t in lr_run.rebuilt_panel["texts"])
+
+
+# ---------------------------------------------------------------------
+# iter-1/step-6 (plan-2026-09-19T131351-b8d39688/D-003): the cosine floor is not reached
+# ---------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def schedule_e100(tmp_path_factory):
+    """The learning-rate schedule the REAL ``train()`` hands the optimizer, E=100 W=10 spe=400.
+
+    ``optimizer_builder`` is replaced by a spy that keeps its schedule argument and raises,
+    so ``train()`` stops right after building the schedule and no epoch is fitted. The
+    schedule is then evaluated at plain integer steps (a pure function, no GPU needed).
+    """
+    root = tmp_path_factory.mktemp("bfunet_schedule")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    seen: Dict[str, object] = {}
+
+    def spy(config, learning_rate, *args, **kwargs):
+        seen["schedule"] = learning_rate
+        raise _Probe
+
+    config = _tiny_config(
+        root, "schedule_probe", epochs=100, warmup_epochs=10, steps_per_epoch=400,
+        learning_rate=1e-3)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "optimizer_builder", spy)
+        with pytest.raises(_Probe):
+            run_train(config)
+    return seen["schedule"]
+
+
+def _rate(schedule, step: int) -> float:
+    return float(keras.ops.convert_to_numpy(schedule(step)))
+
+
+# DECISION plan-2026-09-19T131351-b8d39688/D-003: this pins a KNOWN imperfection on purpose.
+# The default schedule is WarmupSchedule(CosineDecay(decay_steps=E*spe)), which feeds the
+# cosine `step - warmup_steps`, so the decay is cut at (E-W)/E of its horizon and the last
+# step of E=100 W=10 spe=400 runs at 3.42e-5, not at the 1e-5 floor (alpha 0.01 x 1e-3).
+# The published bfunet runs used exactly this schedule, so the number is pinned to keep
+# them reproducible. Do NOT "fix" it by changing alpha or the warmup feed in train() to
+# make this test green, and do NOT loosen the tolerance. To change the schedule
+# deliberately: decide it in decisions.md first (the named candidate is an opt-in
+# decay-to-end schedule with decay_steps = (E-W)*spe, which ends at 1.0e-5), keep the
+# default as it is unless that decision says otherwise, then update the literal below
+# together with the README cosine-floor note.
+def test_the_default_schedule_ends_at_3_42e_minus_5_not_at_the_1e_minus_5_floor(
+        schedule_e100) -> None:
+    last_step = 100 * 400 - 1
+    assert _rate(schedule_e100, last_step) == pytest.approx(3.42e-5, rel=0.01)
+
+
+def test_the_default_schedule_warms_up_to_the_configured_rate_over_the_warmup_steps(
+        schedule_e100) -> None:
+    """The warmup feed: 1e-8 at step 0, exactly the peak 1e-3 where the 10 warmup epochs end."""
+    assert _rate(schedule_e100, 0) == pytest.approx(1e-8, rel=1e-3)
+    assert _rate(schedule_e100, 10 * 400) == pytest.approx(1e-3, rel=1e-6)
