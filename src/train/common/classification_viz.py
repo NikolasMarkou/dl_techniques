@@ -153,18 +153,23 @@ def _save_and_close(fig: plt.Figure, out_path: PathLike) -> str:
 # ordinary decade ticks carry the labels alone.
 LOG_NARROW_MAX_RATIO = 10.0
 
-# Mantissa sets tried in order until at least ``LOG_MIN_NICE_TICKS`` ticks fall inside
-# the view: coarse first (1, 1.5, 2, 3, 5 read cleanly), then finer for a very narrow view.
+# Mantissa sets tried in order until between ``LOG_MIN_NICE_TICKS`` and
+# ``LOG_MAX_NICE_TICKS`` ticks fall inside the view: coarse first (1, 1.5, 2, 3, 5 read
+# cleanly), then finer for a narrow view. The last set (steps of 0.1) is only a fallback
+# for a very narrow view: a 2.8 to 4.7 loss range gives 3 and 4 from the second set and
+# 3, 3.5, 4, 4.5 from the third, and must never fall through to twenty labels.
 _NICE_MANTISSAS: Tuple[Tuple[float, ...], ...] = (
     (1.0, 1.5, 2.0, 3.0, 5.0),
     (1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0),
+    (1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0),
     tuple(round(1.0 + 0.1 * i, 1) for i in range(90)),
 )
 LOG_MIN_NICE_TICKS = 3
+LOG_MAX_NICE_TICKS = 8
 
 
 def _nice_log_ticks(vmin: float, vmax: float) -> np.ndarray:
-    """Ticks in ``[vmin, vmax]`` from the coarsest mantissa set that gives enough of them.
+    """Ticks in ``[vmin, vmax]`` from the coarsest mantissa set that gives enough, but not too many.
 
     A 0.8 to 2.4 loss range reads ``1, 1.5, 2`` (matplotlib's own minor ticks read
     ``2, 1, 0.9, 0.8``: crowded at one end, empty at 1.5).
@@ -173,17 +178,19 @@ def _nice_log_ticks(vmin: float, vmax: float) -> np.ndarray:
         vmin, vmax: The visible range, ``0 < vmin < vmax``.
 
     Returns:
-        Ascending tick values inside the range (possibly fewer than
-        :data:`LOG_MIN_NICE_TICKS` if even the finest set cannot give that many).
+        Ascending tick values inside the range, at most :data:`LOG_MAX_NICE_TICKS` (fewer
+        than :data:`LOG_MIN_NICE_TICKS` if no set fits that many inside the range).
     """
     lo_exp, hi_exp = int(np.floor(np.log10(vmin))), int(np.ceil(np.log10(vmax)))
-    ticks = np.array([])
+    best = np.array([])
     for mantissas in _NICE_MANTISSAS:
         candidates = np.array([m * 10.0 ** e for e in range(lo_exp, hi_exp + 1) for m in mantissas])
         ticks = candidates[(candidates >= vmin) & (candidates <= vmax)]
-        if len(ticks) >= LOG_MIN_NICE_TICKS:
-            break
-    return ticks
+        if LOG_MIN_NICE_TICKS <= len(ticks) <= LOG_MAX_NICE_TICKS:
+            return ticks
+        if best.size < len(ticks) <= LOG_MAX_NICE_TICKS:
+            best = ticks
+    return best
 
 
 class _NarrowAwareLogLocator(LogLocator):

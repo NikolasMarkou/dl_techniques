@@ -178,6 +178,14 @@ and were removed; the driver below is how to measure it again.
   the smoothing (a smoothed target cannot be fit to zero loss, so the loss floor is above 0) and
   are **not comparable with unsmoothed rows**, while accuracy, top-5 and ECE keep their
   definitions. The initial-loss guard stays valid: uniform logits give `ln(C)` for any `a`.
+  Measured (5 epochs, seed 42, `a = 0.1`; runs 4a and 4b in the results table): on CIFAR-10 test
+  accuracy 0.7174 lies inside the 0.7150 to 0.7255 band of the unsmoothed runs, so no accuracy
+  change is attributable; on CIFAR-100 top-1 0.3972 and top-5 0.7072 against 0.3905 / 0.3851 and
+  0.6921 / 0.6916, a gain of 0.7 to 1.2 and about 1.5 points that is borderline against the
+  0.5-point run noise. The calibration signature is clear: the most confident predictions cap
+  near 0.97 (unsmoothed runs reach about 1.0) and the models become under-confident, with ECE
+  0.0866 against 0.012 to 0.0136 (CIFAR-10) and 0.0965 against 0.0436 to 0.0552 (CIFAR-100).
+  Whether smoothing pays off at more epochs is not measured.
   No effect of smoothing is claimed here; measured rows appear in "Measured results" only after
   runs 4a and 4b.
 - **The cosine spans the whole run.** `steps_per_epoch = n_train // batch_size` (the train pipeline drops the incomplete last
@@ -499,6 +507,10 @@ is named too: numbers from earlier code states are kept only when labelled as su
 | `convnext_v1_cifar10_cifar10_warmup1_iter3_run3e2` | `same command as run 3e, run again after the figure fixes` | 0.7208 | 0.8108 | 0.0120 | 73.6, 14.1, 14.2, 14.4, 14.3 | Same seed and command as 3e: 0.7208 vs 0.7150, so identical-seed GPU runs differ by about 0.6 points. |
 | `convnext_v1_cifar100_cifar10_iter3_run3b` | `train_convnext_v1 --variant cifar10 --dataset cifar100 --epochs 5` | 0.3905 (top-5 0.6921) | 2.4209 | 0.0552 | 65.1, 14.3, 14.7, 14.9, 14.3 | CIFAR-100, 5 epochs, before the 100-class figure fixes (its per-class and confusion figures were unreadable). |
 | `convnext_v1_cifar100_cifar10_iter3_run3b2` | `same command as run 3b, run again after the figure fixes` | 0.3851 (top-5 0.6916) | 2.4093 | 0.0436 | 65.2, 14.5, 14.8, 14.6, 14.8 | Same seed and command as 3b: 0.3851 vs 0.3905. Figures readable (worst/best 15 classes, confusion pairs, CIFAR-100 names). |
+| `convnext_v1_cifar10_cifar10_ls01_iter4_run4a` | `train_convnext_v1 --variant cifar10 --dataset cifar10 --epochs 5 --label-smoothing 0.1` | 0.7174 | 1.1432 | 0.0866 | 63.4, 14.1, 14.4, 14.3, 14.2 | Label smoothing 0.1, code state HEAD after d3ceb1de3. Accuracy is inside the 0.7150-0.7255 band of the unsmoothed runs (no attributable change). The loss (smoothed target, not comparable with the unsmoothed rows) and the ECE 0.0866 (about 7x the unsmoothed 0.012-0.0136, an under-confident model) are the visible effects. |
+| `convnext_v1_cifar100_cifar10_ls01_iter4_run4b` | `train_convnext_v1 --variant cifar10 --dataset cifar100 --epochs 5 --label-smoothing 0.1 --no-model-analysis` | 0.3972 (top-5 0.7072) | 2.8060 | 0.0965 | 64.1, 14.5, 14.8, 14.5, 14.9 | Label smoothing 0.1 on CIFAR-100 against 3b/3b2 (0.3905 / 0.3851 top-1, 0.6921 / 0.6916 top-5): top-1 +0.7 to +1.2 points, top-5 +1.5 points (borderline against the 0.5-point run noise), ECE 0.0965 vs 0.0552 / 0.0436. Loss not comparable. |
+| `convnext_v1_mnist_cifar10_iter4_run4c` | `train_convnext_v1 --variant cifar10 --dataset mnist --epochs 3 --no-model-analysis` | 0.9924 | 0.0367 | 0.0014 | 66.6, 16.9, 16.9 | First MNIST run of the normalized trainer: 28x28 at the default strides 2 gives 14x14 then 7x7 maps; epoch 1 66.6 s (XLA compile), steady 16.9 s. |
+| `convnext_v2_cifar10_tiny_iter4_run4d` | `train_convnext_v2 --variant tiny --dataset cifar10 --epochs 2 --no-model-analysis` | 0.4477 | 1.5718 | 0.0313 | 135.1, 27.2 | First 4-stage run (27.9M params, maps 16, 8, 4, 2; V2 at the final code state). Two epochs only: epoch 1 135.1 s (XLA compile of the larger step), steady 27.2 s. |
 
 Seed and run-to-run noise: two runs that differ only in the seed (2a vs 3a) differ by 0.5 points of test accuracy, and two runs with the identical seed and command (3b vs 3b2, 3e vs 3e2) by 0.5 to 0.6 points (GPU non-determinism). The identical-seed re-runs also moved the ECE (3b 0.0552 vs 3b2 0.0436), so ECE differences of about 1 point are not attributable either. Differences below about 1 point in this table are not attributable. The strides effect (run 1 vs 2a, 10.6 points) and the batch-256 loss (5.5 points) are far outside that band; the V1 vs V2 gap (1.1 points) and warmup are not.
 

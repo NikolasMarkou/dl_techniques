@@ -483,3 +483,15 @@ def test_every_function_of_the_shared_viz_module_is_fully_annotated() -> None:
         if signature.return_annotation is inspect.Signature.empty:
             bare.append(f"{name} -> ?")
     assert bare == []
+
+
+@pytest.mark.parametrize("lo, hi", [(2.7, 4.9), (2.4, 4.8), (2.8, 4.74), (1.1, 2.5), (0.9, 1.3)])
+def test_narrow_log_ranges_never_get_a_crowd_of_ticks(lo, hi):
+    """A 2.8 to 4.74 loss range (a 100-class run) once fell through to a tick every 0.1."""
+    ticks = viz._nice_log_ticks(lo, hi)
+    assert 3 <= len(ticks) <= 8
+    assert all(lo <= t <= hi for t in ticks)
+
+
+def test_the_100_class_loss_range_reads_as_a_few_round_numbers():
+    assert viz._nice_log_ticks(2.7, 4.9).tolist() == [3.0, 3.5, 4.0, 4.5]
