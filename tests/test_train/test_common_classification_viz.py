@@ -463,3 +463,23 @@ def test_no_hairline_when_no_hatched_bin_has_accuracy_zero(tmp_path, figures) ->
     viz.plot_calibration(y, probs, tmp_path / "cal.png")
     ax = _by_title(figures[0], "Reliability diagram")
     assert not [ln for ln in ax.get_lines() if list(ln.get_ydata()) == [0.0, 0.0]]
+
+
+def test_every_function_of_the_shared_viz_module_is_fully_annotated() -> None:
+    """The repo convention is type hints on every parameter and return (review-iter-3 C7).
+
+    ``_per_class_report`` was the one new helper of iteration 3 with bare parameters, and
+    two axis helpers next to it had bare ``ax`` parameters too.
+    """
+    import inspect
+
+    bare = []
+    for name, fn in inspect.getmembers(viz, inspect.isfunction):
+        if fn.__module__ != viz.__name__:
+            continue
+        signature = inspect.signature(fn)
+        bare += [f"{name}({p.name})" for p in signature.parameters.values()
+                 if p.annotation is inspect.Parameter.empty]
+        if signature.return_annotation is inspect.Signature.empty:
+            bare.append(f"{name} -> ?")
+    assert bare == []

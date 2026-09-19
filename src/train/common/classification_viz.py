@@ -208,7 +208,7 @@ class _NarrowAwareLogLocator(LogLocator):
         return super().tick_values(vmin, vmax)
 
 
-def _plain_log_ticks(ax) -> None:
+def _plain_log_ticks(ax: plt.Axes) -> None:
     """Label a log-scaled y axis with plain numbers at readable positions.
 
     The default log formatter prints scientific notation on every minor tick once the
@@ -253,7 +253,10 @@ def _class_labels(n: int, class_names: Optional[Sequence[str]]) -> List[str]:
     return [str(i) for i in range(n)]
 
 
-def _align_zero_lines(ax_left, left: Optional[np.ndarray], ax_right, right: Optional[np.ndarray]) -> None:
+def _align_zero_lines(
+        ax_left: plt.Axes, left: Optional[np.ndarray],
+        ax_right: plt.Axes, right: Optional[np.ndarray],
+) -> None:
     """Give two y axes limits that put ``0`` at the same height on both.
 
     The generalization-gap panel has one axis per gap (loss, accuracy), each autoscaled
@@ -924,7 +927,10 @@ def plot_per_class_metrics(
     return _per_class_report(names, prec, rec, f1, support, y_true, y_pred)
 
 
-def _per_class_report(names, prec, rec, f1, support, y_true, y_pred) -> Dict[str, Any]:
+def _per_class_report(
+        names: List[str], prec: np.ndarray, rec: np.ndarray, f1: np.ndarray,
+        support: np.ndarray, y_true: np.ndarray, y_pred: np.ndarray,
+) -> Dict[str, Any]:
     """The JSON-serializable per-class report of :func:`plot_per_class_metrics` (all classes)."""
     return {
         "per_class": {

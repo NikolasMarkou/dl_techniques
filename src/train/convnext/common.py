@@ -84,7 +84,14 @@ from train.common.classification_viz import TrainingDashboardCallback
 # Constants
 # ---------------------------------------------------------------------
 
-DATASETS: Tuple[str, ...] = ("mnist", "cifar10", "cifar100")
+# Train-set size of each dataset. Used ONLY to refuse an impossible configuration before
+# a run directory exists (``TrainingConfig.__post_init__``); ``prepare_data`` sizes the
+# split from the array it really loaded, so a wrong entry here weakens the early refusal
+# but never the split. It is also the ONE list of supported datasets: :data:`DATASETS` is
+# derived from its keys, so adding a dataset here cannot leave ``__post_init__`` indexing
+# a missing size (review iteration 3, N5).
+DATASET_TRAIN_SIZES: Dict[str, int] = {"mnist": 60000, "cifar10": 50000, "cifar100": 50000}
+DATASETS: Tuple[str, ...] = tuple(DATASET_TRAIN_SIZES)
 LR_SCHEDULES: Tuple[str, ...] = ("cosine", "exponential", "constant")
 STOCHASTIC_MODES: Tuple[str, ...] = ("depth", "gradient")
 
@@ -133,12 +140,6 @@ STATUS_DIVERGED = "diverged"
 
 # Classes for which the top-5 metric is meaningful (10-class tasks report top-1 only).
 TOP_K_MIN_CLASSES = 11
-
-# Train-set size of each dataset. Used ONLY to refuse an impossible configuration before
-# a run directory exists (``TrainingConfig.__post_init__``); ``prepare_data`` sizes the
-# split from the array it really loaded, so a wrong entry here weakens the early refusal
-# but never the split.
-DATASET_TRAIN_SIZES: Dict[str, int] = {"mnist": 60000, "cifar10": 50000, "cifar100": 50000}
 
 
 @dataclass(frozen=True)
@@ -208,6 +209,9 @@ class TrainingConfig:
     model_family: str = "v1"
     variant: str = "cifar10"
     kernel_size: int = 7
+    # DECISION plan-2026-09-19T040641-db6932ec/D-033: the trainer default is 2. Do NOT
+    # restore 4 to match the model classes: measured +10.6 points test accuracy at strides
+    # 2 vs 4 (findings/iter2-audit.md), and 4 collapses the 4-stage variants to 1x1 maps.
     strides: int = 2
     drop_path_rate: Optional[float] = None
     stochastic_mode: str = "depth"

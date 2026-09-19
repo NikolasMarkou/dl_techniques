@@ -825,6 +825,18 @@ def test_the_pool_check_uses_the_split_the_run_will_really_get() -> None:
     assert common.split_sizes(100, 500, 0.1) == (90, 10), "a cap above the data changes nothing"
 
 
+def test_every_per_dataset_table_covers_exactly_the_supported_datasets() -> None:
+    """One dataset list: a dataset in ``DATASETS`` cannot lack a size or regularization row.
+
+    Before, ``DATASETS`` and ``DATASET_TRAIN_SIZES`` were two literals, and a dataset added
+    to the first only surfaced as a ``KeyError`` from inside ``TrainingConfig.__post_init__``
+    (review iteration 3, N5).
+    """
+    assert set(common.DATASETS) == set(common.DATASET_TRAIN_SIZES)
+    assert set(common.DATASETS) == set(common.REGULARIZATION_DEFAULTS)
+    assert set(common.FLIP_DATASETS) <= set(common.DATASETS)
+
+
 # ---------------------------------------------------------------------
 # Geometry helper equals the real model
 # ---------------------------------------------------------------------

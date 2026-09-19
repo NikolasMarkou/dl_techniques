@@ -129,7 +129,8 @@ def write_classification_figures(
             and reshaping the misclassification grid).
 
     Returns:
-        ``{"files": [names of files that exist on disk], "ece": float | None,
+        ``{"files": [names of the post-fit figure and report files that exist on disk;
+        the dashboard is written by the training callback and is not listed], "ece": float | None,
         "failed": [names]}``. A figure that raised is in ``failed``; one that legitimately
         wrote nothing (a perfect classifier has no misclassification grid) is in neither.
     """

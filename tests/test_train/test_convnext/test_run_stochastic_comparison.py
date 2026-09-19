@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from types import SimpleNamespace
 from typing import List
 
 os.environ.setdefault("MPLBACKEND", "Agg")

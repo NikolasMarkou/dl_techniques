@@ -6,6 +6,8 @@ sorted-differently or mistyped tuple fails.
 """
 
 import os
+import pickle
+from pathlib import Path
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -18,6 +20,21 @@ def test_there_are_100_distinct_names_in_alphabetical_order() -> None:
     assert len(CIFAR100_CLASS_NAMES) == 100
     assert len(set(CIFAR100_CLASS_NAMES)) == 100
     assert list(CIFAR100_CLASS_NAMES) == sorted(CIFAR100_CLASS_NAMES)
+
+
+KERAS_CIFAR100_META = Path.home() / ".keras/datasets/cifar-100-python-target/cifar-100-python/meta"
+
+
+@pytest.mark.skipif(not KERAS_CIFAR100_META.is_file(), reason="Keras CIFAR-100 cache is absent")
+def test_the_whole_tuple_equals_the_fine_labels_in_the_keras_cache_meta_file() -> None:
+    """The ground truth is on disk: 100 pinned names instead of 10 spot checks (review-iter-3 C3).
+
+    A sort-order-preserving typo such as ``sweetpepper`` for ``sweet_pepper`` keeps the tuple
+    sorted, distinct and 100 long, so only a comparison with the dataset's own metadata sees it.
+    """
+    with open(KERAS_CIFAR100_META, "rb") as handle:
+        meta = pickle.load(handle, encoding="latin1")
+    assert list(CIFAR100_CLASS_NAMES) == list(meta["fine_label_names"])
 
 
 @pytest.mark.parametrize("index,name", [
