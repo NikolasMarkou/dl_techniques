@@ -188,8 +188,8 @@ results/<experiment_name>/
     run.log                     the dl logger for this run (not Keras' own stdout lines)
     visualizations/
         training_dashboard.png  six panels, redrawn on a cadence during training
-        confusion_matrix.png    counts and row-normalized panels
-        per_class_metrics.png   per-class precision / recall / F1
+        confusion_matrix.png    counts and row-normalized panels (more than 20 classes: heatmap without cell text + the 15 most confused pairs)
+        per_class_metrics.png   per-class precision / recall / F1 (more than 20 classes: the 15 worst and 15 best by F1)
         confidence_calibration.png   reliability diagram with ECE
         misclassifications.png  the most confident errors
         classification_report.json   per-class report, macro F1, accuracy
@@ -217,8 +217,10 @@ Notes on individual files:
 - **`training_dashboard.png`**: six panels: Loss (log axis, with the epoch-0 baseline star,
   clipped and annotated only if it is more than 10x the curves; under batch normalization
   the star is the untrained model measured in TRAINING mode on the validation set, the same
-  measurement as the initial-loss guard, and its legend says so), Accuracy, Learning rate,
-  Generalization gap, Per-epoch time (bars above 3x the median of epochs 2 and later are
+  measurement as the initial-loss guard, and its legend says so), Accuracy (dashed top-5
+  curves when the history has them), Learning rate (floored at peak / 1e3: a warmup start
+  below that is a marker on the bottom edge annotated with its value),
+  Generalization gap (its two zero lines are aligned), Per-epoch time (bars above 3x the median of epochs 2 and later are
   drawn at the ceiling, hatched, and annotated with their true value: epoch 1 is the XLA
   warmup), and Smoothed loss (moving average, present from 6 epochs). The train curve is
   the running mean over the epoch while the validation curve is measured at the epoch end,

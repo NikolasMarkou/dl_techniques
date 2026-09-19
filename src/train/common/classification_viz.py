@@ -35,6 +35,7 @@ matplotlib.use("Agg")  # must precede the pyplot import: headless-safe
 
 import keras  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.colors import PowerNorm  # noqa: E402
 from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullFormatter  # noqa: E402
 import numpy as np  # noqa: E402
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support  # noqa: E402
@@ -97,6 +98,35 @@ CONFUSION_MIN_ANNOTATION = 0.005
 # MNIST chart would otherwise be a wall of equal bars) and the axis label says so. A
 # truncated axis on a weaker run made a 0.52 bar look a seventh as tall as a 0.86 one.
 PER_CLASS_TRUNCATE_FROM = 0.8
+
+# More classes than this and the confusion matrix / per-class chart switch to their
+# bounded layouts: a 100-class run made a 15585 x 7571 px confusion matrix (about 1 px of
+# text) and an 8837 x 524 px per-class strip, neither readable at any size. Up to this
+# many classes the original layouts (counts + row-normalized; grouped bars) are kept.
+MANY_CLASSES_THRESHOLD = 20
+
+# The per-class chart of a many-class run draws the worst and the best this many classes
+# by F1 (so at most ``2 * PER_CLASS_SHOWN_EACH_END`` rows, whatever the class count); the
+# full table stays in ``classification_report.json``.
+PER_CLASS_SHOWN_EACH_END = 15
+
+# The many-class confusion figure lists this many most-confused (true -> predicted) pairs.
+CONFUSION_TOP_PAIRS = 15
+
+# Row-normalized heatmap of a many-class run: tick labels go only to classes in the top
+# pairs, and never closer together than ``n / CONFUSION_MAX_TICK_LABELS`` classes so the
+# labels cannot overprint one another whatever the class count.
+CONFUSION_MAX_TICK_LABELS = 40
+
+# Gamma of the many-class heatmap colour scale: the diagonal (0.4 to 0.9) would otherwise
+# leave every off-diagonal cell (0.01 to 0.1) an unreadable near-white.
+CONFUSION_HEATMAP_GAMMA = 0.5
+
+# The learning-rate panel shows at most this many decades below the peak. A warmup that
+# starts at 1e-8 under a 1e-3 peak spans 10 decades and squeezed the real schedule into
+# the top fifth of the axis; points below the floor are drawn ON its bottom edge and
+# annotated with their value.
+LR_PANEL_MAX_DECADES = 3.0
 
 
 # ---------------------------------------------------------------------
@@ -223,6 +253,47 @@ def _class_labels(n: int, class_names: Optional[Sequence[str]]) -> List[str]:
     return [str(i) for i in range(n)]
 
 
+def _align_zero_lines(ax_left, left: Optional[np.ndarray], ax_right, right: Optional[np.ndarray]) -> None:
+    """Give two y axes limits that put ``0`` at the same height on both.
+
+    The generalization-gap panel has one axis per gap (loss, accuracy), each autoscaled
+    on its own, so the two zero lines sat at different heights (about 11 px apart in run
+    3c) and a curve could seem to cross or coincide with the other for no reason. The
+    limits are ``[-f * R, (1 - f) * R]`` on each axis: zero at fraction ``f`` of the
+    height, ``R`` the smallest range that holds that axis's data with 5% padding. ``f`` is
+    the natural zero fraction of whichever axis wastes the least room when the other adopts
+    it (clipped to ``[0.05, 0.95]``, so an all-positive series still gets a margin).
+
+    Args:
+        ax_left, ax_right: The two axes; each gets ``set_ylim``.
+        left, right: The plotted values of each axis, or ``None`` when it has no data
+            (its limits then just follow the other axis's zero fraction).
+    """
+    def extents(values: Optional[np.ndarray]) -> Optional[Tuple[float, float]]:
+        if values is None or not np.isfinite(values).any():
+            return None
+        finite = values[np.isfinite(values)]
+        below, above = max(0.0, -float(finite.min())), max(0.0, float(finite.max()))
+        pad = 0.05 * max(below + above, 1e-12)
+        return below + pad, above + pad
+
+    both = [e for e in (extents(left), extents(right)) if e is not None]
+    if not both:
+        return
+
+    def limits(e: Optional[Tuple[float, float]], f: float) -> Tuple[float, float]:
+        span = 1.0 if e is None else max(e[0] / f, e[1] / (1.0 - f))
+        return -f * span, (1.0 - f) * span
+
+    def waste(f: float) -> float:
+        return sum(max(b / f, a / (1.0 - f)) / (a + b) for b, a in both)
+
+    fractions = [float(np.clip(b / (a + b), 0.05, 0.95)) for b, a in both]
+    f = min(fractions, key=waste)
+    ax_left.set_ylim(*limits(extents(left), f))
+    ax_right.set_ylim(*limits(extents(right), f))
+
+
 # ---------------------------------------------------------------------
 # Training dashboard
 # ---------------------------------------------------------------------
@@ -271,6 +342,7 @@ def render_training_dashboard(
     """
     loss, val_loss = _series(history, "loss"), _series(history, "val_loss")
     acc, val_acc = _series(history, "accuracy"), _series(history, "val_accuracy")
+    top5, val_top5 = _series(history, "top_5_accuracy"), _series(history, "val_top_5_accuracy")
     lr = _series(history, "lr")
     times = None if not epoch_times else np.asarray(epoch_times, dtype=np.float64)
     n_epochs = max((len(s) for s in (loss, val_loss, acc, val_acc) if s is not None), default=0)
@@ -281,7 +353,8 @@ def render_training_dashboard(
     def _x(values: np.ndarray) -> np.ndarray:
         return np.arange(1, len(values) + 1)
 
-    def _curves(ax, train, val, base_key: str, ylabel: str) -> None:
+    def _curves(ax, train, val, base_key: str, ylabel: str,
+                extra: Optional[Callable[[Any], None]] = None) -> None:
         clipped = False
         if train is not None:
             ax.plot(_x(train), train, color=TRAIN_COLOR, lw=1.6, marker="o", ms=3, label="train")
@@ -305,6 +378,8 @@ def render_training_dashboard(
                     ax.annotate(f"epoch-0: {true_value:.4g} (clipped)", xy=(0, drawn),
                                 xytext=(8, 0), textcoords="offset points", va="center",
                                 fontsize=8, color=VAL_COLOR)
+        if extra is not None:
+            extra(ax)  # before the legend, so its labelled lines join it
         ax.set_xlabel("epoch")
         ax.set_ylabel(ylabel)
         # 'best' does not see annotations: with a clipped baseline the annotation sits
@@ -313,23 +388,60 @@ def render_training_dashboard(
         ax.legend(fontsize=8, loc="center right" if clipped else "best")
 
     def _loss(ax) -> None:
-        _curves(ax, loss, val_loss, "loss", "loss")
+        _curves(ax, loss, val_loss, "loss", "loss (log scale)")
         ax.set_yscale("log")
         _plain_log_ticks(ax)
 
     def _accuracy(ax) -> None:
-        _curves(ax, acc, val_acc, "accuracy", "accuracy")
+        # Top-5 (recorded by a run that compiles it, e.g. CIFAR-100): dashed, same colours.
+        def top5_curves(ax_) -> None:
+            for values, color, label in ((top5, TRAIN_COLOR, "train top-5"),
+                                         (val_top5, VAL_COLOR, "val top-5")):
+                if values is not None:
+                    ax_.plot(_x(values), values, color=color, lw=1.4, ls="--", marker="s",
+                             ms=2.5, label=label)
+
+        _curves(ax, acc, val_acc, "accuracy", "accuracy", extra=top5_curves)
 
     def _lr(ax) -> None:
-        ax.plot(_x(lr), lr, color=ACCENT_COLOR, lw=1.6, marker="o", ms=3)
+        """Log-scaled rate curve; see :data:`LR_PANEL_MAX_DECADES` and the sparse-tick label."""
+        x = _x(lr)
+        ax.plot(x, lr, color=ACCENT_COLOR, lw=1.6, marker="o", ms=3)
         ax.set_yscale("log")
+        _plain_log_ticks(ax)
         ax.set_xlabel("epoch")
-        ax.set_ylabel("learning rate")
+        ax.set_ylabel("learning rate (log scale)")
+        positive = lr[np.isfinite(lr) & (lr > 0.0)]
+        if positive.size == 0:
+            return
+        peak = float(positive.max())
+        below = np.zeros(len(lr), dtype=bool)
+        if peak / float(positive.min()) > 10.0 ** LR_PANEL_MAX_DECADES:
+            floor = peak / 10.0 ** LR_PANEL_MAX_DECADES
+            ax.set_ylim(floor, peak * 1.5)
+            below = np.isfinite(lr) & (lr < floor)
+            ax.scatter(x[below], np.full(int(below.sum()), floor), marker="v", s=40,
+                       color=ACCENT_COLOR, edgecolor="black", zorder=5, clip_on=False)
+            for k, (xi, value) in enumerate(zip(x[below], lr[below])):
+                ax.annotate(f"epoch {int(xi)}: {value:.3g}, below axis", xy=(xi, floor),
+                            xytext=(8, 6 + 12 * k), textcoords="offset points", fontsize=8,
+                            color="#444444", va="bottom")
+        lo, hi = ax.get_ylim()
+        ticks = ax.yaxis.get_major_locator().tick_values(lo, hi)
+        if int(np.count_nonzero((ticks >= lo) & (ticks <= hi))) < 2:
+            # Too few labelled ticks to read the ends (a 2.1e-4 to 2e-3 cosine): name them.
+            for xi, value, ha in ((x[0], lr[0], "left"), (x[-1], lr[-1], "right")):
+                if np.isfinite(value) and value > 0.0 and lo <= value <= hi:
+                    ax.annotate(f"{value:.3g}", xy=(xi, value), xytext=(0, 7),
+                                textcoords="offset points", fontsize=8, color="#444444",
+                                ha=ha, va="bottom")
 
     def _gap(ax) -> None:
+        loss_gap = acc_gap = None
         if loss is not None and val_loss is not None:
             n = min(len(loss), len(val_loss))
-            ax.plot(np.arange(1, n + 1), val_loss[:n] - loss[:n], color=VAL_COLOR, lw=1.6,
+            loss_gap = val_loss[:n] - loss[:n]
+            ax.plot(np.arange(1, n + 1), loss_gap, color=VAL_COLOR, lw=1.6,
                     marker="o", ms=3, label="val_loss - loss")
         ax.axhline(0.0, color="grey", lw=0.8)
         ax.set_xlabel("epoch")
@@ -337,8 +449,10 @@ def render_training_dashboard(
         if acc is not None and val_acc is not None:
             n = min(len(acc), len(val_acc))
             ax2 = ax.twinx()
-            ax2.plot(np.arange(1, n + 1), acc[:n] - val_acc[:n], color=TRAIN_COLOR, lw=1.6,
+            acc_gap = acc[:n] - val_acc[:n]
+            ax2.plot(np.arange(1, n + 1), acc_gap, color=TRAIN_COLOR, lw=1.6,
                      marker="s", ms=3, ls="--", label="acc - val_acc")
+            _align_zero_lines(ax, loss_gap, ax2, acc_gap)
             ax2.set_ylabel("accuracy gap", color=TRAIN_COLOR)
             ax2.grid(False)  # a global style may grid every axes; keep one grid
             lines = [ln for ln in ax.get_lines() + ax2.get_lines()
@@ -379,7 +493,7 @@ def render_training_dashboard(
         ax.set_yscale("log")
         _plain_log_ticks(ax)
         ax.set_xlabel("epoch")
-        ax.set_ylabel("loss")
+        ax.set_ylabel("loss (log scale)")
         ax.legend(fontsize=8)
 
     panels: List[Tuple[str, Any]] = []
@@ -544,7 +658,8 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         logs = logs or {}
         try:
             self.epoch_times.append(time.perf_counter() - self._epoch_start)
-            for key in ("loss", "val_loss", "accuracy", "val_accuracy"):
+            for key in ("loss", "val_loss", "accuracy", "val_accuracy",
+                        "top_5_accuracy", "val_top_5_accuracy"):
                 if key in logs:
                     self.history.setdefault(key, []).append(float(logs[key]))
             lr = self._current_lr(logs)
@@ -574,7 +689,14 @@ def plot_confusion_matrix(
         class_names: Optional[Sequence[str]],
         out_path: PathLike,
 ) -> np.ndarray:
-    """Save a two-panel confusion matrix: raw counts and row-normalized recall.
+    """Save a confusion-matrix figure whose pixel size is bounded for any class count.
+
+    Up to :data:`MANY_CLASSES_THRESHOLD` classes: two panels, raw counts and
+    row-normalized recall. More classes: the row-normalized heatmap without cell text
+    (tick labels only for the classes in the top confusions) beside a panel of the
+    :data:`CONFUSION_TOP_PAIRS` most confused ``true -> predicted`` pairs (count and rate),
+    see :func:`_plot_confusion_many_classes`. The two-panel layout scaled as
+    ``0.62 * n`` inches per panel: 100 classes made a 15585 x 7571 px image.
 
     The row-normalized panel leaves cells at or below ``CONFUSION_MIN_ANNOTATION``
     (0.5%) unannotated so it never prints "0%"; the counts panel annotates every
@@ -599,6 +721,11 @@ def plot_confusion_matrix(
     names = _class_labels(n, class_names)
     cm = confusion_matrix(y_true, y_pred, labels=list(range(n)))
     norm = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1)
+
+    acc = float(np.trace(cm)) / max(int(cm.sum()), 1)
+    if n > MANY_CLASSES_THRESHOLD:
+        _plot_confusion_many_classes(cm, norm, names, acc, out_path)
+        return cm
 
     size = max(6.0, 0.62 * n + 2.5)
     fig, axes = plt.subplots(1, 2, figsize=(2 * size + 1.0, size))
@@ -625,7 +752,6 @@ def plot_confusion_matrix(
                         continue
                     ax.text(j, i, fmt(mat[i, j]), ha="center", va="center", fontsize=8,
                             color="white" if mat[i, j] > cut else "black")
-        acc = float(np.trace(cm)) / max(int(cm.sum()), 1)
         fig.suptitle(f"Confusion matrix (accuracy {acc:.4f}, n={int(cm.sum())})", fontsize=13)
         fig.tight_layout(rect=(0, 0, 1, 0.95))
         _save_and_close(fig, out_path)
@@ -634,15 +760,117 @@ def plot_confusion_matrix(
     return cm
 
 
+def _top_confused_pairs(cm: np.ndarray, k: int) -> List[Tuple[int, int, int, float]]:
+    """The ``k`` most confused off-diagonal cells, largest count first.
+
+    Args:
+        cm: ``(n, n)`` count matrix, rows true, columns predicted.
+        k: Maximum number of pairs.
+
+    Returns:
+        ``(true, predicted, count, rate)`` tuples, ``rate`` being the count as a fraction
+        of the true class's samples; ties in count go to the higher rate, then the lower
+        indices. Cells with a zero count are never listed (fewer than ``k`` when the
+        classifier makes few distinct errors, an empty list for a perfect one).
+    """
+    n = cm.shape[0]
+    rows, cols = np.nonzero(~np.eye(n, dtype=bool) & (cm > 0))
+    counts = cm[rows, cols]
+    rates = counts / np.maximum(cm.sum(axis=1)[rows], 1)
+    order = np.lexsort((cols, rows, -rates, -counts))[:k]
+    return [(int(rows[i]), int(cols[i]), int(counts[i]), float(rates[i])) for i in order]
+
+
+def _plot_confusion_many_classes(
+        cm: np.ndarray, norm: np.ndarray, names: List[str], acc: float, out_path: PathLike,
+) -> None:
+    """The bounded confusion figure for more than :data:`MANY_CLASSES_THRESHOLD` classes.
+
+    Left: the row-normalized heatmap, no cell text, a power-law colour scale
+    (:data:`CONFUSION_HEATMAP_GAMMA`) so off-diagonal cells show next to the diagonal, tick
+    labels for the classes of the top pairs only (most confused first, never closer than
+    ``ceil(n / CONFUSION_MAX_TICK_LABELS)`` classes). Right: horizontal bars of the top
+    :data:`CONFUSION_TOP_PAIRS` pairs, each labelled ``true -> predicted`` with its count and
+    its rate (share of the true class). The figure size is a constant.
+
+    Args:
+        cm: ``(n, n)`` count matrix.
+        norm: ``cm`` divided by its row sums.
+        names: One name per class.
+        acc: Overall accuracy, for the title.
+        out_path: PNG destination.
+    """
+    n = len(names)
+    pairs = _top_confused_pairs(cm, CONFUSION_TOP_PAIRS)
+    min_gap = -(-n // CONFUSION_MAX_TICK_LABELS)
+    ticks: List[int] = []
+    for true_i, pred_j, _, _ in pairs:
+        for c in (true_i, pred_j):
+            if c not in ticks and all(abs(c - t) >= min_gap for t in ticks):
+                ticks.append(c)
+    ticks.sort()
+
+    fig = plt.figure(figsize=(17.0, 9.0))
+    try:
+        grid = fig.add_gridspec(1, 2, width_ratios=[1.25, 1.0], wspace=0.4)
+        ax = fig.add_subplot(grid[0, 0])
+        im = ax.imshow(norm, cmap="Blues", interpolation="nearest",
+                       norm=PowerNorm(CONFUSION_HEATMAP_GAMMA, vmin=0.0,
+                                      vmax=max(float(norm.max()), 1e-9)))
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+        ax.grid(False)
+        ax.set_xticks(ticks)
+        ax.set_yticks(ticks)
+        ax.set_xticklabels([names[t] for t in ticks], rotation=90, fontsize=7)
+        ax.set_yticklabels([names[t] for t in ticks], fontsize=7)
+        ax.set_xlabel("predicted (labelled: classes in the most confused pairs)")
+        ax.set_ylabel("true")
+        ax.set_title("Row-normalized (recall per true class)")
+
+        bars = fig.add_subplot(grid[0, 1])
+        if pairs:
+            y = np.arange(len(pairs))[::-1]  # the most confused pair on top
+            counts = np.array([c for _, _, c, _ in pairs])
+            bars.barh(y, counts, color=TRAIN_COLOR, alpha=0.85)
+            bars.set_yticks(y)
+            bars.set_yticklabels([f"{names[t]} -> {names[p]}" for t, p, _, _ in pairs], fontsize=8)
+            for yi, count, rate in zip(y, counts, [r for _, _, _, r in pairs]):
+                bars.annotate(f"{int(count)} ({rate:.1%})", xy=(count, yi), xytext=(4, 0),
+                              textcoords="offset points", va="center", fontsize=8)
+            bars.set_xlim(0.0, float(counts.max()) * 1.25)
+            bars.set_xlabel("samples of the true class predicted as the other class")
+            bars.grid(False)
+            bars.grid(axis="x", alpha=0.3)
+            bars.set_axisbelow(True)
+        else:
+            bars.text(0.5, 0.5, "no misclassifications", ha="center", va="center",
+                      transform=bars.transAxes)
+            bars.set_xticks([])
+            bars.set_yticks([])
+        bars.set_title(f"Most confused pairs (top {len(pairs)}; count and share of the true class)")
+        fig.suptitle(f"Confusion matrix (accuracy {acc:.4f}, n={int(cm.sum())}, {n} classes)",
+                     fontsize=13)
+        _save_and_close(fig, out_path)
+    finally:
+        plt.close(fig)
+
+
 def plot_per_class_metrics(
         y_true: np.ndarray,
         y_pred: np.ndarray,
         class_names: Optional[Sequence[str]],
         out_path: PathLike,
 ) -> Dict[str, Any]:
-    """Save grouped bars of precision / recall / F1 per class.
+    """Save the per-class precision / recall / F1 chart.
 
-    The y axis starts at 0 unless every bar is at or above :data:`PER_CLASS_TRUNCATE_FROM`,
+    Up to :data:`MANY_CLASSES_THRESHOLD` classes: grouped vertical bars of all three, one
+    group per class. More classes: horizontal bars of F1 for the
+    :data:`PER_CLASS_SHOWN_EACH_END` best and worst classes (precision and recall as markers
+    on the same row), the title naming how many of how many classes are shown; a 100-class
+    grouped chart was an 8837 x 524 px strip. Either way the returned report holds EVERY
+    class.
+
+    The score axis starts at 0 unless every bar is at or above :data:`PER_CLASS_TRUNCATE_FROM`,
     in which case it is truncated and the axis label says so.
 
     Args:
@@ -662,6 +890,10 @@ def plot_per_class_metrics(
     prec, rec, f1, support = precision_recall_fscore_support(
         y_true, y_pred, labels=list(range(n)), zero_division=0
     )
+
+    if n > MANY_CLASSES_THRESHOLD:
+        _plot_per_class_extremes(prec, rec, f1, support, names, out_path)
+        return _per_class_report(names, prec, rec, f1, support, y_true, y_pred)
 
     fig, ax = plt.subplots(figsize=(max(8.0, 0.9 * n + 2.0), 4.8))
     try:
@@ -689,6 +921,11 @@ def plot_per_class_metrics(
         _save_and_close(fig, out_path)
     finally:
         plt.close(fig)
+    return _per_class_report(names, prec, rec, f1, support, y_true, y_pred)
+
+
+def _per_class_report(names, prec, rec, f1, support, y_true, y_pred) -> Dict[str, Any]:
+    """The JSON-serializable per-class report of :func:`plot_per_class_metrics` (all classes)."""
     return {
         "per_class": {
             nm: {"precision": float(p), "recall": float(r), "f1": float(f), "support": int(s)}
@@ -697,6 +934,63 @@ def plot_per_class_metrics(
         "macro_f1": float(f1.mean()),
         "accuracy": float(np.mean(y_true == y_pred)),
     }
+
+
+def _plot_per_class_extremes(
+        prec: np.ndarray, rec: np.ndarray, f1: np.ndarray, support: np.ndarray,
+        names: List[str], out_path: PathLike,
+) -> None:
+    """Horizontal F1 bars of the best and worst classes, for more than 20 classes.
+
+    Rows run best (top) to worst (bottom), with a gap row reading ``... N more classes ...``
+    between the two blocks when classes are left out; at most
+    ``2 * PER_CLASS_SHOWN_EACH_END`` rows, so the figure height is bounded for any class
+    count. Each row is a green F1 bar with precision and recall as markers. The axis starts
+    at zero unless every DRAWN value is at or above :data:`PER_CLASS_TRUNCATE_FROM`
+    (same rule and label as the grouped chart).
+
+    Args:
+        prec, rec, f1, support: Per-class arrays, length n.
+        names: One name per class.
+        out_path: PNG destination.
+    """
+    n = len(names)
+    k = PER_CLASS_SHOWN_EACH_END
+    order = np.argsort(-f1, kind="stable")  # best first; ties keep the lower class index first
+    shown = order if n <= 2 * k else np.concatenate([order[:k], order[-k:]])
+    gap = n > 2 * k
+    rows = np.arange(len(shown), dtype=float)
+    if gap:
+        rows[k:] += 1.0  # one empty row between the blocks
+    y = -rows  # best at the top
+
+    fig, ax = plt.subplots(figsize=(11.0, 0.34 * (len(shown) + int(gap)) + 1.8))
+    try:
+        ax.barh(y, f1[shown], height=0.62, color="#2ca02c", alpha=0.75, label="F1")
+        ax.scatter(prec[shown], y, marker="o", s=26, color="#1f77b4", zorder=4, label="precision")
+        ax.scatter(rec[shown], y, marker="D", s=26, color="#ff7f0e", zorder=4, label="recall")
+        ax.set_yticks(y)
+        ax.set_yticklabels([f"{names[i]} (n={int(support[i])})" for i in shown], fontsize=8)
+        if gap:
+            ax.text(0.5, -float(k), f"... {n - 2 * k} more classes ...", ha="center",
+                    va="center", fontsize=9, color="#444444", style="italic",
+                    transform=ax.get_yaxis_transform())
+        lo = float(min(prec[shown].min(), rec[shown].min(), f1[shown].min()))
+        truncated = lo >= PER_CLASS_TRUNCATE_FROM
+        ax.set_xlim(max(0.0, lo - 0.05) if truncated else 0.0, 1.005)
+        ax.set_ylim(y.min() - 0.7, y.max() + 0.7)
+        ax.set_xlabel("score (axis truncated)" if truncated else "score")
+        which = (f"{len(shown)} of {n} classes shown ({k} best and {k} worst by F1)" if gap
+                 else f"{len(shown)} of {n} classes shown, best to worst by F1")
+        ax.set_title(f"Per-class F1, precision, recall: {which}; macro F1 {float(f1.mean()):.4f}",
+                     fontsize=11)
+        ax.grid(False)
+        ax.grid(axis="x", alpha=0.3)
+        ax.set_axisbelow(True)
+        ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9)
+        _save_and_close(fig, out_path)
+    finally:
+        plt.close(fig)
 
 
 def plot_calibration(
@@ -756,6 +1050,11 @@ def plot_calibration(
                     edgecolor="black", hatch="//",
                     label=f"n < {CALIBRATION_MIN_BIN_SAMPLES} (not evidence)")
             for c, a, n_b in zip(centers[sparse], bin_acc[sparse], counts[sparse]):
+                if a == 0.0:
+                    # A hatched bar of height 0 is invisible; a hairline at the bin accuracy
+                    # shows the bin exists (clip_on off so it is not half cut by the axis).
+                    ax1.plot([c - width * 0.475, c + width * 0.475], [0.0, 0.0], color="black",
+                             lw=1.5, solid_capstyle="butt", clip_on=False, zorder=4)
                 high = a > 0.9  # keep the label inside the axes for a full-height bar
                 ax1.text(c, a - 0.02 if high else a + 0.02, f"n={int(n_b)}", ha="center",
                          va="top" if high else "bottom", fontsize=8)

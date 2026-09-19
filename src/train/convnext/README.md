@@ -265,8 +265,8 @@ results/<experiment_name>/
     run.log                     the dl logger for this run
     visualizations/
         training_dashboard.png  per-epoch curves, redrawn on a cadence during training
-        confusion_matrix.png
-        per_class_metrics.png
+        confusion_matrix.png         up to 20 classes: counts + row-normalized; more: heatmap + the 15 most confused pairs (bounded size)
+        per_class_metrics.png        up to 20 classes: grouped bars; more: the 15 worst and 15 best classes by F1 (the full table is in classification_report.json)
         confidence_calibration.png   reliability diagram with ECE
         misclassifications.png       the most confident errors
         classification_report.json
