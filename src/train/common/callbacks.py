@@ -451,17 +451,35 @@ class LearningRateLogger(keras.callbacks.Callback):
     leaves ``logs['lr']`` UNSET on a non-finite read rather than writing a NaN
     into the CSV row, and documents a callback-ordering contract.
 
+    By default the rate is read in ``on_epoch_end``. With a per-step schedule
+    that is the rate of the NEXT epoch's first step, not the rate the epoch
+    trained at (the last epoch shows the schedule's value one step past its
+    end). ``at_epoch_start=True`` reads it in ``on_epoch_begin`` instead and
+    writes that value into ``logs`` at ``on_epoch_end``, so the recorded rate
+    is the one the epoch's first step used. The default is unchanged: existing
+    adopters (power_mlp, capsnet) keep their recorded history byte for byte.
+
     Args:
         log_key: Key written into ``logs``. The default ``'lr'`` matches what
             the adopting trainers already recorded in their history; changing
             it renames the series in every downstream plot and CSV column.
+        at_epoch_start: When ``True``, record the rate at the START of the
+            epoch (see above). Default ``False``: record it at the end.
     """
 
-    def __init__(self, log_key: str = "lr") -> None:
+    def __init__(self, log_key: str = "lr", at_epoch_start: bool = False) -> None:
         super().__init__()
         self.log_key = log_key
+        self.at_epoch_start = at_epoch_start
+        self._epoch_start_lr = float("nan")
+
+    def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        if self.at_epoch_start:
+            self._epoch_start_lr = read_current_lr(self.model)
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         if logs is None:
             logs = {}
-        logs[self.log_key] = read_current_lr(self.model)
+        logs[self.log_key] = (
+            self._epoch_start_lr if self.at_epoch_start else read_current_lr(self.model)
+        )

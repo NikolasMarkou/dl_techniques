@@ -252,9 +252,17 @@ results/<experiment_name>/
 Notes:
 
 - **`training_log.csv`**: the `epoch` column is 0-based, `best_epoch` in the summary is 1-based
-  (`best_epoch_csv_index` = `best_epoch - 1`). `lr` is read after the epoch's last step, so with
-  a per-step schedule it is the rate of the NEXT epoch's first step, not the rate the epoch
-  trained at.
+  (`best_epoch_csv_index` = `best_epoch - 1`). `lr` is the rate at the START of the epoch (its
+  first step): epoch 1 shows the configured base rate (or the warmup start value under
+  warmup), and the last epoch shows the rate it began at, not the schedule's value past its
+  end.
+- **Per-epoch line and the progress bar**: `run.log` and the console carry one line per epoch,
+  `Epoch N/E - loss X - accuracy X - [top_5_accuracy X -] val_loss X - val_accuracy X -
+  [val_top_5_accuracy X -] lr X - time Ns`, built from the true epoch logs (the same values as
+  the CSV row, 4 decimals). The Keras progress bar is kept, but its TRAIN numbers read low: it
+  averages the already-running-mean metrics a second time (`keras/src/utils/progbar.py`, no
+  `stateful_metrics`), most in a fast-learning first epoch (run 1: bar 0.3152 vs true 0.3709
+  accuracy). Its validation numbers are exact. The CSV and the log line are the reference.
 - **`best_model.keras` vs `final_model.keras`** differ whenever the last epoch is not the best.
   `model_loading_validated` reports whether `final_model.keras` reloads and reproduces its
   predictions; `best_checkpoint_max_abs_diff` is the gap between the reloaded best checkpoint
@@ -296,7 +304,7 @@ Keys added by a finished run (`status: "ok"`):
 | `status` | `"ok"` or `"diverged"`. |
 | `epochs_run`, `stopped_early` | Epochs actually trained; whether `EarlyStopping` ended the run. |
 | `best_epoch`, `best_epoch_csv_index`, `final_is_best` | 1-based best epoch by `val_loss`; the 0-based twin; whether the last epoch is the best. |
-| `lr_first_epoch`, `lr_last_epoch` | The CSV `lr` of the first and last epoch. |
+| `lr_first_epoch`, `lr_last_epoch` | The CSV `lr` of the first and last epoch: the rate at the START of each (`lr_first_epoch` is the configured base rate, or the warmup start value under warmup). |
 | `best_val_metrics`, `final_val_metrics` | Validation metrics of the best epoch and of the last epoch. |
 | `test_metrics_best`, `test_metrics_final` | Test metrics of the reloaded `best_model.keras` and of the last epoch's weights (`final_model.keras`). |
 | `best_checkpoint_load_error`, `best_checkpoint_max_abs_diff` | Whether the best checkpoint loaded and its gap to the in-memory best weights. |

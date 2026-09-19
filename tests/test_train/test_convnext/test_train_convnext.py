@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -285,21 +286,162 @@ def test_the_constant_schedule_is_a_plain_float() -> None:
     assert common.build_lr_schedule(config, 10) == 2e-4
 
 
+def _csv_rows(run_dir: Path):
+    with open(run_dir / "training_log.csv") as f:
+        return list(csv.DictReader(f))
+
+
 def test_the_csv_lr_column_is_a_live_cosine(e2e) -> None:
     """The rate the optimizer really used, read from ``training_log.csv``.
 
-    The column is read after each epoch's last step, i.e. it is the rate of the NEXT
-    epoch's first step: at 2 of 3 epochs a live cosine is ~26% of the peak, a collapsed
-    one is ~1% of it.
+    A live cosine over 3 epochs starts epoch 2 at ~75% of the peak, a collapsed one at
+    ~1% of it (the old trainer's defect).
     """
-    with open(e2e.run_dir / "training_log.csv") as f:
-        rows = list(csv.DictReader(f))
-    lrs = [float(r["lr"]) for r in rows]
+    lrs = [float(r["lr"]) for r in _csv_rows(e2e.run_dir)]
     assert len(lrs) == EPOCHS
     assert lrs[1] > 0.2 * E2E_LEARNING_RATE and lrs[1] != pytest.approx(1e-5, abs=5e-5)
     assert all(a >= b for a, b in zip(lrs, lrs[1:]))
     assert e2e.summary["lr_first_epoch"] == pytest.approx(lrs[0])
     assert e2e.summary["lr_last_epoch"] == pytest.approx(lrs[-1])
+
+
+def test_the_csv_lr_is_the_rate_at_the_start_of_each_epoch(e2e) -> None:
+    """F2: epoch 1 shows the configured base rate, epoch k the schedule at its first step.
+
+    A read after the epoch's last step would show the NEXT epoch's first-step rate
+    (epoch 1 below the base rate, the last epoch at the schedule's end value).
+    """
+    steps = e2e.summary["steps_per_epoch"]
+    schedule = common.build_lr_schedule(e2e.config, steps)
+    lrs = [float(r["lr"]) for r in _csv_rows(e2e.run_dir)]
+    assert e2e.config.warmup_epochs == 0
+    assert lrs[0] == pytest.approx(E2E_LEARNING_RATE, rel=1e-6)
+    for epoch, lr in enumerate(lrs):
+        assert lr == pytest.approx(float(schedule(epoch * steps)), rel=1e-5), epoch
+    assert e2e.summary["lr_first_epoch"] == pytest.approx(E2E_LEARNING_RATE, rel=1e-6)
+    history = _strict((e2e.run_dir / "training_history.json").read_text())
+    assert history["lr"][0] == pytest.approx(E2E_LEARNING_RATE, rel=1e-6)
+    assert not any("NEXT epoch" in note for note in e2e.summary["notes"])
+
+
+EPOCH_LINE = re.compile(r"Epoch (\d+)/(\d+) - (.*) - time ([0-9.]+)s\s*$")
+
+
+def _epoch_lines(run_dir: Path):
+    """``[(epoch, total, {key: value}, seconds)]`` for every epoch line of ``run.log``."""
+    found = []
+    for line in (run_dir / "run.log").read_text().splitlines():
+        match = EPOCH_LINE.search(line)
+        if match is None:
+            continue
+        pairs = {}
+        for part in match.group(3).split(" - "):
+            key, value = part.rsplit(" ", 1)
+            pairs[key] = float(value)
+        found.append((int(match.group(1)), int(match.group(2)), pairs, float(match.group(4))))
+    return found
+
+
+def test_run_log_has_exactly_one_line_per_epoch_carrying_the_csv_values(e2e) -> None:
+    """F3/F4: the line is built from the true epoch logs, not the progress bar's average."""
+    lines = _epoch_lines(e2e.run_dir)
+    rows = _csv_rows(e2e.run_dir)
+    assert [n for n, _, _, _ in lines] == list(range(1, EPOCHS + 1))
+    assert all(total == EPOCHS for _, total, _, _ in lines)
+    for (n, _, values, seconds), row in zip(lines, rows):
+        for key in ("loss", "accuracy", "val_loss", "val_accuracy"):
+            assert values[key] == pytest.approx(float(row[key]), abs=1e-4), (n, key)
+        assert values["lr"] == pytest.approx(float(row["lr"]), rel=1e-4), n
+        assert "top_5_accuracy" not in values, "10 classes: no top-5 metric, so no top-5 field"
+        assert seconds > 0.0
+    # The last epoch carries the fixture's +100 penalty on val_loss: a line built from
+    # anything but the logs the CSV sees could not show it.
+    assert lines[-1][2]["val_loss"] > LAST_EPOCH_PENALTY
+    assert lines[-1][2]["val_loss"] == pytest.approx(float(rows[-1]["val_loss"]), abs=1e-4)
+
+
+def test_the_epoch_line_time_matches_the_summary_epoch_times(e2e) -> None:
+    lines = _epoch_lines(e2e.run_dir)
+    for (_, _, _, seconds), recorded in zip(lines, e2e.summary["epoch_times"]):
+        assert seconds == pytest.approx(recorded, abs=0.25 + 0.05 * recorded)
+
+
+def test_the_epoch_line_callback_reports_top_5_when_the_logs_carry_it() -> None:
+    """Direct unit test: keys are printed in a fixed order, absent ones skipped."""
+    callback = common._EpochLogLine()
+    callback.set_params({"epochs": 7})
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Capture()
+    logging.getLogger("dl").addHandler(handler)
+    try:
+        callback.on_epoch_begin(2)
+        callback.on_epoch_end(2, {
+            "loss": 1.5, "accuracy": 0.25, "top_5_accuracy": 0.5, "val_loss": 1.75,
+            "val_accuracy": 0.125, "val_top_5_accuracy": 0.625, "lr": 0.001,
+        })
+        callback.on_epoch_begin(3)
+        callback.on_epoch_end(3, {"loss": 1.0})
+    finally:
+        logging.getLogger("dl").removeHandler(handler)
+    lines = [m for m in records if m.startswith("Epoch ")]
+    assert len(lines) == 2
+    assert lines[0].startswith(
+        "Epoch 3/7 - loss 1.5000 - accuracy 0.2500 - top_5_accuracy 0.5000 - val_loss 1.7500 "
+        "- val_accuracy 0.1250 - val_top_5_accuracy 0.6250 - lr 0.001 - time ")
+    assert lines[1].startswith("Epoch 4/7 - loss 1.0000 - time ")
+
+
+class _FakeOptimizer:
+    def __init__(self, lr: float) -> None:
+        self.learning_rate = lr
+
+
+def test_the_start_of_epoch_rate_under_warmup_is_the_warmup_start_value() -> None:
+    """A real (tiny) ``fit`` with a per-step warmup schedule: epoch 1 logs the ramp's start."""
+    from train.common.callbacks import LearningRateLogger
+
+    config = common.TrainingConfig(epochs=3, learning_rate=1e-2, warmup_epochs=1)
+    steps = 4
+    schedule = common.build_lr_schedule(config, steps)
+    model = keras.Sequential([keras.layers.Input((3,)), keras.layers.Dense(2)])
+    model.compile(optimizer=keras.optimizers.AdamW(learning_rate=schedule), loss="mse")
+    x = np.random.default_rng(0).random((steps * 2, 3), dtype=np.float32)
+    history = model.fit(
+        x, np.zeros((steps * 2, 2), np.float32), batch_size=2, epochs=3, verbose=0,
+        callbacks=[LearningRateLogger(at_epoch_start=True)],
+    )
+    lrs = history.history["lr"]
+    assert lrs[0] == pytest.approx(float(schedule(0)), rel=1e-5) and lrs[0] < 1e-2 * 0.1
+    assert lrs[1] == pytest.approx(float(schedule(steps)), rel=1e-5)
+    assert lrs[1] == pytest.approx(1e-2, rel=1e-3)
+
+
+def test_the_shared_learning_rate_logger_default_still_reads_at_epoch_end() -> None:
+    """PowerMLP and CapsNet rely on the unchanged default (byte-identical history)."""
+    from train.common.callbacks import LearningRateLogger
+
+    model = SimpleNamespace(optimizer=_FakeOptimizer(0.1))
+    default, opt_in = LearningRateLogger(), LearningRateLogger(at_epoch_start=True)
+    for callback in (default, opt_in):
+        callback.set_model(model)
+        callback.on_epoch_begin(0)
+    model.optimizer.learning_rate = 0.05          # the schedule moved during the epoch
+    default_logs, opt_in_logs = {}, {}
+    default.on_epoch_end(0, default_logs)
+    opt_in.on_epoch_end(0, opt_in_logs)
+    assert default_logs == {"lr": pytest.approx(0.05)}
+    assert opt_in_logs == {"lr": pytest.approx(0.1)}
+    renamed = LearningRateLogger(log_key="learning_rate")
+    renamed.set_model(model)
+    renamed.on_epoch_begin(0)
+    logs = {}
+    renamed.on_epoch_end(0, logs)
+    assert logs == {"learning_rate": pytest.approx(0.05)}
 
 
 # ---------------------------------------------------------------------

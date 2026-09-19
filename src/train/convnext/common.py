@@ -668,6 +668,48 @@ class _LastEpochWeights(keras.callbacks.Callback):
         self.weights = self.model.get_weights()
 
 
+# DECISION plan-2026-09-19T040641-db6932ec/D-019: the per-epoch line is built from the
+# TRUE epoch ``logs`` and written through the repo logger (run.log and console). Do NOT
+# treat the Keras progress bar as the reference and do NOT copy its train numbers into
+# this line: the bar averages the already-running-mean logs a second time
+# (keras/src/utils/progbar.py:84-100, no ``stateful_metrics``), so its train metrics read
+# low, most in a fast-learning first epoch. Val numbers agree with the bar.
+EPOCH_LINE_KEYS = (
+    "loss", "accuracy", "top_5_accuracy", "val_loss", "val_accuracy", "val_top_5_accuracy",
+)
+
+
+class _EpochLogLine(keras.callbacks.Callback):
+    """Logs one ``Epoch N/E - loss X - ... - lr X - time Ns`` line per epoch.
+
+    Reads the epoch ``logs`` exactly as CSVLogger does, so the line equals the CSV row
+    (to the printed precision). Place it AFTER ``LearningRateLogger`` (which writes
+    ``logs['lr']``) and after every callback that changes ``logs``; a metric absent from
+    ``logs`` (top-5 on a 10-class dataset, validation metrics after a failed evaluation)
+    is skipped, never printed as a placeholder. The epoch time is measured here
+    (``on_epoch_begin`` to ``on_epoch_end``) and equals the dashboard's ``epoch_times``
+    up to the few milliseconds of the callbacks that run in between.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._epoch_start = 0.0
+
+    def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        self._epoch_start = time.perf_counter()
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        logs = logs or {}
+        elapsed = time.perf_counter() - self._epoch_start
+        total = (self.params or {}).get("epochs", "?")
+        parts = [f"Epoch {epoch + 1}/{total}"]
+        parts += [f"{key} {float(logs[key]):.4f}" for key in EPOCH_LINE_KEYS if key in logs]
+        if logs.get("lr") is not None:
+            parts.append(f"lr {float(logs['lr']):.6g}")
+        parts.append(f"time {elapsed:.1f}s")
+        logger.info(" - ".join(parts))
+
+
 # ---------------------------------------------------------------------
 # Evaluation helpers
 # ---------------------------------------------------------------------
@@ -1037,9 +1079,17 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
             include_analyzer=config.epoch_analysis,
         )
         # Index 0: `lr` must be in `logs` before CSVLogger reads it.
-        callbacks.insert(0, LearningRateLogger())
+        # DECISION plan-2026-09-19T040641-db6932ec/D-020: the logged `lr` is the rate at
+        # the START of the epoch (`at_epoch_start=True`). Do NOT drop the flag: the
+        # default reads after the epoch's last step, which under a per-step schedule is
+        # the NEXT epoch's first-step rate (epoch 1 would show 9.05e-4 although it began
+        # at 1e-3, the run-1 audit finding F2) and the dashboard curve would be shifted.
+        callbacks.insert(0, LearningRateLogger(at_epoch_start=True))
         last_weights = _LastEpochWeights()
         callbacks.append(last_weights)
+        # After every callback that edits `logs`, before the dashboard (whose redraw must
+        # stay outside this line's clock).
+        callbacks.append(_EpochLogLine())
         # Last: it reads `logs['lr']`, written by LearningRateLogger above.
         dashboard = TrainingDashboardCallback(
             out_path=vis_dir / "training_dashboard.png",
@@ -1167,8 +1217,8 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
                 "plain evaluate on the validation split (LayerNorm model)",
                 "CSV `epoch` is 0-based, `best_epoch` is 1-based (`best_epoch_csv_index` = "
                 "`best_epoch` - 1)",
-                "CSV `lr` is read AFTER the epoch's last step: with a per-step schedule it is "
-                "the rate of the NEXT epoch's first step, not the rate the epoch trained at",
+                "CSV `lr` is the rate at the START of the epoch (its first step), so epoch 1 "
+                "shows the configured base rate, or the warmup start value under warmup",
                 "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` the "
                 "last epoch's weights (final_model.keras); figures and model_analysis/ use the "
                 "best weights; the test set never influenced selection",
