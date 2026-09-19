@@ -45,7 +45,6 @@ refused, never merged or overwritten.
 
 import argparse
 import math
-import os
 import time
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -509,30 +508,6 @@ def stage_feature_map_sizes(
         h, w = sizes[-1]
         sizes.append((math.ceil(h / strides), math.ceil(w / strides)))
     return sizes
-
-
-def describe_devices() -> Dict[str, Any]:
-    """Which GPU(s) TensorFlow sees in this process, for the run log and the summary.
-
-    The first call enumerates devices, after which a changed ``CUDA_VISIBLE_DEVICES``
-    no longer selects a different one; ``gpu_name`` is what TF actually sees, while
-    ``cuda_visible_devices`` is only the environment value at call time.
-
-    Returns:
-        ``{"cuda_visible_devices", "tf_visible_devices", "gpu_names", "gpu_name"}``;
-        ``gpu_name`` is the first visible GPU's name or ``None`` on a CPU-only process.
-    """
-    gpus = tf.config.list_physical_devices("GPU")
-    names = [
-        str(tf.config.experimental.get_device_details(gpu).get("device_name", gpu.name))
-        for gpu in gpus
-    ]
-    return {
-        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "tf_visible_devices": [gpu.name for gpu in gpus],
-        "gpu_names": names,
-        "gpu_name": names[0] if names else None,
-    }
 
 
 # ---------------------------------------------------------------------
@@ -1067,7 +1042,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
     vis_dir.mkdir(parents=True, exist_ok=True)
     with attach_run_log(run_dir):
         logger.info(f"Run directory: {run_dir}")
-        devices = describe_devices()
+        devices = run_summary.describe_devices()
         logger.info(
             f"Devices: CUDA_VISIBLE_DEVICES={devices['cuda_visible_devices']!r}, "
             f"TensorFlow sees {devices['tf_visible_devices']} ({devices['gpu_names']})"

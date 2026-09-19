@@ -23,11 +23,13 @@ Interface contracts:
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
+import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
 from train.common.callbacks import best_checkpoint_path, resolve_monitor_mode
@@ -201,3 +203,27 @@ def read_analysis_status(run_dir: Path, model_name: str) -> Dict[str, Any]:
 def skipped_analysis_status() -> Dict[str, Any]:
     """The :func:`read_analysis_status` schema for a run that did not call the analyzer."""
     return {"status": "skipped", "loss": None, "accuracy": None, "error": None, "path": None}
+
+
+def describe_devices() -> Dict[str, Any]:
+    """Which GPU(s) TensorFlow sees in this process, for the run log and the summary.
+
+    The first call enumerates devices, after which a changed ``CUDA_VISIBLE_DEVICES``
+    no longer selects a different one; ``gpu_name`` is what TF actually sees, while
+    ``cuda_visible_devices`` is only the environment value at call time.
+
+    Returns:
+        ``{"cuda_visible_devices", "tf_visible_devices", "gpu_names", "gpu_name"}``;
+        ``gpu_name`` is the first visible GPU's name or ``None`` on a CPU-only process.
+    """
+    gpus = tf.config.list_physical_devices("GPU")
+    names = [
+        str(tf.config.experimental.get_device_details(gpu).get("device_name", gpu.name))
+        for gpu in gpus
+    ]
+    return {
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "tf_visible_devices": [gpu.name for gpu in gpus],
+        "gpu_names": names,
+        "gpu_name": names[0] if names else None,
+    }

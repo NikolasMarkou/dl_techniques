@@ -2252,6 +2252,19 @@ def train(
         )
 
 
+# How to read the numbers in every ``results_summary.json`` (finished or diverged).
+SUMMARY_READING_NOTES: List[str] = [
+    "CSV `epoch` is 0-based, `best_epoch` is 1-based (`best_epoch_csv_index` = `best_epoch` - 1)",
+    "CSV `lr` is the rate at the START of the epoch (its first step), so epoch 1 shows the "
+    "warmup start value; `lr_last_step` is the rate of the run's very last optimizer step",
+    "`epoch_times` are the seconds of each epoch as printed on its `run.log` line; "
+    "`fit_wall_seconds` minus their sum is time outside that clock (visualization redraws, "
+    "checkpoint saves)",
+    "`val_*` metrics are measured on freshly drawn validation noise, so `val_loss` carries a "
+    "sampling noise of its own and the best epoch can flip on it",
+]
+
+
 def _summary_head(
     config: "BFUnetTrainingConfig",
     output_dir: Path,
@@ -2260,17 +2273,22 @@ def _summary_head(
     steps_per_epoch: int,
     lr_schedule,
     init_from_block: Optional[Dict[str, Any]],
+    hist: Dict[str, List[float]],
+    devices: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Keys every ``results_summary.json`` carries, whether the run finished or diverged.
 
     Interface contract: pure (reads ``lr_schedule`` at one step, no I/O). ``params`` is the
     model's parameter count, ``steps_per_epoch`` the RESOLVED value, ``lr_schedule`` the
     schedule handed to the optimizer, ``init_from_block`` the ``{path, loaded,
-    missing_in_source, shape_mismatch}`` record (``None`` without ``--init-from``). Returns a
-    plain dict; :func:`write_summary_json` sanitizes it. Both the diverged and the finished
-    summary are built from this head, so a key is added here once (plan step 8 extends it).
+    missing_in_source, shape_mismatch}`` record (``None`` without ``--init-from``), ``hist``
+    the Keras history dict (its ``lr`` list gives the first and last epoch's rate, ``None``
+    when empty), ``devices`` the ``run_summary.describe_devices()`` dict. Returns a plain
+    dict; :func:`write_summary_json` sanitizes it. The diverged and the finished summary are
+    both built from this head, so a shared key is added here once.
     """
     last_step = steps_per_epoch * config.epochs - 1
+    lrs = hist.get("lr", [])
     return {
         "run_dir": str(output_dir),
         "experiment_name": config.experiment_name,
@@ -2279,9 +2297,22 @@ def _summary_head(
         "learning_rate": config.learning_rate,
         "warmup_epochs": config.warmup_epochs,
         "steps_per_epoch": int(steps_per_epoch),
+        "lr_first_epoch": lrs[0] if lrs else None,
+        "lr_last_epoch": lrs[-1] if lrs else None,
         "lr_last_step": float(keras.ops.convert_to_numpy(lr_schedule(last_step))),
+        "noise": {
+            "type": config.noise_type,
+            "start": config.sigma_max_start,
+            "end": config.sigma_max_end,
+            "schedule": config.curriculum_schedule,
+            "sigma_min": config.noise_sigma_min,
+            "curriculum_epochs": config.curriculum_epochs,
+        },
         "epochs_requested": config.epochs,
         "init_from": init_from_block,
+        "gpu_name": devices["gpu_name"],
+        "tf_visible_devices": devices["tf_visible_devices"],
+        "cuda_visible_devices": devices["cuda_visible_devices"],
     }
 
 
@@ -2291,18 +2322,19 @@ def _write_diverged_summary(
     hist: Dict[str, List[float]],
     *,
     non_finite: List[str],
+    epoch_times: List[float],
     fit_wall_seconds: float,
     message: str,
 ) -> Dict[str, Any]:
     """Write ``results_summary.json`` for a run whose ``loss`` / ``val_loss`` went non-finite.
 
     Interface contract: ``head`` comes from :func:`_summary_head`, ``hist`` is the Keras
-    history dict, ``non_finite`` the names from ``run_summary.non_finite_metrics``. Returns
-    the strict-JSON dict written (every non-finite float is ``null``). ``stopped_early`` and
-    ``best_epoch`` are ``None``: the run was ended by a non-finite loss, not by
-    EarlyStopping, and no best epoch can be named from a history holding a NaN.
+    history dict, ``non_finite`` the names from ``run_summary.non_finite_metrics``,
+    ``epoch_times`` the ``EpochLogLine.epoch_times`` list. Returns the strict-JSON dict
+    written (every non-finite float is ``null``). ``stopped_early`` and ``best_epoch`` are
+    ``None``: the run was ended by a non-finite loss, not by EarlyStopping, and no best epoch
+    can be named from a history holding a NaN.
     """
-    lrs = hist.get("lr", [])
     return write_summary_json(output_dir, {
         "status": "diverged",
         **head,
@@ -2310,15 +2342,62 @@ def _write_diverged_summary(
         "stopped_early": None,
         "best_epoch": None,
         "non_finite_metrics": non_finite,
-        "lr_first_epoch": lrs[0] if lrs else None,
-        "lr_last_epoch": lrs[-1] if lrs else None,
         "history": {k: [float(v) for v in vals] for k, vals in hist.items()},
+        "epoch_times": epoch_times,
         "fit_wall_seconds": fit_wall_seconds,
         "notes": [
             message,
             "non-finite values are written as null (strict JSON)",
             "`stopped_early` is null: the run was ended by a non-finite loss, not by "
             "EarlyStopping, and no best epoch can be named from a history holding a NaN",
+            *SUMMARY_READING_NOTES,
+        ],
+    })
+
+
+def _write_finished_summary(
+    output_dir: Path,
+    head: Dict[str, Any],
+    hist: Dict[str, List[float]],
+    *,
+    epoch_times: List[float],
+    fit_wall_seconds: float,
+    model_loading_validated: Optional[bool],
+) -> Dict[str, Any]:
+    """Write ``results_summary.json`` for a run that finished with a finite history.
+
+    Interface contract: ``head`` comes from :func:`_summary_head`, ``hist`` is a finite
+    Keras history dict holding ``val_loss`` (the caller has already refused a non-finite
+    one), ``epoch_times`` the ``EpochLogLine.epoch_times`` list, ``model_loading_validated``
+    the ``final_model.keras`` round-trip verdict (``None`` when the check could not run).
+    ``best_epoch`` is 1-based, the argmin of ``val_loss`` (the ModelCheckpoint monitor);
+    ``best_val_metrics`` / ``final_val_metrics`` are the ``val_*`` columns of the best and
+    the last epoch. ``test_eval`` is ``None`` until the held-out evaluation fills it.
+    Returns the strict-JSON dict written.
+    """
+    epochs_run = len(hist["val_loss"])
+    best_epoch = run_summary.best_epoch(hist, "val_loss")
+    best_i, final_i = best_epoch - 1, epochs_run - 1
+    val_keys = [k for k in hist if k.startswith("val_")]
+    return write_summary_json(output_dir, {
+        "status": "ok",
+        **head,
+        "epochs_run": epochs_run,
+        "stopped_early": epochs_run < head["epochs_requested"],
+        "best_epoch": best_epoch,
+        "best_epoch_csv_index": best_i,
+        "final_is_best": best_epoch == epochs_run,
+        "best_val_metrics": {k: hist[k][best_i] for k in val_keys},
+        "final_val_metrics": {k: hist[k][final_i] for k in val_keys},
+        "epoch_times": epoch_times,
+        "fit_wall_seconds": fit_wall_seconds,
+        "model_loading_validated": model_loading_validated,
+        "test_eval": None,
+        "notes": [
+            "`final_model.keras` holds the LAST epoch's weights and `best_model.keras` the "
+            "best `val_loss` epoch's; they are equal only when `final_is_best` is true",
+            "`test_eval` is null: no held-out test evaluation is part of this summary yet",
+            *SUMMARY_READING_NOTES,
         ],
     })
 
@@ -2344,6 +2423,11 @@ def _train_in_run_dir(
     """
     logger.info(
         f"Sourced {len(train_paths)} train / {len(val_paths)} val image paths"
+    )
+    devices = run_summary.describe_devices()
+    logger.info(
+        f"Devices: CUDA_VISIBLE_DEVICES={devices['cuda_visible_devices']!r}, "
+        f"TensorFlow sees {devices['tf_visible_devices']} ({devices['gpu_names']})"
     )
 
     # DECISION plan_2026-06-20_0433c2f2/D-002: --deep-supervision is NOT wired in this
@@ -2739,7 +2823,8 @@ def _train_in_run_dir(
     # outside its clock. Do NOT lean on the Keras progress bar for train numbers: it
     # averages the running-mean logs a second time and reads low. Do NOT move this above
     # the edit sites: it would print a value the CSV does not hold.
-    callbacks.append(EpochLogLine(EPOCH_LINE_KEYS))
+    epoch_line = EpochLogLine(EPOCH_LINE_KEYS)
+    callbacks.append(epoch_line)
 
     # Denoising visualization: same images under 3 noise regimes.
     viz_batch = build_fixed_val_batch(val_paths, config, n=config.viz_samples)
@@ -2839,7 +2924,8 @@ def _train_in_run_dir(
         callbacks=callbacks,
         verbose=1,
     )
-    logger.info(f"Training completed in {time.time() - start:.2f}s")
+    fit_wall_seconds = time.time() - start
+    logger.info(f"Training completed in {fit_wall_seconds:.2f}s")
 
     save_training_history_json(history, output_dir)
 
@@ -2850,6 +2936,11 @@ def _train_in_run_dir(
     # exist for a run that failed.
     hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
     non_finite = run_summary.non_finite_metrics(hist, "val_loss")
+    summary_head = _summary_head(
+        config, output_dir, params=model.count_params(),
+        steps_per_epoch=steps_per_epoch, lr_schedule=lr_schedule,
+        init_from_block=init_from_block, hist=hist, devices=devices,
+    )
     if non_finite:
         epochs_run = len(hist.get("loss", []))
         message = (
@@ -2859,15 +2950,10 @@ def _train_in_run_dir(
         )
         logger.error(message)
         _write_diverged_summary(
-            output_dir,
-            _summary_head(
-                config, output_dir, params=model.count_params(),
-                steps_per_epoch=steps_per_epoch, lr_schedule=lr_schedule,
-                init_from_block=init_from_block,
-            ),
-            hist,
+            output_dir, summary_head, hist,
             non_finite=non_finite,
-            fit_wall_seconds=time.time() - start,
+            epoch_times=epoch_line.epoch_times,
+            fit_wall_seconds=fit_wall_seconds,
             message=message,
         )
         raise RuntimeError(message)
@@ -2899,19 +2985,20 @@ def _train_in_run_dir(
     model.save(final_path)
     logger.info(f"Saved final (last-epoch) model -> {final_path}")
 
+    model_loading_validated: Optional[bool] = None
     if round_trip_pred is not None:
         try:
             # fp16 save/load drifts more; relax the tolerance so the check does not
             # false-WARN under mixed_precision.
             tol = 5e-2 if config.mixed_precision else 1e-4
-            ok = validate_model_loading(
+            model_loading_validated = bool(validate_model_loading(
                 str(final_path),
                 round_trip_sample,
                 round_trip_pred,
                 custom_objects=None,  # all layers are @register_dl_technique
                 tolerance=tol,
-            )
-            if not ok:
+            ))
+            if not model_loading_validated:
                 logger.warning(
                     "final_model.keras round-trip check FAILED: reloaded outputs "
                     f"differ from pre-save (tol={tol:.1e}). The saved file may not "
@@ -2921,6 +3008,18 @@ def _train_in_run_dir(
             logger.warning(
                 f"final_model.keras round-trip check errored (non-fatal): {e}"
             )
+
+    # DECISION plan-2026-09-19T131351-b8d39688/D-015: the finished summary is written LAST,
+    # after the final save and the round-trip verdict, so ``model_loading_validated`` is a
+    # fact of this run and a summary with status "ok" exists only for a run that produced
+    # ``final_model.keras``. Do NOT move it above the save (the verdict would be unknown) and
+    # do NOT let a failure to write it pass silently: the exception propagates to ``main()``.
+    _write_finished_summary(
+        output_dir, summary_head, hist,
+        epoch_times=epoch_line.epoch_times,
+        fit_wall_seconds=fit_wall_seconds,
+        model_loading_validated=model_loading_validated,
+    )
 
     gc.collect()
     return model

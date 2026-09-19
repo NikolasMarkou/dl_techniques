@@ -712,7 +712,14 @@ def default_run(tmp_path_factory) -> SimpleNamespace:
     _write_pngs(root / "val", N_VAL, seed=2)
     recorder = _WeightRecorder()
     config = _tiny_config(root, "default_final", epochs=2)
-    _run_with_callbacks(config, back=[recorder])
+    # Scripted val_loss (a falling pair) so step 8's ``final_is_best`` has a True case with a
+    # literal expectation; it changes no weight, only which epoch ModelCheckpoint calls best.
+    # ``validate_model_loading`` is forced to report a FAILED round trip here (a corrupt
+    # reload cannot be produced on demand), so ``model_loading_validated`` has a False case
+    # beside the True one every other fixture records.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "validate_model_loading", lambda *args, **kwargs: False)
+        _run_with_callbacks(config, front=[_ScriptedValLoss([0.9, 0.5])], back=[recorder])
     run_dir = root / "out" / "default_final"
     return SimpleNamespace(
         run_dir=run_dir, recorded=recorder.weights,
@@ -829,6 +836,9 @@ def test_a_missing_in_source_layer_only_warns_and_is_counted(e2e) -> None:
         e2e.root, "init_missing", blocks_per_level=2, epochs=1,
         init_from=str(e2e.run_dir / "final_model.keras"))
     run_train(config)
+    block = _strict_json(e2e.root / "out" / "init_missing" / "results_summary.json")["init_from"]
+    assert block["path"] == str(e2e.run_dir / "final_model.keras")
+    assert block["loaded"] > 0 and block["missing_in_source"] == 5 and block["shape_mismatch"] == 0
     warnings = [
         line for line in (e2e.root / "out" / "init_missing" / "run.log").read_text().splitlines()
         if "WARNING" in line and "init_from" in line and "missing_in_source" in line
@@ -836,3 +846,160 @@ def test_a_missing_in_source_layer_only_warns_and_is_counted(e2e) -> None:
     assert len(warnings) == 1, warnings
     assert "5 layer(s)" in warnings[0] and "encoder_level_0_convnext_v1_block_1" in warnings[0]
     assert (e2e.root / "out" / "init_missing" / "final_model.keras").stat().st_size > 0
+
+
+# ---------------------------------------------------------------------
+# iter-1/step-8 (plan-2026-09-19T131351-b8d39688): results_summary.json for every run
+# ---------------------------------------------------------------------
+
+# Typed here from the plan, never read from the trainer: the keys a finished run promises.
+OK_KEYS = (
+    "status", "run_dir", "experiment_name", "variant", "params", "learning_rate",
+    "warmup_epochs", "steps_per_epoch", "lr_first_epoch", "lr_last_epoch", "lr_last_step",
+    "noise", "epochs_requested", "epochs_run", "stopped_early", "best_epoch",
+    "best_epoch_csv_index", "final_is_best", "best_val_metrics", "final_val_metrics",
+    "epoch_times", "fit_wall_seconds", "model_loading_validated", "init_from", "gpu_name",
+    "cuda_visible_devices", "notes", "test_eval",
+)
+# What a diverged run shares with it (no best epoch can be named, nothing was saved).
+DIVERGED_KEYS = (
+    "status", "run_dir", "experiment_name", "variant", "params", "learning_rate",
+    "warmup_epochs", "steps_per_epoch", "lr_first_epoch", "lr_last_epoch", "lr_last_step",
+    "noise", "epochs_requested", "epochs_run", "stopped_early", "best_epoch", "epoch_times",
+    "fit_wall_seconds", "init_from", "gpu_name", "cuda_visible_devices", "notes",
+    "non_finite_metrics", "history",
+)
+NOISE_KEYS = ("start", "end", "schedule", "sigma_min")
+OK_FIXTURES = ("e2e", "early_stop_run", "default_run")
+
+
+@pytest.fixture(params=OK_FIXTURES)
+def ok_run(request) -> SimpleNamespace:
+    """Each finished-run fixture already in this module, with its summary parsed strictly."""
+    run = request.getfixturevalue(request.param)
+    return SimpleNamespace(
+        name=request.param, run_dir=run.run_dir,
+        summary=_strict_json(run.run_dir / "results_summary.json"),
+        rows=_csv_rows(run.run_dir),
+    )
+
+
+def test_a_finished_run_writes_a_strict_json_summary_with_every_promised_key(ok_run) -> None:
+    missing = [key for key in OK_KEYS if key not in ok_run.summary]
+    assert not missing, missing
+    assert ok_run.summary["status"] == "ok"
+
+
+def test_the_summary_names_the_real_run_directory_and_experiment(ok_run) -> None:
+    assert Path(ok_run.summary["run_dir"]).is_dir()
+    assert Path(ok_run.summary["run_dir"]).resolve() == ok_run.run_dir.resolve()
+    assert ok_run.summary["experiment_name"] == ok_run.run_dir.name
+
+
+def test_best_epoch_is_the_one_based_argmin_of_the_csv_val_loss(ok_run) -> None:
+    val_loss = [float(row["val_loss"]) for row in ok_run.rows]
+    expected = min(range(len(val_loss)), key=val_loss.__getitem__) + 1
+    assert ok_run.summary["best_epoch"] == expected
+    assert ok_run.summary["best_epoch_csv_index"] == expected - 1
+    assert int(ok_run.rows[ok_run.summary["best_epoch_csv_index"]]["epoch"]) == expected - 1
+
+
+def test_final_is_best_agrees_with_the_epochs_and_the_best_and_final_metrics(ok_run) -> None:
+    summary = ok_run.summary
+    assert summary["final_is_best"] == (summary["best_epoch"] == summary["epochs_run"])
+    assert (summary["best_val_metrics"] == summary["final_val_metrics"]) == summary["final_is_best"]
+
+
+def test_best_and_final_val_metrics_are_the_csv_rows_of_those_epochs(ok_run) -> None:
+    csv_val = sorted(key for key in ok_run.rows[0] if key.startswith("val_"))
+    assert sorted(ok_run.summary["best_val_metrics"]) == csv_val
+    assert sorted(ok_run.summary["final_val_metrics"]) == csv_val
+    for block, index in (
+            ("best_val_metrics", ok_run.summary["best_epoch"] - 1),
+            ("final_val_metrics", len(ok_run.rows) - 1)):
+        for key in csv_val:
+            assert ok_run.summary[block][key] == pytest.approx(
+                float(ok_run.rows[index][key]), rel=1e-5), (block, key)
+
+
+def test_epoch_times_are_positive_one_per_epoch_and_equal_the_run_log_seconds(ok_run) -> None:
+    times = ok_run.summary["epoch_times"]
+    assert len(times) == len(ok_run.rows) == ok_run.summary["epochs_run"]
+    assert all(isinstance(t, float) and t > 0.0 for t in times), times
+    printed = [seconds for *_, seconds in _epoch_lines(ok_run.run_dir)]
+    assert len(printed) == len(times)
+    assert all(abs(t - p) <= 0.05 + 1e-9 for t, p in zip(times, printed)), (times, printed)
+    assert sum(times) < ok_run.summary["fit_wall_seconds"]
+
+
+def test_the_summary_records_the_epoch_budget_and_whether_the_run_stopped_early(ok_run) -> None:
+    summary = ok_run.summary
+    literal = {"e2e": (3, 3, False), "early_stop_run": (4, 3, True), "default_run": (2, 2, False)}
+    assert (summary["epochs_requested"], summary["epochs_run"], summary["stopped_early"]) == \
+        literal[ok_run.name]
+
+
+def test_the_scripted_scenarios_have_the_literal_best_epoch_and_final_is_best(ok_run) -> None:
+    literal = {"early_stop_run": (2, 1, False), "default_run": (2, 1, True)}
+    if ok_run.name in literal:
+        best, index, final = literal[ok_run.name]
+        assert (ok_run.summary["best_epoch"], ok_run.summary["best_epoch_csv_index"],
+                ok_run.summary["final_is_best"]) == (best, index, final)
+
+
+def test_the_summary_records_the_schedule_the_run_used(ok_run) -> None:
+    summary = ok_run.summary
+    lrs = [float(row["lr"]) for row in ok_run.rows]
+    assert summary["learning_rate"] == 1e-3 and summary["warmup_epochs"] == 1
+    assert summary["steps_per_epoch"] == 3
+    assert summary["lr_first_epoch"] == pytest.approx(lrs[0], rel=1e-6) == pytest.approx(1e-8)
+    assert summary["lr_last_epoch"] == pytest.approx(lrs[-1], rel=1e-6)
+    # The last STEP of the run is after the last epoch's first step: the rate is still falling.
+    assert 0.0 < summary["lr_last_step"] < summary["lr_last_epoch"]
+
+
+def test_the_summary_records_the_noise_block(ok_run) -> None:
+    noise = ok_run.summary["noise"]
+    assert all(key in noise for key in NOISE_KEYS), noise
+    assert (noise["start"], noise["end"], noise["schedule"], noise["sigma_min"]) == \
+        (0.025, 0.25, "linear", 0.0)
+
+
+def test_the_summary_records_the_model_and_the_finished_run_facts(ok_run) -> None:
+    summary = ok_run.summary
+    assert summary["variant"] == "tiny"
+    assert isinstance(summary["params"], int) and summary["params"] > 1000
+    assert summary["init_from"] is None
+    assert summary["test_eval"] is None       # step 9 fills it
+    assert summary["model_loading_validated"] is (ok_run.name != "default_run")
+    assert summary["fit_wall_seconds"] > 0.0
+    assert summary["cuda_visible_devices"] == os.environ.get("CUDA_VISIBLE_DEVICES")
+    assert summary["gpu_name"] is None or isinstance(summary["gpu_name"], str)
+
+
+def test_the_notes_say_how_to_read_the_epoch_index_and_the_lr_column(ok_run) -> None:
+    notes = ok_run.summary["notes"]
+    assert isinstance(notes, list) and notes and all(isinstance(n, str) and n for n in notes)
+    joined = " ".join(notes)
+    assert "1-based" in joined and "0-based" in joined and "START of the epoch" in joined
+
+
+def test_a_diverged_summary_carries_the_shared_keys_and_null_for_the_non_finite(diverged_run) -> None:
+    summary = _strict_json(diverged_run.run_dir / "results_summary.json")
+    missing = [key for key in DIVERGED_KEYS if key not in summary]
+    assert not missing, missing
+    assert summary["stopped_early"] is None and summary["best_epoch"] is None
+    assert summary["history"]["loss"] == [summary["history"]["loss"][0], None]
+    assert isinstance(summary["history"]["loss"][0], float)
+
+
+def test_a_diverged_summary_names_the_real_directory_and_times_each_epoch_it_ran(diverged_run) -> None:
+    summary = _strict_json(diverged_run.run_dir / "results_summary.json")
+    assert Path(summary["run_dir"]).resolve() == diverged_run.run_dir.resolve()
+    assert summary["epochs_run"] == 2
+    assert len(summary["epoch_times"]) == 2 and all(t > 0.0 for t in summary["epoch_times"])
+    assert summary["fit_wall_seconds"] > 0.0
+    assert summary["init_from"] is None and summary["variant"] == "tiny"
+    assert all(key in summary["noise"] for key in NOISE_KEYS)
+    assert summary["lr_first_epoch"] == pytest.approx(1e-8)
+    assert summary["cuda_visible_devices"] == os.environ.get("CUDA_VISIBLE_DEVICES")

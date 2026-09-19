@@ -285,3 +285,20 @@ class TestEpochLogLine:
     def test_the_keys_are_required(self):
         with pytest.raises(TypeError):
             EpochLogLine()
+
+    # iter-1/step-8: the epoch clock is an accessor so a summary can record it.
+
+    def test_epoch_times_holds_one_positive_float_per_epoch_equal_to_the_printed_seconds(self):
+        callback = EpochLogLine(("loss",))
+        assert callback.epoch_times == []
+        lines = _epoch_lines(callback, [{"loss": 1.0}, {"loss": 0.5}, {"loss": 0.25}])
+        printed = [float(line.rsplit("time ", 1)[1].rstrip("s")) for line in lines]
+        times = callback.epoch_times
+        assert len(times) == 3 and all(isinstance(t, float) and t > 0.0 for t in times)
+        assert all(abs(t - p) <= 0.05 + 1e-9 for t, p in zip(times, printed))
+
+    def test_epoch_times_returns_a_copy_the_caller_cannot_use_to_edit_the_record(self):
+        callback = EpochLogLine(("loss",))
+        _epoch_lines(callback, [{"loss": 1.0}])
+        callback.epoch_times.append(99.0)
+        assert len(callback.epoch_times) == 1 and callback.epoch_times[0] != 99.0

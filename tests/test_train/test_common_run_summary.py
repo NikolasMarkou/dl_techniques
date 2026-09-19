@@ -266,3 +266,22 @@ def test_load_best_metrics_reports_an_evaluation_error_instead_of_raising(tmp_pa
         raise RuntimeError("bad eval")
 
     assert run_summary.load_best_metrics(tmp_path, evaluate) == (None, "RuntimeError: bad eval")
+
+
+# ---------------------------------------------------------------------
+# iter-1/step-8: describe_devices, promoted from the ConvNeXt trainer (second call site)
+# ---------------------------------------------------------------------
+
+
+def test_describe_devices_reports_the_environment_value_and_a_consistent_gpu_name(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    devices = run_summary.describe_devices()
+    assert set(devices) == {"cuda_visible_devices", "tf_visible_devices", "gpu_names", "gpu_name"}
+    assert devices["cuda_visible_devices"] == "1"
+    assert len(devices["gpu_names"]) == len(devices["tf_visible_devices"])
+    assert devices["gpu_name"] == (devices["gpu_names"][0] if devices["gpu_names"] else None)
+
+
+def test_describe_devices_reports_none_when_the_variable_is_unset(monkeypatch) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    assert run_summary.describe_devices()["cuda_visible_devices"] is None

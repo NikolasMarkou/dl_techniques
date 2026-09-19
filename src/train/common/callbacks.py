@@ -509,9 +509,10 @@ class EpochLogLine(keras.callbacks.Callback):
         placeholder. ``logs['lr']`` is appended as ``lr X`` (``.6g``) only when it is
         present and finite. The elapsed time is measured here, ``on_epoch_begin`` to
         ``on_epoch_end`` of THIS callback, so callbacks placed after it (a dashboard
-        redraw) stay outside its clock. Nothing is returned and ``logs`` is never
-        modified; a failure to format cannot be swallowed, so keep ``keys`` to numeric
-        entries.
+        redraw) stay outside its clock; the per-epoch values are kept and read back through
+        the ``epoch_times`` property (a copy, epoch 1 first) for a run summary. Nothing else
+        is returned and ``logs`` is never modified; a failure to format cannot be swallowed,
+        so keep ``keys`` to numeric entries.
 
     Reads the epoch ``logs`` exactly as CSVLogger does, so the line equals the CSV row
     (to the printed precision). Place it AFTER ``LearningRateLogger`` (which writes
@@ -525,6 +526,12 @@ class EpochLogLine(keras.callbacks.Callback):
         super().__init__()
         self.keys = tuple(keys)
         self._epoch_start = 0.0
+        self._epoch_times: List[float] = []
+
+    @property
+    def epoch_times(self) -> List[float]:
+        """Seconds of every epoch so far, in order, as printed on the epoch line (a copy)."""
+        return list(self._epoch_times)
 
     def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         self._epoch_start = time.perf_counter()
@@ -532,6 +539,7 @@ class EpochLogLine(keras.callbacks.Callback):
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         logs = logs or {}
         elapsed = time.perf_counter() - self._epoch_start
+        self._epoch_times.append(elapsed)
         total = (self.params or {}).get("epochs", "?")
         parts = [f"Epoch {epoch + 1}/{total}"]
         parts += [f"{key} {float(logs[key]):.4f}" for key in self.keys if key in logs]
