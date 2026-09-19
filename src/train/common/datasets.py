@@ -414,15 +414,45 @@ def load_dataset(
 
 
 # ---------------------------------------------------------------------
+# The 100 CIFAR-100 fine label names, in the order of ``keras.datasets.cifar100``
+# (``label_mode="fine"`` integer labels are indices into this tuple, and that
+# order is alphabetical). Without them every CIFAR-100 figure carried ``class_N``
+# placeholders that no reader could map to a class.
+# ---------------------------------------------------------------------
+
+CIFAR100_CLASS_NAMES: Tuple[str, ...] = (
+    "apple", "aquarium_fish", "baby", "bear", "beaver", "bed", "bee", "beetle", "bicycle",
+    "bottle", "bowl", "boy", "bridge", "bus", "butterfly", "camel", "can", "castle",
+    "caterpillar", "cattle", "chair", "chimpanzee", "clock", "cloud", "cockroach", "couch",
+    "crab", "crocodile", "cup", "dinosaur", "dolphin", "elephant", "flatfish", "forest", "fox",
+    "girl", "hamster", "house", "kangaroo", "keyboard", "lamp", "lawn_mower", "leopard", "lion",
+    "lizard", "lobster", "man", "maple_tree", "motorcycle", "mountain", "mouse", "mushroom",
+    "oak_tree", "orange", "orchid", "otter", "palm_tree", "pear", "pickup_truck", "pine_tree",
+    "plain", "plate", "poppy", "porcupine", "possum", "rabbit", "raccoon", "ray", "road",
+    "rocket", "rose", "sea", "seal", "shark", "shrew", "skunk", "skyscraper", "snail", "snake",
+    "spider", "squirrel", "streetcar", "sunflower", "sweet_pepper", "table", "tank",
+    "telephone", "television", "tiger", "tractor", "train", "trout", "tulip", "turtle",
+    "wardrobe", "whale", "willow_tree", "wolf", "woman", "worm",
+)
+
+
+# ---------------------------------------------------------------------
 
 def get_class_names(dataset: str, num_classes: int) -> List[str]:
-    """Get class names for the dataset."""
+    """Get class names for the dataset.
+
+    ``cifar100`` returns :data:`CIFAR100_CLASS_NAMES` when ``num_classes`` is 100;
+    any other ``num_classes`` (a subset, a different label mode) falls back to
+    ``class_N`` placeholders rather than mislabel the classes.
+    """
     if dataset.lower() == 'mnist':
         return [str(i) for i in range(10)]
     elif dataset.lower() == 'cifar10':
         return ['airplane', 'automobile', 'bird', 'cat', 'deer',
                 'dog', 'frog', 'horse', 'ship', 'truck']
     elif dataset.lower() == 'cifar100':
+        if num_classes == len(CIFAR100_CLASS_NAMES):
+            return list(CIFAR100_CLASS_NAMES)
         return [f'class_{i}' for i in range(num_classes)]
     elif dataset.lower() == 'imagenet':
         try:
