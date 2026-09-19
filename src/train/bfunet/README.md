@@ -50,7 +50,7 @@ its value *is* `‖f(1) − 1‖`.
 | `eval_psnr_vs_noise.py` | **Standalone tool** — PSNR-vs-noise-level evaluation of any saved `.keras` denoiser, with optional SOTA reference overlay. |
 | `eval_per_pixel_uncertainty.py` | **Standalone tool** — per-pixel uncertainty / residual maps for a saved `.keras` denoiser. |
 | `variance_probe.py` | **Standalone tool** — ConvUNeXt-only training-stability probe (run-to-run variance across seeds). |
-| `FINDINGS.md` | Empirical note on the channel-matching (`--zero-pad-channels`) experiment. |
+| `FINDINGS.md` | Two bodies of evidence. Sections 1-7: the channel-matching (`--zero-pad-channels` / `--extra-zero-output-channels`) variance experiment. Sections 8-9: eval caveats, the SOTA and SSIM comparison tables and the capability-boundary work, measured on **legacy `[-0.5,+0.5]`-domain checkpoints** (`20260707`, `20260710`) that the provenance gate now refuses; the dB numbers there must be re-measured on a `[0,1]` model and are not results of the current trainers. |
 
 All three trainers are deliberately thin: each supplies only a `build_model()`, a `verify_bias_free()`,
 a model-specific `TrainingConfig(BFUnetTrainingConfig)`, and CLI glue. Everything else —
@@ -76,8 +76,10 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_unet_denoiser \
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser --smoke
 ```
 
-Outputs (checkpoints, CSV history, config JSON, dashboard PNG, eval grids) are written under
-the repo-root `results/` directory, in a run folder named from the model prefix + variant.
+Outputs are written under the repo-root `results/` directory, in a run folder named
+`<model prefix><variant>_<YYYYMMDD_HHMMSS>` (for example `convunext_denoiser_base_...`) unless
+`--experiment-name` is given. What the folder holds and what is refused before it is created
+are in "Run-directory contract" and "Refusals" below.
 
 > **Memory note:** the `base` variant at `--patch-size 256` needs `--batch-size 4` on a
 > 24 GB RTX 4090. Reduce batch or patch size on smaller GPUs.
@@ -86,11 +88,26 @@ the repo-root `results/` directory, in a run folder named from the model prefix 
 
 Training data directories are **hardcoded** in `BFUnetTrainingConfig` (not CLI flags):
 
-- **Train:** `COCO/train2017` + `div2k/train` (weighted so COCO does not drown DIV2K)
-- **Validation:** `div2k/validation`
+- **Train:** `COCO/train2017` + `div2k/train`. `dataset_weights` defaults to equal weight per
+  directory, so each directory gets an equal share of the `--max-train-files` list and a
+  directory with fewer images than its share wraps around (its images repeat) rather than
+  letting COCO drown DIV2K.
+- **Validation:** `div2k/validation`, capped at `--max-val-files`.
+- **Held-out test sets** (end-of-run evaluation only, see `test_eval` below): `kodak24` and
+  `cbsd68_src/CBSD68/original`, hard-coded as `TEST_DATASETS` in `common.py`.
 
 To train on other data, edit `train_image_dirs` / `val_image_dirs` in the config, or construct
-the `TrainingConfig` programmatically. `--max-train-files` / `--max-val-files` cap how many are used.
+the `TrainingConfig` programmatically.
+
+**Effective caps.** `--max-train-files`, `--max-val-files`, `--validation-steps` and
+`--steps-per-epoch` default to unset on the command line. On the ConvUNeXt trainer an unset
+value is not forwarded, so the config default applies: **`--max-train-files` 10000,
+`--max-val-files` 500, `--validation-steps` 100 batches**; `--steps-per-epoch` unset resolves
+to `max(100, len(train paths) * patches_per_image // batch_size)`, and the resolved number is
+written back into `config.json`. A typed `0` for any of the four is refused on the ConvUNeXt
+trainer (0 is not "unlimited"). The unet and bfcnn mains still read the two file caps as
+`args.max_train_files or 10000` / `args.max_val_files or 500`, so there a `0` silently becomes
+the default.
 
 ---
 
@@ -108,11 +125,20 @@ in the per-trainer sections below.
 | `--patch-size` | 256 | Training crop size |
 | `--channels` | 3 | 1 (grayscale) or 3 (RGB) |
 | `--patches-per-image` | 4 | Random crops drawn per source image |
-| `--learning-rate` | 1e-3 | Peak LR (AdamW) |
+| `--learning-rate` | 1e-3 | Peak LR (must be > 0) |
 | `--weight-decay` | 0.004 | AdamW decoupled weight decay (no separate L2) |
-| `--warmup-epochs` | 10% of epochs | LR warmup length |
-| `--max-train-files` / `--max-val-files` | None | Cap source images |
-| `--steps-per-epoch` / `--validation-steps` | None | Bound epoch length |
+| `--warmup-epochs` | `max(1, round(0.1 * epochs))` | LR warmup length; may equal `--epochs` (warns that the cosine never starts), refused above it |
+| `--optimizer-type` | adamw | One of the optimizer builder's names (`adam`, `adamw`, `sgd`, `rmsprop`, `adadelta`, `sgld`, `vsgd`, `gefen`); anything else is refused at config time |
+| `--lr-schedule-type` | cosine_decay | The only accepted value; see "Learning rate" for its shape |
+| `--gradient-clipping` | 1.0 | Clip-by-norm value (0 = off) |
+| `--early-stopping-patience` | -1 | `<= 0` disables early stopping (the default: the curriculum makes `val_loss` non-monotonic) |
+| `--seed` | 42 | Seed for Python / NumPy / TF / Keras |
+| `--no-clip` / `--no-augment` | off | Skip the `[0,1]` clip of the noisy input / the train-time flips and rot90 |
+| `--noise-sigma-min` | 0.0 | Lower bound of the sampled sigma range |
+| `--max-train-files` | 10000 effective | Cap on the weighted training path list (see "Effective caps" above) |
+| `--max-val-files` | 500 effective | Cap on the validation path list |
+| `--steps-per-epoch` | derived | See "Effective caps" above |
+| `--validation-steps` | 100 effective | Validation batches per epoch |
 | `--mixed-precision` | off | Enable `mixed_float16`. **Slower** than fp32 for base@256/b4 on a 4090 (XLA is disabled by the bilinear-upsample grad). Off by default. |
 
 **Architecture (shared)**
@@ -125,7 +151,7 @@ in the per-trainer sections below.
 | `--no-gabor-projection` | off | Drop the 1×1 projection after the Gabor stem (requires `gabor_filters == initial_filters`) |
 | `--initial-filters` | variant | Override level-0 width |
 | `--filter-multiplier` | 2.0 | Per-level channel growth: `channels[l] = round(initial_filters * m**l)` |
-| `--depth` | variant | Number of U-Net levels (≥2) |
+| `--depth` | variant | Number of U-Net levels (≥1 at config time; the plain U-Net model requires ≥3) |
 | `--blocks-per-level` | variant | Blocks per level (≥1) |
 | `--final-projection-groups` | 1 | Groups for the final 1×1 output projection (`-1` = one group per output channel) |
 | `--laplacian-pyramid` | off | Enable the Laplacian-pyramid downsample/skip path |
@@ -140,7 +166,7 @@ in the per-trainer sections below.
 > `block_normalization=batchnorm`.** For the ConvUNeXt / plain-U-Net / BFCNN denoisers, `batchnorm`
 > resolves to the real degree-1-homogeneous `BiasFreeBatchNorm`, and **all three resolve it inside
 > the MODEL builder, not here**: ConvUNeXt via its ConvNeXt blocks, and the plain U-Net + BFCNN via
-> `layers/bias_free_conv2d.resolve_denoiser_normalization`, which `create_bfunet_denoiser` /
+> `layers/conv_blocks/bias_free_conv2d.resolve_denoiser_normalization`, which `create_bfunet_denoiser` /
 > `create_bfcnn_denoiser` call themselves. The trainer forwards `--block-normalization` unchanged.
 > As a result **all three are degree-1 homogeneous** (`f(a·x)=a·f(x)`), so the residual `x−f(x)` is
 > a valid scaled score (Miyasawa/Tweedie) — and so is a denoiser someone builds through the model
@@ -154,7 +180,7 @@ in the per-trainer sections below.
 | `--sigma-max-end` | 0.25 | Curriculum end (wide noise) |
 | `--curriculum-schedule` | linear | `linear` / `cosine` / `exp` |
 | `--curriculum-epochs` | = epochs | Epochs over which the curriculum widens |
-| `--deep-supervision` | off | Enable deep-supervision auxiliary heads |
+| `--deep-supervision` | off | **Refused at config time** (`ValueError` before any run directory exists): the model would return several outputs but no multi-scale targets, per-output loss dict or weight scheduler are wired, so `fit` would crash. Accepted by the parser only so the refusal names the flag. |
 
 **Noise model** (default is additive AWGN):
 
@@ -184,14 +210,227 @@ in the per-trainer sections below.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--smoke` | off | Tiny end-to-end mechanism check (few steps, constant LR) |
-| `--init-from PATH` | None | Warm-start weights from a `.keras` checkpoint (architecture must match) — primary use: self-iterate fine-tuning |
-| `--dashboard DIR` | None | Rebuild the dashboard PNG from an existing run dir and exit (no training) |
+| `--smoke` | off | Tiny end-to-end mechanism check (2 epochs, 3 steps, cosine LR). On the ConvUNeXt trainer a flag you type overrides the preset and the run name is timestamped; see "`--smoke`" below |
+| `--init-from PATH` | None | Warm-start weights from a `.keras` checkpoint — primary use: self-iterate fine-tuning. Refused when the checkpoint is not stamped `data_range: "[0,1]"`, loads 0 layers, or has any same-name layer of a different shape (see "Refusals") |
+| `--dashboard DIR` | None | Rebuild `visualizations/training_dashboard.png` from an existing run dir's `training_log.csv` and `config.json` and exit (no training; the LR panel needs the resolved `steps_per_epoch` that `config.json` holds) |
 | `--analyzer` / `--analyzer-freq` | off / 10 | Run ModelAnalyzer every N epochs |
 | `--viz-freq` / `--viz-samples` | 5 / 8 | Clean/noisy/denoised grid cadence & columns |
-| `--output-dir` | `results` | Output root (repo-root `results/`) |
-| `--experiment-name` | None | Override the run-folder name |
+| `--output-dir` | `results` | Output root; a relative path is anchored at the repo root, not the working directory |
+| `--experiment-name` | None | Override the run-folder name. A name whose folder already holds a run is refused |
 | `--gpu` | None | GPU index (e.g. `--gpu 1`) |
+
+---
+
+## Run-directory contract
+
+Every run writes ONE folder, `results/<experiment_name>/` (repo-root anchored), and never touches
+another. Files are written in this order and all of them come from `common.train()`, so the
+three trainers share the contract (the differences are in "What unet and bfcnn inherit").
+
+```
+results/<experiment_name>/
+    config.json                 resolved TrainingConfig, incl. data_range "[0,1]" and the RESOLVED steps_per_epoch
+    run.log                     the dl logger for this run (devices, model summary, probes, one line per epoch)
+    training_log.csv            one row per epoch (columns below)
+    training_history.json       per-epoch lists of every history metric
+    best_model.keras            checkpoint of the lowest-val_loss epoch (rewritten on every improvement)
+    final_model.keras           the model after the LAST epoch (not the best; see "Best versus final")
+    results_summary.json        the run's record (strict JSON, keys below)
+    tensorboard/                TensorBoard logs
+    visualizations/
+        training_dashboard.png  per-epoch curves, redrawn after every epoch (the epoch-0 point is the untrained baseline)
+        epoch_NNN_denoise_grid.png   clean / noisy / denoised grid, same images under the 15/25/50 (sigma_255) regimes;
+                                     written at epoch 0 (untrained), epoch 1 and every --viz-freq epochs
+    epoch_analysis/             only with --analyzer
+    ww_pgd_layer_alpha.csv      only with --ww-pgd-log-alpha
+    final_model_bottleneck.keras  only with --expose-bottleneck (the full 2-output model)
+```
+
+- **`config.json` is written twice.** First when the directory is created (with
+  `steps_per_epoch: null` when it is derived), then again once the data pipeline exists, from a
+  copy of the config with the number that actually runs. `--dashboard` rebuilds the LR panel from
+  that field.
+- **`training_log.csv`**: `epoch` is 0-based; `best_epoch` in the summary is 1-based
+  (`best_epoch_csv_index` = `best_epoch - 1`). **`lr` is the rate the epoch STARTED at**, the
+  rate of its first optimizer step: epoch 1 shows the schedule's value at step 0 (about `1e-8`
+  under warmup, not the peak), and the last epoch shows the rate it began at, not the schedule's
+  value at its end (`lr_last_step` in the summary is that).
+- **Per-epoch line and the progress bar.** `run.log` and the console carry one line per epoch,
+  `Epoch N/E - loss X - mae X - psnr_metric X - ssim_metric X - val_loss X - val_mae X -
+  val_psnr_metric X - val_ssim_metric X - lr X - time Ns`, built from the true epoch logs (the
+  same values as the CSV row, 4 decimals; `time` is the epoch's own clock, which excludes the
+  dashboard and grid redraw). The Keras progress bar is kept for live feedback, but its TRAIN
+  numbers read low: it averages the already-running-mean metrics a second time
+  (`keras/src/utils/progbar.py`), most in a fast-learning first epoch. Its validation numbers agree
+  with the CSV. **The CSV and the `run.log` epoch line are the reference**; Keras' own progress
+  bars are not written to `run.log`.
+- **Best versus final.** `best_model.keras` (lowest `val_loss`) and `final_model.keras` differ
+  whenever the last epoch is not the best (`final_is_best` in the summary). `final_model.keras`
+  is the real last epoch **also under `--early-stopping-patience`**: the shared callback's
+  `restore_best_weights` is switched off after it is built, so the in-memory model is not
+  overwritten by the best weights at the end of `fit`. `model_loading_validated` reports whether
+  `final_model.keras` reloads and reproduces its predictions (`null` when the check could not run).
+- **Validation noise.** `val_*` metrics are measured on freshly drawn noise at a FIXED upper
+  sigma (`--sigma-max-end`) while the training sigma follows the curriculum, so `val_loss`
+  carries a sampling noise of its own, is not guaranteed identical between two runs with the same
+  seed, and the best epoch can flip on it. Read small `val_loss` gaps accordingly.
+- **A run that goes non-finite is recorded, not finished.** `TerminateOnNaN` ends the fit; then
+  `training_history.json` and a `results_summary.json` with `status: "diverged"` are written, a
+  `RuntimeError` is raised (the trainer logs `Training failed`, never `Training completed
+  successfully!`), and `final_model.keras` is NOT written. `best_model.keras` and
+  `training_log.csv` from before the divergence remain.
+
+### `results_summary.json` keys
+
+Strict JSON (`allow_nan=False`: non-finite values become `null`). Keys on EVERY summary (from
+`_summary_head`), finished or diverged:
+
+| Key | Meaning |
+|---|---|
+| `status` | `"ok"` or `"diverged"` |
+| `run_dir`, `experiment_name`, `variant` | Identity of the run |
+| `params` | Model parameter count |
+| `learning_rate`, `warmup_epochs`, `steps_per_epoch` | Peak rate, warmup epochs and the RESOLVED steps per epoch |
+| `lr_first_epoch`, `lr_last_epoch` | The CSV `lr` of the first and last epoch (rate at the START of each) |
+| `lr_last_step` | The schedule's rate at the run's very last optimizer step (`steps_per_epoch * epochs - 1`); see "Learning rate" |
+| `noise` | `{type, start, end, schedule, sigma_min, curriculum_epochs}` as run |
+| `epochs_requested`, `epochs_run`, `stopped_early` | Requested and trained epochs; whether early stopping ended the run (`null` when diverged) |
+| `best_epoch` | 1-based epoch of the lowest `val_loss` (`null` when diverged) |
+| `init_from` | `{path, loaded, missing_in_source, shape_mismatch}` (counts) or `null` without `--init-from` |
+| `gpu_name`, `tf_visible_devices`, `cuda_visible_devices` | The device TensorFlow used and the environment at call time |
+| `epoch_times`, `fit_wall_seconds` | Seconds of each epoch as printed on its `run.log` line, and the wall time of `fit`; the difference is time outside that clock (redraws, checkpoint saves) |
+| `notes` | Plain-language reading notes for the file |
+
+Added by a finished run (`status: "ok"`):
+
+| Key | Meaning |
+|---|---|
+| `best_epoch_csv_index`, `final_is_best` | 0-based twin of `best_epoch`; whether the last epoch is the best |
+| `best_val_metrics`, `final_val_metrics` | The `val_*` columns of the best epoch and of the last epoch |
+| `model_loading_validated` | `final_model.keras` round-trip verdict (`true` / `false` / `null`) |
+| `test_eval` | The held-out block below |
+
+Added by a diverged run instead: `non_finite_metrics` (names of the metrics holding a
+non-finite or missing value) and `history` (every history list, with `null`s).
+
+**`test_eval`** (ConvUNeXt: `--test-eval` on by default, `--no-test-eval` to skip). After the final
+save the run scores `best_model.keras` (reloaded from disk, which also exercises the provenance
+gate) and the last-epoch in-memory model on the fixed sets `kodak24` and `cbsd68` at
+sigma_255 = 15, 25, 50, using `eval_psnr_vs_noise.evaluate_dataset` with `RandomState(42)` per set
+(the script's own default seed, deliberately not `--seed`), so the same crops and noise are used
+by every run and `eval_psnr_vs_noise` given the same seed, patch size, sample count and sigmas
+reproduces the numbers. The block is `{status, seed, patch_size, num_samples, sigmas_255,
+datasets, seconds}`; each dataset is `{status, directory, n_images, sigmas}` and each sigma
+(keys `"15"`, `"25"`, `"50"`) is
+
+| Key | Meaning |
+|---|---|
+| `input_psnr` | The noisy input against the clean crop |
+| `best_psnr`, `final_psnr` | `best_model.keras` and the last-epoch model against the clean crop |
+| `gain_db` | `best_psnr - input_psnr` (the best checkpoint's gain over the noisy input) |
+| `final_gain_db` | `final_psnr - input_psnr` (the last-epoch model's gain) |
+| `n_patches` | Crops averaged (`--test-num-samples`, default 100, refused below 1; crops are `--patch-size` wide) |
+
+`status` is `ok` (at least one set scored), `skipped` (with a `reason`: `disabled` under
+`--no-test-eval`, or no set directory holds an image; a single missing set is recorded as
+`skipped` inside `datasets` with a WARNING and does not stop the other), or `error` (with the
+exception in `message`, logged at ERROR). An evaluation failure never fails a run that already
+trained and saved.
+
+## Learning rate
+
+The schedule is `learning_rate_schedule_builder` with `type: cosine_decay`,
+`decay_steps = steps_per_epoch * epochs`, `warmup_steps = steps_per_epoch * warmup_epochs` and a
+fixed `alpha = 0.01` (no flag), so the configured floor is `alpha * --learning-rate` (`1e-5` at
+the default peak `1e-3`). **The default schedule does not reach that floor.** The horizon
+(`decay_steps`) is the whole run, but the builder feeds the cosine `step - warmup_steps`, so the
+decay is cut at `(epochs - warmup_epochs) / epochs` of its length. Measured by calling the builder
+at peak `1e-3`:
+
+| epochs / warmup / steps per epoch | rate at the LAST optimizer step (`lr_last_step`) | rate at the start of the last epoch (the CSV's last `lr`) |
+|---|---|---|
+| 100 / 10 / 400 | 3.42e-5 | 3.93e-5 |
+| 8 / 1 / 100 | 4.84e-5 | 1.55e-4 |
+
+The `100 / 10 / 400` last-step value is pinned by
+`test_the_default_schedule_ends_at_3_42e_minus_5_not_at_the_1e_minus_5_floor`. The behaviour is
+kept on purpose (every earlier bfunet run used exactly this schedule, and changing it silently
+would make those runs incomparable); a decay-to-end schedule is **not implemented**. Read
+`lr_last_step` from the summary instead of assuming the floor.
+
+## Refusals
+
+A bad invocation is refused **before the run directory exists** wherever the machine can know it
+in advance, so it burns no experiment name and writes nothing. The three layers, in order:
+
+1. **Config time** (`TrainingConfig(...)`, pure value rules, no filesystem). Summary:
+   counts `>= 1` (`batch_size`, `epochs`, `curriculum_epochs`, `patches_per_image`, `viz_freq`,
+   `viz_samples`, `test_num_samples`) and `>= 1` when set for `steps_per_epoch`,
+   `validation_steps`, `max_train_files`, `max_val_files`; `learning_rate > 0`,
+   `weight_decay >= 0`, `gradient_clipping >= 0`; `warmup_epochs` in `[0, epochs]`; the sigma
+   range (`sigma_max_end > noise_sigma_min`, `noise_sigma_min <= sigma_max_start`, `exp` schedule
+   needs `sigma_max_start > 0`, schedule name, `composite_additive_ratio > 0`,
+   `self_iterate_mix_ratio` in `[0, 1]`); `lr_schedule_type` other than `cosine_decay` and an
+   unknown `optimizer_type`; `--deep-supervision`; `--mixed-precision` with
+   `--expose-bottleneck`; a nonzero `--symmetry-weight` with `--mixed-precision` or deep
+   supervision; `--self-iterate` with non-additive noise or a pool smaller than the batch; the
+   Gabor rules (`--no-gabor-projection` needs `gabor_filters == initial_filters`, or
+   `channels * N == initial_filters` on the depthwise arm, checked against the RESOLVED
+   `initial_filters`; `--freeze-gabor-stem` with `--no-gabor-stem`; `--final-projection-groups`
+   must divide both `initial_filters` and `channels`); unknown `--variant`. The two Gabor
+   filter-count flags being given together is a parse error.
+2. **Preflight in `train()`**, still before anything is written: a `--init-from` checkpoint
+   that is not stamped `data_range: "[0,1]"` in its sibling `config.json` (a legacy
+   `[-0.5,+0.5]` checkpoint of the same architecture would otherwise load and train from
+   wrong-domain weights with no error); a train or validation directory list that yields no
+   image (missing or empty directories, "Nothing was written"); and **a reused experiment
+   name**: if the resolved folder already holds any of `results_summary.json`, `config.json`,
+   `best_model.keras`, `run.log` or `training_log.csv`, `FileExistsError` names the files.
+   Nothing is ever overwritten, merged or deleted.
+3. **After the model is built** (the directory, `config.json` and `run.log` exist, so the name is
+   used up and `run.log` records why): `--init-from` loading 0 layers, and `--init-from`
+   with any layer of the same name but a different shape (`shape_mismatch`, the layers are
+   named: another `--variant` or width flag). A layer absent from the checkpoint
+   (`missing_in_source`) only warns, with a count and the names, and stays at random init; both
+   counts are recorded in `init_from` in the summary.
+
+## `--smoke`
+
+`--smoke` is a tiny end-to-end mechanism check, not a training recipe. On the **ConvUNeXt trainer**
+it supplies a preset only for the flags you did NOT type: an explicit flag always wins, **even
+when its value equals the parser default** (`--smoke --epochs 3` runs 3 epochs, `--smoke
+--batch-size 2` is honoured as typed). The preset (`SMOKE_PRESET`): `--variant tiny`, `--epochs 2`,
+`--batch-size 2`, `--patch-size 64`, `--patches-per-image 2`, `--max-train-files 8`,
+`--max-val-files 8`, `--steps-per-epoch 3`, `--validation-steps 2`, `--warmup-epochs 0`,
+`--viz-freq 1`, `--gabor-filters 8`, `--learning-rate 1e-3`, `--sigma-max-start 0.025`,
+`--sigma-max-end 0.25`, `--curriculum-schedule linear`, `--self-iterate-pool-size 32`,
+`--self-iterate-regen-freq 1`; the curriculum length follows `--epochs`, and the schedule is the
+same cosine as a full run (with no warmup). The run name is
+`convunext_denoiser_smoke_<YYYYMMDD_HHMMSS>` (timestamped, so smoke runs never collide) unless
+`--experiment-name` is typed. `--smoke` does not switch the held-out test evaluation off; add
+`--no-test-eval` to skip it. `--dashboard` and the config-time refusals behave as without it.
+
+## What unet and bfcnn inherit
+
+`train_unet_denoiser.py` and `train_bfcnn_denoiser.py` call the same `common.train()` and build
+their configs on `BFUnetTrainingConfig`, so they inherit, with no flag to opt out:
+
+- the config-time validation of the base config (list above; the plain U-Net adds `--depth >= 3`),
+  the preflight, the reused-name refusal and the repo-root anchoring of `--output-dir`;
+- `run.log`, the per-epoch line, the start-of-epoch `lr`, the resolved `config.json`, the
+  honest `final_model.keras`, the divergence record, the `init_from` checks and
+  `results_summary.json`;
+- **the held-out test evaluation, on by default with no switch**: neither parser has
+  `--test-eval` / `--test-num-samples`, so both always run it with `test_num_samples = 100` at
+  their `--patch-size`. **Only the ConvUNeXt parser has `--test-eval`, `--no-test-eval` and
+  `--test-num-samples`.**
+
+They do **not** get the ConvUNeXt `main()` changes: their `main()` functions keep the older
+two-branch smoke, which fixes epochs, batch size, patch size, steps, learning rate, sigma range and
+curriculum regardless of the flags you type and uses the FIXED run names `unet_denoiser_smoke` /
+`bfcnn_denoiser_smoke` (so a second `--smoke` run of either trainer is refused as a reused name
+unless you pass `--experiment-name`), and they still turn a typed `--max-train-files 0` /
+`--max-val-files 0` into the default (`or 10000` / `or 500`).
 
 ---
 
@@ -203,6 +442,8 @@ Trains `create_convunext_denoiser` — a bias-free ConvNeXt U-Net. Variants: `ti
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--variant` | base | ConvUNeXt size preset |
+| `--test-eval` / `--no-test-eval` | on | End-of-run held-out evaluation of `best_model.keras` and the last-epoch model on Kodak24 and CBSD68 crops, recorded as `test_eval` in `results_summary.json` (see "`results_summary.json` keys"). **ConvUNeXt parser only.** |
+| `--test-num-samples` | 100 | Crops per held-out test set (the `eval_psnr_vs_noise` default); refused below 1. **ConvUNeXt parser only.** |
 | `--convnext-version` | v1 | `v1` = strict bias-free; `v2` adds a trainable GRN β (mildly breaks strict homogeneity) |
 | `--gabor-filters-per-channel` | None (off) | Build the Gabor stem as a **depthwise** bank (`depth_multiplier = N`) applied to each input channel independently instead of the default cross-channel `Conv2D`. Emits `channels·N` responses, so it is **mutually exclusive with `--gabor-filters`** (a `Conv2D` output-channel count — passing both is a parse error). Still trainable and bias-free, so `--freeze-gabor-stem` and degree-1 homogeneity are unaffected. Under `--no-gabor-projection` the width rule becomes `channels·N == initial_filters`. ConvUNeXt only |
 | `--dropout` | 0.0 | MLP dropout inside the inverted-bottleneck blocks |
@@ -280,7 +521,7 @@ Model-specific flags (beyond the shared set):
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_bfcnn_denoiser \
     --variant base --epochs 100 --batch-size 16 --gpu 1
 
-# Fast end-to-end mechanism check
+# Fast end-to-end mechanism check (fixed run name: pass --experiment-name for a second run)
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_bfcnn_denoiser --smoke
 ```
 
@@ -331,7 +572,35 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.variance_probe \
   clean-image fixed point that makes 2–5 passes non-decreasing) holds for additive noise only.
 - **Mixed precision is usually slower here** — leave it off unless you measure a win.
 - **Outputs go to repo-root `results/`.** Do not point `--output-dir` inside `src/`.
+- **A run folder is never reused.** A second run under an existing `--experiment-name` is
+  refused; choose a new name (or omit it for a timestamped one). Nothing under `results/` is
+  overwritten or deleted by the trainers.
+- **Read `results_summary.json` and `training_log.csv`, not the progress bar,** for train
+  metrics (see "Run-directory contract").
 - **Always set `MPLBACKEND=Agg`** to avoid X11 crashes on headless/remote systems.
 
-See `FINDINGS.md` for the empirical channel-matching (`--zero-pad-channels` /
-`--extra-zero-output-channels`) variance investigation.
+See `FINDINGS.md` sections 1-7 for the empirical channel-matching (`--zero-pad-channels` /
+`--extra-zero-output-channels`) variance investigation; its sections 8-9 are measured on legacy
+`[-0.5,+0.5]` checkpoints (see the directory table).
+
+---
+
+## Tests
+
+Scope pytest to this trainer and run it on the second GPU; never the full suite.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_train/test_bfunet -q
+# every TrainingConfig field is read by its trainer (covers both bfunet configs)
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_train/test_config_fields_are_live.py -q
+```
+
+| File (under `tests/test_train/test_bfunet/`) | Guards |
+|---|---|
+| `test_cli_contract.py` | One row per flag the ConvUNeXt parser declares, driven through `parse_arguments_with_explicit` and `config_from_args` (no training, no GPU, no directory created); the same table again behind `--smoke` |
+| `test_smoke_and_explicit_flags.py` | `--smoke` preset versus typed flags, the unique smoke name, the `--max-*-files` / `--validation-steps` semantics, `--help` |
+| `test_config_validation.py` | The config-time refusal table with boundary twins |
+| `test_train_bfunet_run.py` | Real tiny end-to-end runs: run-directory contract, refusal order, `run.log`, start-of-epoch `lr`, the cosine last-step pin, final versus best model, divergence record, `init_from` checks, `results_summary.json` and `test_eval` |
+| `test_provenance_gate.py` | Legacy-domain checkpoints are refused by the checkpoint-load paths (the eval tools and `--init-from`) |
+| `test_unet_denoiser.py`, `test_bfcnn_denoiser.py` | The two baseline trainers: config, `build_model` wiring, bias-free check, CLI parsing (construction only, CPU) |
+| `test_the_*_gabor_stem_*.py`, `test_convunext_*.py` | Gabor stem flags and width rule, self-iterate, supporting fixes |
