@@ -565,6 +565,26 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.variance_probe \
 
 ---
 
+## Measured runs (audit iteration 1, tiny variant, 8 epochs, GPU 1)
+
+Recipe: `--variant tiny --patch-size 64 --epochs 8 --steps-per-epoch 100 --validation-steps 20 --max-train-files 400 --max-val-files 50 --batch-size 16 --patches-per-image 4 --viz-freq 2`, seed 0 for run 1. Run directories: `results/convunext_iter1_*`. Every number below is copied from a `results_summary.json` or from the paired `eval_psnr_vs_noise` output `results/convunext_iter1_paired_eval/psnr_vs_noise.csv`, and was recomputed from the raw CSV by an independent pass.
+
+| run | epochs run | best epoch (1-based) | fit wall (s) | val_loss at best | val_psnr at best (dB) |
+|---|---|---|---|---|---|
+| `convunext_iter1_run1` (8 epochs) | 8 | 8 | 202.0 | 0.002396 | 27.74 |
+| `convunext_iter1_es` (4 epochs, patience 1, never triggered) | 4 | 4 | 133.4 | 0.003471 | 25.89 |
+| `convunext_iter1_smoke` (`--smoke`, 6 steps) | 2 | 2 | 75.5 | 0.023512 | 16.42 |
+
+Held-out test PSNR, run 1 (best equals final, 100 patches of 64 px, seed 42, Kodak24 and CBSD68): Kodak24 30.11 / 28.35 / 24.45 dB and CBSD68 29.60 / 27.96 / 24.18 dB at sigma 15 / 25 / 50, against noisy-input 24.74 / 20.42 / 14.88 dB and 24.80 / 20.51 / 14.97 dB (clipped). The trainer's `test_eval` equals the paired `eval_psnr_vs_noise` invocation to 2.1e-5 dB.
+
+Noise floor at this recipe (best equals final in all five runs). Seeds 0, 1, 2 give a range of 0.12 to 0.23 dB (sd 0.06 to 0.12) per dataset and sigma. Same-seed reruns of seeds 0 and 1 differ by 0.002 to 0.068 dB. A difference between two settings is attributable only above about 0.25 dB at this size (n = 3 seeds, so this is a rough floor, not an interval).
+
+Timing: epoch 1 is about 60 s (XLA compile), later epochs 10.8 to 12.5 s; the baseline validation and the per-epoch figure callbacks account for 61 s of the 202 s fit wall time and are not in `epoch_times`.
+
+Reading the curves: the training loss and PSNR get worse from epoch 5 while the validation metrics keep improving. That is the noise curriculum (training sigma_max rises from 0.025 to 0.25), not a defect: the noise floor rises 7.8x from epoch 3 to 8 while the training loss rises 1.27x. Validation is not reproducible between identical-seed runs (epoch-1 `val_loss` 0.00725 against 0.00690) because the tf.data validation path is stateful and parallel; the GPU kernels account for at most 0.5 percent of that (measured by a probe that evaluated identical weights repeatedly under the shipped pipeline and under a sequential one).
+
+Open items found by this audit and not fixed (the audit was closed at the user's request after iteration 1): the pass-1 PSNR label in `epoch_*_denoise_grid.png` scores the unclipped output while the log line and passes 2 and 3 use the clipped output (3.9 to 4.2 dB apart at the untrained epoch-0 grid, at most 0.4 dB from epoch 1 on); the dashboard has no best-epoch marker and its green dashed line marks the end of the noise ramp; the grids redraw unseeded noise; the validation set is not fixed; setup_gpu logs an ERROR on every run although the GPU works; the default cosine schedule stops at 4.8e-5, not at the 1e-5 floor; unet and bfcnn keep fixed smoke names that the new reused-name refusal turns into a second-run failure.
+
 ## Constraints & gotchas
 
 - **Additive-only self-iteration.** `--self-iterate` is rejected at parse time with
