@@ -22,12 +22,21 @@ so a gain above the fixed point blows the logits up doubly exponentially with
 depth. The pre-fit sanity evaluate therefore compares the untrained loss with
 ``ln(num_classes)`` and logs a WARNING when the ratio exceeds
 ``INITIAL_LOSS_WARN_FACTOR`` (it does not raise, a probe run may want the number);
-``results_summary.json`` records ``initial_loss_ratio`` and ``init_scale_warning``.
+``results_summary.json`` records ``initial_loss_ratio``, ``init_scale_warning`` and
+``initial_loss_mode``: a batch-normalized model is measured in training mode (its
+moving statistics are restored afterwards), any other model in inference mode.
 The default is ``lecun_normal`` on ``unit`` inputs (measured initial loss about
 ``ln(C)``); ``glorot_normal`` on ``standardize`` inputs starts about 95x above it.
 
 Per-epoch ``ModelAnalyzer`` is opt-in (``--epoch-analysis``); the final
 ``run_model_analysis`` always runs.
+
+A run whose ``loss`` or ``val_loss`` turns non-finite is ``status: "diverged"``: no
+evaluation, figures, analysis or ``final_model.keras``, a reduced strict-JSON
+``results_summary.json`` (non-finite values as ``null``, ``best_epoch: null``) is
+written, and only then a ``RuntimeError`` is raised. Every run also writes
+``run.log`` (the ``dl`` logger, plus the LR-reduction and early-stop lines that
+Keras only prints to stdout).
 
 Every run writes to ``<repo>/results/<experiment_name>/`` regardless of the
 current working directory (``train.common.resolved_run_dir``).
@@ -41,7 +50,7 @@ Usage:
 Results land in ``results/<experiment_name>/`` at the repository root (never
 under ``src/``): ``config.json``, ``training_log.csv`` (with ``lr``),
 ``training_history.json``, ``best_model.keras``, ``final_model.keras``,
-``results_summary.json``, ``visualizations/`` and ``model_analysis/`` (plus
+``results_summary.json``, ``run.log``, ``visualizations/`` and ``model_analysis/`` (plus
 ``epoch_analysis/`` only with ``--epoch-analysis``). The CSV ``epoch`` column is
 0-based; ``best_epoch`` in the summary is 1-based (``best_epoch_csv_index`` is the
 0-based twin).
@@ -49,6 +58,7 @@ under ``src/``): ``config.json``, ``training_log.csv`` (with ``lr``),
 
 import argparse
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -58,7 +68,7 @@ import numpy as np
 
 from dl_techniques.models.general_purpose.power_mlp.model import PowerMLP
 from dl_techniques.optimization import optimizer_builder
-from dl_techniques.utils.logger import logger
+from dl_techniques.utils.logger import LOGGER_FORMAT, logger
 
 from train.common import (
     CIFAR10_MEAN,
@@ -119,6 +129,13 @@ INPUT_SCALINGS: Tuple[str, ...] = ("standardize", "unit")
 
 # ``_check_initial_loss`` warns when loss / ln(num_classes) is STRICTLY above this.
 INITIAL_LOSS_WARN_FACTOR = 10.0
+
+# ``results_summary.json["status"]``: the run finished / stopped on a non-finite loss.
+STATUS_OK = "ok"
+STATUS_DIVERGED = "diverged"
+
+# The run's own narrative: the ``dl`` logger, tee'd into ``<run_dir>/run.log``.
+RUN_LOG_NAME = "run.log"
 
 # Hidden widths ONLY. ``PowerMLP`` reads ``hidden_units[0]`` as the input width
 # and ``hidden_units[-1]`` as the class count, so neither belongs in this table;
@@ -528,7 +545,7 @@ def create_optimizer(
 
 def _check_initial_loss(
         model: keras.Model, x: np.ndarray, y: np.ndarray
-) -> Tuple[float, float, bool]:
+) -> Tuple[float, float, bool, str]:
     """Evaluate the untrained model on a small slice; refuse NaN, warn on a huge loss.
 
     The loss is compared with ``ln(num_classes)``, the loss of a uniform
@@ -536,26 +553,49 @@ def _check_initial_loss(
     unscaled input starts the run at ``loss / ln(C)`` in the tens to the millions
     and the first epochs are spent recovering (iteration 1: 218.6 vs 2.30).
 
+    A model with batch normalization is evaluated in TRAINING mode: at init the
+    moving statistics are (0, 1), so an inference-mode pass sees un-normalized
+    activations (measured 4.2e11 where the first training step, which uses batch
+    statistics, sees 2.7) and would warn on a healthy run. The training-mode pass
+    assigns the moving statistics, so the weights are snapshotted before and
+    restored after; the model is left exactly as it was. Dropout stays active in
+    that pass (the regime of the first training step). A model without batch
+    normalization keeps ``model.evaluate`` (inference mode), so its recorded
+    numbers are unchanged.
+
     Args:
         model: Built and compiled model.
         x: Inputs ``(N, input_dim)``.
         y: Integer labels ``(N,)``.
 
     Returns:
-        ``(loss, ratio, warned)``: the finite scalar loss on ``x``, ``loss /
-        ln(num_classes)``, and whether ``ratio > INITIAL_LOSS_WARN_FACTOR``
+        ``(loss, ratio, warned, mode)``: the finite scalar loss on ``x``,
+        ``loss / ln(num_classes)``, whether ``ratio > INITIAL_LOSS_WARN_FACTOR``
         (strict) so a WARNING naming ``--kernel-initializer`` /
-        ``--input-scaling`` was logged. It does not raise on a large loss.
+        ``--input-scaling`` was logged, and how the loss was measured
+        (``"inference"`` or ``"training"``). It does not raise on a large loss.
 
     Raises:
         RuntimeError: If the loss is NaN or infinite. Raising (not returning)
             is deliberate: a silent return would leave an empty run directory.
     """
-    loss = float(model.evaluate(x, y, batch_size=SANITY_SAMPLES, verbose=0, return_dict=True)["loss"])
+    if model.batch_normalization:
+        mode = "training"
+        snapshot = model.get_weights()
+        try:
+            probabilities = model(x, training=True)
+            loss = float(keras.ops.convert_to_numpy(
+                keras.ops.mean(keras.losses.sparse_categorical_crossentropy(y, probabilities))
+            ))
+        finally:
+            model.set_weights(snapshot)  # undo the moving-statistics update
+    else:
+        mode = "inference"
+        loss = float(model.evaluate(x, y, batch_size=SANITY_SAMPLES, verbose=0, return_dict=True)["loss"])
     uniform_loss = float(np.log(model.hidden_units[-1]))
     logger.info(
-        f"Sanity evaluate BEFORE fit: initial loss {loss:.4f} on {len(x)} train samples "
-        f"(uniform-prediction loss would be {uniform_loss:.4f})"
+        f"Sanity evaluate BEFORE fit ({mode} mode): initial loss {loss:.4f} on {len(x)} "
+        f"train samples (uniform-prediction loss would be {uniform_loss:.4f})"
     )
     if not np.isfinite(loss):
         raise RuntimeError(
@@ -571,7 +611,7 @@ def _check_initial_loss(
             "too large and early epochs will be spent recovering. Try a different "
             "--kernel-initializer (e.g. lecun_normal) or --input-scaling unit."
         )
-    return loss, ratio, warned
+    return loss, ratio, warned, mode
 
 
 def _evaluate(model: keras.Model, x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
@@ -581,10 +621,76 @@ def _evaluate(model: keras.Model, x: np.ndarray, y: np.ndarray) -> Dict[str, flo
 
 
 def _best_epoch(history: Dict[str, List[float]]) -> int:
-    """1-based epoch that is best under ``MONITOR`` (direction from ``resolve_monitor_mode``)."""
+    """1-based epoch that is best under ``MONITOR`` (direction from ``resolve_monitor_mode``).
+
+    Raises:
+        ValueError: If any monitored value is NaN or infinite. ``np.argmin`` of a
+            list holding a NaN returns the NaN's index, so a diverged run would
+            otherwise report its NaN epoch as the best one.
+    """
     values = np.asarray(history[MONITOR], dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"cannot pick a best epoch: {MONITOR} has non-finite values {values.tolist()}")
     mode = resolve_monitor_mode(MONITOR)
     return int(np.argmin(values) if mode == "min" else np.argmax(values)) + 1
+
+
+def _non_finite_metrics(history: Dict[str, List[float]]) -> List[str]:
+    """Names among ``loss`` and ``MONITOR`` that are empty or hold a NaN / infinity."""
+    return [
+        key for key in dict.fromkeys(("loss", MONITOR))
+        if not history.get(key) or not np.all(np.isfinite(history[key]))
+    ]
+
+
+def _lr_reduction_epochs(lrs: Sequence[float]) -> List[int]:
+    """1-based epochs whose learning rate is lower than the previous epoch's.
+
+    ``lrs`` is the ``lr`` history (``LearningRateLogger`` writes the rate used
+    DURING each epoch), so an entry ``e`` means ``ReduceLROnPlateau`` acted
+    after epoch ``e - 1`` and epoch ``e`` was the first one trained at the lower
+    rate. Keras prints that message to stdout, not to the logger, so this is how
+    the run's own log and summary learn about it.
+
+    Args:
+        lrs: Per-epoch learning rates, epoch 1 first.
+
+    Returns:
+        The reduction epochs in ascending order (empty for a constant rate).
+    """
+    return [i + 1 for i in range(1, len(lrs)) if lrs[i] < lrs[i - 1]]
+
+
+def _write_summary(run_dir: Path, summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Write ``results_summary.json`` as STRICT JSON and return what was written.
+
+    Every summary (normal or diverged) goes through here. The dict is
+    round-tripped through ``json`` (numpy values via ``json_numpy_default``),
+    every non-finite float becomes ``None`` (``null``), and the dump uses
+    ``allow_nan=False`` so a ``NaN`` / ``Infinity`` token can never reach the
+    file (jq and most non-Python readers reject them).
+
+    Args:
+        run_dir: Existing run directory.
+        summary: The summary dict (may hold numpy scalars / arrays).
+
+    Returns:
+        The sanitized, pure-JSON dict that was written.
+    """
+    def clean(value: Any) -> Any:
+        if isinstance(value, float):
+            return value if np.isfinite(value) else None
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [clean(v) for v in value]
+        return value
+
+    written = clean(json.loads(json.dumps(summary, default=json_numpy_default)))
+    with open(run_dir / "results_summary.json", "w") as f:
+        json.dump(written, f, indent=2, allow_nan=False)
+    logger.info(f"Wrote {run_dir / 'results_summary.json'}")
+    return written
 
 
 def _load_best_metrics(
@@ -688,200 +794,264 @@ def _read_analysis_status(run_dir: Path, model_name: str) -> Dict[str, Any]:
 def train_model(config: TrainingConfig) -> Dict[str, Any]:
     """Train PowerMLP, evaluate it, write every artifact and return the summary.
 
+    The ``dl`` logger is also written to ``<run_dir>/run.log`` for the duration of
+    the call (the handler is removed on return AND on an exception). Keras' own
+    stdout lines (``ReduceLROnPlateau reducing...``, ``Epoch N: early stopping``)
+    are not in it; the trainer derives and logs them after ``fit``.
+
     Args:
         config: A validated :class:`TrainingConfig`.
 
     Returns:
-        The dict also written to ``<run_dir>/results_summary.json`` (see the
-        keys assembled at the bottom of this function).
+        The strict-JSON dict also written to ``<run_dir>/results_summary.json``
+        (``status`` is ``"ok"``; see the keys assembled at the bottom).
 
     Raises:
-        RuntimeError: If the initial loss before fitting is NaN or infinite.
+        RuntimeError: If the initial loss before fitting is NaN or infinite, or
+            (after ``results_summary.json`` with ``status: "diverged"`` was
+            written) if any epoch ``loss`` / ``val_loss`` is non-finite.
     """
     logger.info("Starting PowerMLP training")
     set_seeds(config.seed)
     run_dir = Path(prepare_run_dir(config, output_dir=resolved_run_dir(config))).resolve()
     vis_dir = run_dir / "visualizations"
     vis_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Run directory: {run_dir}")
+    run_log = logging.FileHandler(run_dir / RUN_LOG_NAME)
+    run_log.setFormatter(logging.Formatter(LOGGER_FORMAT))
+    logger.addHandler(run_log)
+    try:
+        logger.info(f"Run directory: {run_dir}")
 
-    train, val, test, info = prepare_data(
-        config.dataset, config.validation_split, config.seed, config.input_scaling
-    )
-    (x_train, y_train), (x_val, y_val), (x_test, y_test) = train, val, test
+        train, val, test, info = prepare_data(
+            config.dataset, config.validation_split, config.seed, config.input_scaling
+        )
+        (x_train, y_train), (x_val, y_val), (x_test, y_test) = train, val, test
 
-    hidden_units = effective_hidden_units(
-        config.dataset, config.architecture, info["input_dim"], info["num_classes"]
-    )
-    # ``kernel_regularizer`` is never passed: weight decay lives in the optimizer.
-    model = PowerMLP(
-        hidden_units=hidden_units,
-        k=config.k,
-        dropout_rate=config.dropout_rate,
-        batch_normalization=config.batch_normalization,
-        output_activation="softmax",
-        kernel_initializer=config.kernel_initializer,
-        bias_initializer="zeros",
-    )
-    model.build((None, info["input_dim"]))
-    model.compile(
-        optimizer=create_optimizer(config.optimizer, config.learning_rate, config.weight_decay),
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
-        metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
-    )
-    # Read off the BUILT model, not the config: the input width is the shape the
-    # model was built at, the rest are the layers' own widths.
-    effective_units = [
-        info["input_dim"],
-        *[int(layer.units) for layer in model.hidden_layers],
-        int(model.output_layer.units),
-    ]
-    params = int(model.count_params())
-    logger.info(f"  Architecture: {effective_units}, k={config.k}")
-    logger.info(f"  Dropout: {config.dropout_rate}, BatchNorm: {config.batch_normalization}")
-    logger.info(
-        f"  LR: {config.learning_rate}, Optimizer: {config.optimizer}, "
-        f"Weight decay: {config.weight_decay}, Params: {params:,}"
-    )
+        hidden_units = effective_hidden_units(
+            config.dataset, config.architecture, info["input_dim"], info["num_classes"]
+        )
+        # ``kernel_regularizer`` is never passed: weight decay lives in the optimizer.
+        model = PowerMLP(
+            hidden_units=hidden_units,
+            k=config.k,
+            dropout_rate=config.dropout_rate,
+            batch_normalization=config.batch_normalization,
+            output_activation="softmax",
+            kernel_initializer=config.kernel_initializer,
+            bias_initializer="zeros",
+        )
+        model.build((None, info["input_dim"]))
+        model.compile(
+            optimizer=create_optimizer(config.optimizer, config.learning_rate, config.weight_decay),
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+            metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
+        )
+        # Read off the BUILT model, not the config: the input width is the shape the
+        # model was built at, the rest are the layers' own widths.
+        effective_units = [
+            info["input_dim"],
+            *[int(layer.units) for layer in model.hidden_layers],
+            int(model.output_layer.units),
+        ]
+        params = int(model.count_params())
+        logger.info(f"  Architecture: {effective_units}, k={config.k}")
+        logger.info(f"  Dropout: {config.dropout_rate}, BatchNorm: {config.batch_normalization}")
+        logger.info(
+            f"  LR: {config.learning_rate}, Optimizer: {config.optimizer}, "
+            f"Weight decay: {config.weight_decay}, Params: {params:,}"
+        )
 
-    initial_loss, initial_loss_ratio, init_scale_warning = _check_initial_loss(
-        model, x_train[:SANITY_SAMPLES], y_train[:SANITY_SAMPLES]
-    )
+        initial_loss, initial_loss_ratio, init_scale_warning, initial_loss_mode = (
+            _check_initial_loss(model, x_train[:SANITY_SAMPLES], y_train[:SANITY_SAMPLES])
+        )
+        # Keys every summary carries, whether the run finished or diverged.
+        summary_head: Dict[str, Any] = {
+            "run_dir": str(run_dir),
+            "experiment_name": config.experiment_name,
+            "dataset": config.dataset,
+            "architecture": config.architecture,
+            "effective_hidden_units": effective_units,
+            "params": params,
+            "k": config.k,
+            "dropout_rate": config.dropout_rate,
+            "batch_normalization": config.batch_normalization,
+            "kernel_initializer": config.kernel_initializer,
+            "input_scaling": config.input_scaling,
+            "optimizer": config.optimizer,
+            "learning_rate": config.learning_rate,
+            "weight_decay": config.weight_decay,
+            "batch_size": config.batch_size,
+            "seed": config.seed,
+            "input_normalization": {
+                "mean": info["mean"], "std": info["std"], "input_dim": info["input_dim"],
+            },
+            "epochs_requested": config.epochs,
+            "monitor": MONITOR,
+            "initial_loss_sanity_eval": {
+                "loss": initial_loss, "n_samples": int(min(SANITY_SAMPLES, len(x_train))),
+                "split": "train", "before_fit": True,
+            },
+            "initial_loss_ratio": initial_loss_ratio,
+            "init_scale_warning": init_scale_warning,
+            "initial_loss_mode": initial_loss_mode,
+        }
 
-    callbacks, _ = create_callbacks(
-        model_name=config.experiment_name,
-        results_dir_prefix="powermlp",
-        run_dir=str(run_dir),
-        monitor=MONITOR,
-        patience=config.patience,
-        use_lr_schedule=False,  # ReduceLROnPlateau, no external schedule
-        include_terminate_on_nan=True,
-        include_analyzer=config.epoch_analysis,
-    )
-    # Index 0: `lr` must be in `logs` before CSVLogger reads it.
-    callbacks.insert(0, LearningRateLogger())
-    # Last: it reads `logs['lr']`, written by LearningRateLogger above.
-    dashboard = TrainingDashboardCallback(
-        out_path=vis_dir / "training_dashboard.png",
-        baseline_data=(x_val, y_val),
-        title=f"{config.experiment_name} (seed {config.seed})",
-    )
-    callbacks.append(dashboard)
+        callbacks, _ = create_callbacks(
+            model_name=config.experiment_name,
+            results_dir_prefix="powermlp",
+            run_dir=str(run_dir),
+            monitor=MONITOR,
+            patience=config.patience,
+            use_lr_schedule=False,  # ReduceLROnPlateau, no external schedule
+            include_terminate_on_nan=True,
+            include_analyzer=config.epoch_analysis,
+        )
+        # Index 0: `lr` must be in `logs` before CSVLogger reads it.
+        callbacks.insert(0, LearningRateLogger())
+        # Last: it reads `logs['lr']`, written by LearningRateLogger above.
+        dashboard = TrainingDashboardCallback(
+            out_path=vis_dir / "training_dashboard.png",
+            baseline_data=(x_val, y_val),
+            title=f"{config.experiment_name} (seed {config.seed})",
+        )
+        callbacks.append(dashboard)
 
-    history = model.fit(
-        x_train, y_train,
-        validation_data=(x_val, y_val),
-        epochs=config.epochs,
-        batch_size=config.batch_size,
-        callbacks=callbacks,
-        verbose=1,
-    )
-    save_training_history_json(history, str(run_dir))
-    hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
-    epochs_run = len(hist[MONITOR])
+        history = model.fit(
+            x_train, y_train,
+            validation_data=(x_val, y_val),
+            epochs=config.epochs,
+            batch_size=config.batch_size,
+            callbacks=callbacks,
+            verbose=1,
+        )
+        save_training_history_json(history, str(run_dir))
+        hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
+        epochs_run = len(hist.get(MONITOR, []))
+        stopped_early = epochs_run < config.epochs
 
-    # Final (in-memory) weights vs the reloaded best checkpoint. Keras 3.8
-    # EarlyStopping restores the best weights at every train end, so equality is
-    # expected (D-011) and a difference is a bug signal.
-    test_metrics_final = _evaluate(model, x_test, y_test)
-    logger.info(f"Test results (final weights): {test_metrics_final}")
-    test_metrics_best, best_load_error = _load_best_metrics(run_dir, x_test, y_test)
-    if test_metrics_best is not None:
-        logger.info(f"Test results (best_model.keras): {test_metrics_best}")
-        diffs = {k: abs(test_metrics_final[k] - test_metrics_best[k])
-                 for k in test_metrics_final if k in test_metrics_best}
-        if any(d > WEIGHT_MISMATCH_TOLERANCE for d in diffs.values()):
-            logger.warning(
-                f"Final weights and best_model.keras disagree on the test set: {diffs}. "
-                "EarlyStopping should have restored the best weights (D-011)."
+        # What Keras prints to stdout (never to the logger), derived from the history.
+        lr_reduction_epochs = _lr_reduction_epochs(hist.get("lr", []))
+        for epoch in lr_reduction_epochs:
+            logger.info(
+                f"ReduceLROnPlateau: learning rate {hist['lr'][epoch - 2]:.3g} -> "
+                f"{hist['lr'][epoch - 1]:.3g} from epoch {epoch}"
+            )
+        if stopped_early:
+            logger.info(
+                f"EarlyStopping: stopped after epoch {epochs_run} of {config.epochs} "
+                f"(patience {config.patience} on {MONITOR}); the best weights were restored"
             )
 
-    final_path = run_dir / "final_model.keras"
-    model.save(final_path)
-    load_check: Optional[bool] = None
-    try:
-        sample = x_val[:LOAD_CHECK_SAMPLES]
-        load_check = bool(validate_model_loading(
-            str(final_path), sample, model.predict(sample, verbose=0)
-        ))
-    except Exception as e:  # noqa: BLE001 - log-only
-        logger.warning(f"validate_model_loading raised: {e}")
+        non_finite = _non_finite_metrics(hist)
+        if non_finite:
+            message = (
+                f"Training diverged: {non_finite} hold a non-finite or missing value after "
+                f"{epochs_run} epoch(s); no evaluation, figures, analysis or final_model.keras "
+                f"were produced. Check k, --kernel-initializer, --input-scaling and the "
+                f"initial-loss ratio ({initial_loss_ratio:.3g})."
+            )
+            logger.error(message)
+            _write_summary(run_dir, {
+                "status": STATUS_DIVERGED,
+                **summary_head,
+                "epochs_run": epochs_run,
+                "stopped_early": stopped_early,
+                "best_epoch": None,
+                "non_finite_metrics": non_finite,
+                "lr_reduction_epochs": lr_reduction_epochs,
+                "history": hist,
+                "epoch_times": list(dashboard.epoch_times),
+                "notes": [message, "non-finite values are written as null (strict JSON)"],
+            })
+            raise RuntimeError(message)
 
-    probs = model.predict(x_test, batch_size=1024, verbose=0)
-    visualizations = _write_visualizations(
-        vis_dir, x_test, y_test, probs,
-        get_class_names(config.dataset, info["num_classes"]), info,
-    )
+        # Final (in-memory) weights vs the reloaded best checkpoint. Keras 3.8
+        # EarlyStopping restores the best weights at every train end, so equality is
+        # expected (D-011) and a difference is a bug signal.
+        test_metrics_final = _evaluate(model, x_test, y_test)
+        logger.info(f"Test results (final weights): {test_metrics_final}")
+        test_metrics_best, best_load_error = _load_best_metrics(run_dir, x_test, y_test)
+        if test_metrics_best is not None:
+            logger.info(f"Test results (best_model.keras): {test_metrics_best}")
+            diffs = {k: abs(test_metrics_final[k] - test_metrics_best[k])
+                     for k in test_metrics_final if k in test_metrics_best}
+            if any(d > WEIGHT_MISMATCH_TOLERANCE for d in diffs.values()):
+                logger.warning(
+                    f"Final weights and best_model.keras disagree on the test set: {diffs}. "
+                    "EarlyStopping should have restored the best weights (D-011)."
+                )
 
-    run_model_analysis(
-        model, (x_test, y_test), history, config.experiment_name, str(run_dir)
-    )
-    analysis = _read_analysis_status(run_dir, config.experiment_name)
-    logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
+        final_path = run_dir / "final_model.keras"
+        model.save(final_path)
+        load_check: Optional[bool] = None
+        try:
+            sample = x_val[:LOAD_CHECK_SAMPLES]
+            load_check = bool(validate_model_loading(
+                str(final_path), sample, model.predict(sample, verbose=0)
+            ))
+        except Exception as e:  # noqa: BLE001 - log-only
+            logger.warning(f"validate_model_loading raised: {e}")
 
-    best_epoch = _best_epoch(hist)
-    best_i, final_i = best_epoch - 1, epochs_run - 1
-    val_keys = [k for k in hist if k.startswith("val_")]
-    widths = ARCHITECTURE_HIDDEN_WIDTHS[config.architecture][config.dataset]
-    notes: List[str] = [
-        f"expected hidden widths {widths}, built {effective_units[1:-1]}: "
-        f"{'match' if widths == effective_units[1:-1] else 'MISMATCH'}",
-        f"initial loss {initial_loss:.4f} vs uniform ln(C)={np.log(info['num_classes']):.4f} "
-        f"(ratio {initial_loss_ratio:.2f}, warn above {INITIAL_LOSS_WARN_FACTOR:g})",
-        "CSV `epoch` column is 0-based, `best_epoch` is 1-based "
-        "(`best_epoch_csv_index` = `best_epoch` - 1)",
-        "analyzer accuracy is on the first 1000 test samples only, not the full test set",
-        f"final weights vs best_model.keras: "
-        f"{'not compared' if test_metrics_best is None else 'compared, see test_metrics_*'}",
-    ]
-    summary: Dict[str, Any] = {
-        "run_dir": str(run_dir),
-        "experiment_name": config.experiment_name,
-        "dataset": config.dataset,
-        "architecture": config.architecture,
-        "effective_hidden_units": effective_units,
-        "params": params,
-        "k": config.k,
-        "dropout_rate": config.dropout_rate,
-        "batch_normalization": config.batch_normalization,
-        "kernel_initializer": config.kernel_initializer,
-        "input_scaling": config.input_scaling,
-        "optimizer": config.optimizer,
-        "learning_rate": config.learning_rate,
-        "weight_decay": config.weight_decay,
-        "batch_size": config.batch_size,
-        "seed": config.seed,
-        "input_normalization": {
-            "mean": info["mean"], "std": info["std"], "input_dim": info["input_dim"],
-        },
-        "epochs_requested": config.epochs,
-        "epochs_run": epochs_run,
-        "stopped_early": epochs_run < config.epochs,
-        "monitor": MONITOR,
-        "best_epoch": best_epoch,
-        "best_epoch_csv_index": best_i,
-        "best_val_metrics": {k: hist[k][best_i] for k in val_keys},
-        "final_val_metrics": {k: hist[k][final_i] for k in val_keys},
-        "test_metrics_final": test_metrics_final,
-        "test_metrics_best": test_metrics_best,
-        "best_checkpoint_load_error": best_load_error,
-        "epoch_times": list(dashboard.epoch_times),
-        "initial_loss_sanity_eval": {
-            "loss": initial_loss, "n_samples": int(min(SANITY_SAMPLES, len(x_train))),
-            "split": "train", "before_fit": True,
-        },
-        "initial_loss_ratio": initial_loss_ratio,
-        "init_scale_warning": init_scale_warning,
-        "ece": visualizations["ece"],
-        "visualizations": visualizations,
-        "model_loading_validated": load_check,
-        "analyzer": analysis,
-        "notes": notes,
-    }
-    with open(run_dir / "results_summary.json", "w") as f:
-        json.dump(summary, f, indent=2, default=json_numpy_default)
-    logger.info(f"Wrote {run_dir / 'results_summary.json'}")
-    return summary
+        probs = model.predict(x_test, batch_size=1024, verbose=0)
+        visualizations = _write_visualizations(
+            vis_dir, x_test, y_test, probs,
+            get_class_names(config.dataset, info["num_classes"]), info,
+        )
+
+        run_model_analysis(
+            model, (x_test, y_test), history, config.experiment_name, str(run_dir)
+        )
+        analysis = _read_analysis_status(run_dir, config.experiment_name)
+        logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
+
+        best_epoch = _best_epoch(hist)
+        best_i, final_i = best_epoch - 1, epochs_run - 1
+        val_keys = [k for k in hist if k.startswith("val_")]
+        widths = ARCHITECTURE_HIDDEN_WIDTHS[config.architecture][config.dataset]
+        notes: List[str] = [
+            f"expected hidden widths {widths}, built {effective_units[1:-1]}: "
+            f"{'match' if widths == effective_units[1:-1] else 'MISMATCH'}",
+            f"initial loss {initial_loss:.4f} vs uniform ln(C)={np.log(info['num_classes']):.4f} "
+            f"(ratio {initial_loss_ratio:.2f}, warn above {INITIAL_LOSS_WARN_FACTOR:g})",
+            f"initial loss mode: {initial_loss_mode} "
+            f"({'batch statistics, dropout on, weights restored afterwards' if initial_loss_mode == 'training' else 'model.evaluate, dropout off'})",
+            f"the init-scale guard is a floor for hazards (warns above {INITIAL_LOSS_WARN_FACTOR:g}x "
+            "ln(C)); a ratio between 3x and 10x raises no warning but is not healthy",
+            "CSV `epoch` column is 0-based, `best_epoch` is 1-based "
+            "(`best_epoch_csv_index` = `best_epoch` - 1)",
+            "analyzer accuracy is on the first 1000 test samples only, not the full test set",
+            "top-level `ece` is computed on the FULL test set; the analyzer's calibration "
+            "numbers in model_analysis/ use the first 1000 test samples, so the two differ",
+            "`test_metrics_final` describes the in-memory weights AFTER EarlyStopping restored "
+            "the best-val_loss weights, so it equals `test_metrics_best` by construction; "
+            "`final_val_metrics` is the LAST epoch's validation metrics",
+            f"final weights vs best_model.keras: "
+            f"{'not compared' if test_metrics_best is None else 'compared, see test_metrics_*'}",
+        ]
+        summary: Dict[str, Any] = {
+            "status": STATUS_OK,
+            **summary_head,
+            "epochs_run": epochs_run,
+            "stopped_early": stopped_early,
+            "best_epoch": best_epoch,
+            "best_epoch_csv_index": best_i,
+            "lr_reduction_epochs": lr_reduction_epochs,
+            "best_val_metrics": {k: hist[k][best_i] for k in val_keys},
+            "final_val_metrics": {k: hist[k][final_i] for k in val_keys},
+            "test_metrics_final": test_metrics_final,
+            "test_metrics_best": test_metrics_best,
+            "best_checkpoint_load_error": best_load_error,
+            "epoch_times": list(dashboard.epoch_times),
+            "ece": visualizations["ece"],
+            "visualizations": visualizations,
+            "model_loading_validated": load_check,
+            "analyzer": analysis,
+            "notes": notes,
+        }
+        return _write_summary(run_dir, summary)
+    finally:
+        logger.removeHandler(run_log)
+        run_log.close()
 
 
 # ---------------------------------------------------------------------

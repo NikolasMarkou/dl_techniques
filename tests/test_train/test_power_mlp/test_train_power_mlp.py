@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import types
 from pathlib import Path
@@ -358,7 +359,7 @@ def test_smoke_run_directory_inventory(smoke) -> None:
     )
     expected = [
         "config.json", "training_log.csv", "training_history.json", "best_model.keras",
-        "final_model.keras", "results_summary.json",
+        "final_model.keras", "results_summary.json", "run.log",
         "visualizations/training_dashboard.png", "visualizations/confusion_matrix.png",
         "visualizations/per_class_metrics.png", "visualizations/confidence_calibration.png",
         "visualizations/misclassifications.png", "visualizations/classification_report.json",
@@ -459,6 +460,43 @@ def test_smoke_records_the_init_scale_diagnostics(smoke) -> None:
     assert config["epoch_analysis"] is False
 
 
+def _no_constants(token: str):
+    raise ValueError(f"non-strict JSON constant {token!r}")
+
+
+def test_smoke_summary_is_strict_json_with_status_ok_and_no_failed_figure(smoke) -> None:
+    """``status`` distinguishes a finished run from a diverged one; a figure that
+    failed is swallowed into ``visualizations.failed``, so it is asserted EMPTY here."""
+    text = (smoke.run_dir / "results_summary.json").read_text()
+    on_disk = json.loads(text, parse_constant=_no_constants)
+    assert on_disk["status"] == "ok" == tpm.STATUS_OK
+    assert smoke.summary["status"] == "ok"
+    assert on_disk["visualizations"]["failed"] == [], on_disk["visualizations"]
+    assert on_disk["initial_loss_mode"] == "inference", "the default model has no batch norm"
+    assert on_disk["lr_reduction_epochs"] == [], "ReduceLROnPlateau cannot fire in 2 epochs"
+    assert on_disk["epochs_run"] == 2 and on_disk["stopped_early"] is False
+
+
+def test_smoke_notes_state_the_guard_floor_the_ece_slice_and_what_final_means(smoke) -> None:
+    """Review C6, C8, C9: three readings a reader would otherwise get wrong."""
+    notes = " || ".join(json.loads((smoke.run_dir / "results_summary.json").read_text())["notes"])
+    assert "guard is a floor" in notes and "not healthy" in notes, "3x-10x is not 'healthy'"
+    assert "top-level `ece` is computed on the FULL test set" in notes
+    assert "first 1000 test samples" in notes
+    assert "equals `test_metrics_best` by construction" in notes
+    assert "`final_val_metrics` is the LAST epoch's validation metrics" in notes
+    assert "initial loss mode: inference" in notes
+
+
+def test_smoke_run_log_is_in_the_run_dir_and_its_handler_is_gone(smoke) -> None:
+    text = (smoke.run_dir / "run.log").read_text()
+    assert "Run directory" in text and "Sanity evaluate BEFORE fit (inference mode)" in text, text[:400]
+    assert "Test results (final weights)" in text
+    assert "Analyzer status (read back from disk): success" in text
+    leaked = [h for h in logging.getLogger("dl").handlers if isinstance(h, logging.FileHandler)]
+    assert leaked == [], f"train_model left a file handler on the dl logger: {leaked}"
+
+
 def test_smoke_best_epoch_csv_index_is_the_zero_based_csv_row(smoke) -> None:
     """``best_epoch`` is 1-based, the CSV ``epoch`` column is 0-based; the summary
     carries both and says so."""
@@ -485,6 +523,59 @@ def test_smoke_no_model_layer_carries_a_kernel_regularizer(smoke) -> None:
     assert all(sub.kernel_regularizer is None for sub in dense_like)
     assert all(layer.kernel_regularizer is None for layer in model.hidden_layers)
     assert model.losses == []
+
+
+# ---------------------------------------------------------------------
+# Summary writer and best-epoch selection (review C5)
+# ---------------------------------------------------------------------
+
+
+def test_write_summary_is_strict_json_and_turns_every_non_finite_value_into_null(tmp_path) -> None:
+    """``json.dump`` writes ``NaN`` tokens by default and jq / most non-Python readers
+    reject them. numpy scalars and arrays must still serialize."""
+    summary = {
+        "status": "diverged",
+        "metric": float("nan"),
+        "curve": [1.0, float("inf"), float("-inf")],
+        "nested": {"f32": np.float32("nan"), "array": np.array([0.5, np.nan]), "int": np.int64(3)},
+        "ok": np.float32(0.5),
+        "text": "x",
+    }
+    written = tpm._write_summary(tmp_path, summary)
+
+    text = (tmp_path / "results_summary.json").read_text()
+    parsed = json.loads(text, parse_constant=_no_constants)
+    assert parsed == written == {
+        "status": "diverged", "metric": None, "curve": [1.0, None, None],
+        "nested": {"f32": None, "array": [0.5, None], "int": 3}, "ok": 0.5, "text": "x",
+    }
+    for token in ("NaN", "Infinity"):
+        assert token not in text
+
+
+def test_a_nan_test_metric_reaches_the_summary_file_as_null(tmp_path) -> None:
+    tpm._write_summary(tmp_path, {"test_metrics_final": {"loss": float("nan"), "accuracy": 0.9}})
+    parsed = json.loads((tmp_path / "results_summary.json").read_text(), parse_constant=_no_constants)
+    assert parsed["test_metrics_final"] == {"loss": None, "accuracy": 0.9}
+
+
+def test_best_epoch_picks_the_lowest_val_loss_one_based() -> None:
+    assert tpm._best_epoch({"val_loss": [0.9, 0.5, 0.7]}) == 2
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_best_epoch_refuses_a_non_finite_history(bad) -> None:
+    """``np.argmin([nan, 1.0, 0.5]) == 0``: the NaN epoch would be reported as the best."""
+    assert int(np.argmin([float("nan"), 1.0, 0.5])) == 0
+    with pytest.raises(ValueError, match="non-finite"):
+        tpm._best_epoch({"val_loss": [bad, 1.0, 0.5]})
+
+
+def test_non_finite_metrics_names_the_offending_keys() -> None:
+    assert tpm._non_finite_metrics({"loss": [1.0, 0.5], "val_loss": [1.1, 0.6]}) == []
+    assert tpm._non_finite_metrics({"loss": [float("nan")], "val_loss": [1.0]}) == ["loss"]
+    assert tpm._non_finite_metrics({"loss": [1.0], "val_loss": [float("inf")]}) == ["val_loss"]
+    assert tpm._non_finite_metrics({}) == ["loss", "val_loss"], "no epoch at all is not a finite run"
 
 
 # ---------------------------------------------------------------------

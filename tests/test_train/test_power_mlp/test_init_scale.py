@@ -10,7 +10,9 @@ every unit test used tiny synthetic data on which the blow-up is invisible.
 This file pins the repair:
 
 - ``_check_initial_loss`` WARNS (strictly above ``INITIAL_LOSS_WARN_FACTOR`` x
-  ``ln(C)``) and returns ``(loss, ratio, warned)``;
+  ``ln(C)``) and returns ``(loss, ratio, warned, mode)``; a batch-normalized model
+  is measured in TRAINING mode with its moving statistics restored (review C4:
+  the inference-mode number was 4.2e11 where the first training step sees 2.7);
 - the CHOSEN defaults (``TrainingConfig()``) start near ``ln(C)`` on real-shaped
   data, and would not if they were set back to ``glorot_normal`` + ``standardize``;
 - ``--input-scaling`` really changes what ``prepare_data`` returns;
@@ -117,12 +119,15 @@ def _guard_slice(regime: str, input_scaling: str) -> Tuple[np.ndarray, np.ndarra
     return x[:GUARD_SAMPLES], y[:GUARD_SAMPLES]
 
 
-def _build_model(kernel_initializer: str) -> keras.Model:
+def _build_model(
+        kernel_initializer: str, k: int = 2, batch_normalization: bool = False
+) -> keras.Model:
     """The ``default`` MNIST preset built and compiled the way ``train_model`` does."""
     model = tpm.PowerMLP(
         hidden_units=tpm.effective_hidden_units("mnist", "default", 784, 10),
-        k=2,
+        k=k,
         dropout_rate=0.1,
+        batch_normalization=batch_normalization,
         output_activation="softmax",
         kernel_initializer=kernel_initializer,
         bias_initializer="zeros",
@@ -145,11 +150,14 @@ def recorded_warnings(monkeypatch):
     return seen
 
 
-def _initial_loss_check(pair: Tuple[str, str], regime: str):
+def _initial_loss_check(
+        pair: Tuple[str, str], regime: str, k: int = 2, batch_normalization: bool = False
+):
     keras.utils.set_random_seed(0)
     kernel_initializer, input_scaling = pair
     x, y = _guard_slice(regime, input_scaling)
-    return tpm._check_initial_loss(_build_model(kernel_initializer), x, y)
+    model = _build_model(kernel_initializer, k, batch_normalization)
+    return tpm._check_initial_loss(model, x, y)
 
 
 # ---------------------------------------------------------------------
@@ -160,7 +168,7 @@ def _initial_loss_check(pair: Tuple[str, str], regime: str):
 @pytest.mark.parametrize("regime", REGIMES)
 def test_initial_loss_guard_fires_on_the_iteration_1_configuration(
         regime, recorded_warnings) -> None:
-    loss, ratio, warned = _initial_loss_check(ITERATION_1_PAIR, regime)
+    loss, ratio, warned, mode = _initial_loss_check(ITERATION_1_PAIR, regime)
 
     assert warned is True
     assert ratio > 10.0, f"glorot_normal + standardize started at {ratio:.1f}x ln(C)"
@@ -174,10 +182,11 @@ def test_initial_loss_guard_fires_on_the_iteration_1_configuration(
 @pytest.mark.parametrize("regime", REGIMES)
 def test_the_chosen_default_pair_does_not_warn(regime, recorded_warnings) -> None:
     """The POSITIVE arm: the guard must stay quiet on the configuration it recommends."""
-    loss, ratio, warned = _initial_loss_check(CHOSEN_PAIR, regime)
+    loss, ratio, warned, mode = _initial_loss_check(CHOSEN_PAIR, regime)
 
     assert warned is False
     assert ratio <= 3.0, f"{CHOSEN_PAIR} started at {ratio:.2f}x ln(C)"
+    assert mode == "inference", "the non-BN default keeps model.evaluate"
     assert recorded_warnings == []
 
 
@@ -190,8 +199,9 @@ def test_trainingconfig_defaults_start_near_the_uniform_loss(
     iteration-1 pair) makes this fail while the literal-pair test above still passes.
     """
     defaults = tpm.TrainingConfig()
-    loss, ratio, warned = _initial_loss_check(
-        (defaults.kernel_initializer, defaults.input_scaling), regime
+    loss, ratio, warned, mode = _initial_loss_check(
+        (defaults.kernel_initializer, defaults.input_scaling), regime,
+        batch_normalization=defaults.batch_normalization,
     )
 
     assert ratio <= 3.0, (
@@ -202,12 +212,102 @@ def test_trainingconfig_defaults_start_near_the_uniform_loss(
     assert recorded_warnings == []
 
 
+# ---------------------------------------------------------------------
+# BatchNorm: the guard measures the regime of the first training step (C4)
+# ---------------------------------------------------------------------
+
+#: The review's discriminating case: glorot_normal + standardize + k=3 is a huge
+#: initial scale. Without BN it is hazardous (ratio 1e8-1e11) and must warn; with BN
+#: the first TRAINING step sees batch statistics and starts near ln(C) (1.14-1.16),
+#: while the inference-mode pass sees the untrained (0, 1) moving statistics
+#: (4.2e11 on real MNIST). k=3 is what makes the two modes differ this much.
+BN_PAIR = ("glorot_normal", "standardize")
+
+
+@pytest.mark.parametrize("regime", REGIMES)
+def test_a_batch_normalized_model_is_measured_in_training_mode_and_does_not_warn(
+        regime, recorded_warnings) -> None:
+    loss, ratio, warned, mode = _initial_loss_check(
+        BN_PAIR, regime, k=3, batch_normalization=True)
+
+    assert mode == "training"
+    assert ratio <= 3.0, f"BN training-mode ratio {ratio:.3g} (inference mode gives ~1e8-1e11)"
+    assert ratio == pytest.approx(loss / np.log(10.0))
+    assert warned is False
+    assert recorded_warnings == []
+
+
+@pytest.mark.parametrize("regime", REGIMES)
+def test_the_same_configuration_without_batch_norm_warns(regime, recorded_warnings) -> None:
+    """The discriminating twin: identical pair, k and data, BN off. If this did not
+    warn, the BN arm above would pass on any measurement and prove nothing."""
+    loss, ratio, warned, mode = _initial_loss_check(
+        BN_PAIR, regime, k=3, batch_normalization=False)
+
+    assert mode == "inference"
+    assert warned is True and ratio > 1e3, f"non-BN ratio {ratio:.3g}"
+    assert len(recorded_warnings) == 1, recorded_warnings
+
+
+@pytest.mark.parametrize("regime", REGIMES)
+def test_the_batch_norm_sanity_pass_leaves_every_weight_bit_identical(regime) -> None:
+    """A training-mode pass assigns ``moving_mean`` / ``moving_variance``; the check
+    must snapshot and restore, or a BN run would start with drifted statistics."""
+    keras.utils.set_random_seed(0)
+    x, y = _guard_slice(regime, "standardize")
+    model = _build_model("glorot_normal", k=3, batch_normalization=True)
+
+    # Control: a bare training-mode call DOES change the moving statistics, so the
+    # equality below is a statement about the restore and not about BN being inert.
+    before_control = model.get_weights()
+    model(x, training=True)
+    changed = [not np.array_equal(a, b) for a, b in zip(before_control, model.get_weights())]
+    assert sum(changed) >= 6, "3 BN layers x (moving_mean, moving_variance) must move"
+    model.set_weights(before_control)
+
+    tpm._check_initial_loss(model, x, y)
+
+    after = model.get_weights()
+    assert len(after) == len(before_control)
+    for i, (a, b) in enumerate(zip(before_control, after)):
+        np.testing.assert_array_equal(a, b, err_msg=f"weight {i} changed by the sanity check")
+
+
+@pytest.mark.parametrize("regime", REGIMES)
+def test_a_model_without_batch_norm_keeps_model_evaluate_bit_identically(
+        regime, recorded_warnings) -> None:
+    """The non-BN path is untouched: ``mode == "inference"`` and the loss is the
+    number ``model.evaluate`` returns for the same batch and weights."""
+    keras.utils.set_random_seed(0)
+    x, y = _guard_slice(regime, "unit")
+    model = _build_model("lecun_normal")
+
+    loss, ratio, warned, mode = tpm._check_initial_loss(model, x, y)
+    reference = float(model.evaluate(x, y, batch_size=tpm.SANITY_SAMPLES, verbose=0,
+                                     return_dict=True)["loss"])
+
+    assert mode == "inference"
+    assert loss == reference
+    assert warned is False
+
+
+def test_lr_reduction_epochs_are_the_epochs_trained_at_a_lower_rate() -> None:
+    """1-based; ``lr`` is the rate USED in each epoch, so a drop at index i (0-based)
+    is reported as epoch i + 1."""
+    assert tpm._lr_reduction_epochs([3e-4, 3e-4, 1.5e-4, 1.5e-4, 7.5e-5]) == [3, 5]
+    assert tpm._lr_reduction_epochs([3e-4] * 6) == []
+    assert tpm._lr_reduction_epochs([]) == [] and tpm._lr_reduction_epochs([3e-4]) == []
+    assert tpm._lr_reduction_epochs([1e-3, 5e-4]) == [2]
+
+
 class _StubModel:
-    """Just what ``_check_initial_loss`` reads: ``evaluate`` and ``hidden_units``."""
+    """Just what ``_check_initial_loss`` reads: ``evaluate``, ``hidden_units`` and
+    ``batch_normalization`` (False: the inference-mode ``evaluate`` path)."""
 
     def __init__(self, loss: float, classes: int = 10) -> None:
         self._loss = loss
         self.hidden_units = [784, 64, classes]
+        self.batch_normalization = False
 
     def evaluate(self, *args: Any, **kwargs: Any) -> Dict[str, float]:
         return {"loss": self._loss}
@@ -224,7 +324,7 @@ def test_the_warning_threshold_is_strict(factor, expected_warned, recorded_warni
     uniform = float(np.log(10))
     x, y = np.zeros((4, 784), np.float32), np.zeros(4, np.int32)
 
-    loss, ratio, warned = tpm._check_initial_loss(_StubModel(factor * uniform), x, y)
+    loss, ratio, warned, mode = tpm._check_initial_loss(_StubModel(factor * uniform), x, y)
 
     assert ratio == factor, "the stub must land exactly on the ratio under test"
     assert warned is expected_warned
