@@ -256,7 +256,19 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
     notes = " ".join(summary["notes"])
     assert "unreliable for short runs and depthwise kernels" in notes, summary["notes"]
     assert "first 1000 test samples" in notes and "skipped" not in notes, summary["notes"]
+    # G5: the analyzer-figure facts a reader needs (library output, not fixable here).
+    for fact in ("`training_dynamics.png` counts 'Best Epoch' from 0", "'Final Acc'",
+                 "differs from this summary's `ece`", "different layer counts"):
+        assert fact in notes, (fact, summary["notes"])
+    # N6: the key exists; under the default cosine schedule it is null, never the epochs
+    # at which the (by design falling) rate dropped.
+    assert "lr_reduction_epochs" in summary and summary["lr_reduction_epochs"] is None
+    rates = [float(row["lr"]) for row in _csv_rows(e2e.run_dir)]
+    assert rates[1] < rates[0], "the cosine really falls, so a helper applied to it would list epochs"
     assert summary["visualizations"]["failed"] == []
+    # N5: every listed file exists on disk.
+    assert all((e2e.run_dir / "visualizations" / name).is_file()
+               for name in summary["visualizations"]["files"])
     assert summary["best_checkpoint_load_error"] is None
     assert summary["best_checkpoint_max_abs_diff"] <= common.WEIGHT_MISMATCH_TOLERANCE
     assert summary["model_loading_validated"] is True
@@ -286,10 +298,53 @@ def test_no_model_analysis_skips_the_analyzer_and_records_it(monkeypatch, tmp_pa
     assert not (tmp_path / "skipped" / "model_analysis").exists()
     notes = " ".join(summary["notes"])
     assert "--no-model-analysis" in notes and "first 1000 test samples" not in notes, notes
+    assert "training_dynamics" not in notes and "layer counts" not in notes, notes
     saved = _strict((tmp_path / "skipped" / "results_summary.json").read_text())
     assert saved["analyzer"]["status"] == "skipped"
     assert "Analyzer skipped (--no-model-analysis)" in (tmp_path / "skipped" / "run.log").read_text()
     assert _strict((tmp_path / "skipped" / "config.json").read_text())["model_analysis"] is False
+
+
+def test_the_constant_schedule_branch_trains_and_records_the_plateau_reductions(
+        monkeypatch, tmp_path) -> None:
+    """N6: the first end-to-end run of ``--lr-schedule constant``, the branch that adds
+    ``ReduceLROnPlateau``. The callback is made deterministic (patience 0 and a ``min_delta``
+    no loss can beat, so it reduces after every epoch that is not the first: epoch 1 always
+    improves on the initial ``inf``), because natural plateaus need more
+    epochs than a test can afford. The summary must name the reduction epochs, the run log
+    must say so, and every epoch line must carry the rate."""
+    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    real = keras.callbacks.ReduceLROnPlateau
+    monkeypatch.setattr(
+        keras.callbacks, "ReduceLROnPlateau",
+        lambda **kwargs: real(**{**kwargs, "patience": 0, "min_delta": 10.0}))
+    config = _config(tmp_path, "constant", lr_schedule="constant", max_samples=64,
+                     batch_size=32, model_analysis=False)
+
+    summary = common.train(config)
+
+    run_dir = tmp_path / "constant"
+    assert summary["status"] == "ok" and summary["lr_schedule"] == "constant"
+    assert summary["epochs_run"] == EPOCHS
+    rates = [float(row["lr"]) for row in _csv_rows(run_dir)]
+    # The reduction after epoch 2 shows at epoch 3; the one after epoch 3 is past the last epoch.
+    assert rates == pytest.approx([E2E_LEARNING_RATE, E2E_LEARNING_RATE, E2E_LEARNING_RATE / 2])
+    assert summary["lr_reduction_epochs"] == [3]
+    assert _strict((run_dir / "results_summary.json").read_text())["lr_reduction_epochs"] == [3]
+    log = (run_dir / "run.log").read_text()
+    assert "ReduceLROnPlateau: learning rate 0.005 -> 0.0025 from epoch 3" in log, log
+    lines = _epoch_lines(run_dir)
+    assert [pairs["lr"] for _, _, pairs, _ in lines] == pytest.approx(rates, rel=1e-4)
+
+
+def test_a_constant_schedule_without_a_plateau_records_an_empty_list(monkeypatch, tmp_path) -> None:
+    """``[]`` (constant, no reduction) is distinct from ``null`` (a schedule that never installs
+    ``ReduceLROnPlateau``)."""
+    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    config = _config(tmp_path, "flat", lr_schedule="constant", max_samples=64, batch_size=32,
+                     epochs=2, model_analysis=False)
+    summary = common.train(config)
+    assert summary["lr_reduction_epochs"] == []
 
 
 # ---------------------------------------------------------------------
@@ -464,6 +519,33 @@ def test_the_epoch_line_callback_reports_top_5_when_the_logs_carry_it() -> None:
         "Epoch 3/7 - loss 1.5000 - accuracy 0.2500 - top_5_accuracy 0.5000 - val_loss 1.7500 "
         "- val_accuracy 0.1250 - val_top_5_accuracy 0.6250 - lr 0.001 - time ")
     assert lines[1].startswith("Epoch 4/7 - loss 1.0000 - time ")
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_the_epoch_line_prints_an_lr_only_when_it_is_finite(bad) -> None:
+    """N9: ``LearningRateLogger`` writes NaN into ``logs`` when the rate cannot be read, and
+    NaN is not None, so the line used to carry the placeholder ``lr nan``."""
+    callback = common._EpochLogLine()
+    callback.set_params({"epochs": 3})
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Capture()
+    logging.getLogger("dl").addHandler(handler)
+    try:
+        for epoch, lr in enumerate((bad, 0.002)):
+            callback.on_epoch_begin(epoch)
+            callback.on_epoch_end(epoch, {"loss": 1.0, "lr": lr})
+    finally:
+        logging.getLogger("dl").removeHandler(handler)
+    lines = [m for m in records if m.startswith("Epoch ")]
+    assert len(lines) == 2
+    assert " lr " not in lines[0] and "nan" not in lines[0] and "inf" not in lines[0], lines[0]
+    assert lines[0].startswith("Epoch 1/3 - loss 1.0000 - time ")
+    assert "lr 0.002 - time " in lines[1], lines[1]
 
 
 class _FakeOptimizer:
@@ -648,7 +730,7 @@ def _split_ids(monkeypatch, seed: int, validation_split: float = 0.1, max_sample
     loader, total = _identity_loader(n_train=200, n_test=100)
     monkeypatch.setattr(common, "load_dataset", loader)
     config = common.TrainingConfig(
-        seed=seed, validation_split=validation_split, max_samples=max_samples)
+        seed=seed, validation_split=validation_split, max_samples=max_samples, batch_size=8)
     data = common.prepare_data(config)
     return data, {
         "train": _ids(data, data.x_train, total),
@@ -686,12 +768,58 @@ def test_max_samples_caps_the_train_pool_and_the_test_set(monkeypatch) -> None:
     assert set(ids["test"].tolist()) <= set(range(200, 300))
 
 
-def test_a_split_that_holds_out_nothing_is_refused(monkeypatch) -> None:
+def test_a_split_that_holds_out_nothing_is_refused(monkeypatch, tmp_path) -> None:
+    """Refused when the config is built (no run directory), and again by ``prepare_data`` for a
+    config edited after construction."""
+    with pytest.raises(ValueError, match="holds out 0 of 5"):
+        common.TrainingConfig(max_samples=5, validation_split=0.1, batch_size=1,
+                              output_dir=str(tmp_path), experiment_name="nothing")
+    assert list(tmp_path.iterdir()) == []
     loader, _ = _identity_loader(n_train=200, n_test=100)
     monkeypatch.setattr(common, "load_dataset", loader)
-    config = common.TrainingConfig(max_samples=5, validation_split=0.1)
+    config = common.TrainingConfig(max_samples=50, validation_split=0.1, batch_size=8)
+    config.max_samples = 5  # bypasses __post_init__
     with pytest.raises(ValueError, match="holds out 0"):
         common.prepare_data(config)
+
+
+# ---------------------------------------------------------------------
+# W1: a train pool smaller than one batch is refused BEFORE a run directory exists
+# ---------------------------------------------------------------------
+
+
+def test_a_train_pool_smaller_than_one_batch_is_refused_before_any_run_directory(
+        monkeypatch, tmp_path) -> None:
+    """``--max-samples 64`` at the default batch 64 leaves 58 train samples (10% validation).
+    That used to die inside ``train`` AFTER ``prepare_run_dir``, so the experiment name was
+    burned by a directory holding only ``config.json`` and ``run.log``."""
+    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    with pytest.raises(ValueError, match="batch_size 64 exceeds the 58 train samples"):
+        common.TrainingConfig(max_samples=64, output_dir=str(tmp_path), experiment_name="w1")
+    assert list(tmp_path.iterdir()) == [], "the refusal must not leave a run directory behind"
+
+    # The same experiment name works once the flags are corrected.
+    config = common.TrainingConfig(
+        max_samples=64, batch_size=32, epochs=1, model_analysis=False,
+        output_dir=str(tmp_path), experiment_name="w1")
+    summary = common.train(config)
+    assert summary["status"] == "ok" and summary["n_train"] == 58
+    assert (tmp_path / "w1" / "results_summary.json").is_file()
+
+
+def test_the_command_line_refuses_a_too_small_pool_at_config_time() -> None:
+    args = common.parse_arguments(["--max-samples", "64"], "v1")
+    with pytest.raises(ValueError, match="exceeds the 58 train samples"):
+        common.config_from_args(args, "v1")
+
+
+def test_the_pool_check_uses_the_split_the_run_will_really_get() -> None:
+    """The full dataset is checked too: a validation split of 0.99 leaves 500 of 50000."""
+    with pytest.raises(ValueError, match="exceeds the 500 train samples"):
+        common.TrainingConfig(dataset="cifar10", validation_split=0.99, batch_size=1000)
+    assert common.split_sizes(50000, None, 0.1) == (45000, 5000)
+    assert common.split_sizes(50000, 64, 0.1) == (58, 6)
+    assert common.split_sizes(100, 500, 0.1) == (90, 10), "a cap above the data changes nothing"
 
 
 # ---------------------------------------------------------------------

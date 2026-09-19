@@ -134,6 +134,12 @@ STATUS_DIVERGED = "diverged"
 # Classes for which the top-5 metric is meaningful (10-class tasks report top-1 only).
 TOP_K_MIN_CLASSES = 11
 
+# Train-set size of each dataset. Used ONLY to refuse an impossible configuration before
+# a run directory exists (``TrainingConfig.__post_init__``); ``prepare_data`` sizes the
+# split from the array it really loaded, so a wrong entry here weakens the early refusal
+# but never the split.
+DATASET_TRAIN_SIZES: Dict[str, int] = {"mnist": 60000, "cifar10": 50000, "cifar100": 50000}
+
 
 @dataclass(frozen=True)
 class ModelFamily:
@@ -159,6 +165,32 @@ MODEL_FAMILIES: Dict[str, ModelFamily] = {
 # ---------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------
+
+def split_sizes(
+        n_available: int, max_samples: Optional[int], validation_split: float
+) -> Tuple[int, int]:
+    """Sizes of the fit and validation splits: the ONE place the split arithmetic lives.
+
+    Both :func:`prepare_data` (from the array it loaded) and ``TrainingConfig.__post_init__``
+    (from :data:`DATASET_TRAIN_SIZES`, before any run directory exists) call it, so the
+    early refusal cannot disagree with the split the run will really get.
+
+    Args:
+        n_available: Samples in the train set.
+        max_samples: The ``--max-samples`` cap, or ``None``.
+        validation_split: Fraction of the (capped) pool held out.
+
+    Returns:
+        ``(n_fit, n_val)``: the fit split and the validation split, summing to the pool.
+
+    Raises:
+        ValueError: If the validation split would hold out zero samples.
+    """
+    pool = n_available if max_samples is None else min(max_samples, n_available)
+    n_val = int(pool * validation_split)
+    if n_val == 0:
+        raise ValueError(f"validation_split={validation_split} holds out 0 of {pool} samples")
+    return pool - n_val, n_val
 
 @dataclass
 class TrainingConfig:
@@ -271,6 +303,14 @@ class TrainingConfig:
                 raise ValueError(
                     f"warmup_epochs ({self.warmup_epochs}) must be smaller than epochs ({self.epochs})"
                 )
+        # DECISION plan-2026-09-19T040641-db6932ec/D-027: the train pipeline drops the
+        # incomplete last batch (D-021), so the fit split must hold at least one full
+        # batch, and that is refused HERE. Do NOT move it back into ``train``: there it
+        # ran after ``prepare_run_dir``, so a rejected ``--max-samples 64`` left a run
+        # directory behind and burned the experiment name (review iteration 2, W1).
+        n_fit, _ = split_sizes(DATASET_TRAIN_SIZES[self.dataset], self.max_samples,
+                               self.validation_split)
+        steps_per_epoch_for(n_fit, self.batch_size)
         if self.experiment_name is None:
             self.experiment_name = default_experiment_name(
                 f"convnext_{self.model_family}", self.dataset, self.variant
@@ -533,11 +573,7 @@ def prepare_data(config: TrainingConfig) -> SplitData:
     if config.max_samples is not None:
         train_order = train_order[:config.max_samples]
         test_order = test_order[:config.max_samples]
-    val_size = int(len(train_order) * config.validation_split)
-    if val_size == 0:
-        raise ValueError(
-            f"validation_split={config.validation_split} holds out 0 of {len(train_order)} samples"
-        )
+    _, val_size = split_sizes(len(x_train), config.max_samples, config.validation_split)
     val_idx, train_idx = train_order[:val_size], train_order[val_size:]
 
     x_fit = x_train[train_idx]
@@ -585,7 +621,7 @@ def steps_per_epoch_for(n_train: int, batch_size: int) -> int:
         raise ValueError(
             f"batch_size {batch_size} exceeds the {n_train} train samples: the train "
             f"pipeline drops the incomplete last batch and would yield no step. "
-            f"Use a batch size of at most {n_train}."
+            f"Use a batch size of at most {n_train}, or a larger --max-samples."
         )
     return n_train // batch_size
 
@@ -736,8 +772,9 @@ class _EpochLogLine(keras.callbacks.Callback):
         total = (self.params or {}).get("epochs", "?")
         parts = [f"Epoch {epoch + 1}/{total}"]
         parts += [f"{key} {float(logs[key]):.4f}" for key in EPOCH_LINE_KEYS if key in logs]
-        if logs.get("lr") is not None:
-            parts.append(f"lr {float(logs['lr']):.6g}")
+        lr = logs.get("lr")
+        if lr is not None and math.isfinite(float(lr)):
+            parts.append(f"lr {float(lr):.6g}")
         parts.append(f"time {elapsed:.1f}s")
         logger.info(" - ".join(parts))
 
@@ -841,6 +878,12 @@ def _analyzer_notes(ran: bool) -> List[str]:
         "analyzer accuracy and its calibration numbers use the first 1000 test samples and "
         "differ from the full-test-set `test_metrics_*` and `ece`; its 'Final Acc' is not the "
         "final epoch's",
+        "analyzer figure labels (library output, not changed here): `training_dynamics.png` "
+        "counts 'Best Epoch' from 0 (this summary's `best_epoch` is 1-based); 'Final Acc' is "
+        "the first-1000-test-sample accuracy in `summary_dashboard.png` but the validation "
+        "accuracy in `training_dynamics.png`; the ECE in `summary_dashboard.png` uses the "
+        "first 1000 samples and differs from this summary's `ece`; panels of one figure can "
+        "show different layer counts",
         "the analyzer's spectral (WeightWatcher) verdicts such as 'overfit / over-trained' are "
         "heuristics: they read a 5-epoch model as over-trained and are unreliable for short "
         "runs and depthwise kernels",
@@ -1049,6 +1092,22 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
         epochs_run = len(hist.get(MONITOR, []))
         non_finite = run_summary.non_finite_metrics(hist, MONITOR)
 
+        # ``--lr-schedule constant`` adds ReduceLROnPlateau, whose message Keras prints to
+        # stdout, never to the logger; the rate history is how the run's own log and
+        # summary learn about it. Under cosine / exponential the rate falls every epoch
+        # by design, so the helper would name every epoch: there the key is null
+        # (not applicable: ReduceLROnPlateau is not installed), never an empty list that
+        # could be read as "constant and no plateau".
+        lr_reduction_epochs = (
+            run_summary.lr_reduction_epochs(hist.get("lr", []))
+            if config.lr_schedule == "constant" else None
+        )
+        for epoch in lr_reduction_epochs or []:
+            logger.info(
+                f"ReduceLROnPlateau: learning rate {hist['lr'][epoch - 2]:.3g} -> "
+                f"{hist['lr'][epoch - 1]:.3g} from epoch {epoch}"
+            )
+
         if non_finite:
             # TerminateOnNaN ended the run: fewer epochs than requested is NOT an early
             # stop and no best weights were restored, so ``stopped_early`` is unknown.
@@ -1065,6 +1124,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
                 "stopped_early": None,
                 "best_epoch": None,
                 "non_finite_metrics": non_finite,
+                "lr_reduction_epochs": lr_reduction_epochs,
                 "history": hist,
                 "epoch_times": list(dashboard.epoch_times),
                 "fit_wall_seconds": fit_wall_seconds,
@@ -1141,6 +1201,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
             "final_is_best": best_epoch == epochs_run,
             "lr_first_epoch": hist["lr"][0] if hist.get("lr") else None,
             "lr_last_epoch": hist["lr"][-1] if hist.get("lr") else None,
+            "lr_reduction_epochs": lr_reduction_epochs,
             "best_val_metrics": {k: hist[k][best_i] for k in val_keys},
             "final_val_metrics": {k: hist[k][final_i] for k in val_keys},
             "test_metrics_best": test_metrics_best,

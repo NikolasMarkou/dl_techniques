@@ -83,7 +83,7 @@ it). Both wrappers have the same flags; only `--variant` differs.
 |---|---|---|
 | `--dataset {mnist,cifar10,cifar100}` | `cifar10` | Dataset. `imagenet` is refused with an explicit error (see "Data"). |
 | `--validation-split` | `0.1` | Fraction of the TRAIN set held out (seeded) for early stopping and checkpoint selection. Strictly inside (0, 1); 0 is refused because it would silently validate on the test set. |
-| `--max-samples` | none | Cap the train pool and the test set at this many samples (smoke runs). Must be at least 2. |
+| `--max-samples` | none | Cap the train pool and the test set at this many samples (smoke runs). Refused at config time, before any run directory exists, unless the resulting train split (after the `--validation-split` cut, which must hold out at least one sample) holds at least one full `--batch-size` batch: `--max-samples 64` with the default batch 64 and split 0.1 leaves 58 train samples and is refused; lower `--batch-size` or raise `--max-samples`. |
 | `--variant` | `cifar10` | V1: `cifar10, tiny, small, base, large, xlarge`. V2: `cifar10, atto, femto, pico, nano, tiny, base, large, huge`. Sets depths and dims. |
 | `--kernel-size` | `7` | Depthwise convolution kernel size. |
 | `--strides` | `4` | Stem patch size AND every inter-stage downsample stride (one knob). See "Geometry". |
@@ -285,8 +285,14 @@ Notes:
   are unreliable for short runs and for depthwise kernels. Its `Final Acc` and ECE come from
   the first 1000 test samples and differ from the summary's full-test-set `test_metrics_*` and
   `ece`; the `Final Acc` is not the last epoch's accuracy. `summary_dashboard.png` can carry an
-  empty "No weight PCA data available" panel. The summary's `notes` repeat the caveat when the
-  analysis ran, and say it was skipped when it did not.
+  empty "No weight PCA data available" panel. Three more label facts, all library output that
+  this trainer does not change: `training_dynamics.png` counts "Best Epoch" from 0 (the summary's
+  `best_epoch` is 1-based); "Final Acc" is the first-1000-test-sample accuracy in
+  `summary_dashboard.png` but the validation accuracy in `training_dynamics.png` (so it can read
+  below "Best Acc" although the last epoch is the best); and the panels of one analyzer figure can
+  show different layer counts (`information_flow_analysis.png` in runs 2a and 2b: 10 layers on top, 8 below). The
+  summary's `notes` repeat the caveats when the analysis ran, and say it was skipped when it did
+  not.
 
 ### `results_summary.json` keys
 
@@ -319,14 +325,15 @@ Keys added by a finished run (`status: "ok"`):
 | `best_checkpoint_load_error`, `best_checkpoint_max_abs_diff` | Whether the best checkpoint loaded and its gap to the in-memory best weights. |
 | `epoch_times`, `fit_wall_seconds` | Seconds per epoch and the wall time of `fit`; the difference is time outside the epoch clock (dashboard redraws, checkpoint saves, train-end restore). |
 | `ece` | Expected calibration error on the FULL test set. |
-| `visualizations` | The files written, the ECE, and `failed` (empty on a healthy run). |
+| `visualizations` | `files`: the figure and report files that exist on disk (a perfect classifier writes no `misclassifications.png`, and the name is then absent, not listed), the ECE, and `failed` (figures that raised; empty on a healthy run). |
+| `lr_reduction_epochs` | 1-based epochs trained at a lower rate than the epoch before, from the `lr` history: only meaningful under `--lr-schedule constant` (which adds `ReduceLROnPlateau`), where an empty list means no plateau reduction; `null` under `cosine` and `exponential`, where the rate falls every epoch by design and `ReduceLROnPlateau` is not installed. |
 | `model_loading_validated` | Result of reloading `final_model.keras` and comparing predictions. |
 | `analyzer` | Status, loss, accuracy, error and path of the `ModelAnalyzer` run, read back from disk; `{"status": "skipped", ...}` with `null` for the rest under `--no-model-analysis`. |
 | `notes` | Plain-language caveats for the reader of the file. |
 
 A `diverged` summary carries the shared keys plus `status`, `epochs_run`, `stopped_early`
 (`null`: `TerminateOnNaN` ended the run, not `EarlyStopping`), `best_epoch` (`null`),
-`non_finite_metrics`, `history` (with `null`s), `epoch_times`, `fit_wall_seconds` and `notes`.
+`non_finite_metrics`, `lr_reduction_epochs`, `history` (with `null`s), `epoch_times`, `fit_wall_seconds` and `notes`.
 
 ---
 
