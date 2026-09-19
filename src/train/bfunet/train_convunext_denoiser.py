@@ -447,6 +447,16 @@ def parse_arguments() -> argparse.Namespace:
     )
     add_common_arguments(parser)
     parser.add_argument("--variant", choices=list(CONVUNEXT_CONFIGS), default="base")
+    parser.add_argument(
+        "--test-eval", action=argparse.BooleanOptionalAction, default=True,
+        help="After training, score best_model.keras and the last-epoch model on Kodak24 "
+             "and CBSD68 crops at sigma 15/25/50 (with the noisy-input baseline) and record "
+             "them under `test_eval` in results_summary.json. --no-test-eval records a skip.",
+    )
+    parser.add_argument(
+        "--test-num-samples", type=int, default=100,
+        help="Crops per held-out test set (the eval_psnr_vs_noise default).",
+    )
     parser.add_argument("--convnext-version", choices=["v1", "v2"], default="v1")
     parser.add_argument(
         "--gabor-filters-per-channel", type=int, default=None,
@@ -638,6 +648,8 @@ def main():
             block_normalization=args.block_normalization,
             viz_freq=1,
             viz_samples=args.viz_samples,
+            test_eval=args.test_eval,
+            test_num_samples=args.test_num_samples,
             mixed_precision=args.mixed_precision,
             output_dir=args.output_dir,
             experiment_name=args.experiment_name or "convunext_denoiser_smoke",
@@ -727,6 +739,8 @@ def main():
             validation_steps=args.validation_steps if args.validation_steps is not None else 100,
             viz_freq=args.viz_freq,
             viz_samples=args.viz_samples,
+            test_eval=args.test_eval,
+            test_num_samples=args.test_num_samples,
             output_dir=args.output_dir,
             experiment_name=args.experiment_name,
         )

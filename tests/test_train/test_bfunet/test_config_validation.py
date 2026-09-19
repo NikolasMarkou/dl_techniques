@@ -65,6 +65,8 @@ SHARED_BAD_ROWS = [
     ("max_train_files_zero", dict(max_train_files=0), "max_train_files"),
     ("max_val_files_zero", dict(max_val_files=0), "max_val_files"),
     ("max_val_files_negative", dict(max_val_files=-5), "max_val_files"),
+    ("test_num_samples_zero", dict(test_num_samples=0), "test_num_samples"),
+    ("test_num_samples_negative", dict(test_num_samples=-100), "test_num_samples"),
     ("mixed_precision_with_expose_bottleneck",
      dict(mixed_precision=True, expose_bottleneck=True), "mixed_precision"),
     ("deep_supervision", dict(enable_deep_supervision=True), "enable_deep_supervision"),
@@ -113,6 +115,8 @@ SHARED_GOOD_ROWS = [
     ("max_train_files_one", dict(max_train_files=1)),
     ("max_val_files_unset", dict(max_val_files=None)),
     ("max_val_files_one", dict(max_val_files=1)),
+    ("test_num_samples_one", dict(test_num_samples=1)),
+    ("test_eval_off_keeps_the_sample_count_rule_quiet", dict(test_eval=False, test_num_samples=7)),
     ("mixed_precision_alone", dict(mixed_precision=True)),
     ("expose_bottleneck_alone", dict(expose_bottleneck=True)),
     ("deep_supervision_off", dict(enable_deep_supervision=False)),
@@ -273,3 +277,5 @@ def test_default_configs_still_construct(cls) -> None:
     assert config.max_val_files == 500
     assert config.lr_schedule_type == "cosine_decay"
     assert config.optimizer_type == "adamw"
+    assert config.test_eval is True
+    assert config.test_num_samples == 100

@@ -1393,6 +1393,11 @@ class BFUnetTrainingConfig:
     viz_freq: int = 5  # save denoising grids every N epochs
     viz_samples: int = 8  # number of image columns in the eval grid
 
+    # Held-out test evaluation at the end of the run (best and final model on the fixed
+    # sets in ``TEST_DATASETS``, recorded in ``results_summary.json``); see ``_run_test_eval``.
+    test_eval: bool = True
+    test_num_samples: int = 100  # crops per test set, the eval script's own default
+
     def __post_init__(self):
         if self.experiment_name is None:
             # NOTE: `experiment_prefix` already ends with "_" (e.g. "denoiser_"),
@@ -1500,7 +1505,7 @@ class BFUnetTrainingConfig:
         # `epochs` is checked before everything derived from it (curriculum_epochs and
         # warmup_epochs default to it above), so epochs=0 names `epochs`, not a derivative.
         for name in ("batch_size", "epochs", "curriculum_epochs", "patches_per_image",
-                     "viz_freq", "viz_samples"):
+                     "viz_freq", "viz_samples", "test_num_samples"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
         # A cap of 0 files or 0 steps is not "unlimited": it used to be swallowed by an
@@ -2265,6 +2270,117 @@ SUMMARY_READING_NOTES: List[str] = [
 ]
 
 
+# The held-out sets the end-of-run test evaluation reads, hard-coded like the training
+# directories (name -> one directory, read recursively). ``TEST_SIGMAS_255`` are the noise
+# levels on the [0, 255] scale; ``TEST_EVAL_SEED`` is the seed ``eval_psnr_vs_noise`` defaults
+# to and is deliberately NOT ``config.seed``: the crops and the noise must be the same for
+# every run, or two runs would be compared on different test sets.
+TEST_DATASETS: Dict[str, str] = {
+    "kodak24": "/media/arxwn/data0_4tb/datasets/kodak24",
+    "cbsd68": "/media/arxwn/data0_4tb/datasets/cbsd68_src/CBSD68/original",
+}
+TEST_SIGMAS_255: Tuple[int, ...] = (15, 25, 50)
+TEST_EVAL_SEED = 42
+
+
+def _evaluate_held_out(
+    config: "BFUnetTrainingConfig", final_model: keras.Model, output_dir: Path,
+) -> Dict[str, Any]:
+    """Score ``best_model.keras`` (reloaded) and ``final_model`` on every set of ``TEST_DATASETS``.
+
+    Interface contract: ``final_model`` is the model in memory after the last epoch,
+    ``output_dir`` the run directory holding ``best_model.keras`` and its ``config.json``
+    stamp. Returns the ``test_eval`` block (``status`` ``ok`` when at least one set was
+    scored, ``skipped`` with a ``reason`` when none could be read); a set whose directory
+    holds no image is recorded as ``skipped`` with a WARNING and does not stop the others.
+    Raises whatever the load or the prediction raises; :func:`_run_test_eval` owns that.
+    Every number comes from ``eval_psnr_vs_noise.evaluate_dataset`` with a fresh
+    ``RandomState(TEST_EVAL_SEED)`` per set, exactly as its ``run_evaluation`` does, so the
+    same arguments given to that script reproduce them.
+    """
+    # DECISION plan-2026-09-19T131351-b8d39688/D-009: function-level import, because
+    # eval_psnr_vs_noise imports this module (``DATA_MIN`` and friends) and a top-level
+    # import here would be circular. Do NOT hoist it, and do NOT copy its sampling / noise /
+    # PSNR helpers in (a second instrument would drift from the one every later comparison
+    # is run with) or move them here (a large move of a working script for a cosmetic import).
+    from train.bfunet import eval_psnr_vs_noise as ev
+
+    started = time.time()
+    eval_config = ev.EvalConfig(
+        models={}, datasets={}, sigmas_255=list(TEST_SIGMAS_255),
+        num_samples=config.test_num_samples, patch_size=config.patch_size,
+        channels=config.channels, seed=TEST_EVAL_SEED,
+    )
+    models = {
+        "best": ev.load_denoiser(str(output_dir / "best_model.keras")),
+        "final": final_model,
+    }
+    datasets: Dict[str, Any] = {}
+    for name, directory in TEST_DATASETS.items():
+        paths = collect_image_paths([directory], extensions=ev.IMAGE_EXTENSIONS, sort=True)
+        if not paths:
+            reason = f"no image found under {directory} (missing directory or no matching file)"
+            logger.warning(f"Test set '{name}' skipped: {reason}")
+            datasets[name] = {"status": "skipped", "reason": reason}
+            continue
+        rows = ev.evaluate_dataset(
+            models, eval_config, name, paths, np.random.RandomState(eval_config.seed)
+        )
+        by_key = {(row["model"], row["sigma_255"]): row for row in rows}
+        sigmas = {}
+        for sigma in TEST_SIGMAS_255:
+            best, final = by_key[("best", sigma)], by_key[("final", sigma)]
+            sigmas[str(sigma)] = {
+                "input_psnr": best["input_psnr_mean"],
+                "best_psnr": best["psnr_mean"],
+                "final_psnr": final["psnr_mean"],
+                "gain_db": best["gain_db"],
+                "final_gain_db": final["gain_db"],
+                "n_patches": best["n"],
+            }
+        datasets[name] = {
+            "status": "ok", "directory": directory, "n_images": len(paths), "sigmas": sigmas,
+        }
+    block: Dict[str, Any] = {
+        "seed": TEST_EVAL_SEED,
+        "patch_size": config.patch_size,
+        "num_samples": config.test_num_samples,
+        "sigmas_255": list(TEST_SIGMAS_255),
+        "datasets": datasets,
+        "seconds": time.time() - started,
+    }
+    if any(entry["status"] == "ok" for entry in datasets.values()):
+        return {"status": "ok", **block}
+    return {"status": "skipped", "reason": "no test set directory holds an image", **block}
+
+
+def _run_test_eval(
+    config: "BFUnetTrainingConfig", final_model: keras.Model, output_dir: Path,
+) -> Dict[str, Any]:
+    """The ``test_eval`` block of ``results_summary.json``; never raises for an evaluation failure.
+
+    Interface contract: same arguments as :func:`_evaluate_held_out`. Returns
+    ``{"status": "skipped", "reason": "disabled"}`` when ``config.test_eval`` is off, the
+    scored block otherwise, and ``{"status": "error", "message": ...}`` (plus an ERROR log
+    line) when the evaluation raised.
+    """
+    if not config.test_eval:
+        logger.info("Held-out test evaluation disabled (test_eval=False).")
+        return {"status": "skipped", "reason": "disabled"}
+    # DECISION plan-2026-09-19T131351-b8d39688/D-009: the run has already trained and saved
+    # by now, so a failure here is recorded, loud, and never turned into a failed run. Do
+    # NOT let the exception propagate, and do NOT swallow it without the record and the log
+    # line: an error nobody sees would read as a run with no test numbers for no reason.
+    try:
+        block = _evaluate_held_out(config, final_model, output_dir)
+    except Exception as exc:  # noqa: BLE001 - recorded and logged, see the docstring
+        message = f"{type(exc).__name__}: {exc}"
+        logger.error(f"Held-out test evaluation failed (the run itself finished): {message}")
+        return {"status": "error", "message": message}
+    logger.info(f"Held-out test evaluation: {block['status']} in {block['seconds']:.1f}s")
+    return block
+
+
 def _summary_head(
     config: "BFUnetTrainingConfig",
     output_dir: Path,
@@ -2363,6 +2479,7 @@ def _write_finished_summary(
     epoch_times: List[float],
     fit_wall_seconds: float,
     model_loading_validated: Optional[bool],
+    test_eval: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Write ``results_summary.json`` for a run that finished with a finite history.
 
@@ -2372,8 +2489,8 @@ def _write_finished_summary(
     the ``final_model.keras`` round-trip verdict (``None`` when the check could not run).
     ``best_epoch`` is 1-based, the argmin of ``val_loss`` (the ModelCheckpoint monitor);
     ``best_val_metrics`` / ``final_val_metrics`` are the ``val_*`` columns of the best and
-    the last epoch. ``test_eval`` is ``None`` until the held-out evaluation fills it.
-    Returns the strict-JSON dict written.
+    the last epoch. ``test_eval`` is the block :func:`_run_test_eval` returned. Returns the
+    strict-JSON dict written.
     """
     epochs_run = len(hist["val_loss"])
     best_epoch = run_summary.best_epoch(hist, "val_loss")
@@ -2392,11 +2509,16 @@ def _write_finished_summary(
         "epoch_times": epoch_times,
         "fit_wall_seconds": fit_wall_seconds,
         "model_loading_validated": model_loading_validated,
-        "test_eval": None,
+        "test_eval": test_eval,
         "notes": [
             "`final_model.keras` holds the LAST epoch's weights and `best_model.keras` the "
             "best `val_loss` epoch's; they are equal only when `final_is_best` is true",
-            "`test_eval` is null: no held-out test evaluation is part of this summary yet",
+            "`test_eval` scores `best_model.keras` (`best_psnr`) and the last-epoch model "
+            "(`final_psnr`) on fixed held-out crops: `input_psnr` is the noisy input "
+            "against the clean crop, `gain_db` = `best_psnr` - `input_psnr` and "
+            "`final_gain_db` = `final_psnr` - `input_psnr`; crops and noise are fixed by "
+            "`seed`, so `eval_psnr_vs_noise` with the same seed, patch size, sample count "
+            "and sigmas reproduces them",
             *SUMMARY_READING_NOTES,
         ],
     })
@@ -3019,6 +3141,7 @@ def _train_in_run_dir(
         epoch_times=epoch_line.epoch_times,
         fit_wall_seconds=fit_wall_seconds,
         model_loading_validated=model_loading_validated,
+        test_eval=_run_test_eval(config, model, output_dir),
     )
 
     gc.collect()

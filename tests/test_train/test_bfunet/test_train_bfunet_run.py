@@ -47,6 +47,8 @@ STEPS_PER_EPOCH = 3
 VALIDATION_STEPS = 2
 EXPERIMENT = "bfunet_e2e"
 FIXTURE_BUDGET_SECONDS = 90.0
+N_TEST_IMAGES = 3        # per generated held-out set; fewer than TEST_NUM_SAMPLES on purpose
+TEST_NUM_SAMPLES = 5     # crops per held-out set, so the crop list wraps around the images
 
 # Keras ignores an unfinished-epoch advisory here for the same reason the self-iterate
 # fit test does: the tiny generated corpus is smaller than ``steps_per_epoch`` batches.
@@ -82,11 +84,30 @@ def _tiny_config(root: Path, name: str, **overrides) -> TrainingConfig:
         viz_freq=1,
         viz_samples=2,
         seed=0,
+        # The held-out evaluation is OFF unless a fixture asks for it: it reloads the best
+        # model and predicts on two sets, which the fixtures that do not read it need not pay.
+        test_eval=False,
+        test_num_samples=TEST_NUM_SAMPLES,
         output_dir=str(root / "out"),
         experiment_name=name,
     )
     fields.update(overrides)
     return TrainingConfig(**fields)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def held_out_sets(tmp_path_factory) -> Dict[str, str]:
+    """Two tiny generated stand-ins for Kodak24 and CBSD68, wired in for the whole module.
+
+    ``common.TEST_DATASETS`` names two directories on the data disk; no test may read them.
+    """
+    root = tmp_path_factory.mktemp("bfunet_held_out")
+    _write_pngs(root / "kodak24", N_TEST_IMAGES, seed=11)
+    _write_pngs(root / "cbsd68", N_TEST_IMAGES, seed=12)
+    sets = {"kodak24": str(root / "kodak24"), "cbsd68": str(root / "cbsd68")}
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "TEST_DATASETS", sets)
+        yield sets
 
 
 def run_train(config: TrainingConfig) -> keras.Model:
@@ -106,7 +127,7 @@ def e2e(tmp_path_factory) -> SimpleNamespace:
     root = tmp_path_factory.mktemp("bfunet_e2e")
     _write_pngs(root / "train", N_TRAIN, seed=1)
     _write_pngs(root / "val", N_VAL, seed=2)
-    config = _tiny_config(root, EXPERIMENT)
+    config = _tiny_config(root, EXPERIMENT, test_eval=True)
     started = time.time()
     run_train(config)
     seconds = time.time() - started
@@ -675,7 +696,8 @@ def early_stop_run(tmp_path_factory) -> SimpleNamespace:
     _write_pngs(root / "train", N_TRAIN, seed=1)
     _write_pngs(root / "val", N_VAL, seed=2)
     recorder = _WeightRecorder()
-    config = _tiny_config(root, "early_stop", epochs=4, early_stopping_patience=1)
+    config = _tiny_config(
+        root, "early_stop", epochs=4, early_stopping_patience=1, test_eval=True)
     _run_with_callbacks(
         config, front=[_ScriptedValLoss([1.0, 0.5, 0.9, 0.8])], back=[recorder])
     run_dir = root / "out" / "early_stop"
@@ -711,7 +733,7 @@ def default_run(tmp_path_factory) -> SimpleNamespace:
     _write_pngs(root / "train", N_TRAIN, seed=1)
     _write_pngs(root / "val", N_VAL, seed=2)
     recorder = _WeightRecorder()
-    config = _tiny_config(root, "default_final", epochs=2)
+    config = _tiny_config(root, "default_final", epochs=2, test_eval=True)
     # Scripted val_loss (a falling pair) so step 8's ``final_is_best`` has a True case with a
     # literal expectation; it changes no weight, only which epoch ModelCheckpoint calls best.
     # ``validate_model_loading`` is forced to report a FAILED round trip here (a corrupt
@@ -970,7 +992,7 @@ def test_the_summary_records_the_model_and_the_finished_run_facts(ok_run) -> Non
     assert summary["variant"] == "tiny"
     assert isinstance(summary["params"], int) and summary["params"] > 1000
     assert summary["init_from"] is None
-    assert summary["test_eval"] is None       # step 9 fills it
+    assert summary["test_eval"]["status"] == "ok"      # the fixtures evaluate on generated sets
     assert summary["model_loading_validated"] is (ok_run.name != "default_run")
     assert summary["fit_wall_seconds"] > 0.0
     assert summary["cuda_visible_devices"] == os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -1003,3 +1025,265 @@ def test_a_diverged_summary_names_the_real_directory_and_times_each_epoch_it_ran
     assert all(key in summary["noise"] for key in NOISE_KEYS)
     assert summary["lr_first_epoch"] == pytest.approx(1e-8)
     assert summary["cuda_visible_devices"] == os.environ.get("CUDA_VISIBLE_DEVICES")
+
+
+# ---------------------------------------------------------------------
+# iter-1/step-9 (plan-2026-09-19T131351-b8d39688/D-009): held-out test evaluation
+# ---------------------------------------------------------------------
+
+# Typed here from the plan, never read from the trainer.
+TEST_SIGMAS_255 = (15, 25, 50)
+TEST_SEED = 42
+CELL_KEYS = ("input_psnr", "best_psnr", "final_psnr", "gain_db", "final_gain_db", "n_patches")
+
+
+def _held_out_crops(directory: str):
+    """``[(sigma_255, clean, noisy)]`` the instrument must have used on ``directory``.
+
+    The crops are drawn by the SCRIPT's sampler (that sampler is the instrument the trainer
+    promises to reproduce), but the seed, the fresh per-dataset generator, the path order and
+    every number computed from them are re-derived here, so a trainer that seeds differently
+    or shares one generator across sets no longer matches.
+    """
+    from train.bfunet import eval_psnr_vs_noise as ev
+
+    paths = sorted(str(p) for p in Path(directory).glob("*.png"))
+    config = ev.EvalConfig(models={}, datasets={}, num_samples=TEST_NUM_SAMPLES, patch_size=PATCH)
+    rng = np.random.RandomState(TEST_SEED)
+    clean = ev.sample_clean_patches(config, paths, rng)
+    return [
+        (sigma, clean, ev.add_awgn(clean, sigma / 255.0, True, rng))
+        for sigma in TEST_SIGMAS_255
+    ]
+
+
+def _mean_psnr(image: np.ndarray, clean: np.ndarray) -> float:
+    """Mean over the crops of ``20 * log10(1 / rmse)`` (the peak is 1.0 on the unit domain)."""
+    rmse = np.sqrt(np.mean((image.astype(np.float64) - clean.astype(np.float64)) ** 2,
+                           axis=(1, 2, 3)))
+    return float(np.mean(20.0 * np.log10(1.0 / rmse)))
+
+
+def _block(run_dir: Path) -> Dict:
+    return _strict_json(run_dir / "results_summary.json")["test_eval"]
+
+
+def test_the_test_eval_block_has_every_dataset_sigma_and_field(e2e, held_out_sets) -> None:
+    block = _block(e2e.run_dir)
+    assert block["status"] == "ok"
+    assert (block["seed"], block["patch_size"], block["num_samples"]) == (42, 16, 5)
+    assert block["sigmas_255"] == [15, 25, 50]
+    assert sorted(block["datasets"]) == ["cbsd68", "kodak24"]
+    for name, entry in block["datasets"].items():
+        assert entry["status"] == "ok", name
+        assert entry["directory"] == held_out_sets[name]
+        assert sorted(entry["sigmas"]) == ["15", "25", "50"], name
+        for sigma, cell in entry["sigmas"].items():
+            assert sorted(cell) == sorted(CELL_KEYS), (name, sigma)
+            assert cell["n_patches"] == 5
+            assert all(np.isfinite(cell[key]) for key in CELL_KEYS), (name, sigma)
+
+
+def test_the_input_psnr_is_recomputed_from_the_same_crops(e2e, held_out_sets) -> None:
+    """The noisy-input baseline: 20*log10(1/rmse) of the noisy crops against the clean ones."""
+    block = _block(e2e.run_dir)
+    for name, directory in held_out_sets.items():
+        for sigma, clean, noisy in _held_out_crops(directory):
+            recorded = block["datasets"][name]["sigmas"][str(sigma)]["input_psnr"]
+            assert recorded == pytest.approx(_mean_psnr(noisy, clean), abs=1e-4), (name, sigma)
+
+
+def test_the_two_sets_get_different_crops_so_the_reseed_is_visible(held_out_sets) -> None:
+    """Anti-vacuity for the re-seed: a generator shared across the sets would change the
+    second set's crops, and that has to show up in the number recomputed above."""
+    crops = {name: _held_out_crops(directory) for name, directory in held_out_sets.items()}
+    assert not np.array_equal(crops["kodak24"][0][1], crops["cbsd68"][0][1])
+
+
+@pytest.mark.parametrize("run_name", ["e2e", "early_stop_run", "default_run"])
+def test_the_gains_are_the_psnr_minus_the_noisy_input(request, run_name) -> None:
+    block = _block(request.getfixturevalue(run_name).run_dir)
+    for name, entry in block["datasets"].items():
+        for sigma, cell in entry["sigmas"].items():
+            assert cell["gain_db"] == pytest.approx(cell["best_psnr"] - cell["input_psnr"], abs=1e-9)
+            assert cell["final_gain_db"] == pytest.approx(
+                cell["final_psnr"] - cell["input_psnr"], abs=1e-9), (name, sigma)
+
+
+def test_best_and_final_are_the_same_number_when_the_final_epoch_is_the_best(default_run) -> None:
+    """``default_run`` scripts val_loss [0.9, 0.5]: epoch 2 is best AND last, so the file the
+    best number is read from and the model in memory hold the same weights."""
+    summary = _strict_json(default_run.run_dir / "results_summary.json")
+    assert summary["final_is_best"] is True
+    for entry in summary["test_eval"]["datasets"].values():
+        for cell in entry["sigmas"].values():
+            assert cell["best_psnr"] == cell["final_psnr"]
+            assert cell["gain_db"] == cell["final_gain_db"]
+
+
+def test_best_and_final_differ_when_the_best_epoch_is_not_the_last(early_stop_run) -> None:
+    """Anti-vacuity for the equality above, and for a best/final swap: scripted val_loss
+    [1.0, 0.5, 0.9] makes the best epoch 2 of 3, so the two files hold different weights."""
+    summary = _strict_json(early_stop_run.run_dir / "results_summary.json")
+    assert summary["final_is_best"] is False
+    cells = [c for e in summary["test_eval"]["datasets"].values() for c in e["sigmas"].values()]
+    assert any(c["best_psnr"] != c["final_psnr"] for c in cells)
+
+
+@pytest.mark.parametrize("kind", ["best", "final"])
+def test_each_number_is_that_checkpoints_own_psnr_computed_independently(
+        early_stop_run, held_out_sets, kind) -> None:
+    """The model behind ``best_psnr`` is ``best_model.keras`` and behind ``final_psnr`` the
+    last epoch, measured here by loading the file and applying the formula directly (nothing
+    from the script's predict or PSNR helpers). Uses the run whose best is not its last."""
+    model = keras.models.load_model(early_stop_run.run_dir / f"{kind}_model.keras", compile=False)
+    block = _block(early_stop_run.run_dir)
+    for name, directory in held_out_sets.items():
+        for sigma, clean, noisy in _held_out_crops(directory):
+            recorded = block["datasets"][name]["sigmas"][str(sigma)][f"{kind}_psnr"]
+            direct = _mean_psnr(np.asarray(model.predict(noisy, batch_size=16, verbose=0)), clean)
+            assert recorded == pytest.approx(direct, abs=0.01), (kind, name, sigma)
+
+
+def test_the_trainers_numbers_reproduce_the_eval_script_with_the_same_arguments(
+        e2e, held_out_sets, tmp_path) -> None:
+    """One paired ``eval_psnr_vs_noise`` run over the run's own two checkpoints, same seed,
+    patch size, sample count and sigmas, gives the numbers the trainer wrote (0.01 dB)."""
+    from train.bfunet import eval_psnr_vs_noise as ev
+
+    out = ev.run_evaluation(ev.EvalConfig(
+        models={"best": str(e2e.run_dir / "best_model.keras"),
+                "final": str(e2e.run_dir / "final_model.keras")},
+        datasets={name: [directory] for name, directory in held_out_sets.items()},
+        sigmas_255=list(TEST_SIGMAS_255), num_samples=TEST_NUM_SAMPLES, patch_size=PATCH,
+        seed=TEST_SEED, output_dir=str(tmp_path), experiment_name="paired_eval",
+    ))
+    rows = json.loads((out / "psnr_vs_noise.json").read_text())
+    block = _block(e2e.run_dir)
+    assert len(rows) == 2 * 2 * 3
+    for row in rows:
+        cell = block["datasets"][row["dataset"]]["sigmas"][str(int(row["sigma_255"]))]
+        assert cell[f"{row['model']}_psnr"] == pytest.approx(row["psnr_mean"], abs=0.01), row
+        assert cell["input_psnr"] == pytest.approx(row["input_psnr_mean"], abs=1e-6), row
+        assert cell["n_patches"] == row["n"]
+
+
+# --- the helper itself: skip, disable, error -----------------------------------------------
+
+def _capture_dl_log():
+    records: List[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Capture(level=logging.INFO)
+    logging.getLogger("dl").addHandler(handler)
+    return records, handler
+
+
+def test_a_missing_directory_skips_that_set_with_a_warning_and_the_rest_still_runs(
+        e2e, held_out_sets, tmp_path) -> None:
+    gone = str(tmp_path / "no_such_set")
+    records, handler = _capture_dl_log()
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(common, "TEST_DATASETS", {"kodak24": held_out_sets["kodak24"], "cbsd68": gone})
+            block = common._run_test_eval(e2e.config, e2e.final, e2e.run_dir)
+    finally:
+        logging.getLogger("dl").removeHandler(handler)
+    assert block["status"] == "ok"
+    assert block["datasets"]["kodak24"]["status"] == "ok"
+    skipped = block["datasets"]["cbsd68"]
+    assert skipped["status"] == "skipped" and gone in skipped["reason"], skipped
+    assert any(r.levelno == logging.WARNING and gone in r.getMessage()
+               and "cbsd68" in r.getMessage() for r in records), [r.getMessage() for r in records]
+
+
+def test_when_every_directory_is_missing_the_whole_block_is_a_skip(e2e, tmp_path) -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "TEST_DATASETS", {"kodak24": str(tmp_path / "a"), "cbsd68": str(tmp_path / "b")})
+        block = common._run_test_eval(e2e.config, e2e.final, e2e.run_dir)
+    assert block["status"] == "skipped" and block["reason"]
+    assert all(entry["status"] == "skipped" for entry in block["datasets"].values())
+
+
+def test_a_disabled_test_eval_records_a_skip_and_reads_nothing(e2e, tmp_path) -> None:
+    from dataclasses import replace
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "TEST_DATASETS", {"kodak24": str(tmp_path / "never_read")})
+        block = common._run_test_eval(replace(e2e.config, test_eval=False), e2e.final, e2e.run_dir)
+    assert block == {"status": "skipped", "reason": "disabled"}
+
+
+def test_a_disabled_run_writes_the_skip_into_its_summary(unset_steps_run) -> None:
+    """The fixture leaves ``test_eval`` off (the ``_tiny_config`` default): a real run, not a helper call."""
+    summary = _strict_json(unset_steps_run.run_dir / "results_summary.json")
+    assert summary["status"] == "ok"
+    assert summary["test_eval"] == {"status": "skipped", "reason": "disabled"}
+
+
+def test_an_error_in_the_test_eval_is_recorded_and_logged_and_never_raised(e2e) -> None:
+    """A finished run must survive its own post-run evaluation failing, and say so."""
+    from train.bfunet import eval_psnr_vs_noise as ev
+
+    def boom(path):
+        raise RuntimeError("scripted load failure")
+
+    records, handler = _capture_dl_log()
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(ev, "load_denoiser", boom)
+            block = common._run_test_eval(e2e.config, e2e.final, e2e.run_dir)
+    finally:
+        logging.getLogger("dl").removeHandler(handler)
+    assert block["status"] == "error"
+    assert "RuntimeError" in block["message"] and "scripted load failure" in block["message"]
+    assert any(r.levelno == logging.ERROR and "scripted load failure" in r.getMessage()
+               for r in records), [r.getMessage() for r in records]
+
+
+def test_a_model_that_returns_its_input_gains_exactly_zero(e2e) -> None:
+    """The baseline and the model share one noisy batch: identity in, identity out."""
+    identity = keras.Sequential([keras.Input(shape=(PATCH, PATCH, 3)), keras.layers.Identity()])
+    block = common._run_test_eval(e2e.config, identity, e2e.run_dir)
+    assert block["status"] == "ok"
+    for entry in block["datasets"].values():
+        for cell in entry["sigmas"].values():
+            assert cell["final_gain_db"] == 0.0
+            assert cell["final_psnr"] == cell["input_psnr"]
+
+
+# --- the flags -----------------------------------------------------------------------------
+
+def _config_main_builds(argv: List[str]) -> TrainingConfig:
+    """The config ``main()`` hands to ``train`` for ``argv`` (training stubbed)."""
+    import sys
+
+    import train.bfunet.train_convunext_denoiser as trainer
+
+    seen: List[TrainingConfig] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(trainer, "setup_gpu", lambda gpu_id=None: None)
+        patch.setattr(trainer, "train", lambda main_config: seen.append(main_config))
+        patch.setattr(sys, "argv", ["train_convunext_denoiser", *argv])
+        trainer.main()
+    (config,) = seen
+    return config
+
+
+@pytest.mark.parametrize("smoke", [False, True], ids=["full", "smoke"])
+def test_the_cli_flags_reach_the_config(smoke) -> None:
+    extra = ["--smoke"] if smoke else []
+    default = _config_main_builds(extra)
+    assert (default.test_eval, default.test_num_samples) == (True, 100)
+    off = _config_main_builds([*extra, "--no-test-eval", "--test-num-samples", "7"])
+    assert (off.test_eval, off.test_num_samples) == (False, 7)
+    on = _config_main_builds([*extra, "--test-eval", "--test-num-samples", "3"])
+    assert (on.test_eval, on.test_num_samples) == (True, 3)
+
+
+def test_a_zero_sample_count_is_refused_at_the_command_line() -> None:
+    with pytest.raises(ValueError, match="test_num_samples"):
+        _config_main_builds(["--test-num-samples", "0"])
