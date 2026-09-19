@@ -35,7 +35,7 @@ matplotlib.use("Agg")  # must precede the pyplot import: headless-safe
 
 import keras  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.ticker import FuncFormatter, MaxNLocator  # noqa: E402
+from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullFormatter  # noqa: E402
 import numpy as np  # noqa: E402
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support  # noqa: E402
 
@@ -92,6 +92,12 @@ TIME_CLIP_FACTOR = 3.0
 # even), the exact text this floor exists to remove.
 CONFUSION_MIN_ANNOTATION = 0.005
 
+# The per-class bar chart starts its y axis at zero, so bar length is proportional to the
+# score. Only when EVERY bar is at or above this value is the axis truncated (a 0.98
+# MNIST chart would otherwise be a wall of equal bars) and the axis label says so. A
+# truncated axis on a weaker run made a 0.52 bar look a seventh as tall as a 0.86 one.
+PER_CLASS_TRUNCATE_FROM = 0.8
+
 
 # ---------------------------------------------------------------------
 # Helpers
@@ -112,33 +118,86 @@ def _save_and_close(fig: plt.Figure, out_path: PathLike) -> str:
     return str(out)
 
 
-# Minor tick labels on a log axis are drawn only while the visible range is narrower than
-# this ratio (hi / lo); at or above it the major decades carry the labels alone.
-LOG_MINOR_LABEL_MAX_RATIO = 10.0
+# Below this ratio (hi / lo) a log axis is "narrow": its ticks come from a nice set of
+# mantissas (see ``_nice_log_ticks``) and it has no minor ticks; at or above it the
+# ordinary decade ticks carry the labels alone.
+LOG_NARROW_MAX_RATIO = 10.0
+
+# Mantissa sets tried in order until at least ``LOG_MIN_NICE_TICKS`` ticks fall inside
+# the view: coarse first (1, 1.5, 2, 3, 5 read cleanly), then finer for a very narrow view.
+_NICE_MANTISSAS: Tuple[Tuple[float, ...], ...] = (
+    (1.0, 1.5, 2.0, 3.0, 5.0),
+    (1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0),
+    tuple(round(1.0 + 0.1 * i, 1) for i in range(90)),
+)
+LOG_MIN_NICE_TICKS = 3
+
+
+def _nice_log_ticks(vmin: float, vmax: float) -> np.ndarray:
+    """Ticks in ``[vmin, vmax]`` from the coarsest mantissa set that gives enough of them.
+
+    A 0.8 to 2.4 loss range reads ``1, 1.5, 2`` (matplotlib's own minor ticks read
+    ``2, 1, 0.9, 0.8``: crowded at one end, empty at 1.5).
+
+    Args:
+        vmin, vmax: The visible range, ``0 < vmin < vmax``.
+
+    Returns:
+        Ascending tick values inside the range (possibly fewer than
+        :data:`LOG_MIN_NICE_TICKS` if even the finest set cannot give that many).
+    """
+    lo_exp, hi_exp = int(np.floor(np.log10(vmin))), int(np.ceil(np.log10(vmax)))
+    ticks = np.array([])
+    for mantissas in _NICE_MANTISSAS:
+        candidates = np.array([m * 10.0 ** e for e in range(lo_exp, hi_exp + 1) for m in mantissas])
+        ticks = candidates[(candidates >= vmin) & (candidates <= vmax)]
+        if len(ticks) >= LOG_MIN_NICE_TICKS:
+            break
+    return ticks
+
+
+class _NarrowAwareLogLocator(LogLocator):
+    """A ``LogLocator`` whose ticks depend on how wide the view is.
+
+    Wide (``vmax / vmin`` at or above :data:`LOG_NARROW_MAX_RATIO`): behaves as the base
+    class (decades as major ticks, the usual minor ticks). Narrow: the major locator
+    returns :func:`_nice_log_ticks` and the minor locator returns nothing, so no tick
+    is labelled twice.
+
+    Args:
+        minor: ``True`` for the minor-tick instance.
+    """
+
+    def __init__(self, minor: bool = False) -> None:
+        super().__init__(base=10.0, subs="auto" if minor else (1.0,), numticks="auto")
+        self._is_minor = minor
+
+    def tick_values(self, vmin: float, vmax: float) -> np.ndarray:
+        if vmin > 0.0 and vmax < vmin * LOG_NARROW_MAX_RATIO:
+            return np.array([]) if self._is_minor else _nice_log_ticks(vmin, vmax)
+        return super().tick_values(vmin, vmax)
 
 
 def _plain_log_ticks(ax) -> None:
-    """Label a log-scaled y axis with plain numbers instead of ``2x10^0`` clutter.
+    """Label a log-scaled y axis with plain numbers at readable positions.
 
     The default log formatter prints scientific notation on every minor tick once the
     range is under a decade (a loss curve of 1.1 to 2.5 read ``1.8x10^0``, ``2x10^0``).
-    Major ticks read ``{value:.3g}`` (``1.5``, ``0.001``); minor ticks read the same while
-    the visible range ``hi / lo`` is below :data:`LOG_MINOR_LABEL_MAX_RATIO` and are blank
-    otherwise, so a wide range keeps only its decades. The range is read when the labels
-    are drawn, so later ``set_ylim`` calls are honoured.
+    Labels read ``{value:.3g}`` (``1.5``, ``0.001``). A wide range (``hi / lo`` at or above
+    :data:`LOG_NARROW_MAX_RATIO`) keeps its decades and no minor labels; a narrow one gets
+    ticks from a nice set (:func:`_nice_log_ticks`) and no minor ticks. The range is read
+    when the ticks are drawn, so later ``set_ylim`` calls are honoured.
 
     Args:
         ax: An axes whose y scale is already ``"log"``; nothing is checked or drawn here.
     """
-    def major(value: float, _pos: Optional[int]) -> str:
+    def label(value: float, _pos: Optional[int]) -> str:
         return f"{value:.3g}"
 
-    def minor(value: float, pos: Optional[int]) -> str:
-        lo, hi = ax.get_ylim()
-        return major(value, pos) if lo > 0.0 and hi < lo * LOG_MINOR_LABEL_MAX_RATIO else ""
-
-    ax.yaxis.set_major_formatter(FuncFormatter(major))
-    ax.yaxis.set_minor_formatter(FuncFormatter(minor))
+    ax.yaxis.set_major_locator(_NarrowAwareLogLocator())
+    ax.yaxis.set_minor_locator(_NarrowAwareLogLocator(minor=True))
+    ax.yaxis.set_major_formatter(FuncFormatter(label))
+    ax.yaxis.set_minor_formatter(NullFormatter())
 
 
 def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
@@ -583,6 +642,9 @@ def plot_per_class_metrics(
 ) -> Dict[str, Any]:
     """Save grouped bars of precision / recall / F1 per class.
 
+    The y axis starts at 0 unless every bar is at or above :data:`PER_CLASS_TRUNCATE_FROM`,
+    in which case it is truncated and the axis label says so.
+
     Args:
         y_true: Integer true labels ``(N,)``.
         y_pred: Integer predicted labels ``(N,)``.
@@ -611,10 +673,11 @@ def plot_per_class_metrics(
         ):
             ax.bar(x + offset, values, width, color=color, label=label)
         lo = float(min(prec.min(), rec.min(), f1.min()))
-        ax.set_ylim(max(0.0, lo - 0.05), 1.005)
+        truncated = lo >= PER_CLASS_TRUNCATE_FROM
+        ax.set_ylim(max(0.0, lo - 0.05) if truncated else 0.0, 1.005)
         ax.set_xticks(x)
         ax.set_xticklabels([f"{nm}\n(n={int(s)})" for nm, s in zip(names, support)], fontsize=8)
-        ax.set_ylabel("score (y-axis truncated)")
+        ax.set_ylabel("score (y-axis truncated)" if truncated else "score")
         ax.set_title(f"Per-class precision / recall / F1 (macro F1 {float(f1.mean()):.4f})")
         # ``grid(axis="y")`` alone leaves the x grid at the ambient rcParams value:
         # ``dl_techniques.visualization.core`` sets a whitegrid style at import, so

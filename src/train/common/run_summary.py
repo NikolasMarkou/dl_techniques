@@ -129,7 +129,9 @@ def write_classification_figures(
             and reshaping the misclassification grid).
 
     Returns:
-        ``{"files": [names written], "ece": float | None, "failed": [names]}``.
+        ``{"files": [names of files that exist on disk], "ece": float | None,
+        "failed": [names]}``. A figure that raised is in ``failed``; one that legitimately
+        wrote nothing (a perfect classifier has no misclassification grid) is in neither.
     """
     y_pred = np.argmax(probs, axis=-1)
     out: Dict[str, Any] = {"files": [], "ece": None, "failed": []}
@@ -137,7 +139,8 @@ def write_classification_figures(
     def _attempt(name: str, fn: Callable[[], Any]) -> Any:
         try:
             result = fn()
-            out["files"].append(name)
+            if (vis_dir / name).is_file():
+                out["files"].append(name)
             return result
         except Exception as e:  # noqa: BLE001 - a figure must not fail the run
             logger.warning(f"Visualization {name} failed: {e}")

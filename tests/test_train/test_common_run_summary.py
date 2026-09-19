@@ -172,6 +172,10 @@ def test_a_perfect_classifier_has_no_misclassification_grid_and_that_is_not_a_fa
     out = run_summary.write_classification_figures(tmp_path, x, y, perfect, list("abcd"))
     assert out["failed"] == []
     assert not (tmp_path / "misclassifications.png").exists()
+    # N5: the summary must not claim a file that was never written.
+    assert "misclassifications.png" not in out["files"], out["files"]
+    assert set(out["files"]) == FIGURES - {"misclassifications.png"}
+    assert all((tmp_path / name).is_file() for name in out["files"])
 
 
 # ---------------------------------------------------------------------

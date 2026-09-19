@@ -252,7 +252,7 @@ Written by one function with `allow_nan=False`: strict JSON, non-finite values b
 | `test_metrics_final`, `test_metrics_best` | Test metrics of the in-memory weights after best-weight restore, and of `best_model.keras`. Equal by construction. |
 | `epoch_times` | Seconds per epoch (epoch 1 includes the XLA warmup). |
 | `ece` | Expected calibration error on the FULL test set. |
-| `visualizations` | The files written, the ECE, and `failed` (a list, empty on a healthy run; a figure error is swallowed into it rather than killing the run). |
+| `visualizations` | The files that exist on disk after writing (a perfect classifier writes no `misclassifications.png`, so it is not listed), the ECE, and `failed` (a list, empty on a healthy run; a figure error is swallowed into it rather than killing the run). |
 | `model_loading_validated`, `best_checkpoint_load_error` | Result of loading `best_model.keras` back and comparing predictions. |
 | `analyzer` | Status, loss, accuracy (first 1000 test samples) and path of the `ModelAnalyzer` run. |
 | `notes` | Plain-language caveats for the reader of the file (initial-loss mode, the guard is a floor, epoch indexing, ECE slice, final == best). |

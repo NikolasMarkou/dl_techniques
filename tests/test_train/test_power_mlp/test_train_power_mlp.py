@@ -726,7 +726,26 @@ def test_dashboard_loss_axis_reads_plain_numbers_for_a_narrow_range(
         assert shown, (title, "no tick label at all: the guard would pass vacuously")
         assert not any("10^" in t or "x" in t or "\u00d7" in t for t in shown), (title, shown)
         assert all(0.0 < float(t) < 3.0 for t in shown), (title, shown)  # plain, parseable
-    assert any(t for t in read["Loss"][1]), "a narrow range keeps its minor labels"
+        assert [t for t in minor if t] == [], (title, "a narrow range has no minor labels")
+
+
+def test_dashboard_loss_axis_ticks_for_a_narrow_range_come_from_the_nice_set(
+        tmp_path, monkeypatch) -> None:
+    """G1: a loss of 0.8 to 2.4 read ``2, 1, 0.9, 0.8`` (crowded at one end, no 1.5). The
+    ticks now come from 1, 1.5, 2, 3, 5 x 10^k, so the axis reads ``1, 1.5, 2``."""
+    read = _loss_axis_labels(tmp_path, monkeypatch, 0.8, 2.4)
+    for title, (major, minor) in read.items():
+        assert [t for t in major if t] == ["1", "1.5", "2"], (title, major)
+        assert [t for t in minor if t] == [], (title, minor)
+
+
+def test_dashboard_loss_axis_uses_a_finer_set_for_a_very_narrow_range(
+        tmp_path, monkeypatch) -> None:
+    """A range of 1.1 to 1.4 holds only ``1.5``-free coarse ticks (none), so the finer set is used."""
+    read = _loss_axis_labels(tmp_path, monkeypatch, 1.1, 1.4)
+    major, _ = read["Loss"]
+    assert len([t for t in major if t]) >= 3, major
+    assert all(1.1 <= float(t) <= 1.4 for t in major if t), major
 
 
 def test_dashboard_loss_axis_keeps_only_decades_for_a_wide_range(
@@ -972,6 +991,44 @@ def test_per_class_chart_has_no_vertical_grid_whatever_the_ambient_style_says(
     (figure,) = captured_figures
     assert figure.xgrid_visible == [False], figure.xgrid_visible
     assert figure.ygrid_visible == [True], figure.ygrid_visible
+
+
+def _per_class_axis(tmp_path, monkeypatch, y_true, y_pred, names):
+    """Draw the per-class chart and return ``(ylim, ylabel)`` of its axes."""
+    seen = {}
+    real = viz._save_and_close
+
+    def spy(fig, out_path):
+        ax = fig.axes[0]
+        seen["ylim"], seen["ylabel"] = ax.get_ylim(), ax.get_ylabel()
+        return real(fig, out_path)
+
+    monkeypatch.setattr(viz, "_save_and_close", spy)
+    viz.plot_per_class_metrics(np.array(y_true), np.array(y_pred), names, tmp_path / "pc.png")
+    return seen["ylim"], seen["ylabel"]
+
+
+def test_per_class_chart_starts_at_zero_unless_every_bar_is_high(
+        tmp_path, monkeypatch) -> None:
+    """G2: a truncated axis made a 0.52 F1 bar look a seventh as tall as a 0.86 one. A weak
+    class (F1 well under 0.8) forces the zero baseline and the plain label."""
+    y_true = [0] * 10 + [1] * 10 + [2] * 10
+    y_pred = [0] * 9 + [1] + [1] * 5 + [2] * 5 + [2] * 10  # class 1 recall 0.5
+    ylim, label = _per_class_axis(tmp_path, monkeypatch, y_true, y_pred,
+                                  ["a", "b", "c"])
+    assert ylim[0] == 0.0 and ylim[1] == pytest.approx(1.005), ylim
+    assert label == "score"
+
+
+def test_per_class_chart_truncates_and_says_so_when_every_bar_is_high(
+        tmp_path, monkeypatch) -> None:
+    """The MNIST-like case the truncation was made for: every bar at or above 0.8."""
+    y_true = [0] * 20 + [1] * 20
+    y_pred = [0] * 19 + [1] + [1] * 19 + [0]  # every score 0.95
+    ylim, label = _per_class_axis(tmp_path, monkeypatch, y_true, y_pred,
+                                  ["a", "b"])
+    assert 0.85 < ylim[0] < 0.95 and ylim[1] == pytest.approx(1.005), ylim
+    assert label == "score (y-axis truncated)"
 
 
 def _reliability_groups():
