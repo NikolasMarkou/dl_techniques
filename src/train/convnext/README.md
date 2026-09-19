@@ -467,16 +467,25 @@ Every number below is copied from a `results_summary.json` (or the run's `traini
 by the trainer. `results/` is untracked, so the run directory is named for each row. The code state
 is named too: numbers from earlier code states are kept only when labelled as such.
 
-| Run | Command (GPU 0, RTX 4090, seed 42) | Test acc | Test loss | ECE | Epoch times (s) | Notes |
+| Run | Command (GPU 0, RTX 4090, seed 42 unless the command says otherwise) | Test acc | Test loss | ECE | Epoch times (s) | Notes |
 |---|---|---|---|---|---|---|
 | `convnext_v1_cifar10_cifar10_iter1_run1` | `train_convnext_v1 --dataset cifar10 --variant cifar10 --epochs 5` (2.23M params, strides 4, feature maps 8x8 then 2x2, batch 64, cosine 1e-3) | 0.6148 | 1.0911 | 0.0124 | 84.0, 13.1, 11.9, 12.2, 12.4 | Code state of the iteration-1 audit. Val acc 0.6078. Best epoch = last epoch (5), loss still falling. Wall 198 s: fit 138 s, post-fit 41 s. |
 | `convnext_v1_cifar10_cifar10_strides2_iter2_run2a` | `train_convnext_v1 --dataset cifar10 --variant cifar10 --epochs 5 --strides 2` (2.00M params, 2,004,586, feature maps 16x16 then 8x8, depths 5, 5, dims 96, 192, batch 64, cosine 1e-3, 703 steps per epoch) | 0.7206 | 0.8134 | 0.0136 | 63.7, 13.6, 13.7, 14.0, 14.3 | Code state HEAD after `25e4afc84`. Val acc 0.7154, fit 124.0 s. Best epoch = last epoch (5). Paired with run 1 in "Choosing strides". |
 | `convnext_v2_cifar10_cifar10_strides2_iter2_run2b` | `train_convnext_v2 --dataset cifar10 --variant cifar10 --epochs 5 --strides 2` (2.02M params, 2,016,106, feature maps 16x16 then 8x8, depths 5, 5, dims 96, 192, batch 64, cosine 1e-3, 703 steps per epoch) | 0.7098 | 0.8386 | 0.0084 | 73.8, 14.7, 15.1, 15.3, 15.3 | Code state HEAD after `25e4afc84`. Val acc 0.7136, fit 139.0 s. Best epoch = last epoch (5). The 1.1-point gap to 2a is one seed each and not attributable to V1 versus V2. |
+| `convnext_v1_cifar10_cifar10_seed43_iter3_run3a` | `train_convnext_v1 --variant cifar10 --dataset cifar10 --epochs 5 --seed 43 (default strides 2)` | 0.7255 | 0.8009 | 0.0117 | 63.9, 13.7, 14.4, 14.3, 14.5 | Seed 43. Against 2a (seed 42) only the seed differs: 0.5 points test accuracy, 1.2 points val accuracy. Code state HEAD after 21fe4af47. |
+| `convnext_v1_cifar10_cifar10_gradient_iter3_run3c` | `train_convnext_v1 --variant cifar10 --dataset cifar10 --epochs 5 --stochastic-mode gradient --no-model-analysis` | 0.7052 | 0.8452 | 0.0169 | 64.8, 15.7, 15.7, 15.7, 15.7 | Gradient mode: 1.5 points below the mean of the two depth-mode seeds (0.7231) and about 12% slower steady epochs. |
+| `convnext_v1_cifar10_cifar10_bs256_iter3_run3d` | `train_convnext_v1 --variant cifar10 --dataset cifar10 --epochs 5 --batch-size 256 --learning-rate 2e-3 --no-model-analysis` | 0.6677 | 0.9505 | 0.0136 | 56.8, 7.6, 7.5, 7.7, 7.7 | 175 steps per epoch: steady epochs 1.85x faster, 5.5 points worse at equal epochs; fit wall time only 27% shorter because about 50 s is the fixed compile. |
+| `convnext_v1_cifar10_cifar10_warmup1_iter3_run3e` | `train_convnext_v1 --variant cifar10 --dataset cifar10 --epochs 5 --warmup-epochs 1 --no-model-analysis` | 0.7150 | 0.8197 | 0.0165 | 73.1, 14.0, 14.0, 14.5, 14.2 | One warmup epoch (lr at epoch start 1e-8, 1e-3, 8.55e-4, 5.05e-4, 1.55e-4). Within noise of the no-warmup runs; epoch 1 about 9 s slower. |
+| `convnext_v1_cifar10_cifar10_warmup1_iter3_run3e2` | `same command as run 3e, run again after the figure fixes` | 0.7208 | 0.8108 | 0.0120 | 73.6, 14.1, 14.2, 14.4, 14.3 | Same seed and command as 3e: 0.7208 vs 0.7150, so identical-seed GPU runs differ by about 0.6 points. |
+| `convnext_v1_cifar100_cifar10_iter3_run3b` | `train_convnext_v1 --variant cifar10 --dataset cifar100 --epochs 5` | 0.3905 (top-5 0.6921) | 2.4209 | 0.0552 | 65.1, 14.3, 14.7, 14.9, 14.3 | CIFAR-100, 5 epochs, before the 100-class figure fixes (its per-class and confusion figures were unreadable). |
+| `convnext_v1_cifar100_cifar10_iter3_run3b2` | `same command as run 3b, run again after the figure fixes` | 0.3851 (top-5 0.6916) | 2.4093 | 0.0436 | 65.2, 14.5, 14.8, 14.6, 14.8 | Same seed and command as 3b: 0.3851 vs 0.3905. Figures readable (worst/best 15 classes, confusion pairs, CIFAR-100 names). |
+
+Seed and run-to-run noise: two runs that differ only in the seed (2a vs 3a) differ by 0.5 points of test accuracy, and two runs with the identical seed and command (3b vs 3b2, 3e vs 3e2) by 0.5 to 0.6 points (GPU non-determinism), so differences below about 1 point in this table are not attributable. The strides effect (run 1 vs 2a, 10.6 points) and the batch-256 loss (5.5 points) are far outside that band; the V1 vs V2 gap (1.1 points) and warmup are not.
 
 Reading the epoch times: epoch 1 is much slower than the rest because the XLA-compiled train step
 is built on the first batch, and it is not step time (steady state is 17 to 18 ms per step at batch
-64), so per-epoch cost comparisons use epochs 2 onward. The run-1 row above predates the fix
-described next.
+64), so per-epoch cost comparisons use epochs 2 onward. Only the run-1 row predates the fix described
+next (it used 704 steps per epoch); every later row uses 703.
 
 **First epoch (measured, GPU 0, 2-epoch probes on the full CIFAR-10 data, cifar10 variant, batch
 64, seed 42, `findings/iter2-f1-epoch1.md`).** Keras compiles the train step with XLA by default
