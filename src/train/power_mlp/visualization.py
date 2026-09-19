@@ -558,7 +558,12 @@ def plot_per_class_metrics(
         ax.set_xticklabels([f"{nm}\n(n={int(s)})" for nm, s in zip(names, support)], fontsize=8)
         ax.set_ylabel("score (y-axis truncated)")
         ax.set_title(f"Per-class precision / recall / F1 (macro F1 {float(f1.mean()):.4f})")
+        # ``grid(axis="y")`` alone leaves the x grid at the ambient rcParams value:
+        # ``dl_techniques.visualization.core`` sets a whitegrid style at import, so
+        # vertical lines ran through the bars. Off explicitly, horizontal grid behind.
+        ax.grid(False)
         ax.grid(axis="y", alpha=0.3)
+        ax.set_axisbelow(True)
         ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9)
         _save_and_close(fig, out_path)
     finally:
@@ -583,6 +588,10 @@ def plot_calibration(
 
     Confidence is the top-class probability. ECE is the bin-population-weighted
     mean of ``|accuracy - mean confidence|`` over ``n_bins`` equal-width bins.
+    Bins holding fewer than :data:`CALIBRATION_MIN_BIN_SAMPLES` samples are drawn
+    hatched, lighter and annotated with their ``n`` (their accuracy is one of a
+    handful of values, not evidence); they still count in the ECE, weighted by
+    their tiny population.
 
     Args:
         y_true: Integer true labels ``(N,)``.
@@ -603,20 +612,32 @@ def plot_calibration(
     bin_acc = np.full(n_bins, np.nan)
     bin_conf = np.full(n_bins, np.nan)
     weight = np.zeros(n_bins)
+    counts = np.zeros(n_bins, dtype=int)
     for b in range(n_bins):
         mask = bin_ids == b
         if mask.any():
             bin_acc[b], bin_conf[b] = correct[mask].mean(), conf[mask].mean()
             weight[b] = mask.mean()
+            counts[b] = int(mask.sum())
     populated = weight > 0
+    sparse = populated & (counts < CALIBRATION_MIN_BIN_SAMPLES)
+    dense = populated & ~sparse
     ece = float(np.sum(weight[populated] * np.abs(bin_acc[populated] - bin_conf[populated])))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.8))
     try:
         centers = (edges[:-1] + edges[1:]) / 2
         width = 1.0 / n_bins
-        ax1.bar(centers[populated], bin_acc[populated], width * 0.95, color=VAL_COLOR, alpha=0.8,
+        ax1.bar(centers[dense], bin_acc[dense], width * 0.95, color=VAL_COLOR, alpha=0.8,
                 edgecolor="black", label="accuracy in bin")
+        if sparse.any():
+            ax1.bar(centers[sparse], bin_acc[sparse], width * 0.95, color=VAL_COLOR, alpha=0.25,
+                    edgecolor="black", hatch="//",
+                    label=f"n < {CALIBRATION_MIN_BIN_SAMPLES} (not evidence)")
+            for c, a, n_b in zip(centers[sparse], bin_acc[sparse], counts[sparse]):
+                high = a > 0.9  # keep the label inside the axes for a full-height bar
+                ax1.text(c, a - 0.02 if high else a + 0.02, f"n={int(n_b)}", ha="center",
+                         va="top" if high else "bottom", fontsize=8)
         ax1.plot([0, 1], [0, 1], "k--", lw=1.2, label="perfect calibration")
         ax1.text(0.04, 0.93, f"ECE = {ece:.4f}", transform=ax1.transAxes, fontsize=12,
                  bbox=dict(boxstyle="round", facecolor="white", alpha=0.85))
@@ -625,7 +646,9 @@ def plot_calibration(
         ax1.set_xlabel("confidence (top-class probability)")
         ax1.set_ylabel("accuracy")
         ax1.set_title("Reliability diagram")
-        ax1.legend(loc="lower right", fontsize=9)
+        # Upper left under the ECE box: the bars of a trained model crowd the right
+        # side and a lower-right legend hid the n labels of the low-confidence bins.
+        ax1.legend(loc="upper left", bbox_to_anchor=(0.02, 0.86), fontsize=9)
         ax1.grid(alpha=0.3)
 
         ax2.hist([conf[correct], conf[~correct]], bins=edges, stacked=False,

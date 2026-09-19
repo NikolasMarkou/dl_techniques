@@ -638,6 +638,14 @@ class CapturedFigure:
             any(gl.get_visible() for gl in ax.get_xgridlines() + ax.get_ygridlines())
             for ax in fig.axes
         ]
+        # Same, split by direction, for axes that legitimately keep one direction.
+        self.xgrid_visible = [any(gl.get_visible() for gl in ax.get_xgridlines()) for ax in fig.axes]
+        self.ygrid_visible = [any(gl.get_visible() for gl in ax.get_ygridlines()) for ax in fig.axes]
+        # (hatch, alpha, height) of every bar patch, keyed by the axes title.
+        self.bars = {
+            ax.get_title(): [(p.get_hatch(), p.get_alpha(), p.get_height()) for p in ax.patches]
+            for ax in titled
+        }
 
 
 @pytest.fixture
@@ -869,6 +877,72 @@ def test_confusion_matrix_grid_lines_are_off_whatever_the_ambient_style_says(
     (figure,) = captured_figures
     assert len(figure.grid_visible) == 4, "two image axes and two colorbar axes"
     assert figure.grid_visible == [False] * 4, figure.grid_visible
+
+
+def test_per_class_chart_has_no_vertical_grid_whatever_the_ambient_style_says(
+        tmp_path, captured_figures) -> None:
+    """The per-class bar chart showed vertical grid lines through the bars: it set
+    ``ax.grid(axis="y")`` only, so the x grid followed the ambient ``axes.grid=True``
+    that ``dl_techniques.visualization.core`` sets at import. The horizontal grid is
+    deliberate and stays (asserted, so switching the whole grid off cannot pass)."""
+    y_true = np.array([0, 1, 2, 0, 1, 2, 0, 1])
+    y_pred = np.array([0, 1, 2, 0, 2, 2, 1, 1])
+    with matplotlib.rc_context({"axes.grid": True}):
+        control_fig, control_ax = plt.subplots()
+        control_ax.plot([0, 1])
+        control_x = any(gl.get_visible() for gl in control_ax.get_xgridlines())
+        plt.close(control_fig)
+        viz.plot_per_class_metrics(y_true, y_pred, ["a", "b", "c"], tmp_path / "pc.png")
+    assert control_x is True, "the ambient setting really grids a plain axes"
+    (figure,) = captured_figures
+    assert figure.xgrid_visible == [False], figure.xgrid_visible
+    assert figure.ygrid_visible == [True], figure.ygrid_visible
+
+
+def _reliability_groups():
+    """``(n, top-class confidence, n_correct)`` per bin; 20 is dense, 19 is sparse."""
+    return [(150, 0.97, 147), (20, 0.85, 17), (19, 0.75, 14), (3, 0.65, 0), (2, 0.55, 1)]
+
+
+def _reliability_inputs():
+    y, probs = [], []
+    for n, conf, n_correct in _reliability_groups():
+        y += [0] * n_correct + [1] * (n - n_correct)
+        probs += [[conf, 1.0 - conf]] * n
+    return np.array(y), np.array(probs)
+
+
+def test_reliability_bins_under_20_samples_are_hatched_lighter_and_annotated(
+        tmp_path, captured_figures) -> None:
+    y, probs = _reliability_inputs()
+    ece = viz.plot_calibration(y, probs, tmp_path / "cal.png")
+    (figure,) = captured_figures
+    bars = figure.bars["Reliability diagram"]
+    assert len(bars) == 5, "one bar per populated bin"
+    dense = [b for b in bars if not b[0]]
+    sparse = [b for b in bars if b[0]]
+    # Exactly the 19-, 3- and 2-sample bins are marked; the 20-sample bin is not
+    # (the threshold is strict on n < 20).
+    assert len(dense) == 2 and len(sparse) == 3, bars
+    assert all(alpha == 0.8 for _, alpha, _ in dense)
+    assert all(alpha < 0.5 for _, alpha, _ in sparse), "lighter than the dense bars"
+    assert sorted(round(h, 4) for _, _, h in sparse) == [0.0, 0.5, round(14 / 19, 4)]
+    assert sorted(figure.axes_texts["Reliability diagram"]) == sorted(
+        ["ECE = %.4f" % ece, "n=19", "n=3", "n=2"]), figure.axes_texts["Reliability diagram"]
+    # The ECE is the untouched population-weighted one (hand-derived from the groups).
+    total = sum(n for n, _, _ in _reliability_groups())
+    expected = sum(n / total * abs(k / n - conf) for n, conf, k in _reliability_groups())
+    assert ece == pytest.approx(expected, abs=1e-9)
+
+
+def test_reliability_diagram_with_only_dense_bins_has_no_hatch_and_no_n_labels(
+        tmp_path, captured_figures) -> None:
+    rng = np.random.default_rng(0)
+    y, _, probs = _predictions(rng, n=400)
+    viz.plot_calibration(y, probs, tmp_path / "cal2.png")
+    (figure,) = captured_figures
+    assert all(not hatch for hatch, _, _ in figure.bars["Reliability diagram"])
+    assert not [t for t in figure.axes_texts["Reliability diagram"] if t.startswith("n=")]
 
 
 def test_dashboard_with_no_epochs_writes_nothing(tmp_path) -> None:
