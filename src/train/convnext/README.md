@@ -415,9 +415,16 @@ seeded disjoint validation split and the geometry helper. The tests write only u
 
 ## Measured results
 
-None yet. This section is filled in after the audited runs: every number added here will be
-copied from a `results_summary.json` written by the trainer, with its run directory named
-(`results/` is untracked, so run directories are not part of the repository). Until then this
-file quotes no accuracy or timing figure, and none should be assumed from earlier versions of it:
-the accuracy and per-epoch time figures the previous README carried came from the pre-normalization
-trainers (collapsed schedule, test-set validation) and no longer describe this code.
+Every number below is copied from a `results_summary.json` (or the run's `training_log.csv`) written
+by the trainer. `results/` is untracked, so the run directory is named for each row. The code state
+is named too: numbers from earlier code states are kept only when labelled as such.
+
+| Run | Command (GPU 0, RTX 4090, seed 42) | Test acc | Test loss | ECE | Epoch times (s) | Notes |
+|---|---|---|---|---|---|---|
+| `convnext_v1_cifar10_cifar10_iter1_run1` | `train_convnext_v1 --dataset cifar10 --variant cifar10 --epochs 5` (2.23M params, strides 4, feature maps 8x8 then 2x2, batch 64, cosine 1e-3) | 0.6148 | 1.0911 | 0.0124 | 84.0, 13.1, 11.9, 12.2, 12.4 | Code state of the iteration-1 audit. Val acc 0.6078. Best epoch = last epoch (5), loss still falling. Wall 198 s: fit 138 s, post-fit 41 s. |
+
+Reading the epoch times: epoch 1 carries about 50 s that is not step time (steady state is 18 to
+20 ms per step at batch 64), so per-epoch cost comparisons must use epochs 2 onward until the cause
+is fixed. The console progress bar's train metrics are a second average of the running mean and read
+lower than `training_log.csv` (epoch 1: bar 0.3152 vs CSV 0.3709 accuracy); the CSV, the summary and
+the dashboard are the reference.
