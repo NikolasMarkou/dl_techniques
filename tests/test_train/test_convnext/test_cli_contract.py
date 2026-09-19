@@ -43,7 +43,7 @@ from .._cli_contract import (  # noqa: TID252 -- shared driver, one level up
 
 def _rows(variant_probe: str) -> Tuple[Row, ...]:
     """One row per declared flag. Probes differ from the defaults (cifar10 / cifar10 /
-    k=7 / s=4 / 100 epochs / ...) and from each other. ``variant_probe`` is the one
+    k=7 / s=2 / 100 epochs / ...) and from each other. ``variant_probe`` is the one
     value that has to be a member of the family's own variant table."""
     return (
         Row(("--dataset",), ("--dataset", "cifar100"), "dataset", "cifar100"),
@@ -51,7 +51,7 @@ def _rows(variant_probe: str) -> Tuple[Row, ...]:
         Row(("--max-samples",), ("--max-samples", "321"), "max_samples", 321),
         Row(("--variant",), ("--variant", variant_probe), "variant", variant_probe),
         Row(("--kernel-size",), ("--kernel-size", "5"), "kernel_size", 5),
-        Row(("--strides",), ("--strides", "2"), "strides", 2),
+        Row(("--strides",), ("--strides", "4"), "strides", 4),
         Row(("--drop-path-rate",), ("--drop-path-rate", "0.35"), "drop_path_rate", 0.35),
         Row(("--stochastic-mode",), ("--stochastic-mode", "gradient"), "stochastic_mode", "gradient"),
         Row(("--dropout-rate",), ("--dropout-rate", "0.15"), "dropout_rate", 0.15),

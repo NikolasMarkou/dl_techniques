@@ -208,7 +208,7 @@ class TrainingConfig:
     model_family: str = "v1"
     variant: str = "cifar10"
     kernel_size: int = 7
-    strides: int = 4
+    strides: int = 2
     drop_path_rate: Optional[float] = None
     stochastic_mode: str = "depth"
     dropout_rate: Optional[float] = None
@@ -369,8 +369,10 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
     model.add_argument("--kernel-size", type=int, default=defaults.kernel_size,
                        help="Depthwise convolution kernel size.")
     model.add_argument("--strides", type=int, default=defaults.strides,
-                       help="Stem patch size and downsampling stride. 4 gives 8,2,1,1 feature "
-                            "maps on 32x32 inputs (see stage_feature_map_sizes in the summary).")
+                       help="Stem patch size and downsampling stride. The default 2 gives 16,8 "
+                            "(cifar10 variant) or 16,8,4,2 (4-stage variants) feature maps on 32x32 "
+                            "inputs; 4 gives 8,2 or 8,2,1,1 (see stage_feature_map_sizes in the "
+                            "summary).")
     model.add_argument("--drop-path-rate", type=float, default=None,
                        help="Maximum stochastic-depth rate (default per dataset: 0.1 for mnist "
                             "and cifar10, 0.2 for cifar100).")
@@ -473,8 +475,8 @@ def stage_feature_map_sizes(
     The stem is a ``strides x strides`` convolution at stride ``strides`` with
     ``"valid"`` padding (``"same"`` when ``strides == 1``), giving ``n // strides``;
     every downsample between stages is ``"same"``, giving ``ceil(n / strides)``. This
-    is why the default ``strides=4`` on 32x32 inputs gives 8, 2, 1, 1 and later stages
-    run on a single pixel.
+    is why ``strides=4`` on 32x32 inputs gives 8, 2, 1, 1 and later stages run on a
+    single pixel, while the trainer default ``strides=2`` gives 16, 8, 4, 2.
 
     Args:
         input_hw: ``(height, width)`` of the input image.

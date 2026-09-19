@@ -249,7 +249,10 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
     # incomplete last batch is dropped, D-021).
     assert (summary["n_train"], summary["n_val"], summary["n_test"]) == (216, 24, 240)
     assert summary["steps_per_epoch"] == 6
-    assert summary["stage_feature_map_sizes"] == [[8, 8], [2, 2]]
+    # The config never sets strides, so this is the TRAINER default (2, D-033): a run
+    # that falls back to the model default 4 would read [[8, 8], [2, 2]] here.
+    assert summary["stage_feature_map_sizes"] == [[16, 16], [8, 8]]
+    assert summary["strides"] == 2
     assert summary["initial_loss_ratio"] == pytest.approx(
         summary["initial_loss_sanity_eval"]["loss"] / np.log(10))
     assert summary["analyzer"]["status"] == "success", summary["analyzer"]
@@ -841,6 +844,43 @@ def test_stage_feature_map_sizes_equals_the_real_last_stage(family, variant, str
     sizes = common.stage_feature_map_sizes((size, size), model.depths, strides)
     assert len(sizes) == len(model.depths)
     assert tuple(out.shape[1:3]) == sizes[-1], (family, variant, strides, size, sizes)
+
+
+def test_the_default_strides_is_2_and_gives_the_stage_maps_the_readme_states() -> None:
+    """D-033: the trainer default is 2 (measured +10.6 accuracy points over 4 on CIFAR-10).
+
+    Read off a config that never mentions strides, then through the real model built from
+    it, so neither the dataclass default nor the geometry the run would report can drift
+    from what the README's "Geometry" table says.
+    """
+    config = common.TrainingConfig()
+    assert config.strides == 2
+    model = common.MODEL_FAMILIES["v1"].factory(
+        variant=config.variant, num_classes=10, input_shape=(32, 32, 3),
+        strides=config.strides, include_top=False,
+    )
+    sizes = common.stage_feature_map_sizes((32, 32), model.depths, config.strides)
+    assert sizes == [(16, 16), (8, 8)]
+    assert tuple(model(np.zeros((1, 32, 32, 3), dtype=np.float32)).shape[1:3]) == sizes[-1]
+
+
+@pytest.mark.parametrize(
+    "dataset_hw,variant,expected",
+    [
+        ((28, 28), "cifar10", [(14, 14), (7, 7)]),
+        ((32, 32), "cifar10", [(16, 16), (8, 8)]),
+        ((28, 28), "tiny", [(14, 14), (7, 7), (4, 4), (2, 2)]),
+        ((32, 32), "tiny", [(16, 16), (8, 8), (4, 4), (2, 2)]),
+    ],
+)
+def test_the_default_strides_never_degenerates_a_stage_on_any_dataset(
+        dataset_hw, variant, expected) -> None:
+    """Every dataset at the default strides keeps every stage above one pixel (no
+    ``1x1`` stage, which strides 4 produced for the 4-stage variants)."""
+    depths = common.ConvNeXtV1.MODEL_VARIANTS[variant]["depths"]
+    sizes = common.stage_feature_map_sizes(dataset_hw, depths, common.TrainingConfig().strides)
+    assert sizes == expected
+    assert all(h > 1 and w > 1 for h, w in sizes), sizes
 
 
 @pytest.mark.parametrize(

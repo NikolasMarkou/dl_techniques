@@ -50,11 +50,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
                         help='GPU index given to each training subprocess as '
                              'CUDA_VISIBLE_DEVICES (the driver itself stays CPU-only); '
                              'a negative value hides every GPU (CPU training).')
-    parser.add_argument('--strides', type=int, default=4,
-                        help='Stem + inter-stage downsample stride. Use 2 for the '
-                             '4-stage ImageNet variants (tiny/small/base/...) on '
-                             '32x32 CIFAR; the default 4 collapses spatial dims and '
-                             'crashes (only the 2-stage cifar10 variant tolerates 4).')
+    parser.add_argument('--strides', type=int, default=None,
+                        help='Stem + inter-stage downsample stride; forwarded only when '
+                             'given, so the trainer default (2: 16,8 feature maps for the '
+                             'cifar10 variant and 16,8,4,2 for the 4-stage variants on '
+                             '32x32) is the one source. 4 builds fine but is spatially '
+                             'degenerate on 32x32 (8,2 or 8,2,1,1).')
     parser.add_argument('--kernel-size', type=int, default=7,
                         help='Depthwise kernel size (forwarded to the trainer).')
     parser.add_argument('--output-dir', type=str, default='results',
@@ -99,11 +100,12 @@ def run_comparison(args: argparse.Namespace) -> None:
             '--epochs', str(args.epochs),
             '--batch-size', str(args.batch_size),
             '--variant', args.variant,
-            '--strides', str(args.strides),
             '--kernel-size', str(args.kernel_size),
             '--output-dir', args.output_dir,
             '--experiment-name', experiment_name,
         ]
+        if args.strides is not None:
+            cmd += ['--strides', str(args.strides)]
         if args.max_samples is not None:
             cmd += ['--max-samples', str(args.max_samples)]
 

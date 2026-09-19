@@ -41,7 +41,7 @@ backend. Pick the GPU with `CUDA_VISIBLE_DEVICES` in the shell (see "GPU selecti
 ```bash
 cd <repo root>
 
-# V1, CIFAR-10, the 2-stage cifar10 variant, 100 epochs (the defaults)
+# V1, CIFAR-10, the 2-stage cifar10 variant, 100 epochs (the defaults, strides 2)
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_convnext_v1 \
     --dataset cifar10 --variant cifar10
 
@@ -49,9 +49,10 @@ MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_c
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_convnext_v2 \
     --dataset cifar100 --variant cifar10 --epochs 100 --experiment-name my_c100_v2
 
-# A 4-stage variant with the standard 32 -> 16 -> 8 -> 4 -> 2 schedule (see "Geometry")
+# A 4-stage variant: the default strides 2 gives the standard 32 -> 16 -> 8 -> 4 -> 2 schedule
+# (see "Geometry" and "Choosing strides")
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_convnext_v1 \
-    --dataset cifar10 --variant tiny --strides 2
+    --dataset cifar10 --variant tiny
 
 # Smoke run: 512 samples, 2 epochs
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_convnext_v1 \
@@ -86,7 +87,7 @@ it). Both wrappers have the same flags; only `--variant` differs.
 | `--max-samples` | none | Cap the train pool and the test set at this many samples (smoke runs). Refused at config time, before any run directory exists, unless the resulting train split (after the `--validation-split` cut, which must hold out at least one sample) holds at least one full `--batch-size` batch: `--max-samples 64` with the default batch 64 and split 0.1 leaves 58 train samples and is refused; lower `--batch-size` or raise `--max-samples`. |
 | `--variant` | `cifar10` | V1: `cifar10, tiny, small, base, large, xlarge`. V2: `cifar10, atto, femto, pico, nano, tiny, base, large, huge`. Sets depths and dims. |
 | `--kernel-size` | `7` | Depthwise convolution kernel size. |
-| `--strides` | `4` | Stem patch size AND every inter-stage downsample stride (one knob). See "Geometry". |
+| `--strides` | `2` | Stem patch size AND every inter-stage downsample stride (one knob). The default is 2 on measured evidence ("Choosing strides"); the model classes keep their own default 4. See "Geometry". |
 | `--drop-path-rate` | per dataset | Maximum stochastic-depth rate. `0.1` for mnist and cifar10, `0.2` for cifar100. |
 | `--stochastic-mode {depth,gradient}` | `depth` | `depth` = `StochasticDepth`, `gradient` = `StochasticGradient` (see below). |
 | `--dropout-rate` | per dataset | Dropout inside each block. `0.1` for mnist and cifar10, `0.2` for cifar100. |
@@ -196,17 +197,40 @@ The stem is a `strides x strides` convolution at stride `strides` with `"valid"`
 
 | Input | Stages | `--strides` | Feature map per stage |
 |---|---|---|---|
-| 32x32 | 4 | 4 (default) | 8, 2, 1, 1 |
-| 32x32 | 4 | 2 | 16, 8, 4, 2 |
-| 32x32 | 2 (`cifar10` variant) | 4 (default) | 8, 2 |
-| 28x28 (MNIST) | 4 | 4 (default) | 7, 2, 1, 1 |
+| 32x32 | 4 | 2 (default) | 16, 8, 4, 2 |
+| 32x32 | 4 | 4 | 8, 2, 1, 1 |
+| 32x32 | 2 (`cifar10` variant) | 2 (default) | 16, 8 |
+| 32x32 | 2 (`cifar10` variant) | 4 | 8, 2 |
+| 28x28 (MNIST) | 4 | 2 (default) | 14, 7, 4, 2 |
+| 28x28 (MNIST) | 2 (`cifar10` variant) | 2 (default) | 14, 7 |
+| 28x28 (MNIST) | 4 | 4 | 7, 2, 1, 1 |
 
-So the default `strides=4` builds and trains on 32x32 four-stage models (there is no crash),
-but the last two stages run on a single pixel, so the spatial mixing of the depthwise
-convolution there is degenerate. `--strides 2` gives the usual `32 -> 16 -> 8 -> 4 -> 2` schedule for
-`tiny/small/base/...`. Every summary records `stage_feature_map_sizes` (computed by
+`--strides 4` builds and trains on 32x32 four-stage models (there is no crash), but the last two
+stages run on a single pixel, so the spatial mixing of the depthwise convolution there is
+degenerate. The default `--strides 2` gives the usual `32 -> 16 -> 8 -> 4 -> 2` schedule for
+`tiny/small/base/...` and no stage below 2x2 on any of the three datasets. Every summary records `stage_feature_map_sizes` (computed by
 `stage_feature_map_sizes`, which a test checks against the real `include_top=False` model) and
 the run log prints it, so a degenerate geometry is visible in the record of the run.
+
+### Choosing strides
+
+The default changed from 4 to 2 on one paired measurement (CIFAR-10, `cifar10` variant, V1,
+5 epochs, seed 42, batch 64, cosine 1e-3, GPU 0):
+
+| Run directory | `--strides` | Feature maps | Params | Test acc | Test loss | Steady epoch |
+|---|---|---|---|---|---|---|
+| `results/convnext_v1_cifar10_cifar10_iter1_run1` | 4 | 8x8, 2x2 | 2,229,226 | 0.6148 | 1.0911 | about 12.4 s |
+| `results/convnext_v1_cifar10_cifar10_strides2_iter2_run2a` | 2 | 16x16, 8x8 | 2,004,586 | 0.7206 | 0.8134 | about 13.9 s |
+
+That is +10.6 accuracy points and -0.28 test loss for about 12 percent more time per steady
+epoch (epochs 2 to 5, mean) and 10 percent fewer parameters. It is a single seed per arm; seed
+noise is measured separately (the run-3a repeat of the strides-2 arm), and a gap this size is far
+above any plausible seed spread but is not a statement about differences of a point or two. The two
+runs were measured at slightly different code states (run 1 before the LR log point moved, the
+`drop_remainder` pipeline change and the step count 704 to 703; run 2a after them); none of those
+changes what is trained beyond 8 dropped samples per epoch, so the pairing holds to that extent.
+What is not measured: 4-stage variants (only the `cifar10` variant was paired), CIFAR-100, MNIST,
+and longer runs. Pass `--strides 4` to reproduce the old default.
 
 ---
 
@@ -361,7 +385,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.convnext.run_stochastic_comparison \
 | `--batch-size` | `64` | Forwarded. |
 | `--seed` | `42` | Forwarded; the same for both modes. |
 | `--gpu` | `0` | GPU index handed to each child as `CUDA_VISIBLE_DEVICES`; a negative value hides every GPU (CPU training). |
-| `--strides` | `4` | Forwarded. |
+| `--strides` | none | Forwarded only when given, so the trainer default (2) is the one source. |
 | `--kernel-size` | `7` | Forwarded. |
 | `--output-dir` | `results` | Output root of the two runs and the comparison (anchored at the repo root by the trainer when relative). |
 | `--max-samples` | none | Forwarded only when given. |
@@ -446,6 +470,8 @@ is named too: numbers from earlier code states are kept only when labelled as su
 | Run | Command (GPU 0, RTX 4090, seed 42) | Test acc | Test loss | ECE | Epoch times (s) | Notes |
 |---|---|---|---|---|---|---|
 | `convnext_v1_cifar10_cifar10_iter1_run1` | `train_convnext_v1 --dataset cifar10 --variant cifar10 --epochs 5` (2.23M params, strides 4, feature maps 8x8 then 2x2, batch 64, cosine 1e-3) | 0.6148 | 1.0911 | 0.0124 | 84.0, 13.1, 11.9, 12.2, 12.4 | Code state of the iteration-1 audit. Val acc 0.6078. Best epoch = last epoch (5), loss still falling. Wall 198 s: fit 138 s, post-fit 41 s. |
+| `convnext_v1_cifar10_cifar10_strides2_iter2_run2a` | `train_convnext_v1 --dataset cifar10 --variant cifar10 --epochs 5 --strides 2` (2.00M params, 2,004,586, feature maps 16x16 then 8x8, depths 5, 5, dims 96, 192, batch 64, cosine 1e-3, 703 steps per epoch) | 0.7206 | 0.8134 | 0.0136 | 63.7, 13.6, 13.7, 14.0, 14.3 | Code state HEAD after `25e4afc84`. Val acc 0.7154, fit 124.0 s. Best epoch = last epoch (5). Paired with run 1 in "Choosing strides". |
+| `convnext_v2_cifar10_cifar10_strides2_iter2_run2b` | `train_convnext_v2 --dataset cifar10 --variant cifar10 --epochs 5 --strides 2` (2.02M params, 2,016,106, feature maps 16x16 then 8x8, depths 5, 5, dims 96, 192, batch 64, cosine 1e-3, 703 steps per epoch) | 0.7098 | 0.8386 | 0.0084 | 73.8, 14.7, 15.1, 15.3, 15.3 | Code state HEAD after `25e4afc84`. Val acc 0.7136, fit 139.0 s. Best epoch = last epoch (5). The 1.1-point gap to 2a is one seed each and not attributable to V1 versus V2. |
 
 Reading the epoch times: epoch 1 is much slower than the rest because the XLA-compiled train step
 is built on the first batch, and it is not step time (steady state is 17 to 18 ms per step at batch
