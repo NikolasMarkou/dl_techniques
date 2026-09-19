@@ -51,9 +51,11 @@ POWER_MLP_ROWS: Tuple[Row, ...] = (
     Row(("--architecture",), ("--architecture", "large"), "architecture", "large"),
     Row(("--k",), ("--k", "3"), "k", 3),
     Row(("--dropout-rate",), ("--dropout-rate", "0.35"), "dropout_rate", 0.35),
+    # BooleanOptionalAction: one row accounts for both spellings. BN is ON by default
+    # (D-025), so the probe is the non-default `--no-batch-normalization` -> False.
     Row(
-        ("--batch-normalization",), ("--batch-normalization",),
-        "batch_normalization", True,
+        ("--batch-normalization", "--no-batch-normalization"),
+        ("--no-batch-normalization",), "batch_normalization", False,
     ),
     # Probes differ from the measured defaults (lecun_normal / unit) and are not in
     # the grid that chose them, so a cross-wire or a dropped forward is visible.
@@ -123,6 +125,17 @@ def test_probe_values_are_mutually_distinct() -> None:
     values = [row.expected for row in POWER_MLP_ROWS if row.field is not None
               and not isinstance(row.expected, bool)]
     assert len(values) == len(set(map(repr, values))), values
+
+
+@pytest.mark.parametrize(
+    "argv,expected",
+    [((), True), (("--batch-normalization",), True), (("--no-batch-normalization",), False)],
+    ids=["default", "on", "off"],
+)
+def test_batch_normalization_has_both_spellings(argv, expected) -> None:
+    """BN defaults ON (D-025): `--no-batch-normalization` is the only way off."""
+    config = tpm.config_from_args(tpm.parse_arguments(list(argv)))
+    assert config.batch_normalization is expected
 
 
 def test_parser_defaults_equal_the_config_defaults() -> None:

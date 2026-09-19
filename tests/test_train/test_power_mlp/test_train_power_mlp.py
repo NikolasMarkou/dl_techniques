@@ -98,6 +98,27 @@ def test_effective_hidden_units_is_input_then_hidden_then_classes(
     assert units[1:-1] == tpm.ARCHITECTURE_HIDDEN_WIDTHS[architecture][dataset]
 
 
+def test_the_default_config_builds_the_486218_param_model() -> None:
+    """The DEFAULT model (BN on, D-025) has 486,218 params; without BN 484,426.
+
+    Derived from the code, not typed in: 484,426 + 4 * (256 + 128 + 64) = 486,218
+    (gamma, beta, moving mean, moving variance per hidden unit).
+    """
+    config = tpm.TrainingConfig()
+    units = tpm.effective_hidden_units("mnist", "default", 784, 10)
+    counts = {}
+    for bn in (False, True):
+        model = PowerMLP(
+            hidden_units=units, k=config.k, batch_normalization=bn,
+            output_activation="softmax",
+        )
+        model.build((None, 784))
+        counts[bn] = model.count_params()
+    assert config.batch_normalization is True
+    assert counts == {False: 484_426, True: 486_218}
+    assert counts[True] - counts[False] == 4 * (256 + 128 + 64)
+
+
 def test_the_built_model_has_the_preset_widths_and_params() -> None:
     """784 -> 256/128/64 -> 10 for mnist default: 3 hidden layers, 484,426 params."""
     units = tpm.effective_hidden_units("mnist", "default", 784, 10)
@@ -431,7 +452,11 @@ def test_smoke_summary_is_self_consistent(smoke) -> None:
     val_losses = [float(r["val_loss"]) for r in rows]
 
     assert on_disk["effective_hidden_units"] == [784, 256, 128, 64, 10]
-    assert on_disk["params"] == 484_426
+    # 484,426 is the no-BN count; the default (BN on, D-025) adds 2 * (256 + 128 + 64)
+    # BatchNormalization gamma/beta (trainable) plus the same number of moving
+    # mean/variance (counted by Keras): 486,218 = 484,426 + 1,792.
+    assert on_disk["batch_normalization"] is True
+    assert on_disk["params"] == 486_218
     assert on_disk["epochs_run"] == 2 and on_disk["epochs_requested"] == 2
     assert on_disk["best_epoch"] == int(np.argmin(val_losses)) + 1
     assert Path(on_disk["run_dir"]) == smoke.run_dir.resolve()
@@ -472,7 +497,7 @@ def test_smoke_summary_is_strict_json_with_status_ok_and_no_failed_figure(smoke)
     assert on_disk["status"] == "ok" == tpm.STATUS_OK
     assert smoke.summary["status"] == "ok"
     assert on_disk["visualizations"]["failed"] == [], on_disk["visualizations"]
-    assert on_disk["initial_loss_mode"] == "inference", "the default model has no batch norm"
+    assert on_disk["initial_loss_mode"] == "training", "the default model is batch-normalized (D-025)"
     assert on_disk["lr_reduction_epochs"] == [], "ReduceLROnPlateau cannot fire in 2 epochs"
     assert on_disk["epochs_run"] == 2 and on_disk["stopped_early"] is False
 
@@ -485,12 +510,12 @@ def test_smoke_notes_state_the_guard_floor_the_ece_slice_and_what_final_means(sm
     assert "first 1000 test samples" in notes
     assert "equals `test_metrics_best` by construction" in notes
     assert "`final_val_metrics` is the LAST epoch's validation metrics" in notes
-    assert "initial loss mode: inference" in notes
+    assert "initial loss mode: training" in notes
 
 
 def test_smoke_run_log_is_in_the_run_dir_and_its_handler_is_gone(smoke) -> None:
     text = (smoke.run_dir / "run.log").read_text()
-    assert "Run directory" in text and "Sanity evaluate BEFORE fit (inference mode)" in text, text[:400]
+    assert "Run directory" in text and "Sanity evaluate BEFORE fit (training mode)" in text, text[:400]
     assert "Test results (final weights)" in text
     assert "Analyzer status (read back from disk): success" in text
     leaked = [h for h in logging.getLogger("dl").handlers if isinstance(h, logging.FileHandler)]

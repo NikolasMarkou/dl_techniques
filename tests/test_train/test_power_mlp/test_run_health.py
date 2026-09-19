@@ -91,7 +91,7 @@ def test_a_non_finite_history_writes_a_diverged_summary_then_raises(monkeypatch,
     run_dir = tmp_path / "diverged_stub"
 
     with pytest.raises(RuntimeError, match="diverged"):
-        tpm.train_model(_config(tmp_path, "diverged_stub"))
+        tpm.train_model(_config(tmp_path, "diverged_stub", batch_normalization=False))
 
     summary = _strict((run_dir / "results_summary.json").read_text())
     assert summary["status"] == "diverged" == tpm.STATUS_DIVERGED
@@ -189,7 +189,11 @@ def test_the_run_log_handler_is_removed_when_train_model_raises_midway(
 def test_a_real_tiny_deep_k3_run_diverges_and_is_reported_as_diverged(tmp_path) -> None:
     """The exact failing configuration of the review: ``deep`` + ``--k 3`` at the shipped
     defaults warns at the guard (ratio ~1e6) and hits ``Invalid loss`` at batch 2."""
-    config = _config(tmp_path, "real_deep_k3", architecture="deep", k=3, epochs=2, batch_size=128)
+    # BN off: the review measured this failure without BN (the BN guard reads ~1.2 there).
+    config = _config(
+        tmp_path, "real_deep_k3", architecture="deep", k=3, epochs=2, batch_size=128,
+        batch_normalization=False,
+    )
 
     with pytest.raises(RuntimeError, match="diverged"):
         tpm.train_model(config)

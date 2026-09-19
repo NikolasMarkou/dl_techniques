@@ -27,6 +27,9 @@ depth. The pre-fit sanity evaluate therefore compares the untrained loss with
 moving statistics are restored afterwards), any other model in inference mode.
 The default is ``lecun_normal`` on ``unit`` inputs (measured initial loss about
 ``ln(C)``); ``glorot_normal`` on ``standardize`` inputs starts about 95x above it.
+Batch normalization is ON by default (``--no-batch-normalization`` turns it off):
+both defaults (``lecun_normal`` + BN) were chosen by the pre-registered 3-seed
+x 10-epoch MNIST grid of plan decision D-021 and recorded in D-025.
 
 Per-epoch ``ModelAnalyzer`` is opt-in (``--epoch-analysis``); the final
 ``run_model_analysis`` always runs.
@@ -45,7 +48,8 @@ Usage:
     python -m train.power_mlp.train_power_mlp --help
     python -m train.power_mlp.train_power_mlp --dataset mnist --epochs 50 --architecture default --k 2
     python -m train.power_mlp.train_power_mlp --dataset cifar10 --architecture large \\
-        --k 2 --dropout-rate 0.2 --batch-normalization
+        --k 2 --dropout-rate 0.2
+    python -m train.power_mlp.train_power_mlp --no-batch-normalization
 
 Results land in ``results/<experiment_name>/`` at the repository root (never
 under ``src/``): ``config.json``, ``training_log.csv`` (with ``lr``),
@@ -186,7 +190,17 @@ class TrainingConfig:
     architecture: str = "default"
     k: int = 2
     dropout_rate: float = 0.1
-    batch_normalization: bool = False
+    # DECISION plan-2026-09-18T213948-68dcb72c/D-025: the defaults below
+    # (batch_normalization=True, kernel_initializer="lecun_normal", input_scaling
+    # "unit") come from the pre-registered 3-seed x 10-epoch MNIST grid of D-021:
+    # BN beat the best non-BN arm by +0.00243 mean test accuracy (bar 0.002) with
+    # its worst seed above that mean, and lecun vs glorot tied under BN
+    # (-0.00010). Do NOT turn BN back off or switch to glorot_normal because a
+    # single run or a 3-epoch table looks better: one seed and 3 epochs already
+    # picked a winner the 5-seed replication refuted (D-019). Change the default
+    # only through a new multi-seed grid and a new decision entry; the literal
+    # pin is test_training_config_defaults_are_the_d025_outcome.
+    batch_normalization: bool = True
     # Chosen by the pre-registered rule (plan D-014, recorded in D-018) from a
     # measured 3-epoch MNIST grid: lecun_normal + unit was the only eligible arm.
     kernel_initializer: str = "lecun_normal"
@@ -296,9 +310,10 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Power of the ReLU-k activation.")
     model.add_argument("--dropout-rate", type=float, default=defaults.dropout_rate,
                        help="Dropout rate after each hidden layer, in [0, 1).")
-    model.add_argument("--batch-normalization", action="store_true",
+    model.add_argument("--batch-normalization", action=argparse.BooleanOptionalAction,
                        default=defaults.batch_normalization,
-                       help="Enable batch normalization after each hidden layer.")
+                       help="Batch normalization after each hidden layer "
+                            "(default: on; --no-batch-normalization turns it off).")
     model.add_argument("--kernel-initializer", type=str, default=defaults.kernel_initializer,
                        choices=KERNEL_INITIALIZERS,
                        help="Kernel initializer of every layer; it sets the initial logit "

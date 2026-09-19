@@ -212,6 +212,25 @@ def test_trainingconfig_defaults_start_near_the_uniform_loss(
     assert recorded_warnings == []
 
 
+def test_training_config_defaults_are_the_d025_outcome() -> None:
+    """Literal pin of the D-021 grid outcome recorded in D-025.
+
+    The 3-seed x 10-epoch MNIST grid chose lecun_normal + BN on (unit inputs).
+    Changing a default must go through a new grid and a new decision, so it must
+    fail here first; the pin is literal on purpose (the guards above read the
+    defaults and would follow a silent change).
+    """
+    defaults = tpm.TrainingConfig()
+    assert (defaults.kernel_initializer, defaults.batch_normalization) == (
+        "lecun_normal", True,
+    )
+    assert defaults.input_scaling == "unit"
+    args = tpm.parse_arguments([])
+    assert (args.kernel_initializer, args.batch_normalization, args.input_scaling) == (
+        "lecun_normal", True, "unit",
+    )
+
+
 # ---------------------------------------------------------------------
 # BatchNorm: the guard measures the regime of the first training step (C4)
 # ---------------------------------------------------------------------
@@ -506,7 +525,7 @@ def iteration_1_run(tmp_path_factory):
         config = tpm.config_from_args(tpm.parse_arguments([
             "--epochs", "1", "--batch-size", "64", "--seed", "3",
             "--kernel-initializer", "glorot_normal", "--input-scaling", "standardize",
-            "--output-dir", str(out_root), "--experiment-name", "iter1_config",
+            "--no-batch-normalization", "--output-dir", str(out_root), "--experiment-name", "iter1_config",
         ]))
         summary = tpm.train_model(config)
     finally:
