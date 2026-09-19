@@ -985,6 +985,40 @@ class TestOutputChannels:
             create_convunext(output_channels=bad, **_knob_config())
 
 
+class TestSegmentationHead:
+    """The builder as the SEGMENTATION trainer uses it (``src/train/convunext``).
+
+    No other test here builds ``output_channels=3`` with ``use_bias=True`` at odd input
+    sizes, which is the whole segmentation contract: a 3-class linear head whose output
+    carries the input's own H and W.
+    """
+
+    def test_three_class_head_keeps_the_input_size_and_the_bias_guardrail(self) -> None:
+        """Linear and softmax heads build with ``use_bias=True`` at even and odd sizes and
+        return ``(None, H, W, 3)`` for the input's own ``H, W``; ``use_bias=False`` still
+        refuses a softmax head (it is only positively-homogeneous heads that stay
+        bias-free), so the segmentation arm cannot be reached by dropping the biases.
+        """
+        base = dict(use_bias=True, output_channels=3, depth=2, initial_filters=8,
+                    blocks_per_level=1, drop_path_rate=0.0)
+        for h, w in ((64, 64), (65, 67)):
+            model = create_convunext(
+                input_shape=(h, w, 3), final_activation='linear', **base)
+            assert model.output_shape == (None, h, w, 3), (h, w, model.output_shape)
+            out = keras.ops.convert_to_numpy(
+                model(np.zeros((1, h, w, 3), dtype='float32'), training=False))
+            assert out.shape == (1, h, w, 3) and np.isfinite(out).all()
+        # 4 input channels: with a 3-channel input an ignored ``output_channels`` (which
+        # falls back to the input's channel count) would still return 3 channels.
+        softmax = create_convunext(
+            input_shape=(65, 67, 4), final_activation='softmax', **base)
+        assert softmax.output_shape == (None, 65, 67, 3)
+        with pytest.raises(ValueError):
+            create_convunext(
+                input_shape=(64, 64, 3), final_activation='softmax',
+                **dict(base, use_bias=False))
+
+
 class TestAbsorbedKnobsRoundTrip:
     """All three knobs at once must survive a `.keras` round trip BY VALUE."""
 

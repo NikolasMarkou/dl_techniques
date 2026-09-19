@@ -118,6 +118,7 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/mini_vec2vec/train_mini_vec2vec.py", "MiniVec2VecTrainingConfig"),
     ("train/power_mlp/train_power_mlp.py", "TrainingConfig"),
     ("train/convnext/common.py", "TrainingConfig"),
+    ("train/convunext/common.py", "SegTrainingConfig"),
     ("train/bfunet/common.py", "BFUnetTrainingConfig"),
     ("train/bfunet/train_convunext_denoiser.py", "TrainingConfig"),
 ]
