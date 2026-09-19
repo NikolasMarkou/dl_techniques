@@ -119,6 +119,27 @@ def test_the_default_config_builds_the_486218_param_model() -> None:
     assert counts[True] - counts[False] == 4 * (256 + 128 + 64)
 
 
+def test_the_cifar10_default_config_builds_the_3475594_param_model_without_bn() -> None:
+    """CIFAR-10 defaults to BN OFF (D-028): 3,475,594 params, 3,479,178 with BN.
+
+    Derived from the code: 3,475,594 + 4 * (512 + 256 + 128) = 3,479,178 (the 6 grid
+    runs report exactly these two counts).
+    """
+    config = tpm.TrainingConfig(dataset="cifar10")
+    units = tpm.effective_hidden_units("cifar10", "default", 3072, 10)
+    counts = {}
+    for bn in (False, True):
+        model = PowerMLP(
+            hidden_units=units, k=config.k, batch_normalization=bn,
+            output_activation="softmax",
+        )
+        model.build((None, 3072))
+        counts[bn] = model.count_params()
+    assert config.batch_normalization is False
+    assert counts == {False: 3_475_594, True: 3_479_178}
+    assert counts[True] - counts[False] == 4 * (512 + 256 + 128)
+
+
 def test_the_built_model_has_the_preset_widths_and_params() -> None:
     """784 -> 256/128/64 -> 10 for mnist default: 3 hidden layers, 484,426 params."""
     units = tpm.effective_hidden_units("mnist", "default", 784, 10)

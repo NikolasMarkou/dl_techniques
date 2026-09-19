@@ -27,9 +27,14 @@ depth. The pre-fit sanity evaluate therefore compares the untrained loss with
 moving statistics are restored afterwards), any other model in inference mode.
 The default is ``lecun_normal`` on ``unit`` inputs (measured initial loss about
 ``ln(C)``); ``glorot_normal`` on ``standardize`` inputs starts about 95x above it.
-Batch normalization is ON by default (``--no-batch-normalization`` turns it off):
-both defaults (``lecun_normal`` + BN) were chosen by the pre-registered 3-seed
-x 10-epoch MNIST grid of plan decision D-021 and recorded in D-025.
+Batch normalization (``--batch-normalization`` / ``--no-batch-normalization``) has a
+PER-DATASET default, ``BATCH_NORMALIZATION_BY_DATASET``: ON for ``mnist``, OFF for
+``cifar10``. Each entry comes from a pre-registered 3-seed x 10-epoch grid on that
+dataset (MNIST: plan decision D-021, recorded in D-025, BN +0.0024 test accuracy;
+CIFAR-10: D-027, recorded in D-028, BN -0.031). An explicit flag always wins; with
+neither, ``TrainingConfig`` resolves ``None`` from the table in ``__post_init__`` so
+``config.json`` and the summary record the value actually used. ``lecun_normal`` +
+``unit`` inputs are the global defaults.
 
 Per-epoch ``ModelAnalyzer`` is opt-in (``--epoch-analysis``); the final
 ``run_model_analysis`` always runs.
@@ -49,7 +54,8 @@ Usage:
     python -m train.power_mlp.train_power_mlp --dataset mnist --epochs 50 --architecture default --k 2
     python -m train.power_mlp.train_power_mlp --dataset cifar10 --architecture large \\
         --k 2 --dropout-rate 0.2
-    python -m train.power_mlp.train_power_mlp --no-batch-normalization
+    python -m train.power_mlp.train_power_mlp --dataset mnist --no-batch-normalization
+    python -m train.power_mlp.train_power_mlp --dataset cifar10 --batch-normalization
 
 Results land in ``results/<experiment_name>/`` at the repository root (never
 under ``src/``): ``config.json``, ``training_log.csv`` (with ``lr``),
@@ -141,6 +147,18 @@ STATUS_DIVERGED = "diverged"
 # The run's own narrative: the ``dl`` logger, tee'd into ``<run_dir>/run.log``.
 RUN_LOG_NAME = "run.log"
 
+# DECISION plan-2026-09-18T213948-68dcb72c/D-028: BN is ON for MNIST (D-025) and OFF for
+# CIFAR-10, each from its own pre-registered 3-seed x 10-epoch grid (CIFAR-10: BN mean
+# 0.4791 vs 0.5102 without, BN worse in 3 of 3 seeds). Do NOT collapse this back to
+# one global flag "for simplicity": either value is the measured loser on the other
+# dataset. Change an entry only through a new multi-seed grid and a decision entry;
+# the literal pins are test_batch_normalization_default_is_resolved_per_dataset and
+# the two default-parameter pins.
+# Resolved by ``TrainingConfig.__post_init__`` when ``batch_normalization`` is None
+# (the CLI default). A dataset absent here is a ``KeyError`` at config time, not a
+# silent fallback: a new dataset needs its own grid.
+BATCH_NORMALIZATION_BY_DATASET: Dict[str, bool] = {"mnist": True, "cifar10": False}
+
 # Hidden widths ONLY. ``PowerMLP`` reads ``hidden_units[0]`` as the input width
 # and ``hidden_units[-1]`` as the class count, so neither belongs in this table;
 # see ``effective_hidden_units``. Passing ``[256, 128, 64, 10]`` (the old shape)
@@ -179,7 +197,10 @@ class TrainingConfig:
 
     Every field is read by the trainer (``tests/test_train/
     test_config_fields_are_live.py``). ``experiment_name`` defaults to
-    ``powermlp_<dataset>_<architecture>_<timestamp>``.
+    ``powermlp_<dataset>_<architecture>_<timestamp>``. ``batch_normalization=None``
+    (the default) is replaced in ``__post_init__`` by
+    ``BATCH_NORMALIZATION_BY_DATASET[dataset]``, so after construction it is always a
+    ``bool``.
     """
 
     # Data
@@ -191,16 +212,18 @@ class TrainingConfig:
     k: int = 2
     dropout_rate: float = 0.1
     # DECISION plan-2026-09-18T213948-68dcb72c/D-025: the defaults below
-    # (batch_normalization=True, kernel_initializer="lecun_normal", input_scaling
+    # (batch_normalization=True ON MNIST (per-dataset table since D-028),
+    # kernel_initializer="lecun_normal", input_scaling
     # "unit") come from the pre-registered 3-seed x 10-epoch MNIST grid of D-021:
     # BN beat the best non-BN arm by +0.00243 mean test accuracy (bar 0.002) with
     # its worst seed above that mean, and lecun vs glorot tied under BN
-    # (-0.00010). Do NOT turn BN back off or switch to glorot_normal because a
+    # (-0.00010). Do NOT turn BN back off on MNIST or switch to glorot_normal because a
     # single run or a 3-epoch table looks better: one seed and 3 epochs already
     # picked a winner the 5-seed replication refuted (D-019). Change the default
     # only through a new multi-seed grid and a new decision entry; the literal
     # pin is test_training_config_defaults_are_the_d025_outcome.
-    batch_normalization: bool = True
+    # None -> BATCH_NORMALIZATION_BY_DATASET[dataset] in __post_init__ (D-028).
+    batch_normalization: Optional[bool] = None
     # Chosen by the pre-registered rule (plan D-014, recorded in D-018) from a
     # measured 3-epoch MNIST grid: lecun_normal + unit was the only eligible arm.
     kernel_initializer: str = "lecun_normal"
@@ -235,6 +258,8 @@ class TrainingConfig:
             )
         if self.optimizer not in OPTIMIZERS:
             raise ValueError(f"optimizer must be one of {OPTIMIZERS}, got {self.optimizer!r}")
+        if self.batch_normalization is None:
+            self.batch_normalization = BATCH_NORMALIZATION_BY_DATASET[self.dataset]
         if self.kernel_initializer not in KERNEL_INITIALIZERS:
             raise ValueError(
                 f"kernel_initializer must be one of {KERNEL_INITIALIZERS}, "
@@ -310,10 +335,14 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Power of the ReLU-k activation.")
     model.add_argument("--dropout-rate", type=float, default=defaults.dropout_rate,
                        help="Dropout rate after each hidden layer, in [0, 1).")
+    # default=None, NOT defaults.batch_normalization: that is the MNIST value (a bare
+    # ``TrainingConfig()`` is an MNIST config); the dataset-dependent default is
+    # resolved after parsing, from BATCH_NORMALIZATION_BY_DATASET.
     model.add_argument("--batch-normalization", action=argparse.BooleanOptionalAction,
-                       default=defaults.batch_normalization,
-                       help="Batch normalization after each hidden layer "
-                            "(default: on; --no-batch-normalization turns it off).")
+                       default=None,
+                       help="Batch normalization after each hidden layer. Default per "
+                            "dataset: on for mnist, off for cifar10 (each measured); "
+                            "--batch-normalization / --no-batch-normalization override it.")
     model.add_argument("--kernel-initializer", type=str, default=defaults.kernel_initializer,
                        choices=KERNEL_INITIALIZERS,
                        help="Kernel initializer of every layer; it sets the initial logit "

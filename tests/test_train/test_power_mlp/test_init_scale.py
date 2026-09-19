@@ -213,12 +213,15 @@ def test_trainingconfig_defaults_start_near_the_uniform_loss(
 
 
 def test_training_config_defaults_are_the_d025_outcome() -> None:
-    """Literal pin of the D-021 grid outcome recorded in D-025.
+    """Literal pin of the D-021 grid outcome recorded in D-025 (MNIST) and of the
+    global init / scaling defaults.
 
     The 3-seed x 10-epoch MNIST grid chose lecun_normal + BN on (unit inputs).
     Changing a default must go through a new grid and a new decision, so it must
     fail here first; the pin is literal on purpose (the guards above read the
-    defaults and would follow a silent change).
+    defaults and would follow a silent change). Batch normalization is per-dataset
+    since D-028: a bare ``TrainingConfig()`` is an MNIST config (BN on), and the CLI
+    parser default is ``None`` (resolved after parsing).
     """
     defaults = tpm.TrainingConfig()
     assert (defaults.kernel_initializer, defaults.batch_normalization) == (
@@ -227,8 +230,37 @@ def test_training_config_defaults_are_the_d025_outcome() -> None:
     assert defaults.input_scaling == "unit"
     args = tpm.parse_arguments([])
     assert (args.kernel_initializer, args.batch_normalization, args.input_scaling) == (
-        "lecun_normal", True, "unit",
+        "lecun_normal", None, "unit",
     )
+    assert tpm.config_from_args(args).batch_normalization is True
+
+
+def test_batch_normalization_default_is_resolved_per_dataset() -> None:
+    """Literal pin of D-028: MNIST BN on (D-025 grid, +0.0024), CIFAR-10 BN off (its
+    own grid, BN 0.4791 vs 0.5102, worse in 3 of 3 seeds). Flipping either table
+    entry, dropping the resolution, or reading the CLI default off ``TrainingConfig()``
+    (the MNIST value) each fail here."""
+    assert tpm.BATCH_NORMALIZATION_BY_DATASET == {"mnist": True, "cifar10": False}
+    assert set(tpm.BATCH_NORMALIZATION_BY_DATASET) == set(tpm.DATASETS)
+    assert tpm.TrainingConfig(dataset="mnist").batch_normalization is True
+    assert tpm.TrainingConfig(dataset="cifar10").batch_normalization is False
+    # An explicit value always wins, in both directions, on both datasets.
+    for dataset in tpm.DATASETS:
+        for explicit in (True, False):
+            config = tpm.TrainingConfig(dataset=dataset, batch_normalization=explicit)
+            assert config.batch_normalization is explicit
+    # The resolved value is a bool, never None (config.json and the summary record it).
+    for dataset in tpm.DATASETS:
+        assert isinstance(tpm.TrainingConfig(dataset=dataset).batch_normalization, bool)
+    # Through the CLI: no flag -> the dataset's default; a flag -> the flag.
+    for argv, expected in (
+        (["--dataset", "mnist"], True),
+        (["--dataset", "cifar10"], False),
+        (["--dataset", "cifar10", "--batch-normalization"], True),
+        (["--dataset", "mnist", "--no-batch-normalization"], False),
+    ):
+        config = tpm.config_from_args(tpm.parse_arguments(argv))
+        assert config.batch_normalization is expected, argv
 
 
 # ---------------------------------------------------------------------

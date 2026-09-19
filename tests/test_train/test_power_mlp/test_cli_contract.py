@@ -51,8 +51,10 @@ POWER_MLP_ROWS: Tuple[Row, ...] = (
     Row(("--architecture",), ("--architecture", "large"), "architecture", "large"),
     Row(("--k",), ("--k", "3"), "k", 3),
     Row(("--dropout-rate",), ("--dropout-rate", "0.35"), "dropout_rate", 0.35),
-    # BooleanOptionalAction: one row accounts for both spellings. BN is ON by default
-    # (D-025), so the probe is the non-default `--no-batch-normalization` -> False.
+    # BooleanOptionalAction: one row accounts for both spellings. The default is per
+    # dataset (D-028; the parser default is None and the config resolves it). On the
+    # default dataset (mnist) BN is ON, so the probe is `--no-batch-normalization` -> False;
+    # the per-dataset cases are test_batch_normalization_has_both_spellings.
     Row(
         ("--batch-normalization", "--no-batch-normalization"),
         ("--no-batch-normalization",), "batch_normalization", False,
@@ -129,11 +131,19 @@ def test_probe_values_are_mutually_distinct() -> None:
 
 @pytest.mark.parametrize(
     "argv,expected",
-    [((), True), (("--batch-normalization",), True), (("--no-batch-normalization",), False)],
-    ids=["default", "on", "off"],
+    [
+        ((), True),  # default dataset is mnist: BN on (D-025)
+        (("--batch-normalization",), True),
+        (("--no-batch-normalization",), False),
+        (("--dataset", "cifar10"), False),  # cifar10: BN off (D-028)
+        (("--dataset", "cifar10", "--batch-normalization"), True),
+        (("--dataset", "cifar10", "--no-batch-normalization"), False),
+        (("--dataset", "mnist", "--no-batch-normalization"), False),
+    ],
+    ids=["default", "on", "off", "cifar10-default", "cifar10-on", "cifar10-off", "mnist-off"],
 )
 def test_batch_normalization_has_both_spellings(argv, expected) -> None:
-    """BN defaults ON (D-025): `--no-batch-normalization` is the only way off."""
+    """BN has a per-dataset default (D-028); either flag overrides it on either dataset."""
     config = tpm.config_from_args(tpm.parse_arguments(list(argv)))
     assert config.batch_normalization is expected
 
@@ -143,6 +153,9 @@ def test_parser_defaults_equal_the_config_defaults() -> None:
     args = tpm.parse_arguments([])
     config = tpm.config_from_args(args)
     default = tpm.TrainingConfig()
+    # ``batch_normalization`` is the one flag whose parser default is deliberately NOT
+    # the config default: it is None (per-dataset, D-028), resolved after parsing.
+    assert tpm.parse_arguments([]).batch_normalization is None
     for name in (
         "dataset", "validation_split", "architecture", "k", "dropout_rate",
         "batch_normalization", "kernel_initializer", "input_scaling", "epochs",
