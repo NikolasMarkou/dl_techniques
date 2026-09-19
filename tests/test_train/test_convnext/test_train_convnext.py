@@ -236,6 +236,9 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
     assert summary["initial_loss_ratio"] == pytest.approx(
         summary["initial_loss_sanity_eval"]["loss"] / np.log(10))
     assert summary["analyzer"]["status"] == "success", summary["analyzer"]
+    notes = " ".join(summary["notes"])
+    assert "unreliable for short runs and depthwise kernels" in notes, summary["notes"]
+    assert "first 1000 test samples" in notes and "skipped" not in notes, summary["notes"]
     assert summary["visualizations"]["failed"] == []
     assert summary["best_checkpoint_load_error"] is None
     assert summary["best_checkpoint_max_abs_diff"] <= common.WEIGHT_MISMATCH_TOLERANCE
@@ -246,6 +249,30 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
     log = (e2e.run_dir / "run.log").read_text()
     assert "Run directory:" in log and "Stage feature maps (H, W)" in log
     assert "Analyzer status (read back from disk): success" in log
+
+
+def test_no_model_analysis_skips_the_analyzer_and_records_it(monkeypatch, tmp_path) -> None:
+    """``--no-model-analysis``: ModelAnalyzer is never called, no ``model_analysis/``
+    directory appears, and the summary says so instead of reporting a missing analysis."""
+    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+
+    def analyzer_must_not_run(*args, **kwargs):
+        raise AssertionError("run_model_analysis was called under model_analysis=False")
+
+    monkeypatch.setattr(common, "run_model_analysis", analyzer_must_not_run)
+    config = _config(tmp_path, "skipped", epochs=1, max_samples=64, model_analysis=False)
+
+    summary = common.train(config)
+
+    assert summary["analyzer"] == {"status": "skipped", "loss": None, "accuracy": None,
+                                   "error": None, "path": None}
+    assert not (tmp_path / "skipped" / "model_analysis").exists()
+    notes = " ".join(summary["notes"])
+    assert "--no-model-analysis" in notes and "first 1000 test samples" not in notes, notes
+    saved = _strict((tmp_path / "skipped" / "results_summary.json").read_text())
+    assert saved["analyzer"]["status"] == "skipped"
+    assert "Analyzer skipped (--no-model-analysis)" in (tmp_path / "skipped" / "run.log").read_text()
+    assert _strict((tmp_path / "skipped" / "config.json").read_text())["model_analysis"] is False
 
 
 # ---------------------------------------------------------------------

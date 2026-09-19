@@ -270,3 +270,15 @@ def test_learning_phase():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+def test_creation_message_is_debug_not_info(caplog):
+    """A ConvNeXt builds one layer per block, three times per run: at INFO that was 27 of
+    73 ``run.log`` lines (audit F6). The message survives at DEBUG."""
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="dl"):
+        StochasticDepth(drop_path_rate=0.1, name="probe_sd")
+    created = [r for r in caplog.records if "Created StochasticDepth" in r.getMessage()]
+    assert len(created) == 1 and created[0].levelno == logging.DEBUG, [
+        (r.levelname, r.getMessage()) for r in caplog.records
+    ]

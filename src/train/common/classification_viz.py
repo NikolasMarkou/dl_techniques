@@ -35,7 +35,7 @@ matplotlib.use("Agg")  # must precede the pyplot import: headless-safe
 
 import keras  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.ticker import MaxNLocator  # noqa: E402
+from matplotlib.ticker import FuncFormatter, MaxNLocator  # noqa: E402
 import numpy as np  # noqa: E402
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support  # noqa: E402
 
@@ -110,6 +110,35 @@ def _save_and_close(fig: plt.Figure, out_path: PathLike) -> str:
     finally:
         plt.close(fig)
     return str(out)
+
+
+# Minor tick labels on a log axis are drawn only while the visible range is narrower than
+# this ratio (hi / lo); at or above it the major decades carry the labels alone.
+LOG_MINOR_LABEL_MAX_RATIO = 10.0
+
+
+def _plain_log_ticks(ax) -> None:
+    """Label a log-scaled y axis with plain numbers instead of ``2x10^0`` clutter.
+
+    The default log formatter prints scientific notation on every minor tick once the
+    range is under a decade (a loss curve of 1.1 to 2.5 read ``1.8x10^0``, ``2x10^0``).
+    Major ticks read ``{value:.3g}`` (``1.5``, ``0.001``); minor ticks read the same while
+    the visible range ``hi / lo`` is below :data:`LOG_MINOR_LABEL_MAX_RATIO` and are blank
+    otherwise, so a wide range keeps only its decades. The range is read when the labels
+    are drawn, so later ``set_ylim`` calls are honoured.
+
+    Args:
+        ax: An axes whose y scale is already ``"log"``; nothing is checked or drawn here.
+    """
+    def major(value: float, _pos: Optional[int]) -> str:
+        return f"{value:.3g}"
+
+    def minor(value: float, pos: Optional[int]) -> str:
+        lo, hi = ax.get_ylim()
+        return major(value, pos) if lo > 0.0 and hi < lo * LOG_MINOR_LABEL_MAX_RATIO else ""
+
+    ax.yaxis.set_major_formatter(FuncFormatter(major))
+    ax.yaxis.set_minor_formatter(FuncFormatter(minor))
 
 
 def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
@@ -227,6 +256,7 @@ def render_training_dashboard(
     def _loss(ax) -> None:
         _curves(ax, loss, val_loss, "loss", "loss")
         ax.set_yscale("log")
+        _plain_log_ticks(ax)
 
     def _accuracy(ax) -> None:
         _curves(ax, acc, val_acc, "accuracy", "accuracy")
@@ -288,6 +318,7 @@ def render_training_dashboard(
             ax.plot(np.arange(window, len(values) + 1), _moving_average(values, window),
                     color=color, lw=2.0, label=f"{label} (MA-{window})")
         ax.set_yscale("log")
+        _plain_log_ticks(ax)
         ax.set_xlabel("epoch")
         ax.set_ylabel("loss")
         ax.legend(fontsize=8)

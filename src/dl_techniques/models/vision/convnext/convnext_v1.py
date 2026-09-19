@@ -312,9 +312,17 @@ class ConvNeXtV1(keras.Model):
             )
 
         if len(depths) != 4:
-            logger.warning(
-                f"ConvNeXt typically uses 4 stages, got {len(depths)} stages"
-            )
+            # A built-in variant's depths (e.g. the 2-stage ``cifar10``) are deliberate,
+            # and they arrive here as explicit args both from ``from_variant`` and after
+            # ``from_config`` / a ``.keras`` reload, so the check compares the values.
+            if any(depths == list(v["depths"]) for v in self.MODEL_VARIANTS.values()):
+                logger.info(
+                    f"ConvNeXt built with {len(depths)} stages (the depths of a built-in variant)"
+                )
+            else:
+                logger.warning(
+                    f"ConvNeXt typically uses 4 stages, got {len(depths)} stages"
+                )
 
         if strides <= 0:
             raise ValueError(

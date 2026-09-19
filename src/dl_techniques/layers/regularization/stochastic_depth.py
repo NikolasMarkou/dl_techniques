@@ -97,7 +97,7 @@ class StochasticDepth(keras.layers.Layer):
 
         self.drop_path_rate = float(drop_path_rate)
 
-        logger.info(
+        logger.debug(
             f"Created StochasticDepth layer '{self.name}' with "
             f"drop_path_rate={self.drop_path_rate}"
         )

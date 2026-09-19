@@ -35,7 +35,8 @@ Every run writes to ``<repo>/results/<experiment_name>/`` (a relative ``--output
 is anchored at the repo root): ``config.json``, ``training_log.csv`` (with ``lr``),
 ``training_history.json``, ``best_model.keras``, ``final_model.keras``,
 ``results_summary.json``, ``run.log``, ``visualizations/`` and ``model_analysis/``
-(plus ``epoch_analysis/`` only with ``--epoch-analysis``). The CSV ``epoch`` column
+(``model_analysis/`` is skipped with ``--no-model-analysis``; ``epoch_analysis/`` is
+written only with ``--epoch-analysis``). The CSV ``epoch`` column
 is 0-based; ``best_epoch`` in the summary is 1-based. A reused experiment name is
 refused, never merged or overwritten.
 """
@@ -205,6 +206,7 @@ class TrainingConfig:
 
     # Monitoring / output
     epoch_analysis: bool = False
+    model_analysis: bool = True
     output_dir: str = "results"
     experiment_name: Optional[str] = None
 
@@ -370,7 +372,12 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
                        help="Seed for weights, shuffling, augmentation and the splits.")
     train.add_argument("--epoch-analysis", action="store_true", default=defaults.epoch_analysis,
                        help="Run the per-epoch ModelAnalyzer callback (off by default; the "
-                            "final analysis always runs).")
+                            "end-of-run analysis is controlled by --model-analysis).")
+    train.add_argument("--model-analysis", action=argparse.BooleanOptionalAction,
+                       default=defaults.model_analysis,
+                       help="Run the end-of-run ModelAnalyzer into model_analysis/ (about 24 s "
+                            "of a 198 s CIFAR-10 5-epoch run; its spectral verdicts are "
+                            "heuristics, see the README). --no-model-analysis skips it.")
 
     out = parser.add_argument_group("output")
     out.add_argument("--output-dir", type=str, default=defaults.output_dir,
@@ -943,6 +950,28 @@ def _read_analysis_status(run_dir: Path, model_name: str) -> Dict[str, Any]:
     }
 
 
+def _analyzer_notes(ran: bool) -> List[str]:
+    """The ``notes`` lines about ``model_analysis/``: what it measured, or that it was skipped.
+
+    Args:
+        ran: ``config.model_analysis``.
+
+    Returns:
+        Plain-language lines for ``results_summary.json``'s ``notes``.
+    """
+    if not ran:
+        return ["model_analysis/ was skipped (--no-model-analysis); `analyzer.status` is "
+                "'skipped'"]
+    return [
+        "analyzer accuracy and its calibration numbers use the first 1000 test samples and "
+        "differ from the full-test-set `test_metrics_*` and `ece`; its 'Final Acc' is not the "
+        "final epoch's",
+        "the analyzer's spectral (WeightWatcher) verdicts such as 'overfit / over-trained' are "
+        "heuristics: they read a 5-epoch model as over-trained and are unreliable for short "
+        "runs and depthwise kernels",
+    ]
+
+
 # ---------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------
@@ -1194,11 +1223,16 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
         visualizations = _write_visualizations(
             vis_dir, data, probs, get_class_names(config.dataset, data.num_classes)
         )
-        run_model_analysis(
-            model, (data.x_test, data.y_test), history, config.experiment_name, str(run_dir)
-        )
-        analysis = _read_analysis_status(run_dir, config.experiment_name)
-        logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
+        if config.model_analysis:
+            run_model_analysis(
+                model, (data.x_test, data.y_test), history, config.experiment_name, str(run_dir)
+            )
+            analysis = _read_analysis_status(run_dir, config.experiment_name)
+            logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
+        else:
+            analysis = {"status": "skipped", "loss": None, "accuracy": None,
+                        "error": None, "path": None}
+            logger.info("Analyzer skipped (--no-model-analysis)")
 
         # DECISION plan-2026-09-19T040641-db6932ec/D-012: the FINAL model is the last
         # epoch's weights, captured by ``_LastEpochWeights``, because Keras 3.8
@@ -1254,8 +1288,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
                 "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` the "
                 "last epoch's weights (final_model.keras); figures and model_analysis/ use the "
                 "best weights; the test set never influenced selection",
-                "analyzer accuracy and its calibration numbers use the first 1000 test samples; "
-                "top-level `ece` uses the full test set",
+                *_analyzer_notes(config.model_analysis),
                 "`fit_wall_seconds` minus the sum of `epoch_times` is time outside the epoch "
                 "clock (dashboard redraws, checkpoint saves, train-end restore)",
             ],

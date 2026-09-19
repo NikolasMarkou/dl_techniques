@@ -67,6 +67,9 @@ def _rows(variant_probe: str) -> Tuple[Row, ...]:
         Row(("--seed",), ("--seed", "1234"), "seed", 1234),
         # Opt-in (default False): the probe is the non-default True.
         Row(("--epoch-analysis",), ("--epoch-analysis",), "epoch_analysis", True),
+        # BooleanOptionalAction, default True: the probe is the non-default spelling.
+        Row(("--model-analysis", "--no-model-analysis"), ("--no-model-analysis",),
+            "model_analysis", False),
         Row(("--output-dir",), ("--output-dir", "/probe/convnext-out"), "output_dir",
             "/probe/convnext-out"),
         Row(("--experiment-name",), ("--experiment-name", "probe-experiment-name"),
@@ -163,7 +166,8 @@ def test_parser_defaults_equal_the_config_defaults() -> None:
             "variant", "kernel_size", "strides", "drop_path_rate", "stochastic_mode",
             "dropout_rate", "use_gamma", "dataset", "validation_split", "max_samples",
             "epochs", "batch_size", "learning_rate", "weight_decay", "lr_schedule",
-            "warmup_epochs", "patience", "seed", "epoch_analysis", "output_dir",
+            "warmup_epochs", "patience", "seed", "epoch_analysis", "model_analysis",
+            "output_dir",
         ):
             assert getattr(config, name) == getattr(default, name), (family, name)
         assert config.model_family == family

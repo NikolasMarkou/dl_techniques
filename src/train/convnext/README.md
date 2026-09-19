@@ -99,7 +99,8 @@ it). Both wrappers have the same flags; only `--variant` differs.
 | `--warmup-epochs` | `0` | Linear warmup epochs before the cosine. Only valid with `cosine` and strictly below `--epochs`; otherwise refused at config time. |
 | `--patience` | `50` | Early-stopping patience in epochs, on `val_loss`. |
 | `--seed` | `42` | Seed for weights, shuffling, augmentation and the splits. |
-| `--epoch-analysis` | off | Also run the per-epoch `ModelAnalyzer` callback into `epoch_analysis/`. The end-of-run analysis always runs. |
+| `--epoch-analysis` | off | Also run the per-epoch `ModelAnalyzer` callback into `epoch_analysis/`. Independent of `--model-analysis`. |
+| `--model-analysis` / `--no-model-analysis` | on | The end-of-run `ModelAnalyzer` into `model_analysis/`. `--no-model-analysis` skips it and the summary records `analyzer.status = "skipped"`. See "The end-of-run analysis". |
 | `--output-dir` | `results` | Output root; a relative path is anchored at the repo root. |
 | `--experiment-name` | `convnext_<family>_<dataset>_<variant>_<timestamp>` | Run directory name. A name that already holds a run is refused. |
 | `--gpu` | none | GPU index; see "GPU selection". Not a config field. |
@@ -245,7 +246,7 @@ results/<experiment_name>/
         confidence_calibration.png   reliability diagram with ECE
         misclassifications.png       the most confident errors
         classification_report.json
-    model_analysis/             ModelAnalyzer output of the final analysis (analysis_results.json, ...)
+    model_analysis/             ModelAnalyzer output of the final analysis (analysis_results.json, ...); absent with --no-model-analysis
     epoch_analysis/             ONLY with --epoch-analysis
 ```
 
@@ -276,8 +277,16 @@ Notes:
   removed when `train()` returns or raises. Keras' own progress bars are not in it.
 - **The analyzer status is read back from disk** (`model_analysis/analysis_results.json`),
   because `run_model_analysis` logs "completed successfully" even when its evaluation failed.
-  The analyzer's accuracy and calibration numbers use the first 1000 test samples; the top-level
-  `ece` uses the full test set.
+  With `--no-model-analysis` there is nothing to read and the status is `"skipped"`.
+- **The end-of-run analysis** (`model_analysis/`, on by default, `--no-model-analysis` to skip)
+  costs about 24 s of a 198 s CIFAR-10 5-epoch run (seven PNGs), so a short run or a sweep
+  usually wants it off. Read it with three caveats. Its spectral (WeightWatcher) verdicts such
+  as "overfit / over-trained" are heuristics that read a 5-epoch model as over-trained, and they
+  are unreliable for short runs and for depthwise kernels. Its `Final Acc` and ECE come from
+  the first 1000 test samples and differ from the summary's full-test-set `test_metrics_*` and
+  `ece`; the `Final Acc` is not the last epoch's accuracy. `summary_dashboard.png` can carry an
+  empty "No weight PCA data available" panel. The summary's `notes` repeat the caveat when the
+  analysis ran, and say it was skipped when it did not.
 
 ### `results_summary.json` keys
 
@@ -312,7 +321,7 @@ Keys added by a finished run (`status: "ok"`):
 | `ece` | Expected calibration error on the FULL test set. |
 | `visualizations` | The files written, the ECE, and `failed` (empty on a healthy run). |
 | `model_loading_validated` | Result of reloading `final_model.keras` and comparing predictions. |
-| `analyzer` | Status, loss, accuracy, error and path of the `ModelAnalyzer` run, read back from disk. |
+| `analyzer` | Status, loss, accuracy, error and path of the `ModelAnalyzer` run, read back from disk; `{"status": "skipped", ...}` with `null` for the rest under `--no-model-analysis`. |
 | `notes` | Plain-language caveats for the reader of the file. |
 
 A `diverged` summary carries the shared keys plus `status`, `epochs_run`, `stopped_early`

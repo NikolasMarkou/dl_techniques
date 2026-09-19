@@ -685,6 +685,58 @@ def captured_figures(monkeypatch):
     return figures
 
 
+def _loss_axis_labels(tmp_path, monkeypatch, low, high, n_epochs=8):
+    """Render a dashboard and return the drawn y tick labels of the Loss and Smoothed loss
+    panels: ``{title: (visible major labels, visible minor labels)}``.
+
+    Labels exist only after a draw, and ``_save_and_close`` closes the figure, so the spy
+    draws the canvas and reads them first.
+    """
+    read = {}
+    real = viz._save_and_close
+
+    def spy(fig, out_path):
+        fig.canvas.draw()
+        for ax in fig.axes:
+            if ax.get_title() in ("Loss", "Smoothed loss"):
+                lo, hi = ax.get_ylim()  # matplotlib also labels ticks outside the view
+                read[ax.get_title()] = tuple(
+                    [t.get_text() for t, loc in zip(labels, locs) if lo <= loc <= hi]
+                    for labels, locs in (
+                        (ax.yaxis.get_majorticklabels(), ax.yaxis.get_majorticklocs()),
+                        (ax.yaxis.get_minorticklabels(), ax.yaxis.get_minorticklocs()),
+                    )
+                )
+        return real(fig, out_path)
+
+    monkeypatch.setattr(viz, "_save_and_close", spy)
+    loss = np.geomspace(high, low, n_epochs)
+    viz.render_training_dashboard(
+        {"loss": loss.tolist(), "val_loss": (loss * 1.05).tolist()}, tmp_path / "d.png")
+    return read
+
+
+def test_dashboard_loss_axis_reads_plain_numbers_for_a_narrow_range(
+        tmp_path, monkeypatch) -> None:
+    """A loss of 1.1 to 2.5 used to be labelled ``1.8x10^0``, ``2x10^0`` (audit F9)."""
+    read = _loss_axis_labels(tmp_path, monkeypatch, 1.1, 2.5)
+    assert set(read) == {"Loss", "Smoothed loss"}
+    for title, (major, minor) in read.items():
+        shown = [t for t in major + minor if t]
+        assert shown, (title, "no tick label at all: the guard would pass vacuously")
+        assert not any("10^" in t or "x" in t or "\u00d7" in t for t in shown), (title, shown)
+        assert all(0.0 < float(t) < 3.0 for t in shown), (title, shown)  # plain, parseable
+    assert any(t for t in read["Loss"][1]), "a narrow range keeps its minor labels"
+
+
+def test_dashboard_loss_axis_keeps_only_decades_for_a_wide_range(
+        tmp_path, monkeypatch) -> None:
+    read = _loss_axis_labels(tmp_path, monkeypatch, 0.001, 10.0)
+    major, minor = read["Loss"]
+    assert {"0.001", "0.01", "0.1", "1", "10"} <= {t for t in major if t}, major
+    assert [t for t in minor if t] == [], minor
+
+
 @pytest.mark.parametrize("n_epochs", [1, 2, 3, 5, 6, 7, 12])
 def test_dashboard_smoothed_loss_panel_iff_more_than_five_epochs(
         tmp_path, captured_figures, n_epochs) -> None:
