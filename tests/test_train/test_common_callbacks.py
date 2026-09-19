@@ -24,11 +24,14 @@ no ``mode`` attribute, so it is pinned on ``monitor_op`` (``np.greater`` /
 ``np.less``) -- the thing that actually decides which epoch is written.
 """
 
+import logging
+
 import numpy as np
 import keras
 import pytest
 
 from train.common.callbacks import (
+    EpochLogLine,
     create_callbacks,
     resolve_monitor_mode,
     _MAXIMIZE_METRIC_TOKENS,
@@ -218,3 +221,67 @@ class TestRegistryHygiene:
         assert "val" not in _MAXIMIZE_METRIC_TOKENS
         assert "val" not in _MINIMIZE_METRIC_TOKENS
         assert resolve_monitor_mode("val_psnr") == resolve_monitor_mode("psnr")
+
+
+# ---------------------------------------------------------------------
+# iter-1/step-4 (plan-2026-09-19T131351-b8d39688/D-007): the shared per-epoch line
+# ---------------------------------------------------------------------
+
+
+def _epoch_lines(callback: EpochLogLine, epochs_logs, total: int = 7, start: int = 2):
+    """Drive ``callback`` through ``epochs_logs`` and return the ``Epoch ...`` messages."""
+    callback.set_params({"epochs": total})
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Capture()
+    logging.getLogger("dl").addHandler(handler)
+    try:
+        for offset, logs in enumerate(epochs_logs):
+            callback.on_epoch_begin(start + offset)
+            callback.on_epoch_end(start + offset, logs)
+    finally:
+        logging.getLogger("dl").removeHandler(handler)
+    return [m for m in records if m.startswith("Epoch ")]
+
+
+class TestEpochLogLine:
+    """``EpochLogLine(keys)`` logs one truthful line per epoch from the epoch ``logs``."""
+
+    def test_only_the_named_keys_are_printed_in_the_given_order(self):
+        callback = EpochLogLine(("val_loss", "loss"))
+        lines = _epoch_lines(callback, [
+            {"loss": 1.5, "mae": 0.3, "val_loss": 1.75, "lr": 0.001},
+        ])
+        assert len(lines) == 1
+        assert lines[0].startswith("Epoch 3/7 - val_loss 1.7500 - loss 1.5000 - lr 0.001 - time ")
+        assert "mae" not in lines[0]
+
+    def test_a_key_absent_from_the_logs_is_skipped_not_printed_as_a_placeholder(self):
+        callback = EpochLogLine(("loss", "val_loss", "psnr_metric"))
+        lines = _epoch_lines(callback, [{"loss": 1.0}])
+        assert lines[0].startswith("Epoch 3/7 - loss 1.0000 - time ")
+        assert "val_loss" not in lines[0] and "psnr_metric" not in lines[0]
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_lr_is_omitted(self, bad):
+        callback = EpochLogLine(("loss",))
+        lines = _epoch_lines(callback, [{"loss": 1.0, "lr": bad}, {"loss": 1.0, "lr": 0.002}])
+        assert len(lines) == 2
+        assert " lr " not in lines[0] and "nan" not in lines[0] and "inf" not in lines[0]
+        assert lines[0].startswith("Epoch 3/7 - loss 1.0000 - time ")
+        assert "lr 0.002 - time " in lines[1]
+
+    def test_the_epoch_time_is_the_measured_begin_to_end_interval(self):
+        callback = EpochLogLine(("loss",))
+        lines = _epoch_lines(callback, [{"loss": 1.0}])
+        seconds = float(lines[0].rsplit("time ", 1)[1].rstrip("s"))
+        assert 0.0 <= seconds < 5.0
+        assert lines[0].endswith("s")
+
+    def test_the_keys_are_required(self):
+        with pytest.raises(TypeError):
+            EpochLogLine()

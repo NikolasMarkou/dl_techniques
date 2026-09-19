@@ -17,7 +17,9 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import logging
 import os
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -301,3 +303,116 @@ def test_config_json_records_the_pool_steps_per_epoch_under_self_iterate(pool_ru
     written = json.loads((pool_run.run_dir / "config.json").read_text())
     assert written["steps_per_epoch"] == 2
     assert pool_run.config.steps_per_epoch is None
+
+
+# ---------------------------------------------------------------------
+# iter-1/step-4 (plan-2026-09-19T131351-b8d39688/D-007): run.log and the epoch line
+# ---------------------------------------------------------------------
+
+EPOCH_LINE = re.compile(r"Epoch (\d+)/(\d+) - (.*) - time ([0-9.]+)s\s*$")
+# The metric columns the trainer compiles, typed here (never read from the code under
+# test). Every one must exist in the CSV or the comparison below would be vacuous.
+LINE_METRICS = (
+    "loss", "mae", "psnr_metric", "ssim_metric",
+    "val_loss", "val_mae", "val_psnr_metric", "val_ssim_metric",
+)
+
+
+def _epoch_lines(run_dir: Path):
+    """``[(epoch, total, {key: value text}, seconds)]`` for every epoch line of run.log."""
+    found = []
+    for line in (run_dir / "run.log").read_text().splitlines():
+        match = EPOCH_LINE.search(line)
+        if match is None:
+            continue
+        pairs = {}
+        for part in match.group(3).split(" - "):
+            key, value = part.rsplit(" ", 1)
+            pairs[key] = value
+        found.append((int(match.group(1)), int(match.group(2)), pairs, float(match.group(4))))
+    return found
+
+
+def test_the_run_writes_a_run_log(e2e) -> None:
+    assert (e2e.run_dir / "run.log").stat().st_size > 0
+
+
+def test_run_log_holds_exactly_one_epoch_line_per_epoch(e2e) -> None:
+    lines = _epoch_lines(e2e.run_dir)
+    assert [n for n, _, _, _ in lines] == [1, 2, 3]
+    assert all(total == 3 for _, total, _, _ in lines)
+
+
+def test_every_metric_the_line_needs_is_a_csv_column(e2e) -> None:
+    """Anti-vacuity: the comparison below iterates a typed list, so pin that it is real."""
+    assert set(LINE_METRICS) <= set(_csv_rows(e2e.run_dir)[0])
+
+
+def test_each_epoch_line_equals_its_csv_row_to_four_decimals(e2e) -> None:
+    """Expected texts are computed here from the CSV, not read from the callback's keys."""
+    lines = _epoch_lines(e2e.run_dir)
+    rows = _csv_rows(e2e.run_dir)
+    assert len(lines) == len(rows) == 3
+    for (epoch, _, values, _), row in zip(lines, rows):
+        expected = {key: f"{float(row[key]):.4f}" for key in LINE_METRICS}
+        expected["lr"] = f"{float(row['lr']):.6g}"
+        assert values == expected, epoch
+
+
+def test_the_epoch_line_seconds_are_positive_and_fit_inside_the_fit(e2e) -> None:
+    lines = _epoch_lines(e2e.run_dir)
+    assert len(lines) == 3
+    assert all(seconds > 0.0 for _, _, _, seconds in lines)
+    assert sum(seconds for _, _, _, seconds in lines) < e2e.seconds
+
+
+def test_run_log_covers_the_whole_run_through_the_final_save(e2e) -> None:
+    """The handler wraps the training body, not just the fit: the save at the end is in it."""
+    text = (e2e.run_dir / "run.log").read_text()
+    assert "Training completed in" in text
+    assert "Saved final (last-epoch) model" in text
+
+
+def test_the_run_log_handler_is_detached_when_train_returns(e2e) -> None:
+    """A later message in the same process must not land in a finished run's log."""
+    before = (e2e.run_dir / "run.log").read_bytes()
+    logging.getLogger("dl").info("after the run: this must not reach run.log")
+    assert (e2e.run_dir / "run.log").read_bytes() == before
+    attached = [
+        h for h in logging.getLogger("dl").handlers
+        if isinstance(h, logging.FileHandler) and str(e2e.run_dir) in str(h.baseFilename)
+    ]
+    assert attached == []
+
+
+class _LogsEditor(keras.callbacks.Callback):
+    """Stands in for any callback that edits the epoch ``logs`` after the stock ones."""
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs["psnr_metric"] = 12.3457
+
+
+@pytest.fixture(scope="module")
+def edited_run(tmp_path_factory) -> SimpleNamespace:
+    """One-epoch run whose callback list gains a logs-editing callback after the stock ones."""
+    root = tmp_path_factory.mktemp("bfunet_edited_logs")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    original = common.create_common_callbacks
+
+    def with_editor(*args, **kwargs):
+        callbacks, results_dir = original(*args, **kwargs)
+        callbacks.append(_LogsEditor())
+        return callbacks, results_dir
+
+    config = _tiny_config(root, "edited_logs", epochs=1)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "create_common_callbacks", with_editor)
+        run_train(config)
+    return SimpleNamespace(run_dir=root / "out" / "edited_logs")
+
+
+def test_the_epoch_line_is_printed_after_every_callback_that_edits_the_logs(edited_run) -> None:
+    """A line printed before the editor ran would show the compiled value, not 12.3457."""
+    (line,) = _epoch_lines(edited_run.run_dir)
+    assert line[2]["psnr_metric"] == "12.3457"

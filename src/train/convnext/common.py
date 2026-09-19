@@ -78,7 +78,7 @@ from train.common import (
     write_summary_json,
 )
 from train.common import run_summary
-from train.common.callbacks import LearningRateLogger
+from train.common.callbacks import EpochLogLine, LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
 
 
@@ -826,42 +826,19 @@ class _LastEpochWeights(keras.callbacks.Callback):
 # treat the Keras progress bar as the reference and do NOT copy its train numbers into
 # this line: the bar averages the already-running-mean logs a second time
 # (keras/src/utils/progbar.py:84-100, no ``stateful_metrics``), so its train metrics read
-# low, most in a fast-learning first epoch. Val numbers agree with the bar.
+# low, most in a fast-learning first epoch. Val numbers agree with the bar. The class
+# itself now lives in ``train.common.callbacks.EpochLogLine`` (plan-2026-09-19T131351-b8d39688
+# /D-007, second call site); this subclass only fixes the ConvNeXt key set.
 EPOCH_LINE_KEYS = (
     "loss", "accuracy", "top_5_accuracy", "val_loss", "val_accuracy", "val_top_5_accuracy",
 )
 
 
-class _EpochLogLine(keras.callbacks.Callback):
-    """Logs one ``Epoch N/E - loss X - ... - lr X - time Ns`` line per epoch.
-
-    Reads the epoch ``logs`` exactly as CSVLogger does, so the line equals the CSV row
-    (to the printed precision). Place it AFTER ``LearningRateLogger`` (which writes
-    ``logs['lr']``) and after every callback that changes ``logs``; a metric absent from
-    ``logs`` (top-5 on a 10-class dataset, validation metrics after a failed evaluation)
-    is skipped, never printed as a placeholder. The epoch time is measured here
-    (``on_epoch_begin`` to ``on_epoch_end``) and equals the dashboard's ``epoch_times``
-    up to the few milliseconds of the callbacks that run in between.
-    """
+class _EpochLogLine(EpochLogLine):
+    """``EpochLogLine`` with the ConvNeXt classification keys."""
 
     def __init__(self) -> None:
-        super().__init__()
-        self._epoch_start = 0.0
-
-    def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        self._epoch_start = time.perf_counter()
-
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        logs = logs or {}
-        elapsed = time.perf_counter() - self._epoch_start
-        total = (self.params or {}).get("epochs", "?")
-        parts = [f"Epoch {epoch + 1}/{total}"]
-        parts += [f"{key} {float(logs[key]):.4f}" for key in EPOCH_LINE_KEYS if key in logs]
-        lr = logs.get("lr")
-        if lr is not None and math.isfinite(float(lr)):
-            parts.append(f"lr {float(lr):.6g}")
-        parts.append(f"time {elapsed:.1f}s")
-        logger.info(" - ".join(parts))
+        super().__init__(EPOCH_LINE_KEYS)
 
 
 # ---------------------------------------------------------------------

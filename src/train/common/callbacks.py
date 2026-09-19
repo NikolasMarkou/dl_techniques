@@ -3,6 +3,8 @@
 import os
 import re
 import json
+import math
+import time
 import keras
 from datetime import datetime
 from typing import Tuple, List, Dict, Optional, Any
@@ -447,9 +449,11 @@ class LearningRateLogger(keras.callbacks.Callback):
     behaviour change -- see :func:`read_current_lr` on why the plain
     ``float(optimizer.learning_rate)`` they used was already correct.
 
-    ``bfunet/common.py`` keeps its own ``LRLoggerCallback``: it deliberately
-    leaves ``logs['lr']`` UNSET on a non-finite read rather than writing a NaN
-    into the CSV row, and documents a callback-ordering contract.
+    Callback ordering: Keras runs callbacks in list order and CSVLogger writes
+    the row from ``logs`` at ITS position, so this logger must be inserted at
+    the FRONT of the list (index 0) for ``lr`` to reach ``training_log.csv``.
+    On a non-finite read it writes ``nan`` into ``logs`` (the CSV cell reads
+    ``nan``); :class:`EpochLogLine` then leaves the rate out of the printed line.
 
     By default the rate is read in ``on_epoch_end``. With a per-step schedule
     that is the rate of the NEXT epoch's first step, not the rate the epoch
@@ -483,3 +487,56 @@ class LearningRateLogger(keras.callbacks.Callback):
         logs[self.log_key] = (
             self._epoch_start_lr if self.at_epoch_start else read_current_lr(self.model)
         )
+
+
+# DECISION plan-2026-09-19T131351-b8d39688/D-007: the per-epoch line is built from the TRUE
+# epoch ``logs`` and written through the repo logger (console and run.log). Do NOT treat
+# the Keras progress bar as the reference and do NOT copy its train numbers into this line:
+# the bar averages the already-running-mean logs a second time
+# (keras/src/utils/progbar.py:84-100, no ``stateful_metrics``), so its train metrics read
+# low, most in a fast-learning first epoch. Val numbers agree with the bar. This class is
+# the promoted body of the ConvNeXt trainer's ``_EpochLogLine`` (D-019 there); the second
+# call site (bfunet) is what earned the promotion, so do NOT copy it back into a trainer.
+# NOT @register_dl_technique: callbacks are never serialized as part of a model.
+class EpochLogLine(keras.callbacks.Callback):
+    """Log one ``Epoch N/E - loss X - ... - lr X - time Ns`` line per epoch.
+
+    Interface contract:
+        ``EpochLogLine(keys)`` -- ``keys`` is the ordered tuple of ``logs`` keys to
+        print with 4 decimals (required, no default: the metric set is the trainer's
+        decision). A key absent from ``logs`` (a metric the model does not compile,
+        validation metrics after a failed evaluation) is skipped, never printed as a
+        placeholder. ``logs['lr']`` is appended as ``lr X`` (``.6g``) only when it is
+        present and finite. The elapsed time is measured here, ``on_epoch_begin`` to
+        ``on_epoch_end`` of THIS callback, so callbacks placed after it (a dashboard
+        redraw) stay outside its clock. Nothing is returned and ``logs`` is never
+        modified; a failure to format cannot be swallowed, so keep ``keys`` to numeric
+        entries.
+
+    Reads the epoch ``logs`` exactly as CSVLogger does, so the line equals the CSV row
+    (to the printed precision). Place it AFTER ``LearningRateLogger`` (which writes
+    ``logs['lr']``) and after every callback that changes ``logs``.
+
+    Args:
+        keys: Ordered ``logs`` keys to print.
+    """
+
+    def __init__(self, keys: Tuple[str, ...]) -> None:
+        super().__init__()
+        self.keys = tuple(keys)
+        self._epoch_start = 0.0
+
+    def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        self._epoch_start = time.perf_counter()
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        logs = logs or {}
+        elapsed = time.perf_counter() - self._epoch_start
+        total = (self.params or {}).get("epochs", "?")
+        parts = [f"Epoch {epoch + 1}/{total}"]
+        parts += [f"{key} {float(logs[key]):.4f}" for key in self.keys if key in logs]
+        lr = logs.get("lr")
+        if lr is not None and math.isfinite(float(lr)):
+            parts.append(f"lr {float(lr):.6g}")
+        parts.append(f"time {elapsed:.1f}s")
+        logger.info(" - ".join(parts))

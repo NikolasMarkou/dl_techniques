@@ -26,8 +26,9 @@ from train.common import (
     collect_image_paths,
 )
 from train.common.args import resolved_run_dir
+from train.common.callbacks import EpochLogLine
 from train.common.config_io import save_config_json
-from train.common.run_artifacts import refuse_existing_run
+from train.common.run_artifacts import attach_run_log, refuse_existing_run
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.superpoint.homographic_adaptation import select_weighted_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -85,6 +86,14 @@ from dl_techniques.callbacks.self_iterate_pool import (
 # See plans/plan_2026-07-12_e56909cd/decisions.md D-001.
 DATA_MIN: float = 0.0
 DATA_MAX: float = 1.0
+
+# ``logs`` keys of the per-epoch ``run.log`` line: every metric ``train()`` compiles
+# (``loss``, ``mae``, PSNR, SSIM) and its ``val_`` twin, the same columns as
+# ``training_log.csv``; ``EpochLogLine`` appends ``lr`` and the epoch time itself.
+EPOCH_LINE_KEYS: Tuple[str, ...] = (
+    "loss", "mae", "psnr_metric", "ssim_metric",
+    "val_loss", "val_mae", "val_psnr_metric", "val_ssim_metric",
+)
 
 
 def decode_full_image(
@@ -2216,12 +2225,48 @@ def train(
             f"No validation images found under {list(config.val_image_dirs)}: every "
             "directory is missing or holds no matching file. Nothing was written."
         )
+    refuse_existing_run(resolved)
+    output_dir = prepare_run_dir(config, output_dir=resolved)
+
+    # DECISION plan-2026-09-19T131351-b8d39688/D-007: everything from here to the final save
+    # is teed into ``run.log`` (the per-epoch ``EpochLogLine`` is what makes it useful). The
+    # body is its own function only so the ``with`` does not re-indent 450 lines; do NOT
+    # inline it back without keeping the handler open for the whole body, and do NOT open
+    # the handler before the refusals above (a refused run has no directory to write to).
+    with attach_run_log(output_dir):
+        return _train_in_run_dir(
+            config, build_model_fn, verify_fn,
+            model_label=model_label,
+            results_dir_prefix=results_dir_prefix,
+            bottleneck_name_prefix=bottleneck_name_prefix,
+            output_dir=output_dir,
+            train_paths=train_paths,
+            val_paths=val_paths,
+        )
+
+
+def _train_in_run_dir(
+    config: "BFUnetTrainingConfig",
+    build_model_fn,
+    verify_fn,
+    *,
+    model_label: str,
+    results_dir_prefix: str,
+    bottleneck_name_prefix: Optional[str],
+    output_dir: Path,
+    train_paths: List[str],
+    val_paths: List[str],
+) -> keras.Model:
+    """Everything :func:`train` does once the run directory exists and ``run.log`` is open.
+
+    Interface contract: called only by :func:`train`, which owns the refusals, the seed
+    and the path collection; takes the already-collected ``train_paths`` / ``val_paths``
+    and the created ``output_dir``. Returns the trained in-memory model; any exception
+    propagates (the caller's ``with`` closes ``run.log`` on the way out).
+    """
     logger.info(
         f"Sourced {len(train_paths)} train / {len(val_paths)} val image paths"
     )
-
-    refuse_existing_run(resolved)
-    output_dir = prepare_run_dir(config, output_dir=resolved)
 
     # DECISION plan_2026-06-20_0433c2f2/D-002: --deep-supervision is NOT wired in this
     # trainer (no multi-scale targets, no per-output loss dict, no weight scheduler), so a
@@ -2560,6 +2605,15 @@ def train(
     # the curriculum Variable is consumed ONLY by get_sigma here (intended).
     if self_iterate_callback is not None:
         callbacks.append(self_iterate_callback)
+
+    # DECISION plan-2026-09-19T131351-b8d39688/D-007: one truthful line per epoch, from the
+    # TRUE ``logs``, so it equals the CSV row. It goes AFTER every callback that edits
+    # ``logs`` (LRLoggerCallback at index 0, anything ``create_common_callbacks`` returned)
+    # and BEFORE the visualization callbacks below, whose grid/dashboard redraw must stay
+    # outside its clock. Do NOT lean on the Keras progress bar for train numbers: it
+    # averages the running-mean logs a second time and reads low. Do NOT move this above
+    # the edit sites: it would print a value the CSV does not hold.
+    callbacks.append(EpochLogLine(EPOCH_LINE_KEYS))
 
     # Denoising visualization: same images under 3 noise regimes.
     viz_batch = build_fixed_val_batch(val_paths, config, n=config.viz_samples)
