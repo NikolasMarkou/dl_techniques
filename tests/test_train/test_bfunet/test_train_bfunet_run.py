@@ -416,3 +416,125 @@ def test_the_epoch_line_is_printed_after_every_callback_that_edits_the_logs(edit
     """A line printed before the editor ran would show the compiled value, not 12.3457."""
     (line,) = _epoch_lines(edited_run.run_dir)
     assert line[2]["psnr_metric"] == "12.3457"
+
+
+# ---------------------------------------------------------------------
+# Learning rate: the CSV and the dashboard carry the rate the epoch STARTED at
+# ---------------------------------------------------------------------
+
+# Peak rate of the default config and the warmup start of ``learning_rate_schedule_builder``,
+# as literals: the tests must not read the constants the fix touched. The tiny config resolves
+# ``warmup_epochs`` to 1 (10 percent of 3 epochs, floor 1), so epoch 1 trains from the warmup
+# start, epoch 2 begins at the peak, and epoch 3 begins 3 of 9 cosine steps into the decay
+# (the warmup wrapper hands the cosine ``step - warmup_steps``): 1e-3 * (0.99 * 0.75 + 0.01).
+WARMUP_START_LR = 1e-8
+PEAK_LR = 1e-3
+EPOCH_3_START_LR = 7.525e-4
+LR_PANEL_TITLE = "Learning rate per epoch"
+
+
+def _lr_column(run_dir: Path) -> List[float]:
+    return [float(row["lr"]) for row in _csv_rows(run_dir)]
+
+
+@pytest.fixture(scope="module")
+def lr_run(tmp_path_factory) -> SimpleNamespace:
+    """A tiny run whose dashboard histories and LR-panel figures are recorded as they are drawn.
+
+    ``render_training_dashboard`` is wrapped to copy the history it is handed; ``plt.savefig``
+    is wrapped to read the LR panel's y-limits and annotation texts off the live figure before
+    it is closed. The finished run is then rebuilt with ``build_dashboard_from_dir`` under the
+    same wrappers, so the rebuilt panel is observed the same way.
+    """
+    import matplotlib.pyplot as plt
+
+    root = tmp_path_factory.mktemp("bfunet_lr")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    histories: List[Dict] = []
+    panels: List[Dict] = []
+    real_render = common.render_training_dashboard
+    real_savefig = plt.savefig
+
+    def spy_render(history, out_path, *args, **kwargs):
+        histories.append({k: (None if v is None else list(v)) for k, v in history.items()})
+        return real_render(history, out_path, *args, **kwargs)
+
+    def spy_savefig(path, *args, **kwargs):
+        for ax in plt.gcf().axes:
+            if ax.get_title() == LR_PANEL_TITLE:
+                panels.append({
+                    "ylim": ax.get_ylim(),
+                    "texts": [t.get_text() for t in ax.texts],
+                })
+        return real_savefig(path, *args, **kwargs)
+
+    config = _tiny_config(root, "lr_run")
+    run_dir = root / "out" / "lr_run"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "render_training_dashboard", spy_render)
+        patch.setattr(plt, "savefig", spy_savefig)
+        run_train(config)
+        trained_histories, trained_panels = list(histories), list(panels)
+        histories.clear()
+        panels.clear()
+        common.build_dashboard_from_dir(str(run_dir))
+    return SimpleNamespace(
+        run_dir=run_dir,
+        histories=trained_histories,
+        panels=trained_panels,
+        rebuilt_history=histories[-1],
+        rebuilt_panel=panels[-1],
+    )
+
+
+def test_the_csv_lr_is_the_rate_each_epoch_started_at(lr_run) -> None:
+    """Epoch 1 trains from the warmup start; the end-of-epoch read would show 1e-3 there."""
+    lrs = _lr_column(lr_run.run_dir)
+    assert lrs == pytest.approx([WARMUP_START_LR, PEAK_LR, EPOCH_3_START_LR], rel=1e-3)
+
+
+def test_the_local_lr_logger_is_gone_so_there_is_one_lr_semantics(lr_run) -> None:
+    assert not hasattr(common, "LRLoggerCallback")
+    assert not hasattr(common, "_read_current_lr")
+
+
+def test_the_epoch_zero_baseline_point_carries_no_learning_rate(lr_run) -> None:
+    """Nothing trained at epoch 0; the optimizer's warmup start is not a rate any epoch used."""
+    baseline = lr_run.histories[0]
+    assert baseline["epoch"] == [0]
+    assert np.isnan(baseline["lr"][0])
+
+
+def test_the_dashboard_lr_series_is_the_csv_lr_column(lr_run) -> None:
+    """The last live redraw holds the baseline nan then the CSV rates, epoch for epoch."""
+    final = lr_run.histories[-1]
+    assert final["epoch"] == [0, 1, 2, 3]
+    assert np.isnan(final["lr"][0])
+    assert final["lr"][1:] == pytest.approx(_lr_column(lr_run.run_dir), rel=1e-6)
+
+
+def test_the_live_dashboard_lr_axis_is_not_squeezed_by_the_warmup_start(lr_run) -> None:
+    """Peak 1e-3 and a 1e-8 first epoch: the axis floor is 1e-6, not ten decades down."""
+    low, high = lr_run.panels[-1]["ylim"]
+    assert low >= 1e-6 * (1.0 - 1e-9)
+    assert low < EPOCH_3_START_LR      # the real schedule stays on the axis
+    assert high >= PEAK_LR
+
+
+def test_the_clipped_warmup_point_is_annotated_with_its_value(lr_run) -> None:
+    texts = lr_run.panels[-1]["texts"]
+    assert any("epoch 1" in t and "1e-08" in t and "below axis" in t for t in texts), texts
+
+
+def test_a_rebuilt_dashboard_reproduces_the_csv_lr_column(lr_run) -> None:
+    """``--dashboard`` on a finished run reconstructs the LR panel from config.json."""
+    rebuilt = lr_run.rebuilt_history["lr"]
+    assert rebuilt is not None
+    assert rebuilt == pytest.approx(_lr_column(lr_run.run_dir), rel=1e-6)
+
+
+def test_a_rebuilt_dashboard_clips_its_lr_axis_the_same_way(lr_run) -> None:
+    low, _ = lr_run.rebuilt_panel["ylim"]
+    assert low >= 1e-6 * (1.0 - 1e-9)
+    assert any("1e-08" in t for t in lr_run.rebuilt_panel["texts"])

@@ -61,7 +61,7 @@ from train.bfunet.common import (
     build_self_iterate_pool, create_self_iterate_dataset,
     _denorm, render_training_dashboard, _mean_psnr, denoise_k_passes,
     multi_pass_psnr, build_fixed_val_batch, build_dashboard_from_dir,
-    _read_current_lr, DenoisingVisualizationCallback, LRLoggerCallback,
+    DenoisingVisualizationCallback,
     add_common_arguments, reject_self_iterate_with_nonadditive,
     _homogeneity_probe,
 )

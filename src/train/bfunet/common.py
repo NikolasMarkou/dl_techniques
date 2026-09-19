@@ -26,7 +26,7 @@ from train.common import (
     collect_image_paths,
 )
 from train.common.args import resolved_run_dir
-from train.common.callbacks import EpochLogLine
+from train.common.callbacks import EpochLogLine, LearningRateLogger
 from train.common.config_io import save_config_json
 from train.common.run_artifacts import attach_run_log, refuse_existing_run
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
@@ -498,6 +498,45 @@ def _curriculum_end_epoch(
     return None
 
 
+# DECISION plan-2026-09-19T131351-b8d39688/D-006: the LR panel shows at most this many
+# decades below the peak. A warmup that starts at 1e-8 under a 1e-3 peak spans ten decades
+# and squeezed the real schedule into the top fifth of the axis. Points under the floor are
+# drawn ON its bottom edge and annotated with their value; do NOT drop them (the run really
+# started there) and do NOT let the axis autoscale to them. Same idea as
+# ``train.common.classification_viz.LR_PANEL_MAX_DECADES``, a local literal on purpose.
+LR_PANEL_MAX_DECADES = 3.0
+
+
+def _clip_lr_axis(ax, epochs: List[int], lrs: Optional[List[float]]) -> None:
+    """Clip the log LR axis at ``LR_PANEL_MAX_DECADES`` below the peak and mark clipped points.
+
+    Interface contract: ``ax`` is the already log-scaled LR axis; ``epochs`` and ``lrs`` are
+    the dashboard history lists (``lrs`` may be ``None`` or hold ``nan``, which is skipped).
+    Returns nothing; leaves the axis on matplotlib autoscale when nothing lies below the
+    floor, so a run with a mild schedule renders exactly as before.
+    """
+    if not lrs:
+        return
+    n = min(len(epochs), len(lrs))
+    x = np.asarray(epochs[:n], dtype=float)
+    y = np.asarray(lrs[:n], dtype=float)
+    positive = y[np.isfinite(y) & (y > 0.0)]
+    if positive.size == 0:
+        return
+    peak = float(positive.max())
+    floor = peak / 10.0 ** LR_PANEL_MAX_DECADES
+    below = np.isfinite(y) & (y > 0.0) & (y < floor)
+    if not below.any():
+        return
+    ax.set_ylim(floor, peak * 1.5)
+    ax.scatter(x[below], np.full(int(below.sum()), floor), marker="v", s=40,
+               color="#9467bd", edgecolor="black", zorder=5, clip_on=False)
+    for k, (xi, value) in enumerate(zip(x[below], y[below])):
+        ax.annotate(f"epoch {int(xi)}: {value:.3g}, below axis", xy=(xi, floor),
+                    xytext=(8, 6 + 12 * k), textcoords="offset points", fontsize=8,
+                    color="#444444", va="bottom")
+
+
 def render_training_dashboard(
     history: dict,
     out_path: Path,
@@ -716,6 +755,7 @@ def render_training_dashboard(
     ax.set_yscale("log")
     ax.set_title("Learning rate per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("lr (log)")
     ax.grid(True, alpha=0.3, which="both"); ax.legend(fontsize=7)
+    _clip_lr_axis(ax, ep, history.get("lr"))
 
     plt.tight_layout(rect=(0, 0, 1, 0.97) if title else None)
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
@@ -920,24 +960,6 @@ def make_curriculum_noise_fn(
         return noisy, patch
 
     return add_curriculum_noise
-
-
-def _read_current_lr(model: keras.Model) -> float:
-    """Read the current learning rate from ``model``'s live optimizer.
-
-    Evaluates a ``LearningRateSchedule`` at the optimizer's current step, otherwise
-    reads the scalar LR directly. Returns ``float('nan')`` if the optimizer/LR is
-    unavailable. Single source of truth for both ``DenoisingVisualizationCallback.
-    _current_lr`` (dashboard) and ``LRLoggerCallback`` (CSV ``lr`` column).
-    """
-    try:
-        opt = model.optimizer
-        lr = opt.learning_rate
-        if isinstance(lr, keras.optimizers.schedules.LearningRateSchedule):
-            return float(keras.ops.convert_to_numpy(lr(opt.iterations)))
-        return float(keras.ops.convert_to_numpy(lr))
-    except Exception:
-        return float("nan")
 
 
 # ---------------------------------------------------------------------
@@ -1797,11 +1819,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             "psnr", "val_psnr", "sigma_max", "lr",
         )}
 
-    def _current_lr(self) -> float:
-        """Current LR from the live optimizer; ``float('nan')`` on failure.
-        Delegates to the module-level ``_read_current_lr``."""
-        return _read_current_lr(self.model)
-
     def on_train_begin(self, logs=None):
         """Epoch-0 baseline: visualize the UNTRAINED model (0 epochs completed).
 
@@ -1823,7 +1840,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                     self.val_ds, steps=self.validation_steps,
                     verbose=0, return_dict=True,
                 )
-                lr_val = self._current_lr()
                 self._hist["epoch"].append(0)
                 self._hist["loss"].append(float("nan"))      # no train metric pre-fit
                 self._hist["val_loss"].append(float(res.get("loss", float("nan"))))
@@ -1832,7 +1848,11 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                 self._hist["psnr"].append(float("nan"))
                 self._hist["val_psnr"].append(float(res.get("psnr_metric", float("nan"))))
                 self._hist["sigma_max"].append(float(self.sigma_max_var))
-                self._hist["lr"].append(lr_val)
+                # DECISION plan-2026-09-19T131351-b8d39688/D-006: no rate was USED at
+                # epoch 0 (nothing trained), so the baseline point carries ``nan``. Do NOT
+                # read the optimizer here: that returns the warmup start (1e-8) and plots
+                # a step no epoch trained at.
+                self._hist["lr"].append(float("nan"))
                 render_training_dashboard(
                     self._hist, self.viz_dir / "training_dashboard.png",
                     title="Training dashboard - epoch 0 (untrained baseline)",
@@ -1853,9 +1873,13 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         logs = logs or {}
 
         # Record per-epoch scalars for the combined dashboard. sigma_max is the
-        # value the curriculum used this epoch; lr is read from the live optimizer.
-        # (CSV 'lr' is handled by LRLoggerCallback which runs before CSVLogger.)
-        lr_val = self._current_lr()
+        # value the curriculum used this epoch; lr is the rate the epoch STARTED at,
+        # the same number the CSV row holds.
+        # DECISION plan-2026-09-19T131351-b8d39688/D-006: read ``logs['lr']`` (written at
+        # index 0 by ``LearningRateLogger(at_epoch_start=True)``). Do NOT re-read the
+        # optimizer here: at epoch end that is the NEXT epoch's first-step rate, one epoch
+        # ahead of the CSV, and the dashboard would disagree with the file it rebuilds from.
+        lr_val = float(logs.get("lr", float("nan")))
         self._hist["epoch"].append(epoch + 1)
         self._hist["loss"].append(logs.get("loss", float("nan")))
         self._hist["val_loss"].append(logs.get("val_loss", float("nan")))
@@ -1997,24 +2021,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         plt.savefig(path, dpi=120, bbox_inches="tight")
         plt.close(fig)
         logger.info(f"Saved denoising grid (3 regimes): {path}")
-
-
-class LRLoggerCallback(keras.callbacks.Callback):
-    """Inject the current learning rate into ``logs`` so CSVLogger records an ``lr``
-    column. MUST run BEFORE CSVLogger -> insert at the FRONT of the callbacks list
-    (Keras runs callbacks in list order; an appended callback runs after CSVLogger
-    and its ``logs`` edits never reach the already-written CSV row)."""
-
-    def on_epoch_end(self, epoch: int, logs=None):
-        """Inject the current LR into ``logs['lr']`` so CSVLogger records it; must
-        run before CSVLogger (see the class docstring on callback ordering)."""
-        if logs is None:
-            return
-        # Preserve the prior semantics: on read failure (nan) leave logs['lr'] unset
-        # rather than writing a nan into the CSV row.
-        lr = _read_current_lr(self.model)
-        if np.isfinite(lr):
-            logs["lr"] = lr
 
 
 # ---------------------------------------------------------------------
@@ -2588,7 +2594,11 @@ def _train_in_run_dir(
             "training the full schedule."
         )
     # Prepend so it runs BEFORE CSVLogger -> 'lr' lands in training_log.csv.
-    callbacks.insert(0, LRLoggerCallback())
+    # DECISION plan-2026-09-19T131351-b8d39688/D-006: the SHARED logger in start-of-epoch
+    # mode, so the CSV ``lr`` is the rate the epoch's first step used (epoch 1 = the warmup
+    # start 1e-8). Do NOT go back to a local copy or to the end-of-epoch read: that logged
+    # the NEXT epoch's rate, one epoch late (epoch 1 read 1e-3 while it trained from 1e-8).
+    callbacks.insert(0, LearningRateLogger(at_epoch_start=True))
     callbacks.append(
         NoiseSigmaCurriculumCallback(
             sigma_max_var=sigma_max_var,
@@ -2608,7 +2618,7 @@ def _train_in_run_dir(
 
     # DECISION plan-2026-09-19T131351-b8d39688/D-007: one truthful line per epoch, from the
     # TRUE ``logs``, so it equals the CSV row. It goes AFTER every callback that edits
-    # ``logs`` (LRLoggerCallback at index 0, anything ``create_common_callbacks`` returned)
+    # ``logs`` (LearningRateLogger at index 0, anything ``create_common_callbacks`` returned)
     # and BEFORE the visualization callbacks below, whose grid/dashboard redraw must stay
     # outside its clock. Do NOT lean on the Keras progress bar for train numbers: it
     # averages the running-mean logs a second time and reads low. Do NOT move this above
