@@ -1,15 +1,30 @@
 """
-Orchestrator of the ConvUNext segmentation trainer (part A: config, parser, refusals).
+Orchestrator of the ConvUNext segmentation trainer.
 
 This package trains ``create_convunext`` (``use_bias=True``, ``output_channels=3``, linear
 head) as a semantic segmenter on Oxford-IIIT Pet and writes the run directory of
 ``src/train/convnext/`` (``config.json``, ``run.log``, ``training_log.csv``,
 ``training_history.json``, ``best_model.keras``, ``final_model.keras``,
-``results_summary.json``, ``visualizations/``, ``model_analysis/``). It is a sibling of
-``train.convnext`` and imports every generic piece from ``train.common``; the bias-free
-ConvUNeXt DENOISER stays in ``train.bfunet``. Data, ``train()``, figures and the analyzer
-land in later steps; this module holds what those steps read: :class:`SegTrainingConfig`,
-the parser, and the refusals that must happen before a run directory or a GPU exists.
+``results_summary.json``; ``visualizations/`` and ``model_analysis/`` land in a later
+step). It is a sibling of ``train.convnext`` and imports every generic piece from
+``train.common``; the bias-free ConvUNeXt DENOISER stays in ``train.bfunet``.
+
+Data: ``oxford_iiit_pet`` 4.x from the local TFDS cache (``download=False``), decoded once by
+:func:`load_oxford_pet` into in-memory uint8 arrays (bilinear images, NEAREST masks,
+label = mask - 1, so 0 pet, 1 background, 2 border). A seeded ``validation_split`` slice of
+the TRAIN split drives early stopping and the best checkpoint; the TEST split is read only
+after ``fit``. ``--max-samples`` caps the TRAIN pool only; the test split is always the full
+3669 images, so every run's test numbers are comparable.
+
+Training: ``AdamW(cosine schedule with optional warmup, weight_decay, clipnorm=1.0)``, the
+stock ``SparseCategoricalCrossentropy(from_logits=True)`` over sparse ``(B, H, W)`` masks
+and a linear head, metrics ``accuracy`` (pixel accuracy, named so the shared dashboard draws
+it) and stock ``MeanIoU`` (``miou``). ``EarlyStopping`` is built with
+``restore_best_weights=False``: the in-memory model after ``fit`` is the real last epoch and
+is what ``final_model.keras`` holds; the best epoch is ``best_model.keras`` (monitor
+``val_loss``). The test report (per-class IoU, 3x3 confusion, pixel accuracy, mIoU) is
+computed from a confusion matrix in numpy, independent of the Keras metric, next to a
+majority-class baseline computed from the test masks.
 
 Refusals happen at config time, before any directory is created:
 
@@ -23,27 +38,55 @@ Refusals happen at config time, before any directory is created:
   every size above it too, odd ones included;
 - a reused ``--experiment-name`` (:func:`resolve_new_run_dir`), before the GPU is configured.
 
-``--help`` parses first, so it allocates no GPU and no directory. ``--gpu`` is not a config
-field: ``main`` hands it to ``setup_gpu``, which OVERWRITES an exported
-``CUDA_VISIBLE_DEVICES``.
+A missing or incompatible TFDS cache raises from :func:`load_oxford_pet` inside
+:func:`train` BEFORE the run directory is created. ``--help`` parses first, so it allocates
+no GPU and no directory. ``--gpu`` is not a config field: ``main`` hands it to
+``setup_gpu``, which OVERWRITES an exported ``CUDA_VISIBLE_DEVICES``.
 """
 
 import argparse
+import time
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from dl_techniques.models.vision.convunext.model import CONVUNEXT_CONFIGS
+import keras
+import numpy as np
+import tensorflow as tf
+
+from dl_techniques.models.vision.convunext.model import CONVUNEXT_CONFIGS, create_convunext_variant
+from dl_techniques.utils.logger import logger
 
 from train.common import (
+    attach_run_log,
+    create_callbacks,
+    create_learning_rate_schedule,
     default_experiment_name,
+    log_gpu_peak_memory,
+    prepare_run_dir,
     refuse_existing_run,
     resolved_run_dir,
+    save_training_history_json,
+    set_seeds,
     setup_gpu,
+    validate_model_loading,
+    write_summary_json,
 )
-# The split arithmetic and the "fit split holds at least one batch" rule are the same
-# generic rules the ConvNeXt trainer states once; reused, not re-implemented.
-from train.convnext.common import split_sizes, steps_per_epoch_for
+from train.common import run_summary
+from train.common.callbacks import EpochLogLine, LearningRateLogger
+from train.common.classification_viz import TrainingDashboardCallback
+# The split arithmetic, the "fit split holds at least one batch" rule and the constants
+# below are the generic rules and values the ConvNeXt trainer states once; reused, not
+# re-implemented.
+from train.convnext.common import (
+    GRADIENT_CLIP_NORM,
+    LOAD_CHECK_SAMPLES,
+    MONITOR,
+    STATUS_DIVERGED,
+    STATUS_OK,
+    split_sizes,
+    steps_per_epoch_for,
+)
 
 
 # ---------------------------------------------------------------------
@@ -57,10 +100,30 @@ OXFORD_PET_TRAIN_SIZE = 3680
 
 VARIANTS: Tuple[str, ...] = tuple(CONVUNEXT_CONFIGS)
 
+DATASET_NAME = "oxford_iiit_pet"
+# ``tfds`` version request; the cache holds 4.0.0 only (``3.*.*`` cannot load offline).
+TFDS_NAME = "oxford_iiit_pet:4.*.*"
+# TFDS mask values 1 (pet), 2 (background), 3 (border) minus 1.
+CLASS_NAMES: Tuple[str, ...] = ("pet", "background", "border")
+NUM_CLASSES = len(CLASS_NAMES)
+# Images decoded per pass of the loader (bounds its peak memory; no effect on the result).
+DECODE_BATCH = 128
+
+# ``_check_initial_loss`` warns when loss / ln(num_classes) is STRICTLY above this.
+INITIAL_LOSS_WARN_FACTOR = 10.0
+# The reloaded best checkpoint must reproduce the validation metrics of its epoch.
+BEST_CHECKPOINT_TOLERANCE = 1e-4
+
+EPOCH_LINE_KEYS = ("loss", "accuracy", "miou", "val_loss", "val_accuracy", "val_miou")
+
 # Largest 32-bit unsigned value: ``numpy.random.seed`` takes 0 .. 2**32 - 1.
 MAX_SEED = 2 ** 32 - 1
 
 
+# DECISION plan-2026-09-19T224205-49c8bf80/D-012: the minimum image size is the ANALYTIC
+# ``2 ** depth``, not a build probe: ``create_convunext`` builds at every size and only its
+# forward pass fails. Do NOT "measure" it by building a model. Guard:
+# ``test_min_image_size_is_the_measured_forward_boundary`` (a real forward at min-1, min, min+1).
 def min_image_size(variant: str) -> int:
     """Smallest square input side on which the ``variant`` ConvUNext runs: ``2 ** depth``.
 
@@ -225,7 +288,8 @@ def _build_parser() -> argparse.ArgumentParser:
                            "used for the final report.")
     data.add_argument("--max-samples", type=int, default=defaults.max_samples,
                       help="Cap the train pool (fit and validation splits together) at this many "
-                           "samples (smoke runs and tests); default: the whole train set.")
+                           "samples (smoke runs and tests); default: the whole train set. The "
+                           "test split is never capped (always all 3669 images).")
 
     train = parser.add_argument_group("training")
     train.add_argument("--epochs", type=int, default=defaults.epochs,
@@ -292,13 +356,672 @@ def config_from_args(args: argparse.Namespace) -> SegTrainingConfig:
     return SegTrainingConfig(**{f.name: getattr(args, f.name) for f in fields(SegTrainingConfig)})
 
 
+# ---------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------
+
+def load_oxford_pet(image_size: int) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
+    """Decode ``oxford_iiit_pet`` 4.x from the local TFDS cache into uint8 arrays.
+
+    The ONE function that touches TFDS; tests stub exactly this. Images are resized to
+    ``image_size`` x ``image_size`` bilinearly (with antialiasing: the source is about 500
+    px), masks with NEAREST so no invented value appears, and the label is the TFDS mask
+    minus 1 (TFDS 1 pet, 2 background, 3 border become 0, 1, 2). Order is the TFDS shard
+    order (no shuffling), so the arrays are identical from run to run.
+
+    Args:
+        image_size: Output side in pixels.
+
+    Returns:
+        ``((x_train, y_train), (x_test, y_test))``: ``x`` is uint8 ``(N, S, S, 3)``, ``y`` is
+        uint8 ``(N, S, S)`` with values in ``{0, 1, 2}``. 3680 train and 3669 test images.
+
+    Raises:
+        RuntimeError: If the dataset cannot be read with ``download=False`` (cache missing,
+            wrong version, ``TFDS_DATA_DIR`` unset or wrong); nothing is downloaded.
+        ValueError: If a decoded mask holds a value outside ``{1, 2, 3}``.
+    """
+    import tensorflow_datasets as tfds  # lazy: keeps ``--help`` and the config path light
+
+    size = (int(image_size), int(image_size))
+
+    def resize(example: Dict[str, tf.Tensor]) -> Tuple[tf.Tensor, tf.Tensor]:
+        image = tf.image.resize(example["image"], size, method="bilinear", antialias=True)
+        image = tf.cast(tf.clip_by_value(tf.round(image), 0.0, 255.0), tf.uint8)
+        mask = tf.image.resize(example["segmentation_mask"], size, method="nearest")
+        return image, tf.cast(tf.squeeze(mask, axis=-1), tf.int32) - 1
+
+    def split(name: str) -> Tuple[np.ndarray, np.ndarray]:
+        try:
+            dataset = tfds.load(TFDS_NAME, split=name, download=False, shuffle_files=False)
+        except Exception as e:  # noqa: BLE001 - re-raised with the fix named
+            raise RuntimeError(
+                f"Could not read {TFDS_NAME!r} split {name!r} from the local TFDS cache with "
+                f"download=False: {type(e).__name__}: {e}. Set TFDS_DATA_DIR to the directory "
+                "that holds oxford_iiit_pet/4.0.0 (nothing is downloaded by this trainer)."
+            ) from e
+        batches = tfds.as_numpy(dataset.map(resize, num_parallel_calls=tf.data.AUTOTUNE).batch(DECODE_BATCH))
+        images, labels = zip(*batches)
+        x, y = np.concatenate(images), np.concatenate(labels)
+        if y.min() < 0 or y.max() >= NUM_CLASSES:
+            raise ValueError(
+                f"{TFDS_NAME} split {name!r}: mask - 1 must lie in [0, {NUM_CLASSES - 1}], got "
+                f"[{y.min()}, {y.max()}]"
+            )
+        return x, y.astype(np.uint8)
+
+    return split("train"), split("test")
+
+
+def prepare_data(config: SegTrainingConfig) -> Dict[str, np.ndarray]:
+    """Load the dataset and cut the seeded train / validation split; the test split is kept apart.
+
+    The validation slice is the first ``n_val`` entries of a seeded permutation of the TRAIN
+    split (after ``--max-samples`` truncated the permutation), the fit split is the rest, so
+    the two are disjoint by construction; the test split is returned untouched and never
+    influences the split or the checkpoint.
+
+    Args:
+        config: A validated :class:`SegTrainingConfig`.
+
+    Returns:
+        ``{"x_train", "y_train", "x_val", "y_val", "x_test", "y_test"}``: uint8 images
+        ``(N, S, S, 3)`` and uint8 masks ``(N, S, S)`` with values in ``{0, 1, 2}``.
+
+    Raises:
+        RuntimeError: From :func:`load_oxford_pet`, if the dataset cannot be read.
+        ValueError: If the validation split would hold out zero samples.
+    """
+    (x_train, y_train), (x_test, y_test) = load_oxford_pet(config.image_size)
+    order = np.random.default_rng(config.seed).permutation(len(x_train))
+    if config.max_samples is not None:
+        order = order[:config.max_samples]
+    _, n_val = split_sizes(len(x_train), config.max_samples, config.validation_split)
+    val_idx, fit_idx = order[:n_val], order[n_val:]
+    return {
+        "x_train": x_train[fit_idx], "y_train": y_train[fit_idx],
+        "x_val": x_train[val_idx], "y_val": y_train[val_idx],
+        "x_test": x_test, "y_test": y_test,
+    }
+
+
+def _scale(image: tf.Tensor, mask: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+    """uint8 image to float32 in [0, 1], uint8 mask to int32 class ids."""
+    return tf.cast(image, tf.float32) / 255.0, tf.cast(mask, tf.int32)
+
+
+def _random_flip(image: tf.Tensor, mask: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+    """Flip image ``(H, W, 3)`` and mask ``(H, W)`` left-right TOGETHER with probability 0.5."""
+    flip = tf.random.uniform([]) < 0.5
+    return (tf.where(flip, tf.reverse(image, axis=[1]), image),
+            tf.where(flip, tf.reverse(mask, axis=[1]), mask))
+
+
+# The train pipeline DROPS the incomplete last batch (``steps_per_epoch_for`` and the LR
+# schedule count on it; a smaller final batch is a second input shape that recompiles the
+# train step). The pool is reshuffled every epoch, so no sample is permanently excluded.
+def make_train_dataset(x: np.ndarray, y: np.ndarray, batch_size: int, seed: int) -> "tf.data.Dataset":
+    """The shuffled, flip-augmented, batched train pipeline (tf.data).
+
+    Args:
+        x: uint8 images ``(N, S, S, 3)``.
+        y: uint8 masks ``(N, S, S)``.
+        batch_size: Batch size; an epoch yields :func:`steps_per_epoch_for` batches.
+        seed: Shuffle seed.
+
+    Returns:
+        A dataset of ``(float32 images in [0, 1], int32 masks)`` batches.
+    """
+    return (
+        tf.data.Dataset.from_tensor_slices((x, y))
+        .shuffle(len(x), seed=seed, reshuffle_each_iteration=True)
+        .map(_scale, num_parallel_calls=tf.data.AUTOTUNE)
+        .map(_random_flip, num_parallel_calls=tf.data.AUTOTUNE)
+        .batch(batch_size, drop_remainder=True)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+
+
+def make_eval_dataset(x: np.ndarray, y: np.ndarray, batch_size: int) -> "tf.data.Dataset":
+    """The un-augmented, un-shuffled, batched pipeline (validation and test).
+
+    Args:
+        x: uint8 images ``(N, S, S, 3)``.
+        y: uint8 masks ``(N, S, S)``.
+        batch_size: Rows per batch (the last batch may be smaller).
+
+    Returns:
+        A dataset of ``(float32 images in [0, 1], int32 masks)`` batches.
+    """
+    return (
+        tf.data.Dataset.from_tensor_slices((x, y))
+        .map(_scale, num_parallel_calls=tf.data.AUTOTUNE)
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+
+
+# ---------------------------------------------------------------------
+# Metrics from a confusion matrix (numpy, independent of the Keras metric)
+# ---------------------------------------------------------------------
+
+def confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> np.ndarray:
+    """Pixel confusion matrix: entry ``[t, p]`` counts pixels of true class ``t`` predicted ``p``.
+
+    Args:
+        y_true: Integer class ids, any shape.
+        y_pred: Integer class ids, same number of elements.
+        num_classes: Number of classes ``C``.
+
+    Returns:
+        ``int64`` ``(C, C)``.
+
+    Raises:
+        ValueError: If the two differ in size or a value is outside ``[0, C)`` (a wrong
+            value would land in another cell of the flattened bincount instead of failing).
+    """
+    y_true = np.asarray(y_true).reshape(-1).astype(np.int64)
+    y_pred = np.asarray(y_pred).reshape(-1).astype(np.int64)
+    if y_true.size != y_pred.size:
+        raise ValueError(f"y_true has {y_true.size} elements, y_pred {y_pred.size}")
+    if y_true.size and (min(y_true.min(), y_pred.min()) < 0 or max(y_true.max(), y_pred.max()) >= num_classes):
+        raise ValueError(f"class ids must lie in [0, {num_classes})")
+    return np.bincount(y_true * num_classes + y_pred, minlength=num_classes ** 2).reshape(num_classes, num_classes)
+
+
+def segmentation_scores(confusion: np.ndarray) -> Dict[str, Any]:
+    """Per-class IoU, mean IoU and pixel accuracy of a confusion matrix.
+
+    ``IoU_c = TP_c / (true_c + predicted_c - TP_c)``. A class with an empty union (no true
+    and no predicted pixel) has no IoU: ``None`` in ``per_class_iou`` and left out of the
+    mean, the convention of ``keras.metrics.MeanIoU`` (which the tests cross-check).
+
+    Args:
+        confusion: ``(C, C)`` counts from :func:`confusion_matrix`.
+
+    Returns:
+        ``{"per_class_iou": [float | None] * C, "miou": float | None, "pixel_accuracy":
+        float | None}``; ``None`` where the denominator is zero.
+    """
+    confusion = np.asarray(confusion, dtype=np.int64)
+    tp = np.diag(confusion).astype(np.float64)
+    union = confusion.sum(axis=0) + confusion.sum(axis=1) - tp
+    iou = [float(t / u) if u > 0 else None for t, u in zip(tp, union)]
+    valid = [v for v in iou if v is not None]
+    total = confusion.sum()
+    return {
+        "per_class_iou": iou,
+        "miou": float(np.mean(valid)) if valid else None,
+        "pixel_accuracy": float(tp.sum() / total) if total else None,
+    }
+
+
+def trivial_baseline(y_true: np.ndarray, num_classes: int = NUM_CLASSES) -> Dict[str, Any]:
+    """Scores of predicting the majority class of ``y_true`` for every pixel.
+
+    The floor a trained segmenter must beat: mIoU above it AND more than one predicted class.
+
+    Args:
+        y_true: Integer masks (the TEST masks), any shape.
+        num_classes: Number of classes.
+
+    Returns:
+        :func:`segmentation_scores` of the constant predictor plus ``predicted_class`` (ties
+        resolve to the lowest class id) and ``confusion``.
+    """
+    counts = np.bincount(np.asarray(y_true).reshape(-1).astype(np.int64), minlength=num_classes)
+    majority = int(np.argmax(counts))
+    confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
+    confusion[:, majority] = counts
+    return {"predicted_class": majority, **segmentation_scores(confusion), "confusion": confusion.tolist()}
+
+
+# ---------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------
+
+def build_lr_schedule(config: SegTrainingConfig, steps_per_epoch: int) -> Any:
+    """Cosine over ALL ``config.epochs`` epochs, optionally preceded by a linear warmup.
+
+    ``steps_per_epoch`` MUST reach the schedule: without it the cosine counts optimizer
+    steps against ``decay_steps = epochs`` and hits its floor after ``epochs`` batches.
+    Warmup engages only through ``warmup_steps``.
+
+    Args:
+        config: A validated :class:`SegTrainingConfig`.
+        steps_per_epoch: Optimizer steps of one epoch of :func:`make_train_dataset`.
+
+    Returns:
+        A Keras ``LearningRateSchedule``.
+    """
+    return create_learning_rate_schedule(
+        initial_lr=config.learning_rate,
+        schedule_type="cosine",
+        total_epochs=config.epochs,
+        steps_per_epoch=steps_per_epoch,
+        warmup_steps=config.warmup_epochs * steps_per_epoch,
+    )
+
+
+def build_model(config: SegTrainingConfig, schedule: Any) -> keras.Model:
+    """Build and compile the segmenter.
+
+    Args:
+        config: A validated :class:`SegTrainingConfig`.
+        schedule: The learning rate handed to ``AdamW`` (:func:`build_lr_schedule`).
+
+    Returns:
+        A compiled functional model, input ``(S, S, 3)`` in [0, 1], output ``(S, S, 3)`` LOGITS.
+    """
+    # DECISION plan-2026-09-19T224205-49c8bf80/D-004: a LINEAR 3-channel head trained with the
+    # stock ``SparseCategoricalCrossentropy(from_logits=True)`` over sparse ``(B, H, W)``
+    # masks, and stock ``MeanIoU`` for the mIoU. Do NOT switch to a softmax head "to get
+    # probabilities" (then ``from_logits=True`` softmaxes twice) and do NOT wrap the
+    # repo's ``SegmentationLosses``: they need one-hot targets of the prediction's shape and
+    # probability inputs, i.e. a wrapper class and a second label format. ``use_bias=True``
+    # is required for anything but a linear/relu head (the bias-free arm is the denoiser).
+    model = create_convunext_variant(
+        config.variant, (config.image_size, config.image_size, 3),
+        use_bias=True, output_channels=NUM_CLASSES, final_activation="linear",
+    )
+    model.compile(
+        optimizer=keras.optimizers.AdamW(
+            learning_rate=schedule, weight_decay=config.weight_decay, clipnorm=GRADIENT_CLIP_NORM,
+        ),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=[
+            keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
+            keras.metrics.MeanIoU(num_classes=NUM_CLASSES, sparse_y_true=True, sparse_y_pred=False, name="miou"),
+        ],
+    )
+    return model
+
+
+# ---------------------------------------------------------------------
+# Evaluation helpers
+# ---------------------------------------------------------------------
+
+def _evaluate_split(model: keras.Model, x: np.ndarray, y: np.ndarray, batch_size: int) -> Dict[str, Any]:
+    """Keras metrics plus the confusion-matrix report of ``model`` on one split.
+
+    ``loss``, ``accuracy`` and ``miou`` come from ``model.evaluate``; ``per_class_iou``,
+    ``miou_from_confusion``, ``pixel_accuracy`` and ``confusion`` from a second pass that
+    accumulates :func:`confusion_matrix` of the argmax predictions, so the two mIoU values
+    are independent measurements of one quantity.
+
+    Args:
+        model: A compiled model.
+        x: uint8 images.
+        y: uint8 masks.
+        batch_size: Rows per batch.
+
+    Returns:
+        A JSON-ready dict.
+    """
+    dataset = make_eval_dataset(x, y, batch_size)
+    metrics = {k: float(v) for k, v in model.evaluate(dataset, verbose=0, return_dict=True).items()}
+    confusion = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
+    for images, masks in dataset:
+        predicted = np.argmax(model.predict_on_batch(images), axis=-1)
+        confusion += confusion_matrix(masks.numpy(), predicted, NUM_CLASSES)
+    scores = segmentation_scores(confusion)
+    return {
+        **metrics,
+        "miou_from_confusion": scores["miou"],
+        "pixel_accuracy": scores["pixel_accuracy"],
+        "per_class_iou": scores["per_class_iou"],
+        "confusion": confusion.tolist(),
+    }
+
+
+def _check_initial_loss(
+        model: keras.Model, dataset: "tf.data.Dataset", n_samples: int
+) -> Tuple[Dict[str, float], float, bool]:
+    """Evaluate the untrained model on the validation split; refuse a non-finite loss.
+
+    The single epoch-0 measurement: the summary's initial-loss ratio and the dashboard's
+    baseline marker both come from THIS result, so they cannot disagree.
+
+    Args:
+        model: Built and compiled model.
+        dataset: The validation pipeline.
+        n_samples: Validation images (for the log line only).
+
+    Returns:
+        ``(metrics, ratio, warned)``: the evaluate dict, ``loss / ln(3)`` and whether the
+        ratio is STRICTLY above :data:`INITIAL_LOSS_WARN_FACTOR`.
+
+    Raises:
+        RuntimeError: If the loss is NaN or infinite (raised before ``fit``, so a broken
+            model does not end as a "finished" run).
+    """
+    metrics = {k: float(v) for k, v in model.evaluate(dataset, verbose=0, return_dict=True).items()}
+    loss = metrics["loss"]
+    uniform_loss = float(np.log(NUM_CLASSES))
+    logger.info(
+        f"Untrained evaluate BEFORE fit: val loss {loss:.4f} on {n_samples} images "
+        f"(uniform-prediction loss would be {uniform_loss:.4f})"
+    )
+    if not np.isfinite(loss):
+        raise RuntimeError(f"Initial validation loss is {loss}: the model diverges before training.")
+    ratio = loss / uniform_loss
+    warned = ratio > INITIAL_LOSS_WARN_FACTOR
+    if warned:
+        logger.warning(
+            f"Initial loss {loss:.4f} is {ratio:.1f}x ln(3)={uniform_loss:.4f} (warn above "
+            f"{INITIAL_LOSS_WARN_FACTOR:g}x): the initial logit scale is far too large."
+        )
+    return metrics, ratio, warned
+
+
+def _check_best_checkpoint(
+        run_dir: Path, data: Dict[str, np.ndarray], batch_size: int, hist: Dict[str, List[float]], best_i: int,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], Optional[float]]:
+    """Test metrics of the reloaded ``best_model.keras`` and how well it reproduces its epoch.
+
+    The in-memory model after ``fit`` is the LAST epoch (``restore_best_weights=False``), so
+    the checkpoint cannot be compared with in-memory best weights. It is compared with the
+    History instead: the reloaded model's validation loss, accuracy and mIoU must equal the
+    values ``fit`` recorded for the best epoch.
+
+    Args:
+        run_dir: The run directory holding ``best_model.keras``.
+        data: The :func:`prepare_data` dict.
+        batch_size: Evaluation batch size.
+        hist: ``{metric: per-epoch floats}`` of the finished fit.
+        best_i: 0-based index of the best epoch.
+
+    Returns:
+        ``(test_metrics, load_error, max_abs_diff)``; the first and last are ``None`` when the
+        checkpoint is missing or does not load. ``max_abs_diff`` is the largest absolute gap
+        between the reloaded and the recorded validation metric.
+    """
+    def evaluate(model: keras.Model) -> Dict[str, Any]:
+        val = model.evaluate(make_eval_dataset(data["x_val"], data["y_val"], batch_size),
+                             verbose=0, return_dict=True)
+        return {"val": {k: float(v) for k, v in val.items()},
+                "test": _evaluate_split(model, data["x_test"], data["y_test"], batch_size)}
+
+    reloaded, load_error = run_summary.load_best_metrics(run_dir, evaluate)
+    if reloaded is None:
+        return None, load_error, None
+    logger.info(f"Test results (best_model.keras): {reloaded['test']}")
+    gap = max(abs(reloaded["val"][k] - hist[f"val_{k}"][best_i]) for k in ("loss", "accuracy", "miou"))
+    if gap > BEST_CHECKPOINT_TOLERANCE:
+        logger.warning(
+            f"best_model.keras does not reproduce the best epoch's validation metrics (gap {gap:.3g})"
+        )
+    return reloaded["test"], None, gap
+
+
+# ---------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------
+
+def _summary_head(
+        config: SegTrainingConfig, run_dir: Path, data: Dict[str, np.ndarray], params: int,
+        steps_per_epoch: int, baseline: Dict[str, float], initial_loss_ratio: float,
+        init_scale_warning: bool, devices: Dict[str, Any], data_load_seconds: float,
+) -> Dict[str, Any]:
+    """Keys every summary carries, whether the run finished or diverged."""
+    return {
+        "run_dir": str(run_dir),
+        "experiment_name": config.experiment_name,
+        "model_family": "convunext-seg",
+        "dataset": DATASET_NAME,
+        "variant": config.variant,
+        "params": params,
+        "input_shape": [config.image_size, config.image_size, 3],
+        "num_classes": NUM_CLASSES,
+        "class_names": list(CLASS_NAMES),
+        "optimizer": "AdamW",
+        "gradient_clip_norm": GRADIENT_CLIP_NORM,
+        "learning_rate": config.learning_rate,
+        "lr_schedule": "cosine",
+        "warmup_epochs": config.warmup_epochs,
+        "steps_per_epoch": steps_per_epoch,
+        "weight_decay": config.weight_decay,
+        "batch_size": config.batch_size,
+        "seed": config.seed,
+        "validation_split": config.validation_split,
+        "max_samples": config.max_samples,
+        "n_train": int(len(data["x_train"])),
+        "n_val": int(len(data["x_val"])),
+        "n_test": int(len(data["x_test"])),
+        "data_load_seconds": data_load_seconds,
+        "epochs_requested": config.epochs,
+        "monitor": MONITOR,
+        "initial_loss_sanity_eval": {
+            "loss": baseline["loss"], "n_samples": int(len(data["x_val"])),
+            "split": "val", "before_fit": True,
+        },
+        "initial_loss_ratio": initial_loss_ratio,
+        "init_scale_warning": init_scale_warning,
+        "gpu_name": devices["gpu_name"],
+        "tf_visible_devices": devices["tf_visible_devices"],
+        "cuda_visible_devices": devices["cuda_visible_devices"],
+    }
+
+
+def train(config: SegTrainingConfig) -> Dict[str, Any]:
+    """Train the segmenter, evaluate it on the test split, write every artifact, return the summary.
+
+    Order: refuse a reused name (nothing written), load the data (a missing cache raises
+    HERE, before any directory exists), then create the run directory and attach
+    ``run.log`` for the rest of the call (detached on return AND on an exception).
+
+    ``test_metrics_best`` is the reloaded ``best_model.keras`` on the test split,
+    ``test_metrics_final`` the LAST epoch's weights, which is what ``final_model.keras``
+    holds. The test split is evaluated only after ``fit`` and never selects anything.
+
+    Args:
+        config: A validated :class:`SegTrainingConfig`.
+
+    Returns:
+        The strict-JSON dict also written to ``<run_dir>/results_summary.json``
+        (``status`` is ``"ok"``).
+
+    Raises:
+        FileExistsError: If the experiment directory already holds a run (nothing written).
+        RuntimeError: If the TFDS cache cannot be read (nothing written), if the initial
+            validation loss is non-finite, or (after a ``status: "diverged"`` summary was
+            written) if an epoch ``loss`` / ``val_loss`` is non-finite.
+    """
+    resolved = resolve_new_run_dir(config)
+    load_started = time.perf_counter()
+    data = prepare_data(config)
+    data_load_seconds = time.perf_counter() - load_started
+    steps_per_epoch = steps_per_epoch_for(len(data["x_train"]), config.batch_size)
+
+    run_dir = Path(prepare_run_dir(config, output_dir=resolved)).resolve()
+    (run_dir / "visualizations").mkdir(parents=True, exist_ok=True)
+    with attach_run_log(run_dir):
+        set_seeds(config.seed)
+        logger.info(f"Run directory: {run_dir}")
+        devices = run_summary.describe_devices()
+        logger.info(
+            f"Devices: CUDA_VISIBLE_DEVICES={devices['cuda_visible_devices']!r}, "
+            f"TensorFlow sees {devices['tf_visible_devices']} ({devices['gpu_names']})"
+        )
+        logger.info(
+            f"Data ({DATASET_NAME}, {data_load_seconds:.1f}s to load): train {data['x_train'].shape}, "
+            f"val {data['x_val'].shape}, test {data['x_test'].shape}; "
+            f"train pixel classes {np.bincount(data['y_train'].reshape(-1), minlength=NUM_CLASSES).tolist()}"
+        )
+
+        train_ds = make_train_dataset(data["x_train"], data["y_train"], config.batch_size, config.seed)
+        val_ds = make_eval_dataset(data["x_val"], data["y_val"], config.batch_size)
+
+        schedule = build_lr_schedule(config, steps_per_epoch)
+        model = build_model(config, schedule)
+        params = int(model.count_params())
+        logger.info(
+            f"  ConvUNext {config.variant}: params {params:,}, LR {config.learning_rate} (cosine, "
+            f"warmup {config.warmup_epochs} epochs, {steps_per_epoch} steps/epoch), weight decay "
+            f"{config.weight_decay}, clipnorm {GRADIENT_CLIP_NORM}, batch {config.batch_size}"
+        )
+
+        baseline, initial_loss_ratio, init_scale_warning = _check_initial_loss(
+            model, val_ds, len(data["x_val"]))
+        summary_head = _summary_head(
+            config, run_dir, data, params, steps_per_epoch, baseline, initial_loss_ratio,
+            init_scale_warning, devices, data_load_seconds,
+        )
+
+        callbacks, _ = create_callbacks(
+            model_name=config.experiment_name,
+            results_dir_prefix="convunext_seg",
+            run_dir=str(run_dir),
+            monitor=MONITOR,
+            patience=config.patience,
+            use_lr_schedule=True,
+            include_terminate_on_nan=True,
+            include_analyzer=False,
+        )
+        # DECISION plan-2026-09-19T224205-49c8bf80/D-008: ``create_callbacks`` builds
+        # ``EarlyStopping(restore_best_weights=True)`` and Keras 3.8 then restores the best
+        # weights at EVERY train end, so ``final_model.keras`` would silently be the best
+        # epoch. The best epoch is already on disk (``best_model.keras``), so the restore is
+        # switched off and the in-memory model stays the real last epoch. Do NOT set it back
+        # to True and do NOT copy ``_LastEpochWeights`` from the ConvNeXt trainer instead;
+        # ``test_final_model_holds_the_last_epoch_weights_and_best_holds_the_best_epoch``
+        # is the guard.
+        for callback in callbacks:
+            if isinstance(callback, keras.callbacks.EarlyStopping):
+                callback.restore_best_weights = False
+        # Index 0: ``lr`` must be in ``logs`` before CSVLogger reads it, and it is the rate
+        # at the START of the epoch (the default reads the next epoch's first-step rate).
+        callbacks.insert(0, LearningRateLogger(at_epoch_start=True))
+        # After every callback that edits ``logs``, before the dashboard redraw.
+        callbacks.append(EpochLogLine(EPOCH_LINE_KEYS))
+        dashboard = TrainingDashboardCallback(
+            out_path=run_dir / "visualizations" / "training_dashboard.png",
+            baseline_fn=lambda _model: dict(baseline),
+            title=f"{config.experiment_name} (seed {config.seed})",
+        )
+        callbacks.append(dashboard)
+
+        fit_started = time.perf_counter()
+        history = model.fit(
+            train_ds, validation_data=val_ds, epochs=config.epochs, callbacks=callbacks, verbose=1,
+        )
+        fit_wall_seconds = time.perf_counter() - fit_started
+        log_gpu_peak_memory()
+        save_training_history_json(history, str(run_dir))
+        hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
+        epochs_run = len(hist.get(MONITOR, []))
+        non_finite = run_summary.non_finite_metrics(hist, MONITOR)
+
+        if non_finite:
+            # TerminateOnNaN ended the run: fewer epochs than requested is NOT an early stop.
+            message = (
+                f"Training diverged: {non_finite} hold a non-finite or missing value after "
+                f"{epochs_run} epoch(s); no evaluation, figures or final_model.keras were "
+                f"produced. Initial-loss ratio was {initial_loss_ratio:.3g}."
+            )
+            logger.error(message)
+            write_summary_json(run_dir, {
+                "status": STATUS_DIVERGED,
+                **summary_head,
+                "epochs_run": epochs_run,
+                "stopped_early": None,
+                "best_epoch": None,
+                "non_finite_metrics": non_finite,
+                "history": hist,
+                "epoch_times": list(dashboard.epoch_times),
+                "fit_wall_seconds": fit_wall_seconds,
+                "notes": [
+                    message,
+                    "non-finite values are written as null (strict JSON)",
+                    "`stopped_early` is null: the run was ended by a non-finite loss "
+                    "(TerminateOnNaN), not by EarlyStopping",
+                ],
+            })
+            raise RuntimeError(message)
+
+        stopped_early = epochs_run < config.epochs
+        if stopped_early:
+            logger.info(
+                f"EarlyStopping: stopped after epoch {epochs_run} of {config.epochs} "
+                f"(patience {config.patience} on {MONITOR})"
+            )
+        best_epoch = run_summary.best_epoch(hist, MONITOR)
+        best_i, final_i = best_epoch - 1, epochs_run - 1
+        batch_size = config.batch_size
+
+        # The test split is read for the first time HERE, after ``fit``.
+        test_metrics_best, best_load_error, checkpoint_max_diff = _check_best_checkpoint(
+            run_dir, data, batch_size, hist, best_i)
+        test_metrics_final = _evaluate_split(model, data["x_test"], data["y_test"], batch_size)
+        logger.info(f"Test results (final weights, epoch {epochs_run}): {test_metrics_final}")
+        baseline_test = trivial_baseline(data["y_test"])
+        logger.info(f"Majority-class baseline on the test masks: {baseline_test}")
+
+        final_path = run_dir / "final_model.keras"
+        model.save(final_path)
+        load_check: Optional[bool] = None
+        try:
+            sample = data["x_val"][:LOAD_CHECK_SAMPLES].astype(np.float32) / 255.0
+            load_check = bool(validate_model_loading(
+                str(final_path), sample, model.predict(sample, verbose=0)))
+        except Exception as e:  # noqa: BLE001 - log-only
+            logger.warning(f"validate_model_loading raised: {e}")
+
+        val_keys = [k for k in hist if k.startswith("val_")]
+        steps_run = epochs_run * steps_per_epoch
+        summary: Dict[str, Any] = {
+            "status": STATUS_OK,
+            **summary_head,
+            "epochs_run": epochs_run,
+            "stopped_early": stopped_early,
+            "best_epoch": best_epoch,
+            "best_epoch_csv_index": best_i,
+            "final_is_best": best_epoch == epochs_run,
+            "lr_first_epoch": hist["lr"][0] if hist.get("lr") else None,
+            "lr_last_epoch": hist["lr"][-1] if hist.get("lr") else None,
+            "lr_last_step": float(keras.ops.convert_to_numpy(schedule(steps_run - 1))),
+            "best_val_metrics": {k: hist[k][best_i] for k in val_keys},
+            "final_val_metrics": {k: hist[k][final_i] for k in val_keys},
+            "test_metrics_best": test_metrics_best,
+            "test_metrics_final": test_metrics_final,
+            "trivial_baseline": baseline_test,
+            "best_checkpoint_load_error": best_load_error,
+            "best_checkpoint_max_abs_diff": checkpoint_max_diff,
+            "epoch_times": list(dashboard.epoch_times),
+            "fit_wall_seconds": fit_wall_seconds,
+            "model_loading_validated": load_check,
+            "notes": [
+                f"initial loss {baseline['loss']:.4f} vs ln(3)={np.log(NUM_CLASSES):.4f} (ratio "
+                f"{initial_loss_ratio:.2f}, warn above {INITIAL_LOSS_WARN_FACTOR:g}), a plain "
+                "evaluate on the validation split (LayerNorm model)",
+                "CSV `epoch` is 0-based, `best_epoch` is 1-based (`best_epoch_csv_index` = "
+                "`best_epoch` - 1)",
+                "CSV `lr` is the rate at the START of the epoch (its first step); `lr_last_step` "
+                "is the rate of the final optimizer step",
+                "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` the "
+                "last epoch's weights (final_model.keras); the test split never influenced "
+                "selection and is always the full split (--max-samples caps the train pool only)",
+                "`miou` is keras MeanIoU; `miou_from_confusion`, `pixel_accuracy` and "
+                "`per_class_iou` come from the confusion matrix (null where a class has no true "
+                "and no predicted pixel); `trivial_baseline` predicts the majority test class "
+                "everywhere",
+                "`best_checkpoint_max_abs_diff` is the largest gap between the reloaded "
+                "best_model.keras' validation loss/accuracy/miou and the values fit recorded "
+                "for the best epoch",
+                "`fit_wall_seconds` minus the sum of `epoch_times` is time outside the epoch "
+                "clock (dashboard redraws, checkpoint saves)",
+            ],
+        }
+        return write_summary_json(run_dir, summary)
+
+
+# ---------------------------------------------------------------------
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     """Entry point. Parses ``argv`` FIRST so ``--help`` allocates nothing.
 
     Order (pinned by tests): parse, build and validate the config, refuse a reused
-    experiment name, configure the GPU, then train. ``train()`` lands in step 3; until then
-    the run stops with ``NotImplementedError`` after the GPU is configured and before any
-    directory exists.
+    experiment name, configure the GPU, then train.
 
     Args:
         argv: Argument vector; ``None`` reads ``sys.argv[1:]``.
@@ -306,10 +1029,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     Raises:
         ValueError: If a config value is outside its range.
         FileExistsError: If the experiment directory already holds a run.
-        NotImplementedError: Always, until ``train()`` exists.
+        RuntimeError: From :func:`train` (unreadable cache, diverged run).
     """
     args = parse_arguments(argv)
     config = config_from_args(args)
     resolve_new_run_dir(config)
     setup_gpu(gpu_id=args.gpu)
-    raise NotImplementedError("train() lands in step 3")
+    try:
+        train(config)
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user.")
+    except Exception as e:
+        logger.error(f"Training failed: {e}", exc_info=True)
+        raise

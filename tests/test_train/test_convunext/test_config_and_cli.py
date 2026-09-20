@@ -290,25 +290,53 @@ def _record_setup_gpu(monkeypatch) -> list:
     return calls
 
 
-def test_gpu_flag_reaches_setup_gpu_and_train_is_not_implemented_yet(monkeypatch, tmp_path) -> None:
-    """``--gpu 1`` arrives as ``setup_gpu(gpu_id=1)``; the stub then stops the run.
+def _record_train(monkeypatch) -> list:
+    """Replace ``common.train`` with a recorder of the config it is handed."""
+    handed: list = []
+    monkeypatch.setattr(common, "train", lambda config: handed.append(config))
+    return handed
 
-    Pins the ORDER the stub must keep until ``train()`` lands: parse, build the config,
-    refuse a reused name, configure the GPU, and only then reach the missing ``train()``.
-    Nothing exists in the output directory afterwards.
+
+def test_gpu_flag_reaches_setup_gpu_and_train_receives_the_config(monkeypatch, tmp_path) -> None:
+    """``--gpu 1`` arrives as ``setup_gpu(gpu_id=1)`` and ``train`` gets the parsed config.
+
+    Pins the ORDER of ``main``: parse, build the config, refuse a reused name, configure the
+    GPU, and only then ``train``. ``train`` is stubbed, so nothing exists in the output
+    directory afterwards.
     """
     calls = _record_setup_gpu(monkeypatch)
-    with pytest.raises(NotImplementedError, match="step 3"):
-        common.main(["--gpu", "1", "--output-dir", str(tmp_path), "--experiment-name", "x"])
+    handed = _record_train(monkeypatch)
+    common.main(["--gpu", "1", "--variant", "small", "--output-dir", str(tmp_path),
+                 "--experiment-name", "x"])
     assert calls == [{"gpu_id": 1}], f"--gpu 1 did not reach setup_gpu(gpu_id=1): {calls!r}"
+    assert len(handed) == 1 and handed[0].variant == "small" and handed[0].experiment_name == "x"
     assert list(tmp_path.iterdir()) == []
 
 
 def test_no_gpu_flag_passes_none_to_setup_gpu(monkeypatch, tmp_path) -> None:
     calls = _record_setup_gpu(monkeypatch)
-    with pytest.raises(NotImplementedError):
-        common.main(["--output-dir", str(tmp_path), "--experiment-name", "x"])
+    _record_train(monkeypatch)
+    common.main(["--output-dir", str(tmp_path), "--experiment-name", "x"])
     assert calls == [{"gpu_id": None}]
+
+
+def test_the_gpu_is_configured_before_train_is_called(monkeypatch, tmp_path) -> None:
+    order: list = []
+    monkeypatch.setattr(common, "setup_gpu", lambda **kwargs: order.append("setup_gpu"))
+    monkeypatch.setattr(common, "train", lambda config: order.append("train"))
+    common.main(["--output-dir", str(tmp_path), "--experiment-name", "x"])
+    assert order == ["setup_gpu", "train"]
+
+
+def test_main_logs_and_reraises_a_failed_train(monkeypatch, tmp_path) -> None:
+    _record_setup_gpu(monkeypatch)
+
+    def failing(config):
+        raise RuntimeError("cache missing")
+
+    monkeypatch.setattr(common, "train", failing)
+    with pytest.raises(RuntimeError, match="cache missing"):
+        common.main(["--output-dir", str(tmp_path), "--experiment-name", "x"])
 
 
 def test_a_reused_name_is_refused_before_the_gpu_is_configured(monkeypatch, tmp_path) -> None:
