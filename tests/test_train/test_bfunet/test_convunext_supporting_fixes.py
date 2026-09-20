@@ -462,9 +462,9 @@ class TestARenderThatRaisesIsRecordedNotRaised:
         assert "Visualization training_dashboard.png failed: RuntimeError: scripted dashboard failure" in caplog.text
 
 
-def _dashboard_draws(tmp_path, planned, ran=None, draws=20, label=None) -> SimpleNamespace:
-    """Epochs (``.epochs``) and titles (``.titles``) of the dashboard redraws over ``ran`` of ``planned``
-    epochs plus ``on_train_end``."""
+def _dashboard_draws(tmp_path, planned, ran=None, draws=20, label=None, first=0) -> SimpleNamespace:
+    """Epochs (``.epochs``) and titles (``.titles``) of the dashboard redraws over the epochs ``first`` (a
+    fit's ``initial_epoch``) to ``ran`` of ``planned`` plus ``on_train_end``."""
     cb = common.DenoisingVisualizationCallback(
         clean_batch=None, sigma_max_var=tf.Variable(0.1), out_dir=tmp_path,
         dashboard_draws=draws, run_label=label)
@@ -477,7 +477,7 @@ def _dashboard_draws(tmp_path, planned, ran=None, draws=20, label=None) -> Simpl
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(common, "render_training_dashboard", record)
-        for epoch in range(planned if ran is None else ran):
+        for epoch in range(first, planned if ran is None else ran):
             cb.on_epoch_end(epoch, {"loss": 0.1, "val_loss": 0.2})
         cb.on_train_end()
     return seen
@@ -505,6 +505,19 @@ class TestDashboardCadence:
     def test_an_early_stop_off_the_cadence_still_draws_the_final_state_once(self, tmp_path) -> None:
         assert _dashboard_draws(tmp_path, 100, ran=7).epochs == [1, 5, 7]
         assert _dashboard_draws(tmp_path, 100, ran=5).epochs == [1, 5], "already on disk: no second draw"
+
+    def test_a_resumed_fit_follows_the_absolute_epoch_number_so_its_first_epoch_is_not_special(self, tmp_path) -> None:
+        """No trainer passes ``initial_epoch`` today; this pins what a resumed fit (``initial_epoch=30`` of
+        40) would get. Keras hands ``on_epoch_end`` the ABSOLUTE index, the rule is ``completed == 1 or
+        completed % every == 0`` on that number, so ``completed == 1`` never fires (epoch 31 is not drawn)
+        and the cadence stays on the absolute grid; the final state is drawn, once, by ``on_train_end``."""
+        assert _dashboard_draws(tmp_path, 40, first=30).epochs == [32, 34, 36, 38, 40]
+        assert _dashboard_draws(tmp_path, 40, first=30, ran=37).epochs == [32, 34, 36, 37], "early stop off the grid"
+
+    def test_a_resume_into_the_last_epochs_draws_each_epoch_that_is_on_the_grid_and_the_final_state_once(
+            self, tmp_path) -> None:
+        assert _dashboard_draws(tmp_path, 100, first=97).epochs == [100], "every 5th: only epoch 100"
+        assert _dashboard_draws(tmp_path, 100, first=97, ran=99).epochs == [99], "off the grid: the final state"
 
     def test_without_the_argument_every_epoch_of_a_long_run_is_drawn_as_unet_and_bfcnn_do(self, tmp_path) -> None:
         assert _dashboard_draws(tmp_path, 100, draws=None).epochs == list(range(1, 101))

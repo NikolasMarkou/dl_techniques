@@ -609,6 +609,24 @@ def test_the_dashboard_callback_passes_the_epoch_of_the_lowest_best_key_value(tm
     assert seen == [None], "no best_key, no marker"
 
 
+def test_the_shared_dashboard_callback_counts_the_epochs_it_saw_so_a_resumed_fit_starts_its_cadence_over(
+        tmp_path, monkeypatch) -> None:
+    """No trainer passes ``initial_epoch`` today. The shared callback counts COMPLETED epochs (its own
+    ``epoch_times``), not the absolute index Keras passes, so a fit resumed at epoch 30 of 40 draws after
+    its first epoch and then every 2nd (1, 2, 4, ..., 10 of the ten it runs), and its dashboard restarts at
+    epoch 1: the opposite of the denoiser's absolute rule (``test_convunext_supporting_fixes``)."""
+    drawn = []
+    monkeypatch.setattr(viz, "render_training_dashboard",
+                        lambda history, *args, **kwargs: drawn.append(len(history["loss"])) or [])
+    callback = viz.TrainingDashboardCallback(tmp_path / "d.png")
+    callback.set_params({"epochs": 40})
+    for epoch in range(30, 40):
+        callback.on_epoch_begin(epoch)
+        callback.on_epoch_end(epoch, {"loss": 1.0, "lr": 1e-3})
+    callback.on_train_end()
+    assert drawn == [1, 2, 4, 6, 8, 10]
+
+
 # ---------------------------------------------------------------------
 # The opt-in mIoU panel (segmentation trainer; absent for every history without the columns)
 # ---------------------------------------------------------------------
