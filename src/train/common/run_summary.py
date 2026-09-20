@@ -23,10 +23,14 @@ Interface contracts:
 - :func:`read_data_free_analysis_status` -- ``-> {"status", "analyzers", "error", "path"}``
   for a weights / spectral analysis (which leaves ``model_metrics`` empty, so
   :func:`read_analysis_status` calls it 'missing'); never raises for a file problem.
+- :func:`run_data_free_analysis` -- ``(model, sample, labels, history, model_name, run_dir,
+  enabled) -> {"status", "analyzers", "error", "path", "seconds"}`` (or the skipped block):
+  runs the weights + spectral analysis and reads it back; never raises.
 """
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -34,6 +38,7 @@ import keras
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
 from train.common.callbacks import best_checkpoint_path, resolve_monitor_mode
 from train.common.classification_viz import (
@@ -43,6 +48,7 @@ from train.common.classification_viz import (
     plot_per_class_metrics,
 )
 from train.common.config_io import json_numpy_default
+from train.common.evaluation import run_model_analysis
 
 
 def best_epoch(history: Dict[str, List[float]], monitor: str) -> int:
@@ -279,6 +285,63 @@ def read_data_free_analysis_status(
 def skipped_analysis_status() -> Dict[str, Any]:
     """The :func:`read_analysis_status` schema for a run that did not call the analyzer."""
     return {"status": "skipped", "loss": None, "accuracy": None, "error": None, "path": None}
+
+
+def data_free_analysis_config() -> AnalysisConfig:
+    """Weights and spectral analyses only.
+
+    Calibration, information flow and training dynamics read per-image labels and class
+    probabilities of a classifier; on a dense output (a denoised image, per-pixel logits) they
+    would measure nothing meaningful (D-005). One place for the choice, used by the
+    end-of-run analysis of both ConvUNeXt trainers and the bfunet per-epoch ``--analyzer``.
+    """
+    return AnalysisConfig(
+        analyze_weights=True, analyze_spectral=True, analyze_calibration=False,
+        analyze_information_flow=False, analyze_training_dynamics=False, verbose=False,
+    )
+
+
+def run_data_free_analysis(
+        model: keras.Model, sample: np.ndarray, labels: np.ndarray,
+        history: "keras.callbacks.History", model_name: str, run_dir: Path, enabled: bool = True,
+) -> Dict[str, Any]:
+    """Run the end-of-run weights + spectral analysis and read back what reached the disk; never raises.
+
+    ``run_model_analysis`` swallows its own exceptions and logs success regardless, so the
+    status comes from :func:`read_data_free_analysis_status`, not from its return value.
+    Anything raised on the way is recorded as status ``"error"``: the analysis cannot fail a
+    finished run.
+
+    Args:
+        model: The fitted in-memory model (the LAST epoch's weights).
+        sample: Input array handed to the analyzer as ``x`` (these analyses read weights, not data).
+        labels: Its ``y`` (any array of the same length; unused by weights + spectral).
+        history: The ``History`` of ``fit``.
+        model_name: The key the analysis is stored and read back under.
+        run_dir: The run directory; results land in ``<run_dir>/model_analysis/``.
+        enabled: ``False`` returns :func:`skipped_analysis_status` without touching the disk.
+
+    Returns:
+        :func:`skipped_analysis_status` when disabled, else ``{"status", "analyzers", "error",
+        "path", "seconds"}`` with ``status`` ``ok`` / ``partial`` / ``missing`` /
+        ``unreadable`` (see :func:`read_data_free_analysis_status`) or ``error``.
+    """
+    if not enabled:
+        logger.info("Analyzer skipped (--no-model-analysis)")
+        return skipped_analysis_status()
+    started = time.perf_counter()
+    try:
+        results = run_model_analysis(
+            model, (sample, labels), history, model_name, str(run_dir), data_free_analysis_config())
+        block = read_data_free_analysis_status(run_dir, model_name)
+        if results is None and block["status"] != "ok":
+            block["error"] = f"run_model_analysis failed (its exception is in run.log); {block['error']}"
+    except Exception as e:  # noqa: BLE001 - the analysis must not fail a finished run
+        logger.warning(f"Analyzer raised: {type(e).__name__}: {e}")
+        block = {"status": "error", "analyzers": [], "error": f"{type(e).__name__}: {e}", "path": None}
+    block["seconds"] = time.perf_counter() - started
+    logger.info(f"Analyzer status (read back from disk): {block['status']} in {block['seconds']:.1f}s")
+    return block
 
 
 def describe_devices() -> Dict[str, Any]:

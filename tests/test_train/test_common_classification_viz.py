@@ -542,3 +542,68 @@ def test_plot_confusion_counts_names_what_was_measured_in_the_subtitle(tmp_path,
     plain, sub = (fig._suptitle.get_text() for fig in figures)
     assert "test split" not in plain and plain.startswith("Confusion matrix (accuracy 0.7273, n=11)")
     assert sub == plain + "\ntest split, best weights"
+
+
+# ---------------------------------------------------------------------
+# The optional best-epoch marker (segmentation trainer; default OFF for every other caller)
+# ---------------------------------------------------------------------
+
+
+def _best_marks(ax):
+    """Vertical accent-coloured dashed lines of an axes, as their x positions."""
+    return [ln.get_xdata()[0] for ln in ax.get_lines()
+            if ln.get_linestyle() == "--" and ln.get_color() == viz.ACCENT_COLOR
+            and len(set(ln.get_xdata())) == 1 and ln.get_label().startswith("best epoch")]
+
+
+@pytest.mark.parametrize("panel,key", [("Loss", "val_loss"), ("Accuracy", "val_accuracy")])
+def test_best_epoch_marks_the_validation_curve_of_the_loss_and_accuracy_panels(
+        tmp_path, figures, panel, key) -> None:
+    history = _history()
+    ax = _panel(_dashboard(tmp_path, figures, history, best_epoch=3), panel)
+    assert _best_marks(ax) == [3]
+    stars = [ln for ln in ax.get_lines() if ln.get_marker() == "*" and ln.get_color() == viz.ACCENT_COLOR]
+    assert [(float(ln.get_xdata()[0]), float(ln.get_ydata()[0])) for ln in stars] == [(3.0, history[key][2])]
+    assert "best epoch 3" in [t.get_text() for t in ax.get_legend().get_texts()]
+
+
+def test_a_dashboard_without_best_epoch_is_exactly_the_old_figure(tmp_path, figures) -> None:
+    """Every existing caller (ConvNeXt, PowerMLP) leaves ``best_epoch`` unset: not one extra artist,
+    and the PNG is byte-for-byte what it is with the argument spelled ``None``."""
+    history = _history(lr=[1e-3, 8e-4, 6e-4, 4e-4, 2e-4])
+    viz.render_training_dashboard(history, tmp_path / "default.png", "t")
+    viz.render_training_dashboard(history, tmp_path / "none.png", "t", best_epoch=None)
+    viz.render_training_dashboard(history, tmp_path / "marked.png", "t", best_epoch=2)
+    assert (tmp_path / "default.png").read_bytes() == (tmp_path / "none.png").read_bytes()
+    assert (tmp_path / "default.png").read_bytes() != (tmp_path / "marked.png").read_bytes()
+    for fig in figures[:2]:
+        assert all(_best_marks(ax) == [] for ax in fig.axes)
+        assert not any(t.get_text().startswith("best epoch") for ax in fig.axes
+                       for t in (ax.get_legend().get_texts() if ax.get_legend() else []))
+
+
+@pytest.mark.parametrize("bad", [0, 6, -1])
+def test_a_best_epoch_outside_the_epoch_range_is_refused(tmp_path, bad) -> None:
+    with pytest.raises(ValueError, match="best_epoch must be in"):
+        viz.render_training_dashboard(_history(), tmp_path / "d.png", "t", best_epoch=bad)
+    assert not (tmp_path / "d.png").exists()
+
+
+def test_the_dashboard_callback_passes_the_epoch_of_the_lowest_best_key_value(tmp_path, monkeypatch) -> None:
+    seen = []
+    monkeypatch.setattr(viz, "render_training_dashboard",
+                        lambda *args, **kwargs: seen.append(kwargs.get("best_epoch")) or [])
+    callback = viz.TrainingDashboardCallback(tmp_path / "d.png", best_key="val_loss")
+    passed = []
+    for epoch, val_loss in enumerate([1.0, 0.5, 0.7, float("nan"), 0.6]):
+        callback.on_epoch_begin(epoch)
+        callback.on_epoch_end(epoch, {"loss": 1.0, "val_loss": val_loss, "lr": 1e-3})
+        seen.clear()
+        callback._draw()
+        passed.append(seen[-1])
+    assert passed == [1, 2, 2, 2, 2], "the marker follows the running best and skips a NaN epoch"
+    default = viz.TrainingDashboardCallback(tmp_path / "e.png")
+    default.history = {"val_loss": [1.0, 0.5]}
+    seen.clear()
+    default._draw()
+    assert seen == [None], "no best_key, no marker"

@@ -22,7 +22,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from train.common import (
     augment_patch,
     create_callbacks as create_common_callbacks,
-    run_model_analysis,
     set_seeds,
     validate_model_loading,
     collect_image_paths,
@@ -37,7 +36,6 @@ from train.superpoint.homographic_adaptation import select_weighted_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.metrics.ssim_metric import SsimMetric
 from dl_techniques.losses.jacobian_symmetry import jacobian_symmetry_penalty
-from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.models.vision.convunext.model import (
@@ -1450,7 +1448,7 @@ class BFUnetTrainingConfig:
     test_eval: bool = True
     test_num_samples: int = 100  # crops per test set, the eval script's own default
 
-    # End-of-run ``model_analysis/`` (data-free weights + spectral, see ``_run_end_of_run_analysis``).
+    # End-of-run ``model_analysis/`` (data-free weights + spectral, see ``run_summary.run_data_free_analysis``).
     # OFF here so the unet and bfcnn trainers, which have no flag for it, are unchanged; the
     # ConvUNeXt ``TrainingConfig`` re-declares it ON with ``--model-analysis/--no-model-analysis``.
     model_analysis: bool = False
@@ -2587,7 +2585,7 @@ def _write_finished_summary(
     ``best_epoch`` is 1-based, the argmin of ``val_loss`` (the ModelCheckpoint monitor);
     ``best_val_metrics`` / ``final_val_metrics`` are the ``val_*`` columns of the best and
     the last epoch. ``test_eval`` is the block :func:`_run_test_eval` returned, ``analyzer``
-    the block :func:`_run_end_of_run_analysis` returned and ``visualizations`` the block of
+    the block :func:`run_summary.run_data_free_analysis` returned and ``visualizations`` the block of
     ``DenoisingVisualizationCallback.visualizations_block``. Returns the strict-JSON dict
     written.
     """
@@ -2639,51 +2637,6 @@ def _write_model_summary(model: keras.Model, output_dir: Path) -> Path:
     path.write_text("\n".join(lines) + "\n")
     logger.info(f"Model summary ({model.count_params():,} parameters) written to {path}")
     return path
-
-
-def _data_free_analysis_config() -> AnalysisConfig:
-    """Weights + spectral only (``--analyzer`` and the end-of-run analysis): the other analyzers
-    read per-image labels and class probabilities, which a denoiser does not have."""
-    return AnalysisConfig(
-        analyze_weights=True,
-        analyze_spectral=True,
-        analyze_calibration=False,
-        analyze_information_flow=False,
-        analyze_training_dynamics=False,
-        verbose=False,
-    )
-
-
-def _run_end_of_run_analysis(
-    model: keras.Model, sample: np.ndarray, history: "keras.callbacks.History",
-    config: "BFUnetTrainingConfig", output_dir: Path,
-) -> Dict[str, Any]:
-    """Run the end-of-run weights + spectral analysis and read back what reached the disk; never raises.
-
-    Interface contract: ``model`` is the in-memory (last epoch) model, ``sample`` an
-    ``(N, H, W, C)`` array (these analyses read weights, not data), ``history`` the ``History``
-    of ``fit``. ``config.model_analysis`` False returns ``run_summary.skipped_analysis_status()``.
-    Otherwise returns ``{"status", "analyzers", "error", "path", "seconds"}`` read back from
-    ``<output_dir>/model_analysis/`` by ``run_summary.read_data_free_analysis_status`` (the
-    disk is the only truth: ``run_model_analysis`` swallows its own exceptions), or status
-    ``"error"`` when anything raised.
-    """
-    if not config.model_analysis:
-        logger.info("End-of-run model analysis skipped (--no-model-analysis)")
-        return run_summary.skipped_analysis_status()
-    started = time.perf_counter()
-    try:
-        run_model_analysis(
-            model, (sample, sample), history, config.experiment_name, str(output_dir),
-            _data_free_analysis_config(),
-        )
-        block = run_summary.read_data_free_analysis_status(output_dir, config.experiment_name)
-    except Exception as e:  # noqa: BLE001 - the analysis must not fail a finished run
-        logger.warning(f"End-of-run model analysis raised: {type(e).__name__}: {e}")
-        block = {"status": "error", "analyzers": [], "error": f"{type(e).__name__}: {e}", "path": None}
-    block["seconds"] = time.perf_counter() - started
-    logger.info(f"Model analysis status (read back from disk): {block['status']} in {block['seconds']:.1f}s")
-    return block
 
 
 def _train_in_run_dir(
@@ -3027,7 +2980,7 @@ def _train_in_run_dir(
     # classification-oriented, so they are OFF for this image-to-image denoiser. The
     # EpochAnalyzerCallback attaches to the fitted model (the single-output training view
     # when expose_bottleneck is on), which shares all weights with the full model.
-    analyzer_config = _data_free_analysis_config() if config.enable_analyzer else None
+    analyzer_config = run_summary.data_free_analysis_config() if config.enable_analyzer else None
     callbacks, _ = create_common_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix=results_dir_prefix,
@@ -3298,7 +3251,10 @@ def _train_in_run_dir(
         fit_wall_seconds=fit_wall_seconds,
         model_loading_validated=model_loading_validated,
         test_eval=_run_test_eval(config, model, output_dir, final_is_best=best_is_final),
-        analyzer=_run_end_of_run_analysis(model, analysis_sample, history, config, output_dir),
+        analyzer=run_summary.run_data_free_analysis(
+            model, analysis_sample, analysis_sample, history, config.experiment_name, output_dir,
+            enabled=config.model_analysis,
+        ),
         visualizations=viz_callback.visualizations_block(),
     )
 

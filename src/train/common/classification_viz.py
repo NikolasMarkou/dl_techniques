@@ -315,6 +315,7 @@ def render_training_dashboard(
         epoch_times: Optional[Sequence[float]] = None,
         baseline: Optional[Dict[str, float]] = None,
         baseline_label: str = BASELINE_LABEL,
+        best_epoch: Optional[int] = None,
 ) -> List[str]:
     """Render the per-epoch training dashboard to a single PNG.
 
@@ -345,10 +346,17 @@ def render_training_dashboard(
             when no plotted curve value is finite (there is no ceiling).
         baseline_label: Legend text of the baseline marker (the callback names the
             measurement mode, e.g. ``"epoch-0 baseline (val, training mode)"``).
+        best_epoch: Optional 1-based epoch to mark on the validation curves of the ``Loss`` and
+            ``Accuracy`` panels: a green dashed vertical line, a star on the validation curve
+            and a ``best epoch N`` legend entry. ``None`` (the default) draws nothing extra,
+            so a caller that does not pass it gets the same figure as before.
 
     Returns:
         The titles of the panels drawn, in order (empty, and nothing written,
         when ``history`` has no epochs).
+
+    Raises:
+        ValueError: If ``best_epoch`` is given and lies outside ``[1, number of epochs]``.
     """
     loss, val_loss = _series(history, "loss"), _series(history, "val_loss")
     acc, val_acc = _series(history, "accuracy"), _series(history, "val_accuracy")
@@ -359,6 +367,8 @@ def render_training_dashboard(
     if n_epochs == 0:
         return []
     baseline = baseline or {}
+    if best_epoch is not None and not 1 <= best_epoch <= n_epochs:
+        raise ValueError(f"best_epoch must be in [1, {n_epochs}], got {best_epoch}")
 
     def _x(values: np.ndarray) -> np.ndarray:
         return np.arange(1, len(values) + 1)
@@ -370,6 +380,9 @@ def render_training_dashboard(
             ax.plot(_x(train), train, color=TRAIN_COLOR, lw=1.6, marker="o", ms=3, label="train")
         if val is not None:
             ax.plot(_x(val), val, color=VAL_COLOR, lw=1.6, marker="o", ms=3, label="val")
+            if best_epoch is not None and best_epoch <= len(val) and np.isfinite(val[best_epoch - 1]):
+                ax.axvline(best_epoch, color=ACCENT_COLOR, ls="--", lw=1.2, label=f"best epoch {best_epoch}")
+                ax.plot([best_epoch], [val[best_epoch - 1]], "*", color=ACCENT_COLOR, ms=13, zorder=5)
             if base_key in baseline and np.isfinite(baseline[base_key]):
                 true_value = baseline[base_key]
                 curve_values = np.concatenate(
@@ -579,6 +592,9 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         baseline_mode: How ``baseline_fn`` measured (``"training"`` or
             ``"inference"``); a mode other than ``"inference"`` is named in the
             marker's legend text.
+        best_key: Optional history key (e.g. ``"val_loss"``): the epoch with its LOWEST finite
+            value so far is passed to :func:`render_training_dashboard` as ``best_epoch`` on
+            every draw, so the marker follows the run. ``None`` (the default) marks nothing.
 
     Attributes:
         history: Accumulated per-epoch metrics (``loss``, ``val_loss``, ...,
@@ -595,9 +611,11 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
             batch_size: int = 1024,
             baseline_fn: Optional[Callable[[keras.Model], Dict[str, float]]] = None,
             baseline_mode: str = "inference",
+            best_key: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.out_path = Path(out_path)
+        self.best_key = best_key
         self.baseline_data = baseline_data
         self.baseline_fn = baseline_fn
         self.baseline_label = (
@@ -650,6 +668,13 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         except (TypeError, ValueError):
             return 1
 
+    def _best_epoch(self) -> Optional[int]:
+        """1-based epoch of the lowest finite ``best_key`` value so far, or ``None``."""
+        values = np.asarray(self.history.get(self.best_key, []) if self.best_key else [], dtype=np.float64)
+        if not np.isfinite(values).any():
+            return None
+        return int(np.argmin(np.where(np.isfinite(values), values, np.inf))) + 1
+
     def _draw(self) -> None:
         """Render the dashboard from the accumulated state; never raises."""
         completed = len(self.epoch_times)
@@ -657,7 +682,7 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
             render_training_dashboard(
                 self.history, self.out_path, self.title,
                 epoch_times=self.epoch_times, baseline=self.baseline,
-                baseline_label=self.baseline_label,
+                baseline_label=self.baseline_label, best_epoch=self._best_epoch(),
             )
             self._drawn_epochs = completed
         except Exception as e:  # noqa: BLE001 - never abort training for a plot

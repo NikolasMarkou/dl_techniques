@@ -33,6 +33,7 @@ import pytest  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
 from train.bfunet import common  # noqa: E402
+from train.common import run_summary  # noqa: E402
 from train.bfunet.train_convunext_denoiser import (  # noqa: E402
     TrainingConfig,
     build_model,
@@ -1356,10 +1357,12 @@ def test_an_analyzer_that_raises_or_writes_nothing_never_fails_the_run(e2e, tmp_
         raise RuntimeError("scripted analyzer failure")
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(common, "run_model_analysis", boom)
-        raised = common._run_end_of_run_analysis(e2e.final, sample, history, config, tmp_path)
-        patch.setattr(common, "run_model_analysis", lambda *args, **kwargs: None)
-        wrote_nothing = common._run_end_of_run_analysis(e2e.final, sample, history, config, tmp_path)
+        patch.setattr(run_summary, "run_model_analysis", boom)
+        raised = run_summary.run_data_free_analysis(
+            e2e.final, sample, sample, history, config.experiment_name, tmp_path, config.model_analysis)
+        patch.setattr(run_summary, "run_model_analysis", lambda *args, **kwargs: None)
+        wrote_nothing = run_summary.run_data_free_analysis(
+            e2e.final, sample, sample, history, config.experiment_name, tmp_path, config.model_analysis)
     assert raised["status"] == "error" and "scripted analyzer failure" in raised["error"]
     assert wrote_nothing["status"] == "missing" and wrote_nothing["analyzers"] == []
 

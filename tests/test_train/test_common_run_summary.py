@@ -323,6 +323,65 @@ def test_data_free_status_reads_a_real_analyzer_file_that_read_analysis_status_c
 
 
 # ---------------------------------------------------------------------
+# run_data_free_analysis (the one end-of-run analysis of both ConvUNeXt trainers)
+# ---------------------------------------------------------------------
+
+def _analysis_spy(monkeypatch, run_dir, payload=None, returns="results", raises=None):
+    """Replace ``run_summary.run_model_analysis``; it records its arguments and, when ``payload``
+    is given, writes the file a real analysis would."""
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        if raises is not None:
+            raise raises
+        if payload is not None:
+            _write_analysis(run_dir, payload)
+        return returns
+
+    monkeypatch.setattr(run_summary, "run_model_analysis", spy)
+    return calls
+
+
+def _analyse(tmp_path, **kwargs):
+    x, y, history = np.zeros((2, 4, 4, 3), dtype="float32"), np.zeros((2, 4, 4)), keras.callbacks.History()
+    return run_summary.run_data_free_analysis(object(), x, y, history, "m", tmp_path, **kwargs)
+
+
+def test_a_disabled_analysis_is_skipped_without_touching_the_analyzer_or_the_disk(tmp_path, monkeypatch) -> None:
+    calls = _analysis_spy(monkeypatch, tmp_path, payload=_data_free_payload())
+    assert _analyse(tmp_path, enabled=False) == run_summary.skipped_analysis_status()
+    assert calls == [] and list(tmp_path.iterdir()) == []
+
+
+def test_the_analysis_is_weights_and_spectral_only_and_gets_the_arguments_as_given(tmp_path, monkeypatch) -> None:
+    calls = _analysis_spy(monkeypatch, tmp_path, payload=_data_free_payload())
+    block = _analyse(tmp_path)
+    ((model, data, history, name, directory, config),) = calls
+    assert (name, directory, len(data)) == ("m", str(tmp_path), 2) and data[0].shape == (2, 4, 4, 3)
+    assert (config.analyze_weights, config.analyze_spectral) == (True, True)
+    assert (config.analyze_calibration, config.analyze_information_flow, config.analyze_training_dynamics) == (
+        False, False, False)
+    assert block["status"] == "ok" and block["analyzers"] == ["weights", "spectral"] and block["seconds"] >= 0.0
+    assert set(block) == {"status", "analyzers", "error", "path", "seconds"}
+
+
+def test_the_status_is_what_reached_the_disk_not_what_the_analyzer_returned(tmp_path, monkeypatch) -> None:
+    _analysis_spy(monkeypatch, tmp_path, payload=None, returns="looks fine")
+    assert _analyse(tmp_path)["status"] == "missing", "a truthy return with nothing on disk is not ok"
+    _analysis_spy(monkeypatch, tmp_path, payload=None, returns=None)
+    block = _analyse(tmp_path)
+    assert block["status"] == "missing" and "its exception is in run.log" in block["error"]
+
+
+def test_an_analysis_that_raises_is_recorded_as_error_and_never_propagates(tmp_path, monkeypatch) -> None:
+    _analysis_spy(monkeypatch, tmp_path, raises=ValueError("scripted"))
+    block = _analyse(tmp_path)
+    assert block["status"] == "error" and "ValueError: scripted" in block["error"]
+    assert block["analyzers"] == [] and block["seconds"] >= 0.0
+
+
+# ---------------------------------------------------------------------
 # load_best_metrics
 # ---------------------------------------------------------------------
 
