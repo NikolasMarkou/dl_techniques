@@ -22,6 +22,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from threadpoolctl import threadpool_info, threadpool_limits  # noqa: E402
 
 from train.common import run_summary  # noqa: E402
 from train.common.callbacks import best_checkpoint_path  # noqa: E402
@@ -394,6 +395,35 @@ def test_an_analysis_that_raises_is_recorded_as_error_and_never_propagates(tmp_p
     block = _analyse(tmp_path)
     assert block["status"] == "error" and "ValueError: scripted" in block["error"]
     assert block["analyzers"] == [] and block["seconds"] >= 0.0
+
+
+def _pool_threads() -> list:
+    """The thread count of every BLAS / OpenMP pool loaded in this process, in a stable order."""
+    return sorted((pool["filepath"], pool["num_threads"]) for pool in threadpool_info())
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["returns", "raises"])
+def test_the_analysis_runs_on_one_blas_thread_and_gives_the_pool_back(tmp_path, monkeypatch, fails) -> None:
+    """D-046: the spectral fits oversubscribe the host at the default pool size (14.7-21.0 s against
+    6.1-6.6 s at one thread), so the analyzer call is scoped to one thread; the limit must not leak
+    (training and the per-epoch analyzer keep their pools), also when the analysis raises. The pools
+    are set to two threads first so the guard can fail on a host that would default to one."""
+    seen = []
+    _analysis_spy(monkeypatch, tmp_path, payload=_data_free_payload(), raises=ValueError("scripted") if fails else None)
+    inner = run_summary.run_model_analysis
+
+    def recording_analysis(*args, **kwargs):
+        seen.append(_pool_threads())
+        return inner(*args, **kwargs)
+
+    monkeypatch.setattr(run_summary, "run_model_analysis", recording_analysis)
+    with threadpool_limits(limits=2):
+        before = _pool_threads()
+        assert before and {count for _, count in before} == {2}, "the test needs pools it can tell apart"
+        block = _analyse(tmp_path)
+        assert _pool_threads() == before, "the one-thread limit leaked out of the analyzer call"
+    assert block["status"] == ("error" if fails else "ok")
+    assert len(seen) == 1 and {count for _, count in seen[0]} == {1}, f"not one BLAS thread: {seen}"
 
 
 def _with_library_files(run_dir, payload, results=None):

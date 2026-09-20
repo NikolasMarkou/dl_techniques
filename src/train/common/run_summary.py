@@ -37,6 +37,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import keras
 import numpy as np
 import tensorflow as tf
+from threadpoolctl import threadpool_limits
 
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
@@ -333,8 +334,12 @@ def run_data_free_analysis(
         return skipped_analysis_status()
     started = time.perf_counter()
     try:
-        results = run_model_analysis(
-            model, (sample, labels), history, model_name, str(run_dir), data_free_analysis_config())
+        # DECISION plan-2026-09-19T224205-49c8bf80/D-046: the spectral fits run 12 BLAS threads that
+        # oversubscribe the host (14.7-21.0 s against 6.1-6.6 s at one thread, same model and load).
+        # Do NOT drop the limit, and do NOT set it process-wide: it is scoped to this one call.
+        with threadpool_limits(limits=1):
+            results = run_model_analysis(
+                model, (sample, labels), history, model_name, str(run_dir), data_free_analysis_config())
         block = read_data_free_analysis_status(run_dir, model_name)
         if results is None and block["status"] != "ok":
             block["error"] = f"run_model_analysis failed (its exception is in run.log); {block['error']}"
