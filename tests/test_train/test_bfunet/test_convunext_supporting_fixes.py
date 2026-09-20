@@ -445,7 +445,7 @@ class TestFixedVizBatchIsSeeded:
 
 
 class TestARenderThatRaisesIsRecordedNotRaised:
-    def test_a_failing_dashboard_lands_in_failed_and_training_goes_on(self, tmp_path) -> None:
+    def test_a_failing_dashboard_lands_in_failed_and_training_goes_on(self, tmp_path, caplog) -> None:
         cb = common.DenoisingVisualizationCallback(
             clean_batch=None, sigma_max_var=tf.Variable(0.1), out_dir=tmp_path, noise_seed=1)
 
@@ -457,7 +457,9 @@ class TestARenderThatRaisesIsRecordedNotRaised:
             cb.on_epoch_end(0, {"loss": 0.1, "val_loss": 0.2})
         assert cb.failed == {"training_dashboard.png": "RuntimeError: scripted dashboard failure"}
         block = cb.visualizations_block()
-        assert block["failed"] == cb.failed and block["files"] == [] and block["seconds"] > 0
+        assert block["failed"] == ["training_dashboard.png"], "a list of names, like the ConvNeXt reference"
+        assert block["files"] == [] and block["seconds"] > 0
+        assert "Visualization training_dashboard.png failed: RuntimeError: scripted dashboard failure" in caplog.text
 
 
 def _dashboard_draws(tmp_path, planned, ran=None, draws=20, label=None) -> SimpleNamespace:
@@ -519,7 +521,7 @@ def _head(tmp_path, *, architecture=None, baseline_val_loss=0.5) -> dict:
         TrainingConfig(variant="tiny", depth=2, blocks_per_level=1, patch_size=16), tmp_path,
         params=1, steps_per_epoch=3, lr_schedule=lambda step: 1e-3, init_from_block=None,
         hist={}, devices={"gpu_name": None, "tf_visible_devices": [], "cuda_visible_devices": ""},
-        n_train=6, n_val=4, validation_steps=2, baseline_val_loss=baseline_val_loss,
+        n_train_files=6, n_val_files=4, validation_steps=2, baseline_val_loss=baseline_val_loss,
         architecture=architecture)
 
 
@@ -527,23 +529,34 @@ class TestTheSummaryHead:
     def test_a_trainer_without_an_architecture_gets_no_model_keys_but_the_config_facts(self, tmp_path) -> None:
         head = _head(tmp_path)
         assert "dims" not in head and "model_family" not in head
-        assert (head["batch_size"], head["n_train"], head["monitor"]) == (16, 6, "val_loss")
+        assert (head["batch_size"], head["n_train_files"], head["monitor"]) == (16, 6, "val_loss")
 
     def test_the_trainers_architecture_is_spliced_in_as_it_is(self, tmp_path) -> None:
         head = _head(tmp_path, architecture={"model_family": "x", "dims": [1, 2]})
         assert (head["model_family"], head["dims"]) == ("x", [1, 2])
+
+    def test_one_meaning_per_key_name_and_the_pixel_domain_is_stated(self, tmp_path) -> None:
+        """``dataset`` / ``n_train`` / ``n_val`` are the ConvNeXt reference's names (a dataset name,
+        sample counts); the denoiser's facts are image directories and image-path worklists."""
+        head = _head(tmp_path)
+        assert head["train_image_dirs"] == list(TrainingConfig().train_image_dirs)
+        assert (head["n_train_files"], head["n_val_files"], head["data_range"]) == (6, 4, [0.0, 1.0])
+        assert [key for key in ("dataset", "n_train", "n_val") if key in head] == []
 
     def test_a_missing_baseline_is_null_and_a_measured_one_is_kept(self, tmp_path) -> None:
         assert _head(tmp_path, baseline_val_loss=None)["initial_loss_sanity_eval"] is None
         assert _head(tmp_path)["initial_loss_sanity_eval"]["loss"] == 0.5
 
 
-def test_the_convunext_trainer_hands_its_architecture_resolver_to_the_shared_train() -> None:
-    """Without it the run would silently lose the model keys, the shared cadence and the title label."""
+def test_the_convunext_trainer_hands_the_shared_train_its_resolver_its_cadence_and_its_title() -> None:
+    """Without them the run would silently lose the model keys, the shared cadence or the title label:
+    three separate arguments (D-038), each passed by the trainer that wants it."""
     import train.bfunet.train_convunext_denoiser as trainer
+    from train.common.classification_viz import DASHBOARD_TARGET_DRAWS
 
     seen = {}
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(common, "train", lambda config, *args, **kwargs: seen.update(kwargs))
-        trainer.train(TrainingConfig(patch_size=16))
+        trainer.train(TrainingConfig(patch_size=16, experiment_name="named", seed=7))
     assert seen["architecture_of"] is trainer.architecture_of
+    assert seen["dashboard_draws"] == DASHBOARD_TARGET_DRAWS and seen["run_label"] == "named (seed 7)"

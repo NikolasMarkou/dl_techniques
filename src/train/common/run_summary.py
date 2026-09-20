@@ -355,6 +355,24 @@ def run_data_free_analysis(
     return block
 
 
+# The config attributes every ConvUNeXt-side ``results_summary.json`` records under their own names.
+SUMMARY_CONFIG_KEYS = (
+    "experiment_name", "variant", "learning_rate", "warmup_epochs", "weight_decay", "batch_size", "seed")
+
+
+def summary_head(config: Any, run_dir: Path, *, params: int, steps_per_epoch: int,
+                 devices: Dict[str, Any]) -> Dict[str, Any]:
+    """The summary keys the bfunet trainers and the segmenter share: ``SUMMARY_CONFIG_KEYS`` read
+    off ``config`` (a missing attribute raises ``AttributeError``), ``epochs`` as ``epochs_requested``,
+    the three ``devices`` keys of :func:`describe_devices`, the sizes, and the [0, 1] ``data_range``."""
+    return {
+        "run_dir": str(run_dir), "params": int(params), "steps_per_epoch": int(steps_per_epoch),
+        "epochs_requested": config.epochs, "data_range": [0.0, 1.0],
+        **{key: getattr(config, key) for key in SUMMARY_CONFIG_KEYS},
+        **{key: devices[key] for key in ("gpu_name", "tf_visible_devices", "cuda_visible_devices")},
+    }
+
+
 def describe_devices() -> Dict[str, Any]:
     """Which GPU(s) TensorFlow sees in this process, for the run log and the summary.
 

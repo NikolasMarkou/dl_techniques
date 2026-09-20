@@ -23,7 +23,7 @@ import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, List
+from typing import Any, Dict, List
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -34,6 +34,7 @@ import tensorflow as tf  # noqa: E402
 
 from train.bfunet import common  # noqa: E402
 from train.common import run_summary  # noqa: E402
+from train.common.classification_viz import DASHBOARD_TARGET_DRAWS  # noqa: E402
 from train.bfunet.train_convunext_denoiser import (  # noqa: E402
     TrainingConfig,
     architecture_of,
@@ -124,6 +125,8 @@ def run_train(config: TrainingConfig) -> keras.Model:
         model_label="ConvUNeXt",
         results_dir_prefix="convunext_denoiser",
         architecture_of=architecture_of,
+        dashboard_draws=DASHBOARD_TARGET_DRAWS,
+        run_label=f"{config.experiment_name} (seed {config.seed})",
     )
 
 
@@ -1331,7 +1334,7 @@ def test_the_visualizations_block_lists_the_files_that_are_on_disk(analysis_run)
     assert "training_dashboard.png" in block["files"]
     assert [f"epoch_{e:03d}_denoise_grid.png" for e in (0, 1, 2)] == [
         f for f in block["files"] if f.endswith("_denoise_grid.png")]
-    assert block["failed"] == {} and block["seconds"] > 0
+    assert block["failed"] == [] and block["seconds"] > 0
 
 
 def test_a_run_with_the_analysis_off_records_a_skip_and_writes_no_directory(e2e) -> None:
@@ -1411,11 +1414,14 @@ def test_a_finished_run_flags_the_reuse_exactly_when_the_final_epoch_is_the_best
 # Typed here from audit-loop-2 section 1.2 (the ConvNeXt reference's keys the denoiser lacked
 # without a task reason), never read from the code under test.
 PARITY_KEYS = (
-    "model_family", "dataset", "convnext_version", "depth", "blocks_per_level", "dims",
+    "model_family", "train_image_dirs", "convnext_version", "depth", "blocks_per_level", "dims",
     "kernel_size", "drop_path_rate", "dropout_rate", "input_shape", "optimizer",
-    "gradient_clip_norm", "lr_schedule", "weight_decay", "batch_size", "seed", "n_train",
-    "n_val", "monitor", "initial_loss_sanity_eval",
+    "gradient_clip_norm", "lr_schedule", "weight_decay", "batch_size", "seed", "n_train_files",
+    "n_val_files", "monitor", "initial_loss_sanity_eval", "data_range",
 )
+# The names the ConvNeXt reference gives another meaning (a dataset name, sample counts): the
+# denoiser's own facts are the image directories and the image-path worklists, named for that.
+RETIRED_KEYS = ("dataset", "n_train", "n_val")
 
 
 def test_every_finished_run_carries_the_parity_keys(ok_run) -> None:
@@ -1426,19 +1432,24 @@ def test_every_finished_run_carries_the_parity_keys(ok_run) -> None:
 def test_a_diverged_run_carries_the_parity_keys_too(diverged_run) -> None:
     diverged = _strict_json(diverged_run.run_dir / "results_summary.json")
     assert [key for key in PARITY_KEYS if key not in diverged] == []
+    assert [key for key in RETIRED_KEYS if key in diverged] == []
+
+
+def test_the_retired_key_names_are_gone_from_a_finished_run(ok_run) -> None:
+    assert [key for key in RETIRED_KEYS if key in ok_run.summary] == []
 
 
 def test_each_parity_value_is_the_fact_of_the_run_it_names(e2e) -> None:
     summary, config = _strict_json(e2e.run_dir / "results_summary.json"), e2e.config
-    assert summary["dataset"] == [str(e2e.root / "train")]
+    assert summary["train_image_dirs"] == [str(e2e.root / "train")] and summary["data_range"] == [0.0, 1.0]
     assert summary["input_shape"] == [PATCH, PATCH, 3]
     assert (summary["optimizer"], summary["lr_schedule"], summary["monitor"]) == \
         ("adamw", "cosine_decay", "val_loss")
     assert (summary["weight_decay"], summary["gradient_clip_norm"]) == (0.004, 1.0)
     assert (summary["batch_size"], summary["seed"]) == (2, 0)
     sourced = re.search(r"Sourced (\d+) train / (\d+) val image paths", (e2e.run_dir / "run.log").read_text())
-    assert (summary["n_train"], summary["n_val"]) == tuple(int(n) for n in sourced.groups())
-    assert summary["n_val"] == N_VAL and summary["n_train"] == config.max_train_files   # worklist, not patches
+    assert (summary["n_train_files"], summary["n_val_files"]) == tuple(int(n) for n in sourced.groups())
+    assert summary["n_val_files"] == N_VAL and summary["n_train_files"] == config.max_train_files  # worklist, not patches
     assert summary["model_family"] == "convunext-denoiser"
     assert summary["dropout_rate"] == config.dropout_rate == 0.0 and summary["drop_path_rate"] == 0.0
     assert summary["kernel_size"] == 7
@@ -1480,3 +1491,40 @@ def test_the_run_log_has_one_visualizations_line_that_matches_the_summary_block(
     assert all(name in lines[0] for name in block["files"])
     assert f"{len(block['failed'])} failed" in lines[0] and lines[0].endswith("s")
     assert "dashboard and grids took" in lines[0]
+
+
+class _StopBeforeFit(Exception):
+    """Raised by the stand-in visualization callback: nothing trains after it."""
+
+
+def _callback_arguments(tmp_path, **train_arguments) -> Dict[str, Any]:
+    """The keyword arguments ``common.train`` builds the visualization callback with, captured by
+    a stand-in that stops the run at that point (the data, the model and the optimizer are real)."""
+    _write_pngs(tmp_path / "train", N_TRAIN, seed=1)
+    _write_pngs(tmp_path / "val", N_VAL, seed=2)
+    seen: Dict[str, Any] = {}
+
+    def stand_in(**kwargs):
+        seen.update(kwargs)
+        raise _StopBeforeFit
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "DenoisingVisualizationCallback", stand_in)
+        with pytest.raises(_StopBeforeFit):
+            common.train(
+                _tiny_config(tmp_path, "seam"), build_model, verify_bias_free,
+                model_label="ConvUNeXt", results_dir_prefix="convunext_denoiser", **train_arguments)
+    return seen
+
+
+def test_a_trainer_that_passes_only_architecture_of_keeps_the_every_epoch_dashboard_and_the_default_title(
+        tmp_path) -> None:
+    """D-038: ``architecture_of`` supplies summary keys and nothing else; the cadence and the title
+    are their own arguments, so asking for the keys cannot change the dashboard."""
+    seen = _callback_arguments(tmp_path, architecture_of=architecture_of)
+    assert seen["dashboard_draws"] is None and seen["run_label"] is None
+
+
+def test_the_dashboard_cadence_and_the_title_reach_the_callback_as_given_without_architecture_of(tmp_path) -> None:
+    seen = _callback_arguments(tmp_path, dashboard_draws=7, run_label="my_run (seed 3)")
+    assert (seen["dashboard_draws"], seen["run_label"]) == (7, "my_run (seed 3)")

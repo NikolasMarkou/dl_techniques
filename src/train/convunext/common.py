@@ -820,7 +820,7 @@ def _write_figures(
         config: The run config (its ``experiment_name`` titles the figures).
 
     Returns:
-        ``{"files": [names that exist on disk], "failed": {name: error text}, "skipped":
+        ``{"files": [names that exist on disk], "failed": [names], "skipped":
         {name: reason}, "seconds"}``: the dashboard and the per-epoch grids come first, then
         the figures of this function. ``seconds`` is the wall time of the per-epoch grids
         (``grid.seconds``) plus the end-of-run figures (the dashboard redraw is not timed).
@@ -828,7 +828,7 @@ def _write_figures(
     vis_dir = run_dir / "visualizations"
     epochs_run = len(hist[MONITOR])
     started = time.perf_counter()
-    out: Dict[str, Any] = {"files": [], "failed": dict(grid.failed), "skipped": {}}
+    out: Dict[str, Any] = {"files": [], "failed": list(grid.failed), "skipped": {}}
     out["files"] += [n for n in ["training_dashboard.png", *grid.written] if (vis_dir / n).is_file()]
 
     def attempt(name: str, draw: Callable[[], Any]) -> None:
@@ -839,7 +839,7 @@ def _write_figures(
             out["files"].append(name)
         except Exception as e:  # noqa: BLE001 - a figure must not fail the run
             logger.warning(f"Visualization {name} failed: {type(e).__name__}: {e}")
-            out["failed"][name] = f"{type(e).__name__}: {e}"
+            out["failed"].append(name)
 
     def best_confusion() -> np.ndarray:
         if test_metrics_best is None:
@@ -948,32 +948,23 @@ def _summary_head(
 ) -> Dict[str, Any]:
     """Keys every summary carries, whether the run finished or diverged."""
     return {
-        "run_dir": str(run_dir),
-        "experiment_name": config.experiment_name,
+        **run_summary.summary_head(
+            config, run_dir, params=params, steps_per_epoch=steps_per_epoch, devices=devices),
         "model_family": "convunext-seg",
         "dataset": DATASET_NAME,
-        "variant": config.variant,
-        "params": params,
         **architecture_of(config.variant),
         "input_shape": [config.image_size, config.image_size, 3],
         "num_classes": NUM_CLASSES,
         "class_names": list(CLASS_NAMES),
         "optimizer": "AdamW",
         "gradient_clip_norm": GRADIENT_CLIP_NORM,
-        "learning_rate": config.learning_rate,
         "lr_schedule": "cosine",
-        "warmup_epochs": config.warmup_epochs,
-        "steps_per_epoch": steps_per_epoch,
-        "weight_decay": config.weight_decay,
-        "batch_size": config.batch_size,
-        "seed": config.seed,
         "validation_split": config.validation_split,
         "max_samples": config.max_samples,
         "n_train": int(len(data["x_train"])),
         "n_val": int(len(data["x_val"])),
         "n_test": int(len(data["x_test"])),
         "data_load_seconds": data_load_seconds,
-        "epochs_requested": config.epochs,
         "monitor": MONITOR,
         "initial_loss_sanity_eval": {
             "loss": baseline["loss"], "n_samples": int(len(data["x_val"])),
@@ -981,9 +972,6 @@ def _summary_head(
         },
         "initial_loss_ratio": initial_loss_ratio,
         "init_scale_warning": init_scale_warning,
-        "gpu_name": devices["gpu_name"],
-        "tf_visible_devices": devices["tf_visible_devices"],
-        "cuda_visible_devices": devices["cuda_visible_devices"],
     }
 
 

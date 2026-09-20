@@ -269,7 +269,7 @@ def test_the_test_split_is_scored_for_best_and_final_when_they_differ(e2e) -> No
 def test_a_real_run_whose_best_epoch_is_the_last_writes_no_best_vs_final_figure(last_is_best) -> None:
     block = last_is_best.summary["visualizations"]
     assert not (last_is_best.run_dir / "visualizations" / "best_vs_final_predictions.png").exists()
-    assert "best_vs_final_predictions.png" not in block["files"] and block["failed"] == {}
+    assert "best_vs_final_predictions.png" not in block["files"] and block["failed"] == []
     assert list(block["skipped"]) == ["best_vs_final_predictions.png"]
     assert "1 skipped: best_vs_final_predictions.png" in (last_is_best.run_dir / "run.log").read_text()
 
@@ -311,6 +311,7 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
     assert summary["input_shape"] == [SIZE, SIZE, 3] and summary["class_names"] == ["pet", "background", "border"]
     assert summary["optimizer"] == "AdamW" and summary["lr_schedule"] == "cosine"
     assert summary["monitor"] == "val_loss"
+    assert summary["data_range"] == [0.0, 1.0], "the pixel domain after /255, stated like the denoiser's"
     assert summary["epochs_run"] == EPOCHS and len(summary["epoch_times"]) == EPOCHS
     assert all(t > 0.0 for t in summary["epoch_times"])
     for which in ("test_metrics_best", "test_metrics_final"):
@@ -563,6 +564,7 @@ def test_a_diverged_run_writes_a_strict_diverged_summary_and_no_final_model(dive
     assert summary["history"]["loss"][1] is None, "the NaN is written as null (strict JSON)"
     for key in ("n_train", "n_val", "n_test", "initial_loss_ratio", "epoch_times", "fit_wall_seconds"):
         assert key in summary, key
+    assert summary["data_range"] == [0.0, 1.0] and summary["seed"] == 5 and summary["epochs_requested"] == 3
     assert "test_metrics_best" not in summary and "trivial_baseline" not in summary
     assert not (diverged.run_dir / "final_model.keras").exists()
     assert (diverged.run_dir / "best_model.keras").exists(), "the checkpoint of epoch 1 stays"
@@ -774,7 +776,7 @@ def test_every_promised_figure_exists_and_is_listed_in_the_summary(e2e) -> None:
     assert {p.name for p in vis.iterdir()} == expected, "nothing missing, nothing unlisted"
     block = e2e.summary["visualizations"]
     assert set(block["files"]) == expected and len(block["files"]) == len(expected)
-    assert block["failed"] == {} and block["skipped"] == {} and block["seconds"] > 0.0
+    assert block["failed"] == [] and block["skipped"] == {} and block["seconds"] > 0.0
     assert all(_png(vis / name) for name in expected if name.endswith(".png"))
     saved = _strict((e2e.run_dir / "results_summary.json").read_text())["visualizations"]
     assert saved["files"] == block["files"]
@@ -851,7 +853,9 @@ def test_a_raising_figure_lands_in_failed_with_its_error_and_the_run_stays_ok(ho
     summary = _strict((hostile.run_dir / "results_summary.json").read_text())
     assert summary["status"] == "ok" and (hostile.run_dir / "final_model.keras").exists()
     block = summary["visualizations"]
-    assert block["failed"] == {"miou_curve.png": "RuntimeError: figure exploded"}
+    assert block["failed"] == ["miou_curve.png"], "a list of names, like the ConvNeXt reference"
+    assert "Visualization miou_curve.png failed: RuntimeError: figure exploded" in (
+        hostile.run_dir / "run.log").read_text(), "the error text moved to run.log, it is not lost"
     assert "miou_curve.png" not in block["files"] and not (hostile.run_dir / "visualizations" / "miou_curve.png").exists()
     survivors = _end_of_run_figures() - {"miou_curve.png"}
     if summary["final_is_best"]:  # the best epoch is the last: that figure is skipped, not failed
@@ -974,7 +978,7 @@ def test_best_equal_to_final_skips_best_vs_final_and_records_why(e2e, tmp_path, 
     monkeypatch.setattr(common, "plot_best_vs_final_predictions", lambda *a, **k: pytest.fail("drew it"))
     out = common._write_figures(
         run_dir, grid, e2e.final, hist, EPOCHS, e2e.summary["test_metrics_best"], e2e.config)
-    assert out["failed"] == {} and "best_vs_final_predictions.png" not in out["files"]
+    assert out["failed"] == [] and "best_vs_final_predictions.png" not in out["files"]
     assert not (run_dir / "visualizations" / "best_vs_final_predictions.png").exists()
     assert list(out["skipped"]) == ["best_vs_final_predictions.png"] and "identical" in out["skipped"][
         "best_vs_final_predictions.png"]
@@ -1004,7 +1008,7 @@ def test_best_before_final_loads_the_best_checkpoint_for_the_best_column(e2e, tm
             real(images, truths, best, final, *a, **k))[1])
     out = common._write_figures(
         run_dir, grid, e2e.final, hist, best_epoch, e2e.summary["test_metrics_best"], e2e.config)
-    assert out["failed"] == {}
+    assert out["failed"] == []
     assert loaded == [str(run_dir / "best_model.keras")], "the best column comes from the best checkpoint"
     assert set(np.unique(columns["best"])) == {1}
     np.testing.assert_array_equal(columns["final"], grid.predict_classes(e2e.final))
@@ -1024,7 +1028,7 @@ def test_the_end_of_run_figures_are_drawn_from_the_best_confusion_as_given(e2e, 
                         lambda cm, *a, **k: (drawn.append(np.array(cm)), real(cm, *a, **k))[1])
     out = common._write_figures(
         run_dir, grid, e2e.final, hist, EPOCHS, {"confusion": ASYMMETRIC_CONFUSION}, e2e.config)
-    assert out["failed"] == {}
+    assert out["failed"] == []
     np.testing.assert_array_equal(drawn[0], ASYMMETRIC_CONFUSION)
     report = _strict((run_dir / "visualizations" / "segmentation_report.json").read_text())
     assert report["confusion"] == ASYMMETRIC_CONFUSION
@@ -1034,12 +1038,12 @@ def test_the_end_of_run_figures_are_drawn_from_the_best_confusion_as_given(e2e, 
     assert report["per_class"]["border"]["recall"] == pytest.approx(9 / 10)
 
 
-def test_an_unloadable_best_checkpoint_fails_only_the_figures_that_describe_it(e2e, tmp_path) -> None:
+def test_an_unloadable_best_checkpoint_fails_only_the_figures_that_describe_it(e2e, tmp_path, caplog) -> None:
     run_dir, grid, hist = _figure_inputs(e2e, tmp_path)
     out = common._write_figures(run_dir, grid, e2e.final, hist, EPOCHS, None, e2e.config)
     assert set(out["failed"]) == {"confusion_matrix.png", "per_class_metrics.png", "segmentation_report.json"}
     for name in out["failed"]:
-        assert "did not load" in out["failed"][name], name
+        assert f"Visualization {name} failed: RuntimeError: best_model.keras did not load" in caplog.text, name
     assert set(out["files"]) >= {"miou_curve.png"} and "best_vs_final_predictions.png" in out["skipped"]
     assert not (run_dir / "visualizations" / "segmentation_report.json").exists()
 
@@ -1048,14 +1052,16 @@ def test_a_failure_recorded_by_the_grid_callback_is_merged_into_the_summary_bloc
     run_dir, grid, hist = _figure_inputs(e2e, tmp_path)
     grid.failed["epoch_001_seg_grid.png"] = "OSError: earlier grid failure"
     out = common._write_figures(run_dir, grid, e2e.final, hist, EPOCHS, e2e.summary["test_metrics_best"], e2e.config)
-    assert out["failed"] == {"epoch_001_seg_grid.png": "OSError: earlier grid failure"}
+    assert out["failed"] == ["epoch_001_seg_grid.png"]
 
 
-def test_a_figure_function_that_writes_nothing_is_a_failure_not_a_listed_file(e2e, tmp_path, monkeypatch) -> None:
+def test_a_figure_function_that_writes_nothing_is_a_failure_not_a_listed_file(
+        e2e, tmp_path, monkeypatch, caplog) -> None:
     run_dir, grid, hist = _figure_inputs(e2e, tmp_path)
     monkeypatch.setattr(common, "plot_miou_curve", lambda *a, **k: None)
     out = common._write_figures(run_dir, grid, e2e.final, hist, EPOCHS, e2e.summary["test_metrics_best"], e2e.config)
-    assert "miou_curve.png" not in out["files"] and "without writing" in out["failed"]["miou_curve.png"]
+    assert "miou_curve.png" not in out["files"] and out["failed"] == ["miou_curve.png"]
+    assert "without writing" in caplog.text
 
 
 def test_the_shared_analysis_records_the_status_of_the_file_and_never_raises(e2e, tmp_path, monkeypatch) -> None:

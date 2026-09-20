@@ -29,7 +29,6 @@ from train.common import (
 from train.common import run_summary
 from train.common.args import resolved_run_dir
 from train.common.callbacks import EpochLogLine, LearningRateLogger
-from train.common.classification_viz import DASHBOARD_TARGET_DRAWS
 from train.common.config_io import save_config_json
 from train.common.run_artifacts import attach_run_log, refuse_existing_run, write_summary_json
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
@@ -1919,11 +1918,11 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             self.seconds += time.perf_counter() - started
 
     def visualizations_block(self) -> Dict[str, Any]:
-        """``{"files": sorted names in visualizations/, "failed": {name: error}, "seconds"}``,
+        """``{"files": sorted names in visualizations/, "failed": [names], "seconds"}``,
         the ``visualizations`` block of ``results_summary.json`` (``files`` is read off the disk)."""
         return {
             "files": sorted(path.name for path in self.viz_dir.iterdir() if path.is_file()),
-            "failed": dict(self.failed),
+            "failed": list(self.failed),
             "seconds": self.seconds,
         }
 
@@ -2312,6 +2311,8 @@ def train(
     results_dir_prefix: str,
     bottleneck_name_prefix: Optional[str] = None,
     architecture_of: Optional[Callable[[Any], Dict[str, Any]]] = None,
+    dashboard_draws: Optional[int] = None,
+    run_label: Optional[str] = None,
 ) -> keras.Model:
     """Train a bias-free bfunet denoiser with the noise curriculum.
 
@@ -2319,9 +2320,9 @@ def train(
     model; ``verify_fn(model)`` runs the model-specific bias-free check (called at
     both the post-build and post-``init_from`` sites). ``model_label`` /
     ``results_dir_prefix`` / ``bottleneck_name_prefix`` are the per-trainer seams.
-    ``architecture_of(config)`` returns the trainer's model keys for ``results_summary.json``;
-    supplying it is also what selects the ConvNeXt-parity dashboard (redrawn on the shared
-    cadence, run name and seed in its title). ``None`` keeps the every-epoch, fixed-title dashboard.
+    ``architecture_of(config)`` returns the trainer's model keys for ``results_summary.json``
+    and nothing else; ``dashboard_draws`` and ``run_label`` go to the visualization callback
+    (``None``: redraw every epoch, the fixed title).
     """
     logger.info(f"Starting {model_label} denoiser training: {config.experiment_name}")
 
@@ -2381,6 +2382,8 @@ def train(
             results_dir_prefix=results_dir_prefix,
             bottleneck_name_prefix=bottleneck_name_prefix,
             architecture_of=architecture_of,
+            dashboard_draws=dashboard_draws,
+            run_label=run_label,
             output_dir=output_dir,
             train_paths=train_paths,
             val_paths=val_paths,
@@ -2529,8 +2532,8 @@ def _summary_head(
     init_from_block: Optional[Dict[str, Any]],
     hist: Dict[str, List[float]],
     devices: Dict[str, Any],
-    n_train: int,
-    n_val: int,
+    n_train_files: int,
+    n_val_files: int,
     validation_steps: int,
     baseline_val_loss: Optional[float],
     architecture: Optional[Dict[str, Any]],
@@ -2544,9 +2547,9 @@ def _summary_head(
     the Keras history dict (its ``lr`` list gives the first and last epoch's rate, ``None``
     when empty), ``devices`` the ``run_summary.describe_devices()`` dict. Returns a plain
     dict; :func:`write_summary_json` sanitizes it. The diverged and the finished summary are
-    both built from this head, so a shared key is added here once. ``n_train`` / ``n_val`` are
-    the lengths of the train / val image-path worklists (the ``Sourced N train / M val image
-    paths`` run.log line), ``validation_steps`` the RESOLVED evaluate length,
+    both built from this head, so a shared key is added here once. ``n_train_files`` / ``n_val_files`` are
+    the lengths of the train / val image-path worklists (the ``Sourced N train / M val image paths`` run.log
+    line; drawn with replacement past the files found), ``validation_steps`` the RESOLVED evaluate length,
     ``baseline_val_loss`` the untrained model's validation loss (``None`` when the epoch-0
     evaluation did not run) and ``architecture`` the trainer's model keys (``None`` for a
     trainer that supplies none; they are spliced in as they are).
@@ -2554,24 +2557,16 @@ def _summary_head(
     last_step = steps_per_epoch * config.epochs - 1
     lrs = hist.get("lr", [])
     return {
-        "run_dir": str(output_dir),
-        "experiment_name": config.experiment_name,
-        "variant": getattr(config, "variant", None),
-        "dataset": list(config.train_image_dirs),
-        "params": int(params),
+        **run_summary.summary_head(
+            config, output_dir, params=params, steps_per_epoch=steps_per_epoch, devices=devices),
+        "train_image_dirs": list(config.train_image_dirs),
         **(architecture or {}),
         "input_shape": [config.patch_size, config.patch_size, config.channels],
         "optimizer": config.optimizer_type,
         "gradient_clip_norm": config.gradient_clipping,
-        "learning_rate": config.learning_rate,
         "lr_schedule": config.lr_schedule_type,
-        "warmup_epochs": config.warmup_epochs,
-        "steps_per_epoch": int(steps_per_epoch),
-        "weight_decay": config.weight_decay,
-        "batch_size": config.batch_size,
-        "seed": config.seed,
-        "n_train": n_train,
-        "n_val": n_val,
+        "n_train_files": n_train_files,
+        "n_val_files": n_val_files,
         "monitor": MONITOR,
         "initial_loss_sanity_eval": None if baseline_val_loss is None else {
             "loss": baseline_val_loss, "steps": validation_steps, "split": "val", "before_fit": True,
@@ -2587,11 +2582,7 @@ def _summary_head(
             "sigma_min": config.noise_sigma_min,
             "curriculum_epochs": config.curriculum_epochs,
         },
-        "epochs_requested": config.epochs,
         "init_from": init_from_block,
-        "gpu_name": devices["gpu_name"],
-        "tf_visible_devices": devices["tf_visible_devices"],
-        "cuda_visible_devices": devices["cuda_visible_devices"],
     }
 
 
@@ -2689,8 +2680,6 @@ def _write_finished_summary(
             "`seed`, so `eval_psnr_vs_noise` with the same seed, patch size, sample count "
             "and sigmas reproduces them; when `final_is_best` the model is scored once and "
             "`test_eval.final_reused_best` is true (the `final_*` cells copy the best ones)",
-            "`n_train` / `n_val` are the lengths of the image-path worklists (`max_train_files` "
-            "of them, drawn with replacement when the directories hold fewer), not patch counts; "
             "`initial_loss_sanity_eval` is the untrained model's validation loss "
             "(`steps` batches of the fixed-sigma validation noise)",
             "`analyzer` is read back from `model_analysis/analysis_results.json` (weights and "
@@ -2722,6 +2711,8 @@ def _train_in_run_dir(
     results_dir_prefix: str,
     bottleneck_name_prefix: Optional[str],
     architecture_of: Optional[Callable[[Any], Dict[str, Any]]],
+    dashboard_draws: Optional[int],
+    run_label: Optional[str],
     output_dir: Path,
     train_paths: List[str],
     val_paths: List[str],
@@ -3146,8 +3137,8 @@ def _train_in_run_dir(
         noise_sigma_min=config.noise_sigma_min,
         val_sigma_max=config.sigma_max_end,
         noise_seed=config.seed,
-        dashboard_draws=DASHBOARD_TARGET_DRAWS if architecture_of else None,
-        run_label=f"{config.experiment_name} (seed {config.seed})" if architecture_of else None,
+        dashboard_draws=dashboard_draws,
+        run_label=run_label,
     )
     callbacks.append(viz_callback)
 
@@ -3243,7 +3234,7 @@ def _train_in_run_dir(
         config, output_dir, params=model.count_params(),
         steps_per_epoch=steps_per_epoch, lr_schedule=lr_schedule,
         init_from_block=init_from_block, hist=hist, devices=devices,
-        n_train=len(train_paths), n_val=len(val_paths), validation_steps=validation_steps,
+        n_train_files=len(train_paths), n_val_files=len(val_paths), validation_steps=validation_steps,
         baseline_val_loss=viz_callback.baseline_val_loss,
         architecture=architecture_of(config) if architecture_of else None,
     )

@@ -15,6 +15,7 @@ defined once. Each guard below was proven RED by injecting the defect it names
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -465,3 +466,45 @@ def test_describe_devices_reports_the_environment_value_and_a_consistent_gpu_nam
 def test_describe_devices_reports_none_when_the_variable_is_unset(monkeypatch) -> None:
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     assert run_summary.describe_devices()["cuda_visible_devices"] is None
+
+
+# ---------------------------------------------------------------------
+# iter-3/step-1: summary_head, the keys the bfunet trainers and the segmenter share (D-044)
+# ---------------------------------------------------------------------
+
+_DEVICES = {"gpu_name": "gpu-x", "tf_visible_devices": ["/gpu:0"], "cuda_visible_devices": "1",
+            "gpu_names": ["gpu-x"]}
+
+
+def _head_config(**overrides) -> SimpleNamespace:
+    fields = dict(experiment_name="run_a", variant="tiny", learning_rate=0.003, warmup_epochs=2,
+                  weight_decay=0.05, batch_size=16, seed=11, epochs=30)
+    return SimpleNamespace(**{**fields, **overrides})
+
+
+def test_the_summary_head_reads_each_fact_from_the_argument_that_names_it(tmp_path) -> None:
+    head = run_summary.summary_head(_head_config(), tmp_path, params=1234, steps_per_epoch=207.0, devices=_DEVICES)
+    assert head == {
+        "run_dir": str(tmp_path), "params": 1234, "steps_per_epoch": 207, "epochs_requested": 30,
+        "data_range": [0.0, 1.0], "experiment_name": "run_a", "variant": "tiny", "learning_rate": 0.003,
+        "warmup_epochs": 2, "weight_decay": 0.05, "batch_size": 16, "seed": 11,
+        "gpu_name": "gpu-x", "tf_visible_devices": ["/gpu:0"], "cuda_visible_devices": "1",
+    }
+    assert isinstance(head["steps_per_epoch"], int), "a numpy or float count is written as an int"
+
+
+@pytest.mark.parametrize("name", run_summary.SUMMARY_CONFIG_KEYS + ("epochs",))
+def test_the_summary_head_needs_every_config_attribute_it_records(tmp_path, name) -> None:
+    config = _head_config()
+    delattr(config, name)
+    with pytest.raises(AttributeError, match=name):
+        run_summary.summary_head(config, tmp_path, params=1, steps_per_epoch=1, devices=_DEVICES)
+
+
+def test_the_summary_head_records_the_config_values_not_constants(tmp_path) -> None:
+    """Two different configs give two different heads for every config-read key."""
+    a = run_summary.summary_head(_head_config(), tmp_path, params=1, steps_per_epoch=1, devices=_DEVICES)
+    b = run_summary.summary_head(
+        _head_config(experiment_name="b", variant="base", learning_rate=1.0, warmup_epochs=9, weight_decay=2.0,
+                     batch_size=3, seed=4, epochs=5), tmp_path, params=1, steps_per_epoch=1, devices=_DEVICES)
+    assert [key for key in (*run_summary.SUMMARY_CONFIG_KEYS, "epochs_requested") if a[key] == b[key]] == []

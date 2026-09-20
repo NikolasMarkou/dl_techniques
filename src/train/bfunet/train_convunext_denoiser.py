@@ -111,6 +111,7 @@ from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------
 
 from train.common import setup_gpu
+from train.common.classification_viz import DASHBOARD_TARGET_DRAWS
 from train.common.run_io import default_experiment_name
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
@@ -463,6 +464,8 @@ def train(config: TrainingConfig) -> keras.Model:
         model_label="ConvUNeXt",
         results_dir_prefix="convunext_denoiser",
         architecture_of=architecture_of,
+        dashboard_draws=DASHBOARD_TARGET_DRAWS,
+        run_label=f"{config.experiment_name} (seed {config.seed})",
     )
 
 
