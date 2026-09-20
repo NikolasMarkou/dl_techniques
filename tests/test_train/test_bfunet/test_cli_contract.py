@@ -54,7 +54,7 @@ from .._cli_contract import (  # noqa: E402,TID252 -- shared driver, one level u
 
 
 def _rows() -> Tuple[Row, ...]:
-    """One row per declared flag (87 rows for 88 option strings: ``--test-eval`` has two).
+    """One row per declared flag (88 rows for 90 option strings: ``--test-eval`` and ``--model-analysis`` have two negations).
 
     Probes differ from the parser defaults, from every ``SMOKE_PRESET`` value (so the same
     table can also be driven behind ``--smoke``) and from each other. A row whose flag is
@@ -186,6 +186,9 @@ def _rows() -> Tuple[Row, ...]:
         # BooleanOptionalAction, default True: the probe is the non-default spelling.
         Row(("--test-eval", "--no-test-eval"), ("--no-test-eval",), "test_eval", False),
         Row(("--test-num-samples",), ("--test-num-samples", "37"), "test_num_samples", 37),
+        # BooleanOptionalAction, default True: the probe is the non-default spelling.
+        Row(("--model-analysis", "--no-model-analysis"), ("--no-model-analysis",),
+            "model_analysis", False),
         Row(("--output-dir",), ("--output-dir", "/probe/bfunet-out"), "output_dir",
             "/probe/bfunet-out"),
         Row(("--experiment-name",), ("--experiment-name", "probe-experiment-name"),
@@ -305,10 +308,10 @@ def test_a_row_moves_only_its_own_field(monkeypatch, mode, row) -> None:
     )
 
 
-def test_the_table_is_88_option_strings(monkeypatch) -> None:
+def test_the_table_is_90_option_strings(monkeypatch) -> None:
     """Pins the size of the surface so a silent drop of half the rows cannot stay green."""
-    assert len(declared_option_strings(CONTRACT.build_parser(monkeypatch))) == 88
-    assert len(ROWS) == 87
+    assert len(declared_option_strings(CONTRACT.build_parser(monkeypatch))) == 90
+    assert len(ROWS) == 88
 
 
 def test_no_flag_has_two_rows(monkeypatch) -> None:

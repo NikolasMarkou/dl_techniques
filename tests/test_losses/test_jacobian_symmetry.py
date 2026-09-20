@@ -25,6 +25,12 @@ Coverage:
        penalty is a live training signal by itself.
 """
 
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 import numpy as np
 import pytest
 import keras
@@ -251,3 +257,44 @@ class TestJacobianSymmetryPenalty:
             "penalty-alone gradient must be strictly non-zero on an "
             f"asymmetric-Jacobian net, got max|grad|={max_abs}"
         )
+
+
+# ---------------------------------------------------------------------
+# G. IMPORT-TIME PURITY (plan-2026-09-19T224205-49c8bf80/D-015)
+# ---------------------------------------------------------------------
+
+REPO_SRC = Path(__file__).resolve().parents[2] / "src"
+
+# ``tf.config.set_visible_devices`` raises RuntimeError once the TF context exists, on a CPU-only
+# machine as well as a GPU one, so "the call did not raise" is exactly "importing opened no
+# context". The whole ``setup_gpu`` memory-growth path depends on that.
+_NO_CONTEXT_SNIPPET = """
+import tensorflow as tf
+{import_line}
+tf.config.set_visible_devices([], "GPU")
+print("NO_CONTEXT_OPENED")
+"""
+
+
+def _import_leaves_tf_uninitialized(import_line: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "TF_CPP_MIN_LOG_LEVEL": "3", "MPLBACKEND": "Agg"}
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_NO_CONTEXT_SNIPPET.format(import_line=import_line))],
+        cwd=REPO_SRC, capture_output=True, text=True, env=env, timeout=600,
+    )
+
+
+class TestImportOpensNoTensorflowContext:
+    """G. Importing the module must not run an eager TF op (it created the GPU before setup_gpu)."""
+
+    def test_importing_the_module_opens_no_tensorflow_context(self):
+        result = _import_leaves_tf_uninitialized("import dl_techniques.losses.jacobian_symmetry")
+        assert "NO_CONTEXT_OPENED" in result.stdout, result.stderr[-1500:]
+
+    def test_the_normalizer_floor_keeps_its_float32_value(self):
+        """The plain float added to a float32 tensor is the float32 the old tf.constant held."""
+        from dl_techniques.losses import jacobian_symmetry as module
+
+        total = tf.constant(0.0, dtype=tf.float32) + module._NORM_EPS
+        assert total.dtype == tf.float32
+        assert float(total) == float(tf.constant(1e-12, dtype=tf.float32))

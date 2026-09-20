@@ -10,9 +10,10 @@ import tensorflow as tf
 import matplotlib
 matplotlib.use("Agg")  # headless: avoid X11 crashes (LESSON)
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 from pathlib import Path
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -21,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from train.common import (
     augment_patch,
     create_callbacks as create_common_callbacks,
+    run_model_analysis,
     set_seeds,
     validate_model_loading,
     collect_image_paths,
@@ -545,6 +547,7 @@ def render_training_dashboard(
     sigma_min: Optional[float] = None,
     val_sigma_max: Optional[float] = None,
     additive: bool = True,
+    best_epoch: Optional[int] = None,
 ) -> None:
     """Render a single combined dashboard PNG of per-epoch training curves.
 
@@ -583,6 +586,12 @@ def render_training_dashboard(
             noise floor is an ADDITIVE-noise quantity, so for multiplicative/composite
             runs the floor references and normalized panels are SKIPPED rather than
             silently plotted wrong.
+        best_epoch: The epoch the checkpoint monitor (``val_loss``) picked, as it appears
+            in ``history["epoch"]`` (see :func:`best_epoch_of_history`). ``None`` (the
+            default) draws no marker; otherwise the MSE and PSNR panels get a dashed
+            vertical line and a star on the validation point of that epoch.
+
+    Every epoch axis carries integer ticks only (a 2-epoch run used to show 0.25 steps).
     """
     ep = history.get("epoch")
     if not ep:
@@ -628,6 +637,18 @@ def render_training_dashboard(
         n = min(len(ep), len(ys))
         ax.plot(ep[:n], ys[:n], label=label, lw=1.2, ls=":", alpha=0.75, color=color)
 
+    def _mark_best(ax, key):
+        """Dashed line plus a star on the validation point of the best epoch, if it is known."""
+        if best_epoch is None or best_epoch not in ep:
+            return
+        ax.axvline(best_epoch, color="#2ca02c", ls="--", lw=1.2, alpha=0.9, zorder=1,
+                   label=f"best epoch {best_epoch} (val_loss)")
+        ys = history.get(key)
+        i = list(ep).index(best_epoch)
+        if ys is not None and i < len(ys) and np.isfinite(ys[i]):
+            ax.plot([best_epoch], [ys[i]], marker="*", ms=14, color="#2ca02c",
+                    mec="black", ls="none", zorder=6)
+
     def _mark_ramp(ax):
         """Shade the curriculum ramp; past its end the train task is stationary too."""
         if ramp_end is None or ramp_end <= ep[0]:
@@ -644,6 +665,7 @@ def render_training_dashboard(
     _floor(ax, train_floor, "train noise floor E[s^2]", TRAIN_C)
     _floor(ax, val_floor, "val noise floor E[s^2]", VAL_C)
     _mark_ramp(ax)
+    _mark_best(ax, "val_loss")
     ax.set_title("MSE per epoch (RAW - train task is MOVING)")
     ax.set_xlabel("epoch"); ax.set_ylabel("MSE")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=7)
@@ -655,6 +677,7 @@ def render_training_dashboard(
     _floor(ax, train_floor, "train noise floor", TRAIN_C)
     _floor(ax, val_floor, "val noise floor", VAL_C)
     _mark_ramp(ax)
+    _mark_best(ax, "val_loss")
     ax.set_yscale("log")
     ax.set_title("MSE per epoch (log) - gap to floor = gain")
     ax.set_xlabel("epoch"); ax.set_ylabel("MSE (log)")
@@ -667,6 +690,7 @@ def render_training_dashboard(
     _floor(ax, train_in_psnr, "train input PSNR", TRAIN_C)
     _floor(ax, val_in_psnr, "val input PSNR", VAL_C)
     _mark_ramp(ax)
+    _mark_best(ax, "val_psnr")
     ax.set_title("PSNR per epoch (RAW) vs noisy-input PSNR")
     ax.set_xlabel("epoch"); ax.set_ylabel("PSNR (dB)")
     ax.grid(True, alpha=0.3); ax.legend(fontsize=7)
@@ -758,9 +782,23 @@ def render_training_dashboard(
     ax.grid(True, alpha=0.3, which="both"); ax.legend(fontsize=7)
     _clip_lr_axis(ax, ep, history.get("lr"))
 
+    for panel in axes.flat:
+        panel.xaxis.set_major_locator(MaxNLocator(integer=True))
     plt.tight_layout(rect=(0, 0, 1, 0.97) if title else None)
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
+
+
+def best_epoch_of_history(history: dict) -> Optional[int]:
+    """The epoch (as listed in ``history["epoch"]``) with the lowest finite ``val_loss``.
+
+    The dashboard's best-epoch marker: it repeats the ``ModelCheckpoint`` rule (argmin of
+    ``val_loss`` over the trained epochs), so the epoch-0 untrained baseline (epoch ``0``)
+    is never the answer. Returns ``None`` when no trained epoch has a finite ``val_loss``.
+    """
+    pairs = [(e, v) for e, v in zip(history.get("epoch") or [], history.get("val_loss") or [])
+             if e >= 1 and np.isfinite(v)]
+    return int(min(pairs, key=lambda pair: pair[1])[0]) if pairs else None
 
 
 # NOTE: batch-global RMSE PSNR (one RMSE over the whole batch). This intentionally
@@ -812,15 +850,28 @@ def multi_pass_psnr(model: keras.Model, clean, noisy, k: int) -> List[float]:
 
 
 def build_fixed_val_batch(
-    val_paths: List[str], config: "BFUnetTrainingConfig", n: int = 8
+    val_paths: List[str], config: "BFUnetTrainingConfig", n: int = 8,
+    seed: Optional[int] = None,
 ) -> Optional[tf.Tensor]:
-    """Load a small FIXED batch of clean [0,1] patches for visualization."""
+    """Load a small FIXED batch of clean [0,1] patches for visualization.
+
+    ``seed`` given: the crop positions come from ``tf.image.stateless_random_crop`` with
+    ``[seed, index of the patch]``, so the same paths and seed give the same batch in every
+    run. ``None`` keeps the unseeded random crop (a fresh batch per run).
+    """
     if not val_paths:
         return None
     patches = []
     for p in val_paths[: max(n * 3, n)]:
         try:
-            patch = load_and_preprocess_image(tf.constant(p), config)
+            if seed is None:
+                patch = load_and_preprocess_image(tf.constant(p), config)
+            else:
+                patch = tf.image.stateless_random_crop(
+                    decode_full_image(tf.constant(p), config),
+                    [config.patch_size, config.patch_size, config.channels],
+                    seed=[int(seed), len(patches)],
+                )
             patch = tf.clip_by_value(patch, DATA_MIN, DATA_MAX)
             patches.append(patch)
             if len(patches) >= n:
@@ -907,6 +958,7 @@ def build_dashboard_from_dir(exp_dir: str) -> Optional[Path]:
         sigma_min=cfg.get("noise_sigma_min", 0.0),
         val_sigma_max=cfg.get("sigma_max_end", 0.25),
         additive=(cfg.get("noise_type", "additive") == "additive"),
+        best_epoch=best_epoch_of_history(hist),
     )
     logger.info(f"Saved training dashboard: {out}")
     return out
@@ -1398,6 +1450,11 @@ class BFUnetTrainingConfig:
     test_eval: bool = True
     test_num_samples: int = 100  # crops per test set, the eval script's own default
 
+    # End-of-run ``model_analysis/`` (data-free weights + spectral, see ``_run_end_of_run_analysis``).
+    # OFF here so the unet and bfcnn trainers, which have no flag for it, are unchanged; the
+    # ConvUNeXt ``TrainingConfig`` re-declares it ON with ``--model-analysis/--no-model-analysis``.
+    model_analysis: bool = False
+
     def __post_init__(self):
         if self.experiment_name is None:
             # NOTE: `experiment_prefix` already ends with "_" (e.g. "denoiser_"),
@@ -1752,6 +1809,11 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
     noise at the CURRENT curriculum ``sigma_max`` and saves a 3-row panel
     (Clean | Noisy | Denoised) plus the running validation-PSNR curve. This is the
     denoising-specific visualization the scalar TensorBoard/CSV logs don't provide.
+
+    ``noise_seed`` makes the ADDITIVE grid noise a stateless draw keyed by ``[noise_seed,
+    regime index]``, identical in every epoch and in two same-seed runs (multiplicative and
+    composite noise stay unseeded). ``failed`` is ``{file: error}`` of the renders that raised
+    and ``seconds`` the render wall time; see :meth:`visualizations_block`.
     """
 
     def __init__(
@@ -1770,9 +1832,13 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         model_label: str = "Denoiser",
         noise_sigma_min: float = 0.0,
         val_sigma_max: Optional[float] = None,
+        noise_seed: Optional[int] = None,
     ):
         super().__init__()
         self.clean_batch = clean_batch
+        self.noise_seed = None if noise_seed is None else int(noise_seed)
+        self.failed: Dict[str, str] = {}
+        self.seconds = 0.0
         self.sigma_max_var = sigma_max_var
         self.noise_type = noise_type
         self.model_label = model_label
@@ -1825,6 +1891,26 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             "psnr", "val_psnr", "sigma_max", "lr",
         )}
 
+    def _attempt(self, name: str, draw: Callable[[], Any]) -> None:
+        """Run one render, timed; an exception is logged and put in ``failed``, never raised."""
+        started = time.perf_counter()
+        try:
+            draw()
+        except Exception as e:  # noqa: BLE001 - a figure must not stop training
+            logger.warning(f"Visualization {name} failed: {type(e).__name__}: {e}")
+            self.failed[name] = f"{type(e).__name__}: {e}"
+        finally:
+            self.seconds += time.perf_counter() - started
+
+    def visualizations_block(self) -> Dict[str, Any]:
+        """``{"files": sorted names in visualizations/, "failed": {name: error}, "seconds"}``,
+        the ``visualizations`` block of ``results_summary.json`` (``files`` is read off the disk)."""
+        return {
+            "files": sorted(path.name for path in self.viz_dir.iterdir() if path.is_file()),
+            "failed": dict(self.failed),
+            "seconds": self.seconds,
+        }
+
     def on_train_begin(self, logs=None):
         """Epoch-0 baseline: visualize the UNTRAINED model (0 epochs completed).
 
@@ -1834,10 +1920,7 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         """
         # Epoch-0 grid on the fixed val batch (noise at the curriculum start sigma).
         if self.clean_batch is not None:
-            try:
-                self._save_grid(0)
-            except Exception as e:
-                logger.warning(f"Epoch-0 grid failed: {e}")
+            self._attempt("epoch_000_denoise_grid.png", lambda: self._save_grid(0))
         # Epoch-0 dashboard point: evaluate the untrained model on the val set so the
         # baseline is computed the SAME way Keras computes epoch>=1 val metrics.
         if self.val_ds is not None:
@@ -1859,13 +1942,13 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                 # read the optimizer here: that returns the warmup start (1e-8) and plots
                 # a step no epoch trained at.
                 self._hist["lr"].append(float("nan"))
-                render_training_dashboard(
+                self._attempt("training_dashboard.png", lambda: render_training_dashboard(
                     self._hist, self.viz_dir / "training_dashboard.png",
                     title="Training dashboard - epoch 0 (untrained baseline)",
                     sigma_min=self.noise_sigma_min,
                     val_sigma_max=self.val_sigma_max,
                     additive=(self.noise_type == "additive"),
-                )
+                ))
                 logger.info(
                     f"Epoch-0 baseline: val_loss={res.get('loss'):.4f} "
                     f"val_psnr={res.get('psnr_metric', float('nan')):.2f} dB"
@@ -1896,28 +1979,22 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         self._hist["sigma_max"].append(float(self.sigma_max_var))
         self._hist["lr"].append(lr_val)
 
-        try:
-            render_training_dashboard(
-                self._hist,
-                self.viz_dir / "training_dashboard.png",
-                title=f"Training dashboard - epoch {epoch + 1}",
-                sigma_min=self.noise_sigma_min,
-                val_sigma_max=self.val_sigma_max,
-                additive=(self.noise_type == "additive"),
-            )
-        except Exception as e:
-            logger.warning(f"Dashboard render failed at epoch {epoch + 1}: {e}")
+        self._attempt("training_dashboard.png", lambda: render_training_dashboard(
+            self._hist,
+            self.viz_dir / "training_dashboard.png",
+            title=f"Training dashboard - epoch {epoch + 1}",
+            sigma_min=self.noise_sigma_min,
+            val_sigma_max=self.val_sigma_max,
+            additive=(self.noise_type == "additive"),
+            best_epoch=best_epoch_of_history(self._hist),
+        ))
 
         if (epoch + 1) % self.freq != 0 and epoch != 0:
             return
         if self.clean_batch is None:
             return
-        try:
-            self._save_grid(epoch + 1)
-        except Exception as e:  # visualization must never break training
-            logger.warning(f"Visualization failed at epoch {epoch + 1}: {e}")
-        finally:
-            gc.collect()
+        self._attempt(f"epoch_{epoch + 1:03d}_denoise_grid.png", lambda: self._save_grid(epoch + 1))
+        gc.collect()
 
     def _save_grid(self, epoch: int):
         """Eval grid: the SAME images under 3 fixed noise regimes.
@@ -1938,7 +2015,7 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         multiplicative = self.noise_type == "multiplicative"
         composite = self.noise_type == "composite"
         ratio = self.composite_additive_ratio
-        for label, sigma in self.noise_regimes:
+        for regime_index, (label, sigma) in enumerate(self.noise_regimes):
             if multiplicative:
                 # Per-pixel multiplicative regime: reuse the same noise primitive the
                 # trainer uses, then the SAME [0,1] clip as the additive path.
@@ -1955,15 +2032,25 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                     DATA_MAX,
                 )
             else:
-                noisy = tf.clip_by_value(
-                    clean + tf.random.normal(tf.shape(clean)) * sigma,
-                    DATA_MIN,
-                    DATA_MAX,
-                )
+                # DECISION plan-2026-09-19T224205-49c8bf80/D-015: a stateless draw keyed by the
+                # config seed and the regime, so the noisy input is the same in every epoch and
+                # in two same-seed runs (it used to be a fresh ``tf.random.normal`` per call, so
+                # the "Noisy" label moved 24.8 -> 24.7 dB between epochs and consecutive grids
+                # could not be compared image by image). Do NOT go back to ``tf.random.normal``.
+                if self.noise_seed is None:
+                    gaussian = tf.random.normal(tf.shape(clean))
+                else:
+                    gaussian = tf.random.stateless_normal(
+                        tf.shape(clean), seed=[self.noise_seed, regime_index])
+                noisy = tf.clip_by_value(clean + gaussian * sigma, DATA_MIN, DATA_MAX)
             denoised = self.model(noisy, training=False)
             if isinstance(denoised, (list, tuple)):
                 denoised = denoised[0]  # deep-supervision: primary output
-            denoised = tf.convert_to_tensor(denoised)
+            # DECISION plan-2026-09-19T224205-49c8bf80/D-015: pass 1 is clipped to [0,1] like
+            # passes 2..K (``denoise_k_passes``) and like the eval script, so its label equals
+            # the ``Multi-pass PSNR`` run.log line (the unclipped label read 2.1 dB against a
+            # logged 6.45 dB for the untrained model). Do NOT score the raw output here.
+            denoised = tf.clip_by_value(tf.convert_to_tensor(denoised), DATA_MIN, DATA_MAX)
             psnr = _mean_psnr(denoised, clean)  # max_val=1.0
             psnr_noisy = _mean_psnr(noisy, clean)  # max_val=1.0
             if multiplicative:
@@ -2285,6 +2372,7 @@ TEST_EVAL_SEED = 42
 
 def _evaluate_held_out(
     config: "BFUnetTrainingConfig", final_model: keras.Model, output_dir: Path,
+    final_is_best: bool = False,
 ) -> Dict[str, Any]:
     """Score ``best_model.keras`` (reloaded) and ``final_model`` on every set of ``TEST_DATASETS``.
 
@@ -2294,7 +2382,8 @@ def _evaluate_held_out(
     scored, ``skipped`` with a ``reason`` when none could be read); a set whose directory
     holds no image is recorded as ``skipped`` with a WARNING and does not stop the others.
     Raises whatever the load or the prediction raises; :func:`_run_test_eval` owns that.
-    Every number comes from ``eval_psnr_vs_noise.evaluate_dataset`` with a fresh
+    ``final_is_best`` (best epoch == last, so both models hold the same weights) scores it
+    ONCE and copies the numbers into the ``final_*`` cells (``final_reused_best``). Every number comes from ``eval_psnr_vs_noise.evaluate_dataset`` with a fresh
     ``RandomState(TEST_EVAL_SEED)`` per set, exactly as its ``run_evaluation`` does, so the
     same arguments given to that script reproduce them.
     """
@@ -2311,10 +2400,12 @@ def _evaluate_held_out(
         num_samples=config.test_num_samples, patch_size=config.patch_size,
         channels=config.channels, seed=TEST_EVAL_SEED,
     )
-    models = {
-        "best": ev.load_denoiser(str(output_dir / "best_model.keras")),
-        "final": final_model,
-    }
+    # DECISION plan-2026-09-19T224205-49c8bf80/D-015: with best == last the two models are the
+    # same weights (the audit run printed identical digits in all 6 cells), so the second full
+    # pass is skipped and its numbers are the best ones. Do NOT skip it when best != last.
+    models = {"best": ev.load_denoiser(str(output_dir / "best_model.keras"))}
+    if not final_is_best:
+        models["final"] = final_model
     datasets: Dict[str, Any] = {}
     for name, directory in TEST_DATASETS.items():
         paths = collect_image_paths([directory], extensions=ev.IMAGE_EXTENSIONS, sort=True)
@@ -2329,7 +2420,8 @@ def _evaluate_held_out(
         by_key = {(row["model"], row["sigma_255"]): row for row in rows}
         sigmas = {}
         for sigma in TEST_SIGMAS_255:
-            best, final = by_key[("best", sigma)], by_key[("final", sigma)]
+            best = by_key[("best", sigma)]
+            final = best if final_is_best else by_key[("final", sigma)]
             sigmas[str(sigma)] = {
                 "input_psnr": best["input_psnr_mean"],
                 "best_psnr": best["psnr_mean"],
@@ -2346,6 +2438,7 @@ def _evaluate_held_out(
         "patch_size": config.patch_size,
         "num_samples": config.test_num_samples,
         "sigmas_255": list(TEST_SIGMAS_255),
+        "final_reused_best": final_is_best,
         "datasets": datasets,
         "seconds": time.time() - started,
     }
@@ -2356,10 +2449,12 @@ def _evaluate_held_out(
 
 def _run_test_eval(
     config: "BFUnetTrainingConfig", final_model: keras.Model, output_dir: Path,
+    final_is_best: bool = False,
 ) -> Dict[str, Any]:
     """The ``test_eval`` block of ``results_summary.json``; never raises for an evaluation failure.
 
-    Interface contract: same arguments as :func:`_evaluate_held_out`. Returns
+    Interface contract: same arguments as :func:`_evaluate_held_out` (``final_is_best`` is
+    forwarded to it). Returns
     ``{"status": "skipped", "reason": "disabled"}`` when ``config.test_eval`` is off, the
     scored block otherwise, and ``{"status": "error", "message": ...}`` (plus an ERROR log
     line) when the evaluation raised.
@@ -2372,7 +2467,7 @@ def _run_test_eval(
     # NOT let the exception propagate, and do NOT swallow it without the record and the log
     # line: an error nobody sees would read as a run with no test numbers for no reason.
     try:
-        block = _evaluate_held_out(config, final_model, output_dir)
+        block = _evaluate_held_out(config, final_model, output_dir, final_is_best)
     except Exception as exc:  # noqa: BLE001 - recorded and logged, see the docstring
         message = f"{type(exc).__name__}: {exc}"
         logger.error(f"Held-out test evaluation failed (the run itself finished): {message}")
@@ -2480,6 +2575,8 @@ def _write_finished_summary(
     fit_wall_seconds: float,
     model_loading_validated: Optional[bool],
     test_eval: Dict[str, Any],
+    analyzer: Dict[str, Any],
+    visualizations: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Write ``results_summary.json`` for a run that finished with a finite history.
 
@@ -2489,8 +2586,10 @@ def _write_finished_summary(
     the ``final_model.keras`` round-trip verdict (``None`` when the check could not run).
     ``best_epoch`` is 1-based, the argmin of ``val_loss`` (the ModelCheckpoint monitor);
     ``best_val_metrics`` / ``final_val_metrics`` are the ``val_*`` columns of the best and
-    the last epoch. ``test_eval`` is the block :func:`_run_test_eval` returned. Returns the
-    strict-JSON dict written.
+    the last epoch. ``test_eval`` is the block :func:`_run_test_eval` returned, ``analyzer``
+    the block :func:`_run_end_of_run_analysis` returned and ``visualizations`` the block of
+    ``DenoisingVisualizationCallback.visualizations_block``. Returns the strict-JSON dict
+    written.
     """
     epochs_run = len(hist["val_loss"])
     best_epoch = run_summary.best_epoch(hist, "val_loss")
@@ -2510,6 +2609,8 @@ def _write_finished_summary(
         "fit_wall_seconds": fit_wall_seconds,
         "model_loading_validated": model_loading_validated,
         "test_eval": test_eval,
+        "analyzer": analyzer,
+        "visualizations": visualizations,
         "notes": [
             "`final_model.keras` holds the LAST epoch's weights and `best_model.keras` the "
             "best `val_loss` epoch's; they are equal only when `final_is_best` is true",
@@ -2518,10 +2619,71 @@ def _write_finished_summary(
             "against the clean crop, `gain_db` = `best_psnr` - `input_psnr` and "
             "`final_gain_db` = `final_psnr` - `input_psnr`; crops and noise are fixed by "
             "`seed`, so `eval_psnr_vs_noise` with the same seed, patch size, sample count "
-            "and sigmas reproduces them",
+            "and sigmas reproduces them; when `final_is_best` the model is scored once and "
+            "`test_eval.final_reused_best` is true (the `final_*` cells copy the best ones)",
+            "`analyzer` is read back from `model_analysis/analysis_results.json` (weights and "
+            "spectral only, the LAST epoch's weights; `skipped` under --no-model-analysis); "
+            "`visualizations.files` are the files in `visualizations/`, `failed` the renders "
+            "that raised and `seconds` the time spent rendering the dashboard and grids",
             *SUMMARY_READING_NOTES,
         ],
     })
+
+
+def _write_model_summary(model: keras.Model, output_dir: Path) -> Path:
+    """Write the ~150-line Keras layer table to ``<output_dir>/model_summary.txt`` (it buried
+    ``run.log`` through ``logger.info``) and log one line; returns the path."""
+    lines: List[str] = []
+    model.summary(print_fn=lines.append)
+    path = output_dir / "model_summary.txt"
+    path.write_text("\n".join(lines) + "\n")
+    logger.info(f"Model summary ({model.count_params():,} parameters) written to {path}")
+    return path
+
+
+def _data_free_analysis_config() -> AnalysisConfig:
+    """Weights + spectral only (``--analyzer`` and the end-of-run analysis): the other analyzers
+    read per-image labels and class probabilities, which a denoiser does not have."""
+    return AnalysisConfig(
+        analyze_weights=True,
+        analyze_spectral=True,
+        analyze_calibration=False,
+        analyze_information_flow=False,
+        analyze_training_dynamics=False,
+        verbose=False,
+    )
+
+
+def _run_end_of_run_analysis(
+    model: keras.Model, sample: np.ndarray, history: "keras.callbacks.History",
+    config: "BFUnetTrainingConfig", output_dir: Path,
+) -> Dict[str, Any]:
+    """Run the end-of-run weights + spectral analysis and read back what reached the disk; never raises.
+
+    Interface contract: ``model`` is the in-memory (last epoch) model, ``sample`` an
+    ``(N, H, W, C)`` array (these analyses read weights, not data), ``history`` the ``History``
+    of ``fit``. ``config.model_analysis`` False returns ``run_summary.skipped_analysis_status()``.
+    Otherwise returns ``{"status", "analyzers", "error", "path", "seconds"}`` read back from
+    ``<output_dir>/model_analysis/`` by ``run_summary.read_data_free_analysis_status`` (the
+    disk is the only truth: ``run_model_analysis`` swallows its own exceptions), or status
+    ``"error"`` when anything raised.
+    """
+    if not config.model_analysis:
+        logger.info("End-of-run model analysis skipped (--no-model-analysis)")
+        return run_summary.skipped_analysis_status()
+    started = time.perf_counter()
+    try:
+        run_model_analysis(
+            model, (sample, sample), history, config.experiment_name, str(output_dir),
+            _data_free_analysis_config(),
+        )
+        block = run_summary.read_data_free_analysis_status(output_dir, config.experiment_name)
+    except Exception as e:  # noqa: BLE001 - the analysis must not fail a finished run
+        logger.warning(f"End-of-run model analysis raised: {type(e).__name__}: {e}")
+        block = {"status": "error", "analyzers": [], "error": f"{type(e).__name__}: {e}", "path": None}
+    block["seconds"] = time.perf_counter() - started
+    logger.info(f"Model analysis status (read back from disk): {block['status']} in {block['seconds']:.1f}s")
+    return block
 
 
 def _train_in_run_dir(
@@ -2678,7 +2840,7 @@ def _train_in_run_dir(
         keras.mixed_precision.set_global_policy("float32")
 
     model = build_model_fn(config)
-    model.summary(print_fn=logger.info)
+    _write_model_summary(model, output_dir)
     verify_fn(model)
 
     # Optional warm-start from a saved .keras checkpoint (e.g. self-iterate
@@ -2865,18 +3027,7 @@ def _train_in_run_dir(
     # classification-oriented, so they are OFF for this image-to-image denoiser. The
     # EpochAnalyzerCallback attaches to the fitted model (the single-output training view
     # when expose_bottleneck is on), which shares all weights with the full model.
-    analyzer_config = (
-        AnalysisConfig(
-            analyze_weights=True,
-            analyze_spectral=True,
-            analyze_calibration=False,
-            analyze_information_flow=False,
-            analyze_training_dynamics=False,
-            verbose=False,
-        )
-        if config.enable_analyzer
-        else None
-    )
+    analyzer_config = _data_free_analysis_config() if config.enable_analyzer else None
     callbacks, _ = create_common_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix=results_dir_prefix,
@@ -2949,26 +3100,26 @@ def _train_in_run_dir(
     callbacks.append(epoch_line)
 
     # Denoising visualization: same images under 3 noise regimes.
-    viz_batch = build_fixed_val_batch(val_paths, config, n=config.viz_samples)
-    callbacks.append(
-        DenoisingVisualizationCallback(
-            clean_batch=viz_batch,
-            sigma_max_var=sigma_max_var,
-            out_dir=output_dir,
-            freq=config.viz_freq,
-            max_samples=config.viz_samples,
-            val_ds=val_ds,
-            validation_steps=validation_steps,
-            noise_type=config.noise_type,
-            composite_additive_ratio=config.composite_additive_ratio,
-            model_label=f"{model_label} Denoiser",
-            # Sigma RANGE bounds for the dashboard's noise floor E[sigma^2]. The val
-            # pipeline pins its upper bound to sigma_max_end (see sigma_fixed_var), so
-            # the val floor is CONSTANT while the train floor ramps with the curriculum.
-            noise_sigma_min=config.noise_sigma_min,
-            val_sigma_max=config.sigma_max_end,
-        )
+    viz_batch = build_fixed_val_batch(val_paths, config, n=config.viz_samples, seed=config.seed)
+    viz_callback = DenoisingVisualizationCallback(
+        clean_batch=viz_batch,
+        sigma_max_var=sigma_max_var,
+        out_dir=output_dir,
+        freq=config.viz_freq,
+        max_samples=config.viz_samples,
+        val_ds=val_ds,
+        validation_steps=validation_steps,
+        noise_type=config.noise_type,
+        composite_additive_ratio=config.composite_additive_ratio,
+        model_label=f"{model_label} Denoiser",
+        # Sigma RANGE bounds for the dashboard's noise floor E[sigma^2]. The val
+        # pipeline pins its upper bound to sigma_max_end (see sigma_fixed_var), so
+        # the val floor is CONSTANT while the train floor ramps with the curriculum.
+        noise_sigma_min=config.noise_sigma_min,
+        val_sigma_max=config.sigma_max_end,
+        noise_seed=config.seed,
     )
+    callbacks.append(viz_callback)
 
     # Bottleneck health monitor: only when the full model exposes the bottleneck
     # (reads the trailing bottleneck output from the FULL model, not the view).
@@ -3136,12 +3287,19 @@ def _train_in_run_dir(
     # fact of this run and a summary with status "ok" exists only for a run that produced
     # ``final_model.keras``. Do NOT move it above the save (the verdict would be unknown) and
     # do NOT let a failure to write it pass silently: the exception propagates to ``main()``.
+    best_is_final = run_summary.best_epoch(hist, "val_loss") == len(hist["val_loss"])
+    analysis_sample = (
+        viz_batch.numpy() if viz_batch is not None
+        else np.zeros((1, config.patch_size, config.patch_size, config.channels), dtype="float32")
+    )
     _write_finished_summary(
         output_dir, summary_head, hist,
         epoch_times=epoch_line.epoch_times,
         fit_wall_seconds=fit_wall_seconds,
         model_loading_validated=model_loading_validated,
-        test_eval=_run_test_eval(config, model, output_dir),
+        test_eval=_run_test_eval(config, model, output_dir, final_is_best=best_is_final),
+        analyzer=_run_end_of_run_analysis(model, analysis_sample, history, config, output_dir),
+        visualizations=viz_callback.visualizations_block(),
     )
 
     gc.collect()

@@ -70,7 +70,16 @@ import tensorflow as tf
 # mean squared probe response so it is scale-comparable across probe draws and
 # batches; this epsilon prevents a divide-by-zero when a probe maps to (near-)
 # zero response (e.g. a dead/constant model).
-_NORM_EPS = tf.constant(1e-12, dtype=tf.float32)
+#
+# DECISION plan-2026-09-19T224205-49c8bf80/D-015: a plain Python float, NOT ``tf.constant``.
+# A ``tf.constant`` at module scope is an eager TF op, so importing this module opened the
+# TF context and created the GPU before ``train.common.gpu.setup_gpu`` ran, which then
+# logged the spurious "Physical devices cannot be modified after being initialized" ERROR
+# and never enabled memory growth. ``tensor + 1e-12`` casts the float to the tensor's
+# float32, the same value the constant held. Do NOT turn it back into a tensor; guards:
+# ``test_importing_the_module_opens_no_tensorflow_context`` (this module's tests) and
+# ``test_importing_the_bfunet_trainers_opens_no_tensorflow_context`` (bfunet tests).
+_NORM_EPS = 1e-12
 
 
 # ---------------------------------------------------------------------

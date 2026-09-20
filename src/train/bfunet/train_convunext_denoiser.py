@@ -193,6 +193,8 @@ class TrainingConfig(BFUnetTrainingConfig):
     # bottleneck_filters must be divisible by bottleneck_attention_heads (factory asserts).
     bottleneck_attention_blocks: int = 0
     bottleneck_attention_heads: int = 8
+    # End-of-run model_analysis/ ON for this trainer (the shared base leaves it OFF).
+    model_analysis: bool = True
 
     def __post_init__(self):
         super().__post_init__()
@@ -494,6 +496,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--test-num-samples", type=int, default=100,
         help="Crops per held-out test set (the eval_psnr_vs_noise default).",
     )
+    parser.add_argument(
+        "--model-analysis", action=argparse.BooleanOptionalAction, default=True,
+        help="After training, run the weights + spectral analyzer on the last-epoch model "
+             "into model_analysis/ and record its status under `analyzer` in "
+             "results_summary.json. --no-model-analysis records a skip.",
+    )
     parser.add_argument("--convnext-version", choices=["v1", "v2"], default="v1")
     parser.add_argument(
         "--gabor-filters-per-channel", type=int, default=None,
@@ -728,6 +736,7 @@ def config_from_args(args: argparse.Namespace, explicit: FrozenSet[str]) -> Trai
         viz_samples=v["viz_samples"],
         test_eval=v["test_eval"],
         test_num_samples=v["test_num_samples"],
+        model_analysis=v["model_analysis"],
         output_dir=v["output_dir"],
         experiment_name=v["experiment_name"],
         **defaulted,

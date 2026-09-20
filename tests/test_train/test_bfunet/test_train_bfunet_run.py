@@ -88,6 +88,9 @@ def _tiny_config(root: Path, name: str, **overrides) -> TrainingConfig:
         # model and predicts on two sets, which the fixtures that do not read it need not pay.
         test_eval=False,
         test_num_samples=TEST_NUM_SAMPLES,
+        # Likewise the end-of-run analyzer (about 17 s at tiny/128): only the fixtures that
+        # read ``model_analysis/`` or the ``analyzer`` block turn it on.
+        model_analysis=False,
         output_dir=str(root / "out"),
         experiment_name=name,
     )
@@ -1287,3 +1290,112 @@ def test_the_cli_flags_reach_the_config(smoke) -> None:
 def test_a_zero_sample_count_is_refused_at_the_command_line() -> None:
     with pytest.raises(ValueError, match="test_num_samples"):
         _config_main_builds(["--test-num-samples", "0"])
+
+
+# --- step-6 fixes (plan-2026-09-19T224205-49c8bf80, D-015) --------------------------------------
+# The end-of-run model_analysis/, the `analyzer` and `visualizations` summary blocks, the model
+# summary out of run.log, and one held-out pass when the best epoch is the last one.
+
+MODEL_TABLE_MARKERS = ("Layer (type)", "Total params", "┏", "┃")
+
+
+@pytest.fixture(scope="module")
+def analysis_run(tmp_path_factory) -> SimpleNamespace:
+    """A tiny run with the end-of-run analyzer ON (the trainer default; ``_tiny_config`` turns it off)."""
+    root = tmp_path_factory.mktemp("bfunet_analysis")
+    _write_pngs(root / "train", N_TRAIN, seed=1)
+    _write_pngs(root / "val", N_VAL, seed=2)
+    config = _tiny_config(root, "analysis_run", epochs=2, model_analysis=True, test_eval=True)
+    run_train(config)
+    run_dir = root / "out" / "analysis_run"
+    return SimpleNamespace(run_dir=run_dir, summary=_strict_json(run_dir / "results_summary.json"))
+
+
+def test_the_end_of_run_analysis_writes_model_analysis_and_an_ok_analyzer_block(analysis_run) -> None:
+    results = analysis_run.run_dir / "model_analysis" / "analysis_results.json"
+    assert results.is_file() and results.stat().st_size > 0
+    block = analysis_run.summary["analyzer"]
+    assert block["status"] == "ok", block
+    assert block["analyzers"] == ["weights", "spectral"]
+    assert block["error"] is None and block["seconds"] > 0
+    assert block["path"] == str(results)
+
+
+def test_the_visualizations_block_lists_the_files_that_are_on_disk(analysis_run) -> None:
+    block = analysis_run.summary["visualizations"]
+    on_disk = sorted(p.name for p in (analysis_run.run_dir / "visualizations").iterdir())
+    assert block["files"] == on_disk
+    assert "training_dashboard.png" in block["files"]
+    assert [f"epoch_{e:03d}_denoise_grid.png" for e in (0, 1, 2)] == [
+        f for f in block["files"] if f.endswith("_denoise_grid.png")]
+    assert block["failed"] == {} and block["seconds"] > 0
+
+
+def test_a_run_with_the_analysis_off_records_a_skip_and_writes_no_directory(e2e) -> None:
+    summary = _strict_json(e2e.run_dir / "results_summary.json")
+    assert summary["analyzer"] == {
+        "status": "skipped", "loss": None, "accuracy": None, "error": None, "path": None}
+    assert not (e2e.run_dir / "model_analysis").exists()
+    assert "training_dashboard.png" in summary["visualizations"]["files"]
+
+
+def test_the_model_table_is_in_model_summary_txt_and_not_in_run_log(e2e) -> None:
+    log = (e2e.run_dir / "run.log").read_text()
+    assert [m for m in MODEL_TABLE_MARKERS if m in log] == []
+    table = (e2e.run_dir / "model_summary.txt").read_text()
+    assert "Layer (type)" in table and "Total params" in table
+    assert re.search(r"Model summary \([\d,]+ parameters\) written to .*model_summary\.txt", log)
+
+
+def test_an_analyzer_that_raises_or_writes_nothing_never_fails_the_run(e2e, tmp_path) -> None:
+    sample = np.zeros((1, PATCH, PATCH, 3), dtype="float32")
+    history = SimpleNamespace(history={})
+    config = _tiny_config(tmp_path, "analysis_probe", model_analysis=True)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("scripted analyzer failure")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "run_model_analysis", boom)
+        raised = common._run_end_of_run_analysis(e2e.final, sample, history, config, tmp_path)
+        patch.setattr(common, "run_model_analysis", lambda *args, **kwargs: None)
+        wrote_nothing = common._run_end_of_run_analysis(e2e.final, sample, history, config, tmp_path)
+    assert raised["status"] == "error" and "scripted analyzer failure" in raised["error"]
+    assert wrote_nothing["status"] == "missing" and wrote_nothing["analyzers"] == []
+
+
+def _evaluated_model_sets(run, final_is_best: bool) -> List[List[str]]:
+    """The model names each ``evaluate_dataset`` call received, per dataset, for one ``_run_test_eval``."""
+    from dataclasses import replace
+
+    from train.bfunet import eval_psnr_vs_noise as ev
+
+    calls: List[List[str]] = []
+    real = ev.evaluate_dataset
+
+    def spy(models, *args, **kwargs):
+        calls.append(sorted(models))
+        return real(models, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ev, "evaluate_dataset", spy)
+        block = common._run_test_eval(
+            replace(run.config, test_eval=True), run.final, run.run_dir, final_is_best=final_is_best)
+    assert block["status"] == "ok"
+    return calls, block
+
+
+def test_the_held_out_pass_runs_once_per_set_when_best_is_last_and_twice_otherwise(e2e) -> None:
+    once, reused = _evaluated_model_sets(e2e, final_is_best=True)
+    twice, scored = _evaluated_model_sets(e2e, final_is_best=False)
+    assert once == [["best"], ["best"]] and reused["final_reused_best"] is True
+    assert twice == [["best", "final"], ["best", "final"]] and scored["final_reused_best"] is False
+    for entry in reused["datasets"].values():
+        for cell in entry["sigmas"].values():
+            assert (cell["final_psnr"], cell["final_gain_db"]) == (cell["best_psnr"], cell["gain_db"])
+
+
+def test_a_finished_run_flags_the_reuse_exactly_when_the_final_epoch_is_the_best(default_run) -> None:
+    summary = _strict_json(default_run.run_dir / "results_summary.json")
+    assert summary["final_is_best"] is True
+    assert summary["test_eval"]["final_reused_best"] is True
