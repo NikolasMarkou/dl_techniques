@@ -102,6 +102,7 @@ Kept as an option for higher-res / other GPUs / a future XLA-clean upsample.
 
 import keras
 import argparse
+import inspect
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple
 
@@ -114,6 +115,7 @@ from train.common.run_io import default_experiment_name
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
 from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
+    create_convunext,
     create_convunext_denoiser,
     CONVUNEXT_CONFIGS,
 )
@@ -390,6 +392,31 @@ def build_model(config: TrainingConfig) -> keras.Model:
     return freeze_gabor_stem_if_requested(model, config)
 
 
+def architecture_of(config: TrainingConfig) -> Dict[str, Any]:
+    """The model keys of ``results_summary.json``, resolved the way :func:`build_model` builds.
+
+    Interface contract: pure, needs no model. The variant's row of ``CONVUNEXT_CONFIGS`` with the
+    config's ``convnext_version`` / ``depth`` / ``blocks_per_level`` / ``initial_filters``
+    overrides applied (the trainer's default ``v1`` overrides the variant row's ``v2``);
+    ``dims`` is the channel count of the encoder levels and the bottleneck, ``kernel_size`` the
+    block kernel (``create_convunext``'s default: this trainer never overrides it). Names follow
+    the ConvNeXt summary. Handed to ``common.train`` as ``architecture_of``.
+    """
+    row = CONVUNEXT_CONFIGS[config.variant]
+    depth = row["depth"] if config.depth is None else config.depth
+    return {
+        "model_family": "convunext-denoiser",
+        "convnext_version": config.convnext_version,
+        "depth": depth,
+        "blocks_per_level": row["blocks_per_level"] if config.blocks_per_level is None else config.blocks_per_level,
+        "dims": [int(round(_resolved_initial_filters(config) * config.filter_multiplier ** i))
+                 for i in range(depth + 1)],
+        "kernel_size": inspect.signature(create_convunext).parameters["block_kernel_size"].default,
+        "drop_path_rate": row["drop_path_rate"],
+        "dropout_rate": config.dropout_rate,
+    }
+
+
 def verify_bias_free(model: keras.Model) -> None:
     """Log a bias-free compliance check (informational)."""
     offenders = []
@@ -435,6 +462,7 @@ def train(config: TrainingConfig) -> keras.Model:
         verify_bias_free,
         model_label="ConvUNeXt",
         results_dir_prefix="convunext_denoiser",
+        architecture_of=architecture_of,
     )
 
 

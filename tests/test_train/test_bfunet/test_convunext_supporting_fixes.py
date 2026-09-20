@@ -458,3 +458,92 @@ class TestARenderThatRaisesIsRecordedNotRaised:
         assert cb.failed == {"training_dashboard.png": "RuntimeError: scripted dashboard failure"}
         block = cb.visualizations_block()
         assert block["failed"] == cb.failed and block["files"] == [] and block["seconds"] > 0
+
+
+def _dashboard_draws(tmp_path, planned, ran=None, draws=20, label=None) -> SimpleNamespace:
+    """Epochs (``.epochs``) and titles (``.titles``) of the dashboard redraws over ``ran`` of ``planned``
+    epochs plus ``on_train_end``."""
+    cb = common.DenoisingVisualizationCallback(
+        clean_batch=None, sigma_max_var=tf.Variable(0.1), out_dir=tmp_path,
+        dashboard_draws=draws, run_label=label)
+    cb.set_params({"epochs": planned})
+    seen = SimpleNamespace(epochs=[], titles=[])
+
+    def record(history, path, title=None, **kwargs):
+        seen.epochs.append(history["epoch"][-1])
+        seen.titles.append(title)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "render_training_dashboard", record)
+        for epoch in range(planned if ran is None else ran):
+            cb.on_epoch_end(epoch, {"loss": 0.1, "val_loss": 0.2})
+        cb.on_train_end()
+    return seen
+
+
+class TestDashboardCadence:
+    """The dashboard follows the shared ``max(1, planned // 20)`` cadence when the trainer asks (audit-loop-2 D3)."""
+
+    @pytest.mark.parametrize("planned", [2, 39])
+    def test_up_to_39_epochs_every_epoch_is_drawn_exactly_as_before(self, tmp_path, planned) -> None:
+        assert _dashboard_draws(tmp_path, planned).epochs == list(range(1, planned + 1))
+
+    def test_40_epochs_draw_every_second_one_and_epoch_one(self, tmp_path) -> None:
+        assert _dashboard_draws(tmp_path, 40).epochs == [1] + list(range(2, 41, 2))
+
+    def test_100_epochs_draw_epoch_one_and_every_fifth_and_no_more(self, tmp_path) -> None:
+        drawn = _dashboard_draws(tmp_path, 100).epochs
+        assert drawn == [1] + list(range(5, 101, 5))
+        assert len(drawn) == 21, "21 redraws for 100 epochs, not 100"
+
+    def test_the_last_planned_epoch_is_drawn_when_the_cadence_misses_it(self, tmp_path) -> None:
+        drawn = _dashboard_draws(tmp_path, 45).epochs    # every 2nd: 1, 2, 4, ..., 44, and 45 by the rule
+        assert drawn[-2:] == [44, 45] and drawn.count(45) == 1
+
+    def test_an_early_stop_off_the_cadence_still_draws_the_final_state_once(self, tmp_path) -> None:
+        assert _dashboard_draws(tmp_path, 100, ran=7).epochs == [1, 5, 7]
+        assert _dashboard_draws(tmp_path, 100, ran=5).epochs == [1, 5], "already on disk: no second draw"
+
+    def test_without_the_argument_every_epoch_of_a_long_run_is_drawn_as_unet_and_bfcnn_do(self, tmp_path) -> None:
+        assert _dashboard_draws(tmp_path, 100, draws=None).epochs == list(range(1, 101))
+
+    def test_the_run_label_names_the_run_and_the_default_title_is_unchanged(self, tmp_path) -> None:
+        assert _dashboard_draws(tmp_path, 2, label="my_run (seed 7)").titles == [
+            "my_run (seed 7) - epoch 1", "my_run (seed 7) - epoch 2"]
+        assert _dashboard_draws(tmp_path, 2).titles == [
+            "Training dashboard - epoch 1", "Training dashboard - epoch 2"]
+
+
+def _head(tmp_path, *, architecture=None, baseline_val_loss=0.5) -> dict:
+    return common._summary_head(
+        TrainingConfig(variant="tiny", depth=2, blocks_per_level=1, patch_size=16), tmp_path,
+        params=1, steps_per_epoch=3, lr_schedule=lambda step: 1e-3, init_from_block=None,
+        hist={}, devices={"gpu_name": None, "tf_visible_devices": [], "cuda_visible_devices": ""},
+        n_train=6, n_val=4, validation_steps=2, baseline_val_loss=baseline_val_loss,
+        architecture=architecture)
+
+
+class TestTheSummaryHead:
+    def test_a_trainer_without_an_architecture_gets_no_model_keys_but_the_config_facts(self, tmp_path) -> None:
+        head = _head(tmp_path)
+        assert "dims" not in head and "model_family" not in head
+        assert (head["batch_size"], head["n_train"], head["monitor"]) == (16, 6, "val_loss")
+
+    def test_the_trainers_architecture_is_spliced_in_as_it_is(self, tmp_path) -> None:
+        head = _head(tmp_path, architecture={"model_family": "x", "dims": [1, 2]})
+        assert (head["model_family"], head["dims"]) == ("x", [1, 2])
+
+    def test_a_missing_baseline_is_null_and_a_measured_one_is_kept(self, tmp_path) -> None:
+        assert _head(tmp_path, baseline_val_loss=None)["initial_loss_sanity_eval"] is None
+        assert _head(tmp_path)["initial_loss_sanity_eval"]["loss"] == 0.5
+
+
+def test_the_convunext_trainer_hands_its_architecture_resolver_to_the_shared_train() -> None:
+    """Without it the run would silently lose the model keys, the shared cadence and the title label."""
+    import train.bfunet.train_convunext_denoiser as trainer
+
+    seen = {}
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(common, "train", lambda config, *args, **kwargs: seen.update(kwargs))
+        trainer.train(TrainingConfig(patch_size=16))
+    assert seen["architecture_of"] is trainer.architecture_of

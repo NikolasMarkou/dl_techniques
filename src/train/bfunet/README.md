@@ -241,7 +241,7 @@ results/<experiment_name>/
     results_summary.json        the run's record (strict JSON, keys below)
     tensorboard/                TensorBoard logs
     visualizations/
-        training_dashboard.png  per-epoch curves, redrawn after every epoch (the epoch-0 point is the untrained baseline)
+        training_dashboard.png  per-epoch curves (the epoch-0 point is the untrained baseline); ConvUNeXt: redrawn after epoch 1 and every `max(1, epochs // 20)`-th epoch and once at the end of `fit` if the last epoch was off that cadence (every epoch up to 39 epochs), title `<experiment_name> (seed N) - epoch E`; unet and bfcnn: after every epoch
         epoch_NNN_denoise_grid.png   clean / noisy / denoised grid, same images under the 15/25/50 (sigma_255) regimes;
                                      written at epoch 0 (untrained), epoch 1 and every --viz-freq epochs
     model_analysis/             end-of-run weights + spectral ModelAnalyzer output of the LAST epoch's weights
@@ -296,6 +296,10 @@ Strict JSON (`allow_nan=False`: non-finite values become `null`). Keys on EVERY 
 | `status` | `"ok"` or `"diverged"` |
 | `run_dir`, `experiment_name`, `variant` | Identity of the run |
 | `params` | Model parameter count |
+| `dataset`, `input_shape`, `n_train`, `n_val` | The train image directories, the training patch shape `[patch, patch, channels]`, and the lengths of the train and val image-path worklists (the `Sourced N train / M val image paths` line of `run.log`; `n_train` is `--max-train-files`, drawn with replacement when the directories hold fewer; not patch counts). All three trainers |
+| `optimizer`, `lr_schedule`, `weight_decay`, `gradient_clip_norm`, `batch_size`, `seed`, `monitor` | The configuration the run used (`--optimizer-type`, `--lr-schedule-type`, `--weight-decay`, `--gradient-clipping`, `--batch-size`, `--seed`) and the monitored metric (`val_loss`). All three trainers |
+| `initial_loss_sanity_eval` | `{loss, steps, split: "val", before_fit: true}`: the untrained model's validation loss (the epoch-0 baseline the dashboard starts from, carried out of `DenoisingVisualizationCallback.baseline_val_loss`; `null` if that evaluation failed) over `steps` = `validation_steps` batches of fresh fixed-sigma noise. All three trainers |
+| `model_family`, `convnext_version`, `depth`, `blocks_per_level`, `dims`, `kernel_size`, `drop_path_rate`, `dropout_rate` | ConvUNeXt only (`train_convunext_denoiser.architecture_of`, resolved as `build_model` builds; a test compares them with the layers of the saved model). `dims` are the channel counts of the encoder levels and the bottleneck; `convnext_version` is the trainer's `v1` default, not the variant row's `v2` |
 | `learning_rate`, `warmup_epochs`, `steps_per_epoch` | Peak rate, warmup epochs and the RESOLVED steps per epoch |
 | `lr_first_epoch`, `lr_last_epoch` | The CSV `lr` of the first and last epoch (rate at the START of each) |
 | `lr_last_step` | The schedule's rate at the run's very last optimizer step (`steps_per_epoch * epochs - 1`); see "Learning rate" |
@@ -315,8 +319,8 @@ Added by a finished run (`status: "ok"`):
 | `best_val_metrics`, `final_val_metrics` | The `val_*` columns of the best epoch and of the last epoch |
 | `model_loading_validated` | `final_model.keras` round-trip verdict (`true` / `false` / `null`) |
 | `test_eval` | The held-out block below |
-| `analyzer` | The end-of-run analysis, read back from `model_analysis/analysis_results.json` (not taken from the analyzer's return value): `{status, analyzers, error, path, seconds}` with `status` `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. Under `--no-model-analysis`, and always for unet and bfcnn, the skipped block (`status: "skipped"`). The smoke run `convunext_denoiser_smoke_20260920_055542` reads `status: "ok"`, `analyzers: ["weights", "spectral"]`, `seconds` 9.5 |
-| `visualizations` | `{files, failed, seconds}`: the names present in `visualizations/` (dashboard and `epoch_NNN_denoise_grid.png`), `{file: error}` for renders that raised (a failed render does not fail the run), and the wall seconds spent rendering the dashboard and grids |
+| `analyzer` | The end-of-run analysis, read back from `model_analysis/analysis_results.json` (not taken from the analyzer's return value): `{status, analyzers, error, path, seconds}` (plus `removed`, see "End-of-run artifacts") with `status` `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. Under `--no-model-analysis`, and always for unet and bfcnn, the skipped block (`status: "skipped"`). The smoke run `convunext_denoiser_smoke_20260920_055542` reads `status: "ok"`, `analyzers: ["weights", "spectral"]`, `seconds` 9.5 |
+| `visualizations` | `{files, failed, seconds}`: the names present in `visualizations/` (dashboard and `epoch_NNN_denoise_grid.png`), `{file: error}` for renders that raised (a failed render does not fail the run), and the wall seconds spent rendering the dashboard and grids. `run.log` gets one `Visualizations: N written (files), M failed, dashboard and grids took Ss` line at the end of `fit` |
 
 Added by a diverged run instead: `non_finite_metrics` (names of the metrics holding a
 non-finite or missing value) and `history` (every history list, with `null`s).
@@ -475,10 +479,11 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 - **`model_analysis/`.** After the final save (and after `test_eval`) the run analyzes the
   in-memory last-epoch model with the weights and spectral analyzers only and writes
   `model_analysis/analysis_results.json` plus `spectral_summary.png`,
-  `spectral_funnel_diagram.png`, `weight_learning_journey.png` and `summary_dashboard.png`.
-  `summary_dashboard.png` is library output that is EMPTY for a data-free analysis (its panels
-  read "No ... data available"). The analysis reads weights, not data; the trainer hands it the
-  fixed visualization batch only to satisfy the call. The `analyzer` block of
+  `spectral_funnel_diagram.png` and `weight_learning_journey.png`. The library also draws a
+  `summary_dashboard.png`, which is NOT kept: it is EMPTY for a data-free analysis (its panels read "No ... data
+  available"), so `run_data_free_analysis` deletes it after an `ok` read-back and records
+  `analyzer.removed: ["summary_dashboard.png"]`. The analysis reads weights, not data; the
+  trainer hands it the fixed visualization batch only to satisfy the call. The `analyzer` block of
   `results_summary.json` is what the analyzer actually left on disk, so an analysis that
   raised or wrote nothing is `error` or `missing`, and the finished run stays `status: "ok"`.
   Calibration, information flow and training dynamics are not run.
@@ -633,7 +638,7 @@ Timing: epoch 1 is about 60 s (XLA compile), later epochs 10.8 to 12.5 s; the ba
 
 Reading the curves: the training loss and PSNR get worse from epoch 5 while the validation metrics keep improving. That is the noise curriculum (training sigma_max rises from 0.025 to 0.25), not a defect: the noise floor rises 7.8x from epoch 3 to 8 while the training loss rises 1.27x. Validation is not reproducible between identical-seed runs (epoch-1 `val_loss` 0.00725 against 0.00690) because the tf.data validation path is stateful and parallel; the GPU kernels account for at most 0.5 percent of that (measured by a probe that evaluated identical weights repeatedly under the shipped pipeline and under a sequential one).
 
-Open items of this audit, after the fixes of plan `plan-2026-09-19T224205-49c8bf80` (iteration 1). Fixed and described in "End-of-run artifacts and the run log": the unclipped pass-1 PSNR label, the unseeded additive grid noise and fresh-per-run viz batch, the missing best-epoch marker, the `setup_gpu` ERROR on every run, the missing `model_analysis/`, `analyzer` and `visualizations` blocks, the layer table buried in `run.log`, and the duplicate best-and-final test evaluation when the last epoch is the best. Still open: multiplicative and composite grid noise is unseeded; the validation set is not fixed (validation noise is drawn afresh); the default cosine schedule stops at 4.8e-5, not at the 1e-5 floor, and a 2-epoch run never anneals; the dashboard and grid are redrawn after every epoch (about 7 s after a 10.1 s epoch in `convunext_audit_denoise_l1`, tiny at 64 px); the untrained baseline evaluation costs 12.6 s in that run; the end-of-run `test_eval` scores 64 px crops, which charges the zero-padding border artifact of the U-Net to every crop; unet and bfcnn keep fixed smoke names that the reused-name refusal turns into a second-run failure.
+Open items of this audit, after the fixes of plan `plan-2026-09-19T224205-49c8bf80` (iteration 1). Fixed and described in "End-of-run artifacts and the run log": the unclipped pass-1 PSNR label, the unseeded additive grid noise and fresh-per-run viz batch, the missing best-epoch marker, the `setup_gpu` ERROR on every run, the missing `model_analysis/`, `analyzer` and `visualizations` blocks, the layer table buried in `run.log`, and the duplicate best-and-final test evaluation when the last epoch is the best. Still open: multiplicative and composite grid noise is unseeded; the validation set is not fixed (validation noise is drawn afresh); the default cosine schedule stops at 4.8e-5, not at the 1e-5 floor, and a 2-epoch run never anneals; the grid is redrawn on `--viz-freq` (the dashboard, about 2.3-3.3 s per render, now follows the `max(1, epochs // 20)` cadence, so only runs of 40 or more epochs save anything; 6.9 s of redraw followed each 10.9 s epoch in `convunext_audit_denoise_l2`); the untrained baseline evaluation costs 12.6 s in `convunext_audit_denoise_l1`; `initial_loss_ratio`, `init_scale_warning` and `best_checkpoint_*` are not in the summary on purpose (the first two are defined against a classifier's ln(C) and would read 27x the identity loss on every healthy run; the third would compare two evaluations on different validation noise: the untrained baseline read 0.5693, 0.5672 and 0.5717 in three same-seed runs); the end-of-run `test_eval` scores 64 px crops, which charges the zero-padding border artifact of the U-Net to every crop; unet and bfcnn keep fixed smoke names that the reused-name refusal turns into a second-run failure.
 
 ## Constraints & gotchas
 

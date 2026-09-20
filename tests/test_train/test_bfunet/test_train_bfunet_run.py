@@ -36,6 +36,7 @@ from train.bfunet import common  # noqa: E402
 from train.common import run_summary  # noqa: E402
 from train.bfunet.train_convunext_denoiser import (  # noqa: E402
     TrainingConfig,
+    architecture_of,
     build_model,
     verify_bias_free,
 )
@@ -122,6 +123,7 @@ def run_train(config: TrainingConfig) -> keras.Model:
         verify_bias_free,
         model_label="ConvUNeXt",
         results_dir_prefix="convunext_denoiser",
+        architecture_of=architecture_of,
     )
 
 
@@ -1402,3 +1404,79 @@ def test_a_finished_run_flags_the_reuse_exactly_when_the_final_epoch_is_the_best
     summary = _strict_json(default_run.run_dir / "results_summary.json")
     assert summary["final_is_best"] is True
     assert summary["test_eval"]["final_reused_best"] is True
+
+
+# --- ConvNeXt-parity summary keys, the Visualizations log line ------------------------
+
+# Typed here from audit-loop-2 section 1.2 (the ConvNeXt reference's keys the denoiser lacked
+# without a task reason), never read from the code under test.
+PARITY_KEYS = (
+    "model_family", "dataset", "convnext_version", "depth", "blocks_per_level", "dims",
+    "kernel_size", "drop_path_rate", "dropout_rate", "input_shape", "optimizer",
+    "gradient_clip_norm", "lr_schedule", "weight_decay", "batch_size", "seed", "n_train",
+    "n_val", "monitor", "initial_loss_sanity_eval",
+)
+
+
+def test_every_finished_run_carries_the_parity_keys(ok_run) -> None:
+    missing = [key for key in PARITY_KEYS if key not in ok_run.summary]
+    assert not missing, missing
+
+
+def test_a_diverged_run_carries_the_parity_keys_too(diverged_run) -> None:
+    diverged = _strict_json(diverged_run.run_dir / "results_summary.json")
+    assert [key for key in PARITY_KEYS if key not in diverged] == []
+
+
+def test_each_parity_value_is_the_fact_of_the_run_it_names(e2e) -> None:
+    summary, config = _strict_json(e2e.run_dir / "results_summary.json"), e2e.config
+    assert summary["dataset"] == [str(e2e.root / "train")]
+    assert summary["input_shape"] == [PATCH, PATCH, 3]
+    assert (summary["optimizer"], summary["lr_schedule"], summary["monitor"]) == \
+        ("adamw", "cosine_decay", "val_loss")
+    assert (summary["weight_decay"], summary["gradient_clip_norm"]) == (0.004, 1.0)
+    assert (summary["batch_size"], summary["seed"]) == (2, 0)
+    sourced = re.search(r"Sourced (\d+) train / (\d+) val image paths", (e2e.run_dir / "run.log").read_text())
+    assert (summary["n_train"], summary["n_val"]) == tuple(int(n) for n in sourced.groups())
+    assert summary["n_val"] == N_VAL and summary["n_train"] == config.max_train_files   # worklist, not patches
+    assert summary["model_family"] == "convunext-denoiser"
+    assert summary["dropout_rate"] == config.dropout_rate == 0.0 and summary["drop_path_rate"] == 0.0
+    assert summary["kernel_size"] == 7
+
+
+def test_the_architecture_keys_are_what_the_built_model_has(e2e) -> None:
+    """``depth`` 2, ``blocks_per_level`` 1 and ``dims`` [32, 64, 128] are compared with the layers
+    ``final_model.keras`` really holds, so the resolver cannot drift from ``build_model``."""
+    summary = _strict_json(e2e.run_dir / "results_summary.json")
+    version, dims, blocks = summary["convnext_version"], summary["dims"], summary["blocks_per_level"]
+    assert (summary["depth"], blocks, dims, version) == (2, 1, [32, 64, 128], "v1")
+    names = {layer.name for layer in e2e.final.layers}
+    for level in range(summary["depth"]):
+        block = f"encoder_level_{level}_convnext_{version}_block_{blocks - 1}"
+        assert f"encoder_level_{level}_convnext_{version}_block_{blocks}" not in names
+        assert e2e.final.get_layer(f"{block}_residual").output.shape[-1] == dims[level], level
+    assert f"encoder_level_{summary['depth']}_convnext_{version}_block_0" not in names
+    bottleneck = e2e.final.get_layer(f"bottleneck_convnext_{version}_block_{blocks - 1}_residual")
+    assert bottleneck.output.shape[-1] == dims[-1]
+    block = e2e.final.get_layer(f"encoder_level_0_convnext_{version}_block_0")
+    assert block.kernel_size in (summary["kernel_size"], (summary["kernel_size"],) * 2)
+
+
+def test_the_untrained_baseline_loss_is_carried_out_of_the_callback_into_the_summary(e2e) -> None:
+    logged = re.search(r"Epoch-0 baseline: val_loss=([0-9.]+)", (e2e.run_dir / "run.log").read_text())
+    assert logged, "the run.log line the callback writes at epoch 0"
+    block = _strict_json(e2e.run_dir / "results_summary.json")["initial_loss_sanity_eval"]
+    assert block["loss"] == pytest.approx(float(logged.group(1)), abs=6e-5)
+    assert (block["steps"], block["split"], block["before_fit"]) == (VALIDATION_STEPS, "val", True)
+    epoch_one = float(_csv_rows(e2e.run_dir)[0]["val_loss"])
+    assert block["loss"] != pytest.approx(epoch_one, abs=1e-6), "the baseline is not the epoch-1 loss"
+
+
+def test_the_run_log_has_one_visualizations_line_that_matches_the_summary_block(ok_run) -> None:
+    lines = [row for row in (ok_run.run_dir / "run.log").read_text().splitlines() if "Visualizations:" in row]
+    assert len(lines) == 1, lines
+    block = ok_run.summary["visualizations"]
+    assert f"Visualizations: {len(block['files'])} written (" in lines[0]
+    assert all(name in lines[0] for name in block["files"])
+    assert f"{len(block['failed'])} failed" in lines[0] and lines[0].endswith("s")
+    assert "dashboard and grids took" in lines[0]

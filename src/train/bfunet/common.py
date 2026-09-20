@@ -29,6 +29,7 @@ from train.common import (
 from train.common import run_summary
 from train.common.args import resolved_run_dir
 from train.common.callbacks import EpochLogLine, LearningRateLogger
+from train.common.classification_viz import DASHBOARD_TARGET_DRAWS
 from train.common.config_io import save_config_json
 from train.common.run_artifacts import attach_run_log, refuse_existing_run, write_summary_json
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
@@ -87,6 +88,10 @@ from dl_techniques.callbacks.self_iterate_pool import (
 # See plans/plan_2026-07-12_e56909cd/decisions.md D-001.
 DATA_MIN: float = 0.0
 DATA_MAX: float = 1.0
+
+# The metric ``ModelCheckpoint`` and ``EarlyStopping`` monitor, the best epoch is the argmin of
+# and ``results_summary.json`` names (``monitor``).
+MONITOR = "val_loss"
 
 # ``logs`` keys of the per-epoch ``run.log`` line: every metric ``train()`` compiles
 # (``loss``, ``mae``, PSNR, SSIM) and its ``val_`` twin, the same columns as
@@ -1812,6 +1817,13 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
     regime index]``, identical in every epoch and in two same-seed runs (multiplicative and
     composite noise stay unseeded). ``failed`` is ``{file: error}`` of the renders that raised
     and ``seconds`` the render wall time; see :meth:`visualizations_block`.
+
+    ``dashboard_draws`` (``None`` = redraw after every epoch, the default) redraws the
+    dashboard on the shared cadence instead: after epoch 1 and after every
+    ``max(1, planned_epochs // dashboard_draws)``-th epoch, plus the final state at the end of
+    ``fit`` when that epoch was off the cadence (a run of a length off the cadence, an early stop); the grid keeps its own
+    ``freq``. ``run_label`` names the run in the dashboard title. ``baseline_val_loss`` is the
+    untrained model's validation loss (``None`` until :meth:`on_train_begin` measured it).
     """
 
     def __init__(
@@ -1831,8 +1843,14 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         noise_sigma_min: float = 0.0,
         val_sigma_max: Optional[float] = None,
         noise_seed: Optional[int] = None,
+        dashboard_draws: Optional[int] = None,
+        run_label: Optional[str] = None,
     ):
         super().__init__()
+        self.dashboard_draws = dashboard_draws
+        self.run_label = run_label
+        self.baseline_val_loss: Optional[float] = None
+        self._drawn_epoch: Optional[int] = None
         self.clean_batch = clean_batch
         self.noise_seed = None if noise_seed is None else int(noise_seed)
         self.failed: Dict[str, str] = {}
@@ -1940,13 +1958,8 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                 # read the optimizer here: that returns the warmup start (1e-8) and plots
                 # a step no epoch trained at.
                 self._hist["lr"].append(float("nan"))
-                self._attempt("training_dashboard.png", lambda: render_training_dashboard(
-                    self._hist, self.viz_dir / "training_dashboard.png",
-                    title="Training dashboard - epoch 0 (untrained baseline)",
-                    sigma_min=self.noise_sigma_min,
-                    val_sigma_max=self.val_sigma_max,
-                    additive=(self.noise_type == "additive"),
-                ))
+                self.baseline_val_loss = self._hist["val_loss"][0]
+                self._draw_dashboard(0)
                 logger.info(
                     f"Epoch-0 baseline: val_loss={res.get('loss'):.4f} "
                     f"val_psnr={res.get('psnr_metric', float('nan')):.2f} dB"
@@ -1977,15 +1990,8 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         self._hist["sigma_max"].append(float(self.sigma_max_var))
         self._hist["lr"].append(lr_val)
 
-        self._attempt("training_dashboard.png", lambda: render_training_dashboard(
-            self._hist,
-            self.viz_dir / "training_dashboard.png",
-            title=f"Training dashboard - epoch {epoch + 1}",
-            sigma_min=self.noise_sigma_min,
-            val_sigma_max=self.val_sigma_max,
-            additive=(self.noise_type == "additive"),
-            best_epoch=best_epoch_of_history(self._hist),
-        ))
+        if self._dashboard_due(epoch + 1):
+            self._draw_dashboard(epoch + 1)
 
         if (epoch + 1) % self.freq != 0 and epoch != 0:
             return
@@ -1993,6 +1999,40 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             return
         self._attempt(f"epoch_{epoch + 1:03d}_denoise_grid.png", lambda: self._save_grid(epoch + 1))
         gc.collect()
+
+    def _draw_dashboard(self, epoch: int) -> None:
+        """Render ``training_dashboard.png`` from the history so far (``epoch`` 0 = the untrained baseline)."""
+        self._drawn_epoch = epoch
+        suffix = "epoch 0 (untrained baseline)" if epoch == 0 else f"epoch {epoch}"
+        self._attempt("training_dashboard.png", lambda: render_training_dashboard(
+            self._hist, self.viz_dir / "training_dashboard.png",
+            title=f"{self.run_label or 'Training dashboard'} - {suffix}",
+            sigma_min=self.noise_sigma_min,
+            val_sigma_max=self.val_sigma_max,
+            additive=(self.noise_type == "additive"),
+            best_epoch=best_epoch_of_history(self._hist),
+        ))
+
+    def _dashboard_due(self, completed: int) -> bool:
+        """Whether the dashboard is redrawn after ``completed`` epochs: always by default; with
+        ``dashboard_draws``, epoch 1 and every ``max(1, planned // dashboard_draws)``-th (the last
+        epoch off the cadence is drawn by :meth:`on_train_end`)."""
+        planned = (self.params or {}).get("epochs")
+        every = max(1, int(planned) // self.dashboard_draws) if planned and self.dashboard_draws else 1
+        return completed == 1 or completed % every == 0
+
+    def on_train_end(self, logs=None):
+        """Draw the final state if an early stop left it off the cadence, then log the
+        ``Visualizations:`` line (files on disk, failed renders, render seconds)."""
+        if self._hist["epoch"] and self._hist["epoch"][-1] != self._drawn_epoch:
+            self._draw_dashboard(self._hist["epoch"][-1])
+        block = self.visualizations_block()
+        failed = ", ".join(block["failed"])
+        logger.info(
+            f"Visualizations: {len(block['files'])} written ({', '.join(block['files'])}), "
+            f"{len(block['failed'])} failed{': ' + failed if failed else ''}, "
+            f"dashboard and grids took {block['seconds']:.1f}s"
+        )
 
     def _save_grid(self, epoch: int):
         """Eval grid: the SAME images under 3 fixed noise regimes.
@@ -2271,6 +2311,7 @@ def train(
     model_label: str,
     results_dir_prefix: str,
     bottleneck_name_prefix: Optional[str] = None,
+    architecture_of: Optional[Callable[[Any], Dict[str, Any]]] = None,
 ) -> keras.Model:
     """Train a bias-free bfunet denoiser with the noise curriculum.
 
@@ -2278,6 +2319,9 @@ def train(
     model; ``verify_fn(model)`` runs the model-specific bias-free check (called at
     both the post-build and post-``init_from`` sites). ``model_label`` /
     ``results_dir_prefix`` / ``bottleneck_name_prefix`` are the per-trainer seams.
+    ``architecture_of(config)`` returns the trainer's model keys for ``results_summary.json``;
+    supplying it is also what selects the ConvNeXt-parity dashboard (redrawn on the shared
+    cadence, run name and seed in its title). ``None`` keeps the every-epoch, fixed-title dashboard.
     """
     logger.info(f"Starting {model_label} denoiser training: {config.experiment_name}")
 
@@ -2336,6 +2380,7 @@ def train(
             model_label=model_label,
             results_dir_prefix=results_dir_prefix,
             bottleneck_name_prefix=bottleneck_name_prefix,
+            architecture_of=architecture_of,
             output_dir=output_dir,
             train_paths=train_paths,
             val_paths=val_paths,
@@ -2484,6 +2529,11 @@ def _summary_head(
     init_from_block: Optional[Dict[str, Any]],
     hist: Dict[str, List[float]],
     devices: Dict[str, Any],
+    n_train: int,
+    n_val: int,
+    validation_steps: int,
+    baseline_val_loss: Optional[float],
+    architecture: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Keys every ``results_summary.json`` carries, whether the run finished or diverged.
 
@@ -2494,7 +2544,12 @@ def _summary_head(
     the Keras history dict (its ``lr`` list gives the first and last epoch's rate, ``None``
     when empty), ``devices`` the ``run_summary.describe_devices()`` dict. Returns a plain
     dict; :func:`write_summary_json` sanitizes it. The diverged and the finished summary are
-    both built from this head, so a shared key is added here once.
+    both built from this head, so a shared key is added here once. ``n_train`` / ``n_val`` are
+    the lengths of the train / val image-path worklists (the ``Sourced N train / M val image
+    paths`` run.log line), ``validation_steps`` the RESOLVED evaluate length,
+    ``baseline_val_loss`` the untrained model's validation loss (``None`` when the epoch-0
+    evaluation did not run) and ``architecture`` the trainer's model keys (``None`` for a
+    trainer that supplies none; they are spliced in as they are).
     """
     last_step = steps_per_epoch * config.epochs - 1
     lrs = hist.get("lr", [])
@@ -2502,10 +2557,25 @@ def _summary_head(
         "run_dir": str(output_dir),
         "experiment_name": config.experiment_name,
         "variant": getattr(config, "variant", None),
+        "dataset": list(config.train_image_dirs),
         "params": int(params),
+        **(architecture or {}),
+        "input_shape": [config.patch_size, config.patch_size, config.channels],
+        "optimizer": config.optimizer_type,
+        "gradient_clip_norm": config.gradient_clipping,
         "learning_rate": config.learning_rate,
+        "lr_schedule": config.lr_schedule_type,
         "warmup_epochs": config.warmup_epochs,
         "steps_per_epoch": int(steps_per_epoch),
+        "weight_decay": config.weight_decay,
+        "batch_size": config.batch_size,
+        "seed": config.seed,
+        "n_train": n_train,
+        "n_val": n_val,
+        "monitor": MONITOR,
+        "initial_loss_sanity_eval": None if baseline_val_loss is None else {
+            "loss": baseline_val_loss, "steps": validation_steps, "split": "val", "before_fit": True,
+        },
         "lr_first_epoch": lrs[0] if lrs else None,
         "lr_last_epoch": lrs[-1] if lrs else None,
         "lr_last_step": float(keras.ops.convert_to_numpy(lr_schedule(last_step))),
@@ -2590,7 +2660,7 @@ def _write_finished_summary(
     written.
     """
     epochs_run = len(hist["val_loss"])
-    best_epoch = run_summary.best_epoch(hist, "val_loss")
+    best_epoch = run_summary.best_epoch(hist, MONITOR)
     best_i, final_i = best_epoch - 1, epochs_run - 1
     val_keys = [k for k in hist if k.startswith("val_")]
     return write_summary_json(output_dir, {
@@ -2619,6 +2689,10 @@ def _write_finished_summary(
             "`seed`, so `eval_psnr_vs_noise` with the same seed, patch size, sample count "
             "and sigmas reproduces them; when `final_is_best` the model is scored once and "
             "`test_eval.final_reused_best` is true (the `final_*` cells copy the best ones)",
+            "`n_train` / `n_val` are the lengths of the image-path worklists (`max_train_files` "
+            "of them, drawn with replacement when the directories hold fewer), not patch counts; "
+            "`initial_loss_sanity_eval` is the untrained model's validation loss "
+            "(`steps` batches of the fixed-sigma validation noise)",
             "`analyzer` is read back from `model_analysis/analysis_results.json` (weights and "
             "spectral only, the LAST epoch's weights; `skipped` under --no-model-analysis); "
             "`visualizations.files` are the files in `visualizations/`, `failed` the renders "
@@ -2647,6 +2721,7 @@ def _train_in_run_dir(
     model_label: str,
     results_dir_prefix: str,
     bottleneck_name_prefix: Optional[str],
+    architecture_of: Optional[Callable[[Any], Dict[str, Any]]],
     output_dir: Path,
     train_paths: List[str],
     val_paths: List[str],
@@ -2985,7 +3060,7 @@ def _train_in_run_dir(
         model_name=config.experiment_name,
         results_dir_prefix=results_dir_prefix,
         run_dir=str(output_dir),
-        monitor="val_loss",
+        monitor=MONITOR,
         patience=config.early_stopping_patience if not disable_early_stopping else 1,
         use_lr_schedule=True,
         include_terminate_on_nan=True,
@@ -3071,6 +3146,8 @@ def _train_in_run_dir(
         noise_sigma_min=config.noise_sigma_min,
         val_sigma_max=config.sigma_max_end,
         noise_seed=config.seed,
+        dashboard_draws=DASHBOARD_TARGET_DRAWS if architecture_of else None,
+        run_label=f"{config.experiment_name} (seed {config.seed})" if architecture_of else None,
     )
     callbacks.append(viz_callback)
 
@@ -3161,11 +3238,14 @@ def _train_in_run_dir(
     # final artifact is written; do NOT move this after the save, ``final_model.keras`` would
     # exist for a run that failed.
     hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
-    non_finite = run_summary.non_finite_metrics(hist, "val_loss")
+    non_finite = run_summary.non_finite_metrics(hist, MONITOR)
     summary_head = _summary_head(
         config, output_dir, params=model.count_params(),
         steps_per_epoch=steps_per_epoch, lr_schedule=lr_schedule,
         init_from_block=init_from_block, hist=hist, devices=devices,
+        n_train=len(train_paths), n_val=len(val_paths), validation_steps=validation_steps,
+        baseline_val_loss=viz_callback.baseline_val_loss,
+        architecture=architecture_of(config) if architecture_of else None,
     )
     if non_finite:
         epochs_run = len(hist.get("loss", []))
@@ -3240,7 +3320,7 @@ def _train_in_run_dir(
     # fact of this run and a summary with status "ok" exists only for a run that produced
     # ``final_model.keras``. Do NOT move it above the save (the verdict would be unknown) and
     # do NOT let a failure to write it pass silently: the exception propagates to ``main()``.
-    best_is_final = run_summary.best_epoch(hist, "val_loss") == len(hist["val_loss"])
+    best_is_final = run_summary.best_epoch(hist, MONITOR) == len(hist["val_loss"])
     analysis_sample = (
         viz_batch.numpy() if viz_batch is not None
         else np.zeros((1, config.patch_size, config.patch_size, config.channels), dtype="float32")
