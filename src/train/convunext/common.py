@@ -52,6 +52,7 @@ no GPU and no directory. ``--gpu`` is not a config field: ``main`` hands it to
 """
 
 import argparse
+import inspect
 import time
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -61,8 +62,11 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from dl_techniques.analyzer import AnalysisConfig
-from dl_techniques.models.vision.convunext.model import CONVUNEXT_CONFIGS, create_convunext_variant
+from dl_techniques.models.vision.convunext.model import (
+    CONVUNEXT_CONFIGS,
+    create_convunext,
+    create_convunext_variant,
+)
 from dl_techniques.utils.logger import logger
 
 from train.common import (
@@ -74,7 +78,6 @@ from train.common import (
     prepare_run_dir,
     refuse_existing_run,
     resolved_run_dir,
-    run_model_analysis,
     save_training_history_json,
     set_seeds,
     setup_gpu,
@@ -474,9 +477,24 @@ def _scale(image: tf.Tensor, mask: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
     return tf.cast(image, tf.float32) / 255.0, tf.cast(mask, tf.int32)
 
 
-def _random_flip(image: tf.Tensor, mask: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Flip image ``(H, W, 3)`` and mask ``(H, W)`` left-right TOGETHER with probability 0.5."""
-    flip = tf.random.uniform([]) < 0.5
+def _random_flip(
+        seed: int, position: tf.Tensor, image: tf.Tensor, mask: tf.Tensor
+) -> Tuple[tf.Tensor, tf.Tensor]:
+    """Flip image ``(H, W, 3)`` and mask ``(H, W)`` left-right TOGETHER with probability 0.5.
+
+    The draw is a pure function of ``(seed, position)`` (``position`` = the element's index
+    in this epoch's shuffled order), so it does not depend on which parallel map worker gets
+    to run first.
+    """
+    # DECISION plan-2026-09-19T224205-49c8bf80/D-017: a STATELESS draw keyed by the epoch
+    # position. ``tf.random.uniform([])`` inside ``map(num_parallel_calls=AUTOTUNE)`` is a
+    # stateful op whose draws go to elements in worker-scheduling order, so two same-seed
+    # runs flipped different samples (a candidate cause of the audit's same-seed spread).
+    # Do NOT put a stateful random op back into a parallel map, and do NOT drop
+    # ``num_parallel_calls`` to hide the race (the map is the input-pipeline cost); the guard
+    # is ``test_two_train_pipelines_with_one_seed_yield_identical_batches_over_two_epochs``.
+    key = tf.stack([tf.constant(seed, tf.int64), position])
+    flip = tf.random.stateless_uniform([], seed=key) < 0.5
     return (tf.where(flip, tf.reverse(image, axis=[1]), image),
             tf.where(flip, tf.reverse(mask, axis=[1]), mask))
 
@@ -491,7 +509,9 @@ def make_train_dataset(x: np.ndarray, y: np.ndarray, batch_size: int, seed: int)
         x: uint8 images ``(N, S, S, 3)``.
         y: uint8 masks ``(N, S, S)``.
         batch_size: Batch size; an epoch yields :func:`steps_per_epoch_for` batches.
-        seed: Shuffle seed.
+        seed: Seed of the shuffle AND of the flips. The flips are stateless, so the batches
+            (images and masks) of every epoch are reproducible from it under any parallelism
+            (the shuffle also reads the global TensorFlow seed, which the trainer sets).
 
     Returns:
         A dataset of ``(float32 images in [0, 1], int32 masks)`` batches.
@@ -499,8 +519,9 @@ def make_train_dataset(x: np.ndarray, y: np.ndarray, batch_size: int, seed: int)
     return (
         tf.data.Dataset.from_tensor_slices((x, y))
         .shuffle(len(x), seed=seed, reshuffle_each_iteration=True)
-        .map(_scale, num_parallel_calls=tf.data.AUTOTUNE)
-        .map(_random_flip, num_parallel_calls=tf.data.AUTOTUNE)
+        .enumerate()
+        .map(lambda position, pair: _random_flip(seed, position, *_scale(*pair)),
+             num_parallel_calls=tf.data.AUTOTUNE)
         .batch(batch_size, drop_remainder=True)
         .prefetch(tf.data.AUTOTUNE)
     )
@@ -775,63 +796,6 @@ def _check_best_checkpoint(
 # End of run: figures and the analyzer (neither may fail a finished run)
 # ---------------------------------------------------------------------
 
-def _analysis_config() -> AnalysisConfig:
-    """Weights and spectral analyses only.
-
-    Calibration, information flow and training dynamics read per-image labels and class
-    probabilities of a classifier; on a dense ``(B, H, W, 3)`` logit output they would
-    measure nothing meaningful (D-005). The denoiser trainer makes the same choice.
-    """
-    return AnalysisConfig(
-        analyze_weights=True, analyze_spectral=True, analyze_calibration=False,
-        analyze_information_flow=False, analyze_training_dynamics=False, verbose=False,
-    )
-
-
-def _run_analyzer(
-        model: keras.Model, history: "keras.callbacks.History", config: SegTrainingConfig,
-        run_dir: Path, data: Dict[str, np.ndarray],
-) -> Dict[str, Any]:
-    """Run the end-of-run analysis and read back what really reached the disk; never raises.
-
-    ``run_model_analysis`` swallows its own exceptions and logs success regardless, so the
-    status comes from :func:`run_summary.read_data_free_analysis_status`, not from its return
-    value. Anything raised on the way is recorded as status ``"error"``: the analyzer cannot
-    fail a finished run. ``model`` is the in-memory model, the LAST epoch's weights.
-
-    Args:
-        model: The fitted model.
-        history: The ``History`` of ``fit`` (handed to the analyzer as the training curves).
-        config: The run config; ``model_analysis`` switches this off.
-        run_dir: The run directory; results land in ``<run_dir>/model_analysis/``.
-        data: The :func:`prepare_data` dict (a validation sample is the analyzer's input).
-
-    Returns:
-        ``skipped_analysis_status()`` when disabled, else ``{"status", "analyzers", "error",
-        "path", "seconds"}`` (``status`` ``ok`` / ``partial`` / ``missing`` / ``unreadable`` /
-        ``error``).
-    """
-    if not config.model_analysis:
-        logger.info("Analyzer skipped (--no-model-analysis)")
-        return run_summary.skipped_analysis_status()
-    started = time.perf_counter()
-    try:
-        sample = data["x_val"][:LOAD_CHECK_SAMPLES].astype(np.float32) / 255.0
-        results = run_model_analysis(
-            model, (sample, data["y_val"][:LOAD_CHECK_SAMPLES]), history, config.experiment_name,
-            str(run_dir), _analysis_config(),
-        )
-        block = run_summary.read_data_free_analysis_status(run_dir, config.experiment_name)
-        if results is None and block["status"] != "ok":
-            block["error"] = f"run_model_analysis failed (its exception is in run.log); {block['error']}"
-    except Exception as e:  # noqa: BLE001 - the analyzer must not fail a finished run
-        logger.warning(f"Analyzer raised: {type(e).__name__}: {e}")
-        block = {"status": "error", "analyzers": [], "error": f"{type(e).__name__}: {e}", "path": None}
-    block["seconds"] = time.perf_counter() - started
-    logger.info(f"Analyzer status (read back from disk): {block['status']} in {block['seconds']:.1f}s")
-    return block
-
-
 def _write_figures(
         run_dir: Path, grid: SegmentationGridCallback, model: keras.Model, hist: Dict[str, List[float]],
         best_epoch: int, test_metrics_best: Optional[Dict[str, Any]], config: SegTrainingConfig,
@@ -896,6 +860,11 @@ def _write_figures(
     attempt("miou_curve.png", lambda: plot_miou_curve(
         hist, best_epoch, vis_dir / "miou_curve.png", title=f"{config.experiment_name}: mIoU per epoch"))
     out["seconds"] = time.perf_counter() - started
+    logger.info(
+        f"Visualizations: {len(out['files'])} written ({', '.join(out['files'])}), "
+        f"{len(out['failed'])} failed{': ' + ', '.join(out['failed']) if out['failed'] else ''}, "
+        f"end-of-run figures took {out['seconds']:.1f}s"
+    )
     return out
 
 
@@ -917,6 +886,48 @@ def _analyzer_notes(ran: bool) -> List[str]:
     ]
 
 
+def architecture_of(variant: str) -> Dict[str, Any]:
+    """The architecture keys of the summary, resolved the way :func:`build_model` builds.
+
+    ``create_convunext_variant`` fills ``create_convunext``'s signature defaults with the
+    variant's row of ``CONVUNEXT_CONFIGS`` and then applies the three arguments
+    :func:`build_model` passes; this repeats exactly that resolution, so no value is typed
+    a second time. Names follow the ConvNeXt summary where the model has the same thing:
+    ``dims`` is the channel count of the encoder levels and the bottleneck
+    (``initial_filters * filter_multiplier ** i``, the ``Filter progression`` the model logs)
+    and ``kernel_size`` the block kernel. The model has no ``strides``, ``use_gamma`` or
+    ``stochastic_mode`` (ConvNeXt V2 blocks carry a GRN instead of a layer scale), so those
+    ConvNeXt keys are absent here on purpose.
+
+    Args:
+        variant: A key of ``CONVUNEXT_CONFIGS``.
+
+    Returns:
+        A JSON-ready dict.
+
+    Raises:
+        KeyError: If ``variant`` is not a key of ``CONVUNEXT_CONFIGS``.
+    """
+    resolved = {name: p.default for name, p in inspect.signature(create_convunext).parameters.items()}
+    resolved.update({k: v for k, v in CONVUNEXT_CONFIGS[variant].items() if k != "description"})
+    resolved.update(use_bias=True, output_channels=NUM_CLASSES, final_activation="linear")
+    dims = [int(round(resolved["initial_filters"] * resolved["filter_multiplier"] ** i))
+            for i in range(resolved["depth"] + 1)]
+    return {
+        "convnext_version": resolved["convnext_version"],
+        "depth": resolved["depth"],
+        "blocks_per_level": resolved["blocks_per_level"],
+        "dims": dims,
+        "kernel_size": resolved["block_kernel_size"],
+        "stem_kernel_size": resolved["stem_kernel_size"],
+        "block_normalization": resolved["block_normalization"],
+        "drop_path_rate": resolved["drop_path_rate"],
+        "dropout_rate": resolved["dropout_rate"],
+        "use_bias": resolved["use_bias"],
+        "final_activation": resolved["final_activation"],
+    }
+
+
 def _summary_head(
         config: SegTrainingConfig, run_dir: Path, data: Dict[str, np.ndarray], params: int,
         steps_per_epoch: int, baseline: Dict[str, float], initial_loss_ratio: float,
@@ -930,6 +941,7 @@ def _summary_head(
         "dataset": DATASET_NAME,
         "variant": config.variant,
         "params": params,
+        **architecture_of(config.variant),
         "input_shape": [config.image_size, config.image_size, 3],
         "num_classes": NUM_CLASSES,
         "class_names": list(CLASS_NAMES),
@@ -1064,6 +1076,7 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
             out_path=run_dir / "visualizations" / "training_dashboard.png",
             baseline_fn=lambda _model: dict(baseline),
             title=f"{config.experiment_name} (seed {config.seed})",
+            best_key=MONITOR,
         )
         callbacks.append(dashboard)
 
@@ -1119,8 +1132,20 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
         test_started = time.perf_counter()
         test_metrics_best, best_load_error, checkpoint_max_diff = _check_best_checkpoint(
             run_dir, data, batch_size, hist, best_i)
-        test_metrics_final = _evaluate_split(model, data["x_test"], data["y_test"], batch_size)
-        logger.info(f"Test results (final weights, epoch {epochs_run}): {test_metrics_final}")
+        # DECISION plan-2026-09-19T224205-49c8bf80/D-016: when the best epoch IS the last one the
+        # reloaded ``best_model.keras`` holds the very weights of the in-memory model, so the
+        # test split is scored ONCE and the result serves both keys (a second pass over the
+        # 3669 test images cost 25 s of a 205 s audit run and printed identical digits). Do NOT
+        # score twice "to be safe" and do NOT drop the ``test_metrics_final`` key: it stays
+        # populated, ``final_reused_best`` says it is a copy. If the checkpoint did not load
+        # there is no result to reuse, so the in-memory model is scored.
+        final_reused_best = best_epoch == epochs_run and test_metrics_best is not None
+        if final_reused_best:
+            test_metrics_final = test_metrics_best
+            logger.info(f"Test results (final weights, epoch {epochs_run}): same weights as best, scored once")
+        else:
+            test_metrics_final = _evaluate_split(model, data["x_test"], data["y_test"], batch_size)
+            logger.info(f"Test results (final weights, epoch {epochs_run}): {test_metrics_final}")
         baseline_test = trivial_baseline(data["y_test"])
         logger.info(f"Majority-class baseline on the test masks: {baseline_test}")
         test_eval_seconds = time.perf_counter() - test_started
@@ -1137,7 +1162,11 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
 
         # Both are isolated: nothing below can fail a run whose weights are already on disk.
         visualizations = _write_figures(run_dir, grid, model, hist, best_epoch, test_metrics_best, config)
-        analyzer = _run_analyzer(model, history, config, run_dir, data)
+        analyzer = run_summary.run_data_free_analysis(
+            model, data["x_val"][:LOAD_CHECK_SAMPLES].astype(np.float32) / 255.0,
+            data["y_val"][:LOAD_CHECK_SAMPLES], history, config.experiment_name, run_dir,
+            enabled=config.model_analysis,
+        )
 
         val_keys = [k for k in hist if k.startswith("val_")]
         steps_run = epochs_run * steps_per_epoch
@@ -1156,6 +1185,7 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
             "final_val_metrics": {k: hist[k][final_i] for k in val_keys},
             "test_metrics_best": test_metrics_best,
             "test_metrics_final": test_metrics_final,
+            "final_reused_best": final_reused_best,
             "trivial_baseline": baseline_test,
             "visualizations": visualizations,
             "analyzer": analyzer,
@@ -1174,7 +1204,9 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
                 "CSV `lr` is the rate at the START of the epoch (its first step); `lr_last_step` "
                 "is the rate of the final optimizer step",
                 "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` the "
-                "last epoch's weights (final_model.keras); the test split never influenced "
+                "last epoch's weights (final_model.keras); when `final_is_best` the test split "
+                "is scored once and `final_reused_best` is true (the two blocks are the same "
+                "result); the test split never influenced "
                 "selection and is always the full split (--max-samples caps the train pool only)",
                 "`miou` is keras MeanIoU; `miou_from_confusion`, `pixel_accuracy` and "
                 "`per_class_iou` come from the confusion matrix (null where a class has no true "

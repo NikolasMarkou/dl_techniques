@@ -225,6 +225,47 @@ def e2e(tmp_path_factory):
     )
 
 
+class _ValLossFalls(keras.callbacks.Callback):
+    """In FRONT of the list: a strictly falling ``val_loss``, so the LAST epoch is the best one."""
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs["val_loss"] = 10.0 - epoch
+
+
+@pytest.fixture(scope="module")
+def last_is_best(tmp_path_factory):
+    """A small real run whose best epoch is its last, with ``model_analysis`` off and a spy on it."""
+    out = tmp_path_factory.mktemp("convunext_last_is_best")
+    events: List[Any] = []
+    analysis_calls: List[Any] = []
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(common, "load_oxford_pet", _band_loader(events))
+        mp.setattr(run_summary, "run_model_analysis", lambda *a, **k: analysis_calls.append(a))
+        _patched_callbacks(mp, front=[_ValLossFalls()])
+        _spy_fit_and_eval_datasets(mp, events, {})
+        config = _config(out, "lastbest", epochs=2, warmup_epochs=0, max_samples=24, model_analysis=False)
+        summary = common.train(config)
+    return SimpleNamespace(run_dir=out / "lastbest", summary=summary, events=events, analysis_calls=analysis_calls)
+
+
+def test_the_test_split_is_scored_once_when_the_best_epoch_is_the_last(last_is_best) -> None:
+    """The reloaded best checkpoint and the in-memory model hold the same weights: one pass over
+    the test split serves both keys, and the summary says the second is a copy."""
+    summary = last_is_best.summary
+    assert summary["best_epoch"] == summary["epochs_run"] == 2 and summary["final_is_best"] is True
+    assert last_is_best.events.count(("eval_ds", N_TEST)) == 1, "the test split was scored twice"
+    assert summary["final_reused_best"] is True
+    assert summary["test_metrics_best"] is not None and summary["test_metrics_final"] == summary["test_metrics_best"]
+    assert int(np.sum(summary["test_metrics_final"]["confusion"])) == N_TEST * SIZE * SIZE
+    assert "scored once" in (last_is_best.run_dir / "run.log").read_text()
+
+
+def test_the_test_split_is_scored_for_best_and_final_when_they_differ(e2e) -> None:
+    assert e2e.summary["final_is_best"] is False and e2e.summary["final_reused_best"] is False
+    assert e2e.events.count(("eval_ds", N_TEST)) == 2, "best and final are different weights: two passes"
+    assert e2e.summary["test_metrics_final"]["loss"] != e2e.summary["test_metrics_best"]["loss"]
+
+
 ARTIFACTS = (
     "config.json", "run.log", "training_log.csv", "training_history.json", "best_model.keras",
     "final_model.keras", "results_summary.json",
@@ -594,6 +635,36 @@ def test_the_eval_pipeline_is_ordered_unaugmented_and_keeps_the_partial_last_bat
     np.testing.assert_array_equal(np.concatenate([b[1].numpy() for b in batches]), y)
 
 
+def _epochs_of(dataset, n_epochs: int = 2):
+    """``[(images, masks)]`` per epoch: every batch of every pass, as numpy."""
+    return [[(images.numpy(), masks.numpy()) for images, masks in dataset] for _ in range(n_epochs)]
+
+
+def test_two_train_pipelines_with_one_seed_yield_identical_batches_over_two_epochs() -> None:
+    """The batches are a function of the ``seed`` argument alone. The GLOBAL seed is left unset
+    (the trainer sets it, but the pipeline must not need it): a stateful ``tf.random.uniform`` in
+    the parallel map then draws different flips in every build, and even one draw in a different
+    worker order flips a different sample."""
+    x, y = _pattern_arrays(n=64)
+    x[:, 0, 0, 1] = np.arange(64)  # identity in a corner pixel: identical rows would hide the reshuffle
+    tf.random.set_seed(None)
+    first = _epochs_of(common.make_train_dataset(x, y, batch_size=8, seed=3))
+    tf.random.set_seed(None)
+    second = _epochs_of(common.make_train_dataset(x, y, batch_size=8, seed=3))
+    other = _epochs_of(common.make_train_dataset(x, y, batch_size=8, seed=4))
+    tf.random.set_seed(0)  # what the neighbouring tests expect
+
+    def same(a, b) -> bool:
+        return all(np.array_equal(u[0], v[0]) and np.array_equal(u[1], v[1]) for u, v in zip(a, b))
+
+    for epoch in range(2):
+        assert same(first[epoch], second[epoch]), f"epoch {epoch + 1} differs between two same-seed builds"
+    assert not same(first[0], first[1]), "the second epoch is reshuffled and re-flipped"
+    assert not same(first[0], other[0]), "a different seed gives different batches"
+    flipped = sum(int((np.rint(images[..., 0] * 255)[:, 0, 0] != 0).sum()) for images, _ in first[0])
+    assert 0 < flipped < 64, "the flip is still random per image"
+
+
 # ---------------------------------------------------------------------
 # The TFDS loader (the one function that touches TFDS), against a stubbed tfds.load
 # ---------------------------------------------------------------------
@@ -718,6 +789,8 @@ def test_the_grid_callback_sits_after_the_log_line_and_before_the_dashboard_and_
     (grid,) = [cb for cb in e2e.seen["callbacks"] if isinstance(cb, viz.SegmentationGridCallback)]
     assert grid.viz_freq == e2e.config.viz_freq == 1 and len(grid.indices) == e2e.config.viz_samples == 4
     np.testing.assert_array_equal(grid.images, e2e.data["x_val"][grid.indices])
+    (dashboard,) = [cb for cb in e2e.seen["callbacks"] if type(cb).__name__ == "TrainingDashboardCallback"]
+    assert dashboard.best_key == "val_loss" == e2e.summary["monitor"], "the dashboard marks the checkpoint monitor's best"
 
 
 @pytest.fixture(scope="module")
@@ -736,7 +809,7 @@ def hostile(tmp_path_factory):
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(common, "load_oxford_pet", _band_loader([]))
         mp.setattr(common, "plot_miou_curve", figure_exploded)
-        mp.setattr(common, "run_model_analysis", analyzer_exploded)
+        mp.setattr(run_summary, "run_model_analysis", analyzer_exploded)
         _spy_fit_and_eval_datasets(mp, [], seen)
         config = _config(out, "hostile", epochs=2, warmup_epochs=0, max_samples=24, viz_freq=2, viz_samples=1)
         summary = common.train(config)
@@ -773,17 +846,13 @@ def test_viz_freq_and_viz_samples_reach_the_grid_callback(hostile) -> None:
     assert grid.viz_freq == 2 and len(grid.indices) == 1 < hostile.summary["n_val"]
 
 
-def test_no_model_analysis_skips_the_analyzer_and_says_so_in_the_notes(e2e, tmp_path, monkeypatch) -> None:
-    """The flag reaches ``config.model_analysis`` (contract row) and ``train`` hands that config to
-    ``_run_analyzer``; the disabled path never touches ``run_model_analysis`` or the disk."""
-    def must_not_run(*args, **kwargs):
-        raise AssertionError("run_model_analysis was called although --no-model-analysis")
-
-    monkeypatch.setattr(common, "run_model_analysis", must_not_run)
-    config = _config(tmp_path, "off", model_analysis=False)
-    block = common._run_analyzer(e2e.final, keras.callbacks.History(), config, tmp_path, e2e.data)
-    assert block == run_summary.skipped_analysis_status()
-    assert list(tmp_path.iterdir()) == [], "no model_analysis/ directory"
+def test_no_model_analysis_skips_the_analyzer_and_says_so_in_the_notes(last_is_best) -> None:
+    """The flag reaches ``config.model_analysis`` (contract row) and ``train`` hands it to
+    ``run_summary.run_data_free_analysis``; a run with it off never calls the analysis or writes
+    ``model_analysis/``."""
+    assert last_is_best.analysis_calls == []
+    assert last_is_best.summary["analyzer"] == run_summary.skipped_analysis_status()
+    assert not (last_is_best.run_dir / "model_analysis").exists()
     notes = " ".join(common._analyzer_notes(False))
     assert "--no-model-analysis" in notes and "skipped" in notes
     assert "weights" in " ".join(common._analyzer_notes(True)).lower()
@@ -792,10 +861,63 @@ def test_no_model_analysis_skips_the_analyzer_and_says_so_in_the_notes(e2e, tmp_
 def test_the_analysis_config_runs_weights_and_spectral_only() -> None:
     """Calibration, information flow and training dynamics read per-image labels and class
     probabilities: on a dense (B, H, W, 3) output they would measure nothing meaningful (D-005)."""
-    cfg = common._analysis_config()
+    cfg = run_summary.data_free_analysis_config()
     assert (cfg.analyze_weights, cfg.analyze_spectral) == (True, True)
     assert (cfg.analyze_calibration, cfg.analyze_information_flow, cfg.analyze_training_dynamics) == (
         False, False, False)
+
+
+@pytest.mark.parametrize("variant", ["tiny", "small", "base"])
+def test_the_architecture_keys_are_what_the_built_model_has(variant) -> None:
+    """``architecture_of`` reads the variant table and the signature defaults; every value it
+    reports is compared with the model ``build_model`` really builds (a depth-4 variant included)."""
+    arch = common.architecture_of(variant)
+    table = common.CONVUNEXT_CONFIGS[variant]
+    for key in ("depth", "blocks_per_level", "drop_path_rate", "convnext_version"):
+        assert arch[key] == table[key], key
+    model = common.build_model(_config(Path("."), "arch", variant=variant), 1e-3)
+    names = {layer.name for layer in model.layers}
+    entries = [n for n in names if n.startswith("encoder_level_") and n.endswith(("_stem", "_channel_adjust"))]
+    assert len(entries) == arch["depth"], "one entry layer per encoder level"
+    assert len(arch["dims"]) == arch["depth"] + 1 and arch["dims"][0] == table["initial_filters"]
+    for level, width in enumerate(arch["dims"][:-1]):
+        blocks = [f"encoder_level_{level}_convnext_v2_block_{b}" for b in range(arch["blocks_per_level"])]
+        assert all(name in names for name in blocks)
+        assert f"encoder_level_{level}_convnext_v2_block_{arch['blocks_per_level']}" not in names
+        assert model.get_layer(f"{blocks[-1]}_residual").output.shape[-1] == width, level
+    bottleneck = model.get_layer(f"bottleneck_convnext_v2_block_{arch['blocks_per_level'] - 1}_residual")
+    assert bottleneck.output.shape[-1] == arch["dims"][-1]
+    block = model.get_layer("encoder_level_0_convnext_v2_block_0")
+    assert block.kernel_size in (arch["kernel_size"], (arch["kernel_size"],) * 2)
+    assert block.dropout_rate == arch["dropout_rate"]
+    rates = [layer.drop_path_rate for layer in model.layers if type(layer).__name__ == "StochasticDepth"]
+    assert bool(rates) == (arch["drop_path_rate"] > 0) and all(r <= arch["drop_path_rate"] for r in rates)
+    assert arch["use_bias"] is True and arch["final_activation"] == "linear"
+    assert model.output_shape[-1] == common.NUM_CLASSES
+
+
+def test_the_summary_carries_the_architecture_of_the_config_that_was_run(e2e) -> None:
+    arch = common.architecture_of(e2e.config.variant)
+    for key, value in arch.items():
+        assert e2e.summary[key] == value, key
+    assert e2e.summary["dims"] == [32, 64, 128, 256] and e2e.summary["depth"] == 3
+    assert _strict((e2e.run_dir / "results_summary.json").read_text())["dims"] == arch["dims"]
+
+
+def test_the_run_log_names_the_figures_and_the_grids(e2e) -> None:
+    log = (e2e.run_dir / "run.log").read_text()
+    block = e2e.summary["visualizations"]
+    line = [row for row in log.splitlines() if "Visualizations:" in row]
+    assert len(line) == 1, line
+    assert f"{len(block['files'])} written" in line[0] and "0 failed" in line[0]
+    assert all(name in line[0] for name in block["files"])
+    for epoch in range(EPOCHS + 1):
+        assert f"Segmentation grid written: epoch_{epoch:03d}_seg_grid.png" in log
+
+
+def test_a_failed_figure_is_named_in_the_visualizations_log_line(hostile) -> None:
+    line = [row for row in (hostile.run_dir / "run.log").read_text().splitlines() if "Visualizations:" in row]
+    assert len(line) == 1 and "1 failed: miou_curve.png" in line[0]
 
 
 def _figure_inputs(e2e, tmp_path: Path):
@@ -901,13 +1023,16 @@ def test_a_figure_function_that_writes_nothing_is_a_failure_not_a_listed_file(e2
     assert "miou_curve.png" not in out["files"] and "without writing" in out["failed"]["miou_curve.png"]
 
 
-def test_run_analyzer_records_the_status_of_the_file_and_never_raises(e2e, tmp_path, monkeypatch) -> None:
-    config = _config(tmp_path, "direct")
-    assert common._run_analyzer(e2e.final, keras.callbacks.History(), _config(tmp_path, "off", model_analysis=False),
-                                tmp_path, e2e.data) == run_summary.skipped_analysis_status()
+def test_the_shared_analysis_records_the_status_of_the_file_and_never_raises(e2e, tmp_path, monkeypatch) -> None:
+    """The shared function the trainer calls, driven with this trainer's arguments."""
+    def analyse():
+        return run_summary.run_data_free_analysis(
+            e2e.final, e2e.data["x_val"][:2].astype(np.float32) / 255.0, e2e.data["y_val"][:2],
+            keras.callbacks.History(), "direct", tmp_path)
+
     # run_model_analysis swallows its own errors and returns None: nothing on disk is 'missing'.
-    monkeypatch.setattr(common, "run_model_analysis", lambda *a, **k: None)
-    block = common._run_analyzer(e2e.final, keras.callbacks.History(), config, tmp_path, e2e.data)
+    monkeypatch.setattr(run_summary, "run_model_analysis", lambda *a, **k: None)
+    block = analyse()
     assert block["status"] == "missing" and "its exception is in run.log" in block["error"]
-    monkeypatch.setattr(common, "run_model_analysis", lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
-    assert common._run_analyzer(e2e.final, keras.callbacks.History(), config, tmp_path, e2e.data)["status"] == "error"
+    monkeypatch.setattr(run_summary, "run_model_analysis", lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
+    assert analyse()["status"] == "error"

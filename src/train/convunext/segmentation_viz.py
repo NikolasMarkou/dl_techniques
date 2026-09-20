@@ -454,6 +454,7 @@ class SegmentationGridCallback(keras.callbacks.Callback):
         title: Figure title prefix.
 
     Attributes:
+        n_val: Number of validation images (the population of the ``val mIoU`` in the title).
         indices: The chosen rows of ``x``, sorted ascending.
         written: File names written, in order.
         failed: ``{file name: error text}`` of figures that raised.
@@ -472,6 +473,7 @@ class SegmentationGridCallback(keras.callbacks.Callback):
             raise ValueError(f"viz_freq and viz_samples must be >= 1, got {viz_freq} and {viz_samples}")
         if len(x) != len(y) or len(x) < 1:
             raise ValueError(f"x has {len(x)} rows and y {len(y)}: need equal, non-zero lengths")
+        self.n_val = len(x)
         self.indices = np.sort(np.random.RandomState(seed).choice(
             len(x), size=min(viz_samples, len(x)), replace=False))
         self.images = np.asarray(x)[self.indices]
@@ -505,13 +507,15 @@ class SegmentationGridCallback(keras.callbacks.Callback):
         suffix = "untrained" if completed == 0 else f"after epoch {completed}"
         val_miou = (logs or {}).get("val_miou")
         if val_miou is not None:
-            suffix += f", val mIoU {float(val_miou):.3f}"
+            # The mIoU is of the WHOLE validation set; the sheet shows only ``len(indices)`` of it.
+            suffix += f", val mIoU {float(val_miou):.3f} (all {self.n_val})"
         try:
             plot_segmentation_grid(
                 self.images, self.masks, self.predict_classes(), self.class_names,
                 self.out_dir / name, title=f"{self.title} {suffix}".strip())
             self.written.append(name)
             self.failed.pop(name, None)
+            logger.info(f"Segmentation grid written: {name}")
         except Exception as e:  # noqa: BLE001 - a figure must never stop training
             logger.warning(f"Segmentation grid {name} failed: {type(e).__name__}: {e}")
             self.failed[name] = f"{type(e).__name__}: {e}"

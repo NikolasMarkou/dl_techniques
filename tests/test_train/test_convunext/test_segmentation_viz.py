@@ -411,6 +411,9 @@ def test_the_grid_title_carries_the_epoch_and_the_validation_miou(tmp_path, monk
     _fit(viz.SegmentationGridCallback(x, y, tmp_path, NAMES, 1, 2, 0, title="run"), 2)
     assert titles[0] == "run untrained" and titles[1].startswith("run after epoch 1, val mIoU ")
     assert titles[2].startswith("run after epoch 2, val mIoU ")
+    # The mIoU is of the WHOLE validation set while the sheet shows 2 images of it: say so.
+    assert titles[1].endswith(f"(all {len(x)})") and titles[2].endswith(f"(all {len(x)})")
+    assert len(x) > 2
 
 
 def test_predictions_are_made_with_training_false(tmp_path) -> None:

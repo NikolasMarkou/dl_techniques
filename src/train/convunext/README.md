@@ -92,7 +92,13 @@ the ConvNeXt trainer's and have NOT been tuned for this task.
   checkpoint selection and the grids); the rest is the fit split. The TEST split is read only
   after `fit` and selects nothing. `--max-samples` caps the train pool only, so test numbers
   are comparable across runs.
-- The train pipeline drops the incomplete last batch and reshuffles every epoch.
+- The train pipeline drops the incomplete last batch and reshuffles every epoch. The horizontal
+  flip is a STATELESS draw keyed by `(seed, position in the epoch's shuffled order)`, so the
+  batches (images and masks) of every epoch are reproducible from `--seed` whatever order the
+  parallel map workers run in; a stateful `tf.random.uniform` in that map assigned the flips in
+  worker-scheduling order and changed the batches between two same-seed runs (measured on random
+  1440 x 128 px arrays with the global and shuffle seed both fixed: at least 39 of 90 batches
+  differed between two builds of the old pipeline, compared only on each batch's first sample).
 
 ## What mIoU means here
 
@@ -128,7 +134,7 @@ results/<experiment_name>/
     final_model.keras               the LAST epoch's weights (not the best)
     results_summary.json            the run's record (strict JSON, keys below)
     visualizations/
-        training_dashboard.png      shared per-epoch curves (loss, accuracy, lr, ...), redrawn on a cadence
+        training_dashboard.png      shared per-epoch curves (loss, accuracy, lr, ...), redrawn on a cadence; the best epoch (lowest val_loss so far) is a green dashed line and star on the val curves
         epoch_000_seg_grid.png      the UNTRAINED model on the fixed validation batch
         epoch_NNN_seg_grid.png      after epoch NNN (every --viz-freq epochs, and the last epoch)
         confusion_matrix.png        TEST split, best weights: pixel counts and row-normalized recall
@@ -142,7 +148,9 @@ results/<experiment_name>/
 Grid figures show `viz_samples` validation images chosen ONCE with `numpy.random.RandomState(seed)`,
 so every epoch and every run of one seed shows the same images. Rows are image | ground truth |
 prediction; ground truth and prediction share one palette (pet orange, background dark blue,
-border yellow) with a legend, and each prediction title carries that row's pixel accuracy.
+border yellow) with a legend, and each prediction title carries that row's pixel accuracy. The
+figure title carries the validation mIoU of the WHOLE validation set, written
+`val mIoU 0.390 (all 160)`; the sheet itself shows only `--viz-samples` of those images.
 
 Notes:
 
@@ -158,6 +166,9 @@ Notes:
   library output that is EMPTY for a data-free analysis (every panel reads "No ... data
   available"); the useful ones are `spectral_summary.png`, `spectral_funnel_diagram.png` and
   `weight_learning_journey.png`. A smoke run (tiny, 64 px) spent about 18 s on it (`analyzer.seconds`).
+- `run.log` names what was written: one `Segmentation grid written: <file>` line per grid and one
+  `Visualizations: N written (...), M failed[: names], end-of-run figures took S s` line after the
+  end-of-run figures.
 - Every figure is isolated: one that raises is recorded under `visualizations.failed` with its
   error and the run stays `status: "ok"`. The analyzer cannot fail a finished run either: an
   exception is recorded as `analyzer.status: "error"`.
@@ -165,7 +176,8 @@ Notes:
 ### `results_summary.json` keys
 
 Identity and setup (present for `status` `ok` and `diverged`): `status`, `run_dir`,
-`experiment_name`, `model_family`, `dataset`, `variant`, `params`, `input_shape`, `num_classes`,
+`experiment_name`, `model_family`, `dataset`, `variant`, `params`, the architecture keys
+(below), `input_shape`, `num_classes`,
 `class_names`, `optimizer`, `gradient_clip_norm`, `learning_rate`, `lr_schedule`,
 `warmup_epochs`, `steps_per_epoch`, `weight_decay`, `batch_size`, `seed`, `validation_split`,
 `max_samples`, `n_train`, `n_val`, `n_test`, `data_load_seconds`, `epochs_requested`, `monitor`,
@@ -177,15 +189,27 @@ Identity and setup (present for `status` `ok` and `diverged`): `status`, `run_di
 |---|---|
 | `best_epoch_csv_index` | `best_epoch - 1`, the CSV row of the best epoch. |
 | `final_is_best` | Whether the last epoch is the best one. |
+| `final_reused_best` | True when `final_is_best` and `best_model.keras` loaded: the test split was scored ONCE and `test_metrics_final` is the same result as `test_metrics_best` (both keys stay populated). |
 | `lr_first_epoch`, `lr_last_epoch`, `lr_last_step` | CSV `lr` of the first and last epoch; the schedule's value at the final optimizer step. |
 | `best_val_metrics`, `final_val_metrics` | Validation `loss`, `accuracy`, `miou` of the best and the last epoch. |
 | `test_metrics_best`, `test_metrics_final` | Test-split `loss`, `accuracy`, `miou`, `miou_from_confusion`, `pixel_accuracy`, `per_class_iou`, `confusion` for the reloaded `best_model.keras` and for the last-epoch weights. |
 | `trivial_baseline` | Scores of the majority-class predictor on the test masks (`predicted_class`, `miou`, `per_class_iou`, `pixel_accuracy`, `confusion`). |
 | `visualizations` | `{files, failed, seconds}`: the names that exist on disk (dashboard, per-epoch grids, end-of-run figures), `{figure: error}` for those that raised, wall seconds of the end-of-run figures. |
 | `analyzer` | `{status, analyzers, error, path, seconds}` read back from `model_analysis/analysis_results.json`: status `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. With `--no-model-analysis`: the skipped block (`status: "skipped"`). |
-| `test_eval_seconds` | Wall seconds of the best and final test evaluations plus the baseline. |
+| `test_eval_seconds` | Wall seconds of the test evaluation (one pass over the split when `final_reused_best`, two otherwise) plus the baseline. |
 | `best_checkpoint_load_error`, `best_checkpoint_max_abs_diff` | Whether the best checkpoint reloaded, and the largest gap between its validation metrics and what `fit` recorded for the best epoch. |
 | `model_loading_validated` | Whether `final_model.keras` reloads and reproduces its predictions. |
+
+Architecture keys, resolved by `architecture_of(variant)` the way `create_convunext_variant`
+builds (the variant's row of `CONVUNEXT_CONFIGS` over `create_convunext`'s signature defaults,
+then `use_bias=True`, 3 output channels, linear head), and cross-checked by a test against the
+layers of the built model: `convnext_version`, `depth`, `blocks_per_level`, `dims` (channels of
+the encoder levels and the bottleneck, the model's own `Filter progression`), `kernel_size` (the
+block kernel), `stem_kernel_size`, `block_normalization`, `drop_path_rate` (the configured
+maximum; the model spreads it linearly over the blocks, so the largest per-block rate is below
+it), `dropout_rate`, `use_bias`, `final_activation`. The ConvNeXt summary's `strides`,
+`use_gamma` and `stochastic_mode` are absent on purpose: this model has no such setting
+(its ConvNeXt V2 blocks carry a GRN instead of a layer scale).
 
 A diverged run (`status: "diverged"`) writes the identity block plus `non_finite_metrics` and
 `history`, no evaluation, no figures beyond what training drew, no `final_model.keras`, and then
@@ -200,8 +224,8 @@ CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest tests/test_train/test_convunex
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest tests/test_train/test_convunext/test_run.py -q
 # the figures and the grid callback
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest tests/test_train/test_convunext/test_segmentation_viz.py -q
-# the shared readback of a weights + spectral analysis
-CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest tests/test_train/test_common_run_summary.py -q
+# the shared analysis (run and read back) and the shared dashboard with its optional best-epoch marker
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest tests/test_train/test_common_run_summary.py tests/test_train/test_common_classification_viz.py -q
 ```
 
 `test_run.py` is slow (several real fits). No test reads the TFDS cache or writes under the
@@ -209,16 +233,68 @@ repo-root `results/`.
 
 ## Measured runs
 
-None audited yet. Every number in this section must come from a run directory and its
-summary; the first audit run (`--variant tiny --image-size 128 --epochs 2`) is the next step of the
-plan that added this package.
+Two runs, audited in plan step 5 (`plans/plan-2026-09-19T224205-49c8bf80/findings/audit-loop-1-seg.md`),
+run names `convunext_audit_seg_l1` and `convunext_audit_seg_l1_rerun` (both under `results/`, which
+is untracked). Command (only the name differs), on GPU 1 (RTX 4070), commit `2c9050f57`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.convunext.train_convunext_segmentation \
+    --variant tiny --image-size 128 --epochs 2 --batch-size 16 --max-samples 1600 --viz-freq 1 \
+    --experiment-name convunext_audit_seg_l1        # and ..._l1_rerun
+```
+
+1440 fit images, 160 validation images, the full 3669-image test split, 90 steps per epoch, seed
+42, every other flag at its default. Both runs exited 0 with `status: "ok"`. These are two epochs:
+the schedule spanned 180 steps and the validation loss was still falling, so they show the wiring
+works, not what the recipe reaches.
+
+| Test split, best weights (= final, epoch 2) | `..._l1` | `..._l1_rerun` | Majority-class baseline |
+|---|---|---|---|
+| mIoU | 0.4296 | 0.4272 | 0.1924 |
+| pixel accuracy | 0.7280 | 0.7262 | 0.5772 |
+| IoU pet / background / border | 0.4898 / 0.7021 / 0.0970 | 0.4910 / 0.7007 / 0.0899 | 0 / 0.5772 / 0 |
+| val mIoU, epoch 1 then 2 | 0.3901, 0.4284 | 0.3896, 0.4269 | |
+| val loss, epoch 1 then 2 | 0.7113, 0.6530 | 0.7179, 0.6565 | |
+| `epoch_times` (s) | 83.30, 9.59 | 84.60, 9.64 | |
+| `fit_wall_seconds` | 95.84 | 97.28 | |
+
+Test mIoU is 2.2 times the baseline in both runs and all three classes are predicted, but `border`
+(a thin band, 11 to 12 percent of the pixels) is barely learned: IoU about 0.09 to 0.10, recall
+0.11. A numpy recompute of the confusion matrix from the saved `best_model.keras` equalled the
+summary's exactly. Wall clock: the first epoch is 74 s of graph build (steady epoch 9.6 s);
+`test_eval_seconds` was 59.3 and 58.5 s and the analyzer 16.6 and 17.9 s. The test evaluation
+figure predates the `final_reused_best` change, which scores the split once when the best epoch is
+the last one (it was scored twice in these runs although both blocks were identical).
+
+Noise floor between the two same-seed runs (n = 2, an indication only): 0.0024 in test mIoU
+(0.6 percent relative), 0.0018 in pixel accuracy, 0.0028 in test loss, 0.0071 in `border` IoU. A
+difference below about 0.005 mIoU between two configurations needs three or more seeds. The two runs
+were not bit-identical.
+
+A separate measurement on `jit_compile` (tiny, 128 px, batch 16, 20 steps on synthetic batches, GPU 1,
+one process per row; a probe script, not a run directory):
+
+| | first step | steady step |
+|---|---|---|
+| default (XLA) | 73.4 s, 73.5 s, 73.3 s | 0.086 s |
+| `jit_compile=False` | 51.3 s, 51.5 s | 0.287 s |
+
+Turning XLA off saves about 22 s of build and costs about 0.2 s per step, so it breaks even near
+110 steps (a little over one epoch at 90 steps) and loses beyond; the default is unchanged.
 
 ## Open items
 
-- The training defaults are the ConvNeXt trainer's, untuned for segmentation.
+- The training defaults are the ConvNeXt trainer's, untuned for segmentation. `border` is barely
+  learned after 2 epochs; a longer run (10 epochs on the whole train split, one seed) is the
+  measurement to make before any class weighting or Dice term.
 - `--deep-supervision`, a Dice or focal loss and a softmax head are not offered: the stock
   sparse cross-entropy on logits is the whole loss (the library's `SegmentationLosses` need
   one-hot targets and probabilities).
-- Best-versus-final test evaluations each cost a full pass over the 3669 test images; when the
-  best epoch is the last one they are the same weights evaluated twice.
-- The noise floor between two same-seed runs is not measured yet.
+- Two same-seed runs still differ. The input batches are now reproducible (tested), but a
+  measurement on this model (20 steps from one seed on the SAME numpy batches, two builds, GPU 1)
+  left 172 of 172 weight tensors not bit-identical, largest absolute difference 3.6e-6 to 4.4e-6:
+  GPU kernel non-determinism (convolution backward / XLA), not investigated further. The two-run
+  noise floor above (n = 2) was measured before the pipeline fix and has not been re-measured.
+- `run.log` records the analyzer, figures and grids, but the empty `model_analysis/summary_dashboard.png`
+  is still written (library output), and `validate_model_loading` plus the `final_model.keras` save
+  took 12.8 s in the audit run.
