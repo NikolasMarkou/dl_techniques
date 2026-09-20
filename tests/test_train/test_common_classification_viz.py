@@ -607,3 +607,46 @@ def test_the_dashboard_callback_passes_the_epoch_of_the_lowest_best_key_value(tm
     seen.clear()
     default._draw()
     assert seen == [None], "no best_key, no marker"
+
+
+# ---------------------------------------------------------------------
+# The opt-in mIoU panel (segmentation trainer; absent for every history without the columns)
+# ---------------------------------------------------------------------
+
+
+def _miou_history(**extra):
+    return _history(miou=[0.2, 0.3, 0.4, 0.45, 0.5], val_miou=[0.18, 0.28, 0.36, 0.4, 0.41], **extra)
+
+
+def test_the_miou_panel_exists_only_when_the_history_has_miou_columns(tmp_path, figures) -> None:
+    """ConvNeXt and PowerMLP histories carry no ``miou``: their panel list is what it was."""
+    assert viz.render_training_dashboard(_history(), tmp_path / "plain.png", "t") == [
+        "Loss", "Accuracy", "Generalization gap"]
+    assert viz.render_training_dashboard(_miou_history(), tmp_path / "seg.png", "t") == [
+        "Loss", "Accuracy", "mIoU", "Generalization gap"]
+    only_val = _history(val_miou=[0.1, 0.2, 0.3, 0.4, 0.5])
+    assert "mIoU" in viz.render_training_dashboard(only_val, tmp_path / "val.png", "t")
+
+
+def test_the_miou_panel_draws_both_curves_with_integer_ticks_the_best_epoch_and_the_baseline(
+        tmp_path, figures) -> None:
+    ax = _panel(_dashboard(tmp_path, figures, _miou_history(), best_epoch=3, baseline={"miou": 0.05}), "mIoU")
+    curves = {ln.get_label(): ln for ln in ax.get_lines()}
+    np.testing.assert_allclose(curves["train"].get_ydata(), [0.2, 0.3, 0.4, 0.45, 0.5])
+    np.testing.assert_allclose(curves["val"].get_ydata(), [0.18, 0.28, 0.36, 0.4, 0.41])
+    assert ax.get_ylabel() == "mIoU" and _best_marks(ax) == [3]
+    legend = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert "best epoch 3" in legend and viz.BASELINE_LABEL in legend
+    assert all(float(t).is_integer() for t in ax.get_xticks())
+
+
+def test_the_dashboard_callback_records_miou_when_the_logs_carry_it(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(viz, "render_training_dashboard", lambda *args, **kwargs: [])
+    callback = viz.TrainingDashboardCallback(tmp_path / "d.png")
+    callback.on_epoch_begin(0)
+    callback.on_epoch_end(0, {"loss": 1.0, "val_loss": 1.1, "miou": 0.3, "val_miou": 0.2})
+    assert callback.history["miou"] == [0.3] and callback.history["val_miou"] == [0.2]
+    plain = viz.TrainingDashboardCallback(tmp_path / "e.png")
+    plain.on_epoch_begin(0)
+    plain.on_epoch_end(0, {"loss": 1.0, "val_loss": 1.1})
+    assert "miou" not in plain.history and "val_miou" not in plain.history

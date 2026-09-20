@@ -319,8 +319,8 @@ def render_training_dashboard(
 ) -> List[str]:
     """Render the per-epoch training dashboard to a single PNG.
 
-    Panels, each drawn only when it has data: ``Loss``, ``Accuracy``,
-    ``Learning rate`` (log axis; needs ``lr``), ``Generalization gap``
+    Panels, each drawn only when it has data: ``Loss``, ``Accuracy``, ``mIoU`` (only when the
+    history has ``miou`` or ``val_miou``, i.e. a segmentation run), ``Learning rate`` (log axis; needs ``lr``), ``Generalization gap``
     (``val_loss - loss`` and ``accuracy - val_accuracy``), ``Per-epoch time``
     (needs ``epoch_times``) and ``Smoothed loss`` (only when at least
     ``SMOOTHED_PANEL_MIN_EPOCHS`` epochs exist). A ``Per-epoch time`` bar above
@@ -332,7 +332,7 @@ def render_training_dashboard(
 
     Args:
         history: Per-epoch lists with any of the keys ``loss``, ``val_loss``,
-            ``accuracy``, ``val_accuracy``, ``lr``. Epoch ``i`` is plotted at
+            ``accuracy``, ``val_accuracy``, ``miou``, ``val_miou``, ``lr``. Epoch ``i`` is plotted at
             x = ``i + 1``.
         out_path: PNG destination (parent directories are created).
         title: Figure suptitle.
@@ -361,6 +361,7 @@ def render_training_dashboard(
     loss, val_loss = _series(history, "loss"), _series(history, "val_loss")
     acc, val_acc = _series(history, "accuracy"), _series(history, "val_accuracy")
     top5, val_top5 = _series(history, "top_5_accuracy"), _series(history, "val_top_5_accuracy")
+    miou, val_miou = _series(history, "miou"), _series(history, "val_miou")
     lr = _series(history, "lr")
     times = None if not epoch_times else np.asarray(epoch_times, dtype=np.float64)
     n_epochs = max((len(s) for s in (loss, val_loss, acc, val_acc) if s is not None), default=0)
@@ -524,6 +525,8 @@ def render_training_dashboard(
         panels.append(("Loss", _loss))
     if acc is not None or val_acc is not None:
         panels.append(("Accuracy", _accuracy))
+    if miou is not None or val_miou is not None:  # only a segmentation history has these columns
+        panels.append(("mIoU", lambda ax: _curves(ax, miou, val_miou, "miou", "mIoU")))
     if lr is not None:
         panels.append(("Learning rate", _lr))
     if (loss is not None and val_loss is not None) or (acc is not None and val_acc is not None):
@@ -694,7 +697,7 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         try:
             self.epoch_times.append(time.perf_counter() - self._epoch_start)
             for key in ("loss", "val_loss", "accuracy", "val_accuracy",
-                        "top_5_accuracy", "val_top_5_accuracy"):
+                        "top_5_accuracy", "val_top_5_accuracy", "miou", "val_miou"):
                 if key in logs:
                     self.history.setdefault(key, []).append(float(logs[key]))
             lr = self._current_lr(logs)
