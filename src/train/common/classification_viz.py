@@ -12,7 +12,7 @@ Contents:
   scales with the planned epoch count (see :data:`DASHBOARD_TARGET_DRAWS`), with
   an epoch-0 baseline marker. Only panels that have data are drawn (no blank
   cells).
-- :func:`plot_confusion_matrix` - counts and row-normalized side by side. A local
+- :func:`plot_confusion_matrix` / :func:`plot_confusion_counts` - counts and row-normalized side by side. A local
   two-panel figure rather than the library ``confusion_matrix`` plugin: that
   plugin saves under a timestamped subdirectory of its own choosing (so the
   caller cannot fix the output path), imports seaborn and pandas at module
@@ -728,8 +728,44 @@ def plot_confusion_matrix(
     """
     y_true, y_pred = np.asarray(y_true).reshape(-1), np.asarray(y_pred).reshape(-1)
     n = len(class_names) if class_names is not None else int(max(y_true.max(), y_pred.max())) + 1
-    names = _class_labels(n, class_names)
     cm = confusion_matrix(y_true, y_pred, labels=list(range(n)))
+    return plot_confusion_counts(cm, class_names, out_path)
+
+
+def plot_confusion_counts(
+        cm: np.ndarray,
+        class_names: Optional[Sequence[str]],
+        out_path: PathLike,
+        subtitle: Optional[str] = None,
+) -> np.ndarray:
+    """Draw :func:`plot_confusion_matrix` from a ready count matrix.
+
+    For callers that already hold the counts and cannot afford ``N`` label pairs: a
+    segmentation run accumulates a 3 x 3 pixel confusion over tens of millions of pixels.
+    ``plot_confusion_matrix`` computes ``cm`` from labels and calls this; the layout, the
+    class-count switch and every annotation rule are documented there.
+
+    Args:
+        cm: ``(n, n)`` non-negative integer counts, rows true, columns predicted.
+        class_names: One name per class (``len == n``), or ``None`` for ``"0".."n-1"``.
+        out_path: PNG destination.
+        subtitle: Optional second title line naming what was measured (which split, which
+            weights); drawn by the up-to-``MANY_CLASSES_THRESHOLD`` layout only.
+
+    Returns:
+        ``cm`` as an integer ``(n, n)`` array.
+
+    Raises:
+        ValueError: If ``cm`` is not square, holds a negative value, or ``class_names`` does
+            not have ``n`` entries (from ``_class_labels``).
+    """
+    cm = np.asarray(cm)
+    if cm.ndim != 2 or cm.shape[0] != cm.shape[1] or cm.shape[0] < 1:
+        raise ValueError(f"cm must be a square (n, n) matrix, got shape {cm.shape}")
+    if (cm < 0).any():
+        raise ValueError("cm holds a negative count")
+    n = cm.shape[0]
+    names = _class_labels(n, class_names)  # raises if len(class_names) != n
     norm = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1)
 
     acc = float(np.trace(cm)) / max(int(cm.sum()), 1)
@@ -762,8 +798,9 @@ def plot_confusion_matrix(
                         continue
                     ax.text(j, i, fmt(mat[i, j]), ha="center", va="center", fontsize=8,
                             color="white" if mat[i, j] > cut else "black")
-        fig.suptitle(f"Confusion matrix (accuracy {acc:.4f}, n={int(cm.sum())})", fontsize=13)
-        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        fig.suptitle(f"Confusion matrix (accuracy {acc:.4f}, n={int(cm.sum())})"
+                     + (f"\n{subtitle}" if subtitle else ""), fontsize=13)
+        fig.tight_layout(rect=(0, 0, 1, 0.93 if subtitle else 0.95))
         _save_and_close(fig, out_path)
     finally:
         plt.close(fig)

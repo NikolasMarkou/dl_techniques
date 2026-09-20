@@ -20,6 +20,9 @@ Interface contracts:
 - :func:`read_analysis_status` -- ``-> {"status", "loss", "accuracy", "error", "path"}``;
   never raises. :func:`skipped_analysis_status` is the same schema for a run that did not
   call the analyzer.
+- :func:`read_data_free_analysis_status` -- ``-> {"status", "analyzers", "error", "path"}``
+  for a weights / spectral analysis (which leaves ``model_metrics`` empty, so
+  :func:`read_analysis_status` calls it 'missing'); never raises for a file problem.
 """
 
 import json
@@ -198,6 +201,79 @@ def read_analysis_status(run_dir: Path, model_name: str) -> Dict[str, Any]:
         "error": metrics.get("error"),
         "path": str(path),
     }
+
+
+# DECISION plan-2026-09-19T224205-49c8bf80/D-009: a DATA-FREE analysis (weights + spectral only,
+# calibration / information flow / training dynamics off) leaves ``model_metrics`` EMPTY, so
+# ``read_analysis_status`` reports it as 'missing' with ``KeyError: '<model>'`` although the
+# analysis succeeded (MEASURED on a real ``run_model_analysis`` file; guard:
+# ``test_data_free_status_reads_a_real_analyzer_file_that_read_analysis_status_calls_missing``).
+# Do NOT "fix" this by loosening ``read_analysis_status`` (the ConvNeXt trainer relies on its
+# strict ``model_metrics`` reading) and do NOT record 'ok' without reading the file.
+DATA_FREE_ANALYZER_SECTIONS: Dict[str, str] = {
+    "weights": "weight_stats",
+    "spectral": "spectral_summary_per_model",
+}
+
+
+def read_data_free_analysis_status(
+        run_dir: Path, model_name: str, expected: Sequence[str] = tuple(DATA_FREE_ANALYZER_SECTIONS),
+) -> Dict[str, Any]:
+    """Read a weights / spectral analysis back from ``model_analysis/analysis_results.json``.
+
+    ``run_model_analysis`` swallows every exception and logs "completed successfully"
+    regardless, so what is on disk is the only source of truth. A data-free analysis fills
+    ``weight_stats[model_name]`` and ``spectral_summary_per_model[model_name]`` and leaves
+    ``model_metrics`` empty, which is why :func:`read_analysis_status` cannot read it.
+    Never raises for a file problem (a missing, empty or corrupt file is a returned status).
+
+    Args:
+        run_dir: The run directory holding ``model_analysis/``.
+        model_name: The key the analysis was run under.
+        expected: Analyzers that were requested, names from
+            :data:`DATA_FREE_ANALYZER_SECTIONS` (``"weights"``, ``"spectral"``).
+
+    Returns:
+        ``{"status", "analyzers", "error", "path"}``. ``analyzers`` lists which of
+        ``expected`` wrote a non-empty section for ``model_name`` (in ``expected`` order).
+        ``status`` is ``"ok"`` when every expected analyzer wrote, ``"partial"`` when only
+        some did, ``"missing"`` when the file is absent or nothing expected wrote,
+        ``"unreadable"`` when the file is not a JSON object. ``error`` names the reason
+        for every status but ``"ok"``.
+
+    Raises:
+        ValueError: If ``expected`` is empty or names an unknown analyzer (a caller bug).
+    """
+    path = run_dir / "model_analysis" / "analysis_results.json"
+    out: Dict[str, Any] = {"status": "missing", "analyzers": [], "error": None, "path": str(path)}
+    unknown = [name for name in expected if name not in DATA_FREE_ANALYZER_SECTIONS]
+    if unknown or not expected:
+        raise ValueError(f"expected must name analyzers from {sorted(DATA_FREE_ANALYZER_SECTIONS)}, got {list(expected)}")
+    if not path.is_file():
+        out["error"] = f"{path} does not exist"
+        return out
+    try:
+        with open(path) as f:
+            results = json.load(f)
+        if not isinstance(results, dict):
+            raise ValueError(f"top level is {type(results).__name__}, not an object")
+    except Exception as e:  # noqa: BLE001 - reported, not fatal
+        logger.warning(f"Could not read the analysis from {path}: {e}")
+        out["status"] = "unreadable"
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    for name in expected:
+        section = results.get(DATA_FREE_ANALYZER_SECTIONS[name])
+        if isinstance(section, dict) and section.get(model_name):
+            out["analyzers"].append(name)
+    absent = [name for name in expected if name not in out["analyzers"]]
+    if not absent:
+        out["status"] = "ok"
+    else:
+        out["status"] = "partial" if out["analyzers"] else "missing"
+        out["error"] = f"no results for {absent} under model {model_name!r} in {path.name}"
+    return out
 
 
 def skipped_analysis_status() -> Dict[str, Any]:

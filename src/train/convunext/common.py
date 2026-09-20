@@ -5,9 +5,8 @@ This package trains ``create_convunext`` (``use_bias=True``, ``output_channels=3
 head) as a semantic segmenter on Oxford-IIIT Pet and writes the run directory of
 ``src/train/convnext/`` (``config.json``, ``run.log``, ``training_log.csv``,
 ``training_history.json``, ``best_model.keras``, ``final_model.keras``,
-``results_summary.json``; ``visualizations/`` and ``model_analysis/`` land in a later
-step). It is a sibling of ``train.convnext`` and imports every generic piece from
-``train.common``; the bias-free ConvUNeXt DENOISER stays in ``train.bfunet``.
+``results_summary.json``, ``visualizations/`` and ``model_analysis/``). It is a sibling of
+``train.convnext`` and imports every generic piece from ``train.common``; the bias-free ConvUNeXt DENOISER stays in ``train.bfunet``.
 
 Data: ``oxford_iiit_pet`` 4.x from the local TFDS cache (``download=False``), decoded once by
 :func:`load_oxford_pet` into in-memory uint8 arrays (bilinear images, NEAREST masks,
@@ -25,6 +24,14 @@ is what ``final_model.keras`` holds; the best epoch is ``best_model.keras`` (mon
 ``val_loss``). The test report (per-class IoU, 3x3 confusion, pixel accuracy, mIoU) is
 computed from a confusion matrix in numpy, independent of the Keras metric, next to a
 majority-class baseline computed from the test masks.
+
+Figures (``segmentation_viz``): a per-epoch grid of a fixed seeded validation batch
+(``epoch_000`` is the untrained model), the shared training dashboard, and at the end of the
+run the confusion matrix, per-class scores with ``segmentation_report.json``, best-versus-final
+predictions and the mIoU curve, each isolated so a failure is recorded in the summary's
+``visualizations.failed`` and never fails the run. ``model_analysis/`` (weights and spectral
+analyses only) is written by the shared ``run_model_analysis``, read back from disk into the
+summary's ``analyzer`` block, and wrapped so it cannot fail a finished run.
 
 Refusals happen at config time, before any directory is created:
 
@@ -48,12 +55,13 @@ import argparse
 import time
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.models.vision.convunext.model import CONVUNEXT_CONFIGS, create_convunext_variant
 from dl_techniques.utils.logger import logger
 
@@ -66,6 +74,7 @@ from train.common import (
     prepare_run_dir,
     refuse_existing_run,
     resolved_run_dir,
+    run_model_analysis,
     save_training_history_json,
     set_seeds,
     setup_gpu,
@@ -73,8 +82,9 @@ from train.common import (
     write_summary_json,
 )
 from train.common import run_summary
+from train.common.callbacks import best_checkpoint_path
 from train.common.callbacks import EpochLogLine, LearningRateLogger
-from train.common.classification_viz import TrainingDashboardCallback
+from train.common.classification_viz import TrainingDashboardCallback, plot_confusion_counts
 # The split arithmetic, the "fit split holds at least one batch" rule and the constants
 # below are the generic rules and values the ConvNeXt trainer states once; reused, not
 # re-implemented.
@@ -86,6 +96,14 @@ from train.convnext.common import (
     STATUS_OK,
     split_sizes,
     steps_per_epoch_for,
+)
+from train.convunext.segmentation_viz import (
+    SegmentationGridCallback,
+    class_scores,
+    plot_best_vs_final_predictions,
+    plot_miou_curve,
+    plot_per_class_scores,
+    write_segmentation_report,
 )
 
 
@@ -177,6 +195,7 @@ class SegTrainingConfig:
     # Monitoring / output
     viz_freq: int = 1
     viz_samples: int = 4
+    model_analysis: bool = True
     output_dir: str = "results"
     experiment_name: Optional[str] = None
 
@@ -310,6 +329,11 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Write the segmentation grid every this many epochs.")
     train.add_argument("--viz-samples", type=int, default=defaults.viz_samples,
                        help="Validation images shown in each segmentation grid.")
+
+    train.add_argument("--model-analysis", action=argparse.BooleanOptionalAction,
+                       default=defaults.model_analysis,
+                       help="Run the end-of-run ModelAnalyzer (weights and spectral analyses only) "
+                            "into model_analysis/; --no-model-analysis skips it.")
 
     out = parser.add_argument_group("output")
     out.add_argument("--output-dir", type=str, default=defaults.output_dir,
@@ -534,7 +558,9 @@ def segmentation_scores(confusion: np.ndarray) -> Dict[str, Any]:
 
     ``IoU_c = TP_c / (true_c + predicted_c - TP_c)``. A class with an empty union (no true
     and no predicted pixel) has no IoU: ``None`` in ``per_class_iou`` and left out of the
-    mean, the convention of ``keras.metrics.MeanIoU`` (which the tests cross-check).
+    mean, the convention of ``keras.metrics.MeanIoU`` (which the tests cross-check). The
+    formula lives ONCE, in ``segmentation_viz.class_scores`` (which also computes Dice,
+    precision and recall for the report); this returns its three summary keys.
 
     Args:
         confusion: ``(C, C)`` counts from :func:`confusion_matrix`.
@@ -543,17 +569,8 @@ def segmentation_scores(confusion: np.ndarray) -> Dict[str, Any]:
         ``{"per_class_iou": [float | None] * C, "miou": float | None, "pixel_accuracy":
         float | None}``; ``None`` where the denominator is zero.
     """
-    confusion = np.asarray(confusion, dtype=np.int64)
-    tp = np.diag(confusion).astype(np.float64)
-    union = confusion.sum(axis=0) + confusion.sum(axis=1) - tp
-    iou = [float(t / u) if u > 0 else None for t, u in zip(tp, union)]
-    valid = [v for v in iou if v is not None]
-    total = confusion.sum()
-    return {
-        "per_class_iou": iou,
-        "miou": float(np.mean(valid)) if valid else None,
-        "pixel_accuracy": float(tp.sum() / total) if total else None,
-    }
+    scores = class_scores(confusion)
+    return {key: scores[key] for key in ("per_class_iou", "miou", "pixel_accuracy")}
 
 
 def trivial_baseline(y_true: np.ndarray, num_classes: int = NUM_CLASSES) -> Dict[str, Any]:
@@ -755,8 +772,150 @@ def _check_best_checkpoint(
 
 
 # ---------------------------------------------------------------------
+# End of run: figures and the analyzer (neither may fail a finished run)
+# ---------------------------------------------------------------------
+
+def _analysis_config() -> AnalysisConfig:
+    """Weights and spectral analyses only.
+
+    Calibration, information flow and training dynamics read per-image labels and class
+    probabilities of a classifier; on a dense ``(B, H, W, 3)`` logit output they would
+    measure nothing meaningful (D-005). The denoiser trainer makes the same choice.
+    """
+    return AnalysisConfig(
+        analyze_weights=True, analyze_spectral=True, analyze_calibration=False,
+        analyze_information_flow=False, analyze_training_dynamics=False, verbose=False,
+    )
+
+
+def _run_analyzer(
+        model: keras.Model, history: "keras.callbacks.History", config: SegTrainingConfig,
+        run_dir: Path, data: Dict[str, np.ndarray],
+) -> Dict[str, Any]:
+    """Run the end-of-run analysis and read back what really reached the disk; never raises.
+
+    ``run_model_analysis`` swallows its own exceptions and logs success regardless, so the
+    status comes from :func:`run_summary.read_data_free_analysis_status`, not from its return
+    value. Anything raised on the way is recorded as status ``"error"``: the analyzer cannot
+    fail a finished run. ``model`` is the in-memory model, the LAST epoch's weights.
+
+    Args:
+        model: The fitted model.
+        history: The ``History`` of ``fit`` (handed to the analyzer as the training curves).
+        config: The run config; ``model_analysis`` switches this off.
+        run_dir: The run directory; results land in ``<run_dir>/model_analysis/``.
+        data: The :func:`prepare_data` dict (a validation sample is the analyzer's input).
+
+    Returns:
+        ``skipped_analysis_status()`` when disabled, else ``{"status", "analyzers", "error",
+        "path", "seconds"}`` (``status`` ``ok`` / ``partial`` / ``missing`` / ``unreadable`` /
+        ``error``).
+    """
+    if not config.model_analysis:
+        logger.info("Analyzer skipped (--no-model-analysis)")
+        return run_summary.skipped_analysis_status()
+    started = time.perf_counter()
+    try:
+        sample = data["x_val"][:LOAD_CHECK_SAMPLES].astype(np.float32) / 255.0
+        results = run_model_analysis(
+            model, (sample, data["y_val"][:LOAD_CHECK_SAMPLES]), history, config.experiment_name,
+            str(run_dir), _analysis_config(),
+        )
+        block = run_summary.read_data_free_analysis_status(run_dir, config.experiment_name)
+        if results is None and block["status"] != "ok":
+            block["error"] = f"run_model_analysis failed (its exception is in run.log); {block['error']}"
+    except Exception as e:  # noqa: BLE001 - the analyzer must not fail a finished run
+        logger.warning(f"Analyzer raised: {type(e).__name__}: {e}")
+        block = {"status": "error", "analyzers": [], "error": f"{type(e).__name__}: {e}", "path": None}
+    block["seconds"] = time.perf_counter() - started
+    logger.info(f"Analyzer status (read back from disk): {block['status']} in {block['seconds']:.1f}s")
+    return block
+
+
+def _write_figures(
+        run_dir: Path, grid: SegmentationGridCallback, model: keras.Model, hist: Dict[str, List[float]],
+        best_epoch: int, test_metrics_best: Optional[Dict[str, Any]], config: SegTrainingConfig,
+) -> Dict[str, Any]:
+    """The end-of-run figures, each isolated: one that raises is recorded, the rest still draw.
+
+    Args:
+        run_dir: The run directory (figures go to ``<run_dir>/visualizations``).
+        grid: The fitted grid callback (its fixed samples are reused for best-vs-final).
+        model: The in-memory model, the LAST epoch's weights.
+        hist: ``{metric: per-epoch floats}`` of the finished fit.
+        best_epoch: 1-based best epoch.
+        test_metrics_best: The reloaded best checkpoint's test block, or ``None`` if it did not load.
+        config: The run config (its ``experiment_name`` titles the figures).
+
+    Returns:
+        ``{"files": [names that exist on disk], "failed": {name: error text}, "seconds"}``:
+        the dashboard and the per-epoch grids come first, then the figures of this function.
+    """
+    vis_dir = run_dir / "visualizations"
+    epochs_run = len(hist[MONITOR])
+    started = time.perf_counter()
+    out: Dict[str, Any] = {"files": [], "failed": dict(grid.failed)}
+    out["files"] += [n for n in ["training_dashboard.png", *grid.written] if (vis_dir / n).is_file()]
+
+    def attempt(name: str, draw: Callable[[], Any]) -> None:
+        try:
+            draw()
+            if not (vis_dir / name).is_file():
+                raise RuntimeError("the figure function returned without writing the file")
+            out["files"].append(name)
+        except Exception as e:  # noqa: BLE001 - a figure must not fail the run
+            logger.warning(f"Visualization {name} failed: {type(e).__name__}: {e}")
+            out["failed"][name] = f"{type(e).__name__}: {e}"
+
+    def best_confusion() -> np.ndarray:
+        if test_metrics_best is None:
+            raise RuntimeError("best_model.keras did not load, so there is no best-weights confusion matrix")
+        return np.asarray(test_metrics_best["confusion"])
+
+    def best_vs_final() -> None:
+        final = grid.predict_classes(model)
+        if best_epoch == epochs_run:
+            # Same weights: no second load, and the labels say so instead of hiding it.
+            best, best_label = final, f"best (epoch {best_epoch})"
+            final_label = f"final (epoch {epochs_run}, the same weights)"
+        else:
+            best = grid.predict_classes(keras.models.load_model(best_checkpoint_path(str(run_dir))))
+            best_label, final_label = f"best (epoch {best_epoch})", f"final (epoch {epochs_run})"
+        plot_best_vs_final_predictions(
+            grid.images, grid.masks, best, final, CLASS_NAMES, vis_dir / "best_vs_final_predictions.png",
+            best_label=best_label, final_label=final_label, title=config.experiment_name)
+
+    attempt("confusion_matrix.png", lambda: plot_confusion_counts(
+        best_confusion(), CLASS_NAMES, vis_dir / "confusion_matrix.png",
+        subtitle=f"{config.experiment_name}: test split, best weights, pixel counts"))
+    attempt("per_class_metrics.png", lambda: plot_per_class_scores(
+        best_confusion(), CLASS_NAMES, vis_dir / "per_class_metrics.png"))
+    attempt("segmentation_report.json", lambda: write_segmentation_report(
+        best_confusion(), CLASS_NAMES, vis_dir / "segmentation_report.json"))
+    attempt("best_vs_final_predictions.png", best_vs_final)
+    attempt("miou_curve.png", lambda: plot_miou_curve(
+        hist, best_epoch, vis_dir / "miou_curve.png", title=f"{config.experiment_name}: mIoU per epoch"))
+    out["seconds"] = time.perf_counter() - started
+    return out
+
+
+# ---------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------
+
+def _analyzer_notes(ran: bool) -> List[str]:
+    """The ``notes`` lines about ``model_analysis/``: what it measured, or that it was skipped."""
+    if not ran:
+        return ["model_analysis/ was skipped (--no-model-analysis); `analyzer.status` is 'skipped'"]
+    return [
+        "model_analysis/ holds the WEIGHTS and SPECTRAL analyses only (calibration, information "
+        "flow and training dynamics read per-image labels and are off for a dense output) of the "
+        "LAST epoch's weights (the in-memory model, final_model.keras); `analyzer.status` is read "
+        "back from analysis_results.json (`analyzers` lists which sections have results, "
+        "`seconds` is the wall time of the analysis and its figures); its spectral verdicts are "
+        "heuristics, unreliable for a short run",
+    ]
+
 
 def _summary_head(
         config: SegTrainingConfig, run_dir: Path, data: Dict[str, np.ndarray], params: int,
@@ -892,8 +1051,15 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
         # Index 0: ``lr`` must be in ``logs`` before CSVLogger reads it, and it is the rate
         # at the START of the epoch (the default reads the next epoch's first-step rate).
         callbacks.insert(0, LearningRateLogger(at_epoch_start=True))
-        # After every callback that edits ``logs``, before the dashboard redraw.
+        # After every callback that edits ``logs`` (the grid title reads ``val_miou``), before
+        # the dashboard redraw.
         callbacks.append(EpochLogLine(EPOCH_LINE_KEYS))
+        grid = SegmentationGridCallback(
+            data["x_val"], data["y_val"], run_dir / "visualizations", CLASS_NAMES,
+            viz_freq=config.viz_freq, viz_samples=config.viz_samples, seed=config.seed,
+            title=config.experiment_name,
+        )
+        callbacks.append(grid)
         dashboard = TrainingDashboardCallback(
             out_path=run_dir / "visualizations" / "training_dashboard.png",
             baseline_fn=lambda _model: dict(baseline),
@@ -950,12 +1116,14 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
         batch_size = config.batch_size
 
         # The test split is read for the first time HERE, after ``fit``.
+        test_started = time.perf_counter()
         test_metrics_best, best_load_error, checkpoint_max_diff = _check_best_checkpoint(
             run_dir, data, batch_size, hist, best_i)
         test_metrics_final = _evaluate_split(model, data["x_test"], data["y_test"], batch_size)
         logger.info(f"Test results (final weights, epoch {epochs_run}): {test_metrics_final}")
         baseline_test = trivial_baseline(data["y_test"])
         logger.info(f"Majority-class baseline on the test masks: {baseline_test}")
+        test_eval_seconds = time.perf_counter() - test_started
 
         final_path = run_dir / "final_model.keras"
         model.save(final_path)
@@ -966,6 +1134,10 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
                 str(final_path), sample, model.predict(sample, verbose=0)))
         except Exception as e:  # noqa: BLE001 - log-only
             logger.warning(f"validate_model_loading raised: {e}")
+
+        # Both are isolated: nothing below can fail a run whose weights are already on disk.
+        visualizations = _write_figures(run_dir, grid, model, hist, best_epoch, test_metrics_best, config)
+        analyzer = _run_analyzer(model, history, config, run_dir, data)
 
         val_keys = [k for k in hist if k.startswith("val_")]
         steps_run = epochs_run * steps_per_epoch
@@ -985,6 +1157,9 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
             "test_metrics_best": test_metrics_best,
             "test_metrics_final": test_metrics_final,
             "trivial_baseline": baseline_test,
+            "visualizations": visualizations,
+            "analyzer": analyzer,
+            "test_eval_seconds": test_eval_seconds,
             "best_checkpoint_load_error": best_load_error,
             "best_checkpoint_max_abs_diff": checkpoint_max_diff,
             "epoch_times": list(dashboard.epoch_times),
@@ -1010,6 +1185,12 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
                 "for the best epoch",
                 "`fit_wall_seconds` minus the sum of `epoch_times` is time outside the epoch "
                 "clock (dashboard redraws, checkpoint saves)",
+                "`visualizations.files` lists what exists on disk (dashboard, per-epoch grids on "
+                "the same fixed validation samples, then the end-of-run figures); `failed` maps a "
+                "figure that raised to its error and never fails the run. The confusion matrix, "
+                "per-class chart and segmentation_report.json describe the TEST split with the "
+                "BEST weights; best_vs_final_predictions.png uses fixed validation samples",
+                *_analyzer_notes(config.model_analysis),
             ],
         }
         return write_summary_json(run_dir, summary)

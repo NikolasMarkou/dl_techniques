@@ -48,7 +48,8 @@ import pytest  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
 import train.convunext.common as common  # noqa: E402
-from train.common import json_numpy_default  # noqa: E402
+import train.convunext.segmentation_viz as viz  # noqa: E402
+from train.common import json_numpy_default, run_summary  # noqa: E402
 
 SIZE = 32
 N_TRAIN, N_TEST = 120, 40
@@ -660,3 +661,253 @@ def test_the_loader_turns_a_missing_cache_into_one_clear_error(monkeypatch) -> N
         common.load_oxford_pet(16)
     text = str(raised.value)
     assert "TFDS_DATA_DIR" in text and "download=False" in text and "only: 3.0.0" in text
+
+
+# ---------------------------------------------------------------------
+# Figures, analyzer and their isolation (step 4)
+# ---------------------------------------------------------------------
+
+def _end_of_run_figures():
+    return {"confusion_matrix.png", "per_class_metrics.png", "segmentation_report.json",
+            "best_vs_final_predictions.png", "miou_curve.png"}
+
+
+def _png(path: Path) -> bool:
+    return path.is_file() and path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n" and path.stat().st_size > 500
+
+
+def test_every_promised_figure_exists_and_is_listed_in_the_summary(e2e) -> None:
+    vis = e2e.run_dir / "visualizations"
+    expected = {"training_dashboard.png", *(f"epoch_{i:03d}_seg_grid.png" for i in range(EPOCHS + 1)),
+                *_end_of_run_figures()}
+    assert {p.name for p in vis.iterdir()} == expected, "nothing missing, nothing unlisted"
+    block = e2e.summary["visualizations"]
+    assert set(block["files"]) == expected and len(block["files"]) == len(expected)
+    assert block["failed"] == {} and block["seconds"] > 0.0
+    assert all(_png(vis / name) for name in expected if name.endswith(".png"))
+    saved = _strict((e2e.run_dir / "results_summary.json").read_text())["visualizations"]
+    assert saved["files"] == block["files"]
+
+
+def test_the_segmentation_report_file_equals_the_summary_test_confusion_of_the_best_weights(e2e) -> None:
+    report = _strict((e2e.run_dir / "visualizations" / "segmentation_report.json").read_text())
+    best = e2e.summary["test_metrics_best"]
+    assert report["confusion"] == best["confusion"]
+    assert [report["per_class"][n]["iou"] for n in common.CLASS_NAMES] == pytest.approx(best["per_class_iou"])
+    assert report["miou"] == pytest.approx(best["miou_from_confusion"])
+    assert report["pixel_accuracy"] == pytest.approx(best["pixel_accuracy"])
+    assert sum(v["support"] for v in report["per_class"].values()) == N_TEST * SIZE * SIZE
+
+
+def test_the_analyzer_block_is_read_back_from_the_file_the_analysis_wrote(e2e) -> None:
+    block = e2e.summary["analyzer"]
+    path = e2e.run_dir / "model_analysis" / "analysis_results.json"
+    assert path.stat().st_size > 0
+    assert block["status"] == "ok" and block["analyzers"] == ["weights", "spectral"] and block["error"] is None
+    assert block["path"] == str(path) and block["seconds"] > 0.0
+    assert block == run_summary.read_data_free_analysis_status(e2e.run_dir, "e2e") | {"seconds": block["seconds"]}
+    assert run_summary.read_analysis_status(e2e.run_dir, "e2e")["status"] == "missing", (
+        "the classification reader cannot see a data-free analysis: the reason D-009 exists")
+    assert e2e.summary["test_eval_seconds"] > 0.0
+
+
+def test_the_grid_callback_sits_after_the_log_line_and_before_the_dashboard_and_reads_the_config(e2e) -> None:
+    names = [type(cb).__name__ for cb in e2e.seen["callbacks"]]
+    assert names[0] == "LearningRateLogger" and names[-1] == "TrainingDashboardCallback"
+    assert names[-3:] == ["EpochLogLine", "SegmentationGridCallback", "TrainingDashboardCallback"], names
+    (grid,) = [cb for cb in e2e.seen["callbacks"] if isinstance(cb, viz.SegmentationGridCallback)]
+    assert grid.viz_freq == e2e.config.viz_freq == 1 and len(grid.indices) == e2e.config.viz_samples == 4
+    np.testing.assert_array_equal(grid.images, e2e.data["x_val"][grid.indices])
+
+
+@pytest.fixture(scope="module")
+def hostile(tmp_path_factory):
+    """A small real run in which one end-of-run figure and the analyzer both RAISE, with a
+    non-default ``viz_freq`` and ``viz_samples``."""
+    out = tmp_path_factory.mktemp("convunext_hostile")
+    seen: Dict[str, Any] = {}
+
+    def figure_exploded(*args, **kwargs):
+        raise RuntimeError("figure exploded")
+
+    def analyzer_exploded(*args, **kwargs):
+        raise RuntimeError("analyzer exploded")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(common, "load_oxford_pet", _band_loader([]))
+        mp.setattr(common, "plot_miou_curve", figure_exploded)
+        mp.setattr(common, "run_model_analysis", analyzer_exploded)
+        _spy_fit_and_eval_datasets(mp, [], seen)
+        config = _config(out, "hostile", epochs=2, warmup_epochs=0, max_samples=24, viz_freq=2, viz_samples=1)
+        summary = common.train(config)
+    return SimpleNamespace(run_dir=out / "hostile", summary=summary, seen=seen, config=config)
+
+
+def test_a_raising_figure_lands_in_failed_with_its_error_and_the_run_stays_ok(hostile) -> None:
+    summary = _strict((hostile.run_dir / "results_summary.json").read_text())
+    assert summary["status"] == "ok" and (hostile.run_dir / "final_model.keras").exists()
+    block = summary["visualizations"]
+    assert block["failed"] == {"miou_curve.png": "RuntimeError: figure exploded"}
+    assert "miou_curve.png" not in block["files"] and not (hostile.run_dir / "visualizations" / "miou_curve.png").exists()
+    for name in _end_of_run_figures() - {"miou_curve.png"}:
+        assert name in block["files"], f"{name}: one failed figure must not take the others down"
+
+
+def test_a_raising_analyzer_is_recorded_as_error_and_the_run_stays_ok(hostile) -> None:
+    summary = _strict((hostile.run_dir / "results_summary.json").read_text())
+    assert summary["status"] == "ok"
+    block = summary["analyzer"]
+    assert block["status"] == "error" and "analyzer exploded" in block["error"]
+    assert block["analyzers"] == [] and block["seconds"] >= 0.0
+    assert not (hostile.run_dir / "model_analysis").exists()
+    assert (hostile.run_dir / "final_model.keras").exists() and summary["test_metrics_final"]
+
+
+def test_viz_freq_and_viz_samples_reach_the_grid_callback(hostile) -> None:
+    """2 epochs at viz_freq 2: the untrained grid and epoch 2; a viz_freq of 1 would add epoch 1."""
+    files = sorted(p.name for p in (hostile.run_dir / "visualizations").glob("epoch_*_seg_grid.png"))
+    assert files == ["epoch_000_seg_grid.png", "epoch_002_seg_grid.png"]
+    (grid,) = [cb for cb in hostile.seen["callbacks"] if isinstance(cb, viz.SegmentationGridCallback)]
+    # One sample, not two: the validation split holds only 2 images, so a forwarded default of 4
+    # would be clamped to 2 and a test expecting 2 could not see the missing forward.
+    assert grid.viz_freq == 2 and len(grid.indices) == 1 < hostile.summary["n_val"]
+
+
+def test_no_model_analysis_skips_the_analyzer_and_says_so_in_the_notes(e2e, tmp_path, monkeypatch) -> None:
+    """The flag reaches ``config.model_analysis`` (contract row) and ``train`` hands that config to
+    ``_run_analyzer``; the disabled path never touches ``run_model_analysis`` or the disk."""
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("run_model_analysis was called although --no-model-analysis")
+
+    monkeypatch.setattr(common, "run_model_analysis", must_not_run)
+    config = _config(tmp_path, "off", model_analysis=False)
+    block = common._run_analyzer(e2e.final, keras.callbacks.History(), config, tmp_path, e2e.data)
+    assert block == run_summary.skipped_analysis_status()
+    assert list(tmp_path.iterdir()) == [], "no model_analysis/ directory"
+    notes = " ".join(common._analyzer_notes(False))
+    assert "--no-model-analysis" in notes and "skipped" in notes
+    assert "weights" in " ".join(common._analyzer_notes(True)).lower()
+
+
+def test_the_analysis_config_runs_weights_and_spectral_only() -> None:
+    """Calibration, information flow and training dynamics read per-image labels and class
+    probabilities: on a dense (B, H, W, 3) output they would measure nothing meaningful (D-005)."""
+    cfg = common._analysis_config()
+    assert (cfg.analyze_weights, cfg.analyze_spectral) == (True, True)
+    assert (cfg.analyze_calibration, cfg.analyze_information_flow, cfg.analyze_training_dynamics) == (
+        False, False, False)
+
+
+def _figure_inputs(e2e, tmp_path: Path):
+    """A fresh run directory plus what ``_write_figures`` needs, built from the e2e artifacts."""
+    run_dir = tmp_path / "run"
+    (run_dir / "visualizations").mkdir(parents=True)
+    grid = viz.SegmentationGridCallback(
+        e2e.data["x_val"], e2e.data["y_val"], run_dir / "visualizations", common.CLASS_NAMES,
+        viz_freq=1, viz_samples=3, seed=e2e.config.seed)
+    rows = _csv_rows(e2e.run_dir)
+    hist = {key: [float(r[key]) for r in rows] for key in ("val_loss", "miou", "val_miou")}
+    return run_dir, grid, hist
+
+
+def test_best_equal_to_final_reuses_the_final_predictions_without_loading_a_model(e2e, tmp_path, monkeypatch) -> None:
+    run_dir, grid, hist = _figure_inputs(e2e, tmp_path)
+    monkeypatch.setattr(keras.models, "load_model", lambda *a, **k: pytest.fail("the best checkpoint was loaded"))
+    labels: Dict[str, str] = {}
+    real = common.plot_best_vs_final_predictions
+    monkeypatch.setattr(common, "plot_best_vs_final_predictions",
+                        lambda *a, **k: (labels.update(best=k["best_label"], final=k["final_label"]), real(*a, **k))[1])
+    out = common._write_figures(
+        run_dir, grid, e2e.final, hist, EPOCHS, e2e.summary["test_metrics_best"], e2e.config)
+    assert out["failed"] == {} and "best_vs_final_predictions.png" in out["files"]
+    assert labels == {"best": f"best (epoch {EPOCHS})", "final": f"final (epoch {EPOCHS}, the same weights)"}
+
+
+def test_best_before_final_loads_the_best_checkpoint_for_the_best_column(e2e, tmp_path, monkeypatch) -> None:
+    run_dir, grid, hist = _figure_inputs(e2e, tmp_path)
+    best_epoch = e2e.summary["best_epoch"]
+    assert best_epoch < EPOCHS
+    loaded: List[str] = []
+
+    def constant_class_one(path):
+        """Stands in for the reloaded checkpoint: logits that always pick class 1."""
+        loaded.append(str(path))
+        inputs = keras.Input((SIZE, SIZE, 3))
+        logits = keras.layers.Lambda(lambda t: keras.ops.stack(
+            [t[..., 0] * 0.0, t[..., 0] * 0.0 + 1.0, t[..., 0] * 0.0], axis=-1))(inputs)
+        return keras.Model(inputs, logits)
+
+    monkeypatch.setattr(keras.models, "load_model", constant_class_one)
+    columns: Dict[str, Any] = {}
+    real = common.plot_best_vs_final_predictions
+    monkeypatch.setattr(
+        common, "plot_best_vs_final_predictions",
+        lambda images, truths, best, final, *a, **k: (
+            columns.update(best=best, final=final, labels=(k["best_label"], k["final_label"])),
+            real(images, truths, best, final, *a, **k))[1])
+    out = common._write_figures(
+        run_dir, grid, e2e.final, hist, best_epoch, e2e.summary["test_metrics_best"], e2e.config)
+    assert out["failed"] == {}
+    assert loaded == [str(run_dir / "best_model.keras")], "the best column comes from the best checkpoint"
+    assert set(np.unique(columns["best"])) == {1}
+    np.testing.assert_array_equal(columns["final"], grid.predict_classes(e2e.final))
+    assert columns["labels"] == (f"best (epoch {best_epoch})", f"final (epoch {EPOCHS})")
+
+
+ASYMMETRIC_CONFUSION = [[8, 1, 1], [2, 6, 2], [0, 1, 9]]
+
+
+def test_the_end_of_run_figures_are_drawn_from_the_best_confusion_as_given(e2e, tmp_path, monkeypatch) -> None:
+    """The e2e model is a near-perfect predictor, so its confusion is diagonal and a transposed
+    matrix would look identical: this drives the figures with an ASYMMETRIC one."""
+    run_dir, grid, hist = _figure_inputs(e2e, tmp_path)
+    drawn: List[np.ndarray] = []
+    real = common.plot_confusion_counts
+    monkeypatch.setattr(common, "plot_confusion_counts",
+                        lambda cm, *a, **k: (drawn.append(np.array(cm)), real(cm, *a, **k))[1])
+    out = common._write_figures(
+        run_dir, grid, e2e.final, hist, EPOCHS, {"confusion": ASYMMETRIC_CONFUSION}, e2e.config)
+    assert out["failed"] == {}
+    np.testing.assert_array_equal(drawn[0], ASYMMETRIC_CONFUSION)
+    report = _strict((run_dir / "visualizations" / "segmentation_report.json").read_text())
+    assert report["confusion"] == ASYMMETRIC_CONFUSION
+    assert report["per_class"]["pet"]["recall"] == pytest.approx(8 / 10)
+    assert report["per_class"]["pet"]["precision"] == pytest.approx(8 / 10)
+    assert report["per_class"]["background"]["precision"] == pytest.approx(6 / 8)
+    assert report["per_class"]["border"]["recall"] == pytest.approx(9 / 10)
+
+
+def test_an_unloadable_best_checkpoint_fails_only_the_figures_that_describe_it(e2e, tmp_path) -> None:
+    run_dir, grid, hist = _figure_inputs(e2e, tmp_path)
+    out = common._write_figures(run_dir, grid, e2e.final, hist, EPOCHS, None, e2e.config)
+    assert set(out["failed"]) == {"confusion_matrix.png", "per_class_metrics.png", "segmentation_report.json"}
+    for name in out["failed"]:
+        assert "did not load" in out["failed"][name], name
+    assert set(out["files"]) >= {"best_vs_final_predictions.png", "miou_curve.png"}
+    assert not (run_dir / "visualizations" / "segmentation_report.json").exists()
+
+
+def test_a_failure_recorded_by_the_grid_callback_is_merged_into_the_summary_block(e2e, tmp_path) -> None:
+    run_dir, grid, hist = _figure_inputs(e2e, tmp_path)
+    grid.failed["epoch_001_seg_grid.png"] = "OSError: earlier grid failure"
+    out = common._write_figures(run_dir, grid, e2e.final, hist, EPOCHS, e2e.summary["test_metrics_best"], e2e.config)
+    assert out["failed"] == {"epoch_001_seg_grid.png": "OSError: earlier grid failure"}
+
+
+def test_a_figure_function_that_writes_nothing_is_a_failure_not_a_listed_file(e2e, tmp_path, monkeypatch) -> None:
+    run_dir, grid, hist = _figure_inputs(e2e, tmp_path)
+    monkeypatch.setattr(common, "plot_miou_curve", lambda *a, **k: None)
+    out = common._write_figures(run_dir, grid, e2e.final, hist, EPOCHS, e2e.summary["test_metrics_best"], e2e.config)
+    assert "miou_curve.png" not in out["files"] and "without writing" in out["failed"]["miou_curve.png"]
+
+
+def test_run_analyzer_records_the_status_of_the_file_and_never_raises(e2e, tmp_path, monkeypatch) -> None:
+    config = _config(tmp_path, "direct")
+    assert common._run_analyzer(e2e.final, keras.callbacks.History(), _config(tmp_path, "off", model_analysis=False),
+                                tmp_path, e2e.data) == run_summary.skipped_analysis_status()
+    # run_model_analysis swallows its own errors and returns None: nothing on disk is 'missing'.
+    monkeypatch.setattr(common, "run_model_analysis", lambda *a, **k: None)
+    block = common._run_analyzer(e2e.final, keras.callbacks.History(), config, tmp_path, e2e.data)
+    assert block["status"] == "missing" and "its exception is in run.log" in block["error"]
+    monkeypatch.setattr(common, "run_model_analysis", lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
+    assert common._run_analyzer(e2e.final, keras.callbacks.History(), config, tmp_path, e2e.data)["status"] == "error"

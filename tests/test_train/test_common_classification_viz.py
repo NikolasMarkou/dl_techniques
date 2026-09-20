@@ -495,3 +495,50 @@ def test_narrow_log_ranges_never_get_a_crowd_of_ticks(lo, hi):
 
 def test_the_100_class_loss_range_reads_as_a_few_round_numbers():
     assert viz._nice_log_ticks(2.7, 4.9).tolist() == [3.0, 3.5, 4.0, 4.5]
+
+
+# ---------------------------------------------------------------------
+# plot_confusion_counts: the same figure from a ready count matrix
+# ---------------------------------------------------------------------
+
+def test_plot_confusion_counts_draws_the_figure_of_plot_confusion_matrix_without_labels(
+        tmp_path, figures) -> None:
+    """A count matrix of 50 million pixels must not be expanded into label pairs: the counts
+    entry point draws exactly the panels and annotations the label entry point does."""
+    counts = np.array([[5, 1, 0], [2, 3, 1], [0, 4, 6]])
+    y_true, y_pred = _figure_from_counts(counts)
+    names = ["a", "b", "c"]
+    from_labels = viz.plot_confusion_matrix(y_true, y_pred, names, tmp_path / "labels.png")
+    from_counts = viz.plot_confusion_counts(counts, names, tmp_path / "counts.png")
+    np.testing.assert_array_equal(from_labels, counts)
+    np.testing.assert_array_equal(from_counts, counts)
+
+    def text_of(fig):
+        return [[t.get_text() for t in ax.texts] for ax in fig.axes if ax.texts]
+
+    assert text_of(figures[0]) == text_of(figures[1]) and text_of(figures[0])
+    assert _size(tmp_path / "labels.png") == _size(tmp_path / "counts.png")
+
+    big = viz.plot_confusion_counts(np.diag([40_000_000, 9_000_000, 1_000_000]), names, tmp_path / "big.png")
+    assert int(big.sum()) == 50_000_000 and (tmp_path / "big.png").stat().st_size > 0
+
+
+@pytest.mark.parametrize("cm,names", [
+    (np.zeros((2, 3)), None),
+    (np.zeros(4), None),
+    (np.array([[1, -1], [0, 1]]), None),
+    (np.eye(3), ["only", "two"]),
+])
+def test_plot_confusion_counts_refuses_a_malformed_matrix(tmp_path, cm, names) -> None:
+    with pytest.raises(ValueError):
+        viz.plot_confusion_counts(cm, names, tmp_path / "bad.png")
+    assert not (tmp_path / "bad.png").exists()
+
+
+def test_plot_confusion_counts_names_what_was_measured_in_the_subtitle(tmp_path, figures) -> None:
+    counts = np.array([[5, 1], [2, 3]])
+    viz.plot_confusion_counts(counts, ["a", "b"], tmp_path / "plain.png")
+    viz.plot_confusion_counts(counts, ["a", "b"], tmp_path / "sub.png", subtitle="test split, best weights")
+    plain, sub = (fig._suptitle.get_text() for fig in figures)
+    assert "test split" not in plain and plain.startswith("Confusion matrix (accuracy 0.7273, n=11)")
+    assert sub == plain + "\ntest split, best weights"

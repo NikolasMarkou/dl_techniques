@@ -11,8 +11,9 @@ Run (repo root, the TFDS cache is read with ``download=False``)::
 
 Each run writes ``results/<experiment_name>/`` (``config.json``, ``run.log``,
 ``training_log.csv``, ``training_history.json``, ``best_model.keras``,
-``final_model.keras``, ``results_summary.json``); a reused ``--experiment-name`` is
-refused. ``--help`` allocates no GPU and no run directory.
+``final_model.keras``, ``results_summary.json``, ``visualizations/``, ``model_analysis/``); a
+reused ``--experiment-name`` is refused. ``--help`` allocates no GPU and no run directory.
+The layout and every summary key are documented in ``src/train/convunext/README.md``.
 """
 
 from typing import Optional, Sequence

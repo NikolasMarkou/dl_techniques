@@ -235,6 +235,94 @@ def test_the_skipped_status_has_the_read_back_schema(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------
+# read_data_free_analysis_status (D-009)
+# ---------------------------------------------------------------------
+
+def _data_free_payload(model: str = "m", weights: bool = True, spectral: bool = True) -> dict:
+    """The sections a weights + spectral ``ModelAnalyzer`` run really fills (MEASURED on a real
+    ``analysis_results.json``): ``model_metrics`` stays empty."""
+    return {
+        "model_metrics": {},
+        "weight_stats": {model: {"conv_w0": {"mean": 0.0}}} if weights else {},
+        "spectral_summary_per_model": {model: {"alpha": 3.1}} if spectral else {},
+        "calibration_metrics": {},
+    }
+
+
+def test_data_free_status_ok_names_the_analyzers_that_wrote(tmp_path) -> None:
+    _write_analysis(tmp_path, _data_free_payload())
+    out = run_summary.read_data_free_analysis_status(tmp_path, "m")
+    assert out == {"status": "ok", "analyzers": ["weights", "spectral"], "error": None,
+                   "path": str(tmp_path / "model_analysis" / "analysis_results.json")}
+
+
+def test_data_free_status_is_partial_when_only_some_expected_analyzers_wrote(tmp_path) -> None:
+    _write_analysis(tmp_path, _data_free_payload(spectral=False))
+    out = run_summary.read_data_free_analysis_status(tmp_path, "m")
+    assert out["status"] == "partial" and out["analyzers"] == ["weights"]
+    assert "spectral" in out["error"]
+    assert run_summary.read_data_free_analysis_status(tmp_path, "m", expected=("weights",))["status"] == "ok"
+
+
+@pytest.mark.parametrize("payload", [
+    _data_free_payload(weights=False, spectral=False),          # file exists, nothing written
+    _data_free_payload(model="other"),                          # written under another model name
+    {"model_metrics": {"m": {"status": "success"}}},            # a data-dependent-only file
+])
+def test_data_free_status_is_missing_when_nothing_expected_wrote(tmp_path, payload) -> None:
+    _write_analysis(tmp_path, payload)
+    out = run_summary.read_data_free_analysis_status(tmp_path, "m")
+    assert out["status"] == "missing" and out["analyzers"] == [] and out["error"]
+
+
+def test_data_free_status_is_missing_without_a_file_and_unreadable_for_a_corrupt_one(tmp_path) -> None:
+    out = run_summary.read_data_free_analysis_status(tmp_path, "m")
+    assert out["status"] == "missing" and "does not exist" in out["error"]
+    for name, text in (("garbled", "{not json"), ("array", "[1, 2]"), ("empty", "")):
+        directory = tmp_path / name
+        directory.mkdir()
+        _write_analysis(directory, text)
+        got = run_summary.read_data_free_analysis_status(directory, "m")
+        assert got["status"] == "unreadable" and got["error"] and got["analyzers"] == [], name
+
+
+@pytest.mark.parametrize("expected", [(), ("calibration",), ("weights", "nope")])
+def test_data_free_status_refuses_an_unknown_or_empty_expectation(tmp_path, expected) -> None:
+    with pytest.raises(ValueError, match="expected must name"):
+        run_summary.read_data_free_analysis_status(tmp_path, "m", expected=expected)
+
+
+def test_data_free_status_reads_a_real_analyzer_file_that_read_analysis_status_calls_missing(tmp_path) -> None:
+    """A REAL ``run_model_analysis`` (weights + spectral, everything data-dependent off) on a
+    small conv net: the file it writes is 'ok' for the data-free reader, while the
+    classification reader reports 'missing' with a KeyError although the analysis succeeded.
+    That disagreement is the reason the data-free reader exists (D-009)."""
+    from dl_techniques.analyzer import AnalysisConfig
+    from train.common.evaluation import run_model_analysis
+
+    model = keras.Sequential([
+        keras.layers.Input((16, 16, 3)),
+        keras.layers.Conv2D(16, 3, name="c1"),
+        keras.layers.Conv2D(16, 3, name="c2"),
+        keras.layers.Conv2D(3, 1, name="head"),
+    ])
+    history = keras.callbacks.History()
+    history.history = {"loss": [1.0, 0.5]}
+    config = AnalysisConfig(
+        analyze_weights=True, analyze_spectral=True, analyze_calibration=False,
+        analyze_information_flow=False, analyze_training_dynamics=False, verbose=False,
+    )
+    x = np.random.default_rng(0).random((4, 16, 16, 3), dtype=np.float32)
+    y = np.zeros((4, 16, 16), dtype=np.uint8)
+    assert run_model_analysis(model, (x, y), history, "real", str(tmp_path), config) is not None
+
+    real = run_summary.read_data_free_analysis_status(tmp_path, "real")
+    assert real["status"] == "ok" and real["analyzers"] == ["weights", "spectral"], real
+    assert run_summary.read_analysis_status(tmp_path, "real")["status"] == "missing"
+    assert run_summary.read_data_free_analysis_status(tmp_path, "not_the_model_name")["status"] == "missing"
+
+
+# ---------------------------------------------------------------------
 # load_best_metrics
 # ---------------------------------------------------------------------
 

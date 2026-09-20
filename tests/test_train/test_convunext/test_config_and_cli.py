@@ -72,6 +72,9 @@ def _rows() -> Tuple[Row, ...]:
         Row(("--seed",), ("--seed", "1234"), "seed", 1234),
         Row(("--viz-freq",), ("--viz-freq", "5"), "viz_freq", 5),
         Row(("--viz-samples",), ("--viz-samples", "6"), "viz_samples", 6),
+        # BooleanOptionalAction, default True: the probe is the non-default spelling.
+        Row(("--model-analysis", "--no-model-analysis"), ("--no-model-analysis",),
+            "model_analysis", False),
         Row(("--output-dir",), ("--output-dir", "/probe/seg-out"), "output_dir", "/probe/seg-out"),
         Row(("--experiment-name",), ("--experiment-name", "probe-experiment-name"),
             "experiment_name", "probe-experiment-name"),
