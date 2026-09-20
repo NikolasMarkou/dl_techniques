@@ -23,6 +23,7 @@ rejection guards, and the "no custom train_step" invariant (SC4).
 All shapes are tiny so the suite stays CPU/GPU1-light.
 """
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -336,6 +337,68 @@ def test_clip_noise_false_is_unclipped_and_clip_only_difference():
         "clip_noise True vs False produced identical tensors at high sigma; the clip "
         "gate is a no-op and this test cannot detect a regression."
     )
+
+
+# ---------------------------------------------------------------------
+# --deterministic-data (D-047): the streaming batches are a function of the seed
+# ---------------------------------------------------------------------
+
+
+def _batches(file_paths, count, seed=SEED, is_training=True, **overrides):
+    """Seed like ``train()``, build the streaming pipeline, return its first ``count`` batches."""
+    set_seeds(seed)
+    config = dataclasses.replace(_streaming_config(), seed=seed, **overrides)
+    noise_fn = make_curriculum_noise_fn(config, tf.Variable(config.sigma_max_end, dtype=tf.float32))
+    return [(np.asarray(noisy), np.asarray(clean))
+            for noisy, clean in create_dataset(file_paths, config, noise_fn, is_training=is_training).take(count)]
+
+
+@pytest.mark.parametrize("is_training, noise_type", [
+    (True, "additive"), (False, "additive"), (True, "multiplicative"), (True, "composite")])
+def test_deterministic_data_draws_the_same_batches_in_two_builds_over_ten_epochs(
+        image_paths, is_training, noise_type):
+    """Two builds of one seed give identical crops, flips and noise, training and validation stream.
+
+    Six 2-patch images at batch 4 are 3 batches an epoch, so 30 batches are ten epochs (the shuffles
+    reshuffle each one; a few batches are too few to see a race between parallel random maps).
+    Before D-047 the same probe gave 0 of 6 identical batches.
+    """
+    first = _batches(image_paths, 30, is_training=is_training, deterministic_data=True, noise_type=noise_type)
+    second = _batches(image_paths, 30, is_training=is_training, deterministic_data=True, noise_type=noise_type)
+    assert len(first) == len(second) == 30
+    for index, ((noisy_a, clean_a), (noisy_b, clean_b)) in enumerate(zip(first, second)):
+        np.testing.assert_array_equal(clean_a, clean_b, err_msg=f"clean batch {index} differs")
+        np.testing.assert_array_equal(noisy_a, noisy_b, err_msg=f"noisy batch {index} differs")
+
+
+def test_deterministic_data_follows_the_seed(image_paths):
+    """The draw is a function of the seed, not a constant: another seed gives other batches."""
+    one = _batches(image_paths, 3, seed=1, deterministic_data=True)
+    other = _batches(image_paths, 3, seed=2, deterministic_data=True)
+    assert not all(np.array_equal(a[1], b[1]) and np.array_equal(a[0], b[0]) for a, b in zip(one, other))
+
+
+def test_the_default_pipeline_keeps_todays_call_pattern(image_paths, monkeypatch):
+    """Off: an unordered decode and AUTOTUNE random maps, exactly as before D-047.
+    On: an ordered decode and no parallelism on the maps that draw random numbers."""
+    seen = {"map": []}
+    map_ = tf.data.Dataset.map
+
+    def spy_map(self, fn, *args, **kwargs):
+        seen["map"].append((kwargs.get("num_parallel_calls"), kwargs.get("deterministic")))
+        return map_(self, fn, *args, **kwargs)
+
+    monkeypatch.setattr(tf.data.Dataset, "map", spy_map)
+    _batches(image_paths, 1)
+    off = {key: list(value) for key, value in seen.items()}
+    seen["map"].clear()
+    _batches(image_paths, 1, deterministic_data=True)
+    on = seen
+    auto = tf.data.AUTOTUNE
+    assert off["map"][0] == (auto, False), "the decode map is unordered by default"
+    assert [call[0] for call in off["map"]].count(auto) == 4, "decode, augment, clip and noise are parallel"
+    assert on["map"][0] == (auto, True), "the decode map keeps its order"
+    assert [call[0] for call in on["map"]].count(auto) == 2, "only decode and the pure clip stay parallel"
 
 
 # ---------------------------------------------------------------------

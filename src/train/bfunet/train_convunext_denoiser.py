@@ -514,6 +514,13 @@ def _build_parser() -> argparse.ArgumentParser:
     add_common_arguments(parser)
     parser.add_argument("--variant", choices=list(CONVUNEXT_CONFIGS), default="base")
     parser.add_argument(
+        "--deterministic-data", action="store_true",
+        help="Draw the same crops, flips, noise and validation stream in two runs of one --seed "
+             "(ordered decode, sequential random maps; about 20-30 percent lower "
+             "input throughput). GPU kernel non-determinism remains. Streaming pipeline only: "
+             "with --self-iterate it affects the validation stream.",
+    )
+    parser.add_argument(
         "--test-eval", action=argparse.BooleanOptionalAction, default=True,
         help="After training, score best_model.keras and the last-epoch model on Kodak24 "
              "and CBSD68 crops at sigma 15/25/50 (with the noisy-input baseline) and record "
@@ -745,6 +752,7 @@ def config_from_args(args: argparse.Namespace, explicit: FrozenSet[str]) -> Trai
             else "additive"
         ),
         composite_additive_ratio=v["composite_additive_ratio"],
+        deterministic_data=v["deterministic_data"],
         self_iterate=v["self_iterate"],
         self_iterate_pool_size=v["self_iterate_pool_size"],
         self_iterate_regen_freq=v["self_iterate_regen_freq"],

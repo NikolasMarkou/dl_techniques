@@ -183,6 +183,12 @@ def create_dataset(
     if not file_paths:
         raise ValueError("No image files found for the dataset")
 
+    # DECISION plan-2026-09-19T224205-49c8bf80/D-047: ``deterministic_data`` makes the batches a function
+    # of ``config.seed`` (``set_seeds`` seeds the shuffles): an order-preserving decode and SEQUENTIAL
+    # random maps (a stateful random op run by several threads draws in a racy order: 0 of 8 batches
+    # identical, 8 of 8 when sequential). Do NOT make those maps parallel again.
+    det = config.deterministic_data
+    random_maps = None if det else tf.data.AUTOTUNE
     dataset = tf.data.Dataset.from_tensor_slices(file_paths)
     if is_training:
         dataset = dataset.shuffle(
@@ -198,7 +204,7 @@ def create_dataset(
     dataset = dataset.map(
         lambda p: decode_full_image(p, config),
         num_parallel_calls=tf.data.AUTOTUNE,
-        deterministic=False,
+        deterministic=det,
     )
     # Drop blank/corrupt decodes once, on the full image, before cropping.
     # SEMANTIC FLIP under [0,1] (no code change needed): this drops flat BLACK images
@@ -228,7 +234,7 @@ def create_dataset(
     else:
         dataset = dataset.map(
             lambda img: random_crop_patch(img, config),
-            num_parallel_calls=tf.data.AUTOTUNE,
+            num_parallel_calls=random_maps,
         )
 
     dataset = dataset.map(
@@ -238,7 +244,7 @@ def create_dataset(
     )
 
     if is_training and config.augment_data:
-        dataset = dataset.map(augment_patch, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.map(augment_patch, num_parallel_calls=random_maps)
 
     # Clip the clean patch back to [DATA_MIN, DATA_MAX] after augmentation. flips/rot90
     # preserve range, but the aspect-safe bilinear upscale (small images) can overshoot;
@@ -248,7 +254,7 @@ def create_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
 
-    dataset = dataset.map(noise_fn, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.map(noise_fn, num_parallel_calls=random_maps)
     dataset = dataset.map(
         lambda noisy, clean: (
             tf.ensure_shape(
@@ -1274,6 +1280,9 @@ class BFUnetTrainingConfig:
     # `patches_per_image` consecutive crops of one image are interleaved across images.
     # Without it, batch_size <= patches_per_image yields batches drawn from a single image.
     patch_shuffle_buffer: int = 2048
+    # Opt-in: the streaming pipeline draws the same crops, flips, noise and validation stream in
+    # two runs of one ``seed`` (``create_dataset``). Costs input throughput; default = today's.
+    deterministic_data: bool = False
     seed: int = 42
 
     # Noise curriculum
