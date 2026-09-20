@@ -172,12 +172,13 @@ third copy.
 
 Five things to know before comparing the trees:
 
-**1. Trainers renamed away from their model package.** A model with no same-named trainer
-is usually still trained, under another name:
+**1. Trainers renamed away from their model package, or split across two.** A model with no
+same-named trainer is usually still trained, under another name:
 
 | Model package | Actual trainer |
 |---|---|
 | `models/vision/bias_free_denoisers/` | `src/train/bfunet/` — several `train_*.py` scripts |
+| `models/vision/convunext/` | TWO trainers: the bias-free denoiser arm is `src/train/bfunet/train_convunext_denoiser.py` (it stays under `bfunet/` because it shares `common.py` with the unet and bfcnn denoisers); the segmentation arm (`use_bias=True`, Oxford-IIIT Pet) is `src/train/convunext/train_convunext_segmentation.py` |
 | `models/language/byte_latent_transformer/` | `src/train/blt/train_blt.py` |
 | `models/language/hierarchical_reasoning_model/` | `src/train/hrm/train_hrm.py` |
 
@@ -220,7 +221,8 @@ about test coverage.
 MPLBACKEND=Agg .venv/bin/python -m train.<model>.<script> [args]
 ```
 
-Concretely, `MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser --help`.
+Concretely, `MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser --help`
+or `MPLBACKEND=Agg .venv/bin/python -m train.convunext.train_convunext_segmentation --help`.
 For the two nested families the module path carries an extra segment —
 `-m train.time_series.nbeats.train_nbeats`, `-m train.language.colbert.train_colbert_v1`.
 `MPLBACKEND=Agg` is mandatory; matplotlib's interactive backend crashes headless.
@@ -327,6 +329,14 @@ Named exceptions to the `tests/test_<x>/` rule:
   name that predates the `sam1` spelling.
 - **`embeddings_experimental/shared/` is tested by
   `tests/test_models/test_embeddings_shared/`.**
+
+**Trainer tests live outside `tests/test_models/`**, in `tests/test_train/test_<trainer>/`, named for
+the trainer directory, not the model package: `src/train/convunext/` (segmentation) is tested by
+`tests/test_train/test_convunext/`, the ConvUNeXt denoiser under `src/train/bfunet/` by
+`tests/test_train/test_bfunet/`, and the model itself (both arms) by
+`tests/test_models/test_convunext/`. Config classes are registered in
+`tests/test_train/test_config_fields_are_live.py` (the segmentation trainer's `SegTrainingConfig`
+has a row there).
 
 And one place that only *looks* broken: `src/dl_techniques/layers/sequence_pooling/` has no
 test *directory*, but it is tested by the loose `tests/test_layers/test_sequence_pooling.py`.

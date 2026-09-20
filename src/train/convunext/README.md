@@ -165,7 +165,7 @@ Notes:
 - `model_analysis/` holds `analysis_results.json` plus four PNGs. `summary_dashboard.png` is
   library output that is EMPTY for a data-free analysis (every panel reads "No ... data
   available"); the useful ones are `spectral_summary.png`, `spectral_funnel_diagram.png` and
-  `weight_learning_journey.png`. A smoke run (tiny, 64 px) spent about 18 s on it (`analyzer.seconds`).
+  `weight_learning_journey.png`. Two smoke runs (tiny, 64 px, `convunext_seg_smoke_step4` and `convunext_seg_smoke_step6`) read `analyzer.seconds` 18.1 and 16.4.
 - `run.log` names what was written: one `Segmentation grid written: <file>` line per grid and one
   `Visualizations: N written (...), M failed[: names], end-of-run figures took S s` line after the
   end-of-run figures.
@@ -196,7 +196,7 @@ Identity and setup (present for `status` `ok` and `diverged`): `status`, `run_di
 | `trivial_baseline` | Scores of the majority-class predictor on the test masks (`predicted_class`, `miou`, `per_class_iou`, `pixel_accuracy`, `confusion`). |
 | `visualizations` | `{files, failed, seconds}`: the names that exist on disk (dashboard, per-epoch grids, end-of-run figures), `{figure: error}` for those that raised, wall seconds of the end-of-run figures. |
 | `analyzer` | `{status, analyzers, error, path, seconds}` read back from `model_analysis/analysis_results.json`: status `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. With `--no-model-analysis`: the skipped block (`status: "skipped"`). |
-| `test_eval_seconds` | Wall seconds of the test evaluation (one pass over the split when `final_reused_best`, two otherwise) plus the baseline. |
+| `test_eval_seconds` | Wall seconds of the test evaluation (the split is scored once when `final_reused_best`, twice otherwise) plus the baseline. |
 | `best_checkpoint_load_error`, `best_checkpoint_max_abs_diff` | Whether the best checkpoint reloaded, and the largest gap between its validation metrics and what `fit` recorded for the best epoch. |
 | `model_loading_validated` | Whether `final_model.keras` reloads and reproduces its predictions. |
 

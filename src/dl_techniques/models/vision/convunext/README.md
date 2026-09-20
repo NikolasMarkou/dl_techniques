@@ -30,7 +30,8 @@ registrar (see [§8](#8-relationship-to-bfconvunext)). There is no subclassed
 7. [Deep supervision, bottleneck exposure, serialization](#7-deep-supervision-bottleneck-exposure-serialization)
 8. [Relationship to `bfconvunext`](#8-relationship-to-bfconvunext)
 9. [Package surface](#9-package-surface)
-10. [Tests](#10-tests)
+10. [Training](#10-training)
+11. [Tests](#11-tests)
 
 ---
 
@@ -370,10 +371,39 @@ from dl_techniques.models.vision.convunext import (
 `POSITIVELY_HOMOGENEOUS_ACTIVATIONS` and `_validate_bias_free_arguments` live in
 `dl_techniques.models.vision.convunext.model`; the first is public, the second is private.
 
-## 10. Tests
+## 10. Training
+
+The two arms of this builder have one trainer each. Run them from the repo root with the `.venv`
+interpreter, `MPLBACKEND=Agg`, and `CUDA_VISIBLE_DEVICES` (or `--gpu`) choosing the device.
+
+| Task | Module | What it builds |
+|---|---|---|
+| Bias-free denoising | `python -m train.bfunet.train_convunext_denoiser` (`src/train/bfunet/`) | the bias-free arm through `bfconvunext` (`use_bias=False`), noisy image in and clean image out; README `src/train/bfunet/README.md` |
+| 3-class segmentation on Oxford-IIIT Pet | `python -m train.convunext.train_convunext_segmentation` (`src/train/convunext/`) | `create_convunext` with `use_bias=True`, `output_channels=3` and a linear head that emits logits, trained with `SparseCategoricalCrossentropy(from_logits=True)`; README `src/train/convunext/README.md` |
+
+```bash
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.bfunet.train_convunext_denoiser --help
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.convunext.train_convunext_segmentation --help
+```
+
+The denoiser lives under `bfunet/` because it shares a `common.py` with the unet and bfcnn
+denoisers; the segmentation trainer is a separate package so the two do not share an orchestrator.
+
+**Minimum image size.** The builder BUILDS at any spatial size, but the forward pass fails below
+`2 ** depth`: 8 for `tiny` and `small`, 16 for `base` and `large`, 32 for `xlarge`. A CPU
+test runs the real model at min-1, min and min+1 (min+1 is odd) for `tiny`, `base` and `xlarge`,
+the three distinct depths. The segmentation trainer refuses a smaller
+`--image-size` at config time (`min_image_size` in `src/train/convunext/common.py`); a caller
+of `create_convunext` gets the error only when it calls the model. Guard:
+`test_min_image_size_is_the_measured_forward_boundary` in
+`tests/test_train/test_convunext/test_config_and_cli.py`.
+
+## 11. Tests
 
 ```
 tests/test_models/test_convunext/test_model.py                     # both arms, symmetric
+tests/test_train/test_convunext/                                   # the segmentation trainer
+tests/test_train/test_bfunet/                                      # the denoiser trainer
 tests/test_models/test_bias_free_denoisers/test_bfconvunext_*.py   # the bias-free arm
 tests/test_layers/test_downsample_and_skip.py                      # the shared junction layer
 ```

@@ -23,9 +23,21 @@ Six shapes. Pick the closest exemplar and copy it; do not re-derive the scaffold
 | **Pattern 1: Vision classification** — `load_dataset()` + `create_base_argument_parser()` + the full evaluation pipeline | ConvNeXt, CapsNet, CoshNet, CliffordNet, PowerMLP (`load_dataset()` and the evaluation pipeline, but its own parser, not `create_base_argument_parser()`; see `src/train/power_mlp/README.md`), KAN, ViT, SOM, MobileNet | `src/train/vit/train_vit.py` | `val_accuracy` |
 | **Pattern 2: Time-series / probabilistic** — synthetic generators, local argparse (the base parser's `--dataset` choices do not apply), `include_terminate_on_nan=True`, analyzer behind a `--deep-analysis` flag | N-BEATS, PRISM, TiRex, MDN | `src/train/time_series/nbeats/` | `val_loss` |
 | **Pattern 3: NLP pretrain/finetune** — `train.common.nlp` for tokenization, text datasets, warmup LR, callbacks; model code stays local | BERT, FNet, tree_transformer, GPT-2, wave_field | `src/train/bert/pretrain.py`, `src/train/bert/finetune.py` | `val_loss` |
-| **Pattern 4: Denoising / detection** — file-based datasets, domain callbacks appended to a `create_callbacks()` wrapper | BFCNN, BFUNet, YOLO12-COCO, ResNet, DarkIR | `src/train/bfunet/train_bfcnn_denoiser.py` | `val_loss` / `val_psnr` |
+| **Pattern 4: Denoising / detection / dense prediction** — file-based (or in-memory dense-label) datasets, domain callbacks appended to a `create_callbacks()` wrapper | BFCNN, BFUNet, ConvUNeXt denoiser (`bfunet/`), ConvUNext segmentation (`convunext/`), YOLO12-COCO, ResNet, DarkIR | `src/train/bfunet/train_bfcnn_denoiser.py` | `val_loss` / `val_psnr` |
 | **Pattern 5: Depth estimation** — `train.common.megadepth` pipeline, depth metrics + visualization callbacks from `dl_techniques` | Depth Anything | `src/train/depth_anything/train_depth_anything.py` | `val_loss` |
 | **Pattern 6: Byte-level LM pretrain** — no tokenizer at all: `dl_techniques.datasets.byte_lm` packs raw UTF-8 into causal windows, and the auxiliary loss arrives through the model's `add_loss` rather than a custom `train_step` | H-Net | `src/train/hnet/common.py` | `val_loss` |
+
+**`src/train/convunext/` (ConvUNext segmentation) is a sibling of `src/train/convnext/`, not a task switch inside it.**
+It writes the same run-directory contract (`config.json`, `run.log`, `training_log.csv`,
+`training_history.json`, `best_model.keras`, `final_model.keras`, `results_summary.json`,
+`visualizations/`, `model_analysis/`) from the shared `train.common` pieces, with segmentation's own
+orchestrator (`common.py`), figures (`segmentation_viz.py`) and `SegTrainingConfig`; its README lists
+the flags and every summary key. Run it with `python -m train.convunext.train_convunext_segmentation`.
+Its denoiser counterpart stays in `src/train/bfunet/` (`train_convunext_denoiser.py`). Notes that hold
+for both ConvUNext trainers: neither puts the Keras layer table in `run.log` (the denoiser writes it to
+`model_summary.txt`); a run whose last epoch is the best epoch scores its test data once and records it
+(`final_reused_best` at the top level of the segmentation summary, `test_eval.final_reused_best` for the
+denoiser).
 
 `create_base_argument_parser()` supplies `--dataset`, `--image-size`, `--epochs`, `--batch-size`,
 `--learning-rate`, `--weight-decay`, `--lr-schedule`, `--patience`, `--gpu` and `--show-plots`; add
@@ -134,6 +146,8 @@ substitute, because it resolves at epoch end by matching a compiled metric objec
 | `create_learning_rate_schedule(lr, type, epochs, steps_per_epoch)` | Cosine / exponential / constant. Defined in `dl_techniques.optimization.schedule` and re-exported here; both paths resolve to the same object |
 | `load_dataset(...)` / `get_class_names(...)` | See Data loading below |
 | `validate_model_loading(...)` / `run_model_analysis(...)` | Round-trip serialization check; full ModelAnalyzer pipeline |
+| `run_summary.run_data_free_analysis(model, sample, labels, history, model_name, run_dir, enabled=True)` | The end-of-run weights + spectral analysis for trainers whose data is not per-image labels (the ConvUNeXt denoiser and segmentation trainers). Never raises; the returned `analyzer` block (`{status, analyzers, error, path, seconds}`) is read back from `model_analysis/analysis_results.json` by `read_data_free_analysis_status`, not taken from the analyzer's return value. `data_free_analysis_config()` is the one `AnalysisConfig` behind it. Do not write a per-trainer copy |
+| `TrainingDashboardCallback(..., best_key=None)` / `render_training_dashboard(..., best_epoch=None)` (`classification_viz`) | Opt-in best-epoch marker: pass `best_key="val_loss"` to draw a dashed line and star at the lowest value so far. `None` draws nothing and leaves the PNG unchanged |
 | `discover_megadepth_pairs(root)` / `MegaDepthDataset(...)` | MegaDepth RGB+depth pipeline |
 | `compare_runs(a_dir, b_dir, labels, output_dir)` | Two-run comparison; also `python -m train.common.compare_runs A B`. Emits `comparison.md` + curve PNGs |
 | `StepCheckpointCallback(...)` | Step-indexed CSV logging, rolling `.keras` checkpoint window, optional periodic ModelAnalyzer, step-loss plots. Pass an external `step_counter` for resume setups. Use instead of a per-trainer step-checkpoint class |

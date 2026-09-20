@@ -213,7 +213,8 @@ in the per-trainer sections below.
 | `--smoke` | off | Tiny end-to-end mechanism check (2 epochs, 3 steps, cosine LR). On the ConvUNeXt trainer a flag you type overrides the preset and the run name is timestamped; see "`--smoke`" below |
 | `--init-from PATH` | None | Warm-start weights from a `.keras` checkpoint — primary use: self-iterate fine-tuning. Refused when the checkpoint is not stamped `data_range: "[0,1]"`, loads 0 layers, or has any same-name layer of a different shape (see "Refusals") |
 | `--dashboard DIR` | None | Rebuild `visualizations/training_dashboard.png` from an existing run dir's `training_log.csv` and `config.json` and exit (no training; the LR panel needs the resolved `steps_per_epoch` that `config.json` holds) |
-| `--analyzer` / `--analyzer-freq` | off / 10 | Run ModelAnalyzer every N epochs |
+| `--analyzer` / `--analyzer-freq` | off / 10 | Run ModelAnalyzer every N epochs into `epoch_analysis/` (a per-epoch diagnostic, separate from the end-of-run `model_analysis/` below) |
+| `--model-analysis` / `--no-model-analysis` | on (ConvUNeXt) | After training, run the weights + spectral analyzer on the last-epoch model into `model_analysis/` and record its status under `analyzer` in `results_summary.json`; `--no-model-analysis` records a skip. **ConvUNeXt parser only**: unet and bfcnn have no flag and never run it (their `analyzer` block is the skipped one) |
 | `--viz-freq` / `--viz-samples` | 5 / 8 | Clean/noisy/denoised grid cadence & columns |
 | `--output-dir` | `results` | Output root; a relative path is anchored at the repo root, not the working directory |
 | `--experiment-name` | None | Override the run-folder name. A name whose folder already holds a run is refused |
@@ -230,7 +231,9 @@ three trainers share the contract (the differences are in "What unet and bfcnn i
 ```
 results/<experiment_name>/
     config.json                 resolved TrainingConfig, incl. data_range "[0,1]" and the RESOLVED steps_per_epoch
-    run.log                     the dl logger for this run (devices, model summary, probes, one line per epoch)
+    run.log                     the dl logger for this run (devices, one line naming model_summary.txt, probes, one line per epoch,
+                                the analyzer status); the Keras layer table is NOT in it
+    model_summary.txt           the Keras layer table (model.summary()), written once after the model is built
     training_log.csv            one row per epoch (columns below)
     training_history.json       per-epoch lists of every history metric
     best_model.keras            checkpoint of the lowest-val_loss epoch (rewritten on every improvement)
@@ -241,6 +244,9 @@ results/<experiment_name>/
         training_dashboard.png  per-epoch curves, redrawn after every epoch (the epoch-0 point is the untrained baseline)
         epoch_NNN_denoise_grid.png   clean / noisy / denoised grid, same images under the 15/25/50 (sigma_255) regimes;
                                      written at epoch 0 (untrained), epoch 1 and every --viz-freq epochs
+    model_analysis/             end-of-run weights + spectral ModelAnalyzer output of the LAST epoch's weights
+                                (analysis_results.json plus four PNGs); ConvUNeXt trainer only, on by default,
+                                absent with --no-model-analysis
     epoch_analysis/             only with --analyzer
     ww_pgd_layer_alpha.csv      only with --ww-pgd-log-alpha
     final_model_bottleneck.keras  only with --expose-bottleneck (the full 2-output model)
@@ -298,7 +304,7 @@ Strict JSON (`allow_nan=False`: non-finite values become `null`). Keys on EVERY 
 | `best_epoch` | 1-based epoch of the lowest `val_loss` (`null` when diverged) |
 | `init_from` | `{path, loaded, missing_in_source, shape_mismatch}` (counts) or `null` without `--init-from` |
 | `gpu_name`, `tf_visible_devices`, `cuda_visible_devices` | The device TensorFlow used and the environment at call time |
-| `epoch_times`, `fit_wall_seconds` | Seconds of each epoch as printed on its `run.log` line, and the wall time of `fit`; the difference is time outside that clock (redraws, checkpoint saves) |
+| `epoch_times`, `fit_wall_seconds` | Seconds of each epoch as printed on its `run.log` line, and the wall time of `fit`; the difference is time outside that clock: the epoch-0 grid and untrained baseline evaluation, the dashboard and grid redraws after each epoch, checkpoint saves. Run `convunext_audit_denoise_l1` (tiny, 64 px, 2 epochs): `fit_wall_seconds` 97.18 minus the sum of `epoch_times` 66.76 is 30.42 s |
 | `notes` | Plain-language reading notes for the file |
 
 Added by a finished run (`status: "ok"`):
@@ -309,6 +315,8 @@ Added by a finished run (`status: "ok"`):
 | `best_val_metrics`, `final_val_metrics` | The `val_*` columns of the best epoch and of the last epoch |
 | `model_loading_validated` | `final_model.keras` round-trip verdict (`true` / `false` / `null`) |
 | `test_eval` | The held-out block below |
+| `analyzer` | The end-of-run analysis, read back from `model_analysis/analysis_results.json` (not taken from the analyzer's return value): `{status, analyzers, error, path, seconds}` with `status` `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. Under `--no-model-analysis`, and always for unet and bfcnn, the skipped block (`status: "skipped"`). The smoke run `convunext_denoiser_smoke_20260920_055542` reads `status: "ok"`, `analyzers: ["weights", "spectral"]`, `seconds` 9.5 |
+| `visualizations` | `{files, failed, seconds}`: the names present in `visualizations/` (dashboard and `epoch_NNN_denoise_grid.png`), `{file: error}` for renders that raised (a failed render does not fail the run), and the wall seconds spent rendering the dashboard and grids |
 
 Added by a diverged run instead: `non_finite_metrics` (names of the metrics holding a
 non-finite or missing value) and `history` (every history list, with `null`s).
@@ -320,7 +328,7 @@ sigma_255 = 15, 25, 50, using `eval_psnr_vs_noise.evaluate_dataset` with `Random
 (the script's own default seed, deliberately not `--seed`), so the same crops and noise are used
 by every run and `eval_psnr_vs_noise` given the same seed, patch size, sample count and sigmas
 reproduces the numbers. The block is `{status, seed, patch_size, num_samples, sigmas_255,
-datasets, seconds}`; each dataset is `{status, directory, n_images, sigmas}` and each sigma
+final_reused_best, datasets, seconds}`; when the last epoch is the best (`final_is_best`) the two models are the same weights, so the sets are scored ONCE and `final_reused_best` is `true` (the `final_*` cells copy the best ones); otherwise the last-epoch model is scored separately and it is `false`; each dataset is `{status, directory, n_images, sigmas}` and each sigma
 (keys `"15"`, `"25"`, `"50"`) is
 
 | Key | Meaning |
@@ -408,7 +416,8 @@ when its value equals the parser default** (`--smoke --epochs 3` runs 3 epochs, 
 same cosine as a full run (with no warmup). The run name is
 `convunext_denoiser_smoke_<YYYYMMDD_HHMMSS>` (timestamped, so smoke runs never collide) unless
 `--experiment-name` is typed. `--smoke` does not switch the held-out test evaluation off; add
-`--no-test-eval` to skip it. `--dashboard` and the config-time refusals behave as without it.
+`--no-test-eval` to skip it. `--dashboard` and the config-time refusals behave as without it. The end-of-run
+`model_analysis/` is not switched off by `--smoke` (add `--no-model-analysis`).
 
 ## What unet and bfcnn inherit
 
@@ -437,13 +446,17 @@ unless you pass `--experiment-name`), and they still turn a typed `--max-train-f
 ## ConvUNeXt trainer (`train_convunext_denoiser.py`)
 
 Trains `create_convunext_denoiser` — a bias-free ConvNeXt U-Net. Variants: `tiny`, `small`,
-`base` (default), `large`, `xlarge`. Model-specific flags beyond the shared set:
+`base` (default), `large`, `xlarge`. The same model's biased segmentation arm is trained by the
+sibling package `src/train/convunext/` (`python -m train.convunext.train_convunext_segmentation`,
+see its `README.md`); this denoiser stays under `bfunet/` because it shares `common.py` with the
+unet and bfcnn denoisers. Model-specific flags beyond the shared set:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--variant` | base | ConvUNeXt size preset |
 | `--test-eval` / `--no-test-eval` | on | End-of-run held-out evaluation of `best_model.keras` and the last-epoch model on Kodak24 and CBSD68 crops, recorded as `test_eval` in `results_summary.json` (see "`results_summary.json` keys"). **ConvUNeXt parser only.** |
 | `--test-num-samples` | 100 | Crops per held-out test set (the `eval_psnr_vs_noise` default); refused below 1. **ConvUNeXt parser only.** |
+| `--model-analysis` / `--no-model-analysis` | on | End-of-run weights + spectral analysis into `model_analysis/`, status under `analyzer` in `results_summary.json` (see "End-of-run artifacts"). The shared base config leaves it off; this trainer turns it on. **ConvUNeXt parser only.** |
 | `--convnext-version` | v1 | `v1` = strict bias-free; `v2` adds a trainable GRN β (mildly breaks strict homogeneity) |
 | `--gabor-filters-per-channel` | None (off) | Build the Gabor stem as a **depthwise** bank (`depth_multiplier = N`) applied to each input channel independently instead of the default cross-channel `Conv2D`. Emits `channels·N` responses, so it is **mutually exclusive with `--gabor-filters`** (a `Conv2D` output-channel count — passing both is a parse error). Still trainable and bias-free, so `--freeze-gabor-stem` and degree-1 homogeneity are unaffected. Under `--no-gabor-projection` the width rule becomes `channels·N == initial_filters`. ConvUNeXt only |
 | `--dropout` | 0.0 | MLP dropout inside the inverted-bottleneck blocks |
@@ -456,6 +469,43 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
     --variant base --convnext-version v1 --block-normalization batchnorm \
     --epochs 100 --batch-size 4 --gpu 1
 ```
+
+### End-of-run artifacts and the run log
+
+- **`model_analysis/`.** After the final save (and after `test_eval`) the run analyzes the
+  in-memory last-epoch model with the weights and spectral analyzers only and writes
+  `model_analysis/analysis_results.json` plus `spectral_summary.png`,
+  `spectral_funnel_diagram.png`, `weight_learning_journey.png` and `summary_dashboard.png`.
+  `summary_dashboard.png` is library output that is EMPTY for a data-free analysis (its panels
+  read "No ... data available"). The analysis reads weights, not data; the trainer hands it the
+  fixed visualization batch only to satisfy the call. The `analyzer` block of
+  `results_summary.json` is what the analyzer actually left on disk, so an analysis that
+  raised or wrote nothing is `error` or `missing`, and the finished run stays `status: "ok"`.
+  Calibration, information flow and training dynamics are not run.
+- **`model_summary.txt` and `run.log`.** The Keras layer table goes to `model_summary.txt`
+  and `run.log` carries one line naming it. In the audit run `convunext_audit_denoise_l1`
+  `run.log` was 231 lines (`wc -l`), most of them the layer table; in the smoke run
+  `convunext_denoiser_smoke_20260920_055542` `run.log` is 87 lines and `model_summary.txt` 151.
+- **`visualizations` block.** The dashboard and grid callbacks record the files they wrote, the
+  renders that raised and the seconds spent, and the summary carries them as `visualizations`.
+- **Seeded grids.** The fixed visualization batch is cropped from the validation images with a
+  stateless random crop keyed by `--seed`, and the additive grid noise is a stateless draw keyed
+  by `--seed` and the regime, so the "Noisy" rows are the same in every epoch and in two runs of
+  one seed and consecutive `epoch_NNN_denoise_grid.png` files compare image by image.
+  Multiplicative and composite grid noise is still unseeded.
+- **Clipped pass-1 label.** The pass-1 PSNR in a grid row label scores the output clipped to
+  `[0, 1]`, like passes 2 and 3 and the `Multi-pass PSNR` line in `run.log`. It used to score the
+  raw output, which read 2.1 dB against a logged 6.45 dB for the untrained model in the
+  `convunext_audit_denoise_l1` epoch-0 grid.
+- **Best-epoch marker.** The two MSE panels (linear and log) and the PSNR panel of `training_dashboard.png` carry a dashed green
+  line, a star on the validation point and a `best epoch N (val_loss)` legend entry at the epoch
+  `best_model.keras` holds (`--dashboard` draws it too). It is a separate mark from the lighter
+  shaded band and dashed line that end the noise-curriculum ramp. Epoch axes carry integer ticks.
+- **Importing the trainer opens no TensorFlow context.** `losses/jacobian_symmetry.py` used to
+  build `_NORM_EPS` with `tf.constant` at import, which created the GPU device before
+  `setup_gpu` ran and made `setup_gpu` log an ERROR ("Physical devices cannot be modified after
+  being initialized") on every run although the GPU worked. `_NORM_EPS` is a Python float now;
+  `test_importing_the_bfunet_trainers_opens_no_tensorflow_context` guards the trainers.
 
 > A few tests import re-exported names from this module path; treat its public names as a
 > stable API surface.
@@ -583,7 +633,7 @@ Timing: epoch 1 is about 60 s (XLA compile), later epochs 10.8 to 12.5 s; the ba
 
 Reading the curves: the training loss and PSNR get worse from epoch 5 while the validation metrics keep improving. That is the noise curriculum (training sigma_max rises from 0.025 to 0.25), not a defect: the noise floor rises 7.8x from epoch 3 to 8 while the training loss rises 1.27x. Validation is not reproducible between identical-seed runs (epoch-1 `val_loss` 0.00725 against 0.00690) because the tf.data validation path is stateful and parallel; the GPU kernels account for at most 0.5 percent of that (measured by a probe that evaluated identical weights repeatedly under the shipped pipeline and under a sequential one).
 
-Open items found by this audit and not fixed (the audit was closed at the user's request after iteration 1): the pass-1 PSNR label in `epoch_*_denoise_grid.png` scores the unclipped output while the log line and passes 2 and 3 use the clipped output (3.9 to 4.2 dB apart at the untrained epoch-0 grid, at most 0.4 dB from epoch 1 on); the dashboard has no best-epoch marker and its green dashed line marks the end of the noise ramp; the grids redraw unseeded noise; the validation set is not fixed; setup_gpu logs an ERROR on every run although the GPU works; the default cosine schedule stops at 4.8e-5, not at the 1e-5 floor; unet and bfcnn keep fixed smoke names that the new reused-name refusal turns into a second-run failure.
+Open items of this audit, after the fixes of plan `plan-2026-09-19T224205-49c8bf80` (iteration 1). Fixed and described in "End-of-run artifacts and the run log": the unclipped pass-1 PSNR label, the unseeded additive grid noise and fresh-per-run viz batch, the missing best-epoch marker, the `setup_gpu` ERROR on every run, the missing `model_analysis/`, `analyzer` and `visualizations` blocks, the layer table buried in `run.log`, and the duplicate best-and-final test evaluation when the last epoch is the best. Still open: multiplicative and composite grid noise is unseeded; the validation set is not fixed (validation noise is drawn afresh); the default cosine schedule stops at 4.8e-5, not at the 1e-5 floor, and a 2-epoch run never anneals; the dashboard and grid are redrawn after every epoch (about 7 s after a 10.1 s epoch in `convunext_audit_denoise_l1`, tiny at 64 px); the untrained baseline evaluation costs 12.6 s in that run; the end-of-run `test_eval` scores 64 px crops, which charges the zero-padding border artifact of the U-Net to every crop; unet and bfcnn keep fixed smoke names that the reused-name refusal turns into a second-run failure.
 
 ## Constraints & gotchas
 
@@ -623,4 +673,4 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_trai
 | `test_train_bfunet_run.py` | Real tiny end-to-end runs: run-directory contract, refusal order, `run.log`, start-of-epoch `lr`, the cosine last-step pin, final versus best model, divergence record, `init_from` checks, `results_summary.json` and `test_eval` |
 | `test_provenance_gate.py` | Legacy-domain checkpoints are refused by the checkpoint-load paths (the eval tools and `--init-from`) |
 | `test_unet_denoiser.py`, `test_bfcnn_denoiser.py` | The two baseline trainers: config, `build_model` wiring, bias-free check, CLI parsing (construction only, CPU) |
-| `test_the_*_gabor_stem_*.py`, `test_convunext_*.py` | Gabor stem flags and width rule, self-iterate, supporting fixes |
+| `test_the_*_gabor_stem_*.py`, `test_convunext_*.py` | Gabor stem flags and width rule, self-iterate, supporting fixes (`test_convunext_supporting_fixes.py`: the seeded grid, the clipped pass-1 label, the analyzer and `visualizations` blocks, the once-only test evaluation, the import-time TensorFlow context) |
