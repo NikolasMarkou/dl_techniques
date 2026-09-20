@@ -354,13 +354,81 @@ Wall clock: `run.log` timestamps put the `final_model.keras` save plus `validate
 11.7 s in `..._l2` (12.8 s in loop 1); `analyzer.seconds` 9.5, 13.3, 9.5 in the three seeds and
 18.7 in `..._fix`.
 
+### Loop 3 (same-seed floor, the default 30-epoch recipe)
+
+Every number below was read from the named run's `results_summary.json` or `training_log.csv`
+when this section was written; the run directories are under `results/` (untracked). Audit note:
+`plans/plan-2026-09-19T224205-49c8bf80/findings/audit-loop-3.md`. GPU 1, one job at a time.
+
+**The same-seed floor.** Three runs of the loop-2 command at seed 42 on the fixed code
+(`convunext_audit_seg_l3`, `_rep1`, `_rep2`; tiny, 128 px, 2 epochs, batch 16, `--max-samples 1600`,
+`--viz-freq 1`):
+
+| Run | Test mIoU (best weights) | IoU pet / background / border | Test loss | `epoch_times` (s) | `fit_wall_seconds` | `test_eval_seconds` |
+|---|---|---|---|---|---|---|
+| `convunext_audit_seg_l3` | 0.428110 | 0.494694 / 0.702653 / 0.086982 | 0.660235 | 83.11, 9.71 | 96.29 | 25.28 |
+| `convunext_audit_seg_l3_rep1` | 0.428109 | 0.494705 / 0.702655 / 0.086967 | 0.660236 | 84.44, 9.55 | 97.44 | 25.48 |
+| `convunext_audit_seg_l3_rep2` | 0.428123 | 0.494720 / 0.702670 / 0.086979 | 0.660208 | 84.22, 9.48 | 97.21 | 26.12 |
+
+The test mIoU range is 0.000014, and 0.000017 over the five seed-42 runs of the fixed code
+(`convunext_audit_seg_l2` 0.428124, `convunext_audit_seg_l2_fix` 0.428107 and the three above; three
+code states). That is about a thousandth of the loop-2 seed spread (0.0174, n = 3): the spread in "Loop 2" is a
+seed effect (a seed changes the initial weights and the fit/validation split), not run-to-run noise.
+The same-seed floor is the GPU kernel non-determinism of "Open items" (weights differ at the 1e-6 level
+after 20 steps, measured in iteration 1; test mIoU differs by about 1e-5 after 200 steps, measured here); before the stateless flip of iteration 1 the same pair differed by
+0.0024. So a change of about 1e-4 mIoU on a fixed seed and split is attributable in a 2-epoch run,
+unless the change alters how the random number generators are consumed (an added layer, a different
+initialiser draw order), which makes it a different-seed comparison.
+
+**The default recipe, once (`convunext_probe_seg_l3_default`).** Seed 42, `--variant tiny --image-size 128
+--batch-size 16` and every other flag at its default: 30 epochs planned, patience 10, cosine LR 1e-3,
+whole train split (3312 fit / 368 validation images, 207 steps per epoch), the full 3669-image test
+split. Exit 0, `status: "ok"`, 28 epochs run, `fit_wall_seconds` 675.15, `test_eval_seconds` 48.73
+(two scored passes, best and final), `analyzer.seconds` 22.10. Epoch 1 took 95.76 s, epochs 2 to 28 19.80
+to 20.86 s (mean 20.30). Verdicts, on rules written before the run:
+
+| Question | Rule | Measured | Verdict |
+|---|---|---|---|
+| Did it run to the end? | `epochs_run` 30, else early stop | `stopped_early` true after epoch 28 of 30 (patience 10 on `val_loss`) | Early stop: it fired exactly 10 epochs after the best epoch (18 + 10), saved 2 epochs and did not change the scored checkpoint |
+| Is the best epoch the last? | `best_epoch == epochs_run` | `best_epoch` 18 of 28 | No: the best-versus-final path ran on a real segmentation run |
+| Overfit? | `val_loss` last minus best at least 0.02 with train loss lower | 0.3316 - 0.2990 = +0.0327; train loss 0.1736 against 0.2383 | Yes |
+| Plateau? | `val_miou` range over the last 10 epochs below 0.01 | 0.0150 (epochs 19 to 28); 0.0033 over epochs 24 to 28 | No by the rule; the last four epochs are flat (0.7109, 0.7114, 0.7109, 0.7102) |
+| Above the 10-epoch probe? | test mIoU above 0.6579 by more than the 0.0174 seed spread | 0.7100 (best), 0.7197 (final) | Above (0.0521 and 0.0618, three times the seed spread; the same-seed floor is 1.4e-5). Same seed and split, only the epoch count and so the schedule differ |
+| Is `border` stuck? | test border IoU below 0.20 | 0.4593 (best), 0.4726 (final); recall 0.568 / 0.586, precision 0.706 / 0.710; predicted share 9.87 / 10.14 percent against 12.29 percent | No (the 10-epoch probe: 0.3771) |
+| Does the LR anneal? | `lr_last_step` at most 2e-5 and CSV `lr` falls every epoch | `lr_last_step` 2.0869e-05 (4.3 percent above the line), CSV `lr` strictly falling from 1.0000e-03 to 3.4227e-05 | Borderline: the run stopped at step 5796 of 6210, and the 1e-5 floor is reached only at step 6210 |
+
+Best weights (`best_model.keras`, epoch 18) against the final weights on the test split (60,112,896
+pixels, both confusion matrices sum to it, `miou == miou_from_confusion`):
+
+| | IoU pet / background / border | mIoU | Pixel accuracy | Test loss |
+|---|---|---|---|---|
+| best (epoch 18) | 0.7883 / 0.8824 / 0.4593 | 0.7100 | 0.8866 | 0.3061 |
+| final (epoch 28) | 0.7985 / 0.8880 / 0.4726 | 0.7197 | 0.8911 | 0.3302 |
+
+**The `val_loss` checkpoint scores below the final weights here.** `val_loss` selects the epoch whose
+weights every headline number is scored on, and it turns at epoch 18 and then rises while `val_miou`
+keeps improving to epoch 26 (0.7114). On the test split the final weights beat the best ones by 0.0097 mIoU,
+0.0133 border IoU and 0.0045 pixel accuracy and lose only on cross-entropy (0.3302 against 0.3061), which is
+over-confidence and not worse masks. One seed, and 0.0097 is 0.56 of the seed spread, so this is a measured
+direction, not a proven effect. It is a finding and nothing was changed: the monitor stays `val_loss` (a new
+monitor would change a measured default). Only the best weights get the confusion and per-class figures (their
+titles say so); the final weights' confusion is in `results_summary.json` (`test_metrics_final`).
+
+**Best differs from final: what appeared.** `final_reused_best` false; `test_metrics_final` differs from
+`test_metrics_best`; `best_vs_final_predictions.png` is present (four images, two visibly different prediction
+columns); `visualizations.skipped` is `{}` and `failed` `[]`; 35 files listed and 35 on disk (34 PNG and
+`segmentation_report.json`); `analyzer.removed` is `["summary_dashboard.png"]`. The TensorFlow retracing
+warning that loop 2 saw once in a denoiser run with best differing from final was not reproduced here: no
+`retracing` line in the 1.5 MB stdout. The two scored passes cost 48.73 s against about 26 s for one.
+
 ## Open items
 
 - The training defaults are the ConvNeXt trainer's, untuned for segmentation. `border` is not stuck:
   the 10-epoch probe reaches test IoU 0.3771 (2-epoch runs 0.087 to 0.122), so no class weight or
-  Dice term is justified by the evidence. What is unmeasured is the 30-epoch default itself
-  (one run, about 14 minutes, would say whether it ends above the probe's 0.6579 and whether
-  patience 10 ever fires).
+  Dice term is justified by the evidence. The 30-epoch default was measured once ("Loop 3"): it
+  stops at epoch 28, ends at test mIoU 0.7100 (best weights) and 0.7197 (final), above the probe's
+  0.6579, with `border` IoU 0.4593 and 0.4726. Whether the `val_loss` checkpoint costs mIoU beyond this
+  one seed is unmeasured (one seed, 0.0097 apart).
 - `--deep-supervision`, a Dice or focal loss and a softmax head are not offered: the stock
   sparse cross-entropy on logits is the whole loss (the library's `SegmentationLosses` need
   one-hot targets and probabilities).
@@ -368,8 +436,8 @@ Wall clock: `run.log` timestamps put the `final_model.keras` save plus `validate
   measurement on this model (20 steps from one seed on the SAME numpy batches, two builds, GPU 1)
   left 172 of 172 weight tensors not bit-identical, largest absolute difference 3.6e-6 to 4.4e-6:
   GPU kernel non-determinism (convolution backward / XLA), not investigated further. The
-  same-seed spread of the current code is unmeasured (the one same-seed pair above changed the
-  evaluation code); the seed spread is 0.0174 test mIoU (n = 3).
+  same-seed spread of the current code is 0.000014 test mIoU (n = 3, "Loop 3"); the seed spread is
+  0.0174 (n = 3).
 - `visualizations.seconds` counts the per-epoch grids and the end-of-run figures, not the
   dashboard redraw (the shared callback has no clock); `fit_wall_seconds` minus the sum of
   `epoch_times` is the only account of it.
