@@ -199,7 +199,7 @@ Identity and setup (present for `status` `ok` and `diverged`): `status`, `run_di
 | `test_metrics_best`, `test_metrics_final` | Test-split `loss`, `accuracy`, `miou`, `miou_from_confusion`, `pixel_accuracy`, `per_class_iou`, `confusion` for the reloaded `best_model.keras` and for the last-epoch weights. |
 | `trivial_baseline` | Scores of the majority-class predictor on the test masks (`predicted_class`, `miou`, `per_class_iou`, `pixel_accuracy`, `confusion`). |
 | `visualizations` | `{files, failed, skipped, seconds}`: the names that exist on disk (dashboard, per-epoch grids, end-of-run figures), `{figure: error}` for those that raised, `{figure: reason}` for those deliberately not drawn (`best_vs_final_predictions.png` when the best epoch is the last), wall seconds of the per-epoch grids plus the end-of-run figures (the dashboard redraw is not timed). |
-| `analyzer` | `{status, analyzers, error, path, seconds}` read back from `model_analysis/analysis_results.json`: status `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. With `--no-model-analysis`: the skipped block (`status: "skipped"`). |
+| `analyzer` | `{status, analyzers, error, path, seconds}` read back from `model_analysis/analysis_results.json`, plus `removed: ["summary_dashboard.png"]` when the empty library figure was deleted after an `ok` read-back (the key is absent otherwise): status `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. With `--no-model-analysis`: the skipped block (`status: "skipped"`). |
 | `test_eval_seconds` | Wall seconds of the test evaluation (one prediction pass per scored weight set; the split is scored once when `final_reused_best`, twice otherwise) plus the baseline. |
 | `best_checkpoint_load_error`, `best_checkpoint_max_abs_diff` | Whether the best checkpoint reloaded, and the largest gap between its validation metrics and what `fit` recorded for the best epoch. |
 | `model_loading_validated` | Whether `final_model.keras` reloads and reproduces its predictions. |
@@ -237,6 +237,8 @@ repo-root `results/`.
 
 ## Measured runs
 
+### Loop 1 (before the loop-2 fixes)
+
 Two runs, audited in plan step 5 (`plans/plan-2026-09-19T224205-49c8bf80/findings/audit-loop-1-seg.md`),
 run names `convunext_audit_seg_l1` and `convunext_audit_seg_l1_rerun` (both under `results/`, which
 is untracked). Command (only the name differs), on GPU 1 (RTX 4070), commit `2c9050f57`:
@@ -270,10 +272,10 @@ summary's exactly. Wall clock: the first epoch is 74 s of graph build (steady ep
 figure predates the `final_reused_best` change, which scores the split once when the best epoch is
 the last one (it was scored twice in these runs although both blocks were identical).
 
-Noise floor between the two same-seed runs (n = 2, an indication only): 0.0024 in test mIoU
-(0.6 percent relative), 0.0018 in pixel accuracy, 0.0028 in test loss, 0.0071 in `border` IoU. A
-difference below about 0.005 mIoU between two configurations needs three or more seeds. The two runs
-were not bit-identical.
+Difference between these two same-seed runs (n = 2, measured BEFORE the stateless-flip fix, so
+it is not a noise floor of the current code): 0.0024 in test mIoU, 0.0018 in pixel accuracy,
+0.0028 in test loss, 0.0071 in `border` IoU. The loop-2 measurement below replaces it as the
+reference: the spread between SEEDS is 0.0174, 7.3 times larger.
 
 A separate measurement on `jit_compile` (tiny, 128 px, batch 16, 20 steps on synthetic batches, GPU 1,
 one process per row; a probe script, not a run directory):
@@ -286,18 +288,85 @@ one process per row; a probe script, not a run directory):
 Turning XLA off saves about 22 s of build and costs about 0.2 s per step, so it breaks even near
 110 steps (a little over one epoch at 90 steps) and loses beyond; the default is unchanged.
 
+### Loop 2 (the fixed code of iteration 1, then the loop-2 fixes)
+
+Every number below was read from the named run's `results_summary.json` or `training_log.csv`
+when this section was written; the run directories are under `results/` (untracked). Audit note:
+`plans/plan-2026-09-19T224205-49c8bf80/findings/audit-loop-2.md`. Same command as loop 1 (tiny,
+128 px, 2 epochs, batch 16, `--max-samples 1600`, `--viz-freq 1`), GPU 1, one job at a time,
+1440 fit / 160 validation images, the full 3669-image test split. All exited 0 with
+`status: "ok"`, `best_epoch == epochs_run == 2`, `final_reused_best: true`.
+
+| Run (test split, best weights) | Seed | mIoU | Pixel acc. | IoU pet / background / border | `epoch_times` (s) | `fit_wall_seconds` | `test_eval_seconds` |
+|---|---|---|---|---|---|---|---|
+| `convunext_audit_seg_l2` | 42 | 0.4281 | 0.7277 | 0.4947 / 0.7027 / 0.0870 | 81.82, 9.77 | 94.90 | 34.09 |
+| `convunext_audit_seg_l2_s1` | 1 | 0.4392 | 0.7304 | 0.4959 / 0.7044 / 0.1174 | 84.27, 9.56 | 97.10 | 33.74 |
+| `convunext_audit_seg_l2_s2` | 2 | 0.4455 | 0.7339 | 0.5072 / 0.7071 / 0.1222 | 82.34, 9.82 | 95.38 | 34.06 |
+
+**Seed spread, not a same-seed floor.** Across the three seeds test mIoU spans 0.0174 (0.4281 to
+0.4455; sample standard deviation 0.0088), `border` IoU 0.035 (0.0870 to 0.1222). A seed changes the
+initial weights AND the validation split, so this is the spread of the recipe over seeds; it is not
+the run-to-run variation of one seed. At this 2-epoch recipe a difference between two
+configurations below about 0.02 mIoU on one seed is not attributable. The trivial baseline is 0.1924
+in all three (a majority-class predictor).
+
+**Same seed, fixed code (`convunext_audit_seg_l2_fix`, seed 42, commit `1fb374e81`).** Test mIoU
+0.42811 against 0.42812 in `..._l2` (1.7e-5 apart), per-class IoU identical to four decimals,
+test loss 0.66023 against 0.66021. `test_eval_seconds` 34.09 to 26.18: the test split is scored in
+ONE prediction pass now. The two runs differ in the evaluation code as well as in the run, so this
+pair says the same-seed difference is far below the seed spread, not that two runs are bit-identical
+(the GPU kernel non-determinism in "Open items" is unchanged). `visualizations.seconds` 1.29 to 3.40
+because the per-epoch grid seconds are now counted, and `best_vs_final_predictions.png` is absent
+(`visualizations.skipped` names it) since the best epoch is the last; `analyzer.removed` is
+`["summary_dashboard.png"]` and that file is gone from `model_analysis/`.
+
+**The 10-epoch probe (`convunext_probe_seg_l2_10ep`).** Seed 42, whole train split (3312 fit / 368
+validation images, 207 steps per epoch), every other flag at its default:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.convunext.train_convunext_segmentation \
+    --variant tiny --image-size 128 --epochs 10 --batch-size 16 --experiment-name convunext_probe_seg_l2_10ep
+```
+
+Test mIoU 0.6579 (pixel accuracy 0.8611, loss 0.3584), per-class IoU pet / background / border
+0.7446 / 0.8519 / 0.3771, 3.4 times the trivial baseline. `fit_wall_seconds` 291.3, the whole
+process 371.6 s (measured around the process, not stored in the run directory); epoch 1 93.39 s,
+epochs 2 to 10 about 20.5 to 21.6 s. Verdicts, on rules written before the run:
+
+| Question | Rule | Measured | Verdict |
+|---|---|---|---|
+| Is `border` stuck? | test border IoU below 0.20 | 0.3771 (recall 0.462, precision 0.672) | No: above even the 0.35 upper edge of "lagging"; no class weight or Dice term is indicated |
+| Does the LR anneal? | `lr_last_step` at most 2e-5 and CSV `lr` falls every epoch | `lr_last_step` 1.0001e-05, ten strictly falling CSV values | Yes |
+| Is mIoU still rising? | `val_miou` at epoch 10 exceeds the value at epoch 5 by 0.01 | 0.6480 against 0.5930 (+0.0550) | Yes by the rule, but flat at the end: `val_miou` 0.6487 at epoch 9, 0.6480 at epoch 10 (0.6056 at epoch 6) |
+
+`val_miou` by epoch: 0.4113, 0.4881, 0.5367, 0.5810, 0.5930, 0.6056, 0.6251, 0.6432, 0.6487,
+0.6480. The 10-epoch cosine has run its course; whether the 30-epoch default ends above 0.648 is not
+measured (only 10 epochs, one seed). The predicted `border` share is still below the true 12.3
+percent (8.5 percent), so `border` is under-predicted by a third, not collapsed as in the 2-epoch
+runs (2.6 to 3.4 percent).
+
+Wall clock: `run.log` timestamps put the `final_model.keras` save plus `validate_model_loading` at
+11.7 s in `..._l2` (12.8 s in loop 1); `analyzer.seconds` 9.5, 13.3, 9.5 in the three seeds and
+18.7 in `..._fix`.
+
 ## Open items
 
-- The training defaults are the ConvNeXt trainer's, untuned for segmentation. `border` is barely
-  learned after 2 epochs; a longer run (10 epochs on the whole train split, one seed) is the
-  measurement to make before any class weighting or Dice term.
+- The training defaults are the ConvNeXt trainer's, untuned for segmentation. `border` is not stuck:
+  the 10-epoch probe reaches test IoU 0.3771 (2-epoch runs 0.087 to 0.122), so no class weight or
+  Dice term is justified by the evidence. What is unmeasured is the 30-epoch default itself
+  (one run, about 14 minutes, would say whether it ends above the probe's 0.6579 and whether
+  patience 10 ever fires).
 - `--deep-supervision`, a Dice or focal loss and a softmax head are not offered: the stock
   sparse cross-entropy on logits is the whole loss (the library's `SegmentationLosses` need
   one-hot targets and probabilities).
-- Two same-seed runs still differ. The input batches are now reproducible (tested), but a
+- Two same-seed runs can still differ. The input batches are reproducible (tested), but a
   measurement on this model (20 steps from one seed on the SAME numpy batches, two builds, GPU 1)
   left 172 of 172 weight tensors not bit-identical, largest absolute difference 3.6e-6 to 4.4e-6:
-  GPU kernel non-determinism (convolution backward / XLA), not investigated further. The two-run
-  noise floor above (n = 2) was measured before the pipeline fix and has not been re-measured.
+  GPU kernel non-determinism (convolution backward / XLA), not investigated further. The
+  same-seed spread of the current code is unmeasured (the one same-seed pair above changed the
+  evaluation code); the seed spread is 0.0174 test mIoU (n = 3).
+- `visualizations.seconds` counts the per-epoch grids and the end-of-run figures, not the
+  dashboard redraw (the shared callback has no clock); `fit_wall_seconds` minus the sum of
+  `epoch_times` is the only account of it.
 - `run.log` records the analyzer, figures and grids; `validate_model_loading` plus the
-  `final_model.keras` save took 12.8 s in the audit run.
+  `final_model.keras` save took 11.7 s in `convunext_audit_seg_l2`.

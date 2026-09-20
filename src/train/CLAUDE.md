@@ -37,7 +37,9 @@ Its denoiser counterpart stays in `src/train/bfunet/` (`train_convunext_denoiser
 for both ConvUNext trainers: neither puts the Keras layer table in `run.log` (the denoiser writes it to
 `model_summary.txt`); a run whose last epoch is the best epoch scores its test data once and records it
 (`final_reused_best` at the top level of the segmentation summary, `test_eval.final_reused_best` for the
-denoiser).
+denoiser); both write one `Visualizations: N written (...)` line to `run.log` and record `visualizations.{files, failed, seconds}`
+(the segmentation block also has `skipped`, the figures deliberately not drawn); the denoiser redraws its dashboard on
+the shared cadence (every epoch up to 39 epochs), the segmentation trainer through `TrainingDashboardCallback`.
 
 `create_base_argument_parser()` supplies `--dataset`, `--image-size`, `--epochs`, `--batch-size`,
 `--learning-rate`, `--weight-decay`, `--lr-schedule`, `--patience`, `--gpu` and `--show-plots`; add
@@ -146,8 +148,8 @@ substitute, because it resolves at epoch end by matching a compiled metric objec
 | `create_learning_rate_schedule(lr, type, epochs, steps_per_epoch)` | Cosine / exponential / constant. Defined in `dl_techniques.optimization.schedule` and re-exported here; both paths resolve to the same object |
 | `load_dataset(...)` / `get_class_names(...)` | See Data loading below |
 | `validate_model_loading(...)` / `run_model_analysis(...)` | Round-trip serialization check; full ModelAnalyzer pipeline |
-| `run_summary.run_data_free_analysis(model, sample, labels, history, model_name, run_dir, enabled=True)` | The end-of-run weights + spectral analysis for trainers whose data is not per-image labels (the ConvUNeXt denoiser and segmentation trainers). Never raises; the returned `analyzer` block (`{status, analyzers, error, path, seconds}`) is read back from `model_analysis/analysis_results.json` by `read_data_free_analysis_status`, not taken from the analyzer's return value. `data_free_analysis_config()` is the one `AnalysisConfig` behind it. Do not write a per-trainer copy |
-| `TrainingDashboardCallback(..., best_key=None)` / `render_training_dashboard(..., best_epoch=None)` (`classification_viz`) | Opt-in best-epoch marker: pass `best_key="val_loss"` to draw a dashed line and star at the lowest value so far. `None` draws nothing and leaves the PNG unchanged |
+| `run_summary.run_data_free_analysis(model, sample, labels, history, model_name, run_dir, enabled=True)` | The end-of-run weights + spectral analysis for trainers whose data is not per-image labels (the ConvUNeXt denoiser and segmentation trainers). Never raises; the returned `analyzer` block (`{status, analyzers, error, path, seconds}`) is read back from `model_analysis/analysis_results.json` by `read_data_free_analysis_status`, not taken from the analyzer's return value. After an `ok` read-back it deletes the library's empty `model_analysis/summary_dashboard.png` and adds `removed: ["summary_dashboard.png"]` to the block (absent otherwise). `data_free_analysis_config()` is the one `AnalysisConfig` behind it. Do not write a per-trainer copy |
+| `TrainingDashboardCallback(..., best_key=None)` / `render_training_dashboard(..., best_epoch=None)` (`classification_viz`) | Opt-in best-epoch marker: pass `best_key="val_loss"` to draw a dashed line and star at the lowest value so far. `None` draws nothing and leaves the PNG unchanged. A history that carries `miou` / `val_miou` columns (the segmentation trainer's) gets an extra mIoU panel; a history without them draws the same panels and the same PNG bytes as before |
 | `discover_megadepth_pairs(root)` / `MegaDepthDataset(...)` | MegaDepth RGB+depth pipeline |
 | `compare_runs(a_dir, b_dir, labels, output_dir)` | Two-run comparison; also `python -m train.common.compare_runs A B`. Emits `comparison.md` + curve PNGs |
 | `StepCheckpointCallback(...)` | Step-indexed CSV logging, rolling `.keras` checkpoint window, optional periodic ModelAnalyzer, step-loss plots. Pass an external `step_counter` for resume setups. Use instead of a per-trainer step-checkpoint class |
