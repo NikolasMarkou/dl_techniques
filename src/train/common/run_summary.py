@@ -324,7 +324,9 @@ def run_data_free_analysis(
     Returns:
         :func:`skipped_analysis_status` when disabled, else ``{"status", "analyzers", "error",
         "path", "seconds"}`` with ``status`` ``ok`` / ``partial`` / ``missing`` /
-        ``unreadable`` (see :func:`read_data_free_analysis_status`) or ``error``.
+        ``unreadable`` (see :func:`read_data_free_analysis_status`) or ``error``; after an ``ok``
+        analysis the library's empty ``summary_dashboard.png`` is deleted and the block gains
+        ``"removed": ["summary_dashboard.png"]`` (the key is absent when nothing was removed).
     """
     if not enabled:
         logger.info("Analyzer skipped (--no-model-analysis)")
@@ -336,6 +338,15 @@ def run_data_free_analysis(
         block = read_data_free_analysis_status(run_dir, model_name)
         if results is None and block["status"] != "ok":
             block["error"] = f"run_model_analysis failed (its exception is in run.log); {block['error']}"
+        # DECISION plan-2026-09-19T224205-49c8bf80/D-027: the library always writes
+        # ``summary_dashboard.png`` and, with weights + spectral only, all six panels read "No ...
+        # data available" (194,788 B in every run). Delete THAT file, ours, in this run's own
+        # ``model_analysis/``, after an "ok" read-back, and say so in ``removed``. Do NOT turn
+        # the analyzer's own dashboard off (library layout) and do NOT delete by pattern.
+        empty_dashboard = run_dir / "model_analysis" / "summary_dashboard.png"
+        if block["status"] == "ok" and empty_dashboard.is_file():
+            empty_dashboard.unlink()
+            block["removed"] = [empty_dashboard.name]
     except Exception as e:  # noqa: BLE001 - the analysis must not fail a finished run
         logger.warning(f"Analyzer raised: {type(e).__name__}: {e}")
         block = {"status": "error", "analyzers": [], "error": f"{type(e).__name__}: {e}", "path": None}

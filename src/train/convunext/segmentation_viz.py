@@ -23,6 +23,7 @@ pair per pixel, tens of millions).
 """
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -458,6 +459,7 @@ class SegmentationGridCallback(keras.callbacks.Callback):
         indices: The chosen rows of ``x``, sorted ascending.
         written: File names written, in order.
         failed: ``{file name: error text}`` of figures that raised.
+        seconds: Wall seconds spent drawing (prediction plus figure) over every grid so far.
 
     Raises:
         ValueError: If ``viz_freq`` or ``viz_samples`` is below 1, or ``x`` and ``y`` differ
@@ -484,6 +486,7 @@ class SegmentationGridCallback(keras.callbacks.Callback):
         self.title = title
         self.written: List[str] = []
         self.failed: Dict[str, str] = {}
+        self.seconds = 0.0
         self._completed = 0
         self._drawn_at = -1
         self._last_logs: Dict[str, Any] = {}
@@ -509,6 +512,7 @@ class SegmentationGridCallback(keras.callbacks.Callback):
         if val_miou is not None:
             # The mIoU is of the WHOLE validation set; the sheet shows only ``len(indices)`` of it.
             suffix += f", val mIoU {float(val_miou):.3f} (all {self.n_val})"
+        started = time.perf_counter()
         try:
             plot_segmentation_grid(
                 self.images, self.masks, self.predict_classes(), self.class_names,
@@ -519,6 +523,7 @@ class SegmentationGridCallback(keras.callbacks.Callback):
         except Exception as e:  # noqa: BLE001 - a figure must never stop training
             logger.warning(f"Segmentation grid {name} failed: {type(e).__name__}: {e}")
             self.failed[name] = f"{type(e).__name__}: {e}"
+        self.seconds += time.perf_counter() - started
         self._drawn_at = completed
 
     def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:

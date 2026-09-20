@@ -680,12 +680,14 @@ def build_model(config: SegTrainingConfig, schedule: Any) -> keras.Model:
 # ---------------------------------------------------------------------
 
 def _evaluate_split(model: keras.Model, x: np.ndarray, y: np.ndarray, batch_size: int) -> Dict[str, Any]:
-    """Keras metrics plus the confusion-matrix report of ``model`` on one split.
+    """Loss, accuracy, mIoU and the confusion-matrix report of ``model`` on one split, in ONE pass.
 
-    ``loss``, ``accuracy`` and ``miou`` come from ``model.evaluate``; ``per_class_iou``,
-    ``miou_from_confusion``, ``pixel_accuracy`` and ``confusion`` from a second pass that
-    accumulates :func:`confusion_matrix` of the argmax predictions, so the two mIoU values
-    are independent measurements of one quantity.
+    Each batch is predicted once; ``loss`` is the compiled loss of those logits (weighted by
+    batch size, as ``fit`` and ``evaluate`` average it), and ``accuracy`` / ``miou`` are read
+    off the accumulated :func:`confusion_matrix`, so ``accuracy`` equals ``pixel_accuracy`` and
+    ``miou`` equals ``miou_from_confusion`` by construction. ``model.evaluate`` gave the same
+    numbers from a second pass over the split; the test that compares the two is
+    ``test_the_one_pass_evaluation_equals_keras_evaluate``.
 
     Args:
         model: A compiled model.
@@ -696,15 +698,21 @@ def _evaluate_split(model: keras.Model, x: np.ndarray, y: np.ndarray, batch_size
     Returns:
         A JSON-ready dict.
     """
-    dataset = make_eval_dataset(x, y, batch_size)
-    metrics = {k: float(v) for k, v in model.evaluate(dataset, verbose=0, return_dict=True).items()}
+    # DECISION plan-2026-09-19T224205-49c8bf80/D-026: ONE pass. ``model.evaluate`` plus this
+    # loop cost 17.6 s + 15.7 s on the 3669 test images (cold, tiny, 128 px, GPU 1) for
+    # numbers that agree to 1e-6. Do NOT put ``evaluate`` back "to have Keras' own numbers":
+    # ``test_the_one_pass_evaluation_equals_keras_evaluate`` is the cross-check.
     confusion = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
-    for images, masks in dataset:
-        predicted = np.argmax(model.predict_on_batch(images), axis=-1)
-        confusion += confusion_matrix(masks.numpy(), predicted, NUM_CLASSES)
+    loss_sum = 0.0
+    for images, masks in make_eval_dataset(x, y, batch_size):
+        logits = model.predict_on_batch(images)
+        loss_sum += float(model.loss(masks, logits)) * len(masks)
+        confusion += confusion_matrix(masks.numpy(), np.argmax(logits, axis=-1), NUM_CLASSES)
     scores = segmentation_scores(confusion)
     return {
-        **metrics,
+        "loss": loss_sum / len(x),
+        "accuracy": scores["pixel_accuracy"],
+        "miou": scores["miou"],
         "miou_from_confusion": scores["miou"],
         "pixel_accuracy": scores["pixel_accuracy"],
         "per_class_iou": scores["per_class_iou"],
@@ -812,13 +820,15 @@ def _write_figures(
         config: The run config (its ``experiment_name`` titles the figures).
 
     Returns:
-        ``{"files": [names that exist on disk], "failed": {name: error text}, "seconds"}``:
-        the dashboard and the per-epoch grids come first, then the figures of this function.
+        ``{"files": [names that exist on disk], "failed": {name: error text}, "skipped":
+        {name: reason}, "seconds"}``: the dashboard and the per-epoch grids come first, then
+        the figures of this function. ``seconds`` is the wall time of the per-epoch grids
+        (``grid.seconds``) plus the end-of-run figures (the dashboard redraw is not timed).
     """
     vis_dir = run_dir / "visualizations"
     epochs_run = len(hist[MONITOR])
     started = time.perf_counter()
-    out: Dict[str, Any] = {"files": [], "failed": dict(grid.failed)}
+    out: Dict[str, Any] = {"files": [], "failed": dict(grid.failed), "skipped": {}}
     out["files"] += [n for n in ["training_dashboard.png", *grid.written] if (vis_dir / n).is_file()]
 
     def attempt(name: str, draw: Callable[[], Any]) -> None:
@@ -837,17 +847,12 @@ def _write_figures(
         return np.asarray(test_metrics_best["confusion"])
 
     def best_vs_final() -> None:
-        final = grid.predict_classes(model)
-        if best_epoch == epochs_run:
-            # Same weights: no second load, and the labels say so instead of hiding it.
-            best, best_label = final, f"best (epoch {best_epoch})"
-            final_label = f"final (epoch {epochs_run}, the same weights)"
-        else:
-            best = grid.predict_classes(keras.models.load_model(best_checkpoint_path(str(run_dir))))
-            best_label, final_label = f"best (epoch {best_epoch})", f"final (epoch {epochs_run})"
+        best = grid.predict_classes(keras.models.load_model(best_checkpoint_path(str(run_dir))))
         plot_best_vs_final_predictions(
-            grid.images, grid.masks, best, final, CLASS_NAMES, vis_dir / "best_vs_final_predictions.png",
-            best_label=best_label, final_label=final_label, title=config.experiment_name)
+            grid.images, grid.masks, best, grid.predict_classes(model), CLASS_NAMES,
+            vis_dir / "best_vs_final_predictions.png",
+            best_label=f"best (epoch {best_epoch})", final_label=f"final (epoch {epochs_run})",
+            title=config.experiment_name)
 
     attempt("confusion_matrix.png", lambda: plot_confusion_counts(
         best_confusion(), CLASS_NAMES, vis_dir / "confusion_matrix.png",
@@ -856,14 +861,22 @@ def _write_figures(
         best_confusion(), CLASS_NAMES, vis_dir / "per_class_metrics.png"))
     attempt("segmentation_report.json", lambda: write_segmentation_report(
         best_confusion(), CLASS_NAMES, vis_dir / "segmentation_report.json"))
-    attempt("best_vs_final_predictions.png", best_vs_final)
+    if best_epoch == epochs_run:
+        # DECISION plan-2026-09-19T224205-49c8bf80/D-029: the best epoch IS the last, so the two
+        # columns would be the same weights (two identical predictions, 200-230 KB, 0.3 s in every
+        # loop-2 run). Do NOT draw it "for completeness" and do NOT draw it silently missing: the
+        # skip is recorded in ``skipped`` and the summary stays truthful.
+        out["skipped"]["best_vs_final_predictions.png"] = "best epoch == last epoch: identical columns"
+    else:
+        attempt("best_vs_final_predictions.png", best_vs_final)
     attempt("miou_curve.png", lambda: plot_miou_curve(
         hist, best_epoch, vis_dir / "miou_curve.png", title=f"{config.experiment_name}: mIoU per epoch"))
-    out["seconds"] = time.perf_counter() - started
+    out["seconds"] = grid.seconds + time.perf_counter() - started
     logger.info(
         f"Visualizations: {len(out['files'])} written ({', '.join(out['files'])}), "
         f"{len(out['failed'])} failed{': ' + ', '.join(out['failed']) if out['failed'] else ''}, "
-        f"end-of-run figures took {out['seconds']:.1f}s"
+        f"{len(out['skipped'])} skipped{': ' + ', '.join(out['skipped']) if out['skipped'] else ''}, "
+        f"grids plus end-of-run figures took {out['seconds']:.1f}s"
     )
     return out
 
@@ -1208,10 +1221,11 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
                 "is scored once and `final_reused_best` is true (the two blocks are the same "
                 "result); the test split never influenced "
                 "selection and is always the full split (--max-samples caps the train pool only)",
-                "`miou` is keras MeanIoU; `miou_from_confusion`, `pixel_accuracy` and "
-                "`per_class_iou` come from the confusion matrix (null where a class has no true "
-                "and no predicted pixel); `trivial_baseline` predicts the majority test class "
-                "everywhere",
+                "a test block is ONE pass over the split: `loss` is the compiled loss, `accuracy` "
+                "= `pixel_accuracy` and `miou` = `miou_from_confusion` come from the confusion "
+                "matrix (null where a class has no true and no predicted pixel), and a test "
+                "checks them against keras `evaluate` to 1e-5; the validation metrics are keras' "
+                "own; `trivial_baseline` predicts the majority test class everywhere",
                 "`best_checkpoint_max_abs_diff` is the largest gap between the reloaded "
                 "best_model.keras' validation loss/accuracy/miou and the values fit recorded "
                 "for the best epoch",

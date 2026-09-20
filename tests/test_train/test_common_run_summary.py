@@ -381,6 +381,39 @@ def test_an_analysis_that_raises_is_recorded_as_error_and_never_propagates(tmp_p
     assert block["analyzers"] == [] and block["seconds"] >= 0.0
 
 
+def _with_library_files(run_dir, payload):
+    """A spy payload that also writes the library's files: the empty dashboard, a real figure and
+    a same-named file OUTSIDE ``model_analysis/``."""
+    (run_dir / "summary_dashboard.png").write_bytes(b"outside")
+
+    def write(*_args, **_kwargs):
+        _write_analysis(run_dir, payload)
+        for name in ("summary_dashboard.png", "spectral_summary.png"):
+            (run_dir / "model_analysis" / name).write_bytes(b"png")
+        return "results"
+
+    return write
+
+
+def test_the_empty_summary_dashboard_of_an_ok_analysis_is_deleted_and_recorded(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(run_summary, "run_model_analysis", _with_library_files(tmp_path, _data_free_payload()))
+    block = _analyse(tmp_path)
+    assert block["status"] == "ok" and block["removed"] == ["summary_dashboard.png"]
+    assert not (tmp_path / "model_analysis" / "summary_dashboard.png").exists()
+    assert {p.name for p in (tmp_path / "model_analysis").iterdir()} == {
+        "analysis_results.json", "spectral_summary.png"}, "only that one file goes"
+    assert (tmp_path / "summary_dashboard.png").read_bytes() == b"outside", "never outside model_analysis/"
+
+
+def test_an_analysis_that_did_not_read_back_ok_keeps_every_file_and_has_no_removed_key(
+        tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(run_summary, "run_model_analysis",
+                        _with_library_files(tmp_path, _data_free_payload(spectral=False)))
+    block = _analyse(tmp_path)
+    assert block["status"] == "partial" and "removed" not in block
+    assert (tmp_path / "model_analysis" / "summary_dashboard.png").exists()
+
+
 # ---------------------------------------------------------------------
 # load_best_metrics
 # ---------------------------------------------------------------------

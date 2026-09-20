@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, List
 
@@ -414,6 +415,22 @@ def test_the_grid_title_carries_the_epoch_and_the_validation_miou(tmp_path, monk
     # The mIoU is of the WHOLE validation set while the sheet shows 2 images of it: say so.
     assert titles[1].endswith(f"(all {len(x)})") and titles[2].endswith(f"(all {len(x)})")
     assert len(x) > 2
+
+
+def test_the_callback_accumulates_the_wall_seconds_of_every_grid(tmp_path, monkeypatch) -> None:
+    """``visualizations.seconds`` of the summary adds this to the end-of-run figures."""
+    real = viz.plot_segmentation_grid
+
+    def slow(*args, **kwargs):
+        time.sleep(0.05)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(viz, "plot_segmentation_grid", slow)
+    x, y = _arrays()
+    cb = viz.SegmentationGridCallback(x, y, tmp_path, NAMES, 1, 2, 0)
+    assert cb.seconds == 0.0
+    _fit(cb, 3)
+    assert len(cb.written) == 4 and cb.seconds >= 4 * 0.05
 
 
 def test_predictions_are_made_with_training_false(tmp_path) -> None:

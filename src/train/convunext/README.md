@@ -105,7 +105,10 @@ the ConvNeXt trainer's and have NOT been tuned for this task.
 `mIoU` is the mean over classes of `TP / (true + predicted - TP)` computed from a pixel
 confusion matrix; a class with no true and no predicted pixel has no IoU and is left out of the
 mean (the `keras.metrics.MeanIoU` convention). The summary carries two independent measurements
-of it, Keras' `miou` and `miou_from_confusion` (a numpy count), and a test cross-checks them.
+of it, `miou` and `miou_from_confusion`. A TEST block is ONE pass over the split (the loss is the
+compiled loss of the predicted logits, `accuracy` and `miou` are read off the confusion matrix, so
+they equal `pixel_accuracy` and `miou_from_confusion`); `test_the_one_pass_evaluation_equals_keras_evaluate`
+compares them with Keras' `evaluate` to 1e-5. The validation metrics are Keras' own.
 
 Read a mIoU next to `trivial_baseline`: the scores of predicting the majority class of the
 test masks for every pixel (its pixel accuracy is that class's share of pixels, its mIoU that
@@ -134,13 +137,13 @@ results/<experiment_name>/
     final_model.keras               the LAST epoch's weights (not the best)
     results_summary.json            the run's record (strict JSON, keys below)
     visualizations/
-        training_dashboard.png      shared per-epoch curves (loss, accuracy, lr, ...), redrawn on a cadence; the best epoch (lowest val_loss so far) is a green dashed line and star on the val curves
+        training_dashboard.png      shared per-epoch curves (loss, accuracy, mIoU, lr, ...), redrawn on a cadence; the best epoch (lowest val_loss so far) is a green dashed line and star on the val curves
         epoch_000_seg_grid.png      the UNTRAINED model on the fixed validation batch
         epoch_NNN_seg_grid.png      after epoch NNN (every --viz-freq epochs, and the last epoch)
         confusion_matrix.png        TEST split, best weights: pixel counts and row-normalized recall
         per_class_metrics.png       grouped bars of IoU, Dice, precision and recall per class
         segmentation_report.json    the same per-class numbers plus the confusion counts (strict JSON, null where undefined)
-        best_vs_final_predictions.png   image | ground truth | best weights | final weights, on the grid's samples
+        best_vs_final_predictions.png   image | ground truth | best weights | final weights, on the grid's samples (NOT written when the best epoch is the last: `visualizations.skipped` says so)
         miou_curve.png              train and validation mIoU per epoch, the best epoch marked
     model_analysis/                 weights + spectral ModelAnalyzer output (analysis_results.json, PNGs); absent with --no-model-analysis
 ```
@@ -162,12 +165,13 @@ Notes:
 - `model_analysis/` describes the LAST epoch's weights (the in-memory model). Its spectral
   verdicts are heuristics and unreliable for a short run. Calibration, information flow and
   training dynamics are off: they read per-image labels and probabilities.
-- `model_analysis/` holds `analysis_results.json` plus four PNGs. `summary_dashboard.png` is
-  library output that is EMPTY for a data-free analysis (every panel reads "No ... data
-  available"); the useful ones are `spectral_summary.png`, `spectral_funnel_diagram.png` and
-  `weight_learning_journey.png`. Two smoke runs (tiny, 64 px, `convunext_seg_smoke_step4` and `convunext_seg_smoke_step6`) read `analyzer.seconds` 18.1 and 16.4.
+- `model_analysis/` holds `analysis_results.json` plus three PNGs: `spectral_summary.png`,
+  `spectral_funnel_diagram.png` and `weight_learning_journey.png`. The library also writes
+  `summary_dashboard.png`, which is EMPTY for a data-free analysis (every panel reads "No ...
+  data available"); the run deletes that one file after an `ok` analysis and records it as
+  `analyzer.removed: ["summary_dashboard.png"]`. Two smoke runs (tiny, 64 px, `convunext_seg_smoke_step4` and `convunext_seg_smoke_step6`) read `analyzer.seconds` 18.1 and 16.4.
 - `run.log` names what was written: one `Segmentation grid written: <file>` line per grid and one
-  `Visualizations: N written (...), M failed[: names], end-of-run figures took S s` line after the
+  `Visualizations: N written (...), M failed[: names], K skipped[: names], grids plus end-of-run figures took S s` line after the
   end-of-run figures.
 - Every figure is isolated: one that raises is recorded under `visualizations.failed` with its
   error and the run stays `status: "ok"`. The analyzer cannot fail a finished run either: an
@@ -194,9 +198,9 @@ Identity and setup (present for `status` `ok` and `diverged`): `status`, `run_di
 | `best_val_metrics`, `final_val_metrics` | Validation `loss`, `accuracy`, `miou` of the best and the last epoch. |
 | `test_metrics_best`, `test_metrics_final` | Test-split `loss`, `accuracy`, `miou`, `miou_from_confusion`, `pixel_accuracy`, `per_class_iou`, `confusion` for the reloaded `best_model.keras` and for the last-epoch weights. |
 | `trivial_baseline` | Scores of the majority-class predictor on the test masks (`predicted_class`, `miou`, `per_class_iou`, `pixel_accuracy`, `confusion`). |
-| `visualizations` | `{files, failed, seconds}`: the names that exist on disk (dashboard, per-epoch grids, end-of-run figures), `{figure: error}` for those that raised, wall seconds of the end-of-run figures. |
+| `visualizations` | `{files, failed, skipped, seconds}`: the names that exist on disk (dashboard, per-epoch grids, end-of-run figures), `{figure: error}` for those that raised, `{figure: reason}` for those deliberately not drawn (`best_vs_final_predictions.png` when the best epoch is the last), wall seconds of the per-epoch grids plus the end-of-run figures (the dashboard redraw is not timed). |
 | `analyzer` | `{status, analyzers, error, path, seconds}` read back from `model_analysis/analysis_results.json`: status `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. With `--no-model-analysis`: the skipped block (`status: "skipped"`). |
-| `test_eval_seconds` | Wall seconds of the test evaluation (the split is scored once when `final_reused_best`, twice otherwise) plus the baseline. |
+| `test_eval_seconds` | Wall seconds of the test evaluation (one prediction pass per scored weight set; the split is scored once when `final_reused_best`, twice otherwise) plus the baseline. |
 | `best_checkpoint_load_error`, `best_checkpoint_max_abs_diff` | Whether the best checkpoint reloaded, and the largest gap between its validation metrics and what `fit` recorded for the best epoch. |
 | `model_loading_validated` | Whether `final_model.keras` reloads and reproduces its predictions. |
 
@@ -295,6 +299,5 @@ Turning XLA off saves about 22 s of build and costs about 0.2 s per step, so it 
   left 172 of 172 weight tensors not bit-identical, largest absolute difference 3.6e-6 to 4.4e-6:
   GPU kernel non-determinism (convolution backward / XLA), not investigated further. The two-run
   noise floor above (n = 2) was measured before the pipeline fix and has not been re-measured.
-- `run.log` records the analyzer, figures and grids, but the empty `model_analysis/summary_dashboard.png`
-  is still written (library output), and `validate_model_loading` plus the `final_model.keras` save
-  took 12.8 s in the audit run.
+- `run.log` records the analyzer, figures and grids; `validate_model_loading` plus the
+  `final_model.keras` save took 12.8 s in the audit run.
