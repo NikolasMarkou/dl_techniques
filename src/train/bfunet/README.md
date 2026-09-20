@@ -296,9 +296,10 @@ Strict JSON (`allow_nan=False`: non-finite values become `null`). Keys on EVERY 
 | `status` | `"ok"` or `"diverged"` |
 | `run_dir`, `experiment_name`, `variant` | Identity of the run |
 | `params` | Model parameter count |
-| `dataset`, `input_shape`, `n_train`, `n_val` | The train image directories, the training patch shape `[patch, patch, channels]`, and the lengths of the train and val image-path worklists (the `Sourced N train / M val image paths` line of `run.log`; `n_train` is `--max-train-files`, drawn with replacement when the directories hold fewer; not patch counts). All three trainers |
+| `train_image_dirs`, `input_shape`, `n_train_files`, `n_val_files` | The train image directories, the training patch shape `[patch, patch, channels]`, and the lengths of the train and val image-path worklists (the `Sourced N train / M val image paths` line of `run.log`; `n_train_files` is `--max-train-files`, drawn with replacement when the directories hold fewer; not patch counts). Named for what they are: the ConvNeXt reference's `dataset` is a dataset name and its `n_train` / `n_val` are sample counts, so this summary does not reuse those names (iteration 3; before it the keys were `dataset`, `n_train`, `n_val`). All three trainers |
+| `data_range` | `[0.0, 1.0]`, the pixel domain of the model input (the denoiser domain since the migration off [-0.5, +0.5]); the segmentation summary states it too. All three trainers |
 | `optimizer`, `lr_schedule`, `weight_decay`, `gradient_clip_norm`, `batch_size`, `seed`, `monitor` | The configuration the run used (`--optimizer-type`, `--lr-schedule-type`, `--weight-decay`, `--gradient-clipping`, `--batch-size`, `--seed`) and the monitored metric (`val_loss`). All three trainers |
-| `initial_loss_sanity_eval` | `{loss, steps, split: "val", before_fit: true}`: the untrained model's validation loss (the epoch-0 baseline the dashboard starts from, carried out of `DenoisingVisualizationCallback.baseline_val_loss`; `null` if that evaluation failed) over `steps` = `validation_steps` batches of fresh fixed-sigma noise. All three trainers |
+| `initial_loss_sanity_eval` | `{loss, steps, split: "val", before_fit: true}`: the untrained model's validation loss (the epoch-0 baseline the dashboard starts from, carried out of `DenoisingVisualizationCallback.baseline_val_loss`; `null` if that evaluation failed) over `steps` = `validation_steps` batches of fresh fixed-sigma noise (`steps`, not `n_samples` as in the segmentation summary and the ConvNeXt reference: the validation stream is `.repeat()`ed, so a sample count is not what was evaluated; a deliberate difference). All three trainers |
 | `model_family`, `convnext_version`, `depth`, `blocks_per_level`, `dims`, `kernel_size`, `drop_path_rate`, `dropout_rate` | ConvUNeXt only (`train_convunext_denoiser.architecture_of`, resolved as `build_model` builds; a test compares them with the layers of the saved model). `dims` are the channel counts of the encoder levels and the bottleneck; `convnext_version` is the trainer's `v1` default, not the variant row's `v2` |
 | `learning_rate`, `warmup_epochs`, `steps_per_epoch` | Peak rate, warmup epochs and the RESOLVED steps per epoch |
 | `lr_first_epoch`, `lr_last_epoch` | The CSV `lr` of the first and last epoch (rate at the START of each) |
@@ -320,7 +321,7 @@ Added by a finished run (`status: "ok"`):
 | `model_loading_validated` | `final_model.keras` round-trip verdict (`true` / `false` / `null`) |
 | `test_eval` | The held-out block below |
 | `analyzer` | The end-of-run analysis, read back from `model_analysis/analysis_results.json` (not taken from the analyzer's return value): `{status, analyzers, error, path, seconds}` (plus `removed`, see "End-of-run artifacts") with `status` `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. Under `--no-model-analysis`, and always for unet and bfcnn, the skipped block (`status: "skipped"`). The smoke run `convunext_denoiser_smoke_20260920_055542` reads `status: "ok"`, `analyzers: ["weights", "spectral"]`, `seconds` 9.5 |
-| `visualizations` | `{files, failed, seconds}`: the names present in `visualizations/` (dashboard and `epoch_NNN_denoise_grid.png`), `{file: error}` for renders that raised (a failed render does not fail the run), and the wall seconds spent rendering the dashboard and grids. `run.log` gets one `Visualizations: N written (files), M failed, dashboard and grids took Ss` line at the end of `fit` |
+| `visualizations` | `{files, failed, seconds}`: the names present in `visualizations/` (dashboard and `epoch_NNN_denoise_grid.png`), the list of names of the renders that raised (a failed render does not fail the run; its error text is the `Visualization <name> failed: <error>` WARNING in `run.log`), and the wall seconds spent rendering the dashboard and grids. `run.log` gets one `Visualizations: N written (files), M failed, dashboard and grids took Ss` line at the end of `fit` |
 
 Not in the denoiser summary on purpose, each with its measurement: `initial_loss_ratio` and `init_scale_warning` (defined against a classifier's ln(C); the denoiser analogue is the identity loss E[sigma^2] = 0.25^2/3 = 0.0208, and the untrained baseline 0.5693 is 27 times that on a healthy run, so the segmentation trainer's 10x rule would flag every run); `best_checkpoint_load_error` and `best_checkpoint_max_abs_diff` (they would compare the reloaded checkpoint's validation loss with the recorded one, but the validation noise is drawn afresh: the untrained baseline read 0.5693, 0.5672 and 0.5717 in three same-seed runs, so the difference would be noise); `n_test` (`test_eval` carries its own per-set counts); the classification-only keys.
 
@@ -495,6 +496,11 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
   `convunext_denoiser_smoke_20260920_055542` `run.log` is 87 lines and `model_summary.txt` 151.
 - **`visualizations` block.** The dashboard and grid callbacks record the files they wrote, the
   renders that raised and the seconds spent, and the summary carries them as `visualizations`.
+- **Artifact set against the other two run directories.** `model_summary.txt` and `tensorboard/`
+  exist here and not in `results/convnext_ref_l2` (the ConvNeXt reference) or in a segmentation
+  run. That is deliberate: the reference has neither, so the segmentation trainer follows it, and
+  adding either there would move it away from the reference; a segmentation run keeps only the
+  parameter total in `run.log`.
 - **Seeded grids.** The fixed visualization batch is cropped from the validation images with a
   stateless random crop keyed by `--seed`, and the additive grid noise is a stateless draw keyed
   by `--seed` and the regime, so the "Noisy" rows are the same in every epoch and in two runs of
@@ -642,7 +648,7 @@ Reading the curves: the training loss and PSNR get worse from epoch 5 while the 
 
 ### Loop 2 (tiny, 64 px, 2 epochs of 100 steps, one seed; and a 40-epoch cadence check)
 
-Command of the four audit runs (only the name differs), GPU 1: `--variant tiny --patch-size 64 --epochs 2 --max-train-files 400 --max-val-files 50 --batch-size 16 --seed 42`, defaults elsewhere. Every number here was read from the named run's `results_summary.json` or `run.log` when this section was written; the directories are under `results/` (untracked). Audit note: `plans/plan-2026-09-19T224205-49c8bf80/findings/audit-loop-2.md`.
+Command of the four audit runs (only the name differs), GPU 1: `--variant tiny --patch-size 64 --epochs 2 --steps-per-epoch 100 --validation-steps 20 --viz-freq 1 --max-train-files 400 --max-val-files 50 --batch-size 16 --seed 42`, defaults elsewhere (re-derived in iteration 3 from `results/convunext_audit_denoise_l2/config.json`: every field that differs from the defaults is a flag here, apart from the two derived from `--epochs`). Every number here was read from the named run's `results_summary.json` or `run.log` when this section was written; the directories are under `results/` (untracked). Audit note: `plans/plan-2026-09-19T224205-49c8bf80/findings/audit-loop-2.md`.
 
 | Run | Code | `val_psnr_metric` at best epoch (dB) | Kodak24 gain at sigma 15 (dB) | `fit_wall_seconds` |
 |---|---|---|---|---|

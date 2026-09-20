@@ -170,18 +170,23 @@ Notes:
   `summary_dashboard.png`, which is EMPTY for a data-free analysis (every panel reads "No ...
   data available"); the run deletes that one file after an `ok` analysis and records it as
   `analyzer.removed: ["summary_dashboard.png"]`. Two smoke runs (tiny, 64 px, `convunext_seg_smoke_step4` and `convunext_seg_smoke_step6`) read `analyzer.seconds` 18.1 and 16.4.
+- Against the denoiser, this trainer writes no `model_summary.txt` and no `tensorboard/`: the ConvNeXt
+  reference has neither, so the segmentation trainer follows the reference (the parameter total
+  is in `run.log`; the denoiser's `initial_loss_sanity_eval` carries `steps`, this
+  one `n_samples`, because the denoiser's validation stream is repeated).
 - `run.log` names what was written: one `Segmentation grid written: <file>` line per grid and one
   `Visualizations: N written (...), M failed[: names], K skipped[: names], grids plus end-of-run figures took S s` line after the
   end-of-run figures.
-- Every figure is isolated: one that raises is recorded under `visualizations.failed` with its
-  error and the run stays `status: "ok"`. The analyzer cannot fail a finished run either: an
+- Every figure is isolated: one that raises is recorded by name under `visualizations.failed` (a
+  list, as in the ConvNeXt reference; the error text is the `Visualization <name> failed: ...`
+  WARNING in `run.log`) and the run stays `status: "ok"`. The analyzer cannot fail a finished run either: an
   exception is recorded as `analyzer.status: "error"`.
 
 ### `results_summary.json` keys
 
 Identity and setup (present for `status` `ok` and `diverged`): `status`, `run_dir`,
 `experiment_name`, `model_family`, `dataset`, `variant`, `params`, the architecture keys
-(below), `input_shape`, `num_classes`,
+(below), `input_shape`, `data_range` (`[0.0, 1.0]`, the input after `/255`), `num_classes`,
 `class_names`, `optimizer`, `gradient_clip_norm`, `learning_rate`, `lr_schedule`,
 `warmup_epochs`, `steps_per_epoch`, `weight_decay`, `batch_size`, `seed`, `validation_split`,
 `max_samples`, `n_train`, `n_val`, `n_test`, `data_load_seconds`, `epochs_requested`, `monitor`,
@@ -198,7 +203,7 @@ Identity and setup (present for `status` `ok` and `diverged`): `status`, `run_di
 | `best_val_metrics`, `final_val_metrics` | Validation `loss`, `accuracy`, `miou` of the best and the last epoch. |
 | `test_metrics_best`, `test_metrics_final` | Test-split `loss`, `accuracy`, `miou`, `miou_from_confusion`, `pixel_accuracy`, `per_class_iou`, `confusion` for the reloaded `best_model.keras` and for the last-epoch weights. |
 | `trivial_baseline` | Scores of the majority-class predictor on the test masks (`predicted_class`, `miou`, `per_class_iou`, `pixel_accuracy`, `confusion`). |
-| `visualizations` | `{files, failed, skipped, seconds}`: the names that exist on disk (dashboard, per-epoch grids, end-of-run figures), `{figure: error}` for those that raised, `{figure: reason}` for those deliberately not drawn (`best_vs_final_predictions.png` when the best epoch is the last), wall seconds of the per-epoch grids plus the end-of-run figures (the dashboard redraw is not timed). |
+| `visualizations` | `{files, failed, skipped, seconds}`: the names that exist on disk (dashboard, per-epoch grids, end-of-run figures), the list of figure names that raised, `{figure: reason}` for those deliberately not drawn (`best_vs_final_predictions.png` when the best epoch is the last), wall seconds of the per-epoch grids plus the end-of-run figures (the dashboard redraw is not timed). |
 | `analyzer` | `{status, analyzers, error, path, seconds}` read back from `model_analysis/analysis_results.json`, plus `removed: ["summary_dashboard.png"]` when the empty library figure was deleted after an `ok` read-back (the key is absent otherwise): status `ok`, `partial`, `missing`, `unreadable` or `error`; `analyzers` lists which of `weights` / `spectral` wrote results. With `--no-model-analysis`: the skipped block (`status: "skipped"`). |
 | `test_eval_seconds` | Wall seconds of the test evaluation (one prediction pass per scored weight set; the split is scored once when `final_reused_best`, twice otherwise) plus the baseline. |
 | `best_checkpoint_load_error`, `best_checkpoint_max_abs_diff` | Whether the best checkpoint reloaded, and the largest gap between its validation metrics and what `fit` recorded for the best epoch. |
