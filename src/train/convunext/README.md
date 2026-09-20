@@ -375,7 +375,7 @@ The test mIoU range is 0.000014, and 0.000017 over the five seed-42 runs of the 
 code states). That is about a thousandth of the loop-2 seed spread (0.0174, n = 3): the spread in "Loop 2" is a
 seed effect (a seed changes the initial weights and the fit/validation split), not run-to-run noise.
 The same-seed floor is the GPU kernel non-determinism of "Open items" (weights differ at the 1e-6 level
-after 20 steps, measured in iteration 1; test mIoU differs by about 1e-5 after 200 steps, measured here); before the stateless flip of iteration 1 the same pair differed by
+after 20 steps, measured in iteration 1; test mIoU differs by about 1e-5 after 180 steps (2 epochs of 90), measured here); before the stateless flip of iteration 1 the same pair differed by
 0.0024. So a change of about 1e-4 mIoU on a fixed seed and split is attributable in a 2-epoch run,
 unless the change alters how the random number generators are consumed (an added layer, a different
 initialiser draw order), which makes it a different-seed comparison.
@@ -393,7 +393,7 @@ to 20.86 s (mean 20.30). Verdicts, on rules written before the run:
 | Is the best epoch the last? | `best_epoch == epochs_run` | `best_epoch` 18 of 28 | No: the best-versus-final path ran on a real segmentation run |
 | Overfit? | `val_loss` last minus best at least 0.02 with train loss lower | 0.3316 - 0.2990 = +0.0327; train loss 0.1736 against 0.2383 | Yes |
 | Plateau? | `val_miou` range over the last 10 epochs below 0.01 | 0.0150 (epochs 19 to 28); 0.0033 over epochs 24 to 28 | No by the rule; the last four epochs are flat (0.7109, 0.7114, 0.7109, 0.7102) |
-| Above the 10-epoch probe? | test mIoU above 0.6579 by more than the 0.0174 seed spread | 0.7100 (best), 0.7197 (final) | Above (0.0521 and 0.0618, three times the seed spread; the same-seed floor is 1.4e-5). Same seed and split, only the epoch count and so the schedule differ |
+| Above the 10-epoch probe? | test mIoU above 0.6579 by more than the 0.0174 seed spread | 0.7100 (best), 0.7197 (final) | Above (0.0521 and 0.0618, 3.0 and 3.6 times the seed spread; the same-seed floor is 1.4e-5). Same seed and split, only the epoch count and so the schedule differ |
 | Is `border` stuck? | test border IoU below 0.20 | 0.4593 (best), 0.4726 (final); recall 0.568 / 0.586, precision 0.706 / 0.710; predicted share 9.87 / 10.14 percent against 12.29 percent | No (the 10-epoch probe: 0.3771) |
 | Does the LR anneal? | `lr_last_step` at most 2e-5 and CSV `lr` falls every epoch | `lr_last_step` 2.0869e-05 (4.3 percent above the line), CSV `lr` strictly falling from 1.0000e-03 to 3.4227e-05 | Borderline: the run stopped at step 5796 of 6210, and the 1e-5 floor is reached only at step 6210 |
 
