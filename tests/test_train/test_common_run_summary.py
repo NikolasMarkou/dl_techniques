@@ -327,10 +327,24 @@ def test_data_free_status_reads_a_real_analyzer_file_that_read_analysis_status_c
 # run_data_free_analysis (the one end-of-run analysis of both ConvUNeXt trainers)
 # ---------------------------------------------------------------------
 
-def _analysis_spy(monkeypatch, run_dir, payload=None, returns="results", raises=None):
+PANEL_SECTIONS = ("model_metrics", "calibration_metrics", "confidence_metrics", "weight_pca")
+
+
+def _analysis_results(**filled) -> SimpleNamespace:
+    """A stand-in for the ``AnalysisResults`` a weights + spectral analysis returns: the four sections
+    the summary dashboard's panels read are empty (MEASURED on a real run), except the ones given."""
+    return SimpleNamespace(**{**dict.fromkeys(PANEL_SECTIONS[:3], {}), "weight_pca": None, **filled})
+
+
+_EMPTY_RESULT = object()
+
+
+def _analysis_spy(monkeypatch, run_dir, payload=None, returns=_EMPTY_RESULT, raises=None):
     """Replace ``run_summary.run_model_analysis``; it records its arguments and, when ``payload``
-    is given, writes the file a real analysis would."""
+    is given, writes the file a real analysis would; ``returns`` defaults to an empty-sections result
+    (``None`` is the analyzer's own "it failed" return)."""
     calls = []
+    returns = _analysis_results() if returns is _EMPTY_RESULT else returns
 
     def spy(*args, **kwargs):
         calls.append(args)
@@ -382,16 +396,17 @@ def test_an_analysis_that_raises_is_recorded_as_error_and_never_propagates(tmp_p
     assert block["analyzers"] == [] and block["seconds"] >= 0.0
 
 
-def _with_library_files(run_dir, payload):
-    """A spy payload that also writes the library's files: the empty dashboard, a real figure and
-    a same-named file OUTSIDE ``model_analysis/``."""
+def _with_library_files(run_dir, payload, results=None):
+    """A spy payload that also writes the library's files: the dashboard, a real figure and
+    a same-named file OUTSIDE ``model_analysis/``; returns ``results`` (default: empty sections)."""
+    results = _analysis_results() if results is None else results
     (run_dir / "summary_dashboard.png").write_bytes(b"outside")
 
     def write(*_args, **_kwargs):
         _write_analysis(run_dir, payload)
         for name in ("summary_dashboard.png", "spectral_summary.png"):
             (run_dir / "model_analysis" / name).write_bytes(b"png")
-        return "results"
+        return results
 
     return write
 
@@ -404,6 +419,46 @@ def test_the_empty_summary_dashboard_of_an_ok_analysis_is_deleted_and_recorded(t
     assert {p.name for p in (tmp_path / "model_analysis").iterdir()} == {
         "analysis_results.json", "spectral_summary.png"}, "only that one file goes"
     assert (tmp_path / "summary_dashboard.png").read_bytes() == b"outside", "never outside model_analysis/"
+
+
+@pytest.mark.parametrize("section", PANEL_SECTIONS)
+def test_a_dashboard_that_a_panel_has_data_for_is_kept(tmp_path, monkeypatch, section) -> None:
+    """D-040: the deletion is for the EMPTY figure. Whichever of the four sections the panels read
+    holds data, the file is real output (the ConvNeXt reference's own dashboard is such a file)."""
+    filled = _analysis_results(**{section: {"m": {"x": 1.0}}})
+    monkeypatch.setattr(run_summary, "run_model_analysis",
+                        _with_library_files(tmp_path, _data_free_payload(), results=filled))
+    block = _analyse(tmp_path)
+    assert block["status"] == "ok" and "removed" not in block
+    assert (tmp_path / "model_analysis" / "summary_dashboard.png").read_bytes() == b"png"
+
+
+def test_an_ok_analysis_that_returned_nothing_keeps_the_dashboard(tmp_path, monkeypatch) -> None:
+    """The analyzer returned ``None`` (it raised after writing its file): nothing says the figure is empty."""
+    write = _with_library_files(tmp_path, _data_free_payload())
+    monkeypatch.setattr(run_summary, "run_model_analysis", lambda *a, **k: (write(), None)[1])
+    block = _analyse(tmp_path)
+    assert block["status"] == "ok" and "removed" not in block
+    assert (tmp_path / "model_analysis" / "summary_dashboard.png").exists()
+
+
+def test_the_dashboard_a_real_weights_and_spectral_analysis_writes_is_the_empty_one_the_gate_deletes(
+        tmp_path) -> None:
+    """The gate reads the in-memory ``AnalysisResults``; this checks it against the real analyzer, whose
+    ``summary_dashboard.png`` is written and then removed by the trainers' shared function."""
+    model = keras.Sequential([
+        keras.layers.Input((16, 16, 3)),
+        keras.layers.Conv2D(16, 3, name="c1"),
+        keras.layers.Conv2D(16, 3, name="c2"),
+        keras.layers.Conv2D(3, 1, name="head"),
+    ])
+    history = keras.callbacks.History()
+    history.history = {"loss": [1.0, 0.5]}
+    x = np.random.default_rng(0).random((4, 16, 16, 3), dtype=np.float32)
+    block = run_summary.run_data_free_analysis(model, x, np.zeros((4, 16, 16), dtype=np.uint8), history, "real", tmp_path)
+    assert block["status"] == "ok" and block["removed"] == ["summary_dashboard.png"], block
+    assert not (tmp_path / "model_analysis" / "summary_dashboard.png").exists()
+    assert (tmp_path / "model_analysis" / "spectral_summary.png").is_file()
 
 
 def test_an_analysis_that_did_not_read_back_ok_keeps_every_file_and_has_no_removed_key(

@@ -339,12 +339,14 @@ def run_data_free_analysis(
         if results is None and block["status"] != "ok":
             block["error"] = f"run_model_analysis failed (its exception is in run.log); {block['error']}"
         # DECISION plan-2026-09-19T224205-49c8bf80/D-027: the library always writes
-        # ``summary_dashboard.png`` and, with weights + spectral only, all six panels read "No ...
+        # ``summary_dashboard.png`` and, with weights + spectral only, all four panels read "No ...
         # data available" (194,788 B in every run). Delete THAT file, ours, in this run's own
-        # ``model_analysis/``, after an "ok" read-back, and say so in ``removed``. Do NOT turn
-        # the analyzer's own dashboard off (library layout) and do NOT delete by pattern.
+        # ``model_analysis/``, after an "ok" read-back, and say so in ``removed``, but (D-040) only
+        # while none of the four sections its panels read has data. Do NOT turn the analyzer's own
+        # dashboard off (library layout) and do NOT delete by pattern or by file name alone.
         empty_dashboard = run_dir / "model_analysis" / "summary_dashboard.png"
-        if block["status"] == "ok" and empty_dashboard.is_file():
+        if block["status"] == "ok" and empty_dashboard.is_file() and results is not None and not any(
+                (results.model_metrics, results.calibration_metrics, results.confidence_metrics, results.weight_pca)):
             empty_dashboard.unlink()
             block["removed"] = [empty_dashboard.name]
     except Exception as e:  # noqa: BLE001 - the analysis must not fail a finished run

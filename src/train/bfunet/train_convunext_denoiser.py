@@ -123,17 +123,13 @@ from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
 
 # Shared bfunet trainer substrate. The data / curriculum / callback / dashboard /
 # self-iterate / train-orchestration skeleton lives ONCE in train.bfunet.common; this
-# trainer imports it and RE-EXPORTS the frozen-API names so
+# trainer imports it and RE-EXPORTS the names the tests use, so
 # `from train.bfunet.train_convunext_denoiser import <name>` keeps resolving (3 test
 # files depend on this exact path). `import ... as common` is used for common.train().
 from train.bfunet.common import (
     BFUnetTrainingConfig,
-    decode_full_image, random_crop_patch, load_and_preprocess_image,
-    collect_training_paths, create_dataset, make_curriculum_noise_fn,
-    build_self_iterate_pool, create_self_iterate_dataset,
-    _denorm, render_training_dashboard, _mean_psnr, denoise_k_passes,
-    multi_pass_psnr, build_fixed_val_batch, build_dashboard_from_dir,
-    DenoisingVisualizationCallback,
+    create_dataset, make_curriculum_noise_fn, build_self_iterate_pool, create_self_iterate_dataset,
+    denoise_k_passes, multi_pass_psnr, build_dashboard_from_dir,
     add_common_arguments, reject_self_iterate_with_nonadditive,
     _homogeneity_probe, validate_gabor_stem_channels, freeze_gabor_stem_if_requested,
 )
