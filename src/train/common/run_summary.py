@@ -372,6 +372,8 @@ def summary_head(config: Any, run_dir: Path, *, params: int, steps_per_epoch: in
     """The summary keys the bfunet trainers and the segmenter share: ``SUMMARY_CONFIG_KEYS`` read off ``config``
     (a missing attribute raises ``AttributeError``), ``epochs`` as ``epochs_requested``, the three ``devices`` keys of
     :func:`describe_devices`, the sizes and ``image_range`` [0, 1] (the CLEAN images, not the noisy input)."""
+    # DECISION plan-2026-09-19T224205-49c8bf80/D-051: NOT ``data_range``: that is config.json's string stamp, and a [0, 1]
+    # claim about the noisy input is false under --no-clip. Do NOT rename it back or derive it from ``clip_noise``.
     return {
         "run_dir": str(run_dir), "params": int(params), "steps_per_epoch": int(steps_per_epoch),
         "epochs_requested": config.epochs, "image_range": [0.0, 1.0],
