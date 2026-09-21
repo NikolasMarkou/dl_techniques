@@ -611,6 +611,17 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.eval_psnr_vs_noise \
 flags: `--patch-size`, `--channels`, `--batch-size`, `--full-image` (SOTA reflect-pad protocol),
 `--size-multiple`, `--no-clip`, `--confidence`, `--seed`, `--output-dir`, `--experiment-name`.
 
+Every `predict` call of the patch path feeds ONE batch shape: the patches are padded to a multiple of
+`--batch-size` (rows repeated from the start) and the prediction is cropped back. Without it the short last
+batch (100 patches at batch 16 leave 4) was a second trace of the predict function per model, and TensorFlow
+counts traces across all models of the process, so a run whose best epoch is not its last printed
+`5 out of the last 10 calls ... triggered tf.function retracing` in `run.log` (measured once on
+`convunext_confirm_l4_40ep_s43`, gone after the change; guard `tests/test_train/test_bfunet/test_eval_predict_shape.py`).
+The numbers do not change beyond kernel choice: on that run's saved models the 36 summary cells (Kodak24 and CBSD68 at three
+sigmas) differ from the old code by at most 6.5e-5 dB with TF32 convolutions on (their kernel depends on the batch size) and by
+at most 9.5e-8 dB with TF32 off; two runs of the old code agree exactly. The whole-image path (`--full-image`) still
+retraces once per distinct image size, which is inherent to variable shapes.
+
 > The tool imports the ConvUNeXt model module to register its custom layers for deserialization.
 > A checkpoint from any other architecture may require importing that model module first so its
 > custom objects are registered.

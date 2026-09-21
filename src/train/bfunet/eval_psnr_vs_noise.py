@@ -186,10 +186,15 @@ def _to_flexible_input(model: keras.Model) -> keras.Model:
 
 def _predict_denoised(model: keras.Model, noisy: np.ndarray, batch_size: int) -> np.ndarray:
     """Run the denoiser; reduce multi-output models to output 0 (final denoised image)."""
-    pred = model.predict(noisy, batch_size=batch_size, verbose=0)
+    # DECISION plan-2026-09-19T224205-49c8bf80/D-057: pad to a multiple of ``batch_size``, crop back. A
+    # short last batch is a second trace per model and TF counts traces across all models: the
+    # ``retracing`` warning. Do NOT drop the padding; guard: ``TestPredictTracesOncePerModel``.
+    n = len(noisy)
+    padded = noisy[np.arange(-(-n // batch_size) * batch_size) % n]
+    pred = model.predict(padded, batch_size=batch_size, verbose=0)
     if isinstance(pred, (list, tuple)):
         pred = pred[0]  # deep supervision / exposed bottleneck -> final denoised output
-    return np.asarray(pred)
+    return np.asarray(pred)[:n]
 
 
 # ---------------------------------------------------------------------
