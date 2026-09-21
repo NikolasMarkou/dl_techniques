@@ -375,6 +375,21 @@ def test_deterministic_data_follows_the_seed(image_paths):
     assert not all(np.array_equal(a[1], b[1]) and np.array_equal(a[0], b[0]) for a, b in zip(one, other))
 
 
+def test_a_fresh_iterator_of_the_deterministic_validation_stream_repeats_its_batches(image_paths):
+    """Keras resets the iterator every epoch (``epoch_iterator.reset()``), so the flag's validation stream is
+    the SAME crops and noise in every epoch: the property D-047 and the README lean on (review iter-3 NOTE 4).
+    One dataset, four ``take(3)`` (a fresh iterator each; 3 batches are an epoch of the 6-image fixture)."""
+    set_seeds(SEED)
+    config = dataclasses.replace(_streaming_config(), deterministic_data=True)
+    noise_fn = make_curriculum_noise_fn(config, tf.Variable(config.sigma_max_end, dtype=tf.float32))
+    dataset = create_dataset(image_paths, config, noise_fn, is_training=False)
+    epochs = [[(np.asarray(noisy), np.asarray(clean)) for noisy, clean in dataset.take(3)] for _ in range(4)]
+    for epoch in epochs[1:]:
+        for index, ((noisy_a, clean_a), (noisy_b, clean_b)) in enumerate(zip(epochs[0], epoch)):
+            np.testing.assert_array_equal(clean_a, clean_b, err_msg=f"clean batch {index} of a later epoch differs")
+            np.testing.assert_array_equal(noisy_a, noisy_b, err_msg=f"noisy batch {index} of a later epoch differs")
+
+
 def test_the_default_pipeline_keeps_todays_call_pattern(image_paths, monkeypatch):
     """Off: an unordered decode and AUTOTUNE random maps, exactly as before D-047.
     On: an ordered decode and no parallelism on the maps that draw random numbers."""

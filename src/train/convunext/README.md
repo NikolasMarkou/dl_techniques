@@ -409,8 +409,9 @@ pixels, both confusion matrices sum to it, `miou == miou_from_confusion`):
 weights every headline number is scored on, and it turns at epoch 18 and then rises while `val_miou`
 keeps improving to epoch 26 (0.7114). On the test split the final weights beat the best ones by 0.0097 mIoU,
 0.0133 border IoU and 0.0045 pixel accuracy and lose only on cross-entropy (0.3302 against 0.3061), which is
-over-confidence and not worse masks. One seed, and 0.0097 is 0.56 of the seed spread, so this is a measured
-direction, not a proven effect. It is a finding and nothing was changed: the monitor stays `val_loss` (a new
+over-confidence and not worse masks. One seed: the 0.0097 gap is exact for this run (both checkpoints come from it; the same-seed floor of
+the test mIoU is 1.4e-5), and whether its sign generalizes across seeds is measured in loop 4 (seeds 43 and 44 of the
+default recipe). It is a finding and nothing was changed: the monitor stays `val_loss` (a new
 monitor would change a measured default). Only the best weights get the confusion and per-class figures (their
 titles say so); the final weights' confusion is in `results_summary.json` (`test_metrics_final`).
 

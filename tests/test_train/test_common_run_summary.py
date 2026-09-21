@@ -12,6 +12,7 @@ defined once. Each guard below was proven RED by injecting the defect it names
   "completed successfully" whatever happened
 """
 
+import io
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,9 @@ from types import SimpleNamespace
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import keras  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+from PIL import Image  # noqa: E402
 import pytest  # noqa: E402
 from threadpoolctl import threadpool_info, threadpool_limits  # noqa: E402
 
@@ -472,10 +475,48 @@ def test_an_ok_analysis_that_returned_nothing_keeps_the_dashboard(tmp_path, monk
     assert (tmp_path / "model_analysis" / "summary_dashboard.png").exists()
 
 
+# The empty dashboard the real analyzer writes for weights + spectral only (four "No ... data available"
+# panels) is 194,788 B with 1.2 percent of its pixels darker than 250; a dashboard that carries a plotted
+# panel is far denser (0.22 on the ConvNeXt reference's real one, 0.41 for the synthetic figure below).
+EMPTY_DASHBOARD_MAX_INK = 0.05
+
+
+def _ink_fraction(png: bytes) -> float:
+    """The fraction of a PNG's pixels that are not near-white."""
+    return float((np.asarray(Image.open(io.BytesIO(png)).convert("L")) < 250).mean())
+
+
+def test_the_ink_measure_tells_a_filled_figure_from_the_empty_dashboard() -> None:
+    """A figure with a plotted panel must read above the empty-dashboard bound, an all-text one below it."""
+    filled, text_only = plt.figure(figsize=(6, 4)), plt.figure(figsize=(6, 4))
+    filled.add_subplot().imshow(np.random.default_rng(0).random((20, 20)))
+    text_only.text(0.5, 0.5, "No data available", ha="center")
+    ink = []
+    for fig in (filled, text_only):
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format="png")
+        plt.close(fig)
+        ink.append(_ink_fraction(buffer.getvalue()))
+    assert ink[0] > 4 * EMPTY_DASHBOARD_MAX_INK and ink[1] < EMPTY_DASHBOARD_MAX_INK, ink
+
+
 def test_the_dashboard_a_real_weights_and_spectral_analysis_writes_is_the_empty_one_the_gate_deletes(
-        tmp_path) -> None:
+        tmp_path, monkeypatch) -> None:
     """The gate reads the in-memory ``AnalysisResults``; this checks it against the real analyzer, whose
-    ``summary_dashboard.png`` is written and then removed by the trainers' shared function."""
+    ``summary_dashboard.png`` is written and then removed by the trainers' shared function. It is an
+    ORACLE for the library's behaviour, not a guard of the gate (the four section cases above are the
+    gate's guards): the file is read at the moment it is unlinked and must be the empty figure, so a
+    library change that fills the figure from weights or spectral data turns this test red (and the
+    deletion it would then be doing is a deletion of real content)."""
+    unlinked = []
+    unlink = Path.unlink
+
+    def record(self, *args, **kwargs):
+        if self.name == "summary_dashboard.png":
+            unlinked.append(self.read_bytes())
+        return unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", record)
     model = keras.Sequential([
         keras.layers.Input((16, 16, 3)),
         keras.layers.Conv2D(16, 3, name="c1"),
@@ -489,6 +530,7 @@ def test_the_dashboard_a_real_weights_and_spectral_analysis_writes_is_the_empty_
     assert block["status"] == "ok" and block["removed"] == ["summary_dashboard.png"], block
     assert not (tmp_path / "model_analysis" / "summary_dashboard.png").exists()
     assert (tmp_path / "model_analysis" / "spectral_summary.png").is_file()
+    assert len(unlinked) == 1 and _ink_fraction(unlinked[0]) < EMPTY_DASHBOARD_MAX_INK, "the deleted figure had content"
 
 
 def test_an_analysis_that_did_not_read_back_ok_keeps_every_file_and_has_no_removed_key(
