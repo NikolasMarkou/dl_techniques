@@ -369,12 +369,12 @@ SUMMARY_CONFIG_KEYS = (
 
 def summary_head(config: Any, run_dir: Path, *, params: int, steps_per_epoch: int,
                  devices: Dict[str, Any]) -> Dict[str, Any]:
-    """The summary keys the bfunet trainers and the segmenter share: ``SUMMARY_CONFIG_KEYS`` read
-    off ``config`` (a missing attribute raises ``AttributeError``), ``epochs`` as ``epochs_requested``,
-    the three ``devices`` keys of :func:`describe_devices`, the sizes, and the [0, 1] ``data_range``."""
+    """The summary keys the bfunet trainers and the segmenter share: ``SUMMARY_CONFIG_KEYS`` read off ``config``
+    (a missing attribute raises ``AttributeError``), ``epochs`` as ``epochs_requested``, the three ``devices`` keys of
+    :func:`describe_devices`, the sizes and ``image_range`` [0, 1] (the CLEAN images, not the noisy input)."""
     return {
         "run_dir": str(run_dir), "params": int(params), "steps_per_epoch": int(steps_per_epoch),
-        "epochs_requested": config.epochs, "data_range": [0.0, 1.0],
+        "epochs_requested": config.epochs, "image_range": [0.0, 1.0],
         **{key: getattr(config, key) for key in SUMMARY_CONFIG_KEYS},
         **{key: devices[key] for key in ("gpu_name", "tf_visible_devices", "cuda_visible_devices")},
     }

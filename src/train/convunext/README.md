@@ -186,7 +186,7 @@ Notes:
 
 Identity and setup (present for `status` `ok` and `diverged`): `status`, `run_dir`,
 `experiment_name`, `model_family`, `dataset`, `variant`, `params`, the architecture keys
-(below), `input_shape`, `data_range` (`[0.0, 1.0]`, the input after `/255`), `num_classes`,
+(below), `input_shape`, `image_range` (`[0.0, 1.0]`, the image after `/255`; named `data_range` in iteration 3), `num_classes`,
 `class_names`, `optimizer`, `gradient_clip_norm`, `learning_rate`, `lr_schedule`,
 `warmup_epochs`, `steps_per_epoch`, `weight_decay`, `batch_size`, `seed`, `validation_split`,
 `max_samples`, `n_train`, `n_val`, `n_test`, `data_load_seconds`, `epochs_requested`, `monitor`,

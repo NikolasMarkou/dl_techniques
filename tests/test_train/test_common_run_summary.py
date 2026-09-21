@@ -571,7 +571,7 @@ def test_the_summary_head_reads_each_fact_from_the_argument_that_names_it(tmp_pa
     head = run_summary.summary_head(_head_config(), tmp_path, params=1234, steps_per_epoch=207.0, devices=_DEVICES)
     assert head == {
         "run_dir": str(tmp_path), "params": 1234, "steps_per_epoch": 207, "epochs_requested": 30,
-        "data_range": [0.0, 1.0], "experiment_name": "run_a", "variant": "tiny", "learning_rate": 0.003,
+        "image_range": [0.0, 1.0], "experiment_name": "run_a", "variant": "tiny", "learning_rate": 0.003,
         "warmup_epochs": 2, "weight_decay": 0.05, "batch_size": 16, "seed": 11,
         "gpu_name": "gpu-x", "tf_visible_devices": ["/gpu:0"], "cuda_visible_devices": "1",
     }

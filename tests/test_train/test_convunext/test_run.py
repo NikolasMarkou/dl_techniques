@@ -311,7 +311,8 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
     assert summary["input_shape"] == [SIZE, SIZE, 3] and summary["class_names"] == ["pet", "background", "border"]
     assert summary["optimizer"] == "AdamW" and summary["lr_schedule"] == "cosine"
     assert summary["monitor"] == "val_loss"
-    assert summary["data_range"] == [0.0, 1.0], "the pixel domain after /255, stated like the denoiser's"
+    assert summary["image_range"] == [0.0, 1.0], "the image range after /255, the shared head's value"
+    assert "data_range" not in summary, "renamed: the denoiser's config.json stamps a string under that name"
     assert summary["epochs_run"] == EPOCHS and len(summary["epoch_times"]) == EPOCHS
     assert all(t > 0.0 for t in summary["epoch_times"])
     for which in ("test_metrics_best", "test_metrics_final"):
@@ -564,7 +565,7 @@ def test_a_diverged_run_writes_a_strict_diverged_summary_and_no_final_model(dive
     assert summary["history"]["loss"][1] is None, "the NaN is written as null (strict JSON)"
     for key in ("n_train", "n_val", "n_test", "initial_loss_ratio", "epoch_times", "fit_wall_seconds"):
         assert key in summary, key
-    assert summary["data_range"] == [0.0, 1.0] and summary["seed"] == 5 and summary["epochs_requested"] == 3
+    assert summary["image_range"] == [0.0, 1.0] and summary["seed"] == 5 and summary["epochs_requested"] == 3
     assert "test_metrics_best" not in summary and "trivial_baseline" not in summary
     assert not (diverged.run_dir / "final_model.keras").exists()
     assert (diverged.run_dir / "best_model.keras").exists(), "the checkpoint of epoch 1 stays"

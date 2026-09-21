@@ -211,6 +211,19 @@ def test_config_json_stamps_the_unit_pixel_domain(e2e) -> None:
     assert config["data_range"] == "[0,1]"
 
 
+def test_the_summary_and_config_json_share_no_key_with_two_meanings(e2e) -> None:
+    """One run directory, one meaning per name (review iter-3 WARNING 1): ``config.json``'s ``data_range``
+    is the provenance STRING the checkpoint gate reads, so the summary must not reuse the name. The keys
+    both files carry with different types are the three where the config holds the REQUEST (``null`` =
+    resolved later, or a bool) and the summary the RESOLVED value: ``depth``, ``blocks_per_level``,
+    ``test_eval``. Any other pair is a new same-name / different-type key and must be named here."""
+    config = json.loads((e2e.run_dir / "config.json").read_text())
+    summary = _strict_json(e2e.run_dir / "results_summary.json")
+    mismatched = {key for key in config.keys() & summary.keys() if type(config[key]) is not type(summary[key])}
+    assert mismatched <= {"depth", "blocks_per_level", "test_eval"}, mismatched
+    assert "data_range" not in summary and "image_range" not in config
+
+
 def test_config_json_records_the_experiment_and_the_tiny_variant(e2e) -> None:
     config = json.loads((e2e.run_dir / "config.json").read_text())
     assert config["experiment_name"] == "bfunet_e2e"
@@ -1417,7 +1430,7 @@ PARITY_KEYS = (
     "model_family", "train_image_dirs", "convnext_version", "depth", "blocks_per_level", "dims",
     "kernel_size", "drop_path_rate", "dropout_rate", "input_shape", "optimizer",
     "gradient_clip_norm", "lr_schedule", "weight_decay", "batch_size", "seed", "n_train_files",
-    "n_val_files", "monitor", "initial_loss_sanity_eval", "data_range",
+    "n_val_files", "monitor", "initial_loss_sanity_eval", "image_range",
 )
 # The names the ConvNeXt reference gives another meaning (a dataset name, sample counts): the
 # denoiser's own facts are the image directories and the image-path worklists, named for that.
@@ -1441,7 +1454,7 @@ def test_the_retired_key_names_are_gone_from_a_finished_run(ok_run) -> None:
 
 def test_each_parity_value_is_the_fact_of_the_run_it_names(e2e) -> None:
     summary, config = _strict_json(e2e.run_dir / "results_summary.json"), e2e.config
-    assert summary["train_image_dirs"] == [str(e2e.root / "train")] and summary["data_range"] == [0.0, 1.0]
+    assert summary["train_image_dirs"] == [str(e2e.root / "train")] and summary["image_range"] == [0.0, 1.0]
     assert summary["input_shape"] == [PATCH, PATCH, 3]
     assert (summary["optimizer"], summary["lr_schedule"], summary["monitor"]) == \
         ("adamw", "cosine_decay", "val_loss")

@@ -529,9 +529,9 @@ class TestDashboardCadence:
             "Training dashboard - epoch 1", "Training dashboard - epoch 2"]
 
 
-def _head(tmp_path, *, architecture=None, baseline_val_loss=0.5) -> dict:
+def _head(tmp_path, *, architecture=None, baseline_val_loss=0.5, **config_fields) -> dict:
     return common._summary_head(
-        TrainingConfig(variant="tiny", depth=2, blocks_per_level=1, patch_size=16), tmp_path,
+        TrainingConfig(variant="tiny", depth=2, blocks_per_level=1, patch_size=16, **config_fields), tmp_path,
         params=1, steps_per_epoch=3, lr_schedule=lambda step: 1e-3, init_from_block=None,
         hist={}, devices={"gpu_name": None, "tf_visible_devices": [], "cuda_visible_devices": ""},
         n_train_files=6, n_val_files=4, validation_steps=2, baseline_val_loss=baseline_val_loss,
@@ -553,8 +553,18 @@ class TestTheSummaryHead:
         sample counts); the denoiser's facts are image directories and image-path worklists."""
         head = _head(tmp_path)
         assert head["train_image_dirs"] == list(TrainingConfig().train_image_dirs)
-        assert (head["n_train_files"], head["n_val_files"], head["data_range"]) == (6, 4, [0.0, 1.0])
+        assert (head["n_train_files"], head["n_val_files"], head["image_range"]) == (6, 4, [0.0, 1.0])
         assert [key for key in ("dataset", "n_train", "n_val") if key in head] == []
+
+    @pytest.mark.parametrize("clip_noise", [True, False])
+    def test_the_range_key_names_the_clean_images_and_claims_no_input_domain_under_no_clip(
+            self, tmp_path, clip_noise) -> None:
+        """``--no-clip`` leaves the NOISY input outside [0, 1] (noisy min -0.58, max 1.74 at the default
+        sigma), so the head must not state a domain for it: ``image_range`` is the clean images' range,
+        the same under both flags, and no ``data_range`` key exists to be read as the input's."""
+        head = _head(tmp_path, clip_noise=clip_noise)
+        assert head["image_range"] == [0.0, 1.0]
+        assert "data_range" not in head, "that name is config.json's provenance stamp, a string"
 
     def test_a_missing_baseline_is_null_and_a_measured_one_is_kept(self, tmp_path) -> None:
         assert _head(tmp_path, baseline_val_loss=None)["initial_loss_sanity_eval"] is None
