@@ -140,7 +140,7 @@ class GaborDepthwiseSeparableBlock(keras.layers.Layer):
                                 ▼
         ┌─────────────────────────────────────────────────────┐
         │  Conv2D (1 x 1) ── pointwise projection, learnable  │
-        │  use_bias=False by default                         │
+        │  use_bias=False by default                          │
         └───────────────────────┬─────────────────────────────┘
                                 ▼
         ┌─────────────────────────────────────────────────────┐

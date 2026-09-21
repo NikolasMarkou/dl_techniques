@@ -188,12 +188,12 @@ class RADConv2D(keras.layers.Layer):
         Input (B, H, W, C_in)
               │
               ├─────────────────────┬──────────────────────┐
-              ▼                     ▼                       ▼
+              ▼                     ▼                      ▼
         Conv1x1(4*K*G)        Conv1x1(K*G)         SummedAreaTable(x)
-        + softplus            + softmax(axis=K)          │
-        (Δt,Δb,Δl,Δr)              m                      │
+        + softplus            + softmax(axis=K)            │
+        (Δt,Δb,Δl,Δr)              m                       │
               │                     │                      │
-              ▼                     │                      │
+              ▼                     ▼                      ▼
         box corners per (k,g) ──────┼──────────────────────┘
               │                     │
               ▼                     │
