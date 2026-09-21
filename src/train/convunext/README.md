@@ -411,8 +411,8 @@ weights every headline number is scored on, and it turns at epoch 18 and then ri
 keeps improving to epoch 26 (0.7114). On the test split the final weights beat the best ones by 0.0097 mIoU,
 0.0133 border IoU and 0.0045 pixel accuracy and lose only on cross-entropy (0.3302 against 0.3061), which is
 over-confidence and not worse masks. One seed: the 0.0097 gap is exact for this run (both checkpoints come from it; the same-seed floor of
-the test mIoU is 1.4e-5), and whether its sign generalizes across seeds is measured in loop 4 (seeds 43 and 44 of the
-default recipe). It is a finding and the default was not changed: the monitor stays `val_loss` (a new
+the test mIoU is 1.4e-5), and whether its sign generalizes across seeds was measured in loop 4 (seeds 43 and 44 of the
+default recipe, "Loop 4": the final weights win by 0.0200 and 0.0049, in all three seeds). It is a finding and the default was not changed: the monitor stays `val_loss` (a new
 default monitor would change a measured default); `--monitor val_miou` is the opt-in. Only the best weights get the confusion and per-class figures (their
 titles say so); the final weights' confusion is in `results_summary.json` (`test_metrics_final`).
 
@@ -423,14 +423,33 @@ columns); `visualizations.skipped` is `{}` and `failed` `[]`; 35 files listed an
 warning that loop 2 saw once in a denoiser run with best differing from final was not reproduced here: no
 `retracing` line in the 1.5 MB stdout. The two scored passes cost 48.73 s against about 26 s for one.
 
+### Loop 4 (the default recipe at seeds 43 and 44, the `--monitor` flag, the final confirmation)
+
+Every number below was read from the named run's `results_summary.json` or `training_log.csv` when this section was written; the run directories are under `results/` (untracked). Audit note: `plans/plan-2026-09-19T224205-49c8bf80/findings/audit-loop-4.md`. All runs use the segmentation trainer's stateless input pipeline (there is no `--deterministic-data` here); GPU 1, one job at a time.
+
+**The default recipe at three seeds: does the `val_loss` checkpoint lose to the final weights?** Runs `convunext_probe_seg_l4_default_s43` and `_s44` are the command of `convunext_probe_seg_l3_default` (`--variant tiny --image-size 128 --batch-size 16`, nothing else) with `--seed 43` and `--seed 44` (walls 782.5 s and 797.3 s, exit 0, `status` ok, no `retracing` line, `failed` empty). The rule was written before the runs: the direction repeats iff the final weights beat the checkpoint by at least 0.003 test mIoU in all three seeds, the mean gap is at least 0.005, and `val_miou` peaks after the `val_loss` best epoch in all three.
+
+| Seed | Epochs run (planned 30) / best epoch | Test mIoU best checkpoint / final weights | Gap (final minus best) | Border IoU best / final | `val_loss` best -> last | `val_miou` peak |
+|---|---|---|---|---|---|---|
+| 42 (`convunext_probe_seg_l3_default`) | 28 / 18, early stop | 0.7100 / 0.7197 | +0.0097 | 0.4593 / 0.4726 | 0.2990 -> 0.3316 | 0.7114 at epoch 26 |
+| 43 (`convunext_probe_seg_l4_default_s43`) | 29 / 19, early stop | 0.7015 / 0.7215 | +0.0200 | 0.4310 / 0.4732 | 0.3242 -> 0.3564 | 0.7029 at epoch 27 |
+| 44 (`convunext_probe_seg_l4_default_s44`) | 30 / 21, ran all 30 | 0.7104 / 0.7153 | +0.0049 | 0.4562 / 0.4653 | 0.3072 -> 0.3378 | 0.7058 at epoch 30 |
+
+The gaps are 0.0097, 0.0200 and 0.0049 (mean 0.0115, smallest 1.6 times the threshold); the `val_miou` peak comes 8, 8 and 9 epochs after the `val_loss` best. **Verdict: the direction repeats.** The border IoU gap has the same sign in all three (+0.0133, +0.0422, +0.0092) and `val_loss` rises by 0.0306 to 0.0327 after its best while the train loss keeps falling. Limits: three seeds (all three agreeing has a one in four chance by luck under a coin-flip sign); each gap is exact for its run (both checkpoints come from one run, the same-seed floor is 1.4e-5) but varies 4-fold between seeds; **no checkpoint is saved at the `val_miou` peak, so the test mIoU at that epoch was not measured**: the table supports "the final weights beat the `val_loss` checkpoint", not "selecting by `val_miou` beats both". The default monitor stays `val_loss`; `--monitor val_miou` is the opt-in (flag table above).
+
+**The `--monitor` flag end to end.** `convunext_audit_seg_l4_monitor` (the loop-2 command plus `--monitor val_miou`): the summary's `monitor` is `val_miou`, `best_epoch` 2 (`val_miou` 0.3930 then 0.4265), `best_checkpoint_max_abs_diff` 0.0, `final_reused_best` true, test mIoU 0.428112, and the mIoU curve labels the marker `best epoch 2 (by val_miou)`. In a 2-epoch run both criteria pick epoch 2 (`val_loss` 0.6995 then 0.6565), so this run shows the flag reaching the checkpoint, the early stop, the summary and the figures, not a different selection; the different selection is pinned by a test on two real tiny runs where the criteria disagree by construction. No 30-epoch run with the flag exists.
+
+**Final confirmation of the loop-2 command at seed 42 (two-epoch runs, same-seed floor).** `convunext_audit_seg_l4` (code before the flag): test mIoU 0.428131, IoU pet / background / border 0.494730 / 0.702678 / 0.086985, test loss 0.660195, epochs 79.72 and 9.52 s, fit 92.66 s, `test_eval_seconds` 24.57. `convunext_audit_seg_l4b` (the code with the flag, default monitor): 0.428122, 0.494720 / 0.702670 / 0.086978, 0.660209. Against the expected 0.428110 +/- 0.00003 (twice the same-seed range of 1.4e-5) both pass (+0.000021 and +0.000012); they differ from each other by 8.5e-6, so the flag does not move the default. The six seed-42 runs of the fixed code (`convunext_audit_seg_l3` and its two repeats, `_l4`, `_l4b`, `_l4_monitor`) span 0.428109 to 0.428131 (0.000022). `analyzer.seconds` is 6.99, 6.54 and 6.65 s in these runs and 6.57 to 6.75 s in the two 30-epoch runs (16.06 to 18.01 s in the three loop-3 two-epoch runs before the one-thread limit). All: `status` ok, `visualizations.failed` empty, `analyzer.removed` `["summary_dashboard.png"]`, 68 keys, `image_range` `[0.0, 1.0]`.
+
 ## Open items
 
 - The training defaults are the ConvNeXt trainer's, untuned for segmentation. `border` is not stuck:
   the 10-epoch probe reaches test IoU 0.3771 (2-epoch runs 0.087 to 0.122), so no class weight or
   Dice term is justified by the evidence. The 30-epoch default was measured once ("Loop 3"): it
   stops at epoch 28, ends at test mIoU 0.7100 (best weights) and 0.7197 (final), above the probe's
-  0.6579, with `border` IoU 0.4593 and 0.4726. Whether the `val_loss` checkpoint costs mIoU beyond this
-  one seed is unmeasured (one seed, 0.0097 apart).
+  0.6579, with `border` IoU 0.4593 and 0.4726. The final weights beat the `val_loss` checkpoint in three of three seeds
+  (gaps 0.0097, 0.0200, 0.0049; "Loop 4"); whether `--monitor val_miou` gains test mIoU is unmeasured
+  (no checkpoint is saved at the `val_miou` peak and no 30-epoch run uses the flag).
 - `--deep-supervision`, a Dice or focal loss and a softmax head are not offered: the stock
   sparse cross-entropy on logits is the whole loss (the library's `SegmentationLosses` need
   one-hot targets and probabilities).
