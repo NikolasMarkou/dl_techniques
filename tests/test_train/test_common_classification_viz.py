@@ -609,6 +609,23 @@ def test_the_dashboard_callback_passes_the_epoch_of_the_lowest_best_key_value(tm
     assert seen == [None], "no best_key, no marker"
 
 
+def test_the_dashboard_callback_marks_the_highest_value_of_a_maximised_best_key(tmp_path, monkeypatch) -> None:
+    """``val_miou`` is maximised (``resolve_monitor_mode``): the marker is the HIGHEST finite value so
+    far, and ``val_loss`` keeps the lowest (the test above), so a shared default is unchanged."""
+    seen = []
+    monkeypatch.setattr(viz, "render_training_dashboard",
+                        lambda *args, **kwargs: seen.append(kwargs.get("best_epoch")) or [])
+    callback = viz.TrainingDashboardCallback(tmp_path / "d.png", best_key="val_miou")
+    passed = []
+    for epoch, value in enumerate([0.2, 0.6, 0.5, float("nan"), 0.55]):
+        callback.on_epoch_begin(epoch)
+        callback.on_epoch_end(epoch, {"loss": 1.0, "val_miou": value, "lr": 1e-3})
+        seen.clear()
+        callback._draw()
+        passed.append(seen[-1])
+    assert passed == [1, 2, 2, 2, 2], "the marker follows the running maximum and skips a NaN epoch"
+
+
 def test_the_shared_dashboard_callback_counts_the_epochs_it_saw_so_a_resumed_fit_starts_its_cadence_over(
         tmp_path, monkeypatch) -> None:
     """No trainer passes ``initial_epoch`` today. The shared callback counts COMPLETED epochs (its own

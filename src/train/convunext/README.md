@@ -65,7 +65,8 @@ pins each one) and were checked against `--help`.
 | `--learning-rate` | `0.001` | Peak learning rate. |
 | `--weight-decay` | `0.0001` | Decoupled AdamW weight decay. |
 | `--warmup-epochs` | `0` | Linear warmup epochs before the cosine; smaller than `--epochs`. |
-| `--patience` | `10` | Early-stopping patience in epochs on `val_loss`. |
+| `--patience` | `10` | Early-stopping patience in epochs on the `--monitor` metric. |
+| `--monitor` | `val_loss` | Metric that picks `best_model.keras` and drives early stopping: `val_loss` (minimised, the default, unchanged) or `val_miou` (maximised). The summary's `monitor`, `best_epoch`, `final_is_best`, the dashboard's best-epoch marker and the label of `miou_curve.png` follow it. Opt-in: three seeds of the default recipe showed the final weights beating the `val_loss` checkpoint, and no run had scored a checkpoint taken at the `val_miou` peak before this flag. |
 | `--seed` | `42` | Seeds weights, shuffling, augmentation, the validation split and the grid's sample choice. |
 | `--viz-freq` | `1` | Write the segmentation grid every this many epochs (the last epoch is always written). |
 | `--viz-samples` | `4` | Validation images in each grid. |
@@ -75,7 +76,7 @@ pins each one) and were checked against `--help`.
 | `--gpu` | none | Sets `CUDA_VISIBLE_DEVICES` and overrides an exported value. Not a config field. |
 
 Fixed, not flags: optimizer AdamW with `clipnorm=1.0`, cosine schedule, loss
-`SparseCategoricalCrossentropy(from_logits=True)`, monitor `val_loss`, random horizontal flip
+`SparseCategoricalCrossentropy(from_logits=True)`, random horizontal flip
 (image and mask together) as the only augmentation, deep supervision off. The training defaults are
 the ConvNeXt trainer's and have NOT been tuned for this task.
 
@@ -133,11 +134,11 @@ results/<experiment_name>/
     run.log                         the dl logger for this run
     training_log.csv                one row per epoch: epoch (0-based), accuracy, loss, lr, miou, val_* ...
     training_history.json           per-epoch lists of every history metric
-    best_model.keras                checkpoint of the lowest-val_loss epoch
+    best_model.keras                checkpoint of the best epoch by --monitor (default: the lowest val_loss)
     final_model.keras               the LAST epoch's weights (not the best)
     results_summary.json            the run's record (strict JSON, keys below)
     visualizations/
-        training_dashboard.png      shared per-epoch curves (loss, accuracy, mIoU, lr, ...), redrawn on a cadence; the best epoch (lowest val_loss so far) is a green dashed line and star on the val curves
+        training_dashboard.png      shared per-epoch curves (loss, accuracy, mIoU, lr, ...), redrawn on a cadence; the best epoch by `--monitor` so far (default: the lowest val_loss) is a green dashed line and star on the val curves
         epoch_000_seg_grid.png      the UNTRAINED model on the fixed validation batch
         epoch_NNN_seg_grid.png      after epoch NNN (every --viz-freq epochs, and the last epoch)
         confusion_matrix.png        TEST split, best weights: pixel counts and row-normalized recall
@@ -411,8 +412,8 @@ keeps improving to epoch 26 (0.7114). On the test split the final weights beat t
 0.0133 border IoU and 0.0045 pixel accuracy and lose only on cross-entropy (0.3302 against 0.3061), which is
 over-confidence and not worse masks. One seed: the 0.0097 gap is exact for this run (both checkpoints come from it; the same-seed floor of
 the test mIoU is 1.4e-5), and whether its sign generalizes across seeds is measured in loop 4 (seeds 43 and 44 of the
-default recipe). It is a finding and nothing was changed: the monitor stays `val_loss` (a new
-monitor would change a measured default). Only the best weights get the confusion and per-class figures (their
+default recipe). It is a finding and the default was not changed: the monitor stays `val_loss` (a new
+default monitor would change a measured default); `--monitor val_miou` is the opt-in. Only the best weights get the confusion and per-class figures (their
 titles say so); the final weights' confusion is in `results_summary.json` (`test_metrics_final`).
 
 **Best differs from final: what appeared.** `final_reused_best` false; `test_metrics_final` differs from

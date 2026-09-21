@@ -381,17 +381,19 @@ def plot_per_class_scores(confusion: np.ndarray, class_names: Sequence[str], out
 
 def plot_miou_curve(
         history: Dict[str, Sequence[float]], best_epoch: int, out_path: PathLike, title: Optional[str] = None,
+        monitor: str = "val_loss",
 ) -> None:
     """Save train and validation mIoU per epoch with the best epoch marked.
 
-    ``best_epoch`` is the epoch chosen by the checkpoint monitor (validation loss), which need
-    not be the epoch of the highest validation mIoU; the label says so.
+    ``best_epoch`` is the epoch chosen by the checkpoint ``monitor`` (validation loss by
+    default), which need not be the epoch of the highest validation mIoU; the label says so.
 
     Args:
         history: ``{"miou": [...], "val_miou": [...]}`` per epoch, equal non-zero lengths.
         best_epoch: 1-based epoch to mark, within ``[1, epochs]``.
         out_path: PNG destination.
         title: Optional figure title.
+        monitor: Name of the checkpoint metric, printed in the label.
 
     Raises:
         ValueError: If a series is missing, empty, of unequal length or non-finite, or
@@ -412,7 +414,7 @@ def plot_miou_curve(
     ax.plot(epochs, train, "o-", color=TRAIN_COLOR, label="train (running mean over the epoch)")
     ax.plot(epochs, val, "o-", color=VAL_COLOR, label="validation (end of epoch)")
     ax.axvline(best_epoch, color="#2ca02c", linestyle="--", linewidth=1.2,
-               label=f"best epoch {best_epoch} (by val_loss)")
+               label=f"best epoch {best_epoch} (by {monitor})")
     ax.plot([best_epoch], [val[best_epoch - 1]], "*", color="#2ca02c", markersize=14)
     ax.set_xlim(0.5, n + 0.5)
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))

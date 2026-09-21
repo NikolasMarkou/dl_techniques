@@ -41,6 +41,7 @@ import numpy as np  # noqa: E402
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support  # noqa: E402
 
 from dl_techniques.utils.logger import logger  # noqa: E402
+from train.common.callbacks import resolve_monitor_mode  # noqa: E402
 
 PathLike = Union[str, Path]
 
@@ -595,8 +596,8 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         baseline_mode: How ``baseline_fn`` measured (``"training"`` or
             ``"inference"``); a mode other than ``"inference"`` is named in the
             marker's legend text.
-        best_key: Optional history key (e.g. ``"val_loss"``): the epoch with its LOWEST finite
-            value so far is passed to :func:`render_training_dashboard` as ``best_epoch`` on
+        best_key: Optional history key (e.g. ``"val_loss"``): the epoch with its best finite
+            value so far (lowest, or highest when ``resolve_monitor_mode`` says ``max``) is passed to :func:`render_training_dashboard` as ``best_epoch`` on
             every draw, so the marker follows the run. ``None`` (the default) marks nothing.
 
     Attributes:
@@ -672,11 +673,12 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
             return 1
 
     def _best_epoch(self) -> Optional[int]:
-        """1-based epoch of the lowest finite ``best_key`` value so far, or ``None``."""
+        """1-based epoch of the best finite ``best_key`` value so far, or ``None``."""
         values = np.asarray(self.history.get(self.best_key, []) if self.best_key else [], dtype=np.float64)
         if not np.isfinite(values).any():
             return None
-        return int(np.argmin(np.where(np.isfinite(values), values, np.inf))) + 1
+        sign = -1.0 if resolve_monitor_mode(self.best_key) == "max" else 1.0
+        return int(np.argmin(np.where(np.isfinite(values), sign * values, np.inf))) + 1
 
     def _draw(self) -> None:
         """Render the dashboard from the accumulated state; never raises."""

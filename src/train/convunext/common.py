@@ -21,7 +21,7 @@ and a linear head, metrics ``accuracy`` (pixel accuracy, named so the shared das
 it) and stock ``MeanIoU`` (``miou``). ``EarlyStopping`` is built with
 ``restore_best_weights=False``: the in-memory model after ``fit`` is the real last epoch and
 is what ``final_model.keras`` holds; the best epoch is ``best_model.keras`` (monitor
-``val_loss``). The test report (per-class IoU, 3x3 confusion, pixel accuracy, mIoU) is
+``--monitor``, default ``val_loss``). The test report (per-class IoU, 3x3 confusion, pixel accuracy, mIoU) is
 computed from a confusion matrix in numpy, independent of the Keras metric, next to a
 majority-class baseline computed from the test masks.
 
@@ -137,6 +137,10 @@ BEST_CHECKPOINT_TOLERANCE = 1e-4
 
 EPOCH_LINE_KEYS = ("loss", "accuracy", "miou", "val_loss", "val_accuracy", "val_miou")
 
+# The metrics ``--monitor`` accepts; the first is the default. The direction of each is
+# ``resolve_monitor_mode``'s (``val_loss`` min, ``val_miou`` max), never re-declared here.
+MONITORS = (MONITOR, "val_miou")
+
 # Largest 32-bit unsigned value: ``numpy.random.seed`` takes 0 .. 2**32 - 1.
 MAX_SEED = 2 ** 32 - 1
 
@@ -193,6 +197,9 @@ class SegTrainingConfig:
     weight_decay: float = 1e-4
     warmup_epochs: int = 0
     patience: int = 10
+    # DECISION plan-2026-09-19T224205-49c8bf80/D-056: opt-in; the default stays ``val_loss``
+    # (three seeds are not the evidence to flip it). Guard: ``TestTheMonitorFlag``.
+    monitor: str = MONITOR
     seed: int = 42
 
     # Monitoring / output
@@ -227,6 +234,8 @@ class SegTrainingConfig:
             raise ValueError(f"weight_decay must be >= 0, got {self.weight_decay}")
         if self.patience < 1:
             raise ValueError(f"patience must be >= 1, got {self.patience}")
+        if self.monitor not in MONITORS:
+            raise ValueError(f"monitor must be one of {MONITORS}, got {self.monitor!r}")
         if not 0 <= self.seed <= MAX_SEED:
             raise ValueError(f"seed must be in [0, {MAX_SEED}], got {self.seed}")
         if not 0.0 < self.validation_split < 1.0:
@@ -325,7 +334,10 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--warmup-epochs", type=int, default=defaults.warmup_epochs,
                        help="Linear warmup epochs before the cosine; smaller than --epochs.")
     train.add_argument("--patience", type=int, default=defaults.patience,
-                       help="Early-stopping patience in epochs on val_loss.")
+                       help="Early-stopping patience in epochs on the --monitor metric.")
+    train.add_argument("--monitor", choices=MONITORS, default=defaults.monitor,
+                       help="Metric that picks best_model.keras and drives early stopping "
+                            "(val_miou is maximised). Default unchanged: val_loss.")
     train.add_argument("--seed", type=int, default=defaults.seed,
                        help="Seed for weights, shuffling, augmentation and the splits.")
     train.add_argument("--viz-freq", type=int, default=defaults.viz_freq,
@@ -870,7 +882,8 @@ def _write_figures(
     else:
         attempt("best_vs_final_predictions.png", best_vs_final)
     attempt("miou_curve.png", lambda: plot_miou_curve(
-        hist, best_epoch, vis_dir / "miou_curve.png", title=f"{config.experiment_name}: mIoU per epoch"))
+        hist, best_epoch, vis_dir / "miou_curve.png", title=f"{config.experiment_name}: mIoU per epoch",
+        monitor=config.monitor))
     out["seconds"] = grid.seconds + time.perf_counter() - started
     logger.info(
         f"Visualizations: {len(out['files'])} written ({', '.join(out['files'])}), "
@@ -965,7 +978,7 @@ def _summary_head(
         "n_val": int(len(data["x_val"])),
         "n_test": int(len(data["x_test"])),
         "data_load_seconds": data_load_seconds,
-        "monitor": MONITOR,
+        "monitor": config.monitor,
         "initial_loss_sanity_eval": {
             "loss": baseline["loss"], "n_samples": int(len(data["x_val"])),
             "split": "val", "before_fit": True,
@@ -1044,7 +1057,7 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
             model_name=config.experiment_name,
             results_dir_prefix="convunext_seg",
             run_dir=str(run_dir),
-            monitor=MONITOR,
+            monitor=config.monitor,
             patience=config.patience,
             use_lr_schedule=True,
             include_terminate_on_nan=True,
@@ -1077,7 +1090,7 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
             out_path=run_dir / "visualizations" / "training_dashboard.png",
             baseline_fn=lambda _model: dict(baseline),
             title=f"{config.experiment_name} (seed {config.seed})",
-            best_key=MONITOR,
+            best_key=config.monitor,
         )
         callbacks.append(dashboard)
 
@@ -1089,8 +1102,8 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
         log_gpu_peak_memory()
         save_training_history_json(history, str(run_dir))
         hist = {k: [float(v) for v in vals] for k, vals in history.history.items()}
-        epochs_run = len(hist.get(MONITOR, []))
-        non_finite = run_summary.non_finite_metrics(hist, MONITOR)
+        epochs_run = len(hist.get(config.monitor, []))
+        non_finite = run_summary.non_finite_metrics(hist, config.monitor)
 
         if non_finite:
             # TerminateOnNaN ended the run: fewer epochs than requested is NOT an early stop.
@@ -1123,9 +1136,9 @@ def train(config: SegTrainingConfig) -> Dict[str, Any]:
         if stopped_early:
             logger.info(
                 f"EarlyStopping: stopped after epoch {epochs_run} of {config.epochs} "
-                f"(patience {config.patience} on {MONITOR})"
+                f"(patience {config.patience} on {config.monitor})"
             )
-        best_epoch = run_summary.best_epoch(hist, MONITOR)
+        best_epoch = run_summary.best_epoch(hist, config.monitor)
         best_i, final_i = best_epoch - 1, epochs_run - 1
         batch_size = config.batch_size
 

@@ -276,6 +276,15 @@ def test_the_miou_curve_marks_the_best_epoch_and_uses_integer_ticks(tmp_path, fi
     assert lines, "the two curves are drawn"
 
 
+@pytest.mark.parametrize("monitor,expected", [(None, "by val_loss"), ("val_miou", "by val_miou")])
+def test_the_miou_curve_label_names_the_checkpoint_monitor(tmp_path, figures, monitor, expected) -> None:
+    """The marker is the epoch of the checkpoint monitor: ``val_loss`` unless the trainer says otherwise."""
+    extra = {} if monitor is None else {"monitor": monitor}
+    viz.plot_miou_curve({"miou": [0.2, 0.3], "val_miou": [0.25, 0.35]}, 2, tmp_path / "m.png", **extra)
+    (ax,) = figures[0].axes
+    assert any(expected in t.get_text() for t in ax.get_legend().get_texts())
+
+
 def test_the_miou_curve_of_two_epochs_has_no_fractional_ticks(tmp_path, figures) -> None:
     viz.plot_miou_curve({"miou": [0.2, 0.3], "val_miou": [0.25, 0.35]}, 2, tmp_path / "m.png")
     (ax,) = figures[0].axes

@@ -56,7 +56,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _rows() -> Tuple[Row, ...]:
     """One row per declared flag. Each probe differs from the config default (tiny / 128 /
-    0.1 / None / 30 / 16 / 1e-3 / 1e-4 / 0 / 10 / 42 / 1 / 4 / results) and from every
+    0.1 / None / 30 / 16 / 1e-3 / 1e-4 / 0 / 10 / val_loss / 42 / 1 / 4 / results) and from every
     other row's probe."""
     return (
         Row(("--variant",), ("--variant", "small"), "variant", "small"),
@@ -69,6 +69,7 @@ def _rows() -> Tuple[Row, ...]:
         Row(("--weight-decay",), ("--weight-decay", "0.02"), "weight_decay", 0.02),
         Row(("--warmup-epochs",), ("--warmup-epochs", "3"), "warmup_epochs", 3),
         Row(("--patience",), ("--patience", "8"), "patience", 8),
+        Row(("--monitor",), ("--monitor", "val_miou"), "monitor", "val_miou"),
         Row(("--seed",), ("--seed", "1234"), "seed", 1234),
         Row(("--viz-freq",), ("--viz-freq", "5"), "viz_freq", 5),
         Row(("--viz-samples",), ("--viz-samples", "6"), "viz_samples", 6),

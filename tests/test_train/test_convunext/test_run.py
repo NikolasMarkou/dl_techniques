@@ -1078,3 +1078,79 @@ def test_the_shared_analysis_records_the_status_of_the_file_and_never_raises(e2e
     assert block["status"] == "missing" and "its exception is in run.log" in block["error"]
     monkeypatch.setattr(run_summary, "run_model_analysis", lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
     assert analyse()["status"] == "error"
+
+
+# ---------------------------------------------------------------------
+# --monitor (D-056): the default keeps val_loss, val_miou is opt-in
+# ---------------------------------------------------------------------
+
+class _MiouRisesAndTheLastLossIsPenalised(keras.callbacks.Callback):
+    """In FRONT of the list: ``val_miou`` strictly rising (so the LAST epoch has the highest one)
+    and the last epoch's ``val_loss`` pushed up (so the ``val_loss`` best epoch is NOT the last):
+    the two criteria disagree deterministically on a 3-epoch run."""
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs["val_miou"] = 0.1 * (epoch + 1)
+        if epoch == EPOCHS - 1:
+            logs["val_loss"] = float(logs["val_loss"]) + LAST_EPOCH_PENALTY
+
+
+@pytest.fixture(scope="module", params=["val_loss", "val_miou"])
+def monitored(request, tmp_path_factory):
+    """One real tiny run per ``--monitor`` value, on the history where the two criteria disagree."""
+    out = tmp_path_factory.mktemp(f"convunext_monitor_{request.param}")
+    seen: Dict[str, Any] = {}
+    recorder = _Recorder()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(common, "load_oxford_pet", _band_loader([]))
+        _patched_callbacks(mp, front=[_MiouRisesAndTheLastLossIsPenalised()], back=[recorder])
+        _spy_fit_and_eval_datasets(mp, [], seen)
+        config = _config(out, "monitored", monitor=request.param, model_analysis=False)
+        summary = common.train(config)
+    run_dir = out / "monitored"
+    return SimpleNamespace(
+        monitor=request.param, summary=summary, seen=seen, epoch_weights=recorder.weights,
+        best=keras.models.load_model(run_dir / "best_model.keras"),
+        val_loss=[float(r["val_loss"]) for r in _csv_rows(run_dir)],
+    )
+
+
+class TestTheMonitorFlag:
+    """``TestTheMonitorFlag``: the guard named by the D-056 anchor on ``SegTrainingConfig.monitor``."""
+
+    def test_the_default_is_val_loss_and_the_flag_reaches_the_callbacks_the_summary_and_the_best_epoch(
+            self, monitored) -> None:
+        """Both callbacks watch the requested metric in its own direction (``val_loss`` min,
+        ``val_miou`` max), the summary records it, and ``best_epoch`` is that metric's best epoch:
+        the last epoch under ``val_miou`` (rising), the ``val_loss`` argmin (not the last) by default."""
+        # ``monitor_op(0.1, 0.9)`` is "0.1 is better than 0.9": true for a minimised metric. The two
+        # callbacks hold different function objects for the same direction, so probe, do not compare.
+        watchers = {type(cb).__name__: (cb.monitor, bool(cb.monitor_op(0.1, 0.9)))
+                    for cb in monitored.seen["callbacks"] if hasattr(cb, "monitor")}
+        minimised = monitored.monitor == "val_loss"
+        assert watchers == {"EarlyStopping": (monitored.monitor, minimised),
+                            "ModelCheckpoint": (monitored.monitor, minimised)}, watchers
+        assert monitored.summary["monitor"] == monitored.monitor
+        (dashboard,) = [cb for cb in monitored.seen["callbacks"] if hasattr(cb, "best_key")]
+        assert dashboard.best_key == monitored.monitor, "the dashboard marks the epoch of the same monitor"
+        expected = EPOCHS if monitored.monitor == "val_miou" else int(np.argmin(monitored.val_loss)) + 1
+        assert monitored.summary["best_epoch"] == expected
+        assert monitored.summary["final_is_best"] is (monitored.monitor == "val_miou")
+        assert (expected == EPOCHS) is (monitored.monitor == "val_miou"), "the criteria must disagree here"
+        assert _max_abs_diff(monitored.best.get_weights(), monitored.epoch_weights[expected - 1]) < 1e-6
+
+    def test_the_default_config_value_is_val_loss_and_an_unknown_monitor_is_refused(self) -> None:
+        assert common.SegTrainingConfig().monitor == "val_loss"
+        with pytest.raises(ValueError, match="monitor must be one of"):
+            common.SegTrainingConfig(monitor="val_accuracy")
+
+    def test_the_miou_curve_label_names_the_monitor(self, monitored, tmp_path, monkeypatch) -> None:
+        seen: List[str] = []
+        monkeypatch.setattr(common, "plot_miou_curve", lambda *a, **k: seen.append(k.get("monitor")))
+        run_dir = tmp_path / "run"
+        (run_dir / "visualizations").mkdir(parents=True)
+        grid = SimpleNamespace(failed={}, written=[], seconds=0.0, images=None, masks=None)
+        hist = {"val_loss": [1.0, 0.5, 0.4], "miou": [0.1, 0.2, 0.3], "val_miou": [0.1, 0.2, 0.3]}
+        config = _config(tmp_path, "labelled", monitor=monitored.monitor)
+        common._write_figures(run_dir, grid, monitored.best, hist, EPOCHS, None, config)
+        assert seen == [monitored.monitor]
