@@ -642,7 +642,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.variance_probe \
 
 ## Measured runs (audit iteration 1, tiny variant, 8 epochs, GPU 1)
 
-Recipe: `--variant tiny --patch-size 64 --epochs 8 --steps-per-epoch 100 --validation-steps 20 --max-train-files 400 --max-val-files 50 --batch-size 16 --patches-per-image 4 --viz-freq 2`, seed 0 for run 1. Run directories: `results/convunext_iter1_*`. Every number below is copied from a `results_summary.json` or from the paired `eval_psnr_vs_noise` output `results/convunext_iter1_paired_eval/psnr_vs_noise.csv`, and was recomputed from the raw CSV by an independent pass.
+Recipe: `--variant tiny --patch-size 64 --epochs 8 --steps-per-epoch 100 --validation-steps 20 --max-train-files 400 --max-val-files 50 --batch-size 16 --patches-per-image 4 --viz-freq 2`, seed 0 for run 1. Run directories: `results/convunext_iter1_*`. Every number below is copied from a `results_summary.json` or from the paired `eval_psnr_vs_noise` output `results/convunext_iter1_paired_eval/psnr_vs_noise.csv`, and was recomputed from the raw CSV by an independent pass. The held-out `test_eval` PSNR cells of Loop 1 to Loop 3 below were measured before the evaluator padded its batches ("Standalone tools", `eval_psnr_vs_noise.py`); a rerun at the current code moves a cell by up to 6.5e-5 dB with TF32 on and 9.5e-8 dB with it off.
 
 | run | epochs run | best epoch (1-based) | fit wall (s) | val_loss at best | val_psnr at best (dB) |
 |---|---|---|---|---|---|

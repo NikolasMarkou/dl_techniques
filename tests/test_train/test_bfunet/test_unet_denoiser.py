@@ -120,7 +120,7 @@ class TestVerifyAndContract:
         import train.bfunet.train_unet_denoiser as mod
         for name in ("BFUnetTrainingConfig", "add_common_arguments", "common",
                      "reject_self_iterate_with_nonadditive", "_homogeneity_probe",
-                     "create_dataset", "make_curriculum_noise_fn"):
+                     "build_dashboard_from_dir"):
             assert hasattr(mod, name), name
 
     def test_parse_arguments_importable_and_wired(self, monkeypatch):
