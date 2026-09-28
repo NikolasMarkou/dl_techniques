@@ -43,38 +43,6 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-
-def _inclusive_causal_mask(size: int, dtype: str) -> keras.KerasTensor:
-    """Return the causal keep mask as a float multiplier, diagonal included.
-
-    ``mask[i, j] = 1`` iff ``j <= i``, else ``0``. The diagonal must be
-    included: the ``j = t`` term of the closed-form sum is the current step's
-    own write, and the read-out sees it because it reads the state after that
-    write. Dropping it would make the read-out exclusive and wrong.
-
-    This is a polarity and dtype adapter over the canonical
-    :meth:`~dl_techniques.utils.masking.MaskFactory.create_causal_mask`, not a
-    reimplementation — the triangle logic lives there and only there. The
-    canonical helper returns a boolean block mask (``True`` where a position
-    must be suppressed, i.e. ``j > i``); the scan needs the complementary keep
-    mask as a float it can multiply by.
-
-    ``keras.ops.tril``/``ops.triu`` raise ``TypeError: pred must not be a
-    Python bool`` when traced into a graph on this Keras/TF version, breaking
-    every ``Model``-level path (``fit``, ``predict``, ``jit_compile``,
-    save/load) while eager tests stayed green.
-
-    :param size: Side length of the square mask.
-    :type size: int
-    :param dtype: Floating dtype of the returned mask.
-    :type dtype: str
-    :return: Mask of shape ``(size, size)``.
-    :rtype: keras.KerasTensor
-    """
-    blocked = MaskFactory.create_causal_mask(size, dtype="bool")
-    return ops.cast(ops.logical_not(blocked), dtype)
-
-
 @register_dl_technique("dl_techniques.layers.transformers.gated_linear_attention_block")
 class GatedLinearAttentionBlock(keras.layers.Layer):
     """
@@ -310,13 +278,17 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             if normalization_type == "zero_centered_rms_norm"
             else {}
         )
+        # V is normalized whole-tensor over v_dim (2 * num_heads * head_dim), not per-head.
+        # Its default epsilon differs from Q/K to reflect the different normalization scope.
         self.v_norm_args = v_norm_args or (
-            {"epsilon": 1e-5, "use_scale": True}
+            {"epsilon": 1e-6}
             if normalization_type == "zero_centered_rms_norm"
             else {}
         )
         self.ffn_type = ffn_type
         self.ffn_args = ffn_args or {}
+        # Store the original intermediate_size (may be None) for the public attribute.
+        # The effective resolved value is computed in _create_ffn_layer and serialized in get_config.
         self.intermediate_size = intermediate_size
         self.chunk_size = chunk_size
         self.use_bias = use_bias
@@ -437,6 +409,12 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             )
         if chunk_size <= 0:
             raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if chunk_size > 1024:
+            logger.warning(
+                f"chunk_size={chunk_size} exceeds 1024; the chunked scan's "
+                "intra-block matmul is quadratic in chunk_size and may OOM. "
+                "Consider a smaller value."
+            )
 
     def _warn_if_seq_len_exceeds_declared(self, seq_len: int) -> None:
         """Warn -- never raise -- when a static length exceeds ``max_seq_len``.
@@ -522,9 +500,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :return: FFN layer instance.
         :rtype: keras.layers.Layer
         """
-        # Do NOT mutate `self.intermediate_size` here: `get_config()` serializes it, so
-        # overwriting a caller's `None` with a computed default made a reloaded layer's
-        # config differ from the one that was built. Resolve the effective value locally.
+        # Resolve the effective intermediate size: use the provided value or default to dim * 4.
+        # self.intermediate_size stores the original value (may be None) for the public attribute.
         effective_intermediate = (
             self.dim * 4 if self.intermediate_size is None else self.intermediate_size
         )
@@ -923,10 +900,13 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             (batch_size, n_chunks, chunk, self.num_heads),
         )
         beta_g = ops.transpose(beta_g, [0, 3, 1, 2])
+        # get the causal keep mask as a float multiplier, diagonal included.
+        causal = MaskFactory.create_causal_mask(chunk, dtype=gate_dtype)
+        causal =  ops.cast(ops.logical_not(causal), gate_dtype)
 
-        causal = _inclusive_causal_mask(chunk, gate_dtype)
         # DECISION plan-2026-07-30T081929-1645aa52/D-009: select before the
-        # exp, never clamp after it -- clamping silently saturated alpha>1 entries to exp(0)=1, disagreeing with _sequential_scan by up to 3.59e+04. See decisions.md.
+        # exp, never clamp after it -- clamping silently saturated alpha>1 entries to exp(0)=1,
+        # disagreeing with _sequential_scan by up to 3.59e+04. See decisions.md.
         exponent = ops.where(
             causal > 0,
             ops.expand_dims(cum, -1) - ops.expand_dims(cum, -2),
@@ -1142,6 +1122,10 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :return: Configuration dictionary.
         :rtype: Dict[str, Any]
         """
+        # Serialize the effective resolved intermediate_size for correct round-trip.
+        effective_intermediate = (
+            self.dim * 4 if self.intermediate_size is None else self.intermediate_size
+        )
         config = super().get_config()
         config.update(
             {
@@ -1159,7 +1143,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
                 "ffn_type": self.ffn_type,
                 "ffn_args": self.ffn_args,
                 "chunk_size": self.chunk_size,
-                "intermediate_size": self.intermediate_size,
+                "intermediate_size": effective_intermediate,
                 "use_bias": self.use_bias,
                 "kernel_initializer": initializers.serialize(self.kernel_initializer),
                 "bias_initializer": initializers.serialize(self.bias_initializer),

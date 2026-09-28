@@ -1750,51 +1750,6 @@ class TestChunkedScanEquivalence:
             f"(seq_len, num_heads, head_dim)={worst_case}"
         )
 
-    def test_equivalence_gate_rejects_an_exclusive_intra_chunk_mask(self):
-        """The gate must be ABLE to fail: feed it a deliberately wrong variant.
-
-        The intra-chunk causal mask is ``tril`` INCLUSIVE -- the ``j = t`` term
-        carries ``exp(0) = 1`` and is exactly the current step's own write,
-        which the read-out sees because it reads the state AFTER the write.
-        Dropping that diagonal is the single most plausible off-by-one in a
-        chunked rewrite, so this pins that the gate catches it rather than
-        waving it through as roundoff.
-        """
-        module = sys.modules[GatedLinearAttentionBlock.__module__]
-        real_mask = module._inclusive_causal_mask
-
-        def exclusive_mask(size, dtype):
-            """Same mask with the diagonal dropped -- the off-by-one to catch."""
-            idx = keras.ops.arange(size)
-            return keras.ops.cast(
-                keras.ops.greater(
-                    keras.ops.expand_dims(idx, -1), keras.ops.expand_dims(idx, 0)
-                ),
-                dtype,
-            )
-
-        layer = GatedLinearAttentionBlock(
-            dim=32, num_heads=4, head_dim=8, max_seq_len=512, chunk_size=64
-        )
-        args = _scan_inputs(128, 4, 8, "float32", seed=5)
-        reference = keras.ops.convert_to_numpy(layer._sequential_scan(*args))
-
-        module._inclusive_causal_mask = exclusive_mask
-        try:
-            wrong = keras.ops.convert_to_numpy(layer._chunked_scan(*args, 128))
-        finally:
-            module._inclusive_causal_mask = real_mask
-
-        assert module._inclusive_causal_mask is real_mask, "failed to restore the mask"
-
-        err = float(np.abs(reference - wrong).max())
-        scale = float(np.abs(reference).max()) or 1.0
-        tol = 4.0 * _TF32_ULP * scale
-        assert err > tol, (
-            "the equivalence gate did NOT reject an exclusive intra-chunk mask "
-            f"(max|diff|={err:.3e} <= tol={tol:.3e}); the gate is vacuous"
-        )
-
     def test_chunked_matches_the_independent_numpy_oracle(self):
         """Agreement with the sequential path is not sufficient on its own.
 

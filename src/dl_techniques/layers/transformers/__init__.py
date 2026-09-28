@@ -101,6 +101,11 @@ from .energy_transformer import EnergyTransformer, HopfieldNetwork
 # Public API
 # ---------------------------------------------------------------------
 
+from .factory import (
+    TRANSFORMER_BLOCK_REGISTRY,
+    create_transformer_block,
+)
+
 __all__ = [
     # Foundational Layer
     "TransformerLayer",
@@ -136,6 +141,10 @@ __all__ = [
     # Energy Transformer
     "EnergyTransformer",
     "HopfieldNetwork",
+
+    # Factory
+    "TRANSFORMER_BLOCK_REGISTRY",
+    "create_transformer_block",
 
     # Type Aliases
     "AttentionType",
