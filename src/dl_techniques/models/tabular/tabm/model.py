@@ -71,33 +71,33 @@ class TabMModel(keras.Model):
         │ x_num [B, n_num_features] │  │ x_cat [B, n_cat_features]  │
         └─────────────┬─────────────┘  └──────────────┬─────────────┘
                       │                              (optional)
-                      │                                ▼
+                      │                               ▼
                       │                 ┌────────────────────────────┐
                       │                 │ OneHotEncoding per column  │
-                      │                 └──────────────┬─────────────┘
+                      │                 └───────────────┬────────────┘
                       └────────────►(concat, −1)◄───────┘
                                        │
                                        ▼
-                       ┌────────────────────────────────┐
-                       │ minimal_ensemble_adapter        │
-                       │ ScaleEnsemble ('tabm-mini' only)│
+                       ┌──────────────────────────────────┐
+                       │ minimal_ensemble_adapter         │
+                       │ ScaleEnsemble ('tabm-mini' only) │
                        └────────────────┬─────────────────┘
                                        ▼
-                       ┌────────────────────────────────┐
-                       │ backbone: TabMBackbone          │
+                       ┌──────────────────────────────────┐
+                       │ backbone: TabMBackbone           │
                        │ hidden_dims stack, wired per     │
                        │ ARCH_SPECS[arch_type]            │
                        └────────────────┬─────────────────┘
                                        ▼
-                       ┌────────────────────────────────┐
+                       ┌──────────────────────────────────┐
                        │ output_layer: Dense ('plain') or │
                        │ NLinear (ensemble variants)      │
                        └────────────────┬─────────────────┘
                                        ▼
-                       ┌────────────────────────────────┐
+                       ┌──────────────────────────────────┐
                        │ Output [B, k, n_classes_or_1]    │
                        │ k=1 for 'plain'                  │
-                       └────────────────────────────────┘
+                       └──────────────────────────────────┘
 
     Variants:
 

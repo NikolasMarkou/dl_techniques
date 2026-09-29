@@ -10,13 +10,13 @@ arithmetic units and selects one, writes the result into NTM memory, and
 emits a halt decision. The arithmetic is fixed rather than learned; the
 learned parts are the parse, the routing and the halting.
 
-The cell handles one operator at a time and integers only. Operand assembly
-reads only ``token_ids``, since the NTM read heads feed the controller
-rather than the operands, so a multi-operator expression concatenates the
-far side's digits instead of reducing them first (``"1 + 2 * 3"`` gives
-operands ``(1, 23)`` at the ``+``), and ``DOT_ID`` falls outside
-``is_digit``, so decimals lose their point (``"1.5 + 2"`` gives ``(15,
-2)``). See the ``NAM`` module docstring.
+The cell handles one operator at a time and integers only (single-operator
+and integer-only). Operand assembly reads only ``token_ids``, since the NTM
+read heads feed the controller rather than the operands, so a multi-operator
+expression concatenates the far side's digits instead of reducing them first
+(``"1 + 2 * 3"`` gives operands ``(1, 23)`` at the ``+``), and ``DOT_ID``
+falls outside ``is_digit``, so decimals lose their point (``"1.5 + 2"``
+gives ``(15, 2)``). See the ``NAM`` module docstring.
 """
 
 import keras

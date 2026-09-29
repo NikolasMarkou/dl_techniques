@@ -62,7 +62,8 @@ def _unpack_pair_shape(
 
 
 # DECISION plan-2026-08-31T175140-a4e0c303/D-015: this helper's name stays
-# public since models/vision_language/sd3_mmdit/blocks.py imports it. Do not unify with AdaLNZeroConditionalBlock._modulate. See decisions.md.
+# public since models/vision_language/sd3_mmdit/blocks.py imports it.
+# Do not unify with AdaLNZeroConditionalBlock._modulate. See decisions.md.
 def modulate(
     h: keras.KerasTensor,
     shift: keras.KerasTensor,

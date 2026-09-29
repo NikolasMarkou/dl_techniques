@@ -225,7 +225,7 @@ def test_the_flow_matching_variant_has_no_posterior_at_all():
 # Both cases below are real float32 round-off on ordinary constructor arguments,
 # not manufactured by absurd parameters:
 #
-#   UniformVolatilitySDE(A=5.0, K=1.0)            at t = 1.0      -> -7.450581e-09
+#   UniformVolatilitySDE(A=10.0, K=1.0)           at t = 0.9999999 -> -7.450581e-09
 #   PeriodicVolatilitySDE(0.95, k=3.0, eps=1e-3)  at t = 0.99875  -> -2.980232e-08
 #
 # HONEST SCOPE, recorded by `test_the_shipped_defaults_show_no_float32_negative`
@@ -234,7 +234,7 @@ def test_the_flow_matching_variant_has_no_posterior_at_all():
 # for the two parameterisations above and DEFENSIVE at the defaults.
 
 CLAMP_CASES = [
-    ("uniform_OU_A5_at_t_exactly_one", UniformVolatilitySDE(A=5.0, K=1.0), 1.0),
+    ("uniform_OU_A10_at_t_near_one", UniformVolatilitySDE(A=10.0, K=1.0), 0.9999999),
     ("periodic_k3_eps1e-3_near_one", PeriodicVolatilitySDE(alpha=0.95, k=3.0, eps=1e-3), 0.99875),
 ]
 
