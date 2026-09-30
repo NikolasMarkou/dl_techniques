@@ -2,12 +2,17 @@
 
 What is pinned here, and the mutation each group is meant to catch:
 
-- the default sizes and input counts are the paper's (a changed table entry);
+- the input count, input range, sizes and noise level of every target are the
+  paper's, as literals typed in this file (a changed table entry, including an
+  input range, which no shape assertion can see);
 - the scaling statistics are the TRAIN statistics (statistics taken from train and
   test together keep every test value inside ``[0, 1]``);
-- TF1 and TF2 stay on their own scale (a scaled target no longer equals its formula);
-- the TF2 noise is on the train targets only (noise on test breaks exact equality
-  with the formula);
+- EVERY target and input is min-max scaled, TF1 and TF2 included (``decisions.md``
+  D-041 of plan-2026-09-30T082355-4d999dbc; an unscaled TF1 no longer equals the
+  scaled formula);
+- the TF2 noise is U(-0.2, 0.2) on the SCALED train targets, the scaling statistics
+  are those of the noiseless train targets, and the test targets are the scaled
+  noiseless formula exactly;
 - every target formula, at points worked out by hand in the test body;
 - the CSV loader's refusals and an exact round trip.
 
@@ -21,19 +26,42 @@ import pytest
 
 from train.hkan.data import TARGETS, load_csv_dataset, make_dataset, minmax_scale
 
-#: name -> (inputs, train rows, test rows, scaled), from the paper's Table VI and
-#: Section VI-A. Typed here on purpose: reading it off ``TARGETS`` would compare the
-#: module with itself.
+#: name -> (inputs, train rows, test rows, input low, input high, train noise), from
+#: the paper's Table VI and Section VI-A. Typed here on purpose: reading it off
+#: ``TARGETS`` would compare the module with itself.
 PAPER = {
-    "tf1": (2, 5000, 10000, False),
-    "tf2": (2, 5000, 10000, False),
-    "tf3": (2, 5000, 10000, True),
-    "tf4": (10, 3750, 1250, True),
-    "tf5": (2, 5000, 10000, True),
-    "tf5_5": (5, 7500, 2500, True),
+    "tf1": (2, 5000, 10000, 0.0, 1.0, 0.0),
+    "tf2": (2, 5000, 10000, 0.0, 1.0, 0.2),
+    "tf3": (2, 5000, 10000, -500.0, 500.0, 0.0),
+    "tf4": (10, 3750, 1250, -4.0, 4.0, 0.0),
+    "tf5": (2, 5000, 10000, 0.0, 3.141592653589793, 0.0),
+    "tf5_5": (5, 7500, 2500, 0.0, 3.141592653589793, 0.0),
 }
-SCALED = sorted(name for name, row in PAPER.items() if row[3])
+NOISELESS = sorted(name for name, row in PAPER.items() if row[5] == 0.0)
 KEYS = {"x_train", "y_train", "x_test", "y_test"}
+
+
+def _expected(name: str, seed: int, num_train: int, num_test: int):
+    """The data set rebuilt from the literals above, without ``make_dataset``.
+
+    Raw inputs uniform on the literal range (train drawn first), the target
+    function, min-max scaling with the train statistics. Returns the scaled
+    arrays with the NOISELESS train target, and the generator, whose next draw
+    is the TF2 noise.
+    """
+    inputs, _, _, low, high, _ = PAPER[name]
+    rng = np.random.default_rng(seed)
+    x_train = rng.uniform(low, high, (num_train, inputs))
+    x_test = rng.uniform(low, high, (num_test, inputs))
+    function = TARGETS[name].function  # pinned at hand-computed points below
+    y_train, y_test = function(x_train), function(x_test)
+
+    def scale(train, other):
+        minimum = train.min(axis=0)
+        span = train.max(axis=0) - minimum
+        return (train - minimum) / span, (other - minimum) / span
+
+    return (*scale(x_train, x_test), *scale(y_train, y_test), rng)
 
 
 def _tf1_formula(x: np.ndarray) -> np.ndarray:
@@ -55,7 +83,7 @@ def test_the_target_table_holds_exactly_the_six_paper_targets() -> None:
 
 @pytest.mark.parametrize("name", sorted(PAPER))
 def test_default_sizes_and_input_counts_are_the_papers(name) -> None:
-    inputs, num_train, num_test, _ = PAPER[name]
+    inputs, num_train, num_test = PAPER[name][:3]
     data = make_dataset(name, seed=0)
     assert set(data) == KEYS
     assert data["x_train"].shape == (num_train, inputs)
@@ -74,22 +102,41 @@ def test_explicit_sizes_override_the_defaults(name) -> None:
     assert data["y_test"].shape == (9,)
 
 
-@pytest.mark.parametrize("name", SCALED)
-def test_a_scaled_target_spans_exactly_zero_to_one_on_train(name) -> None:
+@pytest.mark.parametrize("name", sorted(PAPER))
+def test_every_table_entry_is_the_papers(name) -> None:
+    """Input count, range, sizes and noise, against literals typed in this file.
+
+    The ranges are compared as numbers AND by what they do: the raw inputs of a
+    target whose ``high`` was changed from pi to 3 have the same shape and, once
+    scaled, the same [0, 1] span, so only the values can show it.
+    """
+    inputs, num_train, num_test, low, high, noise = PAPER[name]
+    spec = TARGETS[name]
+    assert (spec.num_inputs, spec.num_train, spec.num_test) == (inputs, num_train, num_test)
+    assert (spec.low, spec.high) == (low, high), f"{name}: input range {spec.low}, {spec.high}"
+    assert spec.train_noise == noise
+    data = make_dataset(name, seed=0, num_train=60, num_test=50)
+    x_train, x_test, _, y_test, _ = _expected(name, 0, 60, 50)
+    np.testing.assert_array_equal(data["x_train"], x_train)
+    np.testing.assert_array_equal(data["x_test"], x_test)
+    np.testing.assert_array_equal(
+        data["y_test"], y_test,
+        err_msg=f"{name}: test targets are not the target function on the paper's input range")
+
+
+@pytest.mark.parametrize("name", sorted(PAPER))
+def test_every_input_is_scaled_to_exactly_zero_to_one_on_train(name) -> None:
     data = make_dataset(name, seed=0)
     np.testing.assert_array_equal(data["x_train"].min(axis=0), 0.0)
     np.testing.assert_array_equal(data["x_train"].max(axis=0), 1.0)
-    assert data["y_train"].min() == 0.0
-    assert data["y_train"].max() == 1.0
 
 
-@pytest.mark.parametrize("name", ["tf1", "tf2"])
-def test_unscaled_inputs_lie_in_the_unit_square_without_touching_its_edges(name) -> None:
+@pytest.mark.parametrize("name", NOISELESS)
+def test_every_noiseless_target_spans_exactly_zero_to_one_on_train(name) -> None:
+    """TF1 included: unscaled, its train targets span about [-1, 1]."""
     data = make_dataset(name, seed=0)
-    for key in ("x_train", "x_test"):
-        assert data[key].min() > 0.0 and data[key].max() < 1.0, key
-    # a min-max scaled column would hit 0 and 1 exactly; these do not
-    assert data["x_train"].min(axis=0).min() > 0.0
+    assert data["y_train"].min() == 0.0, f"{name}: train target minimum {data['y_train'].min()}"
+    assert data["y_train"].max() == 1.0, f"{name}: train target maximum {data['y_train'].max()}"
 
 
 # ---------------------------------------------------------------------
@@ -122,13 +169,14 @@ def test_minmax_scale_maps_a_constant_column_to_zero() -> None:
     np.testing.assert_array_equal(scaled_test, [[2.0, 0.5]])  # (9-7)/1: range 0 becomes 1
 
 
-@pytest.mark.parametrize("name", SCALED)
+@pytest.mark.parametrize("name", sorted(PAPER))
 def test_a_scaled_target_with_a_wider_test_split_maps_test_outside_zero_to_one(name) -> None:
     """5 train rows against 4000 test rows: the test split is certainly wider."""
     data = make_dataset(name, seed=3, num_train=5, num_test=4000)
     np.testing.assert_array_equal(data["x_train"].min(axis=0), 0.0)
     np.testing.assert_array_equal(data["x_train"].max(axis=0), 1.0)
-    assert data["y_train"].min() == 0.0 and data["y_train"].max() == 1.0
+    if name in NOISELESS:
+        assert data["y_train"].min() == 0.0 and data["y_train"].max() == 1.0
     assert data["x_test"].min() < 0.0 and data["x_test"].max() > 1.0, (
         "x_test lies inside [0, 1]: the input statistics were not taken from train alone"
     )
@@ -138,33 +186,60 @@ def test_a_scaled_target_with_a_wider_test_split_maps_test_outside_zero_to_one(n
 
 
 # ---------------------------------------------------------------------
-# TF1 / TF2: unscaled, noise on train only
+# TF1 / TF2: scaled like every other target; TF2 noise after scaling, train only
 # ---------------------------------------------------------------------
 
 
-def test_tf1_targets_equal_the_formula_exactly_on_both_splits() -> None:
+def test_tf1_targets_are_the_scaled_formula_exactly_on_both_splits() -> None:
     data = make_dataset("tf1", seed=0)
-    np.testing.assert_array_equal(data["y_test"], _tf1_formula(data["x_test"]))
-    np.testing.assert_array_equal(data["y_train"], _tf1_formula(data["x_train"]))
-
-
-def test_tf2_test_targets_are_the_noiseless_formula_exactly() -> None:
-    data = make_dataset("tf2", seed=0)
-    np.testing.assert_array_equal(
-        data["y_test"], _tf2_formula(data["x_test"]),
-        err_msg="TF2 test targets differ from the noiseless formula (noise or scaling on test)",
+    _, _, y_train, y_test, _ = _expected("tf1", 0, 5000, 10000)
+    np.testing.assert_array_equal(data["y_train"], y_train)
+    np.testing.assert_array_equal(data["y_test"], y_test)
+    # the formula itself, written out: unscaled it reaches below -0.9
+    assert data["y_test"].min() > -0.01, (
+        f"TF1 test targets reach {data['y_test'].min():.3f}: the target is not scaled"
     )
 
 
-def test_tf2_train_targets_carry_bounded_non_constant_noise() -> None:
+def test_tf2_test_targets_are_the_scaled_noiseless_formula_exactly() -> None:
+    """Scaled with the statistics of the NOISELESS train targets.
+
+    Statistics taken from the noisy train targets, noise on the test targets and
+    a missing scaling each break the exact equality.
+    """
     data = make_dataset("tf2", seed=0)
-    noise = data["y_train"] - _tf2_formula(data["x_train"])
+    _, _, _, y_test, _ = _expected("tf2", 0, 5000, 10000)
+    np.testing.assert_array_equal(
+        data["y_test"], y_test,
+        err_msg="TF2 test targets differ from the noiseless formula scaled with the "
+                "noiseless train statistics",
+    )
+
+
+def test_tf2_noise_is_uniform_on_the_scaled_train_targets() -> None:
+    """U(-0.2, 0.2) relative to a unit range, not shrunk by the target's range.
+
+    Noise added BEFORE the scaling would be divided by the range of the (noisy)
+    unscaled target, about 3.7, and reach only about 0.055 here.
+    """
+    data = make_dataset("tf2", seed=0)
+    _, _, scaled_noiseless, _, rng = _expected("tf2", 0, 5000, 10000)
+    noise = data["y_train"] - scaled_noiseless
     assert np.max(np.abs(noise)) <= 0.2 + 1e-12
-    assert np.max(np.abs(noise)) > 0.19, "5000 draws of U(-0.2, 0.2) reach beyond 0.19"
+    assert np.max(np.abs(noise)) > 0.19, (
+        f"the largest noise on the scaled train target is {np.max(np.abs(noise)):.4f}; "
+        "5000 draws of U(-0.2, 0.2) reach beyond 0.19 (noise added before scaling?)"
+    )
     # U(-0.2, 0.2) has standard deviation 0.4 / sqrt(12) = 0.11547
     assert 0.105 < float(np.std(noise)) < 0.125
     assert abs(float(np.mean(noise))) < 0.01
     assert len(np.unique(np.round(noise, 6))) > 4000, "the noise is (nearly) constant"
+    # and it is the generator's next draw after the inputs, added to the scaled target
+    np.testing.assert_array_equal(
+        data["y_train"], scaled_noiseless + rng.uniform(-0.2, 0.2, 5000))
+    # so a noisy train target can leave [0, 1], by less than 0.2
+    assert data["y_train"].min() < 0.0 and data["y_train"].max() > 1.0
+    assert data["y_train"].min() >= -0.2 and data["y_train"].max() <= 1.2
 
 
 # ---------------------------------------------------------------------

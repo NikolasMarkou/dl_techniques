@@ -19,14 +19,32 @@ used for fitting or for checkpoint selection. `closed_form` fits on every train 
 
 Each run writes one directory under repo-root `results/` (or `--output-dir`):
 `config.json`, `run.log`, `results_summary.json` (strict JSON), `final_model.keras`
-and `visualizations/`; the backprop modes add `best_model.keras`, `training_log.csv`
-and `training_history.json`. With `--repeats N` the fit is repeated with N derived
-seeds (new basis centers and initial weights, same data); the summary holds every
-repeat plus median and interquartile range, while the saved models, the history and
-the figures belong to repeat 0. Reported RMSEs come from the weights at the end of
-training in every repeat; the best-validation checkpoint of repeat 0 is reported
-under its own key. A reused `--experiment-name` is refused before anything is
-written.
+and `visualizations/`; the backprop modes add `training_log.csv`,
+`training_history.json` and, when an epoch earned it, `best_model.keras`; the
+two-phase mode adds `closed_form_model.keras`, the model the fine-tune started
+from. With `--repeats N` the fit is repeated with N derived seeds (new basis
+centers and initial weights, same data); the summary holds every repeat plus median
+and interquartile range, while the saved models, the history and the figures belong
+to repeat 0. Reported RMSEs come from the weights at the end of training in every
+repeat. A reused `--experiment-name` is refused before anything is written.
+
+`best_checkpoint` in the summary is `null` in `closed_form` mode and otherwise
+always a dict with the same eight keys, describing the best model of repeat 0 by
+the monitor (`val_loss`, or `loss` when `--val-fraction 0`):
+
+- `monitor`: the monitored name.
+- `source`: `"epoch"` (an epoch of `fit`), `"closed_form"` (two-phase mode only:
+  no epoch beat the closed-form start) or `"none"` (the monitor was never finite,
+  for example a diverged run; nothing was saved).
+- `file`: `best_model.keras`, `closed_form_model.keras` or `null`. `best_model.keras`
+  exists only when `source` is `"epoch"`.
+- `epoch`: the 1-based epoch, `0` for the closed-form start, `null` for `"none"`.
+- `monitor_value`: the monitored MSE of that model (`null` for `"none"`).
+- `train_rmse`, `test_rmse`: its scores (`null` for `"none"`).
+- `reason`: `null` for `"epoch"`, otherwise one sentence saying why.
+
+A run whose loss is not finite still finishes and writes its summary; non-finite
+numbers are written as `null`.
 
 `train.common.create_callbacks()` is not used: it always adds early stopping, which
 would make repeats stop at different epochs, and it has no role at all in the
@@ -53,6 +71,10 @@ import matplotlib.ticker
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.general_purpose.hkan import HKAN
+from dl_techniques.models.general_purpose.hkan.hkan_layer import (
+    BASIS_NAMES, CENTER_MODES, DEFAULT_SLOPE,
+)
+from dl_techniques.models.general_purpose.hkan.model import DEFAULT_L2_BLOCK, DEFAULT_L2_MIX
 from dl_techniques.optimization import optimizer_builder
 from train.common import (
     default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
@@ -73,6 +95,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 EXPERIMENT_NAME = "hkan"
 TRAINING_MODES = ("closed_form", "backprop", "closed_form_then_backprop")
 FINAL_MODEL_NAME = "final_model.keras"
+#: The model the two-phase fine-tune starts from, saved before `fit` (repeat 0).
+CLOSED_FORM_MODEL_NAME = "closed_form_model.keras"
+#: Last entry of the validation split's seed list (the bytes of "SPLT"). Non-zero
+#: and last because numpy drops trailing zeros of a seed list; different from the
+#: model package's `SEED_DOMAIN_TAG`, so the split shares a stream with nothing.
+VALIDATION_SPLIT_TAG = 0x53504C54
 #: Files whose presence means the experiment directory already holds an HKAN run.
 RUN_ARTIFACTS = (RESULTS_SUMMARY_NAME, "config.json", RUN_LOG_NAME, FINAL_MODEL_NAME)
 
@@ -128,15 +156,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-basis", type=_list_of(int), default=[10],
                         help="Basis functions per block, per layer.")
     parser.add_argument("--basis", type=_list_of(str), default=["sigmoid"],
-                        help="Basis per layer: sigmoid, gaussian, relu, tanh, softplus, identity.")
-    parser.add_argument("--slope", type=_list_of(float), default=[5.0],
+                        help=f"Basis per layer: {', '.join(BASIS_NAMES)}.")
+    parser.add_argument("--slope", type=_list_of(float), default=[DEFAULT_SLOPE],
                         help="Basis slope (the paper's sigma), per layer.")
     parser.add_argument("--centers", type=_list_of(str), default=["random"],
-                        help="Center placement per layer: random, equally_spaced, data.")
-    parser.add_argument("--l2-block", type=_list_of(float), default=[0.01],
+                        help=f"Center placement per layer: {', '.join(CENTER_MODES)}.")
+    parser.add_argument("--l2-block", type=_list_of(float), default=[DEFAULT_L2_BLOCK],
                         help="Ridge strength of the block fits, per layer (closed-form modes).")
-    parser.add_argument("--l2-mix", type=_list_of(float), default=[0.0],
-                        help="Ridge strength of the connecting fits, per layer (closed-form modes).")
+    parser.add_argument("--l2-mix", type=_list_of(float), default=[DEFAULT_L2_MIX],
+                        help="Ridge strength of the connecting fits, per layer (closed-form "
+                             "modes); 0 is the paper's plain least squares.")
     parser.add_argument("--no-block-bias", action="store_true",
                         help="Drop the intercept of every block (the paper's equation 13).")
     parser.add_argument("--no-bias", action="store_true",
@@ -190,6 +219,28 @@ def parse_arguments(argv=None) -> argparse.Namespace:
                 f"--{flag.replace('_', '-')} takes 1 value or {num_layers} (one per "
                 f"layer), got {len(getattr(args, flag))}"
             )
+    # Everything below would otherwise fail inside the model or the data module,
+    # after the run directory exists, and leave the experiment name used up.
+    for flag, allowed in (("basis", BASIS_NAMES), ("centers", CENTER_MODES)):
+        unknown = [item for item in getattr(args, flag) if item not in allowed]
+        if unknown:
+            parser.error(f"--{flag} items must be among {', '.join(allowed)}; got {unknown}")
+    for flag in ("hidden_units", "num_basis"):
+        if any(item < 1 for item in getattr(args, flag)):
+            parser.error(f"--{flag.replace('_', '-')} items must be >= 1, got {getattr(args, flag)}")
+    if not all(np.isfinite(args.slope)):
+        parser.error(f"--slope items must be finite, got {args.slope}")
+    for flag in ("l2_block", "l2_mix"):
+        if not all(np.isfinite(item) and item >= 0 for item in getattr(args, flag)):
+            parser.error(
+                f"--{flag.replace('_', '-')} items must be finite and >= 0, got {getattr(args, flag)}")
+    if args.chunk_size is not None and args.chunk_size < 1:
+        parser.error(f"--chunk-size must be >= 1, got {args.chunk_size}")
+    if args.seed < 0:
+        parser.error(f"--seed must be >= 0, got {args.seed}")
+    for flag in ("num_train_samples", "num_test_samples"):
+        if getattr(args, flag) is not None and getattr(args, flag) < 2:
+            parser.error(f"--{flag.replace('_', '-')} must be >= 2, got {getattr(args, flag)}")
     return args
 
 # ---------------------------------------------------------------------
@@ -211,7 +262,18 @@ def load_data(args: argparse.Namespace) -> Dict[str, np.ndarray]:
     # the float32 forward pass then amplifies it. Measured on TF5 (width 912):
     # train RMSE 1.4e-4 with the rounding, 1.4e-7 without. See decisions.md D-031.
     if args.dataset == "csv":
-        return load_csv_dataset(args.train_csv, args.test_csv, scale=args.scale_csv)
+        data = load_csv_dataset(args.train_csv, args.test_csv, scale=args.scale_csv)
+        low, high = data["x_train"].min(axis=0), data["x_train"].max(axis=0)
+        outside = np.flatnonzero((low < 0.0) | (high > 1.0))
+        if outside.size and args.centers[0] != "data":
+            # `random` and `equally_spaced` centers of the first layer lie on [0, 1].
+            logger.warning(
+                f"CSV input column(s) {outside.tolist()} (0-based) leave [0, 1] on the train "
+                f"file (overall range {low.min():.6g} to {high.max():.6g}) while the first "
+                f"layer's centers are '{args.centers[0]}', which are placed on [0, 1]: "
+                "expect a poor fit. Pass --scale-csv, or 'data' as the first --centers item."
+            )
+        return data
     return make_dataset(args.dataset, seed=args.seed,
                         num_train=args.num_train_samples, num_test=args.num_test_samples)
 
@@ -281,7 +343,7 @@ def split_validation(num_rows: int, val_fraction: float, seed: int):
             f"--val-fraction {val_fraction} leaves {num_rows - num_val} of "
             f"{num_rows} train rows to fit on; at least 2 are needed"
         )
-    order = np.random.default_rng([seed, 1]).permutation(num_rows)
+    order = np.random.default_rng([seed, VALIDATION_SPLIT_TAG]).permutation(num_rows)
     return np.sort(order[num_val:]), np.sort(order[:num_val])
 
 
@@ -294,7 +356,8 @@ def run_repeat(
     """Train and score one model.
 
     Repeat 0 also saves its models and, in the backprop modes, its checkpoint and
-    per-epoch log into ``run_dir``.
+    per-epoch log into ``run_dir``; its ``best_checkpoint`` entry has the shape the
+    module docstring describes.
 
     :param args: Parsed arguments.
     :type args: argparse.Namespace
@@ -326,16 +389,26 @@ def run_repeat(
         }
 
     model = build_model(args, seed)
-    result: Dict[str, Any] = {"repeat": repeat, "seed": seed}
-    diagnostics, history = None, None
+    # DECISION plan-2026-09-30T082355-4d999dbc/D-043
+    # `fit_rows` is RECORDED here, from the rows this repeat is fitted on. Do NOT
+    # recompute it in `main` from the arguments: a recomputed value keeps saying
+    # "all train rows" when the fit silently holds rows out. See decisions.md D-043.
+    result: Dict[str, Any] = {"repeat": repeat, "seed": seed, "fit_rows": int(len(x_fit))}
+    diagnostics, history, start_mse = None, None, None
     start = time.perf_counter()
 
     if closed_form:
         diagnostics = model.fit_closed_form(x_fit, y_fit, chunk_size=args.chunk_size)
         result["closed_form_seconds"] = time.perf_counter() - start
         result["layer_rmse"] = diagnostics["layer_rmse"]
+        # How far the model left behind is from the float64 fit it reports.
+        result["forward_deviation_rms"] = float(diagnostics["forward_deviation_rms"])
         if backprop:
             result["closed_form_phase"] = score(model)
+            if repeat == 0:
+                # Before compile(): an archive holding a never-built optimizer
+                # does not reload (Keras 3.8 refuses the variable count).
+                model.save(run_dir / CLOSED_FORM_MODEL_NAME)
     elif "data" in args.centers:
         model.initialize_centers(x_fit)
 
@@ -347,11 +420,30 @@ def run_repeat(
         monitor = "val_loss" if len(val_rows) else "loss"
         callbacks = []
         if repeat == 0:
+            if closed_form:
+                # DECISION plan-2026-09-30T082355-4d999dbc/D-042
+                # The closed-form model was saved above, before fit, and its own
+                # monitored MSE is the checkpoint's starting threshold. Do NOT drop
+                # `initial_value_threshold`: without it `best_model.keras` is the
+                # best EPOCH even when every epoch is worse than the start, and the
+                # better model the run began with is kept nowhere (measured on the
+                # tutorial TF5 run, test RMSE: start 1.5e-07, "best" epoch 1.6e-05). The value
+                # is computed as Keras computes `val_loss` (float32 predictions
+                # against float32 targets) on the validation rows, or on the fit
+                # rows when none are held out. See decisions.md D-042.
+                rows = val_rows if len(val_rows) else fit_rows
+                start_mse = float(np.mean(np.square(
+                    _predict(model, x_train[rows], args.predict_batch_size)
+                    - y_train[rows].astype(np.float32))))
             # Hand-assembled rather than create_callbacks(): see the module docstring.
+            # A non-finite threshold would stop Keras from ever saving, so it is
+            # passed only when finite.
             callbacks = [
                 keras.callbacks.ModelCheckpoint(
                     best_checkpoint_path(str(run_dir)), monitor=monitor, mode="min",
-                    save_best_only=True),
+                    save_best_only=True,
+                    initial_value_threshold=(
+                        start_mse if start_mse is not None and np.isfinite(start_mse) else None)),
                 keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
             ]
         history = model.fit(
@@ -373,12 +465,22 @@ def run_repeat(
     if repeat == 0:
         model.save(run_dir / FINAL_MODEL_NAME)
         if backprop:
-            best = keras.models.load_model(best_checkpoint_path(str(run_dir)))
-            result["best_checkpoint"] = {
-                "monitor": monitor,
-                "epoch": int(np.argmin(history[monitor])) + 1,
-                **score(best),
-            }
+            best_path = Path(best_checkpoint_path(str(run_dir)))
+            if best_path.is_file():  # written only on an improvement, so a finite epoch exists
+                epoch = int(np.nanargmin(history[monitor])) + 1
+                best = {"source": "epoch", "file": best_path.name, "epoch": epoch,
+                        "monitor_value": float(history[monitor][epoch - 1]),
+                        **score(keras.models.load_model(best_path)), "reason": None}
+            elif start_mse is not None and np.isfinite(start_mse):
+                best = {"source": "closed_form", "file": CLOSED_FORM_MODEL_NAME, "epoch": 0,
+                        "monitor_value": start_mse, **result["closed_form_phase"],
+                        "reason": f"no epoch lowered {monitor} below the closed-form start"}
+            else:
+                best = {"source": "none", "file": None, "epoch": None, "monitor_value": None,
+                        "train_rmse": None, "test_rmse": None,
+                        "reason": f"{monitor} was never finite, so no checkpoint was written"}
+                logger.warning(f"No best checkpoint: {best['reason']}")
+            result["best_checkpoint"] = {"monitor": monitor, **best}
         result["_model"] = model
         result["_history"] = history
         result["_importance"] = None if diagnostics is None else diagnostics["importance"]
@@ -563,7 +665,6 @@ def main(argv=None) -> int:
         data = load_data(args)
         results = [run_repeat(args, data, repeat, run_dir) for repeat in range(args.repeats)]
         first = results[0]
-        backprop = args.training_mode != "closed_form"
 
         if first["_history"] is not None:
             save_training_history_json(first["_history"], run_dir)
@@ -578,8 +679,7 @@ def main(argv=None) -> int:
             "dataset": args.dataset,
             "num_inputs": int(data["x_train"].shape[1]),
             "train_rows": int(len(data["x_train"])),
-            "fit_rows": int(len(split_validation(
-                len(data["x_train"]), args.val_fraction if backprop else 0.0, 0)[0])),
+            "fit_rows": first["fit_rows"],
             "test_rows": int(len(data["x_test"])),
             "params": int(params),
             "seed": args.seed,
