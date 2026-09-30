@@ -24,7 +24,10 @@ Guards, in this order:
    per layer, and the two intercept flags set differently.
 8. The forward check that ends ``fit_closed_form``: ``forward_rmse`` and
    ``forward_deviation_rms`` against a forward pass computed here, and the
-   warning when the model at its own dtype is not the fit.
+   warning when the model at its own dtype is not the fit, also for a frozen
+   model, a NaN forward pass and a deviation between 1e-3 of the standard
+   deviation and 1e-3 of the range; a target one ulp from a constant is
+   constant; the pass's batch is sized from the solve's byte budget.
 9. The constructor DEFAULTS (``slope=5.0``, ``l2_block=0.01``,
    ``l2_mix=0.01``): their literal values, and that a default model with
    zero, one and two hidden layers is the fit it reports.
@@ -73,6 +76,7 @@ from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import r2_score
 
 from dl_techniques.models.general_purpose.hkan import HKAN, HKANLayer
+from dl_techniques.models.general_purpose.hkan import hkan_layer as hkan_layer_module
 from dl_techniques.models.general_purpose.hkan import model as hkan_model_module
 
 from . import CLOSED_FORM, HIDDEN, N_IN, N_ROWS, NUM_BASIS, SLOPE, block_features, make_data
@@ -697,16 +701,26 @@ class TestForwardCheck:
             assert abs(diagnostics["forward_rmse"] - diagnostics["layer_rmse"][-1]) < 1e-4
             assert fit_warnings(caplog) == []
 
+    @pytest.mark.parametrize("frozen", [False, True], ids=["trainable", "frozen"])
     @pytest.mark.parametrize("hidden", [(), (16,)])
-    def test_an_ill_conditioned_fit_warns(self, hidden, caplog):
+    def test_an_ill_conditioned_fit_warns(self, hidden, frozen, caplog):
         """Zero ridge, sigmoid at slope 1, smooth data: the block coefficients
         reach 2e10 to 4e10 and the float32 model is not the fit. Measured
         deviation: 1.2e+03 on the CPU and 1.1e+03 on GPU 1 (no hidden layer),
         2.5e+07 and 2.6e+07 (width 16), against a target of standard deviation
-        0.257 and a float64 fit of RMSE 0.083 and 0.049."""
+        0.257 and a float64 fit of RMSE 0.083 and 0.049.
+
+        ``frozen``: the same fit of a model with ``trainable = False``, which
+        has no trainable weights; the warning named the largest of them and
+        raised ``ValueError: max() arg is an empty sequence`` there, after
+        the weights were assigned (decisions.md D-050)."""
         x, y = smooth_problem()
         model = HKAN(hidden_units=hidden, basis="sigmoid", slope=1.0,
                      l2_block=0.0, l2_mix=0.0, seed=0)
+        if frozen:
+            model.build((None, 2))
+            model.trainable = False
+            assert model.trainable_weights == [] and len(model.weights) > 0
         with caplog.at_level(logging.WARNING, logger="dl"):
             diagnostics = model.fit_closed_form(x, y)
         assert diagnostics["layer_rmse"][-1] < 0.1, "the float64 fit itself is fine"
@@ -715,6 +729,8 @@ class TestForwardCheck:
         messages = fit_warnings(caplog)
         assert len(messages) == 1, [r.getMessage() for r in caplog.records]
         message = messages[0]
+        largest = max(float(np.abs(w.numpy()).max()) for w in model.weights)
+        assert largest > 1e9 and f"the largest here is {largest:.1e}" in message
         assert f"{diagnostics['layer_rmse'][-1]:.3e}" in message
         assert f"{diagnostics['forward_rmse']:.3e}" in message
         for needle in ("l2_block", "l2_mix", "float64", "standard deviation"):
@@ -767,6 +783,144 @@ class TestForwardCheck:
         messages = fit_warnings(caplog)
         assert len(messages) == 1 and "absolute floor" in messages[0]
         assert "constant target" in messages[0]
+
+    @staticmethod
+    def _refit_with_forward(monkeypatch, forward_of):
+        """Fit twice: once for the float64 predictions, once with the model's
+        forward pass replaced by ``forward_of(predictions)``. The second fit
+        is bit-identical to the first (same seed, same rows), so the patched
+        forward pass sits exactly where ``forward_of`` puts it."""
+        x, y = smooth_problem()
+        config = dict(hidden_units=(HIDDEN,), basis="tanh", slope=SLOPE, seed=0)
+        predictions = HKAN(**config).fit_closed_form(x, y)["train_predictions"]
+        forward = forward_of(predictions)
+        monkeypatch.setattr(hkan_model_module.HKAN, "_forward_numpy",
+                            lambda self, rows, batch_rows: forward.copy())
+        return y, HKAN(**config).fit_closed_form(x, y)
+
+    @pytest.mark.parametrize("fraction,warns", [(2e-3, True), (5e-4, False)])
+    def test_the_limit_is_a_fraction_of_the_standard_deviation(
+            self, monkeypatch, caplog, fraction, warns):
+        """Not of the range: on this target the range is 3.9 times the
+        standard deviation, so a deviation of 2e-3 of the standard deviation
+        is under 1e-3 of the range. The deviation is placed exactly by
+        patching the model's forward pass (decisions.md D-054, mutation N3)."""
+        y = smooth_problem()[1]
+        assert np.ptp(y) > 3 * np.std(y), "range and std too close to tell apart"
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            y, diagnostics = self._refit_with_forward(
+                monkeypatch, lambda p: p + fraction * np.std(y))
+        np.testing.assert_allclose(
+            diagnostics["forward_deviation_rms"], fraction * np.std(y), rtol=1e-12)
+        messages = fit_warnings(caplog)
+        assert len(messages) == (1 if warns else 0), messages
+        if warns:
+            assert f"standard deviation {np.std(y):.3e}" in messages[0]
+
+    def test_a_non_finite_forward_pass_warns(self, monkeypatch, caplog):
+        """A float32 overflow gives NaN; ``NaN > limit`` is false, so the
+        check is written ``not deviation <= limit`` (decisions.md D-054,
+        mutation N7)."""
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            _, diagnostics = self._refit_with_forward(
+                monkeypatch, lambda p: np.full_like(p, np.nan))
+        assert np.isnan(diagnostics["forward_deviation_rms"])
+        assert len(fit_warnings(caplog)) == 1
+
+    @pytest.mark.parametrize("direction", [np.inf, -np.inf], ids=["one_ulp_up", "one_ulp_down"])
+    @pytest.mark.parametrize("intercepts", [True, False], ids=["intercepts", "bias_free"])
+    def test_a_target_one_ulp_from_constant_is_constant(self, caplog, direction, intercepts):
+        """0.7 everywhere except one entry one ulp away, in either direction.
+
+        Judged by ``max == min`` it was not constant: bias-free, the block
+        R^2 then came out at -2.05e+30 (one ulp up, measured), and with
+        intercepts the forward check measured a perfect fit (deviation
+        1.2e-08, the float32 rounding of 0.7) against 1e-3 of a standard
+        deviation of 1.1e-16 and warned. Relative constancy (decisions.md
+        D-051) gives importance 0.0 and the absolute floor in both.
+        """
+        x, _ = smooth_problem(n_rows=300, seed=5)
+        y = np.full((300,), 0.7)
+        y[0] = np.nextafter(0.7, direction)
+        assert np.ptp(y) > 0.0, "the fixture is an exact constant"
+        model = HKAN(hidden_units=(), seed=0, use_block_bias=intercepts, use_bias=intercepts)
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            diagnostics = model.fit_closed_form(x, y)
+        np.testing.assert_array_equal(diagnostics["block_r2"], 0.0)
+        np.testing.assert_array_equal(diagnostics["importance"], 0.0)
+        assert fit_warnings(caplog) == []
+
+    def test_the_constancy_test_is_relative_and_tight(self):
+        """One ulp either way is constant at every magnitude; 64 ulps, a
+        1e-12 relative spread and any real target are not."""
+        is_constant = hkan_layer_module.is_constant_target
+        for value in (0.7, 1.0, -1.5, 1e6, 3e-200):
+            y = np.full((50,), value)
+            assert is_constant(y), value
+            for direction in (np.inf, -np.inf):
+                near = y.copy()
+                near[7] = np.nextafter(value, direction)
+                assert is_constant(near), (value, direction)
+            far = y.copy()
+            for _ in range(64):
+                far[7] = np.nextafter(far[7], np.inf)
+            assert not is_constant(far), value
+        assert is_constant(np.zeros(5))
+        assert not is_constant(0.7 + 1e-12 * np.random.default_rng(0).standard_normal(300))
+        assert not is_constant(smooth_problem()[1])
+
+
+class TestForwardCheckMemory:
+    """The forward check runs in batches sized from the solve's byte budget.
+
+    Its feature tensor is ``(B, n_out, n_in, m)`` at the compute dtype; one
+    solve chunk's is ``(outputs, n_in, N, m)`` in float64. With a fixed batch
+    of 256 rows the pass ignored ``chunk_size`` and was measured at 3322 MB
+    peak RSS against 745 MB without it (decisions.md D-050). The batches are
+    recorded from the first layer's ``call``, which ``fit_closed_form`` runs
+    only in that pass.
+    """
+
+    N_ROWS = 300
+    WIDTH = 64
+    NUM_BASIS = 10
+
+    def _batches(self, monkeypatch, chunk_size):
+        x, y = smooth_problem(n_rows=self.N_ROWS)
+        model = HKAN(hidden_units=(self.WIDTH,), num_basis=self.NUM_BASIS, seed=0)
+        seen = []
+        real_call = HKANLayer.call
+
+        def recording_call(layer, inputs, training=None):
+            if layer.layer_index == 0:
+                seen.append(int(inputs.shape[0]))
+            return real_call(layer, inputs, training=training)
+
+        monkeypatch.setattr(HKANLayer, "call", recording_call)
+        model.fit_closed_form(x, y, chunk_size=chunk_size)
+        return model, seen
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 16])
+    def test_the_batch_fits_in_one_solve_chunk(self, monkeypatch, chunk_size):
+        model, seen = self._batches(monkeypatch, chunk_size)
+        assert sum(seen) == self.N_ROWS, "the forward pass did not cover every row once"
+        batch = max(seen)
+        n_in = 2
+        solve_bytes = min(chunk_size, self.WIDTH) * n_in * self.N_ROWS * self.NUM_BASIS * 8
+        row_bytes = self.WIDTH * n_in * self.NUM_BASIS * 4
+        # the largest batch within the first layer's solve budget ...
+        assert batch * row_bytes <= solve_bytes < (batch + 1) * row_bytes, (
+            f"chunk_size {chunk_size}: forward batch {batch} rows, "
+            f"{batch * row_bytes} bytes against a solve chunk of {solve_bytes}")
+        # ... measured: 9, 28 and 150 rows, where the fixed batch was 256
+        assert batch == {1: 9, 3: 28, 16: 150}[chunk_size]
+        assert seen == [batch] * (self.N_ROWS // batch) + (
+            [self.N_ROWS % batch] if self.N_ROWS % batch else [])
+
+    def test_the_automatic_budget_takes_every_row_at_once_here(self, monkeypatch):
+        """``chunk_size=None``: 256 MB is far more than 300 rows need."""
+        _, seen = self._batches(monkeypatch, None)
+        assert seen == [self.N_ROWS]
 
 
 # ---------------------------------------------------------------------------

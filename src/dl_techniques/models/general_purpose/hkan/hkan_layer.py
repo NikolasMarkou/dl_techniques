@@ -77,6 +77,11 @@ DEFAULT_SLOPE: float = 5.0
 #: Compute dtypes a layer builds under (the float32 and float64 policies).
 SUPPORTED_COMPUTE_DTYPES: Tuple[str, ...] = ("float32", "float64")
 
+#: A target whose range is at most this many float64 epsilons times its
+#: largest magnitude is constant (:func:`is_constant_target`). 4 covers a
+#: target one ulp away from a constant in either direction at any magnitude.
+CONSTANT_TARGET_EPSILONS: float = 4.0
+
 # DECISION plan-2026-09-30T082355-4d999dbc/D-035
 # The tag is NON-ZERO and goes LAST in every seed list of this package. Do
 # NOT drop it, set it to 0, or move it to the front: numpy ignores trailing
@@ -109,6 +114,36 @@ def is_integer(value: Any) -> bool:
         isinstance(value, numbers.Integral)
         and not isinstance(value, (bool, np.bool_))
     )
+
+
+def is_constant_target(y: np.ndarray) -> bool:
+    """Tell whether a regression target is constant up to float64 rounding.
+
+    Interface contract (call sites: :meth:`HKANLayer.solve_closed_form`, which
+    reports block R^2 0.0 for a constant target, and ``HKAN.fit_closed_form``,
+    whose forward check uses an absolute floor for one): true when the range
+    of ``y`` is at most ``CONSTANT_TARGET_EPSILONS`` float64 epsilons times
+    its largest magnitude, which includes an exact constant and a constant
+    with one entry one ulp away in either direction. It never raises for a
+    non-empty finite array; the caller has checked finiteness.
+
+    :param y: Target, shape ``(N,)``, N at least 1.
+    :type y: np.ndarray
+    :return: Whether ``y`` is constant.
+    :rtype: bool
+    """
+    # DECISION plan-2026-09-30T082355-4d999dbc/D-051
+    # "Constant" is RELATIVE: range <= a few float64 epsilons times max |y|.
+    # Do NOT go back to `max == min` (or `np.ptp(y) > 0`): a target of 0.7
+    # with one entry one ulp above it was then "not constant", its bias-free
+    # block R^2 came out at -2.05e+30, and the forward check measured a
+    # float32 model against 1e-3 of a standard deviation of 1e-16 and warned
+    # on a perfect fit. Do NOT widen it to a loose relative tolerance either:
+    # a target that really varies at 1e-12 has variance to explain. See
+    # decisions.md D-051.
+    y = np.asarray(y, dtype=np.float64)
+    scale = float(np.max(np.abs(y)))
+    return float(np.ptp(y)) <= CONSTANT_TARGET_EPSILONS * np.finfo(np.float64).eps * scale
 
 
 def solve_linear_float64(
@@ -405,6 +440,10 @@ class HKANLayer(keras.layers.Layer):
         # 2.3e-02 away from the fit's own train predictions on a fit whose
         # RMSE is 0.154 (0.126 on the reviewer's data), with no error. See
         # decisions.md D-037.
+        # Correction to the parenthesis above (decisions.md D-055): 0.126 was
+        # the deviation the review measured on its own data, on a fit of RMSE
+        # 0.160, not a fit RMSE. `HKAN(dtype=...)` reaches this check through
+        # the dtype the model passes to its layers (D-049).
         compute_dtype = keras.backend.standardize_dtype(self.compute_dtype)
         if compute_dtype not in SUPPORTED_COMPUTE_DTYPES:
             raise ValueError(
@@ -540,6 +579,35 @@ class HKANLayer(keras.layers.Layer):
             0, n_rows, size=(self.units, n_in, self.num_basis))
         return x[rows, np.arange(n_in)[None, :, None]]
 
+    def solve_chunk_outputs(
+            self, n_rows: int, n_in: int, chunk_size: Optional[int] = None,
+    ) -> int:
+        """Return how many outputs :meth:`solve_closed_form` solves at once.
+
+        Interface contract (call sites: :meth:`solve_closed_form`, and
+        ``HKAN.fit_closed_form``, which sizes its forward check from the same
+        byte budget): the float64 feature tensor of one solve chunk is
+        ``outputs * n_in * n_rows * num_basis * 8`` bytes. A given
+        ``chunk_size`` is used as it is, capped at ``units``; ``None`` picks
+        the largest count whose tensor fits in ``AUTO_CHUNK_BYTES``, at least 1.
+
+        :param n_rows: Rows ``N`` of the layer input.
+        :type n_rows: int
+        :param n_in: Width of the layer input.
+        :type n_in: int
+        :param chunk_size: The caller's chunk size, or ``None``.
+        :type chunk_size: Optional[int]
+        :return: Outputs per chunk, between 1 and ``units``.
+        :rtype: int
+        :raises ValueError: If ``chunk_size`` is below 1.
+        """
+        if chunk_size is None:
+            per_output = n_in * n_rows * self.num_basis * 8
+            chunk_size = max(1, AUTO_CHUNK_BYTES // per_output)
+        elif chunk_size < 1:
+            raise ValueError(f"chunk_size must be at least 1, got {chunk_size!r}")
+        return int(min(chunk_size, self.units))
+
     def solve_closed_form(
             self,
             x: np.ndarray,
@@ -579,8 +647,8 @@ class HKANLayer(keras.layers.Layer):
             is off), ``output`` ``(N, units)`` (the float64 layer output on
             ``x``) and ``block_r2`` ``(units, n_in)`` (the coefficient of
             determination of each block's output against ``y``; ``0.0``
-            everywhere when ``y`` is constant, where scikit-learn's
-            ``r2_score`` gives ``1.0`` for an exact fit).
+            everywhere when ``y`` is constant by :func:`is_constant_target`,
+            where scikit-learn's ``r2_score`` gives ``1.0`` for an exact fit).
         :rtype: Dict[str, np.ndarray]
         :raises TypeError: If ``x``, ``y`` or ``centers`` is not float64.
         :raises ValueError: If a shape is wrong, ``chunk_size`` is below 1,
@@ -603,19 +671,17 @@ class HKANLayer(keras.layers.Layer):
                 f"HKANLayer {self.name!r}: centers must have shape "
                 f"{(self.units, n_in, self.num_basis)}, got {centers.shape}"
             )
-        if chunk_size is None:
-            per_output = n_in * n_rows * self.num_basis * 8
-            chunk_size = max(1, AUTO_CHUNK_BYTES // per_output)
-        elif chunk_size < 1:
-            raise ValueError(f"chunk_size must be at least 1, got {chunk_size!r}")
+        chunk_size = self.solve_chunk_outputs(n_rows, n_in, chunk_size)
 
         basis = NUMPY_BASIS[self.basis]
         columns = x.T[None, :, :, None]
         total = float(np.sum(np.square(y - y.mean())))
-        # "Constant" is max == min, exactly. The centered sum of squares
-        # alone cannot tell: the mean of 96 copies of 0.7 is not 0.7, that
-        # sum is 1e-30, and R^2 computed against it was measured at -2e+30.
-        constant_target = not (np.ptp(y) > 0 and total > 0)
+        # "Constant" is decided on the range, relative to the magnitude
+        # (is_constant_target). The centered sum of squares alone cannot
+        # tell: the mean of 96 copies of 0.7 is not 0.7, that sum is 1e-30,
+        # and R^2 computed against it was measured at -2e+30. `total > 0`
+        # stays for a range whose squares underflow to 0.
+        constant_target = is_constant_target(y) or not total > 0
 
         coef = np.empty((self.units, n_in, self.num_basis), dtype=np.float64)
         block_bias = np.empty((self.units, n_in), dtype=np.float64)

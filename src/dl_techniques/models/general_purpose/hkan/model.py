@@ -34,8 +34,9 @@ Deliberate choices, each with its reason:
   float64 fit depends on the size of the fitted weights: about the largest
   weight times the resolution of the model dtype. Measured in float32: 6e-7
   at most on the authors' tutorial configuration (weights up to 13), but
-  3.2e-03 RMS against a fit of RMSE 3.4e-08 on the paper's Table V row for
-  TF1 (connecting weights up to 6e3), and 2.6e+02 against 8.5e-02 at the
+  3.2e-03 RMS against a fit of RMSE 3.4e-08 with the hyperparameters of the
+  paper's Table V row for TF1 on a smooth two-input probe target, not on TF1
+  (connecting weights up to 6e3), and 2.6e+02 against 8.5e-02 at the
   reference code's defaults (slope 1, no ridge, coefficients up to 5e9).
   This constructor's defaults (``slope=5.0``, ``l2_block=0.01``,
   ``l2_mix=0.01``) are chosen so that the default model stays under 1e-3 of
@@ -54,8 +55,10 @@ Deliberate choices, each with its reason:
 - The centers and the slope are not trainable in any mode.
 - There is no variants table and no ``pretrained`` argument: the paper
   defines no named sizes and no weights are distributed.
-- Supported dtype policies are float32 and float64. Any other compute dtype
-  (``mixed_float16`` included) raises ``ValueError`` at build.
+- Supported dtype policies are float32 and float64, set globally or by the
+  constructor's ``dtype`` argument, which every layer receives. Any other
+  compute dtype (``mixed_float16``, ``float16``, ``bfloat16`` and
+  ``mixed_bfloat16`` included) raises ``ValueError`` at build.
 
 References:
     - Dudek and Rodak, 2025. HKAN: Hierarchical Kolmogorov-Arnold Network
@@ -75,7 +78,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from .hkan_layer import DEFAULT_SLOPE, HKANLayer, is_integer
+from .hkan_layer import DEFAULT_SLOPE, HKANLayer, is_constant_target, is_integer
 
 # ---------------------------------------------------------------------
 
@@ -95,8 +98,9 @@ DEFAULT_L2_BLOCK: float = 0.01
 DEFAULT_L2_MIX: float = 0.01
 
 #: Rows per forward batch when :meth:`HKAN.initialize_centers` propagates
-#: activations and when :meth:`HKAN.fit_closed_form` checks the fitted model;
-#: the feature tensor of a layer is ``(B, n_out, n_in, m)``.
+#: activations; the feature tensor of a layer is ``(B, n_out, n_in, m)``. The
+#: forward check of :meth:`HKAN.fit_closed_form` sizes its batch from the
+#: solve's byte budget instead (:meth:`HKAN._forward_batch_rows`).
 _PROPAGATION_BATCH: int = 256
 
 #: :meth:`HKAN.fit_closed_form` warns when the RMS difference between the
@@ -105,7 +109,7 @@ _PROPAGATION_BATCH: int = 256
 #: sits near 1e-7 of it; 1e-3 is a gap a user would see in a reported RMSE.
 FORWARD_DEVIATION_FRACTION: float = 1e-3
 
-#: The limit used instead when the target is constant (standard deviation 0):
+#: The limit used instead when the target is constant (``is_constant_target``):
 #: an absolute RMS difference, about ten float32 steps at unit scale.
 FORWARD_DEVIATION_FLOOR: float = 1e-6
 
@@ -162,8 +166,9 @@ class HKAN(keras.Model):
     :param l2_mix: Ridge strength of the connecting regressions in
         :meth:`fit_closed_form`. Default 0.01. The paper fits the connecting
         stage by plain least squares (``0``); on a wide layer the block
-        outputs are nearly collinear and ``0`` gives connecting weights of
-        1e3 to 1e8. It has no effect on gradient training.
+        outputs are nearly collinear and ``0`` gave connecting weights of
+        4e2 to 5e8 in the measured cases. It has no effect on gradient
+        training.
     :type l2_mix: Union[float, Sequence[float]]
     :param use_block_bias: Whether every block has an intercept.
     :type use_block_bias: bool
@@ -178,12 +183,14 @@ class HKAN(keras.Model):
     :param seed: Seed of the centers. ``None`` draws from the global numpy
         generator. ``0`` is a seed.
     :type seed: Optional[int]
-    :param kwargs: Additional arguments for the ``keras.Model`` base.
+    :param kwargs: Additional arguments for the ``keras.Model`` base. A
+        ``dtype`` given here is the dtype policy of every layer too.
     :raises ValueError: If a width is not a positive integer, a per-layer
         sequence has the wrong length, a ridge strength is negative, or a
         layer rejects its setting. Building under a dtype policy other than
-        float32 or float64 raises it too, and so does calling the model on an
-        input of another width than it was built for.
+        float32 or float64 (global or given as ``dtype``) raises it too, and
+        so does calling the model on an input of another width than it was
+        built for.
 
     Integer arguments (``hidden_units`` entries, ``num_basis``, ``seed``) may
     be numpy integers; ``get_config`` returns plain Python numbers.
@@ -271,6 +278,15 @@ class HKAN(keras.Model):
 
         # A keras.Model-owned flat list keeps weight tracking through a
         # .keras save.
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-049
+        # Every layer gets the MODEL's dtype policy. Do NOT drop `dtype=` below
+        # "because the global policy already reaches the layers": a policy
+        # given to the constructor (`HKAN(dtype="float64")`, the standard Keras
+        # way) then never reached them. Measured: `dtype="float64"` left
+        # float32 layers and the same 3.6e+07 forward deviation as float32,
+        # and `dtype="mixed_float16"` built, fitted and predicted with no
+        # error, inputs rounded to float16, past the refusal of D-037. See
+        # decisions.md D-049.
         self.hkan_layers: List[HKANLayer] = [
             HKANLayer(
                 units=self._units[index],
@@ -284,6 +300,7 @@ class HKAN(keras.Model):
                 mix_initializer=self.mix_initializer,
                 seed=seed,
                 layer_index=index,
+                dtype=self.dtype_policy,
                 name=f"hkan_layer_{index}",
             )
             for index in range(len(self._units))
@@ -316,20 +333,54 @@ class HKAN(keras.Model):
             return list(value)
         return [value] * n_layers
 
-    def _forward_numpy(self, x: np.ndarray) -> np.ndarray:
+    def _forward_batch_rows(self, n_rows: int, chunk_size: Optional[int]) -> int:
+        """Rows per batch of the forward check, from the solve's byte budget.
+
+        For every layer, the batch whose feature tensor ``(B, n_out, n_in, m)``
+        at the compute dtype is no larger than the float64 feature tensor of
+        one solve chunk of that layer (``HKANLayer.solve_chunk_outputs``); the
+        smallest over the layers, at least 1 and at most ``n_rows``.
+
+        :param n_rows: Rows of the fit.
+        :type n_rows: int
+        :param chunk_size: The ``chunk_size`` the fit was given.
+        :type chunk_size: Optional[int]
+        :return: The batch size.
+        :rtype: int
+        """
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-050
+        # The forward check's batch comes from the SAME byte budget as the
+        # solve. Do NOT go back to a fixed row count (it was 256): the feature
+        # tensor is (B, n_out, n_in, m) whatever `chunk_size` is, so a fixed
+        # batch made `chunk_size` stop bounding memory. Measured (64 inputs,
+        # width 1024, m 10, 300 rows, chunk_size 16, CPU): peak RSS 3322 MB
+        # with the fixed batch against 745 MB with the check stubbed out. See
+        # decisions.md D-050.
+        rows = n_rows
+        for layer in self.hkan_layers:
+            n_in = int(layer.centers.shape[1])
+            outputs = layer.solve_chunk_outputs(n_rows, n_in, chunk_size)
+            solve_bytes = outputs * n_in * n_rows * layer.num_basis * 8
+            row_bytes = (layer.units * n_in * layer.num_basis
+                         * np.dtype(layer.compute_dtype).itemsize)
+            rows = min(rows, max(1, solve_bytes // row_bytes))
+        return int(rows)
+
+    def _forward_numpy(self, x: np.ndarray, batch_rows: int) -> np.ndarray:
         """Run the built model on ``x`` in batches, at the model's own dtype.
 
         :param x: Inputs, shape ``(N, n_in)``.
         :type x: np.ndarray
-        :return: The model output as float64, shape ``(N,)``. Memory is
-            bounded by ``_PROPAGATION_BATCH`` rows whatever ``N`` is.
+        :param batch_rows: Rows per batch (:meth:`_forward_batch_rows`).
+        :type batch_rows: int
+        :return: The model output as float64, shape ``(N,)``.
         :rtype: np.ndarray
         """
         dtype = self.hkan_layers[0].centers.dtype
         return np.concatenate([
             keras.ops.convert_to_numpy(
-                self(x[start:start + _PROPAGATION_BATCH].astype(dtype), training=False))
-            for start in range(0, x.shape[0], _PROPAGATION_BATCH)
+                self(x[start:start + batch_rows].astype(dtype), training=False))
+            for start in range(0, x.shape[0], batch_rows)
         ], axis=0)[:, 0].astype(np.float64)
 
     # ------------------------------------------------------------------
@@ -428,13 +479,15 @@ class HKAN(keras.Model):
         that dtype: 1e-7 for weights of order 1 in float32, and arbitrarily
         much for the block coefficients of 1e7 to 1e11 that a zero ridge
         gives on a smooth basis, or for the connecting weights of 1e3 to 1e8
-        that ``l2_mix = 0`` gives on a wide layer. The fit therefore ends with one
+        that ``l2_mix = 0`` gives on a wide layer (4e2 to 5e8 in the measured
+        cases). The fit therefore ends with one
         batched forward pass of the model on ``x`` and reports it
         (``forward_rmse``, ``forward_deviation_rms``). When the deviation
         exceeds ``FORWARD_DEVIATION_FRACTION`` of the target's standard
         deviation (``FORWARD_DEVIATION_FLOOR`` in absolute terms for a
-        constant target) a warning is logged; it is not an exception,
-        because the float64 diagnostics are still correct.
+        target that ``is_constant_target`` calls constant), or is not a
+        finite number, a warning is logged; it is not an exception, because
+        the float64 diagnostics are still correct.
 
         :param x: Training inputs, shape ``(N, n_in)``.
         :type x: np.ndarray
@@ -442,7 +495,8 @@ class HKAN(keras.Model):
         :type y: np.ndarray
         :param chunk_size: Number of outputs of a layer solved at once. It
             bounds memory and does not change the result. ``None`` picks it
-            per layer.
+            per layer. The forward check runs in batches sized from the same
+            byte budget, so it bounds that pass's memory too.
         :type chunk_size: Optional[int]
         :return: ``layer_rmse``: list of the train RMSE of every layer's
             outputs against ``y`` (mean over the layer's outputs of the
@@ -512,12 +566,12 @@ class HKAN(keras.Model):
         # the float64 diagnostics are correct and the float64 policy is a
         # valid remedy. See decisions.md D-034.
         train_predictions = activations[:, 0]
-        forward = self._forward_numpy(x)
+        forward = self._forward_numpy(x, self._forward_batch_rows(x.shape[0], chunk_size))
         forward_rmse = float(np.sqrt(np.mean(np.square(forward - y))))
         deviation = float(np.sqrt(np.mean(np.square(forward - train_predictions))))
-        # max == min decides "constant": the standard deviation of 96 copies
-        # of 0.7 is 1e-16, not 0, and a fraction of that always warns.
-        spread = float(np.std(y)) if np.ptp(y) > 0 else 0.0
+        # is_constant_target decides "constant": the standard deviation of 96
+        # copies of 0.7 is 1e-16, not 0, and a fraction of that always warns.
+        spread = 0.0 if is_constant_target(y) else float(np.std(y))
         if spread > 0:
             limit = FORWARD_DEVIATION_FRACTION * spread
             limit_text = (
@@ -529,9 +583,13 @@ class HKAN(keras.Model):
                 f"the absolute floor {FORWARD_DEVIATION_FLOOR:g} used for a "
                 "constant target")
         if not deviation <= limit:
+            # Over every weight, with a default: a frozen model has no
+            # trainable weights and max() of nothing raised here, after the
+            # weights were assigned and before the warning (decisions.md D-050).
             largest = max(
-                float(np.abs(keras.ops.convert_to_numpy(weight)).max())
-                for weight in self.trainable_weights)
+                (float(np.abs(keras.ops.convert_to_numpy(weight)).max())
+                 for weight in self.weights),
+                default=0.0)
             logger.warning(
                 "HKAN closed-form fit: the model does not compute the fit it "
                 f"was given. The float64 fit has train RMSE {layer_rmse[-1]:.3e}; "
@@ -543,9 +601,10 @@ class HKAN(keras.Model):
                 "block coefficients from a weak or zero l2_block, or connecting "
                 "weights from l2_mix = 0 on a wide layer, whose block outputs "
                 "are nearly collinear. Remedies: raise l2_block, raise l2_mix, "
-                "or build the model under the float64 dtype policy (which "
-                "narrows the gap by the ratio of the two precisions and does "
-                "not close it for weights of 1e10 and above)."
+                "or build the model under the float64 dtype policy, for "
+                "example HKAN(..., dtype=\"float64\") (which narrows the gap by "
+                "the ratio of the two precisions and does not close it for "
+                "weights of 1e10 and above)."
             )
 
         logger.info(f"HKAN closed-form fit: per-layer train RMSE {layer_rmse}")

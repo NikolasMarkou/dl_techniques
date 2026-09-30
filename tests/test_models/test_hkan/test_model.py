@@ -25,7 +25,9 @@ Guards:
 * a built model refuses an input of another width (width 1 would broadcast
   silently) in ``call``, ``predict`` and ``fit``, also after a ``.keras``
   round trip, while the numpy-side methods keep their own error;
-* a float16 dtype policy is refused at build.
+* a float16 or bfloat16 dtype policy is refused at build, set globally or
+  given to the constructor; ``HKAN(dtype="float64")`` gives float64 layers,
+  closes the float32 gap and reloads as float64.
 """
 
 import inspect
@@ -307,7 +309,9 @@ class TestDtypePolicy:
         finally:
             keras.mixed_precision.set_global_policy(previous)
 
-    @pytest.mark.parametrize("policy", ["mixed_float16", "float16"], indirect=True)
+    REFUSED = ["mixed_float16", "float16", "mixed_bfloat16", "bfloat16"]
+
+    @pytest.mark.parametrize("policy", REFUSED, indirect=True)
     def test_a_float16_policy_is_refused(self, data, policy):
         """At ``build``, at the first call, and by ``fit_closed_form``."""
         x, y = data
@@ -320,6 +324,23 @@ class TestDtypePolicy:
         with pytest.raises(ValueError, match="'float32' and 'float64'"):
             create_hkan(hidden_units=(HIDDEN,), input_dim=N_IN)
 
+    @pytest.mark.parametrize("dtype", REFUSED)
+    def test_the_constructor_dtype_is_refused_too(self, data, dtype):
+        """``HKAN(dtype=...)``, the standard Keras way, under the float32
+        global policy. It never reached the layers: ``mixed_float16`` built,
+        fitted and predicted with float32 layers on float16-rounded inputs,
+        forward deviation 1.2e-04 (bfloat16: 9.2e-04), no error (decisions.md
+        D-049)."""
+        x, y = data
+        with pytest.raises(ValueError, match="'float32' and 'float64'") as raised:
+            _model(dtype=dtype).build((None, N_IN))
+        assert dtype in str(raised.value)
+        with pytest.raises(ValueError, match="'float32' and 'float64'"):
+            _model(dtype=dtype).fit_closed_form(x, y)
+        with pytest.raises(ValueError, match="'float32' and 'float64'"):
+            create_hkan(hidden_units=(HIDDEN,), input_dim=N_IN, dtype=dtype)
+        assert keras.mixed_precision.global_policy().name == "float32"
+
     @pytest.mark.parametrize("policy", ["float32", "float64"], indirect=True)
     def test_float32_and_float64_build_fit_and_predict(self, data, policy):
         x, y = data
@@ -330,6 +351,42 @@ class TestDtypePolicy:
         # Measured deviation at the default l2_mix: 1.7e-07 (float32, CPU),
         # 1.9e-07 (GPU 1), 2.9e-16 (float64).
         assert diagnostics["forward_deviation_rms"] < (1e-5 if policy == "float32" else 1e-13)
+
+    #: A configuration whose float32 model is NOT its fit (connecting weights
+    #: from ``l2_mix = 0`` at slope 1): README section 6, row seven.
+    WIDE_GAP = dict(hidden_units=(16,), num_basis=10, basis="sigmoid", slope=1.0,
+                    l2_block=0.01, l2_mix=0.0, seed=0)
+
+    def test_the_constructor_float64_reaches_every_layer_and_closes_the_gap(self, data):
+        """Measured on this fixture (CPU), deviation / std(y): 1.0e-02 with
+        float32 layers (the fit warns), 2.0e-11 with float64 layers
+        (decisions.md D-049)."""
+        x, y = data
+        ratios = {}
+        for dtype in ("float32", "float64"):
+            model = HKAN(dtype=dtype, **self.WIDE_GAP)
+            diagnostics = model.fit_closed_form(x, y)
+            assert [layer.compute_dtype for layer in model.hkan_layers] == [dtype, dtype]
+            assert {w.dtype for w in model.weights} == {dtype}
+            assert _numpy(model(x[:4])).dtype == np.dtype(dtype)
+            ratios[dtype] = diagnostics["forward_deviation_rms"] / np.std(y)
+        assert keras.mixed_precision.global_policy().name == "float32"
+        assert ratios["float32"] > 1e-4, "the fixture has no float32 gap to close"
+        assert ratios["float64"] < 1e-9, ratios
+
+    def test_a_float64_model_reloads_as_float64(self, data, tmp_path):
+        x, y = data
+        model = HKAN(dtype="float64", **self.WIDE_GAP)
+        model.fit_closed_form(x, y)
+        path = os.path.join(str(tmp_path), "float64.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        assert loaded.dtype_policy.name == "float64"
+        assert [layer.compute_dtype for layer in loaded.hkan_layers] == ["float64", "float64"]
+        for ours, theirs in zip(model.weights, loaded.weights):
+            assert theirs.dtype == "float64"
+            np.testing.assert_array_equal(theirs.numpy(), ours.numpy())
+        np.testing.assert_array_equal(_numpy(loaded(x)), _numpy(model(x)))
 
     def test_the_policy_was_restored(self):
         assert keras.mixed_precision.global_policy().name == "float32"

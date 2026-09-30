@@ -518,6 +518,21 @@ class TestSolveGuards:
         assert r2_score(y, y) == 1.0
 
 
+    def test_a_target_whose_variance_underflows_has_block_r2_zero(self):
+        """Half the rows 1e-170, half 0: not constant by the relative test (its
+        range is its magnitude), but the centered sum of squares underflows to 0,
+        and R^2 against it was NaN (measured; mutation N9 of decisions.md D-054,
+        which the second review called equivalent "unless total underflows")."""
+        x, _ = make_data()
+        y = np.where(np.arange(x.shape[0]) % 2 == 0, 1e-170, 0.0)
+        assert np.sum(np.square(y - y.mean())) == 0.0 and np.ptp(y) > 0.0
+        layer = HKANLayer(units=2, num_basis=4, basis="tanh", slope=SLOPE)
+        centers = np.random.default_rng(2).uniform(0.0, 1.0, size=(2, N_IN, 4))
+        with np.errstate(all="ignore"):
+            solution = layer.solve_closed_form(x, y, 0.01, 0.01, centers)
+        np.testing.assert_array_equal(solution["block_r2"], np.zeros((2, N_IN)))
+
+
 class TestInputWidth:
     """A built layer refuses another width; width 1 would broadcast."""
 
@@ -557,8 +572,11 @@ def policy(request):
 
 class TestDtypePolicy:
 
-    @pytest.mark.parametrize("policy", ["mixed_float16", "float16"], indirect=True)
+    @pytest.mark.parametrize(
+        "policy", ["mixed_float16", "float16", "mixed_bfloat16", "bfloat16"], indirect=True)
     def test_a_float16_compute_dtype_is_refused_at_build(self, policy):
+        """bfloat16 too: the allow-list is float32 and float64 (decisions.md
+        D-037; the bfloat16 cells guard mutation N5 of D-054)."""
         layer = HKANLayer(units=HIDDEN, seed=0)
         with pytest.raises(ValueError, match="'float32' and 'float64'") as raised:
             layer.build((None, N_IN))
