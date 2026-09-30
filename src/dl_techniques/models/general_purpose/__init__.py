@@ -1,5 +1,6 @@
 """General-purpose models — architectures not tied to a single input modality.
 
+- `hkan/` — Hierarchical Kolmogorov-Arnold Network (closed-form fit, optional backpropagation)
 - `kan/` — Kolmogorov-Arnold Networks
 - `mothnet/` — MothNet (bio-inspired)
 - `power_mlp/` — Power MLP

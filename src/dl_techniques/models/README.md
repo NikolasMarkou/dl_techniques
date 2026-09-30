@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **93 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **97 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (93 of 93 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (97 of 97 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -21,7 +21,7 @@ from dl_techniques.models import resnet                               # no - not
 ```
 
 Family-level re-exports were considered and rejected: `import dl_techniques.models.vision`
-would then eagerly construct all 41 vision packages — the whole Keras/TensorFlow import cost
+would then eagerly construct all 43 vision packages — the whole Keras/TensorFlow import cost
 of the family to reach one model — and it opens a circular-import surface between packages
 that share layers. The family `__init__.py` files carry a docstring listing their members and
 nothing else. `time_series/` is the single exception; it predates this layout, has 7 children
@@ -35,21 +35,21 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **41** | image backbones, detectors, segmenters, denoisers, generators |
+| [`vision/`](vision/) | **43** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 18 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
-| [`vision_language/`](vision_language/) | **10** | models consuming an image and a text stream (plus one that does not — see below) |
+| [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
-| [`general_purpose/`](general_purpose/) | 3 | architecture-level MLP replacements, modality-agnostic |
+| [`general_purpose/`](general_purpose/) | 4 | architecture-level MLP replacements, modality-agnostic |
 | [`graph/`](graph/) | 3 | models over explicit graph inputs |
 | [`neural_computer/`](neural_computer/) | 2 | external-memory / differentiable-computer architectures |
 | [`common/`](common/) | 1 | model-agnostic inference machinery |
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **93** | |
+| **Sum** | **97** | |
 
-### `vision/` (41)
+### `vision/` (43)
 
 | Package | |
 |---|---|
@@ -158,6 +158,7 @@ image-patch input modality now matches its filing.)
 
 | Package | |
 |---|---|
+| `general_purpose/hkan/` | HKAN, hierarchical Kolmogorov-Arnold network for single-target regression: closed-form layer-by-layer least-squares fit, or stock `fit`. No variants table, no pretrained weights |
 | `general_purpose/kan/` | Kolmogorov-Arnold Networks |
 | `general_purpose/mothnet/` | MothNet, bio-inspired |
 | `general_purpose/power_mlp/` | Power MLP |

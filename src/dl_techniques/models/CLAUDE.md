@@ -20,12 +20,14 @@ Four families nest one level further (`vision/image_restoration`, `vision/keypoi
 wrong test. Re-derive any count with the command beside it; never quote one from memory.
 
 ```bash
-find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 108 packages
-find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 321 .py
+find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 114 packages
+find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 339 .py
 ```
 
-Both re-derived 2026-09-10 by running exactly those two commands. The previous readings
-here were **102 / 287**, and the drift is mostly not the port that noticed it: the
+Both re-derived 2026-09-30 by running exactly those two commands. The previous readings
+here were **108 / 321** (2026-09-10); `general_purpose/hkan/` contributes 1 package and 3
+`.py`, so 5 packages and 15 files arrived from other work that never re-ran the commands.
+The readings before that were **102 / 287**, and the drift is mostly not the port that noticed it: the
 `vision/image_restoration/doc_scanner/` package contributes 1 package and 5 `.py`, so
 subtracting it still leaves 107 / 316. About 6 packages and 34 files arrived from other
 work that never re-ran the commands. Do the same when you land a package: run them, do not
@@ -79,15 +81,15 @@ archives written before the registration migration keep loading.
 ### Docstring style — re-derive it, never assume it
 
 ```bash
-grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l  # 12
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 204
+grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l  # 11
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 214
 ```
 
-Over 321 files (re-derived 2026-09-10): Google-only **3**, Sphinx-only **195**, both **9**,
-neither **114**. **Match the file you are editing; never convert one wholesale** — that rule
-is unchanged and the 3 remaining Google-only files are exactly the ones it protects.
+Over 339 files (re-derived 2026-09-30; previously 12 / 204 over 321 files: 3, 195, 9, 114):
+Google-only **2**, Sphinx-only **205**, both **9**, neither **123**. **Match the file you are editing; never convert one wholesale** — that rule
+is unchanged and the 2 remaining Google-only files are exactly the ones it protects.
 Perishable — re-run the greps. The unanchored instrument agrees here (bare `Args:` also
-returns 12); it did not always.
+returns 11); it did not always.
 
 > **This refutes a claim two other files still carry.** The reading previously printed here
 > was *"over 287 files: Google-only 80, Sphinx-only 87, both 8, neither 112 — no
