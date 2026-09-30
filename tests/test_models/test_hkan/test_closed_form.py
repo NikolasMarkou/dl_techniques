@@ -25,6 +25,15 @@ Guards, in this order:
 8. The forward check that ends ``fit_closed_form``: ``forward_rmse`` and
    ``forward_deviation_rms`` against a forward pass computed here, and the
    warning when the model at its own dtype is not the fit.
+9. The constructor DEFAULTS (``slope=5.0``, ``l2_block=0.01``,
+   ``l2_mix=0.01``): their literal values, and that a default model with
+   zero, one and two hidden layers is the fit it reports.
+
+REFERENCE CONFIGURATION. The scikit-learn chain fixtures, the data-center
+fixture and the two "settings held equal" tests pass ``l2_mix=0.0``
+explicitly: they were written, and their tolerances measured, against the
+paper's plain least-squares connecting stage, which was the constructor
+default until decisions.md D-039 changed it to 0.01.
 
 NAMED DEVIATION (decisions.md D-024). In the eight cells ``sigmoid`` and
 ``softplus`` at ``l2 == 0`` (both intercept settings, distinct and duplicated
@@ -52,6 +61,7 @@ whatever ``CUDA_VISIBLE_DEVICES`` says, so those numbers have one regime; the
 float32 tolerance is measured on the CPU and on GPU 1.
 """
 
+import inspect
 import itertools
 import logging
 from typing import Any, Dict, Tuple
@@ -357,13 +367,13 @@ def test_the_parity_fixture_can_tell_its_cells_apart(data):
 MODEL_CONFIGS = {
     "intercepts_ridge": dict(
         hidden_units=(HIDDEN,), num_basis=NUM_BASIS, basis=("tanh", "identity"),
-        slope=SLOPE, centers="random", l2_block=(L2_POSITIVE, 0.1), seed=0),
+        slope=SLOPE, centers="random", l2_block=(L2_POSITIVE, 0.1), l2_mix=0.0, seed=0),
     "zero_ridge_data_centers": dict(
         hidden_units=(HIDDEN,), num_basis=NUM_BASIS, basis=("gaussian", "softplus"),
-        slope=SLOPE, centers=("data", "random"), l2_block=0.0, seed=0),
+        slope=SLOPE, centers=("data", "random"), l2_block=0.0, l2_mix=0.0, seed=0),
     "bias_free_ridge": dict(
         hidden_units=(HIDDEN,), num_basis=NUM_BASIS, basis=("sigmoid", "tanh"),
-        slope=SLOPE, centers="random", l2_block=L2_POSITIVE,
+        slope=SLOPE, centers="random", l2_block=L2_POSITIVE, l2_mix=0.0,
         use_block_bias=False, use_bias=False, seed=0),
     "ridge_on_the_connecting_stage": dict(
         hidden_units=(HIDDEN,), num_basis=NUM_BASIS, basis="tanh",
@@ -557,7 +567,7 @@ def test_each_layer_uses_its_own_slope(data):
     x, y = data
     slopes = (3.0, 7.0)
     model = HKAN(hidden_units=(HIDDEN,), num_basis=NUM_BASIS, basis="tanh",
-                 slope=slopes, l2_block=L2_POSITIVE, seed=0)
+                 slope=slopes, l2_block=L2_POSITIVE, l2_mix=0.0, seed=0)
     diagnostics = model.fit_closed_form(x, y)
     assert [layer.slope for layer in model.hkan_layers] == list(slopes)
 
@@ -605,7 +615,7 @@ def test_the_two_intercept_flags_are_independent(data, block_intercept, mix_inte
 
     # The same through the model, both layers.
     model = HKAN(hidden_units=(HIDDEN,), num_basis=NUM_BASIS, basis="tanh", slope=SLOPE,
-                 l2_block=L2_POSITIVE, use_block_bias=block_intercept,
+                 l2_block=L2_POSITIVE, l2_mix=0.0, use_block_bias=block_intercept,
                  use_bias=mix_intercept, seed=0)
     diagnostics = model.fit_closed_form(x, y)
     activations = x
@@ -711,9 +721,10 @@ class TestForwardCheck:
             assert needle in message, needle
 
     def test_a_well_conditioned_fit_does_not_warn(self, caplog):
-        """The README's first configuration. Measured ratio to the target's
-        standard deviation: 7.1e-06 (CPU), 6.8e-06 (GPU 1), 140 times under
-        the threshold; the bound asserted is a tenth of the threshold."""
+        """The README's first configuration (``l2_mix`` at its default, 0.01).
+        Measured ratio to the target's standard deviation: 4.7e-07 (CPU),
+        4.4e-07 (GPU 1), 2000 times under the threshold; with ``l2_mix=0.0``
+        it was 7.1e-06. The bound asserted is a tenth of the threshold."""
         x, y = smooth_problem()
         model = HKAN(hidden_units=(16,), num_basis=(10, 5), basis=("tanh", "identity"),
                      slope=5.0, l2_block=0.01, seed=0)
@@ -851,7 +862,7 @@ class TestDataCenters:
     def data_fit(self):
         x, y = make_data(offset=2.0)
         model = HKAN(hidden_units=(N_IN,), num_basis=NUM_BASIS, basis="tanh",
-                     slope=SLOPE, centers="data", l2_block=L2_POSITIVE, seed=0)
+                     slope=SLOPE, centers="data", l2_block=L2_POSITIVE, l2_mix=0.0, seed=0)
         model.build((None, N_IN))
         placeholder = stored_centers(model)
         diagnostics = model.fit_closed_form(x, y)
@@ -895,3 +906,87 @@ class TestDataCenters:
                 f"second-layer centers of input {p} are up to {distance.max():.3e} "
                 "from the nearest activation of the first layer: they were not "
                 "drawn from this layer's input")
+
+
+# ---------------------------------------------------------------------------
+# The constructor defaults
+# ---------------------------------------------------------------------------
+
+def rough_problem(n_rows: int = 600, seed: int = 123) -> Tuple[np.ndarray, np.ndarray]:
+    """Noise-free ``y = sin(8 x1) cos(5 x2)`` on ``[0, 1]^2``."""
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.0, 1.0, size=(n_rows, 2))
+    return x, np.sin(8.0 * x[:, 0]) * np.cos(5.0 * x[:, 1])
+
+
+class TestDefaults:
+    """The default constructor leaves behind a float32 model that is its fit.
+
+    No ``slope``, ``l2_block`` or ``l2_mix`` argument anywhere in this class.
+    Every cell asserts "no warning" and a bound on
+    ``forward_deviation_rms / std(y)`` that is tighter than the package's
+    warning threshold (1e-3), because at the threshold alone two of the three
+    defaults could be reverted unseen on these cells. Measured on 600 rows,
+    seeds 0 and 1, CPU and GPU 1 (``<scratchpad>/step1_2/guard_cells.py``),
+    worst of the four readings:
+
+    ====================  ============  =========  ============  =========
+    cell                  defaults      slope 1    l2_block 0    l2_mix 0
+    ====================  ============  =========  ============  =========
+    smooth, ``()``        4.4e-07       4.3e-06    1.1e+02       3.6e-07
+    smooth, ``(16,)``     8.7e-07       2.2e-05    1.6e+02       1.2e-04
+    smooth, ``(16, 16)``  1.1e-06       6.0e-05    3.2e+01       7.1e-04
+    smooth, ``(256,)``    2.5e-06       1.6e-05    6.9e+02       7.6e-03
+    rough, ``(16, 16)``   1.6e-04       1.1e-03    2.0e+06       2.7e-04
+    ====================  ============  =========  ============  =========
+
+    (For the three reverted columns the entry is the SMALLEST reading: what
+    the bound has to stay under.) The smooth cells are bounded at 1e-4: 40
+    times the worst default reading, under every reading of a reverted
+    ``l2_block`` and of a reverted ``l2_mix`` at ``(16,)`` and wider (by a
+    factor of 1.2 only at ``(16,)``, of 7 at ``(16, 16)`` and 76 at
+    ``(256,)``). A reverted slope is NOT visible on smooth data (8.0e-05 at
+    most): with both ridges on, slope 1 is worse by a factor of 10 to 70 and
+    still far under the threshold. It shows on the
+    rough target with two hidden layers, bounded at 5e-4: 3 times the worst
+    default reading and 2.2 times under the smallest slope-1 reading.
+    """
+
+    #: (target, hidden_units, bound on forward_deviation_rms / std(y))
+    CELLS = [
+        pytest.param(smooth_problem, (), 1e-4, id="smooth-no_hidden"),
+        pytest.param(smooth_problem, (16,), 1e-4, id="smooth-16"),
+        pytest.param(smooth_problem, (16, 16), 1e-4, id="smooth-16_16"),
+        pytest.param(smooth_problem, (256,), 1e-4, id="smooth-256"),
+        pytest.param(rough_problem, (16, 16), 5e-4, id="rough-16_16"),
+    ]
+
+    def test_the_literal_default_values(self):
+        """Read from the signatures, so a revert shows on any data."""
+        parameters = inspect.signature(HKAN.__init__).parameters
+        assert parameters["slope"].default == 5.0
+        assert parameters["l2_block"].default == 0.01
+        assert parameters["l2_mix"].default == 0.01
+        assert inspect.signature(HKANLayer.__init__).parameters["slope"].default == 5.0
+        model = HKAN(hidden_units=(3,))
+        assert model._slope == [5.0, 5.0]
+        assert model._l2_block == [0.01, 0.01] and model._l2_mix == [0.01, 0.01]
+        assert [layer.slope for layer in model.hkan_layers] == [5.0, 5.0]
+        config = model.get_config()
+        assert (config["slope"], config["l2_block"], config["l2_mix"]) == (5.0, 0.01, 0.01)
+
+    @pytest.mark.parametrize("problem,hidden,bound", CELLS)
+    @pytest.mark.parametrize("seed", [0, 1])
+    def test_a_default_model_is_the_fit_it_reports(self, problem, hidden, bound, seed, caplog):
+        x, y = problem()
+        model = HKAN(hidden_units=hidden, seed=seed)
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            diagnostics = model.fit_closed_form(x, y)
+        ratio = diagnostics["forward_deviation_rms"] / np.std(y)
+        assert fit_warnings(caplog) == []
+        assert ratio < hkan_model_module.FORWARD_DEVIATION_FRACTION
+        assert ratio < bound, f"deviation {ratio:.2e} of std(y), bound {bound:g}"
+        # The default fit is a fit: it explains the target, and the number
+        # `predict` reproduces is the number the fit reports.
+        assert diagnostics["forward_rmse"] < 0.6 * np.std(y)
+        assert abs(diagnostics["forward_rmse"] - diagnostics["layer_rmse"][-1]) < 1e-4

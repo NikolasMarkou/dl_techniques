@@ -87,9 +87,12 @@ class TestConstruction:
         assert model._l2_block == [0.5, 0.5, 0.5] and model._l2_mix == [0.25, 0.25, 0.25]
 
     def test_default_intercepts_are_on(self):
+        """The defaults of decisions.md D-039; the reference code's are slope
+        1 and no ridge on either stage."""
         model = HKAN()
         assert model.use_block_bias is True and model.use_bias is True
-        assert model.l2_block == 0.0 and model.l2_mix == 0.0 and model.seed is None
+        assert model.slope == 5.0 and model.l2_block == 0.01 and model.l2_mix == 0.01
+        assert model.seed is None
 
     @pytest.mark.parametrize("kwargs,match", [
         (dict(hidden_units=5), "hidden_units"),
@@ -324,7 +327,8 @@ class TestDtypePolicy:
         diagnostics = model.fit_closed_form(x, y)
         output = _numpy(model(x.astype(policy)))
         assert output.dtype == np.dtype(policy)
-        # Measured deviation: 1.8e-07 (float32, CPU and GPU 1), 2.6e-16 (float64).
+        # Measured deviation at the default l2_mix: 1.7e-07 (float32, CPU),
+        # 1.9e-07 (GPU 1), 2.9e-16 (float64).
         assert diagnostics["forward_deviation_rms"] < (1e-5 if policy == "float32" else 1e-13)
 
     def test_the_policy_was_restored(self):

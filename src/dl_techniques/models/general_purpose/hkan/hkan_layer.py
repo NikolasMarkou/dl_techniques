@@ -69,6 +69,11 @@ NUMPY_BASIS: Dict[str, Callable[[np.ndarray], np.ndarray]] = {
 #: when the caller does not give a chunk size.
 AUTO_CHUNK_BYTES: int = 256 * 1024 * 1024
 
+#: Default of ``slope`` for :class:`HKANLayer` and for ``HKAN``: defined once
+#: and used in both signatures. The reference code's value is 1.0, at which a
+#: sigmoid or tanh is almost linear over ``[0, 1]`` (decisions.md D-039).
+DEFAULT_SLOPE: float = 5.0
+
 #: Compute dtypes a layer builds under (the float32 and float64 policies).
 SUPPORTED_COMPUTE_DTYPES: Tuple[str, ...] = ("float32", "float64")
 
@@ -236,7 +241,8 @@ class HKANLayer(keras.layers.Layer):
         ``relu``, ``tanh``, ``softplus``, ``identity``.
     :type basis: str
     :param slope: Multiplier applied to ``x_p - center`` before the basis.
-        Must be finite and positive. Ignored by ``identity``.
+        Must be finite and positive. Ignored by ``identity``. The default is
+        ``DEFAULT_SLOPE`` (5.0); the reference code's is 1.0.
     :type slope: float
     :param centers: How the centers are set. ``random``: uniform on
         ``[0, 1]``. ``equally_spaced``: ``linspace(0, 1, num_basis)`` for
@@ -290,7 +296,7 @@ class HKANLayer(keras.layers.Layer):
             units: int,
             num_basis: int = 10,
             basis: str = "sigmoid",
-            slope: float = 1.0,
+            slope: float = DEFAULT_SLOPE,
             centers: str = "random",
             use_block_bias: bool = True,
             use_bias: bool = True,

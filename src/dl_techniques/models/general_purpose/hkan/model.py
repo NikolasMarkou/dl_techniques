@@ -35,8 +35,12 @@ Deliberate choices, each with its reason:
   weight times the resolution of the model dtype. Measured in float32: 6e-7
   at most on the authors' tutorial configuration (weights up to 13), but
   3.2e-03 RMS against a fit of RMSE 3.4e-08 on the paper's Table V row for
-  TF1 (connecting weights up to 6e3), and 2.6e+02 against 8.5e-02 at this
-  constructor's defaults (no ridge, coefficients up to 5e9).
+  TF1 (connecting weights up to 6e3), and 2.6e+02 against 8.5e-02 at the
+  reference code's defaults (slope 1, no ridge, coefficients up to 5e9).
+  This constructor's defaults (``slope=5.0``, ``l2_block=0.01``,
+  ``l2_mix=0.01``) are chosen so that the default model stays under 1e-3 of
+  the target's standard deviation; the paper's and the reference code's
+  behaviour is ``slope=1.0, l2_block=0.0, l2_mix=0.0``, passed explicitly.
   :meth:`HKAN.fit_closed_form` therefore runs the model once on the training
   rows, reports the gap and logs a warning when it is large.
 - Intercepts are on by default in both stages (``use_block_bias``,
@@ -71,9 +75,24 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from .hkan_layer import HKANLayer, is_integer
+from .hkan_layer import DEFAULT_SLOPE, HKANLayer, is_integer
 
 # ---------------------------------------------------------------------
+
+# DECISION plan-2026-09-30T082355-4d999dbc/D-039
+# The defaults of `slope`, `l2_block` and `l2_mix` are 5.0, 0.01 and 0.01. Do
+# NOT restore the reference code's defaults (slope 1, no ridge on either
+# stage) as DEFAULTS "for fidelity to the paper": with them the float32 model
+# does not compute the fit it reports (fit RMSE 8.5e-02, model RMSE 2.6e+02
+# with no hidden layer), and a block ridge alone does not repair it once there
+# is a hidden layer, because the unpenalized connecting weights reach 2.5e+04
+# at width 64. Do NOT drop the `l2_mix` default to 0 on its own for the same
+# reason. The reference behaviour stays available by passing the three values
+# explicitly. See decisions.md D-039 and D-034.
+#: Default ridge strength of the block regressions.
+DEFAULT_L2_BLOCK: float = 0.01
+#: Default ridge strength of the connecting regressions.
+DEFAULT_L2_MIX: float = 0.01
 
 #: Rows per forward batch when :meth:`HKAN.initialize_centers` propagates
 #: activations and when :meth:`HKAN.fit_closed_form` checks the fitted model;
@@ -129,20 +148,22 @@ class HKAN(keras.Model):
         ``softplus`` or ``identity``.
     :type basis: Union[str, Sequence[str]]
     :param slope: Multiplier of ``x_p - center`` inside the basis. Ignored by
-        ``identity``.
+        ``identity``. Default 5.0; the reference code's default is 1.0.
     :type slope: Union[float, Sequence[float]]
     :param centers: ``random``, ``equally_spaced`` or ``data``.
     :type centers: Union[str, Sequence[str]]
     :param l2_block: Ridge strength of the block regressions in
-        :meth:`fit_closed_form`. ``0`` is minimum-norm least squares, which
-        on a smooth basis returns coefficients a float32 model cannot carry
+        :meth:`fit_closed_form`. Default 0.01. ``0``, the reference code's
+        default, is minimum-norm least squares, which on a smooth basis
+        returns coefficients a float32 model cannot carry
         (:meth:`fit_closed_form` warns when that happens). It has no effect
         on gradient training.
     :type l2_block: Union[float, Sequence[float]]
     :param l2_mix: Ridge strength of the connecting regressions in
-        :meth:`fit_closed_form`. The paper uses ``0``; on a wide layer the
-        block outputs are nearly collinear and ``0`` gives connecting weights
-        of 1e3 to 1e8.
+        :meth:`fit_closed_form`. Default 0.01. The paper fits the connecting
+        stage by plain least squares (``0``); on a wide layer the block
+        outputs are nearly collinear and ``0`` gives connecting weights of
+        1e3 to 1e8. It has no effect on gradient training.
     :type l2_mix: Union[float, Sequence[float]]
     :param use_block_bias: Whether every block has an intercept.
     :type use_block_bias: bool
@@ -179,7 +200,8 @@ class HKAN(keras.Model):
     Example:
         >>> model = HKAN(hidden_units=(64,), num_basis=(23, 10),
         ...              basis=("tanh", "identity"), slope=50.0,
-        ...              centers=("random", "data"), l2_block=(0.01, 0.1), seed=0)
+        ...              centers=("random", "data"), l2_block=(0.01, 0.1),
+        ...              l2_mix=0.0, seed=0)  # the authors' tutorial configuration
         >>> diagnostics = model.fit_closed_form(x_train, y_train)
         >>> y_hat = model.predict(x_test)
         >>> # optional joint fine-tuning of all stages by gradient descent
@@ -192,10 +214,10 @@ class HKAN(keras.Model):
             hidden_units: Sequence[int] = (),
             num_basis: Union[int, Sequence[int]] = 10,
             basis: Union[str, Sequence[str]] = "sigmoid",
-            slope: Union[float, Sequence[float]] = 1.0,
+            slope: Union[float, Sequence[float]] = DEFAULT_SLOPE,
             centers: Union[str, Sequence[str]] = "random",
-            l2_block: Union[float, Sequence[float]] = 0.0,
-            l2_mix: Union[float, Sequence[float]] = 0.0,
+            l2_block: Union[float, Sequence[float]] = DEFAULT_L2_BLOCK,
+            l2_mix: Union[float, Sequence[float]] = DEFAULT_L2_MIX,
             use_block_bias: bool = True,
             use_bias: bool = True,
             coef_initializer: Union[str, keras.initializers.Initializer] = "random_normal",

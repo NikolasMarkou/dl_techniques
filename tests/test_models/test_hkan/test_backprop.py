@@ -42,8 +42,11 @@ def _numpy(tensor) -> np.ndarray:
 
 def _model(**overrides) -> HKAN:
     keras.utils.set_random_seed(0)
+    # l2_mix=0.0 explicitly: the numbers quoted in TestClosedFormThenFit were
+    # measured with the plain least-squares connecting stage, the constructor
+    # default until decisions.md D-039.
     config = dict(hidden_units=(HIDDEN,), num_basis=NUM_BASIS, basis="tanh",
-                  slope=SLOPE, l2_block=0.01, seed=3)
+                  slope=SLOPE, l2_block=0.01, l2_mix=0.0, seed=3)
     config.update(overrides)
     return HKAN(**config)
 
