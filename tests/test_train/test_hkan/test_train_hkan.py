@@ -448,6 +448,20 @@ def test_every_repeat_has_its_own_seed_and_its_own_score(runs, mode) -> None:
     )
 
 
+@pytest.mark.parametrize("train, test, scale", [
+    ([1.0e-3, 2.0e-3, 8.0e-3], [1.1e-3, 2.1e-3, 8.1e-3], "linear"),
+    ([1.0e-7, 1.2e-7, 1.5e-7], [0.11, 0.12, 0.12], "log"),
+])
+def test_the_rmse_box_uses_a_log_axis_only_across_a_decade(
+        monkeypatch, tmp_path, train, test, scale) -> None:
+    """Inside one decade a log axis carries at most one labelled tick (seen in the
+    TF5 backprop run of batch 20260930c), so the box plot switches to linear."""
+    captured = []
+    monkeypatch.setattr(train_hkan.plt, "close", lambda fig: captured.append(fig))
+    train_hkan.render_rmse_box(train, test, tmp_path / "box.png")
+    assert captured[0].axes[0].get_yscale() == scale
+
+
 def test_one_repeat_draws_no_box_plot(seed_runs) -> None:
     assert _files(seed_runs["one"].run_dir) == BASE_FILES | CLOSED_FORM_FILES
 

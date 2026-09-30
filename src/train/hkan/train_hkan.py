@@ -514,7 +514,8 @@ def render_predictions(y_true: np.ndarray, y_pred: np.ndarray, out_path: Path) -
     right.set_title("Residuals")
     for ax in (left, right):
         ax.grid(alpha=0.3)
-    fig.suptitle(f"Test split, repeat 0: RMSE {rmse:.3e} over {len(y_true)} rows")
+    fig.suptitle(f"Test split, repeat 0, weights at the end of training: RMSE {rmse:.3e} "
+                 f"over {len(y_true)} rows")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -543,7 +544,11 @@ def render_rmse_box(train: List[float], test: List[float], out_path: Path) -> No
     ax.set_xticklabels(["train", "test"])
     for position, values in ((1, train), (2, test)):
         ax.scatter(np.full(len(values), position), values, color="tab:red", s=14, zorder=3)
-    ax.set_yscale("log")
+    # Log scale only across a decade or more: inside one decade matplotlib labels
+    # at most one tick of a log axis, which left the TF5 backprop plot unreadable.
+    values = np.asarray(list(train) + list(test), dtype=np.float64)
+    if values.min() > 0 and values.max() / values.min() >= 10.0:
+        ax.set_yscale("log")
     ax.set_ylabel("RMSE")
     ax.set_title(f"RMSE over {len(train)} repeats")
     ax.xaxis.grid(False)
