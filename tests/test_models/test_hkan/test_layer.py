@@ -18,6 +18,14 @@ Guards:
   one initializer instance is cloned per weight), the data-driven center draw,
   the config round trip and the argument validation.
 * ``solve_linear_float64`` refuses anything that is not float64.
+* **Seed streams.** No seeded stream of the layer is ``default_rng(seed)``
+  (numpy drops trailing zeros of a seed list, so ``[seed, 0, 0]`` was), and
+  the build stream, the data-draw stream and two layers' streams all differ.
+* **Input width and dtype.** A built layer refuses an input of another width,
+  width 1 included (which would broadcast silently); a float16 compute dtype
+  is refused at build; numpy integers are accepted and stored as ``int``.
+* A constant target has block R^2 0.0, and a non-finite solution is refused
+  by the solve itself, before anything could be assigned.
 """
 
 import inspect
@@ -27,12 +35,14 @@ import keras
 import numpy as np
 import pytest
 from scipy.special import expit
+from sklearn.metrics import r2_score
 
 from dl_techniques.models.general_purpose.hkan.hkan_layer import (
     BASIS_NAMES,
     CENTER_MODES,
     KERAS_BASIS,
     NUMPY_BASIS,
+    SEED_DOMAIN_TAG,
     HKANLayer,
     solve_linear_float64,
 )
@@ -186,6 +196,66 @@ class TestInitialState:
         first = _built(coef_initializer=instance)
         second = _built(coef_initializer=instance)
         assert not np.array_equal(_numpy(first.coef), _numpy(second.coef))
+
+
+class TestSeedStreams:
+    """The seed list is ``[seed, layer_index, stream, SEED_DOMAIN_TAG]``.
+
+    The expected generators are written out here, not taken from the layer,
+    so the layout is pinned: the tag is last and is not zero.
+    """
+
+    SHAPE = (HIDDEN, N_IN, N_BASIS)
+
+    @staticmethod
+    def _expected(seed: int, layer_index: int, stream: int) -> np.random.Generator:
+        return np.random.default_rng([seed, layer_index, stream, 0x484B414E])
+
+    def test_the_tag_is_not_zero(self):
+        assert SEED_DOMAIN_TAG == 0x484B414E != 0
+
+    @pytest.mark.parametrize("seed", [0, 7, 123])
+    def test_layer_zero_centers_are_not_the_callers_own_generator(self, seed):
+        """``default_rng(seed)`` is what a caller draws the data from."""
+        centers = _numpy(_built(seed=seed).centers)
+        callers = np.random.default_rng(seed).uniform(0.0, 1.0, size=self.SHAPE)
+        assert np.abs(centers - callers.astype("float32")).max() > 1e-2, (
+            "layer 0's centers are the first values of default_rng(seed)")
+        np.testing.assert_array_equal(
+            centers,
+            self._expected(seed, 0, 0).uniform(0.0, 1.0, size=self.SHAPE).astype("float32"))
+
+    @pytest.mark.parametrize("seed", [0, 7, 123])
+    @pytest.mark.parametrize("layer_index", [0, 1])
+    @pytest.mark.parametrize("stream", [0, 1])
+    def test_no_stream_is_the_callers_own_generator(self, seed, layer_index, stream):
+        layer = HKANLayer(units=HIDDEN, seed=seed, layer_index=layer_index)
+        ours = layer._generator(stream).uniform(size=16)
+        assert np.abs(ours - np.random.default_rng(seed).uniform(size=16)).max() > 1e-2
+        np.testing.assert_array_equal(
+            ours, self._expected(seed, layer_index, stream).uniform(size=16))
+
+    @pytest.mark.parametrize("seed", [0, 7])
+    def test_the_data_draw_is_not_the_build_stream(self, seed):
+        """The rows drawn for ``data`` centers against the build stream's.
+
+        ``x[i, p] = i``, so the drawn centers ARE the drawn row indices.
+        """
+        n_rows = 1000
+        x = np.broadcast_to(np.arange(n_rows, dtype=np.float64)[:, None], (n_rows, N_IN))
+        layer = HKANLayer(units=HIDDEN, num_basis=N_BASIS, centers="data", seed=seed)
+        rows = layer.sample_data_centers(x)
+        build_stream = self._expected(seed, 0, 0).integers(0, n_rows, size=self.SHAPE)
+        data_stream = self._expected(seed, 0, 1).integers(0, n_rows, size=self.SHAPE)
+        assert (rows != build_stream).mean() > 0.9, (
+            "the data draw replays the build-time stream")
+        np.testing.assert_array_equal(rows, data_stream)
+
+    @pytest.mark.parametrize("stream", [0, 1])
+    def test_two_layers_have_different_streams(self, stream):
+        first = HKANLayer(units=HIDDEN, seed=0, layer_index=0)._generator(stream)
+        second = HKANLayer(units=HIDDEN, seed=0, layer_index=1)._generator(stream)
+        assert np.abs(first.uniform(size=16) - second.uniform(size=16)).max() > 1e-2
 
 
 class TestBasisTables:
@@ -404,7 +474,135 @@ class TestSolveGuards:
             np.testing.assert_array_equal(weight.numpy(), value)
 
 
+    def test_a_non_finite_solution_is_refused_by_the_solve_itself(self):
+        """Finite inputs of magnitude 1e160: the Gram matrix overflows, the
+        ridge solve returns NaN without raising, and ``solve_closed_form``
+        must refuse it before returning. (With ``l2_mix == 0`` numpy's
+        ``lstsq`` raises ``LinAlgError`` first, so both stages are ridged.)"""
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0.0, 1.0, size=(40, N_IN)) * 1e160
+        y = rng.normal(size=40)
+        centers = rng.uniform(0.0, 1.0, size=(2, N_IN, 4))
+        layer = HKANLayer(units=2, num_basis=4, basis="relu", slope=SLOPE)
+        assert np.all(np.isfinite(x)) and np.all(np.isfinite(y))
+        with np.errstate(all="ignore"):
+            with pytest.raises(ValueError, match="non-finite values in 'coef'"):
+                layer.solve_closed_form(x, y, 0.01, 0.5, centers)
+
+    @pytest.mark.parametrize("block_bias", [True, False])
+    def test_a_constant_target_has_block_r2_zero(self, block_bias):
+        """No variance to explain: 0.0, where ``r2_score`` says 1.0.
+
+        Two cells, because the two wrong answers hide in different ones. With
+        a block intercept every block reproduces the constant exactly
+        (measured residual 1e-30), where ``r2_score``'s convention is 1.0. Without one a
+        ridged block cannot (measured residual sum of squares 0.10 to 2.5),
+        where an "exact fit or not" switch the other way round gives 1.0.
+        """
+        x, _ = make_data()
+        y = np.full((x.shape[0],), 0.7)
+        layer = HKANLayer(units=HIDDEN, num_basis=N_BASIS, basis="tanh", slope=SLOPE,
+                          use_block_bias=block_bias)
+        centers = np.random.default_rng(2).uniform(0.0, 1.0, size=(HIDDEN, N_IN, N_BASIS))
+        solution = layer.solve_closed_form(x, y, 0.01, 0.0, centers)
+        residual = np.array([[
+            np.sum((block_features("tanh", SLOPE, x[:, p], centers[q, p])
+                    @ solution["coef"][q, p] + solution["block_bias"][q, p] - y) ** 2)
+            for p in range(N_IN)] for q in range(HIDDEN)])
+        if block_bias:
+            assert residual.max() < 1e-24
+        else:
+            assert residual.min() > 1e-3
+        np.testing.assert_array_equal(solution["block_r2"], np.zeros((HIDDEN, N_IN)))
+        # The convention this departs from, stated by the oracle itself.
+        assert r2_score(y, y) == 1.0
+
+
+class TestInputWidth:
+    """A built layer refuses another width; width 1 would broadcast."""
+
+    @pytest.mark.parametrize("width", [1, N_IN + 2])
+    def test_call_refuses_a_wrong_width(self, width):
+        layer = _built()
+        with pytest.raises(ValueError, match="incompatible with the layer"):
+            layer(np.zeros((2, width), dtype="float32"))
+
+    def test_call_refuses_a_wrong_rank(self):
+        with pytest.raises(ValueError, match="incompatible with the layer"):
+            _built()(np.zeros((2, 1, N_IN), dtype="float32"))
+
+    def test_the_right_width_still_runs(self):
+        assert _numpy(_built()(np.zeros((2, N_IN), dtype="float32"))).shape == (2, HIDDEN)
+
+    @pytest.mark.parametrize("width", [1, N_IN + 2])
+    def test_the_functional_api_carries_the_check(self, width):
+        inputs = keras.Input((N_IN,))
+        functional = keras.Model(inputs, HKANLayer(units=HIDDEN, seed=0)(inputs))
+        assert functional(np.zeros((2, N_IN), dtype="float32")).shape == (2, HIDDEN)
+        wrong = keras.Input((width,))
+        with pytest.raises(ValueError, match="incompatible with the layer"):
+            functional.layers[-1](wrong)
+
+
+@pytest.fixture
+def policy(request):
+    """Set the global dtype policy for one test and always restore it."""
+    previous = keras.mixed_precision.global_policy().name
+    keras.mixed_precision.set_global_policy(request.param)
+    try:
+        yield request.param
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
+
+
+class TestDtypePolicy:
+
+    @pytest.mark.parametrize("policy", ["mixed_float16", "float16"], indirect=True)
+    def test_a_float16_compute_dtype_is_refused_at_build(self, policy):
+        layer = HKANLayer(units=HIDDEN, seed=0)
+        with pytest.raises(ValueError, match="'float32' and 'float64'") as raised:
+            layer.build((None, N_IN))
+        assert "float16" in str(raised.value) and policy in str(raised.value)
+        assert layer.weights == []
+
+    @pytest.mark.parametrize("policy", ["float32", "float64"], indirect=True)
+    def test_float32_and_float64_build_and_run(self, policy):
+        layer = _built()
+        output = _numpy(layer(np.zeros((2, N_IN), dtype=policy)))
+        assert output.dtype == np.dtype(policy) and output.shape == (2, HIDDEN)
+        assert _numpy(layer.centers).dtype == np.dtype(policy)
+
+    def test_a_per_layer_float16_dtype_is_refused_too(self):
+        with pytest.raises(ValueError, match="'float32' and 'float64'"):
+            HKANLayer(units=HIDDEN, dtype="float16").build((None, N_IN))
+
+    def test_the_policy_was_restored(self):
+        assert keras.mixed_precision.global_policy().name == "float32"
+
+
 class TestConfig:
+
+    def test_numpy_integers_are_accepted_and_stored_as_int(self):
+        layer = HKANLayer(units=np.int64(HIDDEN), num_basis=np.int32(N_BASIS),
+                          seed=np.int64(3), layer_index=np.uint8(1))
+        config = layer.get_config()
+        for name, value in (("units", HIDDEN), ("num_basis", N_BASIS),
+                            ("seed", 3), ("layer_index", 1)):
+            assert config[name] == value and type(config[name]) is int, name
+        layer.build((None, N_IN))
+        np.testing.assert_array_equal(
+            _numpy(layer.centers),
+            _numpy(_built(seed=3, layer_index=1).centers))
+
+    @pytest.mark.parametrize("kwargs,match", [
+        (dict(units=np.bool_(True)), "units"), (dict(units=np.float64(2.0)), "units"),
+        (dict(units=2, num_basis=np.float32(3.0)), "num_basis"),
+        (dict(units=2, seed=np.bool_(True)), "seed"),
+        (dict(units=2, seed=np.int64(-1)), "seed"),
+    ])
+    def test_numpy_booleans_and_floats_are_still_refused(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            HKANLayer(**kwargs)
 
     def test_get_config_carries_every_constructor_argument(self):
         arguments = set(inspect.signature(HKANLayer.__init__).parameters) - {"self", "kwargs"}

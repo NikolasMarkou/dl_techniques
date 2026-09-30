@@ -17,7 +17,8 @@ The package has no custom training step, so everything here goes through
   layer its own ``coef`` draw;
 * ``initialize_centers`` (the gradient-only route to ``centers="data"``)
   draws each layer's centers from that layer's own forward input and leaves
-  the other layers alone.
+  the other layers alone, and propagates EVERY row, also past the first
+  forward batch of 256.
 """
 
 import keras
@@ -270,6 +271,39 @@ class TestInitializeCenters:
         assert model.built
         with pytest.raises(ValueError, match="columns"):
             model.initialize_centers(np.zeros((4, N_IN + 1), dtype="float32"))
+
+    def test_rows_past_the_first_forward_batch_reach_a_deeper_layer(self):
+        """300 rows: the first 256 (one forward batch) lie in ``[0, 0.1]``,
+        the last 44 in ``[0.9, 1]``. Layer 0 is set by hand to the identity
+        map, so layer 1's input IS ``x`` and its ``data`` centers are values
+        of ``x``. 192 draws per column: the chance that none comes from the
+        last 44 rows is ``(256 / 300) ** 192 = 6e-14``. If the propagation
+        dropped the rows after the last full batch, every center would be at
+        most 0.1."""
+        rng = np.random.default_rng(4)
+        x = np.concatenate([
+            rng.uniform(0.0, 0.1, size=(256, N_IN)),
+            rng.uniform(0.9, 1.0, size=(44, N_IN)),
+        ]).astype("float32")
+        model = HKAN(hidden_units=(N_IN,), num_basis=(1, 64), basis=("identity", "tanh"),
+                     centers=("random", "data"), use_block_bias=False, use_bias=False, seed=0)
+        model.build((None, N_IN))
+        first = model.hkan_layers[0]
+        first.centers.assign(np.zeros((N_IN, N_IN, 1), dtype="float32"))
+        first.coef.assign(np.ones((N_IN, N_IN, 1), dtype="float32"))
+        first.mix.assign(np.eye(N_IN, dtype="float32"))
+        np.testing.assert_array_equal(_numpy(first(x)), x)
+
+        model.initialize_centers(x)
+        centers = model.hkan_layers[1].centers.numpy()
+        assert centers.shape == (1, N_IN, 64)
+        assert self._members(centers, x), "a center is not a row of the layer's input"
+        from_the_tail = (centers > 0.5).sum()
+        # Expected share 44 / 300 of 192 draws = 28; measured 30.
+        assert from_the_tail >= 10, (
+            f"{from_the_tail} of {centers.size} centers come from the rows past "
+            "index 256: the propagation dropped the tail")
+        assert (centers < 0.5).sum() >= 100
 
     def test_the_drawn_model_trains(self, data32):
         x, y = data32

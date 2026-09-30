@@ -29,6 +29,7 @@ References:
 """
 
 import keras
+import numbers
 import numpy as np
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -68,7 +69,41 @@ NUMPY_BASIS: Dict[str, Callable[[np.ndarray], np.ndarray]] = {
 #: when the caller does not give a chunk size.
 AUTO_CHUNK_BYTES: int = 256 * 1024 * 1024
 
+#: Compute dtypes a layer builds under (the float32 and float64 policies).
+SUPPORTED_COMPUTE_DTYPES: Tuple[str, ...] = ("float32", "float64")
+
+# DECISION plan-2026-09-30T082355-4d999dbc/D-035
+# The tag is NON-ZERO and goes LAST in every seed list of this package. Do
+# NOT drop it, set it to 0, or move it to the front: numpy ignores trailing
+# zeros of a seed list, so `default_rng([seed, 0, 0])` IS `default_rng(seed)`
+# and layer 0's "random" centers were bit for bit the first values a caller
+# draws from `default_rng(seed)` (typically the training inputs). See
+# decisions.md D-035.
+#: Last entry of every seed list of this package: the bytes of ``"HKAN"``.
+SEED_DOMAIN_TAG: int = 0x484B414E
+
 # ---------------------------------------------------------------------
+
+
+def is_integer(value: Any) -> bool:
+    """Tell whether ``value`` is an integer a size or a seed may be given as.
+
+    Interface contract (call sites: the argument validation of
+    :class:`HKANLayer` and of ``HKAN``): true for a Python ``int`` and for a
+    numpy integer scalar (anything registered as ``numbers.Integral``), false
+    for ``bool`` and for every float, including an integral-valued one. It
+    never raises. The caller stores ``int(value)``, so a config holds plain
+    Python integers.
+
+    :param value: The candidate.
+    :type value: Any
+    :return: Whether it is an integer and not a ``bool``.
+    :rtype: bool
+    """
+    return (
+        isinstance(value, numbers.Integral)
+        and not isinstance(value, (bool, np.bool_))
+    )
 
 
 def solve_linear_float64(
@@ -228,6 +263,12 @@ class HKANLayer(keras.layers.Layer):
     :type layer_index: int
     :param kwargs: Additional arguments for the ``keras.layers.Layer`` base.
     :raises ValueError: If an argument is out of range or a name is unknown.
+        ``build`` raises it for a compute dtype other than float32 or
+        float64, and ``call`` for an input whose width is not the ``n_in``
+        the layer was built with.
+
+    ``units``, ``num_basis``, ``seed`` and ``layer_index`` accept numpy
+    integers as well as Python ones and are stored as Python ``int``.
 
     :ivar centers: Basis centers, shape ``(n_out, n_in, m)``, non-trainable.
     :ivar coef: Basis coefficients, shape ``(n_out, n_in, m)``.
@@ -261,9 +302,9 @@ class HKANLayer(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        if not isinstance(units, int) or isinstance(units, bool) or units < 1:
+        if not is_integer(units) or units < 1:
             raise ValueError(f"units must be a positive integer, got {units!r}")
-        if not isinstance(num_basis, int) or isinstance(num_basis, bool) or num_basis < 1:
+        if not is_integer(num_basis) or num_basis < 1:
             raise ValueError(f"num_basis must be a positive integer, got {num_basis!r}")
         if basis not in BASIS_NAMES:
             raise ValueError(f"basis must be one of {BASIS_NAMES}, got {basis!r}")
@@ -271,16 +312,15 @@ class HKANLayer(keras.layers.Layer):
             raise ValueError(f"slope must be finite and positive, got {slope!r}")
         if centers not in CENTER_MODES:
             raise ValueError(f"centers must be one of {CENTER_MODES}, got {centers!r}")
-        if seed is not None and (
-                not isinstance(seed, int) or isinstance(seed, bool) or seed < 0):
+        if seed is not None and (not is_integer(seed) or seed < 0):
             raise ValueError(f"seed must be None or a non-negative integer, got {seed!r}")
-        if not isinstance(layer_index, int) or isinstance(layer_index, bool) or layer_index < 0:
+        if not is_integer(layer_index) or layer_index < 0:
             raise ValueError(
                 f"layer_index must be a non-negative integer, got {layer_index!r}"
             )
 
-        self.units = units
-        self.num_basis = num_basis
+        self.units = int(units)
+        self.num_basis = int(num_basis)
         self.basis = basis
         self.slope = float(slope)
         self.centers_mode = centers
@@ -291,8 +331,8 @@ class HKANLayer(keras.layers.Layer):
             None if mix_initializer is None
             else keras.initializers.get(mix_initializer)
         )
-        self.seed = seed
-        self.layer_index = layer_index
+        self.seed = None if seed is None else int(seed)
+        self.layer_index = int(layer_index)
 
         # DECISION plan-2026-09-30T082355-4d999dbc/D-018
         # `identity` is g(d) = d on the UNSCALED difference. Do NOT multiply
@@ -316,12 +356,15 @@ class HKANLayer(keras.layers.Layer):
         :param stream: ``0`` for the build-time centers, ``1`` for the
             data-driven draw.
         :type stream: int
-        :return: A generator seeded by ``(seed, layer_index, stream)``, or by
-            the global numpy generator when ``seed`` is ``None``.
+        :return: A generator seeded by ``(seed, layer_index, stream,
+            SEED_DOMAIN_TAG)``, or by the global numpy generator when ``seed``
+            is ``None``. No seeded stream of this package equals
+            ``np.random.default_rng(seed)``.
         :rtype: np.random.Generator
         """
         if self.seed is not None:
-            return np.random.default_rng([self.seed, self.layer_index, stream])
+            return np.random.default_rng(
+                [self.seed, self.layer_index, stream, SEED_DOMAIN_TAG])
         return np.random.default_rng(int(np.random.randint(0, 2 ** 31 - 1)))
 
     def _initial_centers(self, shape: Tuple[int, int, int]) -> np.ndarray:
@@ -341,14 +384,32 @@ class HKANLayer(keras.layers.Layer):
 
         :param input_shape: ``(batch_size, n_in)``.
         :type input_shape: Tuple[Optional[int], ...]
-        :raises ValueError: If the input is not rank 2 or ``n_in`` is unknown.
+        :raises ValueError: If the input is not rank 2, ``n_in`` is unknown,
+            or the compute dtype is not float32 or float64.
         """
         if len(input_shape) != 2 or input_shape[-1] is None:
             raise ValueError(
                 f"HKANLayer {self.name!r} needs an input of shape (batch, n_in) "
                 f"with a known n_in, got {tuple(input_shape)}"
             )
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-037
+        # A float16 compute dtype is REFUSED here. Do NOT let it through
+        # "because the variables are float32 under mixed_float16": the forward
+        # pass then runs in float16, and at slope 50 it was measured up to
+        # 2.3e-02 away from the fit's own train predictions on a fit whose
+        # RMSE is 0.154 (0.126 on the reviewer's data), with no error. See
+        # decisions.md D-037.
+        compute_dtype = keras.backend.standardize_dtype(self.compute_dtype)
+        if compute_dtype not in SUPPORTED_COMPUTE_DTYPES:
+            raise ValueError(
+                f"HKANLayer {self.name!r} does not support the compute dtype "
+                f"{compute_dtype!r} (dtype policy {self.dtype_policy.name!r}). "
+                "Supported dtype policies: 'float32' and 'float64'."
+            )
         n_in = int(input_shape[-1])
+        # Without this a (B, 1) input broadcasts against the centers of a
+        # layer built for more columns and returns a (B, units) answer.
+        self.input_spec = keras.layers.InputSpec(ndim=2, axes={-1: n_in})
         block_shape = (self.units, n_in, self.num_basis)
 
         # The value is produced INSIDE the initializer: an assign after
@@ -511,7 +572,9 @@ class HKANLayer(keras.layers.Layer):
             ``(units,)`` (the two intercept arrays are zeros when their flag
             is off), ``output`` ``(N, units)`` (the float64 layer output on
             ``x``) and ``block_r2`` ``(units, n_in)`` (the coefficient of
-            determination of each block's output against ``y``).
+            determination of each block's output against ``y``; ``0.0``
+            everywhere when ``y`` is constant, where scikit-learn's
+            ``r2_score`` gives ``1.0`` for an exact fit).
         :rtype: Dict[str, np.ndarray]
         :raises TypeError: If ``x``, ``y`` or ``centers`` is not float64.
         :raises ValueError: If a shape is wrong, ``chunk_size`` is below 1,
@@ -543,6 +606,10 @@ class HKANLayer(keras.layers.Layer):
         basis = NUMPY_BASIS[self.basis]
         columns = x.T[None, :, :, None]
         total = float(np.sum(np.square(y - y.mean())))
+        # "Constant" is max == min, exactly. The centered sum of squares
+        # alone cannot tell: the mean of 96 copies of 0.7 is not 0.7, that
+        # sum is 1e-30, and R^2 computed against it was measured at -2e+30.
+        constant_target = not (np.ptp(y) > 0 and total > 0)
 
         coef = np.empty((self.units, n_in, self.num_basis), dtype=np.float64)
         block_bias = np.empty((self.units, n_in), dtype=np.float64)
@@ -565,10 +632,16 @@ class HKANLayer(keras.layers.Layer):
             del features
 
             residual = np.sum(np.square(phi - y), axis=-1)
-            if total > 0:
-                block_r2[start:stop] = 1.0 - residual / total
+            # DECISION plan-2026-09-30T082355-4d999dbc/D-036
+            # A CONSTANT target has no variance to explain: block R^2 is 0.0.
+            # Do NOT return 1.0 for an exact fit there (scikit-learn's
+            # `r2_score` convention): the importance of every input would
+            # then read 1.0, "every input explains everything", for a target
+            # no input explains. See decisions.md D-036.
+            if constant_target:
+                block_r2[start:stop] = 0.0
             else:
-                block_r2[start:stop] = np.where(residual == 0, 1.0, 0.0)
+                block_r2[start:stop] = 1.0 - residual / total
 
             stacked = np.swapaxes(phi, -1, -2)
             mix[start:stop], bias[start:stop] = solve_linear_float64(

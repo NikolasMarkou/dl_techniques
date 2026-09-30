@@ -105,13 +105,28 @@ print(diagnostics["layer_rmse"])               # list of 2 floats, one per layer
 print(diagnostics["block_r2"].shape)           # (16, 2): first-layer blocks
 print(diagnostics["importance"].shape)         # (2,): mean of block_r2 over the outputs
 print(diagnostics["train_predictions"].shape)  # (500,), float64
+print(diagnostics["forward_rmse"])             # train RMSE of the model's own forward pass
+print(diagnostics["forward_deviation_rms"])    # RMS of (forward pass - train_predictions)
 
 y_hat = model.predict(x_test, verbose=0)       # (200, 1)
 ```
 
-The returned dict has exactly those four keys. `importance` is the paper's equation 14.
-`train_predictions` are the float64 fit's own; a forward pass of the model reproduces them only
-to the accuracy of the model dtype (section 5).
+The returned dict has exactly those six keys. `importance` is the paper's equation 14.
+
+`layer_rmse` and `train_predictions` describe the float64 fit. The model holds that solution
+cast to its own dtype, and its forward pass is not always the fit (section 6). So
+`fit_closed_form` ends with one batched forward pass of the model on `x` and returns
+`forward_rmse` (the model against `y`: the number a later `predict` reproduces) and
+`forward_deviation_rms` (the model against `train_predictions`). When the deviation exceeds
+1e-3 of the target's standard deviation it logs a warning through the repo logger that states
+both RMSEs, the largest weight and the remedies. For a constant target the limit is an absolute
+1e-6 instead. It is a warning, not an exception: the float64 diagnostics are still correct. In
+this example `forward_rmse` and `layer_rmse[-1]` are both 0.08142, 3e-07 apart, the deviation
+is 3.4e-06 RMS, and no warning is logged.
+
+For a constant target (largest value equal to smallest) `block_r2` and `importance` are 0.0:
+there is no variance to explain. scikit-learn's `r2_score` returns 1.0 for an exact fit in that
+one case; every other target follows `r2_score`.
 
 `y` may have shape `(N,)` or `(N, 1)`. A `y` with more than one column raises `ValueError`:
 every block regresses onto one target, so the model is single-target. `chunk_size` is the
@@ -167,8 +182,8 @@ print(loss_before, history.history["loss"])
 `evaluate` or `fit` sees.
 
 Whether the gradient phase lowers the error depends on the problem and is not claimed here. In
-one CPU run of this example the train loss from `evaluate` was 0.0064 before the gradient phase
-and 0.0065 after its three epochs: it did not lower it.
+one CPU run of this example `evaluate` gave a train loss of 0.0066 before the gradient phase, and
+the three epoch losses `fit` reported were 0.0087, 0.0076 and 0.0074: it did not lower it.
 
 ---
 
@@ -194,14 +209,29 @@ HKAN(
 `num_basis`, `basis`, `slope`, `centers`, `l2_block` and `l2_mix` take one value for all layers
 or a list or tuple with one value per layer, `len(hidden_units) + 1` long. A wrong length, an
 unknown basis or centers name, a non-positive width or slope, or a negative ridge strength
-raises `ValueError` from the constructor.
+raises `ValueError` from the constructor. Widths, `num_basis` and `seed` may be numpy integers
+(`np.int64(16)`); `bool` and floats are refused. `get_config()` returns plain Python numbers.
+
+**The defaults are the reference code's and are not a float32 recipe.** `slope=1.0` with
+`l2_block=0.0` is a sigmoid that is almost linear over `[0, 1]`, fitted without a ridge: the
+coefficients reach 1e9 to 1e11 and the float32 model does not compute the fit (section 6).
+`fit_closed_form` warns when that happens. The examples in this file use `slope=5.0` and
+`l2_block=0.01`.
+
+**Input width.** A built model accepts only the width it was built for. Any other width, 1
+included, raises `ValueError` in `call`, `predict` and `fit`, also after a `.keras` round trip.
 
 **Centers.** `random`: uniform on `[0, 1]`. `equally_spaced`: `linspace(0, 1, num_basis)` for
 every block. `data`: for every block `(q, p)`, `num_basis` values sampled with replacement from
 column `p` of that layer's own input. The `data` draw happens inside `fit_closed_form`, or in
 `initialize_centers(x)` for a gradient-only run; until one of the two runs, the weight holds a
 uniform draw as a placeholder. `seed` seeds the centers only. `seed=0` is a seed like any
-other; `seed=None` draws from the global numpy generator.
+other; `seed=None` draws from the global numpy generator. A seeded layer draws from
+`np.random.default_rng([seed, layer_index, stream, 0x484B414E])`, with `stream` 0 for the
+build-time centers and 1 for the data draw. The constant in the last position keeps every stream
+of this package apart from `np.random.default_rng(seed)`, which is what callers usually draw
+their data from: numpy ignores trailing zeros of a seed list, so without it the first layer's
+centers were the first values of the caller's own generator.
 
 **Factory.** `create_hkan(hidden_units=(), input_dim=None, **kwargs)` forwards to the
 constructor and, when `input_dim` is given, builds the model so its weights exist before the
@@ -218,8 +248,11 @@ print(len(built.weights), built.count_params())   # 10 296
 `MODEL_VARIANTS` table and no `from_variant`. No pretrained weights are distributed and the
 constructor has no parameter for them; an unknown keyword raises `ValueError` from Keras.
 
-**Dtype policies.** float32 and float64 are supported. `mixed_float16` is not supported and not
-tested: float16 has no solve kernel and a slope of 50 saturates it.
+**Dtype policies.** float32 and float64 are supported. Any other compute dtype raises
+`ValueError` at build, `mixed_float16` and `float16` included. Before the refusal existed, a
+`mixed_float16` model (tanh, slope 50, hidden width 5, 96 rows) built, fitted and predicted with
+no error, and its float16 output was up to 2.3e-02 away from the fit's own train predictions on a
+fit of RMSE 0.154.
 
 ---
 
@@ -251,6 +284,16 @@ assert np.array_equal(model.predict(x_test, verbose=0), loaded.predict(x_test, v
 - **A hidden layer of width 1 is allowed.** The reference code raises on it.
 - **Centers are seeded** by the `seed` argument. The reference code uses the global numpy
   generator.
+- **Defaults.** `slope=1.0` and no block ridge (`l2_block=0.0`) are the reference code's
+  defaults and are kept. In float32 they are not usable for a closed-form fit on smooth data
+  (section 6).
+- **The fit checks the model it leaves behind.** `fit_closed_form` runs the Keras model once
+  on the training rows, returns `forward_rmse` and `forward_deviation_rms`, and warns when the
+  model is not the fit. The reference code has one float64 model and needs no such check.
+- **Importance of a constant target is 0.0**, not the 1.0 that scikit-learn's `r2_score` (which
+  the reference code calls) gives for an exact fit of a constant.
+- **Input width and dtype are checked.** A wrong input width raises, and so does a float16
+  compute dtype.
 - **`l2_mix`** adds a ridge penalty to the connecting stage. Its default is 0, which is the
   paper's plain least squares.
 - **Backprop-only runs with `centers="data"`**: `initialize_centers` draws a deeper layer's
@@ -266,7 +309,7 @@ assert np.array_equal(model.predict(x_test, verbose=0), loaded.predict(x_test, v
 ## 6. Measured facts
 
 Every number in this section was measured on this code on 2026-09-30. The derivations are in
-`plans/plan-2026-09-30T082355-4d999dbc/decisions.md` (D-022, D-023, D-024).
+`plans/plan-2026-09-30T082355-4d999dbc/decisions.md` (D-022, D-023, D-024, D-034, D-038).
 
 **Agreement with scikit-learn (reproducible from the repo).** Per block and per output, in
 float64, the closed-form solve is compared with `sklearn.linear_model.Ridge` for a positive
@@ -286,25 +329,74 @@ The reference code is not in this repository, so the probe ran against a scratch
 with this model's centers injected. Over 44 cells (N = 400, `n_in = 3`, hidden width 5,
 `num_basis = (7, 4)`, slope 5; six basis functions in both layers, five non-linear ones under
 an identity top layer, both block-intercept settings, ridge 0 and 0.01), the largest absolute
-difference between the two sets of float64 train predictions was 6.6e-10 at zero ridge and
-1.5e-11 at positive ridge. The command was
+difference between the two sets of float64 train predictions was 7.2e-10 at zero ridge and
+2.0e-11 at positive ridge. The command was
 `CUDA_VISIBLE_DEVICES="" PYTHONPATH=src .venv/bin/python <scratchpad>/hkan_probe/parity_upstream.py`;
 the script and the reference copy lived in a session scratch directory and no committed test
-re-runs it.
+re-runs it. Per cell, the largest absolute difference (0.0 is exact agreement):
 
-**Float32 forward pass against the float64 fit.** On the authors' tutorial configuration
-(5000 rows of the paper's TF5 function generated here, `hidden_units=(912,)`,
-`num_basis=(23, 10)`, `basis=("tanh", "identity")`, `slope=50.0`, `centers=("random", "data")`,
-`l2_block=(0.01, 0.1)`, `seed=0`), the float32 Keras forward pass differs from the fit's own
-float64 train predictions by at most 5.8e-7 in absolute value on CPU and 5.3e-7 on GPU 1. The
-float64 fit itself has a train RMSE of 4.7e-13 on that data. The probe scripts were also
-scratch files.
+| basis (hidden, top) | intercept, `l2=0` | intercept, `l2=0.01` | no intercept, `l2=0` | no intercept, `l2=0.01` |
+|---|---|---|---|---|
+| sigmoid, sigmoid | 4.5e-11 | 7.8e-14 | 2.2e-11 | 3.8e-13 |
+| gaussian, gaussian | 0.0 | 1.0e-14 | 0.0 | 3.8e-14 |
+| relu, relu | 0.0 | 3.9e-14 | 0.0 | 1.3e-12 |
+| tanh, tanh | 0.0 | 4.4e-14 | 0.0 | 2.3e-13 |
+| softplus, softplus | 7.0e-10 | 1.7e-12 | 1.2e-10 | 1.6e-12 |
+| identity, identity | 0.0 | 1.1e-15 | 0.0 | 1.8e-15 |
+| sigmoid, identity | 4.0e-11 | 4.0e-14 | 4.0e-11 | 6.0e-13 |
+| gaussian, identity | 0.0 | 1.4e-14 | 0.0 | 2.0e-14 |
+| relu, identity | 0.0 | 2.3e-14 | 0.0 | 6.4e-13 |
+| tanh, identity | 0.0 | 7.6e-14 | 0.0 | 4.5e-13 |
+| softplus, identity | 7.2e-10 | 1.2e-12 | 2.1e-10 | 2.0e-11 |
 
-The consequence: the RMSE figures of order 1e-14 to 1e-15 that the paper's tables give for its
-TF1 and TF5 functions are not reachable with a float32 forward pass, whose error against the
-fit is already about 1e-7. Under the float64 dtype policy the forward pass is float64 as well;
-on a small check (50 rows, 3 inputs, hidden width 6, tanh, slope 5, ridge 0.01) it differed from
-the fit's train predictions by 7.8e-16 at most.
+This is the run on the code as it stands (seed 7, the seed streams described in section 3). A
+first run, with the seed streams this package had before, gave 6.6e-10 and 1.5e-11 as the two
+worst cells; its table is in `decisions.md` D-022.
+
+**The model's forward pass against the float64 fit.** The fit is float64; the model holds the
+solution cast to its dtype. The gap between the two is about the largest fitted weight times the
+resolution of the model dtype (6e-8 of a value in float32, 1e-16 in float64), because the
+forward pass sums terms of that size which mostly cancel. It is not "float32 accuracy" in
+general. Measured on CPU in float32, train rows, as returned by `fit_closed_form`:
+
+| Configuration | Data | Largest weight | Float64 fit RMSE | Float32 model RMSE | Deviation RMS, as a fraction of std(y) |
+|---|---|---|---|---|---|
+| Authors' tutorial: `hidden_units=(912,)`, `num_basis=(23, 10)`, `basis=("tanh", "identity")`, `slope=50.0`, `centers=("random", "data")`, `l2_block=(0.01, 0.1)` | 5000 rows of the paper's TF5 function, generated here | 13 | 4.0e-13 | 1.3e-07 | 7.6e-07 (largest single difference 5.7e-07 in absolute terms; 6.2e-07 on GPU 1) |
+| The configuration of example 2.1 | probe | 20 | 8.3e-02 | 8.3e-02 | 1.9e-05 |
+| `hidden_units=(16,)`, `l2_block=0.01`, other arguments default | probe | 4.1e+02 | 3.3e-03 | 3.7e-03 | 7.0e-03 |
+| `hidden_units=(256,)`, `l2_block=0.01`, other arguments default | probe | 2.3e+03 | 1.2e-08 | 2.1e-02 | 8.4e-02 |
+| The paper's Table V row for TF1: `hidden_units=(932,)`, `basis=("sigmoid", "tanh")`, `slope=(1.0, 33.0)`, `num_basis=(2, 13)`, `centers="data"`, `l2_block=(0.1, 10.0)` | probe | 6.3e+03 | 3.4e-08 | 3.2e-03 | 1.3e-02 |
+| The same row | 5000 rows of TF1 as `src/train/hkan/data.py` generated it on 2026-09-30 | 9.0e+02 | 5.6e-11 | 4.0e-04 | 1.2e-03 |
+| All defaults, `hidden_units=()` | probe | 4.6e+09 | 8.5e-02 | 2.6e+02 | 1.0e+03 |
+| All defaults, `hidden_units=(16,)` | probe | 5.1e+10 | 4.9e-02 | 2.0e+07 | 7.9e+07 |
+
+"probe" is 1000 rows, two inputs uniform on `[0, 1]` from `np.random.default_rng(123)`,
+`y = sin(3 x1) x2` (standard deviation 0.25); every model has `seed=0`. The scripts were scratch
+files: `<scratchpad>/hkan_probe/float32_probe.py` for the first row and
+`<scratchpad>/step1_1/bad_cases.py` for the others.
+
+Two causes were measured, and a ridge on the blocks removes only the first:
+
+- **Block coefficients from a weak or zero `l2_block`.** The last two rows. The defaults are in
+  this class.
+- **Connecting weights from `l2_mix = 0` on a wide layer.** Rows three to six. The outputs of a
+  wide hidden layer are nearly collinear approximations of the same `y`, so the unpenalized
+  connecting regression of the next layer returns large weights whatever `l2_block` is: 4e+02 to
+  6e+03 in these rows, and up to 4.5e+08 at width 256 in the search recorded in `decisions.md`
+  D-034. The paper's connecting stage is unpenalized, and the hyperparameters of its Table V
+  row for TF1 show the effect on the probe data: a float64 fit of 3.4e-08 that the float32 model
+  reproduces only to 3.2e-03.
+
+Under the float64 dtype policy the last column of rows two to six is at most 1.3e-10 (the Table
+V row on the probe data: 2.4e-11), and the two all-default rows read 1.7e-06 and 2.8e-02 (the
+first row was not re-run in float64). So float64 closes the gap for weights up to 6e+03 and does
+not at 5e+10. `fit_closed_form` measures the gap at whatever dtype the model has and warns
+whenever the last column exceeds 1e-3, which is rows three to eight in float32 and the last row
+in float64.
+
+The consequence for the paper's numbers: the train RMSE figures of order 1e-14 to 1e-15 that
+its tables give for TF1 and TF5 are float64 numbers. A float32 model of the tutorial
+configuration stops at 1.3e-07, and a float32 model of the Table V row for TF1 at 4.0e-04.
 
 No performance claim is made for this port beyond the numbers above. The benchmark results in
 the paper are the paper's, obtained on the authors' data files, and are not restated here.
@@ -324,9 +416,11 @@ The trainer is `src/train/hkan/`. Its measured runs, with their commands, are in
 CUDA_VISIBLE_DEVICES="" .venv/bin/python -m pytest tests/test_models/test_hkan -q
 ```
 
-640 tests: scikit-learn parity, forward arithmetic against the equations above, the fitted
+723 tests: scikit-learn parity, forward arithmetic against the equations above, the fitted
 `.keras` round trip at exact equality, stock `fit` from the initial state, frozen centers,
-data-driven centers per layer, seeds, and chunk independence.
+data-driven centers per layer, seeds and seed streams, chunk independence, the forward check of
+`fit_closed_form` and its warning, the constant-target importance, the input-width and dtype
+refusals, and numpy integer arguments.
 
 ---
 

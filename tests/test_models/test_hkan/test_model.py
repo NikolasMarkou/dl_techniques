@@ -19,10 +19,18 @@ Guards:
   constant input column, the degenerate ``identity`` basis with several basis
   functions (``lambda_eff = lambda / m``), a hidden layer of width 1, no hidden
   layer, ``y`` as ``(N,)`` or ``(N, 1)``, a rejected multi-column ``y``, a fit
-  on an unbuilt model, mismatched or non-finite inputs.
+  on an unbuilt model, mismatched or non-finite inputs;
+* numpy integers are accepted for the widths, ``num_basis`` and ``seed``, the
+  config then holds plain Python numbers and a ``.keras`` save reloads;
+* a built model refuses an input of another width (width 1 would broadcast
+  silently) in ``call``, ``predict`` and ``fit``, also after a ``.keras``
+  round trip, while the numpy-side methods keep their own error;
+* a float16 dtype policy is refused at build.
 """
 
 import inspect
+import json
+import os
 
 import keras
 import numpy as np
@@ -164,6 +172,163 @@ class TestConfig:
         config = HKAN(seed=None).get_config()
         assert config["seed"] is None
         assert HKAN.from_config(config).seed is None
+
+
+class TestNumpyIntegers:
+
+    CONFIG = dict(
+        hidden_units=[np.int64(HIDDEN), np.int32(2)],
+        num_basis=(np.int64(7), np.int64(4), np.int64(3)),
+        slope=np.float32(5.0), l2_block=np.float64(0.01), seed=np.int64(3))
+
+    def test_they_are_accepted_and_the_config_is_plain(self):
+        model = HKAN(**self.CONFIG)
+        assert [layer.units for layer in model.hkan_layers] == [HIDDEN, 2, 1]
+        config = model.get_config()
+        assert config["hidden_units"] == [HIDDEN, 2]
+        assert config["num_basis"] == [7, 4, 3] and config["seed"] == 3
+        for value in (*config["hidden_units"], *config["num_basis"], config["seed"]):
+            assert type(value) is int
+        assert type(config["slope"]) is float and type(config["l2_block"]) is float
+        json.dumps({name: config[name] for name in (
+            "hidden_units", "num_basis", "slope", "l2_block", "l2_mix", "seed")})
+
+    def test_a_scalar_numpy_num_basis(self):
+        config = HKAN(num_basis=np.int64(5)).get_config()
+        assert config["num_basis"] == 5 and type(config["num_basis"]) is int
+
+    def test_the_model_is_the_one_built_from_python_integers(self):
+        plain = HKAN(hidden_units=[HIDDEN, 2], num_basis=(7, 4, 3), slope=5.0,
+                     l2_block=0.01, seed=3)
+        model = HKAN(**self.CONFIG)
+        ours, theirs = model.get_config(), plain.get_config()
+        del ours["name"], theirs["name"]   # auto-generated, one per instance
+        assert ours == theirs
+        model.build((None, N_IN))
+        plain.build((None, N_IN))
+        for ours, theirs in zip(model.hkan_layers, plain.hkan_layers):
+            np.testing.assert_array_equal(_numpy(ours.centers), _numpy(theirs.centers))
+
+    def test_a_keras_archive_of_it_reloads(self, data, tmp_path):
+        x, y = data
+        model = HKAN(**self.CONFIG)
+        model.fit_closed_form(x, y)
+        path = os.path.join(str(tmp_path), "numpy_integers.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        assert loaded.get_config() == model.get_config()
+        for ours, theirs in zip(model.get_weights(), loaded.get_weights()):
+            np.testing.assert_array_equal(theirs, ours)
+
+    @pytest.mark.parametrize("kwargs,match", [
+        (dict(hidden_units=(np.bool_(True),)), "hidden_units"),
+        (dict(hidden_units=(np.float64(5.0),)), "hidden_units"),
+        (dict(hidden_units=(np.int64(0),)), "hidden_units"),
+        (dict(num_basis=np.float32(4.0)), "num_basis"),
+        (dict(seed=np.int64(-3)), "seed"),
+    ])
+    def test_numpy_booleans_floats_and_bad_values_are_still_refused(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            HKAN(**kwargs)
+
+
+class TestInputWidth:
+    """Built for ``N_IN = 3`` columns. One column would broadcast against the
+    centers and return a ``(B, 1)`` answer; ``N_IN + 2`` was an opaque
+    backend shape error."""
+
+    WIDTHS = [1, N_IN + 2]
+
+    @pytest.fixture(scope="class")
+    def fitted_model(self, data):
+        model = _model(l2_block=0.01)
+        model.fit_closed_form(*data)
+        return model
+
+    @pytest.mark.parametrize("width", WIDTHS)
+    def test_call_and_predict_refuse_it(self, fitted_model, width):
+        bad = np.zeros((2, width), dtype="float32")
+        with pytest.raises(ValueError, match="incompatible with the layer"):
+            fitted_model(bad)
+        with pytest.raises(ValueError, match="incompatible with the layer"):
+            fitted_model.predict(bad, verbose=0)
+
+    @pytest.mark.parametrize("width", WIDTHS)
+    def test_fit_refuses_it_and_accepts_the_right_width(self, data, width):
+        x, y = data
+        model = _model()
+        model.build((None, N_IN))
+        model.compile(optimizer="sgd", loss="mse")
+        with pytest.raises(ValueError, match="incompatible with the layer"):
+            model.fit(np.zeros((8, width), dtype="float32"), y[:8], epochs=1, verbose=0)
+        history = model.fit(x.astype("float32"), y.astype("float32"), epochs=1, verbose=0)
+        assert np.isfinite(history.history["loss"][0])
+
+    @pytest.mark.parametrize("width", WIDTHS)
+    def test_it_survives_a_keras_round_trip(self, fitted_model, data, tmp_path, width):
+        path = os.path.join(str(tmp_path), "width.keras")
+        fitted_model.save(path)
+        loaded = keras.models.load_model(path)
+        x = data[0].astype("float32")
+        np.testing.assert_array_equal(_numpy(loaded(x)), _numpy(fitted_model(x)))
+        with pytest.raises(ValueError, match="incompatible with the layer"):
+            loaded(np.zeros((2, width), dtype="float32"))
+
+    @pytest.mark.parametrize("width", WIDTHS)
+    def test_inside_a_functional_model(self, width):
+        inputs = keras.Input((N_IN,))
+        inner = _model()
+        functional = keras.Model(inputs, inner(inputs))
+        assert functional(np.zeros((2, N_IN), dtype="float32")).shape == (2, 1)
+        with pytest.raises(ValueError, match="incompatible with the layer"):
+            inner(np.zeros((2, width), dtype="float32"))
+
+    @pytest.mark.parametrize("width", WIDTHS)
+    def test_the_numpy_side_methods_keep_their_own_error(self, fitted_model, data, width):
+        bad = np.zeros((N_ROWS, width))
+        with pytest.raises(ValueError, match=f"x has {width} columns but the model was built for {N_IN}"):
+            fitted_model.fit_closed_form(bad, data[1])
+        with pytest.raises(ValueError, match=f"x has {width} columns but the model was built for {N_IN}"):
+            fitted_model.initialize_centers(bad)
+
+
+class TestDtypePolicy:
+
+    @pytest.fixture
+    def policy(self, request):
+        """Set the global dtype policy for one test and always restore it."""
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(request.param)
+        try:
+            yield request.param
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    @pytest.mark.parametrize("policy", ["mixed_float16", "float16"], indirect=True)
+    def test_a_float16_policy_is_refused(self, data, policy):
+        """At ``build``, at the first call, and by ``fit_closed_form``."""
+        x, y = data
+        with pytest.raises(ValueError, match="'float32' and 'float64'"):
+            _model().build((None, N_IN))
+        with pytest.raises(ValueError, match="'float32' and 'float64'"):
+            _model()(x.astype("float32"))
+        with pytest.raises(ValueError, match="'float32' and 'float64'"):
+            _model().fit_closed_form(x, y)
+        with pytest.raises(ValueError, match="'float32' and 'float64'"):
+            create_hkan(hidden_units=(HIDDEN,), input_dim=N_IN)
+
+    @pytest.mark.parametrize("policy", ["float32", "float64"], indirect=True)
+    def test_float32_and_float64_build_fit_and_predict(self, data, policy):
+        x, y = data
+        model = _model(l2_block=0.01)
+        diagnostics = model.fit_closed_form(x, y)
+        output = _numpy(model(x.astype(policy)))
+        assert output.dtype == np.dtype(policy)
+        # Measured deviation: 1.8e-07 (float32, CPU and GPU 1), 2.6e-16 (float64).
+        assert diagnostics["forward_deviation_rms"] < (1e-5 if policy == "float32" else 1e-13)
+
+    def test_the_policy_was_restored(self):
+        assert keras.mixed_precision.global_policy().name == "float32"
 
 
 class TestBuildAndForward:

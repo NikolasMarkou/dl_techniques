@@ -20,6 +20,11 @@ Guards, in this order:
 5. The block R^2 matrix and the per-input importance (paper equation 14)
    against ``sklearn.metrics.r2_score``.
 6. ``centers="data"``: every layer draws from ITS OWN input.
+7. Settings that the fixtures above hold equal, set apart: a different slope
+   per layer, and the two intercept flags set differently.
+8. The forward check that ends ``fit_closed_form``: ``forward_rmse`` and
+   ``forward_deviation_rms`` against a forward pass computed here, and the
+   warning when the model at its own dtype is not the fit.
 
 NAMED DEVIATION (decisions.md D-024). In the eight cells ``sigmoid`` and
 ``softplus`` at ``l2 == 0`` (both intercept settings, distinct and duplicated
@@ -48,6 +53,7 @@ float32 tolerance is measured on the CPU and on GPU 1.
 """
 
 import itertools
+import logging
 from typing import Any, Dict, Tuple
 
 import keras
@@ -57,6 +63,7 @@ from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import r2_score
 
 from dl_techniques.models.general_purpose.hkan import HKAN, HKANLayer
+from dl_techniques.models.general_purpose.hkan import model as hkan_model_module
 
 from . import CLOSED_FORM, HIDDEN, N_IN, N_ROWS, NUM_BASIS, SLOPE, block_features, make_data
 
@@ -365,19 +372,26 @@ MODEL_CONFIGS = {
 }
 
 # Float32 forward pass against the float64 fit, max abs over the 96 rows,
-# measured on the four fixtures above (`measure_cells.py`), CPU
-# (CUDA_VISIBLE_DEVICES="") then GPU 1 (CUDA_VISIBLE_DEVICES=1):
-#   intercepts_ridge               1.47e-6   1.44e-6    largest |weight| 2.5
-#   bias_free_ridge                1.54e-6   1.18e-6    largest |weight| 7.8
+# measured on the four fixtures above (`<scratchpad>/step1_1/
+# measure_fixtures.py`), CPU (CUDA_VISIBLE_DEVICES="") then GPU 1
+# (CUDA_VISIBLE_DEVICES=1). Re-measured 2026-09-30 after the seed streams
+# changed (decisions.md D-035): every seeded center moved, and with them the
+# weights (the first readings, with the old centers, were 1.47e-6, 1.54e-6,
+# 1.16e-6 and 2.37e-4 on the CPU, largest zero-ridge weight 2.1e3).
+#   intercepts_ridge               8.40e-7   7.11e-7    largest |weight| 3.8
+#   bias_free_ridge                3.09e-6   1.95e-6    largest |weight| 7.6
 #   ridge_on_the_connecting_stage  1.16e-6   6.72e-7    largest |weight| 2.4
-#   zero_ridge_data_centers        2.37e-4   3.07e-4    largest |weight| 2.1e3
-# The zero-ridge fixture is 200 times worse because its unregularized
-# coefficients are 800 times larger and float32 carries 6e-8 of each.
-# Each tolerance is 6.5 times the worse of its two readings: 1e-5 for the
-# three ridge fixtures, 2e-3 for the zero-ridge one. Both sit above float32
-# resolution at the weight scale and far below what a defect in the forward
-# pass does (a dropped connecting intercept moves the output by more than
-# 1e-1, RED proof i in decisions.md D-025).
+#   zero_ridge_data_centers        2.52e-3   2.81e-3    largest |weight| 9.0e4
+# The zero-ridge fixture is 1000 times worse because its unregularized
+# weights are 12000 times larger and float32 carries 6e-8 of each. Its RMS
+# deviation is 1.7e-3 (CPU) and 2.0e-3 (GPU 1) of the target's standard
+# deviation, so `fit_closed_form` logs its forward-check warning on it.
+# Each tolerance is 6.5 times the worse of its two readings, rounded: 1e-5
+# for the two fixtures that read at most 1.2e-6, 2e-5 for the bias-free one,
+# 2e-2 for the zero-ridge one. All sit above float32 resolution at the weight
+# scale and below what a defect in the forward pass does (a dropped connecting
+# intercept moves the output by more than 1e-1, RED proof i in decisions.md
+# D-025).
 #: Float64 agreement of the model with the scikit-learn chain. The zero-ridge
 #: fixture has an unregularized softplus top layer, a deviation-class solve.
 #: Measured worst: 1.7e-13 (ridge fixtures), 7.0e-14 (zero ridge).
@@ -389,9 +403,9 @@ CHAIN_ATOL = {
 }
 FLOAT32_ATOL = {
     "intercepts_ridge": 1e-5,
-    "bias_free_ridge": 1e-5,
+    "bias_free_ridge": 2e-5,
     "ridge_on_the_connecting_stage": 1e-5,
-    "zero_ridge_data_centers": 2e-3,
+    "zero_ridge_data_centers": 2e-2,
 }
 
 
@@ -482,7 +496,15 @@ class TestTheModelIsTheSklearnChain:
         assert np.std(predictions) > 0.1
 
     def test_importance_is_the_mean_block_r2(self, fitted):
-        """Paper equation 14: mean over the first layer's outputs of block R^2."""
+        """Paper equation 14: mean over the first layer's outputs of block R^2.
+
+        ``r2_score`` is the oracle for every target EXCEPT a constant one,
+        where the package reports 0.0 (no variance to explain) and
+        ``r2_score`` reports 1.0 for an exact fit. That one case is excluded
+        here by the first assertion and pinned on its own in
+        ``test_a_constant_target_has_zero_importance``.
+        """
+        assert np.ptp(fitted["y"]) > 0.0, "a constant target is not r2_score's case"
         phi = fitted["chain"][0]["phi"]
         block_r2 = np.array([
             [r2_score(fitted["y"], phi[:, q, p]) for p in range(N_IN)]
@@ -501,7 +523,239 @@ class TestTheModelIsTheSklearnChain:
 
     def test_the_diagnostics_keys(self, fitted):
         assert set(fitted["diagnostics"]) == {
-            "layer_rmse", "block_r2", "importance", "train_predictions"}
+            "layer_rmse", "block_r2", "importance", "train_predictions",
+            "forward_rmse", "forward_deviation_rms"}
+
+
+@pytest.mark.parametrize("constant", [-1.5, 0.7])
+def test_a_constant_target_has_zero_importance(data, constant):
+    """0.0 for every input, not scikit-learn's 1.0 (see the test above).
+
+    0.7 as well as -1.5: the mean of 96 copies of 0.7 is not 0.7, so the
+    centered sum of squares is 1e-30 instead of 0 and cannot be what decides
+    that the target is constant.
+    """
+    x, _ = data
+    y = np.full((N_ROWS,), constant)
+    diagnostics = HKAN(**MODEL_CONFIGS["intercepts_ridge"]).fit_closed_form(x, y)
+    np.testing.assert_allclose(diagnostics["train_predictions"], constant, rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(diagnostics["block_r2"], np.zeros((HIDDEN, N_IN)))
+    np.testing.assert_array_equal(diagnostics["importance"], np.zeros((N_IN,)))
+    assert r2_score(y, y) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Settings the fixtures above hold equal
+# ---------------------------------------------------------------------------
+
+def test_each_layer_uses_its_own_slope(data):
+    """Slopes (3, 7), tanh in both layers, against the per-layer chain.
+
+    Measured agreement 6.1e-14; the same chain with the first layer's slope
+    in both layers is 0.22 away.
+    """
+    x, y = data
+    slopes = (3.0, 7.0)
+    model = HKAN(hidden_units=(HIDDEN,), num_basis=NUM_BASIS, basis="tanh",
+                 slope=slopes, l2_block=L2_POSITIVE, seed=0)
+    diagnostics = model.fit_closed_form(x, y)
+    assert [layer.slope for layer in model.hkan_layers] == list(slopes)
+
+    def chain(layer_slopes) -> np.ndarray:
+        activations = x
+        for slope, centers in zip(layer_slopes, stored_centers(model)):
+            activations = sklearn_layer(
+                "tanh", slope, activations, y, centers, L2_POSITIVE, 0.0, True, True)["output"]
+        return activations[:, 0]
+
+    np.testing.assert_allclose(
+        diagnostics["train_predictions"], chain(slopes), rtol=0, atol=VALUE_ATOL)
+    assert np.abs(chain(slopes) - chain((slopes[0], slopes[0]))).max() > 1e-3, (
+        "the fixture cannot see the second layer's slope")
+
+
+@pytest.mark.parametrize("block_intercept,mix_intercept", [(True, False), (False, True)])
+def test_the_two_intercept_flags_are_independent(data, block_intercept, mix_intercept):
+    """``use_block_bias`` and ``use_bias`` set DIFFERENTLY, both ways.
+
+    Measured worst difference from scikit-learn over the two cells: 5.4e-12
+    (coefficients, the largest of which is 4.8), 1.2e-13 (outputs). The fits
+    with the two flags swapped differ by 0.63, so a solve that read the wrong
+    flag would show.
+    """
+    x, y = data
+    centers = cell_centers(False)
+    layer = HKANLayer(
+        units=HIDDEN, num_basis=NUM_BASIS[0], basis="tanh", slope=SLOPE,
+        use_block_bias=block_intercept, use_bias=mix_intercept)
+    port = layer.solve_closed_form(x, y, L2_POSITIVE, 0.0, centers, chunk_size=2)
+    oracle = sklearn_layer(
+        "tanh", SLOPE, x, y, centers, L2_POSITIVE, 0.0, block_intercept, mix_intercept)
+    swapped = sklearn_layer(
+        "tanh", SLOPE, x, y, centers, L2_POSITIVE, 0.0, mix_intercept, block_intercept)
+    assert np.abs(oracle["output"] - swapped["output"]).max() > 1e-2
+    scale = max(1.0, float(np.abs(oracle["coef"]).max()))
+    for name in ("coef", "block_bias", "mix", "bias", "output"):
+        np.testing.assert_allclose(
+            port[name], oracle[name], rtol=0,
+            atol=COEF_REL * scale if name in ("coef", "block_bias") else VALUE_ATOL,
+            err_msg=f"{name} differs from scikit-learn's")
+    assert np.any(port["block_bias"] != 0.0) == block_intercept
+    assert np.any(port["bias"] != 0.0) == mix_intercept
+
+    # The same through the model, both layers.
+    model = HKAN(hidden_units=(HIDDEN,), num_basis=NUM_BASIS, basis="tanh", slope=SLOPE,
+                 l2_block=L2_POSITIVE, use_block_bias=block_intercept,
+                 use_bias=mix_intercept, seed=0)
+    diagnostics = model.fit_closed_form(x, y)
+    activations = x
+    for stored in stored_centers(model):
+        activations = sklearn_layer(
+            "tanh", SLOPE, activations, y, stored, L2_POSITIVE, 0.0,
+            block_intercept, mix_intercept)["output"]
+    np.testing.assert_allclose(
+        diagnostics["train_predictions"], activations[:, 0], rtol=0, atol=VALUE_ATOL)
+
+
+# ---------------------------------------------------------------------------
+# The forward check at the end of fit_closed_form
+# ---------------------------------------------------------------------------
+
+def smooth_problem(n_rows: int = 600, seed: int = 123) -> Tuple[np.ndarray, np.ndarray]:
+    """Noise-free ``y = sin(3 x1) x2`` on ``[0, 1]^2`` (more rows than one
+    forward batch of the package, which is 256)."""
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.0, 1.0, size=(n_rows, 2))
+    return x, np.sin(3.0 * x[:, 0]) * x[:, 1]
+
+
+def fit_warnings(caplog) -> list:
+    return [record.getMessage() for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "does not compute the fit" in record.getMessage()]
+
+
+class TestForwardCheck:
+    """``fit_closed_form`` ends by running the model it leaves behind."""
+
+    #: The threshold of the package, restated so a changed constant shows.
+    FRACTION = 1e-3
+
+    def test_the_threshold_constants(self):
+        assert hkan_model_module.FORWARD_DEVIATION_FRACTION == self.FRACTION
+        assert hkan_model_module.FORWARD_DEVIATION_FLOOR == 1e-6
+
+    #: The four model fixtures, whose float32 model IS the fit to 1e-6, and
+    #: one whose model is not (zero ridge, sigmoid at slope 1): there
+    #: ``forward_rmse`` (1e7) and ``layer_rmse`` (0.05) are different numbers,
+    #: so returning the fit's RMSE under the name of the model's would show.
+    FORWARD_CONFIGS = dict(
+        MODEL_CONFIGS,
+        ill_conditioned=dict(hidden_units=(16,), basis="sigmoid", slope=1.0,
+                             l2_block=0.0, l2_mix=0.0, seed=0))
+
+    @pytest.mark.parametrize("name", sorted(FORWARD_CONFIGS))
+    def test_forward_rmse_is_the_rmse_of_the_model(self, name, caplog):
+        """Against ONE un-batched forward pass computed here (600 rows, so
+        the package's own pass is three batches that must be concatenated in
+        order). The two passes differ only by batching; measured difference
+        0.0 on the CPU and on GPU 1 in all five fixtures. ``rtol=1e-5`` (the
+        ill-conditioned output is a cancellation of terms of 1e10, which a
+        backend may batch differently) and ``atol=1e-6``."""
+        x, y = smooth_problem()
+        model = HKAN(**self.FORWARD_CONFIGS[name])
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            diagnostics = model.fit_closed_form(x, y)
+        forward = np.asarray(keras.ops.convert_to_numpy(
+            model(x.astype("float32"), training=False)), dtype=np.float64)[:, 0]
+        expected_rmse = float(np.sqrt(np.mean((forward - y) ** 2)))
+        expected_deviation = float(np.sqrt(np.mean(
+            (forward - diagnostics["train_predictions"]) ** 2)))
+        assert isinstance(diagnostics["forward_rmse"], float)
+        assert isinstance(diagnostics["forward_deviation_rms"], float)
+        np.testing.assert_allclose(
+            diagnostics["forward_rmse"], expected_rmse, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(
+            diagnostics["forward_deviation_rms"], expected_deviation, rtol=1e-5, atol=1e-6)
+        if name == "ill_conditioned":
+            # Non-vacuity: the model's RMSE is not the fit's.
+            assert diagnostics["forward_rmse"] > 1e3 * diagnostics["layer_rmse"][-1]
+            assert len(fit_warnings(caplog)) == 1
+        else:
+            # Non-vacuity: the deviation is not the RMSE.
+            assert expected_rmse > 100 * expected_deviation
+            assert abs(diagnostics["forward_rmse"] - diagnostics["layer_rmse"][-1]) < 1e-4
+            assert fit_warnings(caplog) == []
+
+    @pytest.mark.parametrize("hidden", [(), (16,)])
+    def test_an_ill_conditioned_fit_warns(self, hidden, caplog):
+        """Zero ridge, sigmoid at slope 1, smooth data: the block coefficients
+        reach 2e10 to 4e10 and the float32 model is not the fit. Measured
+        deviation: 1.2e+03 on the CPU and 1.1e+03 on GPU 1 (no hidden layer),
+        2.5e+07 and 2.6e+07 (width 16), against a target of standard deviation
+        0.257 and a float64 fit of RMSE 0.083 and 0.049."""
+        x, y = smooth_problem()
+        model = HKAN(hidden_units=hidden, basis="sigmoid", slope=1.0,
+                     l2_block=0.0, l2_mix=0.0, seed=0)
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            diagnostics = model.fit_closed_form(x, y)
+        assert diagnostics["layer_rmse"][-1] < 0.1, "the float64 fit itself is fine"
+        assert diagnostics["forward_deviation_rms"] > 1.0
+        assert diagnostics["forward_rmse"] > 1.0
+        messages = fit_warnings(caplog)
+        assert len(messages) == 1, [r.getMessage() for r in caplog.records]
+        message = messages[0]
+        assert f"{diagnostics['layer_rmse'][-1]:.3e}" in message
+        assert f"{diagnostics['forward_rmse']:.3e}" in message
+        for needle in ("l2_block", "l2_mix", "float64", "standard deviation"):
+            assert needle in message, needle
+
+    def test_a_well_conditioned_fit_does_not_warn(self, caplog):
+        """The README's first configuration. Measured ratio to the target's
+        standard deviation: 7.1e-06 (CPU), 6.8e-06 (GPU 1), 140 times under
+        the threshold; the bound asserted is a tenth of the threshold."""
+        x, y = smooth_problem()
+        model = HKAN(hidden_units=(16,), num_basis=(10, 5), basis=("tanh", "identity"),
+                     slope=5.0, l2_block=0.01, seed=0)
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            diagnostics = model.fit_closed_form(x, y)
+        assert diagnostics["forward_deviation_rms"] < 0.1 * self.FRACTION * np.std(y)
+        assert fit_warnings(caplog) == []
+
+    @pytest.mark.parametrize("constant", [0.1, 0.7, -1.5])
+    def test_a_constant_target_is_judged_against_the_absolute_floor(
+            self, caplog, monkeypatch, constant):
+        """Standard deviation 0: a fraction of it is 0 and would always warn.
+
+        Three constants and 96 rows, because ``np.std`` of a constant array
+        is not always 0: for 96 copies of 0.7 it is 1.1e-16 and for 96 copies
+        of 0.1 it is 1.4e-17 (the mean does not round back to the constant;
+        for 600 copies numpy's pairwise sum happens to), and a limit of 1e-3
+        of THAT warns on a perfect fit. -1.5 is a float32 number, so its
+        deviation is exactly 0.
+        """
+        x, _ = smooth_problem(n_rows=N_ROWS)
+        y = np.full((N_ROWS,), constant)
+        assert (np.std(y) > 0.0) == (constant != -1.5), "the fixture lost its point"
+        model = HKAN(hidden_units=(HIDDEN,), basis="tanh", slope=SLOPE,
+                     l2_block=L2_POSITIVE, seed=0)
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            diagnostics = model.fit_closed_form(x, y)
+        # float32(0.1) - 0.1 = 1.5e-9 and float32(0.7) - 0.7 = -1.2e-8:
+        # measured deviations 1.5e-9, 1.2e-8 and 0.0.
+        assert diagnostics["forward_deviation_rms"] < 1e-7
+        assert (diagnostics["forward_deviation_rms"] > 0.0) == (constant != -1.5)
+        assert fit_warnings(caplog) == []
+        np.testing.assert_array_equal(diagnostics["importance"], 0.0)
+
+        if constant == -1.5:
+            return
+        monkeypatch.setattr(hkan_model_module, "FORWARD_DEVIATION_FLOOR", 0.0)
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            model.fit_closed_form(x, y)
+        messages = fit_warnings(caplog)
+        assert len(messages) == 1 and "absolute floor" in messages[0]
+        assert "constant target" in messages[0]
 
 
 # ---------------------------------------------------------------------------
