@@ -1389,6 +1389,15 @@ def _b_levjepa():
 _extra("levjepa", _b_levjepa, lambda: _f32(1, 32, 32, 3))
 
 
+def _b_hkan():
+    from dl_techniques.models.general_purpose.hkan.model import create_hkan
+    return create_hkan(hidden_units=(5,), num_basis=(7, 4), basis="tanh",
+                       slope=5.0, seed=0)
+
+
+_extra("hkan", _b_hkan, lambda: _f32(2, 3))
+
+
 #: The one ``models/`` package with NO round-trip subject, and why. Its own
 #: ``__init__.py`` states it: "nothing subclasses ``keras.Model``, so there is
 #: nothing for a model factory to build". ``PowerSampler`` is a sampling
