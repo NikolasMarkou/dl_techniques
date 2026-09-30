@@ -29,10 +29,14 @@ to repeat 0. Reported RMSEs come from the weights at the end of training in ever
 repeat. A reused `--experiment-name` is refused before anything is written.
 
 `best_checkpoint` in the summary is `null` in `closed_form` mode and otherwise
-always a dict with the same eight keys, describing the best model of repeat 0 by
-the monitor (`val_loss`, or `loss` when `--val-fraction 0`):
+always a dict with the same nine keys, describing the best model of repeat 0 by
+the monitor `val_loss`: the MSE at the end of each epoch on the validation rows,
+or on the fit rows when `--val-fraction 0` holds nothing out (the fit rows are then
+passed to `fit` as its validation data, so the monitor is never Keras' `loss`,
+a running mean over an epoch whose weights keep moving):
 
-- `monitor`: the monitored name.
+- `monitor`: the monitored name, `val_loss`.
+- `monitor_rows`: `"validation"` or `"fit"`, the rows `val_loss` is measured on.
 - `source`: `"epoch"` (an epoch of `fit`), `"closed_form"` (two-phase mode only:
   no epoch beat the closed-form start) or `"none"` (the monitor was never finite,
   for example a diverged run; nothing was saved).
@@ -228,8 +232,14 @@ def parse_arguments(argv=None) -> argparse.Namespace:
     for flag in ("hidden_units", "num_basis"):
         if any(item < 1 for item in getattr(args, flag)):
             parser.error(f"--{flag.replace('_', '-')} items must be >= 1, got {getattr(args, flag)}")
-    if not all(np.isfinite(args.slope)):
-        parser.error(f"--slope items must be finite, got {args.slope}")
+    # DECISION plan-2026-09-30T082355-4d999dbc/D-053
+    # A slope must be finite AND positive here, at parse time. Do NOT test
+    # finiteness alone "because the model refuses a non-positive slope": the
+    # model refuses it only after `prepare_run_dir`, so `--slope 0` and
+    # `--slope -1` left config.json and run.log behind, exit 1, and used up the
+    # experiment name. See decisions.md D-053.
+    if not all(np.isfinite(item) and item > 0 for item in args.slope):
+        parser.error(f"--slope items must be finite and > 0, got {args.slope}")
     for flag in ("l2_block", "l2_mix"):
         if not all(np.isfinite(item) and item >= 0 for item in getattr(args, flag)):
             parser.error(
@@ -417,7 +427,17 @@ def run_repeat(
         # starts from the assigned weights (the optimizer holds no copy of them).
         model.compile(optimizer=optimizer_builder({"type": "adam"}, args.learning_rate),
                       loss="mse")
-        monitor = "val_loss" if len(val_rows) else "loss"
+        # DECISION plan-2026-09-30T082355-4d999dbc/D-052
+        # The monitor is ALWAYS `val_loss`; with nothing held out the FIT rows are
+        # the validation data. Do NOT monitor `loss` when `--val-fraction 0`: it is
+        # the running mean over the epoch's batches while the weights move, not the
+        # MSE of any saved model (measured: recorded 0.1546, the saved model's MSE
+        # on the fit rows 0.1419), and the two-phase threshold is the closed-form
+        # model's exact MSE, a different quantity. See decisions.md D-052.
+        monitor = "val_loss"
+        monitor_rows = "validation" if len(val_rows) else "fit"
+        rows = val_rows if len(val_rows) else fit_rows
+        x_monitor, y_monitor = x_train[rows], y_train[rows].astype(np.float32)
         callbacks = []
         if repeat == 0:
             if closed_form:
@@ -431,10 +451,8 @@ def run_repeat(
                 # is computed as Keras computes `val_loss` (float32 predictions
                 # against float32 targets) on the validation rows, or on the fit
                 # rows when none are held out. See decisions.md D-042.
-                rows = val_rows if len(val_rows) else fit_rows
                 start_mse = float(np.mean(np.square(
-                    _predict(model, x_train[rows], args.predict_batch_size)
-                    - y_train[rows].astype(np.float32))))
+                    _predict(model, x_monitor, args.predict_batch_size) - y_monitor)))
             # Hand-assembled rather than create_callbacks(): see the module docstring.
             # A non-finite threshold would stop Keras from ever saving, so it is
             # passed only when finite.
@@ -447,10 +465,7 @@ def run_repeat(
                 keras.callbacks.CSVLogger(str(run_dir / "training_log.csv")),
             ]
         history = model.fit(
-            x_fit, y_fit.astype(np.float32),
-            validation_data=(
-                (x_train[val_rows], y_train[val_rows].astype(np.float32))
-                if len(val_rows) else None),
+            x_fit, y_fit.astype(np.float32), validation_data=(x_monitor, y_monitor),
             epochs=args.epochs, batch_size=args.batch_size, callbacks=callbacks, verbose=0,
         ).history
         result["final_loss"] = float(history["loss"][-1])
@@ -480,7 +495,7 @@ def run_repeat(
                         "train_rmse": None, "test_rmse": None,
                         "reason": f"{monitor} was never finite, so no checkpoint was written"}
                 logger.warning(f"No best checkpoint: {best['reason']}")
-            result["best_checkpoint"] = {"monitor": monitor, **best}
+            result["best_checkpoint"] = {"monitor": monitor, "monitor_rows": monitor_rows, **best}
         result["_model"] = model
         result["_history"] = history
         result["_importance"] = None if diagnostics is None else diagnostics["importance"]
@@ -558,20 +573,30 @@ def render_rmse_box(train: List[float], test: List[float], out_path: Path) -> No
     plt.close(fig)
 
 
+#: Legend label of the monitored `val_loss` line, by the rows it is measured on.
+MONITOR_LABELS = {
+    "validation": "validation rows, end of epoch (monitored)",
+    "fit": "fit rows, end of epoch (monitored; nothing held out)",
+}
+
+
 def render_loss_curve(
         history: Dict[str, List[float]], out_path: Path, start_mse: Optional[float] = None,
+        monitor_rows: str = "validation",
 ) -> None:
-    """Training (and validation) MSE per epoch of repeat 0, log scale.
+    """Training and monitored MSE per epoch of repeat 0, log scale.
 
     ``start_mse`` draws the closed-form train MSE the fine-tune started from. The
-    epoch-1 train value is Keras' running mean over that epoch's batches, so it can
-    sit above the start line even when the epoch ends below it.
+    train value is Keras' running mean over the epoch's batches, so the epoch-1 value
+    can sit above the start line even when the epoch ends below it. ``monitor_rows``
+    names the rows of the ``val_loss`` line: with ``--val-fraction 0`` they are the
+    fit rows, and the legend says so.
     """
     fig, ax = plt.subplots(figsize=(8.0, 4.0))
     epochs = np.arange(1, len(history["loss"]) + 1)
-    ax.plot(epochs, history["loss"], label="train (fit rows)")
+    ax.plot(epochs, history["loss"], label="fit rows, running mean over the epoch")
     if "val_loss" in history:
-        ax.plot(epochs, history["val_loss"], label="validation")
+        ax.plot(epochs, history["val_loss"], label=MONITOR_LABELS[monitor_rows])
     if start_mse is not None:
         ax.axhline(start_mse, color="black", linestyle="--", linewidth=1,
                    label="closed-form fit (train)")
@@ -632,7 +657,8 @@ def render_figures(
         start = first.get("closed_form_phase")
         figures["loss_curve"] = lambda: render_loss_curve(
             first["_history"], viz_dir / "loss_curve.png",
-            start_mse=None if start is None else start["train_rmse"] ** 2)
+            start_mse=None if start is None else start["train_rmse"] ** 2,
+            monitor_rows=first["best_checkpoint"]["monitor_rows"])
 
     failed = []
     for name, render in figures.items():

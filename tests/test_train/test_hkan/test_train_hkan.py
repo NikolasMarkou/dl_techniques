@@ -28,6 +28,16 @@ Added by the completion fix (D-041 to D-044 of the same file):
 - the best checkpoint is the argmin epoch and reproduces the monitor's minimum;
 - ``--val-fraction 0`` end to end; median and IQR on three repeats.
 
+Added by the second completion fix (D-052 to D-054 of the same file):
+
+- the monitor is always ``val_loss``, on the fit rows when nothing is held out, and
+  ``monitor_value`` is the exact MSE of the saved best model in both settings and
+  for all three sources; the loss curve's legend names the monitored rows;
+- ``--slope 0`` and ``--slope -1`` are refused before anything is written;
+- one guard per surviving mutation of the second review: a CSV column below 0
+  only, the box plot's one-decade threshold, a run that diverges after its best
+  epoch, a non-finite closed-form start.
+
 Nothing may be written under repo-root ``results/``: the autouse fixture in
 ``tests/conftest.py`` fails any test that adds an entry there.
 """
@@ -77,7 +87,8 @@ EXPECTED_FILES = {
 }
 MODES = sorted(EXPECTED_FILES)
 BEST_KEYS = {
-    "monitor", "source", "file", "epoch", "monitor_value", "train_rmse", "test_rmse", "reason",
+    "monitor", "monitor_rows", "source", "file", "epoch", "monitor_value", "train_rmse",
+    "test_rmse", "reason",
 }
 
 SUMMARY_KEYS = {
@@ -153,6 +164,14 @@ EXTRA_ARGS = {
     "backprop_again": ("--training-mode", "backprop", "--repeats", str(REPEATS),
                        "--dataset", "tf2", "--seed", "0", "--epochs", str(EPOCHS)),
 }
+# The same three best-checkpoint paths with nothing held out (--val-fraction 0).
+EXTRA_ARGS.update({
+    f"{name}_vf0": (*EXTRA_ARGS[name], "--val-fraction", "0")
+    for name in ("best_in_the_middle", "fine_tune_hurts", "diverged")
+})
+#: Relative bound between a recorded ``val_loss`` and the saved model's MSE
+#: computed here; see ``test_the_recorded_monitor_value_is_the_exact_mse_of_the_best_model``.
+MONITOR_REL = 1e-6
 
 
 class _LazyRuns:
@@ -285,6 +304,7 @@ def test_summary_keys_and_nullness_rules(runs, mode) -> None:
     if summary["best_checkpoint"] is not None:
         assert set(summary["best_checkpoint"]) == BEST_KEYS
         assert summary["best_checkpoint"]["monitor"] == "val_loss"
+        assert summary["best_checkpoint"]["monitor_rows"] == "validation"
         assert summary["best_checkpoint"]["source"] == "epoch"
         assert summary["best_checkpoint"]["file"] == BEST_FILE
         assert summary["best_checkpoint"]["reason"] is None
@@ -450,12 +470,16 @@ def test_every_repeat_has_its_own_seed_and_its_own_score(runs, mode) -> None:
 
 @pytest.mark.parametrize("train, test, scale", [
     ([1.0e-3, 2.0e-3, 8.0e-3], [1.1e-3, 2.1e-3, 8.1e-3], "linear"),
+    ([1.0e-3, 2.0e-3, 8.0e-3], [1.0e-2, 1.5e-2, 2.0e-2], "log"),
+    ([1.0e-3, 2.0e-3, 8.0e-3], [0.1, 0.15, 0.2], "log"),
     ([1.0e-7, 1.2e-7, 1.5e-7], [0.11, 0.12, 0.12], "log"),
-])
+], ids=["ratio_8.1", "ratio_20", "ratio_200", "ratio_1.2e6"])
 def test_the_rmse_box_uses_a_log_axis_only_across_a_decade(
         monkeypatch, tmp_path, train, test, scale) -> None:
     """Inside one decade a log axis carries at most one labelled tick (seen in the
-    TF5 backprop run of batch 20260930c), so the box plot switches to linear."""
+    TF5 backprop run of batch 20260930c), so the box plot switches to linear. The
+    threshold is one decade: a ratio of 20 is log (mutation T4 of decisions.md
+    D-054 moved it to 100 unseen)."""
     captured = []
     monkeypatch.setattr(train_hkan.plt, "close", lambda fig: captured.append(fig))
     train_hkan.render_rmse_box(train, test, tmp_path / "box.png")
@@ -748,8 +772,12 @@ def test_the_recorded_importance_is_the_first_repeats(runs) -> None:
         (["--num-test-samples", "1"], "--num-test-samples must be >= 2, got 1"),
         (["--num-basis", "0"], "--num-basis items must be >= 1, got [0]"),
         (["--hidden-units", "8,0", "--num-basis", "5"], "--hidden-units items must be >= 1"),
-        (["--slope", "nan"], "--slope items must be finite, got [nan]"),
-        (["--slope", "inf"], "--slope items must be finite, got [inf]"),
+        (["--slope", "nan"], "--slope items must be finite and > 0, got [nan]"),
+        (["--slope", "inf"], "--slope items must be finite and > 0, got [inf]"),
+        (["--slope", "0"], "--slope items must be finite and > 0, got [0.0]"),
+        (["--slope", "-1"], "--slope items must be finite and > 0, got [-1.0]"),
+        (["--hidden-units", "4", "--slope", "5,0"],
+         "--slope items must be finite and > 0, got [5.0, 0.0]"),
         (["--l2-block", "-0.1"], "--l2-block items must be finite and >= 0, got [-0.1]"),
         (["--l2-block", "nan"], "--l2-block items must be finite and >= 0, got [nan]"),
         (["--l2-mix", "-1"], "--l2-mix items must be finite and >= 0, got [-1.0]"),
@@ -789,7 +817,8 @@ def test_build_model_passes_one_value_or_a_per_layer_list() -> None:
 BAD_ARGUMENTS = [
     ("--basis", "foo"), ("--centers", "grid"), ("--chunk-size", "0"), ("--seed", "-1"),
     ("--num-train-samples", "1"), ("--num-test-samples", "1"), ("--num-basis", "0"),
-    ("--hidden-units", "0"), ("--slope", "nan"), ("--l2-block", "-0.1"), ("--l2-mix", "inf"),
+    ("--hidden-units", "0"), ("--slope", "nan"), ("--slope", "0"), ("--slope", "-1"),
+    ("--l2-block", "-0.1"), ("--l2-mix", "inf"),
 ]
 
 
@@ -877,6 +906,7 @@ def test_a_diverged_run_finishes_and_reports_no_best_checkpoint(extra_runs) -> N
     best = run.summary["best_checkpoint"]
     assert set(best) == BEST_KEYS
     assert best["monitor"] == "val_loss" and best["source"] == "none"
+    assert best["monitor_rows"] == "validation"
     assert all(best[key] is None for key in
                ("file", "epoch", "monitor_value", "train_rmse", "test_rmse"))
     assert "never finite" in best["reason"]
@@ -884,6 +914,60 @@ def test_a_diverged_run_finishes_and_reports_no_best_checkpoint(extra_runs) -> N
     assert run.summary["repeat_results"][0]["test_rmse"] is None
     assert run.summary["test_rmse"]["median"] is None
     assert "No best checkpoint" in (run.run_dir / "run.log").read_text()
+
+
+def test_a_run_that_diverges_after_its_best_epoch_records_the_best_epoch(
+        monkeypatch, tmp_path) -> None:
+    """History ``[0.1, 0.05, nan]``: the best epoch is 2. ``np.argmin`` returns the
+    index of the NaN (mutation T9 of decisions.md D-054), which no real run of this
+    suite produced, so the history ``fit`` returns is patched after a real fit."""
+    real_fit = keras.Model.fit
+
+    def _fit(self, x=None, y=None, **kwargs):
+        history = real_fit(self, x, y, **kwargs)
+        history.history["val_loss"] = [0.1, 0.05, float("nan")]
+        return history
+
+    monkeypatch.setattr(train_hkan.HKAN, "fit", _fit)
+    run = _run(tmp_path, "partial", "--training-mode", "backprop", "--dataset", "tf2",
+               "--seed", "0", "--epochs", str(EPOCHS))
+    best = run.summary["best_checkpoint"]
+    assert (best["source"], best["epoch"], best["monitor_value"]) == ("epoch", 2, 0.05)
+
+
+class _NanStart:
+    """``_predict`` that returns NaN on the rows of the closed-form start threshold
+    (the 30 validation rows of the tiny runs; every other call scores 270 fit rows
+    or 120 test rows), so the closed-form model's own monitored MSE is NaN."""
+
+    def __init__(self, real):
+        self.real, self.hits = real, 0
+
+    def __call__(self, model, x, batch_size):
+        if len(x) == 30:
+            self.hits += 1
+            return np.full(len(x), np.nan)
+        return self.real(model, x, batch_size)
+
+
+@pytest.mark.parametrize("learning_rate,source", [("1e-3", "epoch"), ("1e12", "none")])
+def test_a_non_finite_closed_form_start_is_not_a_threshold_or_a_best_model(
+        monkeypatch, tmp_path, learning_rate, source) -> None:
+    """A NaN start must not be passed as ``initial_value_threshold`` (nothing would
+    ever compare below it: mutation T8) and must not be named the best model when
+    no epoch was saved (mutation T10). At learning rate 1e-3 an epoch is the best
+    model; at 1e12 every epoch is NaN and there is no best model."""
+    nan_start = _NanStart(train_hkan._predict)
+    monkeypatch.setattr(train_hkan, "_predict", nan_start)
+    run = _run(tmp_path, f"nan_start_{source}", "--training-mode", "closed_form_then_backprop",
+               "--dataset", "tf5", "--seed", "0", "--epochs", "2",
+               "--learning-rate", learning_rate)
+    assert nan_start.hits == 1, "the start threshold was not computed on the 30 validation rows"
+    best = run.summary["best_checkpoint"]
+    assert best["source"] == source, best
+    assert (run.run_dir / BEST_FILE).is_file() == (source == "epoch")
+    if source == "none":
+        assert best["file"] is None and best["monitor_value"] is None
 
 
 # ---------------------------------------------------------------------
@@ -961,20 +1045,31 @@ def test_the_best_checkpoint_is_the_argmin_epoch_and_reproduces_its_value(extra_
 
 
 @pytest.mark.parametrize("mode", ["backprop", "closed_form_then_backprop"])
-def test_val_fraction_zero_monitors_the_train_loss(monkeypatch, tmp_path, mode) -> None:
-    seen = {"checkpoint": [], "fit": []}
+def test_val_fraction_zero_monitors_the_fit_rows_at_the_end_of_each_epoch(
+        monkeypatch, tmp_path, mode) -> None:
+    """With nothing held out the FIT rows are the validation data, so the monitor
+    is ``val_loss``, an end-of-epoch MSE, never Keras' running-mean ``loss``
+    (decisions.md D-052). The figure's legend names the rows."""
+    seen = {"checkpoint": [], "fit": [], "loss_curve": []}
     real_checkpoint, real_fit = keras.callbacks.ModelCheckpoint, keras.Model.fit
+    real_loss_curve = train_hkan.render_loss_curve
 
     def _checkpoint(*args, **kwargs):
         seen["checkpoint"].append(kwargs)
         return real_checkpoint(*args, **kwargs)
 
     def _fit(self, x=None, y=None, **kwargs):
-        seen["fit"].append({"rows": len(x), "validation_data": kwargs.get("validation_data")})
+        seen["fit"].append({"x": np.array(x), "y": np.array(y),
+                            "validation_data": kwargs.get("validation_data")})
         return real_fit(self, x, y, **kwargs)
+
+    def _loss_curve(*args, **kwargs):
+        seen["loss_curve"].append(kwargs.get("monitor_rows"))
+        return real_loss_curve(*args, **kwargs)
 
     monkeypatch.setattr(keras.callbacks, "ModelCheckpoint", _checkpoint)
     monkeypatch.setattr(train_hkan.HKAN, "fit", _fit)
+    monkeypatch.setattr(train_hkan, "render_loss_curve", _loss_curve)
     crashed = None
     try:
         train_hkan.main(_argv(
@@ -983,28 +1078,76 @@ def test_val_fraction_zero_monitors_the_train_loss(monkeypatch, tmp_path, mode) 
     except Exception as error:  # reported after the assertions on what was captured
         crashed = error
 
-    assert [call["validation_data"] for call in seen["fit"]] == [None], (
-        "fit() got validation data although nothing is held out")
-    assert [call["rows"] for call in seen["fit"]] == [TRAIN_ROWS]
-    assert [kwargs["monitor"] for kwargs in seen["checkpoint"]] == ["loss"], (
-        "the checkpoint monitors a validation loss that does not exist")
+    assert len(seen["fit"]) == 1 and len(seen["fit"][0]["x"]) == TRAIN_ROWS
+    validation = seen["fit"][0]["validation_data"]
+    assert validation is not None, "fit() got no validation data: the monitor is the running loss"
+    np.testing.assert_array_equal(np.array(validation[0]), seen["fit"][0]["x"])
+    np.testing.assert_array_equal(np.array(validation[1]), seen["fit"][0]["y"])
+    assert [kwargs["monitor"] for kwargs in seen["checkpoint"]] == ["val_loss"]
+    assert seen["loss_curve"] == ["fit"]
     assert crashed is None, f"the run crashed: {crashed!r}"
 
     run_dir = tmp_path / "vf0"
     summary = _strict_summary(run_dir)
+    best = summary["best_checkpoint"]
     assert summary["fit_rows"] == TRAIN_ROWS == summary["train_rows"]
-    assert summary["best_checkpoint"]["monitor"] == "loss"
-    assert summary["best_checkpoint"]["source"] in ("epoch", "closed_form")
-    assert (run_dir / summary["best_checkpoint"]["file"]).is_file()
-    assert ((run_dir / BEST_FILE).is_file()) == (summary["best_checkpoint"]["source"] == "epoch")
+    assert (best["monitor"], best["monitor_rows"]) == ("val_loss", "fit")
+    assert best["source"] in ("epoch", "closed_form")
+    assert (run_dir / best["file"]).is_file()
+    assert ((run_dir / BEST_FILE).is_file()) == (best["source"] == "epoch")
     history = json.loads((run_dir / "training_history.json").read_text())
-    assert set(history) == {"loss"} and len(history["loss"]) == EPOCHS
-    # Keras' CSVLogger always declares a `val_loss` column and fills it with NA
+    assert set(history) == {"loss", "val_loss"} and len(history["val_loss"]) == EPOCHS
     log = [line.split(",") for line in (run_dir / "training_log.csv").read_text().splitlines()]
-    assert log[0][:2] == ["epoch", "loss"] and len(log) == 1 + EPOCHS
-    assert all(cell == "NA" for row in log[1:] for cell in row[2:])
-    if mode == "backprop":
-        assert summary["best_checkpoint"]["epoch"] == int(np.argmin(history["loss"])) + 1
+    assert log[0] == ["epoch", "loss", "val_loss"] and len(log) == 1 + EPOCHS
+    assert all(np.isfinite(float(row[2])) for row in log[1:])
+    if best["source"] == "epoch":
+        assert best["epoch"] == int(np.nanargmin(history["val_loss"])) + 1
+
+
+def test_the_loss_curve_legend_names_the_monitored_rows(monkeypatch, tmp_path) -> None:
+    captured = []
+    monkeypatch.setattr(train_hkan.plt, "close", lambda fig: captured.append(fig))
+    history = {"loss": [0.3, 0.2, 0.1], "val_loss": [0.25, 0.15, 0.12]}
+    for rows in ("validation", "fit"):
+        train_hkan.render_loss_curve(history, tmp_path / f"{rows}.png", monitor_rows=rows)
+    labels = [[text.get_text() for text in fig.axes[0].get_legend().get_texts()]
+              for fig in captured]
+    assert labels[0][1] == "validation rows, end of epoch (monitored)"
+    assert labels[1][1] == "fit rows, end of epoch (monitored; nothing held out)"
+    assert labels[0][0] == labels[1][0] == "fit rows, running mean over the epoch"
+
+
+#: (run of ``extra_runs``, source, rows the monitor is measured on)
+MONITOR_CASES = [
+    ("best_in_the_middle", "epoch", "validation"),
+    ("fine_tune_hurts", "closed_form", "validation"),
+    ("diverged", "none", "validation"),
+    ("best_in_the_middle_vf0", "epoch", "fit"),
+    ("fine_tune_hurts_vf0", "closed_form", "fit"),
+    ("diverged_vf0", "none", "fit"),
+]
+
+
+@pytest.mark.parametrize("name,source,rows", MONITOR_CASES, ids=[c[0] for c in MONITOR_CASES])
+def test_the_recorded_monitor_value_is_the_exact_mse_of_the_best_model(
+        extra_runs, name, source, rows) -> None:
+    """``monitor_value`` is the MSE of the saved best model on the monitored rows,
+    float32 predictions against float32 targets, in both ``--val-fraction``
+    settings and for all three sources. With ``--val-fraction 0`` it was the
+    running-mean ``loss`` of the best epoch (measured 0.1546 against the saved
+    model's 0.1419, decisions.md D-052). ``MONITOR_REL`` covers the float32
+    averaging of Keras' batched ``val_loss`` and of the batched start threshold:
+    measured relative differences (CPU) 0.0, 9.2e-08, 7.4e-08 and 6.6e-09 in the
+    four cells with a model; 1e-6 is 11 times the worst."""
+    best = extra_runs[name].summary["best_checkpoint"]
+    assert (best["source"], best["monitor"], best["monitor_rows"]) == (source, "val_loss", rows)
+    if source == "none":
+        assert best["monitor_value"] is None and best["file"] is None
+        return
+    exact = _monitor_mse(extra_runs[name], best["file"])
+    assert best["monitor_value"] == pytest.approx(exact, rel=MONITOR_REL, abs=0), (
+        f"{name}: recorded {best['monitor_value']!r}, the saved model's MSE on the "
+        f"{rows} rows is {exact!r}")
 
 
 # ---------------------------------------------------------------------
@@ -1325,6 +1468,27 @@ def test_an_unscaled_csv_outside_the_unit_range_warns_unless_handled(
     if warns:
         assert "column(s) [0]" in messages[0], "only column 0 leaves [0, 1]"
         assert "--scale-csv" in messages[0] and "--centers" in messages[0]
+
+
+def test_a_csv_column_below_zero_only_warns(caplog, tmp_path) -> None:
+    """Column 1 is in [-1, 0.5]: it leaves [0, 1] only below. ``wide_csv``'s bad
+    column leaves it on both sides, so a check of the upper bound alone passed there
+    (mutation T3 of decisions.md D-054)."""
+    rng = np.random.default_rng(22)
+
+    def table(rows):
+        return np.column_stack([rng.uniform(0.0, 1.0, rows), rng.uniform(-1.0, 0.5, rows),
+                                rng.uniform(0.0, 1.0, rows)])
+
+    np.savetxt(tmp_path / "train.csv", table(40), delimiter=",", fmt="%.17g")
+    np.savetxt(tmp_path / "test.csv", table(30), delimiter=",", fmt="%.17g")
+    argv = ["--dataset", "csv", "--train-csv", str(tmp_path / "train.csv"),
+            "--test-csv", str(tmp_path / "test.csv")]
+    with caplog.at_level(logging.WARNING, logger="dl"):
+        data = train_hkan.load_data(train_hkan.parse_arguments(argv))
+    assert data["x_train"].max() <= 1.0 and data["x_train"][:, 1].min() < 0.0
+    messages = _range_warnings(caplog)
+    assert len(messages) == 1 and "column(s) [1]" in messages[0], messages
 
 
 def test_a_csv_inside_the_unit_range_does_not_warn(caplog, disjoint_csv) -> None:

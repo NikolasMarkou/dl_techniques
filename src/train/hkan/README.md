@@ -28,6 +28,10 @@ they are drawn from the data before training starts.
 
 In the two backprop modes `--val-fraction` (default 0.1) of the TRAIN split is held
 out for checkpoint selection. The test split is never used for fitting or selection.
+With `--val-fraction 0` nothing is held out and the fit rows themselves are passed to
+`fit()` as its validation data, so the checkpoint still selects on an end-of-epoch
+MSE (`val_loss`, here on the fit rows) and never on Keras' `loss`, which is a running
+mean over the epoch's batches while the weights move.
 `--epochs`, `--batch-size`, `--learning-rate` and `--val-fraction` are ignored in
 `closed_form` mode.
 
@@ -92,12 +96,12 @@ written.
 | `--hidden-units` | `64` | hidden widths; empty string for a one-layer model |
 | `--num-basis` | `10` | basis functions per block, per layer |
 | `--basis` | `sigmoid` | `sigmoid`, `gaussian`, `relu`, `tanh`, `softplus`, `identity`, per layer |
-| `--slope` | `5` | basis slope (the paper's sigma), per layer; `identity` ignores it |
+| `--slope` | `5` | basis slope (the paper's sigma), finite and positive, per layer; `identity` ignores it |
 | `--centers` | `random` | `random`, `equally_spaced`, `data`, per layer |
 | `--l2-block` | `0.01` | ridge strength of the block fits, per layer (closed-form modes) |
 | `--l2-mix` | `0.01` | ridge strength of the connecting fits, per layer (closed-form modes); `0` is the paper's plain least squares |
 | `--no-block-bias`, `--no-bias` | off | drop the block or the output intercepts (the paper's bias-free equations) |
-| `--chunk-size` | auto | outputs solved at once in the closed-form fit (bounds memory) |
+| `--chunk-size` | auto | outputs solved at once in the closed-form fit (bounds the memory of the solve and of the fit's closing forward pass) |
 | `--epochs` | 100 | backprop epochs |
 | `--batch-size` | 64 | backprop batch size |
 | `--learning-rate` | 1e-3 | Adam learning rate |
@@ -126,10 +130,10 @@ results/<experiment-name>/
     test_predictions.png    predicted against target and residuals, test split, repeat 0, final weights
     input_importance.png    closed-form modes: mean R^2 of the first-layer blocks per input
     rmse_over_repeats.png   when --repeats > 1
-    loss_curve.png          backprop modes
+    loss_curve.png          backprop modes; the legend names the rows of the monitored line
   best_model.keras          backprop modes, when an epoch was the best model (see below)
   closed_form_model.keras   closed_form_then_backprop: the closed-form fit before training
-  training_log.csv          backprop modes: per-epoch loss of repeat 0
+  training_log.csv          backprop modes: per-epoch loss and val_loss of repeat 0
   training_history.json     backprop modes
 ```
 
@@ -150,12 +154,19 @@ the per-layer train RMSE of the float64 fit and `forward_deviation_rms`, the RMS
 difference between the float32 model and that fit on the training rows.
 
 `best_checkpoint` is null in `closed_form` mode. In the backprop modes it has the
-keys `monitor`, `source`, `file`, `epoch`, `monitor_value`, `train_rmse`, `test_rmse`
-and `reason`. `source` is `epoch` when an epoch was the best model (`file` is
+keys `monitor`, `monitor_rows`, `source`, `file`, `epoch`, `monitor_value`,
+`train_rmse`, `test_rmse` and `reason`. `monitor` is always `val_loss`, the MSE at
+the end of each epoch; `monitor_rows` says which rows it is measured on:
+`validation` (the held-out part of the train split) or `fit` (with
+`--val-fraction 0`, when the fit rows are the validation data; `training_log.csv`,
+`training_history.json` and the loss curve's monitored line then describe the fit
+rows). `source` is `epoch` when an epoch was the best model (`file` is
 `best_model.keras`), `closed_form` in the two-phase mode when no epoch beat the
 closed-form start (`file` is `closed_form_model.keras`, `epoch` is 0, and no
 `best_model.keras` is written), or `none` when the monitored loss was never finite
-(a diverged run still finishes and writes its summary).
+(a diverged run still finishes and writes its summary). `monitor_value` is the MSE of
+the model `file` names on the `monitor_rows`, float32 predictions against float32
+targets (`null` for `none`).
 
 Reported RMSEs come from the weights at the end of training in every repeat. They
 are computed in float64 from the model's float32 predictions. Train RMSE is on the
@@ -220,23 +231,26 @@ What these runs show, by the rules written beforehand:
   damage happens at the first optimizer step and scales with the learning rate: one
   Adam step takes the train RMSE from 1.3e-07 to 2.1e-03 at learning rate 1e-4, to
   2.0e-05 at 1e-6 and to 1.5e-07 at 1e-8, while SGD at 1e-4 leaves it at 1.3e-07
-  after 79 steps. No epoch beat the start, so the run directory holds
-  `closed_form_model.keras` and no `best_model.keras`, and `best_checkpoint.source`
-  is `closed_form`.
+  after 79 steps. In repeat 0, the repeat whose models the run directory keeps and
+  the only one with a recorded best checkpoint, no epoch beat the start, so the run
+  directory holds `closed_form_model.keras` and no `best_model.keras`, and
+  `best_checkpoint.source` is `closed_form`.
 - **On TF2 the fine-tune is a tie or mixed on the train rows and worse on test.**
   Train RMSE after the fine-tune is 0.987 to 1.036 of the closed-form phase ("tie
   or mixed" by the rule); the test RMSE ratio is 1.39 to 2.94, above 1 in all 5
   repeats. The train RMSE of about 0.116 is the noise level (the standard deviation
   of `U(-0.2, 0.2)` is 0.1155), so fitting the train rows more closely is fitting
-  noise. No epoch beat the closed-form start on the validation rows.
+  noise. In repeat 0, the only repeat with a recorded best checkpoint, no epoch beat
+  the closed-form start on the validation rows.
 - **Backprop alone against closed form.** TF5: median test RMSE is 17200 times the
   closed-form one ("worse"). TF2: 2.40 times ("worse"; the quartiles are 0.0255 to
   0.0396 for `backprop` against 0.0151 to 0.0166 for `closed_form`). Confound:
   `closed_form` fits on all 5000 train rows and `backprop` on 4500. Against the
   closed-form phase of the two-phase run, which uses the same 4500 rows, the ratios
   are 19900 (TF5) and 2.26 (TF2).
-- **Cost.** The closed-form fit took 3.0 to 9.2 s per repeat; 100 epochs of backprop
-  took 23.7 to 65.4 s.
+- **Cost.** The closed-form fit took 3.0 to 9.2 s per repeat in the `closed_form`
+  runs and 2.7 to 12.1 s inside the two-phase runs (`closed_form_seconds`: 6.8 to
+  12.1 s on TF5, 2.7 to 7.5 s on TF2); 100 epochs of `backprop` took 23.7 to 65.4 s.
 - **TF2 against the paper.** The paper reports train RMSE 0.116 and test RMSE 0.0185
   for HKAN on TF2, on its own data file with its own identity-layer settings; this
   trainer measures 0.1157 and 0.01556 on its own generated data. The two are not the
@@ -250,6 +264,15 @@ seed streams, the scaling of TF1 and TF2, and the defaults (`decisions.md` D-031
 D-033 to D-046). In the reported batch the RMSE box plot of the TF5 `backprop` run
 has a single labelled tick on its log axis; the plot now switches to a linear axis
 inside one decade.
+
+A second review round (`decisions.md` D-048 to D-055) changed the batch size of the
+closed-form fit's closing forward pass, the dtype handling, the constant-target test
+and, with `--val-fraction 0` only, the checkpoint monitor; none of these touches the
+reported configurations. One repeat of the TF5 `closed_form` run was repeated on the
+changed code: seed, train RMSE, test RMSE, per-layer RMSE and
+`forward_deviation_rms` equal repeat 0 of `hkan_tf5_closed_form_20260930c` bit for
+bit. The loss curves of the reported runs carry the legend labels of the code that
+drew them ("train (fit rows)", "validation").
 
 ## 6. Tests
 
