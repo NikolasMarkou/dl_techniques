@@ -197,22 +197,22 @@ def parse_arguments(argv=None) -> argparse.Namespace:
 def load_data(args: argparse.Namespace) -> Dict[str, np.ndarray]:
     """Load the dataset named by ``args``.
 
-    The inputs are rounded to float32 once, here, so the closed-form fit (float64
-    arithmetic) sees exactly the values the float32 model is later called on.
-
     :param args: Parsed arguments.
     :type args: argparse.Namespace
-    :return: ``x_train``, ``x_test`` (float32) and ``y_train``, ``y_test`` (float64).
+    :return: ``x_train``, ``y_train``, ``x_test``, ``y_test``, all float64.
     :rtype: Dict[str, np.ndarray]
     """
+    # DECISION plan-2026-09-30T082355-4d999dbc/D-031
+    # The inputs stay float64. Do NOT round them to float32 here "so the fit sees
+    # what the model is called on": the targets were computed from the unrounded
+    # inputs, so rounding makes them inconsistent with the inputs at about 5e-8,
+    # the near-interpolating closed-form fit chases that with large weights, and
+    # the float32 forward pass then amplifies it. Measured on TF5 (width 912):
+    # train RMSE 1.4e-4 with the rounding, 1.4e-7 without. See decisions.md D-031.
     if args.dataset == "csv":
-        data = load_csv_dataset(args.train_csv, args.test_csv, scale=args.scale_csv)
-    else:
-        data = make_dataset(args.dataset, seed=args.seed,
-                            num_train=args.num_train_samples, num_test=args.num_test_samples)
-    data["x_train"] = data["x_train"].astype(np.float32)
-    data["x_test"] = data["x_test"].astype(np.float32)
-    return data
+        return load_csv_dataset(args.train_csv, args.test_csv, scale=args.scale_csv)
+    return make_dataset(args.dataset, seed=args.seed,
+                        num_train=args.num_train_samples, num_test=args.num_test_samples)
 
 
 def build_model(args: argparse.Namespace, seed: int) -> HKAN:

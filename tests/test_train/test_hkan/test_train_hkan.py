@@ -306,10 +306,22 @@ def test_best_checkpoint_reloads_and_reproduces_its_recorded_test_rmse(runs, mod
     assert rmse == pytest.approx(run.summary["best_checkpoint"]["test_rmse"], rel=1e-6)
 
 
-def test_load_data_rounds_inputs_to_float32_and_keeps_targets_float64() -> None:
+def test_load_data_keeps_the_inputs_unrounded_in_float64() -> None:
+    """The trainer must fit on the inputs the targets were computed from.
+
+    An earlier version rounded the inputs to float32 in ``load_data``. The targets
+    are a function of the unrounded inputs, so the rounding made them inconsistent
+    at about 5e-8; on TF5 at width 912 the closed-form fit chased that with weights
+    near 70 and the train RMSE was 1.4e-4 instead of 1.4e-7 (decisions.md D-031 of
+    plan-2026-09-30T082355-4d999dbc). The guard is on the values, not only the
+    dtype: a round trip through float32 must change them.
+    """
     args = train_hkan.parse_arguments([*TINY, "--dataset", "tf4"])
     data = train_hkan.load_data(args)
-    assert data["x_train"].dtype == np.float32 and data["x_test"].dtype == np.float32
+    assert data["x_train"].dtype == np.float64 and data["x_test"].dtype == np.float64
+    for key in ("x_train", "x_test"):
+        rounded = data[key].astype(np.float32).astype(np.float64)
+        assert np.any(rounded != data[key]), f"{key} is already float32-rounded"
     assert data["y_train"].dtype == np.float64 and data["y_test"].dtype == np.float64
     assert data["x_train"].shape == (TRAIN_ROWS, 10) and data["x_test"].shape == (TEST_ROWS, 10)
 
