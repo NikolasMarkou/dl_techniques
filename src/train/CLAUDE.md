@@ -27,6 +27,13 @@ Six shapes. Pick the closest exemplar and copy it; do not re-derive the scaffold
 | **Pattern 5: Depth estimation** — `train.common.megadepth` pipeline, depth metrics + visualization callbacks from `dl_techniques` | Depth Anything | `src/train/depth_anything/train_depth_anything.py` | `val_loss` |
 | **Pattern 6: Byte-level LM pretrain** — no tokenizer at all: `dl_techniques.datasets.byte_lm` packs raw UTF-8 into causal windows, and the auxiliary loss arrives through the model's `add_loss` rather than a custom `train_step` | H-Net | `src/train/hnet/common.py` | `val_loss` |
 
+**`src/train/hkan/` fits none of the six patterns.** HKAN is a tabular regression model whose default
+training is a closed-form, layer-by-layer least-squares fit (`HKAN.fit_closed_form`), with stock `fit()`
+as an option (`--training-mode closed_form | backprop | closed_form_then_backprop`). Copy it for a model
+trained without an epoch loop: a purpose-built parser, `refuse_existing_run` + `attach_run_log` +
+`write_summary_json`, repeats with derived seeds, median and IQR in `results_summary.json`. Its README
+lists the flags, the per-mode run directory and the measured runs.
+
 **`src/train/convunext/` (ConvUNext segmentation) is a sibling of `src/train/convnext/`, not a task switch inside it.**
 It writes the same run-directory contract (`config.json`, `run.log`, `training_log.csv`,
 `training_history.json`, `best_model.keras`, `final_model.keras`, `results_summary.json`,
@@ -207,6 +214,7 @@ loading — do NOT force it through `load_dataset()`.
 | `yolo12/train_multitask` | Per-task callbacks, losses and visualization |
 | `tabm` | Custom `TabMTrainer`, not standard Keras `fit()` |
 | `lewm` | Dict-shaped inputs (`{"pixels", "action"}`) + add_loss-only training; `EpochAnalyzerCallback` doesn't understand either |
+| `hkan` | Three training modes, one of them closed-form least squares with no epochs; `create_callbacks()` always adds early stopping, which would stop repeats at different epochs. The backprop modes hand-assemble `ModelCheckpoint` + `CSVLogger` |
 
 When a new script genuinely cannot use `create_callbacks()`, document the reason in a comment at
 the top of its callbacks section. **This table is about CALLBACKS and nothing else — it is not a licence to skip the CLI.** Every

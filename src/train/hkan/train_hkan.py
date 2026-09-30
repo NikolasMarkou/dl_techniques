@@ -49,6 +49,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.general_purpose.hkan import HKAN
@@ -459,7 +460,7 @@ def render_loss_curve(
     epoch-1 train value is Keras' running mean over that epoch's batches, so it can
     sit above the start line even when the epoch ends below it.
     """
-    fig, ax = plt.subplots(figsize=(6.0, 4.0))
+    fig, ax = plt.subplots(figsize=(8.0, 4.0))
     epochs = np.arange(1, len(history["loss"]) + 1)
     ax.plot(epochs, history["loss"], label="train (fit rows)")
     if "val_loss" in history:
@@ -469,9 +470,11 @@ def render_loss_curve(
                    label="closed-form fit (train)")
     ax.set_yscale("log")
     ax.set_xlabel("epoch")
+    ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
     ax.set_ylabel("MSE")
     ax.set_title("Backprop loss, repeat 0")
-    ax.legend()
+    # Outside the axes: inside, the legend box landed on the closed-form line.
+    ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5))
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
