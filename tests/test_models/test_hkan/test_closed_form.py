@@ -781,8 +781,23 @@ class TestForwardCheck:
         with caplog.at_level(logging.WARNING, logger="dl"):
             model.fit_closed_form(x, y)
         messages = fit_warnings(caplog)
-        assert len(messages) == 1 and "absolute floor" in messages[0]
-        assert "constant target" in messages[0]
+        assert len(messages) == 1 and "constant target" in messages[0]
+
+    def test_the_constant_target_floor_scales_with_the_target(self, caplog):
+        """A perfect fit of a constant near 1000 must not warn.
+
+        float32(1000.1) - 1000.1 is about 6e-5, far above a fixed floor of
+        1e-6 (the first version of the floor warned here, pass-3 review);
+        the floor is 1e-6 times max(1, max |y|), about 1e-3 here.
+        """
+        x, _ = smooth_problem(n_rows=N_ROWS)
+        y = np.full((N_ROWS,), 1000.1)
+        model = HKAN(hidden_units=(HIDDEN,), basis="tanh", slope=SLOPE,
+                     l2_block=L2_POSITIVE, seed=0)
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            diagnostics = model.fit_closed_form(x, y)
+        assert diagnostics["forward_deviation_rms"] > 1e-6, "the fixture lost its point"
+        assert fit_warnings(caplog) == []
 
     @staticmethod
     def _refit_with_forward(monkeypatch, forward_of):
@@ -826,6 +841,17 @@ class TestForwardCheck:
                 monkeypatch, lambda p: np.full_like(p, np.nan))
         assert np.isnan(diagnostics["forward_deviation_rms"])
         assert len(fit_warnings(caplog)) == 1
+
+    @pytest.mark.parametrize("ulps, constant", [(3, True), (5, False)])
+    def test_the_constancy_tolerance_is_four_epsilons(self, ulps, constant):
+        """Pins ``CONSTANT_TARGET_EPSILONS`` = 4 by behaviour at unit scale: a
+        range of 3 epsilons is constant, 5 is not (1.0 + k eps is exact in
+        float64, so the range is exactly k eps). A tolerance of 1 or 24
+        epsilons fails one of the two cells."""
+        eps = np.finfo(np.float64).eps
+        y = np.array([1.0, 1.0 + ulps * eps, 1.0])
+        assert float(np.ptp(y)) == ulps * eps
+        assert hkan_layer_module.is_constant_target(y) is constant
 
     @pytest.mark.parametrize("direction", [np.inf, -np.inf], ids=["one_ulp_up", "one_ulp_down"])
     @pytest.mark.parametrize("intercepts", [True, False], ids=["intercepts", "bias_free"])
@@ -871,6 +897,20 @@ class TestForwardCheck:
 
 
 class TestForwardCheckMemory:
+
+    def test_a_tiny_fit_on_a_wide_layer_still_uses_one_row_batches(self):
+        """5 rows, width 512, ``chunk_size=1``: the byte budget of one output
+        chunk is smaller than one row of the whole model's features, so the
+        forward batch must be floored at one row (without the floor it is 0
+        and the fit raises ``range() arg 3 must not be zero``, pass-3 review).
+        """
+        rng = np.random.default_rng(0)
+        x, y = rng.uniform(0, 1, (5, 3)), rng.uniform(0, 1, 5)
+        model = HKAN(hidden_units=(512,), seed=0)
+        diagnostics = model.fit_closed_form(x, y, chunk_size=1)
+        assert model._forward_batch_rows(5, 1) == 1
+        assert np.isfinite(diagnostics["forward_rmse"])
+
     """The forward check runs in batches sized from the solve's byte budget.
 
     Its feature tensor is ``(B, n_out, n_in, m)`` at the compute dtype; one

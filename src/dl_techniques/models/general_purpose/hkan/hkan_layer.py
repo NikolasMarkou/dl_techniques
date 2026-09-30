@@ -79,7 +79,8 @@ SUPPORTED_COMPUTE_DTYPES: Tuple[str, ...] = ("float32", "float64")
 
 #: A target whose range is at most this many float64 epsilons times its
 #: largest magnitude is constant (:func:`is_constant_target`). 4 covers a
-#: target one ulp away from a constant in either direction at any magnitude.
+#: target one ulp away from a constant in either direction at any normal
+#: (not subnormal) magnitude; a range of 5 epsilons is not constant.
 CONSTANT_TARGET_EPSILONS: float = 4.0
 
 # DECISION plan-2026-09-30T082355-4d999dbc/D-035
@@ -143,7 +144,7 @@ def is_constant_target(y: np.ndarray) -> bool:
     # decisions.md D-051.
     y = np.asarray(y, dtype=np.float64)
     scale = float(np.max(np.abs(y)))
-    return float(np.ptp(y)) <= CONSTANT_TARGET_EPSILONS * np.finfo(np.float64).eps * scale
+    return bool(float(np.ptp(y)) <= CONSTANT_TARGET_EPSILONS * np.finfo(np.float64).eps * scale)
 
 
 def solve_linear_float64(

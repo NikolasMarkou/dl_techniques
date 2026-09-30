@@ -119,8 +119,8 @@ cast to its own dtype, and its forward pass is not always the fit (section 6). S
 `forward_rmse` (the model against `y`: the number a later `predict` reproduces) and
 `forward_deviation_rms` (the model against `train_predictions`). When the deviation exceeds
 1e-3 of the target's standard deviation it logs a warning through the repo logger that states
-both RMSEs, the largest weight and the remedies. For a constant target the limit is an absolute
-1e-6 instead. It is a warning, not an exception: the float64 diagnostics are still correct. In
+both RMSEs, the largest weight and the remedies. For a constant target the limit is 1e-6 times
+`max(1, max |y|)` instead, about ten float32 steps at the target's scale. It is a warning, not an exception: the float64 diagnostics are still correct. In
 this example (`l2_mix` at its default, 0.01) `forward_rmse` and `layer_rmse[-1]` are both
 0.08270, 5e-09 apart, the deviation is 1.9e-07 RMS, and no warning is logged.
 

@@ -31,7 +31,8 @@ out for checkpoint selection. The test split is never used for fitting or select
 With `--val-fraction 0` nothing is held out and the fit rows themselves are passed to
 `fit()` as its validation data, so the checkpoint still selects on an end-of-epoch
 MSE (`val_loss`, here on the fit rows) and never on Keras' `loss`, which is a running
-mean over the epoch's batches while the weights move.
+mean over the epoch's batches while the weights move. That costs one extra
+evaluation pass over the fit rows per epoch, in every repeat.
 `--epochs`, `--batch-size`, `--learning-rate` and `--val-fraction` are ignored in
 `closed_form` mode.
 

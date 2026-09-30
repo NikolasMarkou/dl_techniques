@@ -110,7 +110,9 @@ _PROPAGATION_BATCH: int = 256
 FORWARD_DEVIATION_FRACTION: float = 1e-3
 
 #: The limit used instead when the target is constant (``is_constant_target``):
-#: an absolute RMS difference, about ten float32 steps at unit scale.
+#: an RMS difference of this much times ``max(1, max |y|)``, about ten float32
+#: steps at the target's own scale. A fixed absolute value warned on a perfect
+#: fit of a constant near 1000, whose float32 rounding alone is about 6e-5.
 FORWARD_DEVIATION_FLOOR: float = 1e-6
 
 # ---------------------------------------------------------------------
@@ -478,13 +480,13 @@ class HKAN(keras.Model):
         from the fit by about the weight magnitude times the resolution of
         that dtype: 1e-7 for weights of order 1 in float32, and arbitrarily
         much for the block coefficients of 1e7 to 1e11 that a zero ridge
-        gives on a smooth basis, or for the connecting weights of 1e3 to 1e8
-        that ``l2_mix = 0`` gives on a wide layer (4e2 to 5e8 in the measured
+        gives on a smooth basis, or for the connecting weights that
+        ``l2_mix = 0`` gives on a wide layer (4e2 to 5e8 in the measured
         cases). The fit therefore ends with one
         batched forward pass of the model on ``x`` and reports it
         (``forward_rmse``, ``forward_deviation_rms``). When the deviation
         exceeds ``FORWARD_DEVIATION_FRACTION`` of the target's standard
-        deviation (``FORWARD_DEVIATION_FLOOR`` in absolute terms for a
+        deviation (``FORWARD_DEVIATION_FLOOR`` times ``max(1, max |y|)`` for a
         target that ``is_constant_target`` calls constant), or is not a
         finite number, a warning is logged; it is not an exception, because
         the float64 diagnostics are still correct.
@@ -578,10 +580,10 @@ class HKAN(keras.Model):
                 f"{FORWARD_DEVIATION_FRACTION:g} of the target's standard "
                 f"deviation {spread:.3e}")
         else:
-            limit = FORWARD_DEVIATION_FLOOR
+            limit = FORWARD_DEVIATION_FLOOR * max(1.0, float(np.max(np.abs(y))))
             limit_text = (
-                f"the absolute floor {FORWARD_DEVIATION_FLOOR:g} used for a "
-                "constant target")
+                f"the floor {limit:.3e} ({FORWARD_DEVIATION_FLOOR:g} times the "
+                "target's scale) used for a constant target")
         if not deviation <= limit:
             # Over every weight, with a default: a frozen model has no
             # trainable weights and max() of nothing raised here, after the
