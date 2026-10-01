@@ -132,6 +132,7 @@ from .infonce_loss import (
 
 from .lpips_loss import LPIPSLoss
 
+from .harmonic_loss import HarmonicCausalLMLoss, harmonic_logits
 from .masked_causal_lm_loss import MaskedCausalLMLoss, PrefixMaskedCausalLMLoss
 from .mase_loss import MASELoss, mase_metric
 
@@ -304,6 +305,9 @@ __all__ = [
     # lpips_loss
     "LPIPSLoss",
     # mase_loss
+    # harmonic_loss
+    "HarmonicCausalLMLoss",
+    "harmonic_logits",
     # masked_causal_lm_loss
     "MaskedCausalLMLoss",
     "PrefixMaskedCausalLMLoss",

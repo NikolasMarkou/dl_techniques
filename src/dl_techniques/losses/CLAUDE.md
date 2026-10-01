@@ -51,6 +51,7 @@ from dl_techniques.losses import (
 - `focal_causal_lm_loss.py` — Focal loss variant for causal LM training
 - `focal_uncertainty_loss.py` — Focal loss with uncertainty estimation
 - `goodhart_loss.py` — Cross-entropy plus a per-sample confidence penalty (Pereyra et al. 2017), with an optional off-by-default `prior_weight * KL(class_prior || mean_p)` anti-collapse term. Also exports `analyze_loss_components`. The `prior_weight` term is irreducibly BATCH-LEVEL: at `prior_weight > 0` the loss no longer decomposes per row. It does NOT compute `I(X; Y_hat)` — `call(y_true, y_pred)` never sees `X`
+- `harmonic_loss.py` — Harmonic loss (arXiv:2502.01628): `harmonic_logits(x, w, n, eps)` returns `-(n/2) log(||x-w||^2 + eps)` in >=float32 (softmax of it is harmonic max `d^-n`), and `HarmonicCausalLMLoss` is the masked CE over those logits (`from_logits` fixed True). `n` is the paper's exponent on `d`, not on `d^2`
 - `hrm_loss.py` — Hierarchical reasoning model loss
 - `huber_loss.py` — Robust Huber loss
 - `image_restoration_loss.py` — Multi-component image restoration loss

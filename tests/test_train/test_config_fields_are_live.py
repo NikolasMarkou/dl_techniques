@@ -97,6 +97,7 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/common/clm_pretrain.py", "ClmPretrainConfig"),
     ("train/gpt2/pretrain.py", "TrainingConfig"),
     ("train/gpt2/pretrain_so.py", "SOTrainingConfig"),
+    ("train/gpt2/pretrain_harmonic.py", "HarmonicTrainingConfig"),
     ("train/gpt2/finetune.py", "FinetuneConfig"),
     ("train/wave_field/pretrain.py", "TrainingConfig"),
     ("train/language/colbert/common.py", "TrainingConfig"),

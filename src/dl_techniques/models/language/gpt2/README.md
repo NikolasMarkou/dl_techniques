@@ -206,6 +206,9 @@ Constructor arguments not covered by a variant:
 | `attention_type` | `"multi_head"` | Forwarded to `TextDecoder`'s attention factory. |
 | `ffn_type` | `"mlp"` | Forwarded to `TextDecoder`'s FFN factory. |
 | `tie_word_embeddings` | `True` | See §4.2. |
+| `head_type` | `"linear"` | `"harmonic"` scores tokens by `-(n/2) log(||h-E_t||^2+eps)` (harmonic max, arXiv:2502.01628); tied embeddings only; no extra parameters. Train with `HarmonicCausalLMLoss` (`train.gpt2.pretrain_harmonic`). |
+| `harmonic_exponent` | `None` | The paper's `n` in `p ~ d^-n`; `None` resolves to `2 * embed_dim`. |
+| `harmonic_eps` | `1e-6` | Floor added to the squared distance. |
 
 ---
 

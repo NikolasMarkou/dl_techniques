@@ -24,7 +24,7 @@ import os
 import glob
 import argparse
 from dataclasses import dataclass
-from typing import Callable, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import keras
 import numpy as np
@@ -142,7 +142,12 @@ def load_model_from_checkpoint(
     return model, step
 
 
-def create_gpt2_model(config: TrainingConfig) -> CausalLanguageModel:
+def create_gpt2_model(
+    config: TrainingConfig,
+    *,
+    head_kwargs: Optional[Dict[str, Any]] = None,
+    loss_fn: Optional[keras.losses.Loss] = None,
+) -> CausalLanguageModel:
     """Create and build a GPT-2 model, wrapped in ``CausalLanguageModel``.
 
     GPT2's own ``call()`` already bakes its tied/untied head and returns a
@@ -152,6 +157,13 @@ def create_gpt2_model(config: TrainingConfig) -> CausalLanguageModel:
     True`` matches ``preprocess_clm_dataset``'s ``(input_ids, labels)``
     packed-CLM contract. See ``masked_language_model/clm.py`` module
     docstring for the full flag contract.
+
+    :param config: Training configuration.
+    :param head_kwargs: Extra ``GPT2`` keyword arguments (for example
+        ``head_type="harmonic"``) merged over the config-derived ones. ``None``
+        leaves the architecture exactly as the config describes it.
+    :param loss_fn: Loss to train with. ``None`` builds the ce/focal loss the
+        config selects via :func:`create_loss_fn`.
     """
     logger.info(f"Creating GPT-2-{config.model_variant.upper()}...")
 
@@ -168,6 +180,8 @@ def create_gpt2_model(config: TrainingConfig) -> CausalLanguageModel:
     if config.num_heads is not None:
         variant_kwargs["num_heads"] = config.num_heads
 
+    variant_kwargs.update(head_kwargs or {})
+
     gpt2_model = GPT2.from_variant(config.model_variant, **variant_kwargs)
 
     model = CausalLanguageModel(
@@ -176,7 +190,7 @@ def create_gpt2_model(config: TrainingConfig) -> CausalLanguageModel:
         skip_head=True,
         output_key="logits",
         pre_shifted=True,
-        loss_fn=create_loss_fn(config),
+        loss_fn=loss_fn if loss_fn is not None else create_loss_fn(config),
         verify_causality=True,
     )
 
@@ -236,6 +250,7 @@ def compile_model(
 def train_gpt2(
     config: TrainingConfig,
     model_factory: Callable[[TrainingConfig], CausalLanguageModel] = create_gpt2_model,
+    results_dir_prefix: str = "gpt2_pretrain",
 ) -> Tuple[CausalLanguageModel, keras.callbacks.History]:
     """Run GPT-2 CLM pre-training.
 
@@ -245,6 +260,7 @@ def train_gpt2(
         :func:`create_gpt2_model`. Override to inject post-construction
         wrapping (e.g. SO regularization). Not used when resuming from a
         checkpoint.
+    :param results_dir_prefix: Prefix of the timestamped run directory.
     :return: Trained model and training history.
     """
     logger.info("=" * 60)
@@ -291,7 +307,7 @@ def train_gpt2(
     # Callbacks: standard NLP callbacks + step-based checkpointing
     callbacks, results_dir = create_nlp_callbacks(
         model_name=f"GPT2-{config.model_variant}",
-        results_dir_prefix="gpt2_pretrain",
+        results_dir_prefix=results_dir_prefix,
         include_analyzer=False,
     )
     save_config_json(config, results_dir)

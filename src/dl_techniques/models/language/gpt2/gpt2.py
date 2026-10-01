@@ -44,6 +44,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.losses.harmonic_loss import harmonic_logits
 from dl_techniques.utils.weight_transfer import load_weights_or_raise
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.utils.model_build import materialize_sublayers
@@ -128,6 +129,21 @@ class GPT2(keras.Model):
         multi-billion-parameter scale (Llama 3, OLMo 2, DeepSeek-V3, large
         Qwen3 variants). Default: True.
     :type tie_word_embeddings: bool
+    :param head_type: ``'linear'`` (default) scores token ``t`` by ``h . E_t``.
+        ``'harmonic'`` scores it by ``-(n/2) log(||h - E_t||^2 + eps)``, i.e. the
+        log of the harmonic-max unnormalized probability ``d_t^-n`` (Baek et
+        al., 2025, arXiv:2502.01628); train it with
+        :class:`~dl_techniques.losses.HarmonicCausalLMLoss`. ``'harmonic'``
+        requires ``tie_word_embeddings=True``: the embedding table is the set of
+        class centres. Adds no parameters.
+    :type head_type: str
+    :param harmonic_exponent: Exponent ``n`` of ``p ~ d^-n`` for the harmonic
+        head. ``None`` (default) resolves to ``2 * embed_dim``, the value the
+        reference implementation uses. Ignored by the linear head.
+    :type harmonic_exponent: Optional[float]
+    :param harmonic_eps: Floor added to the squared distance in the harmonic
+        head. Default: 1e-6.
+    :type harmonic_eps: float
     :param kwargs: Additional keyword arguments for ``keras.Model``.
 
     Example:
@@ -201,6 +217,9 @@ class GPT2(keras.Model):
         attention_type: str = "multi_head",
         ffn_type: str = "mlp",
         tie_word_embeddings: bool = True,
+        head_type: str = "linear",
+        harmonic_exponent: Optional[float] = None,
+        harmonic_eps: float = 1e-6,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -209,6 +228,21 @@ class GPT2(keras.Model):
             vocab_size, embed_dim, depth, num_heads,
             dropout_rate, attention_dropout_rate,
         )
+        if head_type not in ("linear", "harmonic"):
+            raise ValueError(
+                f"head_type must be 'linear' or 'harmonic', got {head_type!r}"
+            )
+        if head_type == "harmonic" and not tie_word_embeddings:
+            raise ValueError(
+                "head_type='harmonic' needs tie_word_embeddings=True: the "
+                "embedding table supplies the class centres."
+            )
+        if harmonic_exponent is not None and harmonic_exponent <= 0:
+            raise ValueError(
+                f"harmonic_exponent must be positive, got {harmonic_exponent}"
+            )
+        if harmonic_eps <= 0:
+            raise ValueError(f"harmonic_eps must be positive, got {harmonic_eps}")
 
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -222,6 +256,12 @@ class GPT2(keras.Model):
         self.attention_type = attention_type
         self.ffn_type = ffn_type
         self.tie_word_embeddings = tie_word_embeddings
+        self.head_type = head_type
+        self.harmonic_exponent = (
+            float(2 * embed_dim) if harmonic_exponent is None
+            else float(harmonic_exponent)
+        )
+        self.harmonic_eps = harmonic_eps
 
         self._build_architecture()
 
@@ -229,7 +269,8 @@ class GPT2(keras.Model):
             f"Created GPT-2: {self.depth} layers, "
             f"embed_dim={self.embed_dim}, heads={self.num_heads}, "
             f"max_seq_len={self.max_seq_len}, "
-            f"tie_word_embeddings={self.tie_word_embeddings}"
+            f"tie_word_embeddings={self.tie_word_embeddings}, "
+            f"head_type={self.head_type}"
         )
 
     @staticmethod
@@ -362,7 +403,13 @@ class GPT2(keras.Model):
         if self.tie_word_embeddings:
             # Weight-tied LM head: logits = hidden_states @ embedding_weights.T
             embedding_weights = self.decoder.word_embeddings.embeddings
-            logits = tied_embedding_logits(hidden_states, embedding_weights)
+            if self.head_type == "harmonic":
+                logits = harmonic_logits(
+                    hidden_states, embedding_weights,
+                    self.harmonic_exponent, self.harmonic_eps,
+                )
+            else:
+                logits = tied_embedding_logits(hidden_states, embedding_weights)
         else:
             logits = self.lm_head(hidden_states)
 
@@ -400,6 +447,9 @@ class GPT2(keras.Model):
             "attention_type": self.attention_type,
             "ffn_type": self.ffn_type,
             "tie_word_embeddings": self.tie_word_embeddings,
+            "head_type": self.head_type,
+            "harmonic_exponent": self.harmonic_exponent,
+            "harmonic_eps": self.harmonic_eps,
         })
         return config
 
