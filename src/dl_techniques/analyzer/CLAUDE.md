@@ -14,6 +14,7 @@ Comprehensive model analysis framework for evaluating trained Keras models. Prov
 - `data_types.py` — `DataInput`, `AnalysisResults`, `TrainingMetrics` data containers
 - `constants.py` — Enums: `LayerType`, `SmoothingMethod`, `StatusCode`, `MetricNames`
 - `calibration_metrics.py` — Brier score, ECE, reliability diagrams
+- `representation_metrics.py` — Loss-agnostic interpretability and grokking metrics from the harmonic-loss paper (arXiv:2502.01628): PCA explained variance (`explained_variance_ratios`, `cumulative_explained_variance`, `top_k_explained_variance`), scale-invariant `parallelogram_loss` (Eq. 3) with `sample_parallelogram_quadruples`, silhouette scoring of cluster/coset partitions (`partition_silhouette`, `rank_partitions`), and `epochs_to_threshold` / `grokking_gap`. Pure numpy, importable as `dl_techniques.analyzer.representation_metrics`; not wired into `ModelAnalyzer`
 - `spectral_metrics.py` / `spectral_utils.py` — Spectral weight analysis (WeightWatcher-style)
 - `utils.py` — Shared helper functions
 

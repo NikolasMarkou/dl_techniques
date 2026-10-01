@@ -163,6 +163,17 @@ that panel (see `D-033`).
 > (raw top-1 `0.075`) against multiclass `0.15`. If you were reading the decomposition's
 > `brier_score` as the multiclass score, call `compute_brier_score` instead.
 
+### Representation geometry and grokking (standalone, `analyzer/representation_metrics.py`)
+
+Not produced by `ModelAnalyzer`; import the functions directly. They implement the measurements of the harmonic-loss paper (arXiv:2502.01628) and apply to any model's embeddings or accuracy curves.
+
+| Function | Measures |
+|---|---|
+| `explained_variance_ratios`, `cumulative_explained_variance`, `top_k_explained_variance` | Compression: PCA variance per component, cumulative, and the first-`k` share (the paper's `EV`) |
+| `parallelogram_loss`, `sample_parallelogram_quadruples` | Geometry: `||E_i + E_n - E_j - E_m|| / sigma` in the first two PCs, invariant to embedding scale |
+| `partition_silhouette`, `rank_partitions` | How well a label partition (for example subgroup cosets) clusters the embedding |
+| `epochs_to_threshold`, `grokking_gap` | Epochs to reach accuracy above a threshold for N consecutive epochs, and the test-minus-train lag |
+
 ### Information flow (`results.information_flow`, per layer)
 
 Activations are captured by temporarily assigning a recording wrapper to `layer.call` on each
