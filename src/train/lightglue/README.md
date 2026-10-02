@@ -55,14 +55,19 @@ LightGlue (static masked path, mask0 / mask1)  -> per-layer log assignments, con
   flag. `freeze` toggles `trainable` through `True` first, because Keras 3.8 treats
   `trainable = False` on a model that is already `False` (a deserialised frozen one) as a
   no-op that leaves its variables trainable.
-- **Labels come from the homography.** Keypoint `i` of image 0 is a positive when it is the
-  mutual nearest neighbour of a keypoint of image 1 within `--pos-threshold` pixels after
-  reprojection (the error of a pair is the larger of the two reprojection errors). It is a
-  dustbin label when no candidate lies within the same threshold or when it warps outside
-  the other image. It is ignored (label -2, no loss, no metric) when a candidate was within
-  the threshold but lost the mutual-nearest-neighbour contest. Padded slots are ignored.
+- **Labels come from the homography.** Same rule as glue-factory's
+  `gt_matches_from_homography`, checked by exact equality against a frozen output of that
+  function. Keypoint `i` of image 0 is a positive when it is the mutual nearest neighbour of a
+  keypoint of image 1 within `--pos-threshold` pixels after reprojection (the pair distance is
+  the larger of the forward and the backward reprojection error). Dustbin is decided per
+  image from ONE direction: image 0 is dustbin when no candidate has a forward error within
+  the threshold, image 1 when no candidate has a backward error within it. A keypoint that
+  warps outside the other image is also dustbin (an extension, not in glue-factory). Everything
+  else that is not positive, a real keypoint with a one-sided candidate in range that did not
+  win the pair contest, is ignored (label -2, no loss, no metric). Padded slots are ignored.
   The same threshold is used for positives and dustbin (glue-factory's 3 px). Rule and
-  reading: `decisions.md` D-011 of the plan that added this trainer.
+  history: `decisions.md` D-011 (first reading, two-sided max) superseded by D-016 of the plan
+  that added this trainer.
 - **Loss under stock `fit`, no custom `train_step`.** `LightGlueLoss.compute` (the glue-factory
   form: balanced negative log-likelihood per layer, layer weights `gamma ** (L - 1 - i)`,
   plus a token-confidence binary cross-entropy against the detached final layer) is
@@ -223,7 +228,7 @@ The command above omits the device selection; the run itself passed `--gpu 0` (s
 - Training loss, epoch means: 8.18 then 4.53; validation loss 4.51 then 4.05. Finite, not
   constant, decreasing over 60 steps. That shows the loss is wired, and nothing more.
 - Label statistics of one training batch: 21% of the keypoints are positives, 79% dustbin,
-  none ignored, 128 keypoints per image.
+  none ignored, 128 keypoints per image (measured under the superseded two-sided dustbin rule of D-011; the one-sided rule of D-016 makes a few percent ignored, so these fractions were not re-measured).
 - Last-epoch training precision 0.04, recall 0.005; validation 0.08 and 0.015. These are
   near zero after 60 steps, as expected.
 - `lightglue.keras` reloaded in a fresh process as a `LightGlue` with the same parameter

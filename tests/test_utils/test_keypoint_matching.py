@@ -1,7 +1,9 @@
 """Contract for ``dl_techniques.utils.keypoint_matching``.
 
-Oracle: an explicit python-loop float64 transcription of the rules in the module
-docstring. Hand-built cases pin the outcome independently of the oracle. The
+Oracle: a float64 numpy transcription of glue-factory's
+``gt_matches_from_homography`` (not of this repo's rule), plus a frozen-output
+test against that function run in torch. Hand-built cases pin the outcome
+independently of the oracle. The
 ``TestMutantsAreRed`` class proves the mutual-NN and inverse-direction checks can fail.
 """
 
@@ -39,48 +41,85 @@ def _run(kp0, kp1, m0, m1, H, s0=SIZE, s1=SIZE, **kw):
     return _np(out["matches0"]), _np(out["matches1"])
 
 
+def _gf_gt_matches(kp0, kp1, H, pos_th, neg_th, visible0=None, visible1=None):
+    """Numpy float64 transcription of glue-factory ``gt_matches_from_homography``.
+
+    Source: cvg/glue-factory ``gluefactory/geometry/gt_generation.py`` (main,
+    last touched 2025-07-10, commit bd356aa), line by line: squared distances,
+    ``dist = max(dist0, dist1)``, positive = mutual argmin and ``dist < pos^2``,
+    ``negative0`` from the FORWARD distances ``dist0`` only and ``negative1``
+    from the BACKWARD distances ``dist1`` only, ``-1`` unmatched, ``-2`` ignore.
+    It is NOT a transcription of this repo's rule.
+
+    The optional ``visible*`` masks add the repo's documented extension (the
+    same device glue-factory uses in its pose/depth variant): pairs with an
+    invisible member are infinite in ``dist``, and an invisible keypoint is
+    unmatched.
+    """
+    Hi = np.linalg.inv(H)
+
+    def warp(p, T):
+        v = np.concatenate([p, np.ones((len(p), 1))], -1) @ T.T
+        return v[:, :2] / v[:, 2:3]
+
+    kp0_1, kp1_0 = warp(kp0, H), warp(kp1, Hi)
+    dist0 = ((kp0_1[:, None] - kp1[None]) ** 2).sum(-1)
+    dist1 = ((kp0[:, None] - kp1_0[None]) ** 2).sum(-1)
+    dist = np.maximum(dist0, dist1)
+    vis0 = np.ones(len(kp0), bool) if visible0 is None else visible0
+    vis1 = np.ones(len(kp1), bool) if visible1 is None else visible1
+    dist = np.where(vis0[:, None] & vis1[None, :], dist, np.inf)
+
+    min0 = dist.argmin(-1)
+    min1 = dist.argmin(-2)
+    ismin0 = np.zeros(dist.shape, bool)
+    ismin1 = np.zeros(dist.shape, bool)
+    ismin0[np.arange(len(kp0)), min0] = True
+    ismin1[min1, np.arange(len(kp1))] = True
+    positive = ismin0 & ismin1 & (dist < pos_th**2)
+    negative0 = (dist0.min(-1) > neg_th**2) | ~vis0
+    negative1 = (dist1.min(-2) > neg_th**2) | ~vis1
+    m0 = np.where(positive.any(-1), min0, -2)
+    m1 = np.where(positive.any(-2), min1, -2)
+    m0 = np.where(negative0, -1, m0)
+    m1 = np.where(negative1, -1, m1)
+    return m0, m1
+
+
 def _oracle(kp0, kp1, m0, m1, H, s0, s1, pos=3.0, neg=3.0):
-    """Loop oracle for one image; returns (matches0, matches1)."""
+    """Oracle for one image; returns (matches0, matches1) over the padded arrays.
+
+    Runs :func:`_gf_gt_matches` on the real keypoints only (the reference is
+    called on unpadded sets) and scatters back; padded slots are -2. A
+    non-invertible homography gives all-dustbin, the repo's documented rule.
+    """
     M, N = len(kp0), len(kp1)
     H = H.astype(np.float64)
-    det = np.linalg.det(H)
-    ok = abs(det) >= 1e-6 * np.linalg.norm(H) ** 3
-    Hi = np.linalg.inv(H) if ok else np.eye(3)
+    out0, out1 = np.full(M, -2), np.full(N, -2)
+    r0, r1 = np.flatnonzero(m0), np.flatnonzero(m1)
+    ok = abs(np.linalg.det(H)) >= 1e-6 * np.linalg.norm(H) ** 3
+    if not ok:
+        out0[r0], out1[r1] = -1, -1
+        return out0, out1
+    if len(r0) == 0 or len(r1) == 0:
+        out0[r0], out1[r1] = -1, -1
+        return out0, out1
+    Hi = np.linalg.inv(H)
 
-    def proj(p, T, size):
-        v = T @ np.array([p[0], p[1], 1.0])
-        if not v[2] > 1e-6:
-            return None
-        q = v[:2] / v[2]
-        if not (0 <= q[0] < size[0] and 0 <= q[1] < size[1]):
-            return None
-        return q
+    def inside(p, T, size):
+        q = np.concatenate([p, np.ones((len(p), 1))], -1) @ T.T
+        w = q[:, 2]
+        xy = q[:, :2] / w[:, None]
+        return (w > 1e-6) & (xy[:, 0] >= 0) & (xy[:, 0] < size[0]) & (xy[:, 1] >= 0) & (xy[:, 1] < size[1])
 
-    p0 = [proj(kp0[i], H, s1) if (m0[i] and ok) else None for i in range(M)]
-    p1 = [proj(kp1[j], Hi, s0) if (m1[j] and ok) else None for j in range(N)]
-    D = np.full((M, N), np.inf)
-    for i in range(M):
-        for j in range(N):
-            if p0[i] is not None and p1[j] is not None:
-                D[i, j] = max(
-                    np.linalg.norm(p0[i] - kp1[j]), np.linalg.norm(kp0[i] - p1[j])
-                )
-
-    def side(D, mk):
-        n = D.shape[0]
-        res = np.full(n, -2)
-        for i in range(n):
-            if not mk[i]:
-                continue
-            row = D[i]
-            j = int(np.argmin(row))
-            if row[j] <= pos and int(np.argmin(D[:, j])) == i:
-                res[i] = j
-            elif row.min() > neg:
-                res[i] = -1
-        return res
-
-    return side(D, m0), side(D.T, m1)
+    k0 = kp0[r0].astype(np.float64)
+    k1 = kp1[r1].astype(np.float64)
+    g0, g1 = _gf_gt_matches(
+        k0, k1, H, pos, neg, visible0=inside(k0, H, s1), visible1=inside(k1, Hi, s0)
+    )
+    out0[r0] = np.where(g0 >= 0, r1[np.maximum(g0, 0)], g0)
+    out1[r1] = np.where(g1 >= 0, r0[np.maximum(g1, 0)], g1)
+    return out0, out1
 
 
 def _random_case(seed, B=3, M=24, N=20):
@@ -175,9 +214,12 @@ class TestHandBuilt:
         kp1 = np.array([[[220, 10], [50, 20]]], "float32")  # first is outside image 1
         m = np.ones((1, 2), bool)
         g0, g1 = _run(kp0, kp1, m, m, H)
-        # kp0[0] -> (220,10) outside; kp1[0] is outside image 1 itself, both dustbin
+        # kp0[0] -> (220,10) is outside image 1: dustbin. kp1[0] lies outside its
+        # own image (detectors never produce that) but warps back inside image 0
+        # onto kp0[0] (backward error 0): one-sided rule, so it is ignored, and
+        # the pair with the invisible kp0[0] is never positive.
         np.testing.assert_array_equal(g0[0], [-1, 1])
-        np.testing.assert_array_equal(g1[0], [-1, 1])
+        np.testing.assert_array_equal(g1[0], [-2, 1])
 
     def test_ambiguity_band_is_ignored(self):
         kp0 = np.array([[[50, 50], [120, 80]]], "float32")
@@ -230,6 +272,86 @@ class TestHandBuilt:
         with pytest.raises(ValueError, match="neg_threshold"):
             _run(kp, kp, np.ones((1, 1)), np.ones((1, 1)), np.eye(3)[None].astype("float32"),
                  pos_threshold=3.0, neg_threshold=1.0)
+
+
+class TestOneSidedDustbin:
+    """D-016: dustbin is one-sided per image, as in glue-factory."""
+
+    @staticmethod
+    def _case():
+        # H halves coordinates: forward error is measured in image 1, backward in
+        # image 0, so one pair can be forward-near and backward-far.
+        H = np.array([[[0.5, 0, 0], [0, 0.5, 0], [0, 0, 1]]], "float32")
+        kp0 = np.array([[[20, 20]]], "float32")  # -> (10, 10) in image 1
+        kp1 = np.array([[[12, 10]]], "float32")  # forward error 2, backward 4
+        m = np.ones((1, 1), bool)
+        return kp0, kp1, m, H
+
+    def test_forward_near_backward_far(self):
+        kp0, kp1, m, H = self._case()
+        g0, g1 = _run(kp0, kp1, m, m, H, s0=(200.0, 160.0), s1=(100.0, 80.0))
+        # pair distance max(2, 4) = 4 > 3: not positive. Image 0 has a candidate
+        # within 3 px FORWARD so it is ignored; image 1 has none BACKWARD: dustbin.
+        np.testing.assert_array_equal(g0[0], [-2])
+        np.testing.assert_array_equal(g1[0], [-1])
+        e0, e1 = _oracle(kp0[0], kp1[0], m[0], m[0], H[0], (200.0, 160.0), (100.0, 80.0))
+        np.testing.assert_array_equal(g0[0], e0)
+        np.testing.assert_array_equal(g1[0], e1)
+
+    def test_backward_near_forward_far(self):
+        # swap roles: H doubles coordinates
+        H = np.array([[[2.0, 0, 0], [0, 2.0, 0], [0, 0, 1]]], "float32")
+        kp0 = np.array([[[10, 10]]], "float32")  # -> (20, 20)
+        kp1 = np.array([[[24, 20]]], "float32")  # forward error 4, backward 2
+        m = np.ones((1, 1), bool)
+        g0, g1 = _run(kp0, kp1, m, m, H, s0=(100.0, 80.0), s1=(200.0, 160.0))
+        np.testing.assert_array_equal(g0[0], [-1])
+        np.testing.assert_array_equal(g1[0], [-2])
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_oracle_agrees_where_rules_differ(self, seed):
+        kp0, kp1, m0, m1, H = _random_case(seed + 40)
+        g0, g1 = _run(kp0, kp1, m0, m1, H)
+        for b in range(len(H)):
+            e0, e1 = _oracle(kp0[b], kp1[b], m0[b], m1[b], H[b], SIZE, SIZE)
+            np.testing.assert_array_equal(g0[b], e0)
+            np.testing.assert_array_equal(g1[b], e1)
+
+
+class TestFrozenGlueFactory:
+    """Exact label equality with glue-factory's torch function.
+
+    Fixture ``data/glue_factory_homography_labels.npz`` (24 pairs, 128 px):
+    keypoints are 128-slot padded SuperPoint detections (a 60-step smoke
+    SuperPoint, NMS 4, border 4, threshold 0.005) on COCO val2017 pairs from
+    ``train.lightglue.data.make_pair_dataset`` (seed 0, no jitter); ``H`` is the
+    forward homography. ``g0``/``g1`` are the outputs of cvg/glue-factory
+    ``gt_matches_from_homography(kp0, kp1, H, pos_th=3, neg_th=3)`` run in
+    float64 on CPU torch 2.14.1 on the REAL keypoints of each pair (padded
+    slots set to -2), source commit bd356aa (2025-07-10), 2026-10-02. No torch
+    is needed to run this test. The image-bounds extension of this repo changes
+    no label on these pairs.
+    """
+
+    @pytest.fixture(scope="class")
+    def fx(self):
+        import os
+
+        path = os.path.join(
+            os.path.dirname(__file__), "data", "glue_factory_homography_labels.npz"
+        )
+        return np.load(path)
+
+    def test_labels_equal_glue_factory(self, fx):
+        size = float(fx["size"])
+        g0, g1 = _run(
+            fx["k0"], fx["k1"], fx["m0"], fx["m1"], fx["H"].astype("float32"),
+            s0=(size, size), s1=(size, size),
+        )
+        np.testing.assert_array_equal(g0, fx["g0"])
+        np.testing.assert_array_equal(g1, fx["g1"])
+        assert (fx["g0"] >= 0).sum() > 300 and (fx["g0"] == -1).sum() > 0
+        assert (fx["g0"] == -2).sum() > 50  # the ignored class is exercised
 
 
 class TestProperties:
@@ -314,9 +436,27 @@ class TestMutantsAreRed:
                      np.eye(3, dtype="float32")[None])
         assert (g0 >= 0).sum() == 2  # the one-positive guard would fail
 
+    def test_two_sided_max_dustbin_is_red(self, monkeypatch):
+        """Reinjecting the D-011 rule (dustbin from the max distance) must fail."""
+        import inspect
+
+        src = inspect.getsource(km.homography_matches)
+        assert "fwd_min" in src and "bwd_min" in src
+        new_src = src.replace("fwd_min > neg_threshold", "min0 > neg_threshold").replace(
+            "bwd_min > neg_threshold", "min1 > neg_threshold"
+        )
+        assert new_src != src
+        ns = dict(vars(km))
+        exec(new_src, ns)
+        monkeypatch.setattr(km, "homography_matches", ns["homography_matches"])
+        kp0, kp1, m, H = TestOneSidedDustbin._case()
+        g0, g1 = _run(kp0, kp1, m, m, H, s0=(200.0, 160.0), s1=(100.0, 80.0))
+        assert not (g0[0, 0] == -2 and g1[0, 0] == -1)
+        assert not self._agrees_with_oracle()
+
     def test_forward_h_instead_of_inverse_is_red(self, monkeypatch):
         real = km.invert_3x3
-        monkeypatch.setattr(km, "invert_3x3", lambda h: (km.ops.cast(h, "float32"), real(h)[1]))
+        monkeypatch.setattr(km, "invert_3x3", lambda h: (keras.ops.cast(h, "float32"), real(h)[1]))
         assert not self._agrees_with_oracle()
 
     def test_outside_image_not_excluded_is_red(self, monkeypatch):
@@ -324,7 +464,7 @@ class TestMutantsAreRed:
 
         def mutant(points, h, size):
             xy, _ = real(points, h, size * 0 + 1e9)
-            return xy, km.ops.ones_like(points[..., 0], dtype="bool")
+            return xy, keras.ops.ones_like(points[..., 0], dtype="bool")
 
         monkeypatch.setattr(km, "_project", mutant)
         assert not self._agrees_with_oracle()
