@@ -145,7 +145,71 @@ def test_match_quality_counts_against_the_labels():
     labels0 = np.array([2, -1, 0, -2])
     quality = ev.match_quality(np.array([[0, 2], [1, 3], [2, 0]]), labels0)
     assert quality["precision"] == pytest.approx(2 / 3) and quality["recall"] == 1.0
-    assert np.isnan(ev.match_quality(np.zeros((0, 2), int), labels0)["precision"])
+    assert quality["precision_strict"] == pytest.approx(2 / 3)
+    empty = ev.match_quality(np.zeros((0, 2), int), labels0)
+    assert np.isnan(empty["precision"]) and np.isnan(empty["precision_strict"])
+
+
+def test_precision_excludes_ignored_partners_and_strict_precision_keeps_them():
+    # image 0: kp0 -> 2 (true), kp1 dustbin, kp2 -> 0 (true), kp3 ignored (-2).
+    labels0 = np.array([2, -1, 0, -2])
+    # image 1: kp 1 is ignored (-2), everything else is unconstrained here.
+    labels1 = np.array([2, -2, 0, -1])
+    matches = np.array([[0, 2],   # correct
+                        [1, 3],   # dustbin keypoint matched: a real false positive
+                        [2, 0],   # correct
+                        [3, 1]])  # label0 == -2: not a prediction
+    quality = ev.match_quality(matches, labels0)
+    assert quality["precision"] == pytest.approx(2 / 3)          # 4th pair leaves both sides
+    assert quality["precision_strict"] == pytest.approx(2 / 4)   # 4th pair is a false positive
+    # a pair into an ignored image-1 keypoint is excluded too, only when labels1 is given
+    with_l1 = ev.match_quality(np.array([[0, 2], [2, 1]]), labels0, labels1)
+    assert with_l1["precision"] == 1.0 and with_l1["precision_strict"] == pytest.approx(0.5)
+    without_l1 = ev.match_quality(np.array([[0, 2], [2, 1]]), labels0)
+    assert without_l1["precision"] == pytest.approx(0.5)
+    # only ignored pairs: lenient precision undefined, strict precision 0
+    only = ev.match_quality(np.array([[3, 1]]), labels0, labels1)
+    assert np.isnan(only["precision"]) and only["precision_strict"] == 0.0
+    assert quality["recall"] == 1.0
+
+
+def test_precision_matches_the_training_metric():
+    """The eval's `precision` equals `KeypointMatchMetric` precision on the same matches."""
+    from dl_techniques.metrics.keypoint_matching import KeypointMatchMetric
+    from dl_techniques.losses.lightglue_loss import pack_matches
+
+    labels0 = np.array([1, -1, -2, 0, 4])
+    labels1 = np.array([3, 0, -2, -1, 4])
+    matches = np.array([[0, 1], [1, 3], [2, 2], [3, 0], [4, 4]])
+    quality = ev.match_quality(matches, labels0, labels1)
+    scores = np.full((1, 6, 6), np.log(1e-6), "float32")
+    for i, j in matches:
+        scores[0, i, j] = np.log(0.9)
+    metric = KeypointMatchMetric(mode="precision", threshold=0.1)
+    metric.update_state(pack_matches(labels0[None], labels1[None]), scores)
+    # (0,1) ok, (1,3) wrong, (2,2) ignored, (3,0) ok, (4,4) ok
+    assert float(metric.result()) == pytest.approx(3 / 4)
+    assert quality["precision"] == pytest.approx(float(metric.result()))
+    assert quality["precision_strict"] == pytest.approx(3 / 5)
+
+
+def test_summary_carries_both_precisions():
+    record = {"error": 1.0, "failed": 0.0, "num_matches": 4.0, "precision": 1.0,
+              "precision_strict": 0.5, "recall": 1.0}
+    summary = ev.summarize_records([record])
+    assert summary["mean_precision"] == 1.0 and summary["mean_precision_strict"] == 0.5
+
+
+def test_border_default_is_the_trainers_default():
+    from train.lightglue.train_lightglue import LightGlueTrainConfig, parse_arguments as trainer_parse
+    args = ev.parse_arguments(["--lightglue", "a", "--superpoint-checkpoint", "b"])
+    trainer = trainer_parse(["--superpoint-checkpoint", "b"])
+    assert args.border == ev.DEFAULT_BORDER == LightGlueTrainConfig.border
+    assert args.border == trainer.border
+    assert ev.parse_arguments(["--lightglue", "a", "--superpoint-checkpoint", "b",
+                               "--border", "9"]).border == 9
+    with pytest.raises(SystemExit):
+        ev.parse_arguments(["--lightglue", "a", "--superpoint-checkpoint", "b", "--border", "-1"])
 
 
 # ----------------------------- MNN baseline -----------------------------
@@ -219,6 +283,9 @@ def test_main_writes_the_summary_with_both_methods(run):
         assert set(stats["auc"]) == {"auc@1", "auc@3", "auc@5", "auc@10"}
         assert stats["pairs"] == 3 and stats["mean_error"] is not None
     assert summary["methods"]["lightglue"]["mean_stop_layer"] == 2.0  # adaptive off: last layer
+    assert summary["border"] == ev.DEFAULT_BORDER
+    for stats in summary["methods"].values():
+        assert "mean_precision_strict" in stats and "mean_precision" in stats
     assert summary["adaptive"]["depth_confidence"] == -1.0
 
 
@@ -241,3 +308,35 @@ def test_main_runs_with_the_checkpoints_adaptive_defaults(run, superpoint_path, 
     summary = json.loads((tmp_path / "adaptive" / "results_summary.json").read_text())
     assert 1.0 <= summary["methods"]["lightglue"]["mean_stop_layer"] <= 3.0
     assert summary["adaptive"]["depth_confidence"] == pytest.approx(0.95)
+
+
+def test_border_flag_reaches_the_decode(run, superpoint_path, tmp_path):
+    """A border wider than half the image leaves no keypoint, so nothing can match."""
+    default = json.loads((run["dir"] / "results_summary.json").read_text())
+    assert default["methods"]["mnn"]["mean_matches"] > 0  # control: the default border keeps keypoints
+    code = ev.main(["--lightglue", str(run["lightglue"]), "--superpoint-checkpoint", superpoint_path,
+                    "--images-dir", str(run["images"]), "--num-pairs", "3", "--max-keypoints", "32",
+                    "--seed", "5", "--output-dir", str(tmp_path), "--experiment-name", "wide",
+                    "--border", "40", "--depth-confidence", "-1", "--width-confidence", "-1"])
+    assert code == 0
+    wide = json.loads((tmp_path / "wide" / "results_summary.json").read_text())
+    assert wide["border"] == 40
+    assert json.loads((tmp_path / "wide" / "config.json").read_text())["border"] == 40
+    assert wide["methods"]["mnn"]["mean_matches"] == 0.0
+    assert wide["methods"]["lightglue"]["mean_matches"] == 0.0
+    assert wide["methods"]["mnn"]["failures"] == 3
+
+
+def test_border_flag_is_what_reaches_decode_superpoint(run, superpoint_path, tmp_path, monkeypatch):
+    seen = []
+    real = ev.decode_superpoint
+
+    def spy(outputs, max_keypoints, threshold, nms_radius, border):
+        seen.append(border)
+        return real(outputs, max_keypoints, threshold, nms_radius, border)
+
+    monkeypatch.setattr(ev, "decode_superpoint", spy)
+    ev.main(["--lightglue", str(run["lightglue"]), "--superpoint-checkpoint", superpoint_path,
+             "--images-dir", str(run["images"]), "--num-pairs", "1", "--max-keypoints", "32",
+             "--output-dir", str(tmp_path), "--experiment-name", "spy", "--border", "7"])
+    assert seen == [7]

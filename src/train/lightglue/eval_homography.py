@@ -28,6 +28,16 @@ the strict summary json holds a number. Median and every AUC threshold below tha
 are identical to the ``inf`` convention. A failure (fewer than 4 matches, a degenerate
 or non-finite homography) is counted at that value, never skipped.
 
+Match precision comes in two flavours, both reported. ``precision`` is the training
+metric's definition (`KeypointMatchMetric`, D-013): a predicted pair ``(i, j)`` whose
+keypoint ``i`` has label ``-2`` in image 0 or keypoint ``j`` has label ``-2`` in image 1
+(ignored or padded: the labeller cannot say) is no prediction and leaves numerator and
+denominator, so the number is comparable with the ``precision`` of the fit log.
+``precision_strict`` counts such a pair as a false positive; it can only be lower or equal.
+Recall (positives found over positive labels) is the same in both. ``--border`` is the
+edge margin of the SuperPoint decode and defaults to the trainer's default, so a model
+trained with another border must be evaluated with the same value.
+
 ``cv2`` (``opencv-python``) is imported lazily and only by the homography fit; without it
 `main` refuses (exit 2) before writing anything.
 
@@ -58,6 +68,7 @@ from train.common.run_artifacts import attach_run_log, refuse_existing_run, writ
 from train.common.run_summary import describe_devices
 from train.lightglue.data import list_images, make_pair_dataset
 from train.lightglue.pipeline import load_superpoint
+from train.lightglue.train_lightglue import LightGlueTrainConfig
 
 # ---------------------------------------------------------------------
 
@@ -67,6 +78,8 @@ EXPERIMENT_NAME = "lightglue_eval"
 DEFAULT_IMAGES_DIR = "/media/arxwn/data0_4tb/datasets/coco_2017/val2017"
 DEFAULT_THRESHOLDS: Tuple[float, ...] = (1.0, 3.0, 5.0, 10.0)
 DEFAULT_MAX_ERROR = 1000.0
+# One source of truth: the trainer's edge margin (a dataclass field default).
+DEFAULT_BORDER = LightGlueTrainConfig.border
 RUN_ARTIFACTS = ("results_summary.json", "config.json", "run.log")
 METHODS = ("lightglue", "mnn")
 
@@ -258,24 +271,44 @@ def mutual_nn_matches(
     return np.stack([idx, nn0[idx]], axis=1).astype(np.int64)
 
 
-def match_quality(matches: np.ndarray, labels0: np.ndarray) -> Dict[str, float]:
-    """Precision and recall of predicted matches against ground-truth labels.
+def match_quality(
+    matches: np.ndarray,
+    labels0: np.ndarray,
+    labels1: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Precision, strict precision and recall of predicted matches against the labels.
 
     ``labels0[i]`` is the ground-truth partner of keypoint ``i`` of image 0 (``-1``
-    dustbin, ``-2`` ignored), the ``matches0`` of `homography_matches`. Precision is the
-    fraction of predicted pairs equal to the label; recall the fraction of positive labels
-    that were predicted. Either is ``nan`` for an empty denominator.
+    dustbin, ``-2`` ignored), the ``matches0`` of `homography_matches`; ``labels1`` is the
+    same for image 1. A predicted pair ``(i, j)`` is correct iff ``labels0[i] == j``.
+
+    * ``precision`` follows `KeypointMatchMetric` (D-013): a pair with ``labels0[i] == -2``
+      or (when ``labels1`` is given) ``labels1[j] == -2`` is not a prediction and is
+      removed from numerator and denominator.
+    * ``precision_strict`` keeps every predicted pair in the denominator.
+    * ``recall`` is correct pairs over positive labels.
+
+    Each is ``nan`` for an empty denominator.
 
     :param matches: ``(S, 2)`` predicted index pairs.
-    :param labels0: ``(M,)`` int labels.
-    :return: ``{"precision": ..., "recall": ...}``.
+    :param labels0: ``(M,)`` int labels of image 0.
+    :param labels1: Optional ``(N,)`` int labels of image 1.
+    :return: ``{"precision", "precision_strict", "recall"}``.
     """
     matches = np.asarray(matches).reshape(-1, 2)
     labels0 = np.asarray(labels0)
-    true_positive = int(np.sum(labels0[matches[:, 0]] == matches[:, 1])) if len(matches) else 0
+    correct = np.zeros(len(matches), dtype=bool)
+    counted = np.zeros(len(matches), dtype=bool)
+    if len(matches):
+        correct = labels0[matches[:, 0]] == matches[:, 1]
+        counted = labels0[matches[:, 0]] != -2
+        if labels1 is not None:
+            counted &= np.asarray(labels1)[matches[:, 1]] != -2
+    true_positive = int(correct.sum())
     positives = int(np.sum(labels0 >= 0))
     return {
-        "precision": true_positive / len(matches) if len(matches) else float("nan"),
+        "precision": true_positive / int(counted.sum()) if counted.any() else float("nan"),
+        "precision_strict": true_positive / len(matches) if len(matches) else float("nan"),
         "recall": true_positive / positives if positives else float("nan"),
     }
 
@@ -287,6 +320,7 @@ def score_matches(
     H_gt: np.ndarray,
     image_size: Sequence[float],
     labels0: Optional[np.ndarray] = None,
+    labels1: Optional[np.ndarray] = None,
     method: str = "ransac",
     reproj_threshold: float = 3.0,
     max_error: float = DEFAULT_MAX_ERROR,
@@ -299,10 +333,12 @@ def score_matches(
     :param H_gt: Ground-truth ``(3, 3)`` homography image 0 -> image 1.
     :param image_size: ``(w, h)`` of image 0.
     :param labels0: Optional ground-truth ``matches0`` labels for precision / recall.
+    :param labels1: Optional ground-truth ``matches1`` labels (ignored partners in image 1).
     :param method: Homography estimator, see :func:`estimate_homography`.
     :param reproj_threshold: RANSAC threshold in pixels.
     :param max_error: Error counted for a failed estimate.
-    :return: ``{"error", "failed", "num_matches", "precision", "recall"}``.
+    :return: ``{"error", "failed", "num_matches", "precision", "precision_strict",
+        "recall"}`` (see :func:`match_quality`).
     """
     matches = np.asarray(matches).reshape(-1, 2)
     H = estimate_homography(kp0, kp1, matches, method=method, reproj_threshold=reproj_threshold)
@@ -311,10 +347,11 @@ def score_matches(
         "failed": float(H is None),
         "num_matches": float(len(matches)),
         "precision": float("nan"),
+        "precision_strict": float("nan"),
         "recall": float("nan"),
     }
     if labels0 is not None:
-        out.update(match_quality(matches, labels0))
+        out.update(match_quality(matches, labels0, labels1))
     return out
 
 
@@ -328,7 +365,7 @@ def summarize_records(
     :param thresholds: AUC thresholds in pixels.
     :return: Dict with ``pairs``, ``mean_error``, ``median_error``, ``auc`` (keyed
         ``"auc@<t>"``), ``failures``, ``mean_matches``, ``mean_precision``,
-        ``mean_recall`` (over pairs where defined, ``None`` if none) and, when records carry
+        ``mean_precision_strict``, ``mean_recall`` (over pairs where defined, ``None`` if none) and, when records carry
         ``"stop"``, ``mean_stop_layer``.
     """
     def mean_defined(key: str) -> Optional[float]:
@@ -346,6 +383,7 @@ def summarize_records(
         "failures": int(sum(r["failed"] for r in records)),
         "mean_matches": mean_defined("num_matches"),
         "mean_precision": mean_defined("precision"),
+        "mean_precision_strict": mean_defined("precision_strict"),
         "mean_recall": mean_defined("recall"),
     }
     if any("stop" in r for r in records):
@@ -383,7 +421,7 @@ def evaluate_pairs(
     max_keypoints: int,
     nms_radius: int,
     detection_threshold: float,
-    border: int = 4,
+    border: int = DEFAULT_BORDER,
     pos_threshold: float = 3.0,
     ransac_threshold: float = 3.0,
     max_error: float = DEFAULT_MAX_ERROR,
@@ -419,6 +457,7 @@ def evaluate_pairs(
             batch["image_size0"], batch["image_size1"],
             pos_threshold=pos_threshold, neg_threshold=pos_threshold)
         labels0 = np.asarray(labels["matches0"])[0]
+        labels1 = np.asarray(labels["matches1"])[0]
         kp0 = np.asarray(det0["keypoints"])[0]
         kp1 = np.asarray(det1["keypoints"])[0]
         H_gt = np.asarray(batch["H0to1"])[0]
@@ -431,7 +470,7 @@ def evaluate_pairs(
             "image_size0": batch["image_size0"], "image_size1": batch["image_size1"],
         })
         lg_matches = np.asarray(result["matches"]).reshape(-1, 2)
-        record = score_matches(kp0, kp1, lg_matches, H_gt, size, labels0,
+        record = score_matches(kp0, kp1, lg_matches, H_gt, size, labels0, labels1,
                                reproj_threshold=ransac_threshold, max_error=max_error)
         record["stop"] = float(result["stop"])
         records["lightglue"].append(record)
@@ -440,7 +479,7 @@ def evaluate_pairs(
             np.asarray(det0["descriptors"])[0], np.asarray(det1["descriptors"])[0],
             np.asarray(mask0)[0], np.asarray(mask1)[0], ratio=mnn_ratio)
         records["mnn"].append(score_matches(
-            kp0, kp1, mnn, H_gt, size, labels0,
+            kp0, kp1, mnn, H_gt, size, labels0, labels1,
             reproj_threshold=ransac_threshold, max_error=max_error))
     return records
 
@@ -471,6 +510,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nms-radius", type=int, default=4, help="Detection NMS radius in pixels.")
     parser.add_argument("--detection-threshold", type=float, default=0.005,
                         help="Minimum heatmap probability of a keypoint.")
+    parser.add_argument("--border", type=int, default=DEFAULT_BORDER,
+                        help="Pixels at the image edge without keypoints (use the value the "
+                             "model was trained with).")
     parser.add_argument("--pos-threshold", type=float, default=3.0,
                         help="Pixel threshold of the ground-truth match labels (precision/recall).")
     parser.add_argument("--ransac-threshold", type=float, default=3.0,
@@ -509,6 +551,8 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
         parser.error(f"--image-size must be >= 1, got {args.image_size}")
     if args.nms_radius < 0:
         parser.error("--nms-radius must be >= 0")
+    if args.border < 0:
+        parser.error("--border must be >= 0")
     for flag in ("pos_threshold", "ransac_threshold", "max_error"):
         if getattr(args, flag) <= 0:
             parser.error(f"--{flag.replace('_', '-')} must be > 0, got {getattr(args, flag)}")
@@ -578,7 +622,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         start = time.time()
         records = evaluate_pairs(
             dataset, superpoint, lightglue, args.max_keypoints, args.nms_radius,
-            args.detection_threshold, pos_threshold=args.pos_threshold,
+            args.detection_threshold, border=args.border, pos_threshold=args.pos_threshold,
             ransac_threshold=args.ransac_threshold, max_error=args.max_error,
             mnn_ratio=args.mnn_ratio)
         seconds = time.time() - start
@@ -594,6 +638,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "image_size": list(image_size),
             "pairs": len(records["lightglue"]),
             "seed": args.seed,
+            "border": args.border,
             "ransac_threshold": args.ransac_threshold,
             "max_error": args.max_error,
             "thresholds": list(DEFAULT_THRESHOLDS),

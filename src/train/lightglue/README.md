@@ -273,7 +273,7 @@ transcribed from glue-factory.
 | `auc@t` | area under the recall-versus-error curve up to `t` pixels, divided by `t`, for `t` in 1, 3, 5, 10 (errors sorted, recall `(i + 1) / n`, a `(0, 0)` point prepended, trapezoid rule) |
 | `mean_error`, `median_error` | mean and median corner error over pairs |
 | `failures`, `mean_matches` | failed estimates and matches per pair |
-| `mean_precision`, `mean_recall` | predicted pairs equal to the ground-truth label over predicted pairs; positive labels that were predicted over all positive labels (labels at `--pos-threshold`; pairs with an empty denominator are left out of the mean) |
+| `mean_precision`, `mean_precision_strict`, `mean_recall` | `mean_precision` is the training metric's definition: correct pairs over predicted pairs, where a pair whose keypoint is labelled -2 (ignored or padded) in either image is no prediction and leaves numerator and denominator. `mean_precision_strict` keeps those pairs as false positives (never higher). Recall is positive labels that were predicted over all positive labels (labels at `--pos-threshold`; pairs with an empty denominator are left out of the mean) |
 | `mean_stop_layer` | LightGlue only: mean 1-based layer whose assignment was used by `match()` (early exit) |
 
 The two methods are `lightglue` (the adaptive eager `LightGlue.match`, with
