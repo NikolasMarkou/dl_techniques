@@ -31,6 +31,10 @@ _EPS32 = float(np.finfo(np.float32).eps)
 _EPS16 = float(np.finfo(np.float16).eps)
 _NP = {"float16": np.float16, "bfloat16": np.float32, "float32": np.float32, "float64": np.float64}
 
+# TF32 matmul is on by default on Ampere+ GPUs; the float32 tolerances in `_tol` are derived
+# from eps32 arithmetic, so the module opts into the repo's TF32-off regime.
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
+
 D, H = 16, 2
 DH = D // H
 

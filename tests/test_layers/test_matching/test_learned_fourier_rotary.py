@@ -20,6 +20,10 @@ from tests import lightglue_reference_numpy as ref
 
 _EPS32 = float(np.finfo(np.float32).eps)
 
+# TF32 matmul is on by default on Ampere+ GPUs; the float32 tolerances below are derived from
+# eps32 arithmetic, so the module opts into the repo's TF32-off regime.
+pytestmark = pytest.mark.usefixtures("tf32_disabled")
+
 
 def _kpts(rng, b=2, n=7, m=2):
     return rng.uniform(-1.0, 1.0, size=(b, n, m))
