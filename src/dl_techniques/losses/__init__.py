@@ -184,6 +184,15 @@ from .siglip_contrastive_loss import (
 # from .smape_loss
 from .smape_loss import SMAPELoss, smape_metric
 
+# from .lightglue_loss
+from .lightglue_loss import (
+    LightGlueLoss,
+    lightglue_nll,
+    lightglue_confidence_loss,
+    pack_matches,
+    unpack_matches,
+)
+
 # from .superpoint_loss
 from .superpoint_loss import (
     SuperPointDetectorLoss,
@@ -349,6 +358,12 @@ __all__ = [
     # smape_loss
     "SMAPELoss",
     "smape_metric",
+    # lightglue_loss
+    "LightGlueLoss",
+    "lightglue_nll",
+    "lightglue_confidence_loss",
+    "pack_matches",
+    "unpack_matches",
     # superpoint_loss
     "SuperPointDetectorLoss",
     "SuperPointDescriptorLoss",

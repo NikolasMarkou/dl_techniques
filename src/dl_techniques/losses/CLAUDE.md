@@ -57,6 +57,7 @@ from dl_techniques.losses import (
 - `image_restoration_loss.py` — Multi-component image restoration loss
 - `infonce_loss.py` — Single-tower symmetric InfoNCE over two views of one batch (SimCSE-style dropout pairs); positives are positional, the batch size is the negative count
 - `jacobian_symmetry.py` — Stochastic Jacobian-symmetry penalty (double-VJP) pushing a denoiser toward a conservative field
+- `lightglue_loss.py` — LightGlue per-layer balanced assignment NLL plus token-confidence BCE (packed-label `call`, full `compute` for `add_loss`)
 - `lpips_loss.py` — LPIPS-flavored perceptual loss over a frozen ImageNet VGG16 backbone
 - `mase_loss.py` — Mean Absolute Scaled Error
 - `masked_causal_lm_loss.py` — Masked causal LM loss (skip ignore-tokens during NTP)
@@ -114,17 +115,17 @@ has gone stale before.
 - **Registration.** Every `Loss` subclass carries
   `@register_dl_technique("dl_techniques.losses.<module>")` from
   `dl_techniques.utils.keras_registration` — never a bare
-  `@keras.saving.register_keras_serializable()`. 43 of 45 modules register something; the
+  `@keras.saving.register_keras_serializable()`. 47 of 49 modules register something; the
   non-registering ones export plain functions only.
   `grep -rl register_dl_technique src/dl_techniques/losses --include=*.py | wc -l`
 
 - **Import style.** NEW files use `import keras` and qualify at the call site (`keras.ops.matmul`).
-  31 of 45 existing modules use the superseded `from keras import ops`; that majority is **neither a
+  31 of 49 existing modules use the superseded `from keras import ops`; that majority is **neither a
   pattern to extend nor a migration target** — leave them alone.
   `grep -rl "^from keras import ops" src/dl_techniques/losses --include=*.py | wc -l`
 
 - **Docstring style is Google-majority, and that is a fact, not a mandate.**
-  33 of 45 carry a Google `Args:` block, 12 carry Sphinx `:param `, 2 carry both.
+  35 of 49 carry a Google `Args:` block, 14 carry Sphinx `:param `, 2 carry both.
   **Match the file you are editing; never convert a file wholesale.** The newest modules
   (`colbert_loss.py`, `infonce_loss.py`) are Sphinx, so both styles are live and growing —
   an earlier claim that "Sphinx is the losses/ convention" was an overstatement the tree does not
