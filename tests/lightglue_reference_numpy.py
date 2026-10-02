@@ -410,6 +410,152 @@ def forward_batched(weights, kpts0, desc0, size0, kpts1, desc1, size1, n_layers,
 
 
 # ---------------------------------------------------------------------
+# adaptive path: early stop (depth confidence) and point pruning (width confidence)
+# ---------------------------------------------------------------------
+
+def get_pruning_mask_ref(
+    confidences: Optional[np.ndarray],
+    scores: np.ndarray,
+    layer_index: int,
+    n_layers: int,
+    width_confidence: float,
+) -> np.ndarray:
+    """Reference ``get_pruning_mask``: keep a point when ``matchability > 1 - width_confidence``
+    OR (when confidences exist) its token confidence is ``<= confidence_threshold(i)``.
+
+    Low-confidence points are never pruned. ``confidences`` is ``None`` when the depth
+    confidence is disabled (the confidence head is then not evaluated at all).
+    """
+    th = confidence_threshold(layer_index, n_layers)
+    keep = np.zeros(scores.shape[0], dtype=bool)
+    for k in range(scores.shape[0]):
+        keep[k] = bool(scores[k] > 1.0 - width_confidence)
+        if confidences is not None and confidences[k] <= th:
+            keep[k] = True
+    return keep
+
+
+def check_if_stop_ref(
+    conf0: np.ndarray,
+    conf1: np.ndarray,
+    layer_index: int,
+    n_layers: int,
+    num_points: int,
+    depth_confidence: float,
+) -> bool:
+    """Reference ``check_if_stop``: ``1 - #(conf < threshold) / num_points > depth_confidence``.
+
+    ``num_points`` is the ORIGINAL ``m + n``, so a pruned point counts as confident.
+    """
+    th = confidence_threshold(layer_index, n_layers)
+    below = sum(1 for c in list(conf0) + list(conf1) if c < th)
+    return (1.0 - below / num_points) > depth_confidence
+
+
+def forward_adaptive(
+    weights: Dict[str, np.ndarray],
+    kpts0: np.ndarray,
+    desc0: np.ndarray,
+    size0: np.ndarray,
+    kpts1: np.ndarray,
+    desc1: np.ndarray,
+    size1: np.ndarray,
+    n_layers: int,
+    num_heads: int,
+    depth_confidence: float,
+    width_confidence: float,
+    filter_threshold: float = 0.1,
+    pruning_min_kpts: int = -1,
+) -> Dict[str, object]:
+    """The reference ``LightGlue._forward`` with early stop and pruning, one sample, no padding.
+
+    Transcribed from ``cvg/LightGlue`` ``lightglue/lightglue.py`` ``_forward`` (fetched
+    2026-10-02). Quirks kept on purpose: the empty-side check sits at the top of the loop,
+    so ``stop`` is ``i + 1`` of the iteration that BROKE (one more than the layers run);
+    ``prune`` counters start at 1 and add 1 for each pruning step a point survives; without
+    point pruning they are all ``n_layers``.
+
+    :return: dict with ``matches0`` (M,), ``matches1`` (N,), ``matching_scores0/1``,
+        ``stop`` (int), ``matches`` (S, 2) in ORIGINAL indices, ``scores`` (S,),
+        ``prune0`` / ``prune1``.
+    """
+    m, n = kpts0.shape[0], kpts1.shape[0]
+    k0 = normalize_keypoints(kpts0, size0)
+    k1 = normalize_keypoints(kpts1, size1)
+    d0, d1 = desc0.astype(np.float64), desc1.astype(np.float64)
+    if "input_proj.weight" in weights:
+        d0 = linear(d0, weights, "input_proj")
+        d1 = linear(d1, weights, "input_proj")
+    enc0 = positional_encoding(weights["posenc.Wr.weight"], k0)
+    enc1 = positional_encoding(weights["posenc.Wr.weight"], k1)
+
+    do_early_stop = depth_confidence > 0
+    do_point_pruning = width_confidence > 0
+    ind0, ind1 = np.arange(m), np.arange(n)
+    prune0, prune1 = np.ones(m, dtype=np.int64), np.ones(n, dtype=np.int64)
+    i = 0
+    for i in range(n_layers):
+        if d0.shape[0] == 0 or d1.shape[0] == 0:
+            break
+        p = f"transformers.{i}"
+        d0 = self_block(d0, enc0, weights, p + ".self_attn", num_heads)
+        d1 = self_block(d1, enc1, weights, p + ".self_attn", num_heads)
+        d0, d1 = cross_block(d0, d1, weights, p + ".cross_attn", num_heads)
+        if i == n_layers - 1:
+            continue
+        t0 = t1 = None
+        if do_early_stop:
+            t0 = token_confidence(d0, weights, f"token_confidence.{i}")
+            t1 = token_confidence(d1, weights, f"token_confidence.{i}")
+            if check_if_stop_ref(t0, t1, i, n_layers, m + n, depth_confidence):
+                break
+        if do_point_pruning and d0.shape[0] > pruning_min_kpts:
+            s0 = matchability(d0, weights, f"log_assignment.{i}")
+            keep0 = np.nonzero(get_pruning_mask_ref(t0, s0, i, n_layers, width_confidence))[0]
+            ind0, d0, enc0 = ind0[keep0], d0[keep0], enc0[:, keep0]
+            prune0[ind0] += 1
+        if do_point_pruning and d1.shape[0] > pruning_min_kpts:
+            s1 = matchability(d1, weights, f"log_assignment.{i}")
+            keep1 = np.nonzero(get_pruning_mask_ref(t1, s1, i, n_layers, width_confidence))[0]
+            ind1, d1, enc1 = ind1[keep1], d1[keep1], enc1[:, keep1]
+            prune1[ind1] += 1
+
+    if d0.shape[0] == 0 or d1.shape[0] == 0:
+        if not do_point_pruning:
+            prune0 = np.ones(m, dtype=np.int64) * n_layers
+            prune1 = np.ones(n, dtype=np.int64) * n_layers
+        return {
+            "matches0": -np.ones(m, dtype=np.int64), "matches1": -np.ones(n, dtype=np.int64),
+            "matching_scores0": np.zeros(m), "matching_scores1": np.zeros(n),
+            "stop": i + 1, "matches": np.zeros((0, 2), dtype=np.int64), "scores": np.zeros(0),
+            "prune0": prune0, "prune1": prune1,
+        }
+
+    scores, _ = match_assignment(d0, d1, weights, f"log_assignment.{i}")
+    m0, m1, ms0, ms1 = filter_matches(scores, filter_threshold)
+    valid = np.nonzero(m0 > -1)[0]
+    matches = (np.stack([ind0[valid], ind1[m0[valid]]], axis=-1)
+               if len(valid) else np.zeros((0, 2), dtype=np.int64))
+    out0 = -np.ones(m, dtype=np.int64)
+    out1 = -np.ones(n, dtype=np.int64)
+    for k in range(len(ind0)):
+        out0[ind0[k]] = -1 if m0[k] == -1 else ind1[m0[k]]
+    for k in range(len(ind1)):
+        out1[ind1[k]] = -1 if m1[k] == -1 else ind0[m1[k]]
+    sc0, sc1 = np.zeros(m), np.zeros(n)
+    sc0[ind0] = ms0
+    sc1[ind1] = ms1
+    if not do_point_pruning:
+        prune0 = np.ones(m, dtype=np.int64) * n_layers
+        prune1 = np.ones(n, dtype=np.int64) * n_layers
+    return {
+        "matches0": out0, "matches1": out1, "matching_scores0": sc0, "matching_scores1": sc1,
+        "stop": i + 1, "matches": matches, "scores": ms0[valid],
+        "prune0": prune0, "prune1": prune1,
+    }
+
+
+# ---------------------------------------------------------------------
 # random torch-layout weights
 # ---------------------------------------------------------------------
 

@@ -15,8 +15,16 @@ layer, prunes nothing and returns the per-layer log assignments and token confid
 so it can be trained, jit-compiled and batched. Padded keypoint slots are described by
 the optional ``mask0`` / ``mask1`` inputs and take no part in the result. The adaptive
 inference path (early exit on depth confidence, point pruning on width confidence) is a
-separate method; the constructor stores ``depth_confidence`` and ``width_confidence`` for
-it and ``call()`` ignores them.
+separate method, :meth:`LightGlue.match`; the constructor stores ``depth_confidence``,
+``width_confidence`` and ``pruning_min_kpts`` for it and ``call()`` ignores them.
+
+The adaptive path, ``match()``, is eager and for inference only. After each layer except
+the last it can stop (the confident fraction of points exceeds ``depth_confidence``) and
+prune (points that are matchable-unlikely and confidently resolved are dropped, so later
+layers see fewer points). Shapes therefore depend on the data, which is why it is not a
+graph function. The pure decision rules (:func:`confidence_threshold`,
+:func:`get_pruning_mask`, :func:`check_if_stop`) are module functions so that a test can
+compare them to the reference one by one.
 
 Architecture:
     ::
@@ -56,7 +64,10 @@ References:
       (https://arxiv.org/abs/1911.11763)
 """
 
+import math
+
 import keras
+import numpy as np
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -92,6 +103,97 @@ def normalize_keypoints(keypoints: Any, image_size: Any) -> Any:
     return (kpts - shift[:, None, :]) / scale[:, None, :]
 
 
+def confidence_threshold(layer_index: int, num_layers: int) -> float:
+    """Confidence threshold of layer ``i``: ``clip(0.8 + 0.1 * exp(-4 i / L), 0, 1)``.
+
+    Interface contract. Pure python, no variables. The threshold falls from 0.9 at layer 0
+    toward 0.8 as depth grows.
+
+    :param layer_index: Zero-based layer index ``i``.
+    :param num_layers: Total layer count ``L``.
+    :return: The threshold as a float.
+    """
+    return float(min(max(0.8 + 0.1 * math.exp(-4.0 * layer_index / num_layers), 0.0), 1.0))
+
+
+def get_pruning_mask(
+        confidences: Optional[Any],
+        matchability: Any,
+        layer_index: int,
+        num_layers: int,
+        width_confidence: float,
+) -> Any:
+    """Boolean keep mask for one image's points, as the reference ``get_pruning_mask``.
+
+    Interface contract. A point is KEPT when ``matchability > 1 - width_confidence`` or,
+    when ``confidences`` is given, its token confidence is ``<= confidence_threshold``.
+    So a low-confidence point is never pruned. ``confidences`` is ``None`` when the depth
+    confidence is disabled (the confidence head was not evaluated). Pure numpy.
+
+    :param confidences: ``(N,)`` token confidences or ``None``.
+    :param matchability: ``(N,)`` matchability in ``[0, 1]``.
+    :param layer_index: Zero-based layer index.
+    :param num_layers: Total layer count.
+    :param width_confidence: Pruning confidence in ``(0, 1]``.
+    :return: ``(N,)`` bool array, True = keep.
+    """
+    keep = np.asarray(matchability) > (1.0 - width_confidence)
+    if confidences is not None:
+        keep = np.logical_or(
+            keep, np.asarray(confidences) <= confidence_threshold(layer_index, num_layers))
+    return keep
+
+
+def check_if_stop(
+        confidences0: Any,
+        confidences1: Any,
+        layer_index: int,
+        num_layers: int,
+        num_points: int,
+        depth_confidence: float,
+) -> bool:
+    """Early-exit rule, as the reference ``check_if_stop``.
+
+    Interface contract. The confident ratio is
+    ``1 - #(confidence < threshold) / num_points`` over both images; the model stops when
+    it exceeds ``depth_confidence``. ``num_points`` is the ORIGINAL ``m + n`` real
+    points, so a point pruned earlier counts as confident. Pure numpy.
+
+    :param confidences0: ``(M',)`` confidences of the points still alive in image 0.
+    :param confidences1: ``(N',)`` confidences of image 1.
+    :param layer_index: Zero-based layer index.
+    :param num_layers: Total layer count.
+    :param num_points: Original real point count ``m + n``.
+    :param depth_confidence: Stop confidence in ``(0, 1]``.
+    :return: True to stop at this layer.
+    """
+    confidences = np.concatenate([np.asarray(confidences0), np.asarray(confidences1)], axis=-1)
+    below = float(np.sum(confidences < confidence_threshold(layer_index, num_layers)))
+    return bool(1.0 - below / num_points > depth_confidence)
+
+
+def _scatter_back(
+        matches0: Any, matches1: Any, scores0: Any, scores1: Any,
+        ind0: Any, ind1: Any, size0: int, size1: int,
+) -> Tuple[Any, Any, Any, Any]:
+    """Map matches on the surviving points back to full-size, original-index arrays.
+
+    Interface contract. ``matches0`` ``(M',)`` holds a position in the surviving set of
+    image 1 (or -1); ``ind0`` / ``ind1`` list the original index of each survivor.
+    Returns ``(m0 (size0,), m1 (size1,), s0, s1)`` where pruned points are -1 / 0 and
+    partners are expressed as ORIGINAL indices. Pure numpy.
+    """
+    out0 = -np.ones(size0, dtype=np.int32)
+    out1 = -np.ones(size1, dtype=np.int32)
+    sc0 = np.zeros(size0, dtype=np.float32)
+    sc1 = np.zeros(size1, dtype=np.float32)
+    out0[ind0] = np.where(matches0 == -1, -1, ind1[np.clip(matches0, 0, None)])
+    out1[ind1] = np.where(matches1 == -1, -1, ind0[np.clip(matches1, 0, None)])
+    sc0[ind0] = scores0
+    sc1[ind1] = scores1
+    return out0, out1, sc0, sc1
+
+
 def _detach_descriptors(descriptors: Any) -> Any:
     """Stop gradient into the input descriptors, as the reference ``descriptors.detach()``.
 
@@ -120,11 +222,18 @@ class LightGlue(keras.Model):
         :func:`filter_matches`, in ``[0, 1]``. Default 0.1.
     :type filter_threshold: float
     :param depth_confidence: Early-exit confidence for the adaptive path, ``-1`` to
-        disable, else in ``[0, 1]``. Stored; ``call()`` ignores it. Default 0.95.
+        disable, else in ``[0, 1]``. Used by :meth:`match` only; ``call()`` ignores it.
+        Default 0.95.
     :type depth_confidence: float
     :param width_confidence: Point-pruning confidence for the adaptive path, ``-1`` to
-        disable, else in ``[0, 1]``. Stored; ``call()`` ignores it. Default 0.99.
+        disable, else in ``[0, 1]``. Used by :meth:`match` only; ``call()`` ignores it.
+        Default 0.99.
     :type width_confidence: float
+    :param pruning_min_kpts: :meth:`match` prunes an image only while it has MORE than this
+        many points alive. ``-1`` (default) always prunes, which is the reference's CPU
+        setting; the reference uses 1024 on a GPU, where pruning small sets costs more than
+        it saves.
+    :type pruning_min_kpts: int
     :param add_scale_ori: Append keypoint scale and orientation to the positional
         encoding input (feature width 4 instead of 2). Needs ``scales0/1`` and
         ``oris0/1`` in the inputs. Default False.
@@ -176,6 +285,7 @@ class LightGlue(keras.Model):
             filter_threshold: float = 0.1,
             depth_confidence: float = 0.95,
             width_confidence: float = 0.99,
+            pruning_min_kpts: int = -1,
             add_scale_ori: bool = False,
             gamma: float = 1.0,
             **kwargs: Any
@@ -202,6 +312,8 @@ class LightGlue(keras.Model):
                 raise ValueError(f"{name} must be -1 (disabled) or in [0, 1], got {value}")
         if gamma <= 0:
             raise ValueError(f"gamma must be positive, got {gamma}")
+        if not isinstance(pruning_min_kpts, int) or isinstance(pruning_min_kpts, bool):
+            raise ValueError(f"pruning_min_kpts must be an int, got {pruning_min_kpts!r}")
 
         self.input_dim = input_dim
         self.descriptor_dim = descriptor_dim
@@ -210,6 +322,7 @@ class LightGlue(keras.Model):
         self.filter_threshold = filter_threshold
         self.depth_confidence = depth_confidence
         self.width_confidence = width_confidence
+        self.pruning_min_kpts = pruning_min_kpts
         self.add_scale_ori = add_scale_ori
         self.gamma = gamma
         self.head_dim = descriptor_dim // num_heads
@@ -306,6 +419,19 @@ class LightGlue(keras.Model):
         desc = keras.ops.cast(_detach_descriptors(descriptors), self.compute_dtype)
         return desc if self.input_proj is None else self.input_proj(desc)
 
+    def _run_layer(self, i: int, desc0: Any, desc1: Any, freqs0: Any, freqs1: Any,
+                   mask0: Optional[Any] = None, mask1: Optional[Any] = None) -> Tuple[Any, Any]:
+        """Layer ``i``: self block on each image (shared weights), then the cross block.
+
+        Shared by :meth:`call` (full size, optional masks) and :meth:`match` (pruned size,
+        no masks), so the two paths cannot drift apart.
+
+        :return: ``(desc0, desc1)`` after the layer.
+        """
+        desc0 = self.self_blocks[i](desc0, freqs0, mask0)
+        desc1 = self.self_blocks[i](desc1, freqs1, mask1)
+        return self.cross_blocks[i](desc0, desc1, mask0, mask1)
+
     def call(self, inputs: Dict[str, Any], training: Optional[bool] = None) -> Dict[str, Any]:
         """Run all layers with padding masks and return per-layer assignments.
 
@@ -329,9 +455,7 @@ class LightGlue(keras.Model):
 
         log_assignments, conf0, conf1 = [], [], []
         for i in range(self.num_layers):
-            desc0 = self.self_blocks[i](desc0, freqs0, mask0)
-            desc1 = self.self_blocks[i](desc1, freqs1, mask1)
-            desc0, desc1 = self.cross_blocks[i](desc0, desc1, mask0, mask1)
+            desc0, desc1 = self._run_layer(i, desc0, desc1, freqs0, freqs1, mask0, mask1)
             scores, _ = self.assignments[i](desc0, desc1, mask0, mask1)
             log_assignments.append(scores)
             if i < self.num_layers - 1:
@@ -357,6 +481,152 @@ class LightGlue(keras.Model):
             "matches1": matches1,
             "matching_scores0": scores0,
             "matching_scores1": scores1,
+        }
+
+    # -----------------------------------------------------------------
+    # adaptive inference
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _real_indices(mask: Optional[Any], count: int) -> Any:
+        """Indices of the real points: all of them without a mask, else ``mask > 0``."""
+        if mask is None:
+            return np.arange(count)
+        return np.nonzero(np.asarray(keras.ops.convert_to_numpy(mask))[0] > 0)[0]
+
+    def _empty_result(self, size0: int, size1: int, stop: int, prune0: Any, prune1: Any) -> Dict[str, Any]:
+        """The reference result when one image has no point left: all -1, scores 0."""
+        return {
+            "matches0": -np.ones((1, size0), dtype=np.int32),
+            "matches1": -np.ones((1, size1), dtype=np.int32),
+            "matching_scores0": np.zeros((1, size0), dtype=np.float32),
+            "matching_scores1": np.zeros((1, size1), dtype=np.float32),
+            "stop": stop,
+            "matches": np.zeros((0, 2), dtype=np.int32),
+            "scores": np.zeros((0,), dtype=np.float32),
+            "prune0": prune0,
+            "prune1": prune1,
+        }
+
+    def match(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Adaptive inference: early exit on depth confidence, point pruning on width confidence.
+
+        This is the reference ``_forward`` and the ONLY path that uses ``depth_confidence``,
+        ``width_confidence`` and ``pruning_min_kpts``. It runs eagerly (numpy control flow
+        between layers) and its shapes depend on the data, so it is not a ``tf.function`` /
+        ``jit`` target; use :meth:`call` for training and batched graph inference. It
+        handles ONE image pair per call (batch size 1), like the reference's pruning, which
+        indexes with a single keep list.
+
+        Per layer ``i`` (every layer but the last): run the self and cross blocks; if
+        ``depth_confidence > 0`` evaluate the token confidences and stop when
+        :func:`check_if_stop` holds; if ``width_confidence > 0`` and an image still has more
+        than ``pruning_min_kpts`` points, keep only the points of :func:`get_pruning_mask`
+        (matchability of that layer's assignment head) and index-select the descriptors and
+        the rotary table to them. The last layer never stops or prunes. The final assignment
+        uses the head of the layer where the loop ended, on the surviving points only, then
+        :func:`filter_matches`, and the result is scattered back to the original indices
+        (pruned points: -1 and score 0). Optional ``mask0`` / ``mask1`` select the real
+        points first; padded slots come back as -1 / 0 as well.
+
+        Reference quirk kept on purpose: when a side runs empty after pruning, the check sits
+        at the top of the next iteration, so ``stop`` is one more than the layers that ran.
+        Token confidences are only computed when ``depth_confidence > 0``; pruning with
+        ``depth_confidence <= 0`` uses matchability alone. With both knobs disabled the
+        result equals the last layer of :meth:`call`.
+
+        :param inputs: Input dict as for :meth:`call`, with batch size 1.
+        :return: Dict of numpy values (not tensors): ``matches0`` ``(1, M)`` / ``matches1``
+            ``(1, N)`` int32 with ORIGINAL partner indices or -1; ``matching_scores0`` /
+            ``matching_scores1`` float32, 0 where pruned or unmatched; ``stop`` int, the
+            1-based index of the layer whose assignment was used (reference value, see the
+            quirk above); ``matches`` ``(S, 2)`` int32 original index pairs and ``scores``
+            ``(S,)`` float32, the compact form (a list of per-image arrays in the reference,
+            here the single array because the batch is 1); ``prune0`` ``(1, M)`` /
+            ``prune1`` ``(1, N)`` int32: with width pruning, 1 plus the number of pruning
+            steps the point survived; without it, ``num_layers`` everywhere.
+        :raises ValueError: If the batch size is not 1.
+        """
+        kp0, kp1 = inputs["keypoints0"], inputs["keypoints1"]
+        if keras.ops.shape(kp0)[0] != 1 or keras.ops.shape(kp1)[0] != 1:
+            raise ValueError("match() handles one image pair per call (batch size 1)")
+        size0, size1 = int(keras.ops.shape(kp0)[1]), int(keras.ops.shape(kp1)[1])
+        ind0 = self._real_indices(inputs.get("mask0"), size0)
+        ind1 = self._real_indices(inputs.get("mask1"), size1)
+        num_points = len(ind0) + len(ind1)
+        num_layers = self.num_layers
+
+        do_early_stop = self.depth_confidence > 0
+        do_point_pruning = self.width_confidence > 0
+        prune0 = np.ones((size0,), dtype=np.int32)
+        prune1 = np.ones((size1,), dtype=np.int32)
+        if len(ind0) == 0 or len(ind1) == 0:
+            if not do_point_pruning:
+                prune0, prune1 = prune0 * num_layers, prune1 * num_layers
+            return self._empty_result(size0, size1, 1, prune0[None], prune1[None])
+
+        pos0, pos1 = self._positions(inputs, "0"), self._positions(inputs, "1")
+        pos0 = keras.ops.take(pos0, ind0, axis=1)
+        pos1 = keras.ops.take(pos1, ind1, axis=1)
+        freqs0, freqs1 = self.posenc(pos0), self.posenc(pos1)
+        desc0 = self._embed(keras.ops.take(inputs["descriptors0"], ind0, axis=1))
+        desc1 = self._embed(keras.ops.take(inputs["descriptors1"], ind1, axis=1))
+
+        i = 0
+        for i in range(num_layers):
+            if desc0.shape[1] == 0 or desc1.shape[1] == 0:
+                break
+            desc0, desc1 = self._run_layer(i, desc0, desc1, freqs0, freqs1)
+            if i == num_layers - 1:
+                continue                      # the last layer never stops or prunes
+            token0 = token1 = None
+            if do_early_stop:
+                token0, token1 = self.confidences[i](desc0, desc1)
+                token0 = keras.ops.convert_to_numpy(token0)[0]
+                token1 = keras.ops.convert_to_numpy(token1)[0]
+                if check_if_stop(token0, token1, i, num_layers, num_points, self.depth_confidence):
+                    break
+            if do_point_pruning and desc0.shape[1] > self.pruning_min_kpts:
+                score0 = keras.ops.convert_to_numpy(self.assignments[i].get_matchability(desc0))[0]
+                keep0 = np.nonzero(get_pruning_mask(
+                    token0, score0, i, num_layers, self.width_confidence))[0]
+                ind0 = ind0[keep0]
+                desc0 = keras.ops.take(desc0, keep0, axis=1)
+                freqs0 = keras.ops.take(freqs0, keep0, axis=3)
+                prune0[ind0] += 1
+            if do_point_pruning and desc1.shape[1] > self.pruning_min_kpts:
+                score1 = keras.ops.convert_to_numpy(self.assignments[i].get_matchability(desc1))[0]
+                keep1 = np.nonzero(get_pruning_mask(
+                    token1, score1, i, num_layers, self.width_confidence))[0]
+                ind1 = ind1[keep1]
+                desc1 = keras.ops.take(desc1, keep1, axis=1)
+                freqs1 = keras.ops.take(freqs1, keep1, axis=3)
+                prune1[ind1] += 1
+
+        if not do_point_pruning:
+            prune0, prune1 = prune0 * 0 + num_layers, prune1 * 0 + num_layers
+        if desc0.shape[1] == 0 or desc1.shape[1] == 0:
+            return self._empty_result(size0, size1, i + 1, prune0[None], prune1[None])
+
+        scores, _ = self.assignments[i](desc0, desc1)
+        m0, m1, ms0, ms1 = filter_matches(scores, self.filter_threshold)
+        m0 = keras.ops.convert_to_numpy(m0)[0]
+        m1 = keras.ops.convert_to_numpy(m1)[0]
+        ms0 = keras.ops.convert_to_numpy(ms0)[0]
+        ms1 = keras.ops.convert_to_numpy(ms1)[0]
+        valid = np.nonzero(m0 > -1)[0]
+        pairs = np.stack([ind0[valid], ind1[m0[valid]]], axis=-1).astype(np.int32)
+        out0, out1, sc0, sc1 = _scatter_back(m0, m1, ms0, ms1, ind0, ind1, size0, size1)
+        return {
+            "matches0": out0[None],
+            "matches1": out1[None],
+            "matching_scores0": sc0[None],
+            "matching_scores1": sc1[None],
+            "stop": i + 1,
+            "matches": pairs,
+            "scores": ms0[valid].astype(np.float32),
+            "prune0": prune0[None],
+            "prune1": prune1[None],
         }
 
     def compute_output_shape(self, input_shape: Dict[str, Tuple[Any, ...]]) -> Dict[str, Tuple]:
@@ -394,6 +664,7 @@ class LightGlue(keras.Model):
             "filter_threshold": self.filter_threshold,
             "depth_confidence": self.depth_confidence,
             "width_confidence": self.width_confidence,
+            "pruning_min_kpts": self.pruning_min_kpts,
             "add_scale_ori": self.add_scale_ori,
             "gamma": self.gamma,
         })
