@@ -10,6 +10,7 @@ Custom Keras metrics for specialized evaluation tasks.
 - `multi_label_metrics.py` — Multi-label classification metrics (F1, precision, recall per label)
 - `perplexity_metric.py` — Language model perplexity
 - `psnr_metric.py` — Peak Signal-to-Noise Ratio for image quality
+- `keypoint_matching.py` — `KeypointMatchMetric` (`precision` / `recall` / `f1` of LightGlue-style matches vs homography labels; packed labels and `log_assignments` as in `LightGlueLoss`; wire through `compile(metrics={"log_assignments": [...]})`)
 - `time_series_metrics.py` — Time series forecasting metrics (MASE, SMAPE, quantile loss, etc.)
 - `depth_metrics.py` — Monocular depth estimation metrics (AbsRel, SqRel, RMSE, RMSE log, delta threshold)
 - `embedding_quality.py` — Pool-level text-embedding metrics: ranking (`rank_of_ground_truth`, `recall_at_k`, `mrr_at_k`, `ndcg_at_k`) and geometry (`anisotropy`, `effective_rank`, `alignment`, `uniformity`, `embedding_norm_stats`). **Plain functions, not `keras.metrics.Metric`** — see Conventions below.

@@ -14,6 +14,7 @@ This module offers stateful Keras `Metric` subclasses that are fully serializabl
 | `clip_accuracy` | `CLIPAccuracy` | Measures top-k retrieval accuracy for contrastive vision-language models by checking similarity matrix predictions. | Evaluating the alignment quality of multimodal models like CLIP. |
 | `capsule_accuracy` | `CapsuleAccuracy` | Computes classification accuracy based on the length of output capsule vectors, not probabilities. | Evaluating Capsule Networks where vector magnitude indicates presence. |
 | `psnr` | `PsnrMetric` | Computes Peak Signal-to-Noise Ratio (PSNR), specifically for the primary output of multi-output models. | Evaluating image quality in restoration/super-resolution tasks with deep supervision. |
+| `keypoint_matching` | `KeypointMatchMetric` | Precision, recall or F1 of mutual-nearest keypoint matches extracted from a final-layer log assignment, scored against homography labels (ignored and padded keypoints excluded). | Evaluating LightGlue-style matchers; pass via `compile(metrics={"log_assignments": [...]})`. |
 | `hrm_metrics` | `HRMMetrics` | A container for a suite of metrics for the Hierarchical Reasoning Model, including accuracy, Q-halt accuracy, and step counts. | Custom evaluation within the training loop of an HRM model. |
 
 ## Basic Usage
