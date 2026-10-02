@@ -53,7 +53,7 @@ produced.
 """
 
 import keras
-from typing import Dict
+from typing import Dict, Tuple
 
 # ---------------------------------------------------------------------
 
@@ -63,7 +63,7 @@ _DET_EPS = 1e-6
 _INF = 1e30
 
 
-def invert_3x3(h):
+def invert_3x3(h: "keras.KerasTensor") -> Tuple["keras.KerasTensor", "keras.KerasTensor"]:
     """Invert batched 3x3 matrices by the adjugate, flagging near-singular ones.
 
     :param h: ``(B, 3, 3)`` matrices.
@@ -94,7 +94,7 @@ def invert_3x3(h):
     return keras.ops.where(ok[:, None, None], inv, eye), ok
 
 
-def _project(points, h, size):
+def _project(points: "keras.KerasTensor", h: "keras.KerasTensor", size: "keras.KerasTensor") -> Tuple["keras.KerasTensor", "keras.KerasTensor"]:
     """Project ``(B, K, 2)`` points with ``h`` and test the result against ``size``.
 
     :return: ``(projected (B, K, 2), inside (B, K) bool)``; ``projected`` is
@@ -113,7 +113,9 @@ def _project(points, h, size):
     return xy, keras.ops.logical_and(inside, valid)
 
 
-def _mutual_nn(dist, pos_threshold):
+def _mutual_nn(
+    dist: "keras.KerasTensor", pos_threshold: float
+) -> Tuple["keras.KerasTensor", "keras.KerasTensor", "keras.KerasTensor", "keras.KerasTensor", "keras.KerasTensor", "keras.KerasTensor"]:
     """Mutual nearest neighbours of a ``(B, M, N)`` distance matrix.
 
     :return: ``(nn0, nn1, min0, min1, pos0, pos1)``: argmin along each axis,
@@ -134,13 +136,13 @@ def _mutual_nn(dist, pos_threshold):
 
 
 def homography_matches(
-    keypoints0,
-    keypoints1,
-    mask0,
-    mask1,
-    H0to1,
-    image_size0,
-    image_size1,
+    keypoints0: "keras.KerasTensor",
+    keypoints1: "keras.KerasTensor",
+    mask0: "keras.KerasTensor",
+    mask1: "keras.KerasTensor",
+    H0to1: "keras.KerasTensor",
+    image_size0: "keras.KerasTensor",
+    image_size1: "keras.KerasTensor",
     pos_threshold: float = 3.0,
     neg_threshold: float = 3.0,
 ) -> Dict[str, "keras.KerasTensor"]:
@@ -214,7 +216,7 @@ def homography_matches(
     }
 
 
-def label_statistics(matches, mask) -> Dict[str, "keras.KerasTensor"]:
+def label_statistics(matches: "keras.KerasTensor", mask: "keras.KerasTensor") -> Dict[str, "keras.KerasTensor"]:
     """Fractions of positive, dustbin and ignored labels among real keypoints.
 
     :param matches: ``(B, K)`` int32 labels from :func:`homography_matches`.

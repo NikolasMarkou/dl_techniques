@@ -39,8 +39,7 @@ decode only casts its outputs to float32 first.
 """
 
 import keras
-from keras import ops
-from typing import Dict
+from typing import Dict, Tuple, Union
 
 from dl_techniques.utils.dtype_policy import stability_floor
 
@@ -49,10 +48,10 @@ from dl_techniques.utils.dtype_policy import stability_floor
 _F32 = "float32"
 
 
-def _dims(x):
+def _dims(x: "keras.KerasTensor") -> Tuple[Union[int, "keras.KerasTensor"], ...]:
     """Return ``(static_or_dynamic)`` dims, preferring static ints."""
     static = tuple(x.shape)
-    dynamic = ops.shape(x)
+    dynamic = keras.ops.shape(x)
     return tuple(
         static[i] if static[i] is not None else dynamic[i] for i in range(len(static))
     )
@@ -61,7 +60,7 @@ def _dims(x):
 # ---------------------------------------------------------------------
 
 
-def superpoint_heatmap(logits):
+def superpoint_heatmap(logits: "keras.KerasTensor") -> "keras.KerasTensor":
     """Decode cell logits to a dense keypoint-probability heatmap.
 
     :param logits: ``(B, Hc, Wc, cell*cell + 1)`` raw detector logits (any float
@@ -69,7 +68,7 @@ def superpoint_heatmap(logits):
     :return: ``(B, Hc*cell, Wc*cell)`` float32 heatmap in ``[0, 1]``.
     :raises ValueError: if the channel count is not ``cell*cell + 1``.
     """
-    logits = ops.cast(logits, _F32)
+    logits = keras.ops.cast(logits, _F32)
     channels = logits.shape[-1]
     cell = int(round((channels - 1) ** 0.5))
     if channels is None or cell * cell + 1 != channels or cell < 1:
@@ -77,13 +76,13 @@ def superpoint_heatmap(logits):
             f"superpoint_heatmap expects last dim cell*cell+1 (65 for cell 8), got {channels}."
         )
     b, hc, wc, _ = _dims(logits)
-    probs = ops.softmax(logits, axis=-1)[..., :-1]
-    grid = ops.reshape(probs, (b, hc, wc, cell, cell))  # (B, Hc, Wc, row, col)
-    grid = ops.transpose(grid, (0, 1, 3, 2, 4))  # (B, Hc, row, Wc, col)
-    return ops.reshape(grid, (b, hc * cell, wc * cell))
+    probs = keras.ops.softmax(logits, axis=-1)[..., :-1]
+    grid = keras.ops.reshape(probs, (b, hc, wc, cell, cell))  # (B, Hc, Wc, row, col)
+    grid = keras.ops.transpose(grid, (0, 1, 3, 2, 4))  # (B, Hc, row, Wc, col)
+    return keras.ops.reshape(grid, (b, hc * cell, wc * cell))
 
 
-def heatmap_nms(heatmap, radius: int):
+def heatmap_nms(heatmap: "keras.KerasTensor", radius: int) -> "keras.KerasTensor":
     """Local-maximum mask of a heatmap.
 
     A pixel is True iff it equals the max of its ``(2*radius+1)^2`` window
@@ -96,29 +95,31 @@ def heatmap_nms(heatmap, radius: int):
     """
     if radius < 0:
         raise ValueError(f"radius must be >= 0, got {radius}.")
-    heatmap = ops.cast(heatmap, _F32)
-    pooled = ops.max_pool(
-        ops.expand_dims(heatmap, -1), 2 * radius + 1, strides=1, padding="same"
+    heatmap = keras.ops.cast(heatmap, _F32)
+    pooled = keras.ops.max_pool(
+        keras.ops.expand_dims(heatmap, -1), 2 * radius + 1, strides=1, padding="same"
     )[..., 0]
-    return ops.equal(heatmap, pooled)
+    return keras.ops.equal(heatmap, pooled)
 
 
-def border_mask(height, width, border: int):
+def border_mask(
+    height: Union[int, "keras.KerasTensor"], width: Union[int, "keras.KerasTensor"], border: int
+) -> "keras.KerasTensor":
     """Boolean ``(H, W)`` mask, True for pixels at least ``border`` from every edge."""
-    ys = ops.arange(height)[:, None]
-    xs = ops.arange(width)[None, :]
+    ys = keras.ops.arange(height)[:, None]
+    xs = keras.ops.arange(width)[None, :]
     return (
         (ys >= border) & (ys < height - border) & (xs >= border) & (xs < width - border)
     )
 
 
 def select_keypoints(
-    heatmap,
+    heatmap: "keras.KerasTensor",
     max_keypoints: int,
     threshold: float = 0.0,
     nms_radius: int = 4,
     border: int = 0,
-):
+) -> Tuple["keras.KerasTensor", "keras.KerasTensor", "keras.KerasTensor"]:
     """NMS, threshold, border removal and padded top-k selection.
 
     :param heatmap: ``(B, H, W)`` score map.
@@ -134,7 +135,7 @@ def select_keypoints(
     """
     if max_keypoints < 1:
         raise ValueError(f"max_keypoints must be >= 1, got {max_keypoints}.")
-    heatmap = ops.cast(heatmap, _F32)
+    heatmap = keras.ops.cast(heatmap, _F32)
     b, h, w = _dims(heatmap)
     keep = heatmap_nms(heatmap, nms_radius) & (heatmap > threshold)
     if border > 0:
@@ -142,27 +143,27 @@ def select_keypoints(
 
     # Dropped pixels rank below every real score (scores are >= 0 for a heatmap,
     # but -1 is also below any threshold >= 0; the mask is the source of truth).
-    ranked = ops.where(keep, heatmap, ops.full_like(heatmap, -1.0))
-    flat = ops.reshape(ranked, (b, h * w))
+    ranked = keras.ops.where(keep, heatmap, keras.ops.full_like(heatmap, -1.0))
+    flat = keras.ops.reshape(ranked, (b, h * w))
     k = max_keypoints
     n_pix = h * w if isinstance(h, int) and isinstance(w, int) else None
     k_eff = k if n_pix is None else min(k, n_pix)
-    values, index = ops.top_k(flat, k_eff, sorted=True)
+    values, index = keras.ops.top_k(flat, k_eff, sorted=True)
     if k_eff < k:
-        values = ops.pad(values, [[0, 0], [0, k - k_eff]], constant_values=-1.0)
-        index = ops.pad(index, [[0, 0], [0, k - k_eff]])
+        values = keras.ops.pad(values, [[0, 0], [0, k - k_eff]], constant_values=-1.0)
+        index = keras.ops.pad(index, [[0, 0], [0, k - k_eff]])
 
     # Heatmap scores are >= 0 and dropped / padded slots hold -1, so the sign is the mask.
     mask = values >= 0.0
-    mask_f = ops.cast(mask, _F32)
-    ys = ops.cast(index // w, _F32)
-    xs = ops.cast(index % w, _F32)
-    keypoints = ops.stack([xs, ys], axis=-1) * mask_f[..., None]
-    scores = ops.where(mask, values, ops.zeros_like(values))
+    mask_f = keras.ops.cast(mask, _F32)
+    ys = keras.ops.cast(index // w, _F32)
+    xs = keras.ops.cast(index % w, _F32)
+    keypoints = keras.ops.stack([xs, ys], axis=-1) * mask_f[..., None]
+    scores = keras.ops.where(mask, values, keras.ops.zeros_like(values))
     return keypoints, scores, mask
 
 
-def sample_descriptors(descriptor_map, keypoints):
+def sample_descriptors(descriptor_map: "keras.KerasTensor", keypoints: "keras.KerasTensor") -> "keras.KerasTensor":
     """Bilinearly sample a dense descriptor map at pixel ``(x, y)`` and L2-normalise.
 
     :param descriptor_map: ``(B, H, W, D)`` dense descriptors.
@@ -171,23 +172,23 @@ def sample_descriptors(descriptor_map, keypoints):
     :return: ``(B, N, D)`` float32 unit-norm descriptors. A zero sampled vector
         stays zero (norm clamped by a float32 stability floor).
     """
-    desc = ops.cast(descriptor_map, _F32)
-    kp = ops.cast(keypoints, _F32)
+    desc = keras.ops.cast(descriptor_map, _F32)
+    kp = keras.ops.cast(keypoints, _F32)
     b, h, w, d = _dims(desc)
-    flat = ops.reshape(desc, (b, h * w, d))
+    flat = keras.ops.reshape(desc, (b, h * w, d))
 
-    x = ops.clip(kp[..., 0], 0.0, ops.cast(w - 1, _F32))
-    y = ops.clip(kp[..., 1], 0.0, ops.cast(h - 1, _F32))
-    x0f, y0f = ops.floor(x), ops.floor(y)
+    x = keras.ops.clip(kp[..., 0], 0.0, keras.ops.cast(w - 1, _F32))
+    y = keras.ops.clip(kp[..., 1], 0.0, keras.ops.cast(h - 1, _F32))
+    x0f, y0f = keras.ops.floor(x), keras.ops.floor(y)
     wx = (x - x0f)[..., None]
     wy = (y - y0f)[..., None]
-    x0 = ops.cast(x0f, "int32")
-    y0 = ops.cast(y0f, "int32")
-    x1 = ops.minimum(x0 + 1, w - 1)
-    y1 = ops.minimum(y0 + 1, h - 1)
+    x0 = keras.ops.cast(x0f, "int32")
+    y0 = keras.ops.cast(y0f, "int32")
+    x1 = keras.ops.minimum(x0 + 1, w - 1)
+    y1 = keras.ops.minimum(y0 + 1, h - 1)
 
     def gather(yy, xx):
-        return ops.take_along_axis(flat, (yy * w + xx)[..., None], axis=1)
+        return keras.ops.take_along_axis(flat, (yy * w + xx)[..., None], axis=1)
 
     out = (
         gather(y0, x0) * (1.0 - wy) * (1.0 - wx)
@@ -195,8 +196,8 @@ def sample_descriptors(descriptor_map, keypoints):
         + gather(y1, x0) * wy * (1.0 - wx)
         + gather(y1, x1) * wy * wx
     )
-    norm = ops.sqrt(ops.sum(ops.square(out), axis=-1, keepdims=True))
-    return out / ops.maximum(norm, stability_floor(_F32, 1e-12))
+    norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(out), axis=-1, keepdims=True))
+    return out / keras.ops.maximum(norm, stability_floor(_F32, 1e-12))
 
 
 def decode_superpoint(
@@ -223,7 +224,7 @@ def decode_superpoint(
         heat, max_keypoints, threshold, nms_radius, border
     )
     descriptors = sample_descriptors(outputs["descriptors"], keypoints)
-    descriptors = descriptors * ops.cast(mask, _F32)[..., None]
+    descriptors = descriptors * keras.ops.cast(mask, _F32)[..., None]
     return {
         "keypoints": keypoints,
         "scores": scores,
