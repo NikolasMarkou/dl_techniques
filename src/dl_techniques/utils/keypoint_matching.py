@@ -44,8 +44,10 @@ with the one-sided rule above. Both thresholds default to 3 px and
 Ties: ``argmin`` picks the lowest index, so with exact duplicates only the
 first copy can be positive; later copies are ignored (-2).
 
-Numerics: ``H^-1`` is the adjugate over the determinant. If ``|det|`` is
-below ``1e-6 * ||H||_F^3`` (near singular, including a zero matrix) the
+Numerics: ``H^-1`` is the adjugate over the determinant. If ``|det Hn|`` is
+below ``1e-6 * ||Hn||_F^3``, with ``Hn = diag(1/w1, 1/h1, 1) @ H @ diag(w0, h0, 1)``
+the size-normalised matrix (near singular, including a zero matrix; D-020: a
+pixel-unit test flags ordinary homographies at 240 px and above), the
 homography is declared unusable: nothing is positive and every real keypoint
 is dustbin. Points whose homogeneous ``w`` is ``<= 1e-6`` (at or behind the
 horizon) or non-finite count as warping outside the image. No NaN is ever
@@ -63,21 +65,55 @@ _DET_EPS = 1e-6
 _INF = 1e30
 
 
-def invert_3x3(h: "keras.KerasTensor") -> Tuple["keras.KerasTensor", "keras.KerasTensor"]:
-    """Invert batched 3x3 matrices by the adjugate, flagging near-singular ones.
+def _size_scale(size: "keras.KerasTensor") -> "keras.KerasTensor":
+    """``(B, 3, 3)`` matrices ``diag(w, h, 1)`` from ``(B, 2)`` sizes."""
+    size = keras.ops.cast(size, _F32)
+    diag = keras.ops.concatenate([size, keras.ops.ones_like(size[:, :1])], axis=-1)
+    return diag[:, :, None] * keras.ops.eye(3, dtype=_F32)[None]
 
-    :param h: ``(B, 3, 3)`` matrices.
+
+def invert_3x3(
+    h: "keras.KerasTensor",
+    size0: "keras.KerasTensor" = None,
+    size1: "keras.KerasTensor" = None,
+) -> Tuple["keras.KerasTensor", "keras.KerasTensor"]:
+    """Invert batched 3x3 homographies by the adjugate, flagging near-singular ones.
+
+    With both sizes given, the conditioning test runs on the size-normalised
+    matrix ``Hn = diag(1/w1, 1/h1, 1) @ H @ diag(w0, h0, 1)``. In pixel units
+    ``||H||_F`` is dominated by the translation entries, so a well-conditioned
+    homography (det near 1) at 240 px fails a pixel-unit test (D-020). The
+    inverse is taken from ``Hn``: ``H^-1 = diag(w0, h0, 1) @ Hn^-1 @ diag(1/w1, 1/h1, 1)``,
+    so the test and the inverse see one matrix.
+
+    :param h: ``(B, 3, 3)`` matrices (image-0 pixels to image-1 pixels).
+    :param size0: ``(B, 2)`` ``(w, h)`` of image 0, or None (no normalisation,
+        only meaningful for matrices already in unit coordinates).
+    :param size1: ``(B, 2)`` ``(w, h)`` of image 1, or None.
     :return: ``(h_inv, ok)``: ``h_inv`` is ``(B, 3, 3)`` float32 (identity where
         not ``ok``, so downstream maths stays finite) and ``ok`` is a ``(B,)``
-        bool, False when ``|det| < 1e-6 * ||H||_F^3`` or non-finite.
+        bool, False when ``|det Hn| < 1e-6 * ||Hn||_F^3`` or non-finite.
     """
     h = keras.ops.cast(h, _F32)
-    a, b, c = h[:, 0, 0], h[:, 0, 1], h[:, 0, 2]
-    d, e, f = h[:, 1, 0], h[:, 1, 1], h[:, 1, 2]
-    g, i, j = h[:, 2, 0], h[:, 2, 1], h[:, 2, 2]
+    normalise = size0 is not None and size1 is not None
+    if normalise:
+        s0 = _size_scale(size0)
+        s1_inv = _size_scale(1.0 / keras.ops.cast(size1, _F32))
+        hn = keras.ops.matmul(s1_inv, keras.ops.matmul(h, s0))
+    else:
+        hn = h
+    a, b, c = hn[:, 0, 0], hn[:, 0, 1], hn[:, 0, 2]
+    d, e, f = hn[:, 1, 0], hn[:, 1, 1], hn[:, 1, 2]
+    g, i, j = hn[:, 2, 0], hn[:, 2, 1], hn[:, 2, 2]
     c00, c01, c02 = e * j - f * i, f * g - d * j, d * i - e * g
     det = a * c00 + b * c01 + c * c02
-    norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(h), axis=(1, 2)))
+    norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(hn), axis=(1, 2)))
+    # DECISION plan-2026-10-02T084508-dd2c07ac/D-020
+    # The conditioning test is on the SIZE-NORMALISED matrix. Do NOT test the
+    # pixel-unit matrix: its Frobenius norm is dominated by the translation
+    # entries, so 8% of ordinary 240 px pairs (50% at 480 px) were declared
+    # singular and labelled all-dustbin. Guard:
+    # tests/test_utils/test_keypoint_matching.py::TestSingularityScale
     ok = keras.ops.abs(det) >= _DET_EPS * norm * norm * norm
     ok = keras.ops.logical_and(ok, keras.ops.isfinite(det))
     safe = keras.ops.where(ok, det, keras.ops.ones_like(det))
@@ -90,6 +126,8 @@ def invert_3x3(h: "keras.KerasTensor") -> Tuple["keras.KerasTensor", "keras.Kera
         axis=1,
     )
     inv = adj / safe[:, None, None]
+    if normalise:
+        inv = keras.ops.matmul(s0, keras.ops.matmul(inv, s1_inv))
     eye = keras.ops.broadcast_to(keras.ops.eye(3, dtype=_F32)[None], keras.ops.shape(inv))
     return keras.ops.where(ok[:, None, None], inv, eye), ok
 
@@ -172,7 +210,7 @@ def homography_matches(
     real0 = keras.ops.cast(mask0, "bool")
     real1 = keras.ops.cast(mask1, "bool")
     h = keras.ops.cast(H0to1, _F32)
-    h_inv, ok = invert_3x3(h)
+    h_inv, ok = invert_3x3(h, image_size0, image_size1)
 
     kp0_in1, inside0 = _project(kp0, h, image_size1)
     kp1_in0, inside1 = _project(kp1, h_inv, image_size0)

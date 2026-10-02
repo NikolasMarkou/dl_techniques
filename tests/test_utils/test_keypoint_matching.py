@@ -86,6 +86,27 @@ def _gf_gt_matches(kp0, kp1, H, pos_th, neg_th, visible0=None, visible1=None):
     return m0, m1
 
 
+COND_LIMIT = 1e6
+
+
+def _is_usable(H, s0, s1):
+    """Independent usability rule for a homography (not copied from the code).
+
+    Derivation: float32 carries about 6e-8 relative precision, and inverting a
+    matrix of condition number ``c`` loses a factor ``c`` of it, so at
+    ``c = 1e6`` about 6% of the inverse is noise and a 3 px label threshold is
+    meaningless; above that the homography is unusable. The condition number
+    must be taken in UNIT coordinates, ``Hn = diag(1/w1, 1/h1, 1) H diag(w0, h0, 1)``,
+    because pixel units mix the translation entries (hundreds) with the
+    projective entries (1e-3) and make every large-image homography look
+    ill-conditioned. numpy's SVD-based ``cond`` is the instrument.
+    """
+    Hn = np.diag([1.0 / s1[0], 1.0 / s1[1], 1.0]) @ H @ np.diag([s0[0], s0[1], 1.0])
+    if not np.all(np.isfinite(Hn)):
+        return False
+    return bool(np.linalg.matrix_rank(Hn) == 3 and np.linalg.cond(Hn) < COND_LIMIT)
+
+
 def _oracle(kp0, kp1, m0, m1, H, s0, s1, pos=3.0, neg=3.0):
     """Oracle for one image; returns (matches0, matches1) over the padded arrays.
 
@@ -97,7 +118,7 @@ def _oracle(kp0, kp1, m0, m1, H, s0, s1, pos=3.0, neg=3.0):
     H = H.astype(np.float64)
     out0, out1 = np.full(M, -2), np.full(N, -2)
     r0, r1 = np.flatnonzero(m0), np.flatnonzero(m1)
-    ok = abs(np.linalg.det(H)) >= 1e-6 * np.linalg.norm(H) ** 3
+    ok = _is_usable(H, s0, s1)
     if not ok:
         out0[r0], out1[r1] = -1, -1
         return out0, out1
@@ -318,6 +339,83 @@ class TestOneSidedDustbin:
             np.testing.assert_array_equal(g1[b], e1)
 
 
+class TestSingularityScale:
+    """D-020: conditioning is judged in unit coordinates, so image size is irrelevant.
+
+    The pixel-unit rule ``|det H| >= 1e-6 ||H||_F^3`` flagged 7.75% of the real
+    generator's pairs at 240 px and 50% at 480 px as singular (every keypoint
+    dustbin, no positives).
+    """
+
+    @staticmethod
+    def _pairs(tmp_path, size, count=64):
+        import os
+
+        from train.lightglue.data import list_images, make_pair_dataset
+
+        rng = np.random.RandomState(1)
+        for i in range(count):
+            img = rng.randint(30, 200, size=(90, 120, 3)).astype(np.uint8)
+            (tmp_path / f"img{i}.png").write_bytes(tf.io.encode_png(tf.constant(img)).numpy())
+        ds = make_pair_dataset(list_images(str(tmp_path)), size, count, seed=0, shuffle=False,
+                               photometric_jitter=False, drop_remainder=False)
+        return next(iter(ds))["H0to1"].numpy()
+
+    @staticmethod
+    def _positives(H, size):
+        rng = np.random.default_rng(0)
+        k0 = rng.uniform(0.15 * size, 0.85 * size, (len(H), 64, 2))
+        q = np.concatenate([k0, np.ones((len(H), 64, 1))], -1) @ H.transpose(0, 2, 1).astype("float64")
+        k1 = q[..., :2] / q[..., 2:]
+        ones = np.ones((len(H), 64), bool)
+        sz = (float(size), float(size))
+        g0, _ = _run(k0.astype("float32"), k1.astype("float32"), ones, ones, H, s0=sz, s1=sz)
+        inside = ((k1 >= 0) & (k1 < size)).all(-1)
+        return (g0 >= 0).sum(-1), inside.sum(-1)
+
+    @pytest.mark.parametrize("size", [240, 480])
+    def test_generator_homographies_keep_their_positives(self, tmp_path, size):
+        H = self._pairs(tmp_path, size)
+        pixel_rule = np.abs(np.linalg.det(H.astype("float64"))) < 1e-6 * np.linalg.norm(H.astype("float64"), axis=(1, 2)) ** 3
+        # the old rule fires on these generator pairs at this size (control: the test can fail)
+        assert pixel_rule.sum() >= 1
+        pos, inside = self._positives(H, size)
+        assert (inside > 20).all()
+        assert (pos >= 0.9 * inside).all(), (pos, inside)
+
+    @pytest.mark.parametrize("size", [240, 480])
+    def test_known_ordinary_homography_is_not_singular(self, size):
+        # det ~1.06, an ordinary mild warp with a translation of about 0.3 of the image
+        t = 0.3 * size
+        H = np.array([[[1.03, 0.05, t], [-0.04, 1.02, -t * 0.5], [1e-5, 0.0, 1.0]]], "float32")
+        _, ok = km.invert_3x3(H, np.full((1, 2), size, "float32"), np.full((1, 2), size, "float32"))
+        assert bool(_np(ok)[0])
+        assert _is_usable(H[0].astype("float64"), (size, size), (size, size))
+
+    def test_inverse_is_consistent_with_the_normalised_test(self):
+        size = np.full((1, 2), 480, "float32")
+        H = np.array([[[0.9, 0.1, 150], [-0.1, 1.1, 60], [2e-5, 1e-5, 1.0]]], "float32")
+        inv, ok = km.invert_3x3(H, size, size)
+        assert bool(_np(ok)[0])
+        np.testing.assert_allclose(_np(inv)[0] @ H[0], np.eye(3), atol=1e-4)
+
+    def test_pixel_unit_rule_is_red(self, monkeypatch):
+        """Reinjecting the old pixel-unit test must fail the regression above."""
+        import inspect
+
+        src = inspect.getsource(km.invert_3x3)
+        assert "hn = h" in src
+        new = src.replace("normalise = size0 is not None and size1 is not None", "normalise = False")
+        assert new != src
+        ns = dict(vars(km))
+        exec(new, ns)
+        monkeypatch.setattr(km, "invert_3x3", ns["invert_3x3"])
+        H = np.array([[[1.0, 0.0, 300.0], [0.0, 1.0, 200.0], [0.0, 0.0, 1.0]]], "float32")
+        s = np.full((1, 2), 480, "float32")
+        _, ok = km.invert_3x3(H, s, s)
+        assert not bool(_np(ok)[0])  # identity-like pair declared singular by the old rule
+
+
 class TestFrozenGlueFactory:
     """Exact label equality with glue-factory's torch function.
 
@@ -457,7 +555,7 @@ class TestMutantsAreRed:
 
     def test_forward_h_instead_of_inverse_is_red(self, monkeypatch):
         real = km.invert_3x3
-        monkeypatch.setattr(km, "invert_3x3", lambda h: (keras.ops.cast(h, "float32"), real(h)[1]))
+        monkeypatch.setattr(km, "invert_3x3", lambda h, *a: (keras.ops.cast(h, "float32"), real(h, *a)[1]))
         assert not self._agrees_with_oracle()
 
     def test_outside_image_not_excluded_is_red(self, monkeypatch):
