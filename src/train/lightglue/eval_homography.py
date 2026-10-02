@@ -282,7 +282,8 @@ def match_quality(
     dustbin, ``-2`` ignored), the ``matches0`` of `homography_matches`; ``labels1`` is the
     same for image 1. A predicted pair ``(i, j)`` is correct iff ``labels0[i] == j``.
 
-    * ``precision`` follows `KeypointMatchMetric` (D-013): a pair with ``labels0[i] == -2``
+    * ``precision`` follows `KeypointMatchMetric` (D-013) per pair; the summary averages it
+      per pair (macro), while the training metric pools counts over a batch (micro): a pair with ``labels0[i] == -2``
       or (when ``labels1`` is given) ``labels1[j] == -2`` is not a prediction and is
       removed from numerator and denominator.
     * ``precision_strict`` keeps every predicted pair in the denominator.

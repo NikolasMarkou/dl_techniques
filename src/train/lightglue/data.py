@@ -25,9 +25,17 @@ pixel of the view. The view-to-source map is ``M = A(k) @ P``.
 Remaining differences to glue-factory, kept on purpose: the quad is a
 perturbed rectangle shrunk to fit (glue-factory samples the corners directly
 with a difficulty parameter and a convexity floor), so large rotations or
-scales cost zoom rather than being re-drawn; the default ranges are per view,
-and the relative homography between the views spans roughly twice them; there
-is no photometric ``dark`` mode. Both views are warped (glue-factory has a
+scales cost zoom rather than being re-drawn; the default ranges are per view
+and the relative homography is NOT simply twice them. Measured (1000 pairs at
+240 px, default parameters, ``ranges.py`` of the plan scratchpad): relative
+rotation p5/p95 -27/+29 deg (max +-39; about twice the +-20 per view, as
+rotation adds), relative scale p5/p50/p95 0.82/1.00/1.21 (log-std 0.12, about
+ONE view's range, not twice: the shrink-to-fit cancels any scale above the cap,
+so the pair scale comes mostly from the rotation and translation zoom-out and
+barely follows the sampled ``scale``), image-centre displacement p5/p95 0.02/0.16
+of the image size, perspective term below about 0.002/size. Raising ``scale``
+therefore widens the pair scale distribution less than expected; there is no
+photometric ``dark`` mode. Both views are warped (glue-factory has a
 ``right_only`` mode that leaves view 0 un-warped, not offered here).
 
 Homography direction convention

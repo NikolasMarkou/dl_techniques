@@ -91,8 +91,11 @@ LightGlue (static masked path, mask0 / mask1)  -> per-layer log assignments, con
   frame `source_scale` times the view size (default 1.5, a `make_pair_dataset` argument, not a
   trainer flag; a smaller photograph is resized up). Both images are then independent warped
   patches of that source (D-017): per view `sample_homography_tf` perturbs the view rectangle
-  (rotation 20 degrees, scale 0.8 to 1.2, perspective 0.001, translation 0.08, per view, so the
-  relative homography spans about twice that), the quad is centred in the source and shrunk
+  (rotation 20 degrees, scale 0.8 to 1.2, perspective 0.001, translation 0.08, per view; the
+  realised relative homography, 1000 pairs at 240 px: rotation p5/p95 -27/+29 degrees, about
+  twice the per-view range, but scale p5/p95 0.82/1.21, about ONE view's range, because the
+  shrink-to-fit cancels any scale above the cap, so raising `scale` widens the pair scale less
+  than expected), the quad is centred in the source and shrunk
   about the centre by the largest factor that keeps all four corners one pixel inside the
   frame (capped at source resolution). No output pixel reads outside the source frame, so
   there is no black border: glue-factory's pair is border-free too, and a zero-filled wedge was
@@ -119,7 +122,7 @@ LightGlue (static masked path, mask0 / mask1)  -> per-layer log assignments, con
 | `--max-keypoints` | 512 | padded keypoints per image |
 | `--nms-radius` | 4 | detection NMS radius in pixels |
 | `--detection-threshold` | 0.005 | minimum heatmap probability of a keypoint |
-| `--border` | 4 | pixels at the image edge without keypoints |
+| `--border` | 4 | pixels at the image edge without keypoints; the labels equal glue-factory's near the image edge only when this is at least `--pos-threshold` (3), because this repo labels a keypoint whose partner warps outside the other image as dustbin and glue-factory has no bounds rule |
 | `--pos-threshold` | 3.0 | reprojection error of a positive pair in pixels; also the dustbin threshold |
 | `--batch-size` | 16 | image pairs per step |
 | `--epochs` | 10 | epochs requested |
@@ -220,6 +223,21 @@ MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.lightglue.eval_h
     --max-keypoints 512 --num-pairs 500 --experiment-name lightglue_240_eval
 ```
 
+### Sanity experiment before a long run
+
+A cheap check that separates under-training from a defect, before committing to the long
+run of step 2. Freeze a SuperPoint trained at least a few thousand steps, train LightGlue
+2000 to 3000 steps at `--image-size 128`, and evaluate with
+`--depth-confidence -1 --width-confidence -1` (adaptive depth and pruning off). Expected
+(a PREDICTION, not measured here): LightGlue precision above mutual nearest neighbours and
+more than about 20 matches per pair. If LightGlue precision stays at or below mutual-NN
+precision while mutual-NN precision is above 0.3, suspect a defect. The only evidence for
+this expectation is the pass 2 reviewer's CPU synthetic probe (3-layer model, synthetic
+keypoints and descriptors at 128 px, `learn_probe.py`): with informative descriptors
+LightGlue passed mutual-NN precision by step 100 and reached precision 0.91 / recall 0.88 by
+step 400; with weak descriptors it first abstained completely and recovered later. No
+real-image run supports it.
+
 Do not pass `--gpu` together with `CUDA_VISIBLE_DEVICES` (section 8). With
 `--steps-per-epoch` left at its default an epoch is `train images // batch size` steps (the
 smoke run reported 118,271 training images with 16 held out). Step 3 refuses to start without `opencv-python` (it uses
@@ -290,7 +308,7 @@ transcribed from glue-factory.
 | `auc@t` | area under the recall-versus-error curve up to `t` pixels, divided by `t`, for `t` in 1, 3, 5, 10 (errors sorted, recall `(i + 1) / n`, a `(0, 0)` point prepended, trapezoid rule) |
 | `mean_error`, `median_error` | mean and median corner error over pairs |
 | `failures`, `mean_matches` | failed estimates and matches per pair |
-| `mean_precision`, `mean_precision_strict`, `mean_recall` | `mean_precision` is the training metric's definition: correct pairs over predicted pairs, where a pair whose keypoint is labelled -2 (ignored or padded) in either image is no prediction and leaves numerator and denominator. `mean_precision_strict` keeps those pairs as false positives (never higher). Recall is positive labels that were predicted over all positive labels (labels at `--pos-threshold`; pairs with an empty denominator are left out of the mean) |
+| `mean_precision`, `mean_precision_strict`, `mean_recall` | `mean_precision` is the per-pair mean (each pair weighs the same, a pair with 2 predictions as much as one with 96) of the training metric's definition, which itself pools counts over a batch: correct pairs over predicted pairs, where a pair whose keypoint is labelled -2 (ignored or padded) in either image is no prediction and leaves numerator and denominator. `mean_precision_strict` keeps those pairs as false positives (never higher). Recall is positive labels that were predicted over all positive labels (labels at `--pos-threshold`; pairs with an empty denominator are left out of the mean) |
 | `mean_stop_layer` | LightGlue only: mean 1-based layer whose assignment was used by `match()` (early exit) |
 
 The two methods are `lightglue` (the adaptive eager `LightGlue.match`, with
@@ -334,7 +352,7 @@ circumstances; "unmeasured" means the effect on accuracy was not tested.
 | Image size | patches of 640 x 480 (dataset default `patch_shape`) | square, fixed by the SuperPoint checkpoint (240 suggested) | yes |
 | Views | image 0 is a warped patch too (`right_only` off), corners sampled by `sample_homography_corners` (difficulty 0.7, `max_angle` 45, convexity floor) | both views are warped patches, quad = perturbed rectangle shrunk to fit (D-017), per-view ranges: rotation 20 degrees, scale 0.8 to 1.2, perspective 0.001, translation 0.08 | yes, a smaller port; large perturbations cost zoom instead of being re-drawn; unmeasured |
 | Augmentation | `photometric: lg` on both views | brightness, contrast, gamma and noise jitter on image 1 only, no flag | simpler on purpose; the `lg` augmentation is not ported, unmeasured |
-| Labels | `gt_matches_from_homography`, thresholds 3 and 3 | same rule, equal on the frozen fixture; plus an extension that a keypoint warping outside the other image is dustbin | the extension is intentional |
+| Labels | `gt_matches_from_homography`, thresholds 3 and 3 | same rule, equal on the frozen fixture; plus an extension that a keypoint warping outside the other image is dustbin (equal near the image edge only when `--border` is at least 3); the positive test is strict (`< 3`), as `dist < pos_th**2` | the extension is intentional |
 | Loss | NLL (`gamma` 1, `nll_balancing` 0.5) plus confidence BCE with logits | same, from logits (D-018); padded keypoints masked | yes (masks) |
 | Model | `flash: false`, `checkpointed: true` | no activation checkpointing, no flash path | yes |
 | Stage 2 | MegaDepth | none (no poses available) | yes |

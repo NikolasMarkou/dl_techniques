@@ -187,7 +187,7 @@ def sample_descriptors(descriptor_map: "keras.KerasTensor", keypoints: "keras.Ke
     x1 = keras.ops.minimum(x0 + 1, w - 1)
     y1 = keras.ops.minimum(y0 + 1, h - 1)
 
-    def gather(yy, xx):
+    def gather(yy: "keras.KerasTensor", xx: "keras.KerasTensor") -> "keras.KerasTensor":
         return keras.ops.take_along_axis(flat, (yy * w + xx)[..., None], axis=1)
 
     out = (

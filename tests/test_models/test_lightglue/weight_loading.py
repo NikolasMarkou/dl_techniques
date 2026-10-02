@@ -1,8 +1,9 @@
 """Test-only torch -> Keras weight mapping for the LightGlue model.
 
 Not collected (no ``test_`` prefix). The mapping is a TRANSPOSE of every ``Linear`` weight
-plus the norm affine copy; sublayer names mirror the torch state dict, so no permutation is
-needed. It is the converter rule the model docstring promises, expressed as code that a
+plus the norm affine copy; the Keras sublayer names do NOT equal the torch state-dict keys,
+they map one to one through the torch-to-Keras table in the model README, and no permutation
+of the weights is needed. It is the converter rule the model docstring promises, expressed as code that a
 parity test exercises.
 """
 

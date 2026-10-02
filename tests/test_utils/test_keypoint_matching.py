@@ -219,6 +219,17 @@ class TestHandBuilt:
         np.testing.assert_array_equal(g0[0], [0, -2, 2, 3])
         np.testing.assert_array_equal(g1[0], [0, -2, 2, 3])
 
+    def test_threshold_is_strict_like_glue_factory(self):
+        # glue-factory: dist**2 < pos_th**2. A pair at exactly 3.0 px is NOT positive
+        # (it falls in the ignore band: within neg_threshold, not positive).
+        kp0 = np.array([[[50, 50]]], "float32")
+        H = np.eye(3, dtype="float32")[None]
+        m = np.ones((1, 1), bool)
+        g0, _ = _run(kp0, np.array([[[53, 50]]], "float32"), m, m, H)
+        np.testing.assert_array_equal(g0[0], [-2])
+        g0, _ = _run(kp0, np.array([[[52.9, 50]]], "float32"), m, m, H)
+        np.testing.assert_array_equal(g0[0], [0])
+
     def test_translation_known_outcome(self):
         kp0 = np.array([[[10, 10], [100, 50], [30, 120], [150, 150]]], "float32")
         H = np.array([[[1, 0, 20], [0, 1, 5], [0, 0, 1]]], "float32")

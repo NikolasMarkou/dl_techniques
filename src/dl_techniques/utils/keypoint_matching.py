@@ -21,7 +21,8 @@ error is ``|H p0_i - p1_j|`` (measured in image 1) and the backward error is
 
 - Positive: ``i`` and ``j`` are each other's nearest neighbour (mutual NN)
   under the pair distance ``max(forward, backward)`` and that distance is
-  ``<= pos_threshold``.
+  ``< pos_threshold`` (strict, as glue-factory's ``dist < pos_th**2``; a pair at
+  exactly 3.0 px is not positive).
 - Dustbin of image 0: every candidate ``j`` has a FORWARD error
   ``> neg_threshold`` (one-sided: the backward error plays no part).
   Dustbin of image 1: every candidate ``i`` has a BACKWARD error
@@ -40,6 +41,12 @@ of keypoints as dustbin that the reference leaves ignored. D-016 replaced it
 with the one-sided rule above. Both thresholds default to 3 px and
 ``neg_threshold`` must be ``>= pos_threshold``; raising it above
 ``pos_threshold`` widens the ignore set.
+
+Border: the outside-image extension above equals glue-factory only when the
+detector keeps keypoints at least ``pos_threshold`` pixels from the image
+border (``--border >= 3`` in the trainer): a keypoint within ``pos_threshold``
+of the edge can have a partner that warps just outside the other image, which
+this module labels dustbin and glue-factory (no bounds rule) labels positive.
 
 Ties: ``argmin`` picks the lowest index, so with exact duplicates only the
 first copy can be positive; later copies are ignored (-2).
@@ -132,7 +139,9 @@ def invert_3x3(
     return keras.ops.where(ok[:, None, None], inv, eye), ok
 
 
-def _project(points: "keras.KerasTensor", h: "keras.KerasTensor", size: "keras.KerasTensor") -> Tuple["keras.KerasTensor", "keras.KerasTensor"]:
+def _project(
+    points: "keras.KerasTensor", h: "keras.KerasTensor", size: "keras.KerasTensor"
+) -> Tuple["keras.KerasTensor", "keras.KerasTensor"]:
     """Project ``(B, K, 2)`` points with ``h`` and test the result against ``size``.
 
     :return: ``(projected (B, K, 2), inside (B, K) bool)``; ``projected`` is
@@ -168,8 +177,8 @@ def _mutual_nn(
     back1 = keras.ops.take_along_axis(nn0, nn1, axis=1)
     mutual0 = back0 == keras.ops.arange(m, dtype=nn0.dtype)[None]
     mutual1 = back1 == keras.ops.arange(n, dtype=nn1.dtype)[None]
-    pos0 = keras.ops.logical_and(mutual0, min0 <= pos_threshold)
-    pos1 = keras.ops.logical_and(mutual1, min1 <= pos_threshold)
+    pos0 = keras.ops.logical_and(mutual0, min0 < pos_threshold)
+    pos1 = keras.ops.logical_and(mutual1, min1 < pos_threshold)
     return nn0, nn1, min0, min1, pos0, pos1
 
 
@@ -218,7 +227,7 @@ def homography_matches(
     vis0 = keras.ops.logical_and(keras.ops.logical_and(inside0, usable), real0)
     vis1 = keras.ops.logical_and(keras.ops.logical_and(inside1, usable), real1)
 
-    def pairwise(a, b):
+    def pairwise(a: "keras.KerasTensor", b: "keras.KerasTensor") -> "keras.KerasTensor":
         diff = a[:, :, None, :] - b[:, None, :, :]
         return keras.ops.sqrt(keras.ops.sum(keras.ops.square(diff), axis=-1))
 
@@ -244,7 +253,7 @@ def homography_matches(
     dust0 = keras.ops.logical_and(real0, keras.ops.logical_or(keras.ops.logical_not(vis0), fwd_min > neg_threshold))
     dust1 = keras.ops.logical_and(real1, keras.ops.logical_or(keras.ops.logical_not(vis1), bwd_min > neg_threshold))
 
-    def labels(pos, nn, dust):
+    def labels(pos: "keras.KerasTensor", nn: "keras.KerasTensor", dust: "keras.KerasTensor") -> "keras.KerasTensor":
         out = keras.ops.where(dust, -1, -2)
         return keras.ops.cast(keras.ops.where(pos, nn, out), "int32")
 
@@ -265,7 +274,7 @@ def label_statistics(matches: "keras.KerasTensor", mask: "keras.KerasTensor") ->
     real = keras.ops.cast(mask, "bool")
     total = keras.ops.maximum(keras.ops.sum(keras.ops.cast(real, _F32)), 1.0)
 
-    def frac(cond):
+    def frac(cond: "keras.KerasTensor") -> "keras.KerasTensor":
         return keras.ops.sum(keras.ops.cast(keras.ops.logical_and(cond, real), _F32)) / total
 
     return {
