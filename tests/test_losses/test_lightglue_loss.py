@@ -66,7 +66,16 @@ def oracle_nll(la, m0, m1, gamma=1.0, b=0.5):
     return np.array(out)
 
 
+def oracle_bce_with_logits(z, t):
+    """``torch.nn.BCEWithLogitsLoss`` element: ``-(t log sigma(z) + (1 - t) log sigma(-z))``."""
+    z = float(z)
+    log_sig = -np.logaddexp(0.0, -z)          # log sigma(z), stable
+    log_sig_neg = -np.logaddexp(0.0, z)       # log sigma(-z)
+    return -(t * log_sig + (1 - t) * log_sig_neg)
+
+
 def oracle_confidence(la, c0, c1, real0=None, real1=None):
+    """``c0``/``c1`` are LOGITS."""
     out = []
     for s in range(la.shape[0]):
         n_layers, mp1, np1 = la.shape[1:]
@@ -88,13 +97,11 @@ def oracle_confidence(la, c0, c1, real0=None, real1=None):
             b0 = 0.0
             for r in r0:
                 t = float(row_arg(n_layers - 1, r) == row_arg(i, r))
-                p = np.clip(c0[s, i, r], 1e-7, 1 - 1e-7)
-                b0 += -(t * np.log(p) + (1 - t) * np.log(1 - p))
+                b0 += oracle_bce_with_logits(c0[s, i, r], t)
             b1 = 0.0
             for c in r1:
                 t = float(col_arg(n_layers - 1, c) == col_arg(i, c))
-                p = np.clip(c1[s, i, c], 1e-7, 1 - 1e-7)
-                b1 += -(t * np.log(p) + (1 - t) * np.log(1 - p))
+                b1 += oracle_bce_with_logits(c1[s, i, c], t)
             total += (b0 / max(len(r0), 1) + b1 / max(len(r1), 1)) / 2.0
         out.append(total / (n_layers - 1))
     return np.array(out)
@@ -124,8 +131,9 @@ def _la(rng, batch=B, layers=L, m=M, n=N):
 
 
 def _conf(rng, batch=B, layers=L, m=M, n=N):
-    return (rng.uniform(0.05, 0.95, (batch, layers - 1, m)).astype("float32"),
-            rng.uniform(0.05, 0.95, (batch, layers - 1, n)).astype("float32"))
+    """Confidence LOGITS (the loss reads pre-sigmoid values)."""
+    return (rng.uniform(-3.0, 3.0, (batch, layers - 1, m)).astype("float32"),
+            rng.uniform(-3.0, 3.0, (batch, layers - 1, n)).astype("float32"))
 
 
 def _np(x):
@@ -266,13 +274,14 @@ class TestConfidence:
                                    rtol=1e-5, atol=1e-6)
         # padded confidences are irrelevant
         c0b = c0.copy()
-        c0b[1, :, 4:] = 0.123
+        c0b[1, :, 4:] = 0.123  # a logit
         again = _np(lightglue_confidence_loss(padded, c0b, c1, real0.astype("float32"),
                                               real1.astype("float32")))
         np.testing.assert_allclose(got, again, rtol=1e-6)
 
     def test_target_is_agreement_with_final_layer(self):
-        # layer 0 argmax differs from final for token 0 only; prob 0.9 everywhere
+        # layer 0 argmax differs from final for token 0 only; probability 0.9 everywhere
+        # (logit log 9)
         la = np.full((1, 2, 3, 3), -5.0, "float32")
         for r, c in ((0, 0), (1, 2), (2, 1)):      # final layer maxima
             la[0, 1, r, c] = -0.1
@@ -281,8 +290,8 @@ class TestConfidence:
         # rows: row0 final->col0, layer0->col1 (disagree); row1 both dustbin (agree)
         # cols: col0 final->row0, layer0->dustbin row (disagree); col1 final->dustbin
         #       row, layer0->row0 (disagree)
-        c0 = np.full((1, 1, 2), 0.9, "float32")
-        c1 = np.full((1, 1, 2), 0.9, "float32")
+        c0 = np.full((1, 1, 2), np.log(9.0), "float32")
+        c1 = np.full((1, 1, 2), np.log(9.0), "float32")
         got = float(_np(lightglue_confidence_loss(la, c0, c1))[0])
         np.testing.assert_allclose(got, oracle_confidence(la, c0, c1)[0], rtol=1e-6)
         row = (-np.log(0.1) - np.log(0.9)) / 2
@@ -294,11 +303,57 @@ class TestConfidence:
         c = np.zeros((2, 0, 3), "float32")
         assert np.all(_np(lightglue_confidence_loss(la, c, c)) == 0.0)
 
-    def test_saturated_confidences_are_finite(self, case):
+    def test_saturated_logits_are_finite(self, case):
         la, _, _, _ = case
-        c0 = np.zeros((B, L - 1, M), "float32")
-        c1 = np.ones((B, L - 1, N), "float32")
-        assert np.all(np.isfinite(_np(lightglue_confidence_loss(la, c0, c1))))
+        for z in (-1e4, 1e4):
+            c0 = np.full((B, L - 1, M), z, "float32")
+            c1 = np.full((B, L - 1, N), -z, "float32")
+            assert np.all(np.isfinite(_np(lightglue_confidence_loss(la, c0, c1))))
+
+    @staticmethod
+    def _saturation_case():
+        """One token per image, layer 0 disagrees with the final layer: target 0."""
+        la = np.zeros((1, 2, 2, 2), "float32")
+        la[0, 0] = [[5.0, -5.0], [-5.0, 0.0]]     # layer 0: row 0 -> column 0
+        la[0, 1] = [[-5.0, 5.0], [5.0, 0.0]]      # final: row 0 -> dustbin
+        return la
+
+    @classmethod
+    def _logit_gradient(cls, logit):
+        z = tf.Variable([[[logit]]], dtype=tf.float32)
+        with tf.GradientTape() as tape:
+            loss = keras.ops.sum(lightglue_confidence_loss(cls._saturation_case(), z, z))
+        return float(tape.gradient(loss, z).numpy().ravel()[0]), float(loss.numpy())
+
+    @pytest.mark.parametrize("logit", [10.0, 17.0, 20.0, 30.0, 88.0])
+    def test_gradient_does_not_die_at_saturation(self, logit):
+        # target 0, one token per image: loss = (bce0 + bce1) / 2, so d loss / d z0 =
+        # sigmoid(z) / 2 and the shared variable collects both halves: sigmoid(z)
+        grad, loss = self._logit_gradient(logit)
+        assert grad == pytest.approx(1.0 / (1.0 + np.exp(-logit)), abs=1e-6), (logit, grad)
+        assert grad > 0.9999
+        assert loss == pytest.approx(logit + np.log1p(np.exp(-logit)), rel=1e-6)   # BCE(z, t=0)
+
+    def test_saturation_guard_is_red_for_the_clipped_probability_form(self, monkeypatch):
+        import dl_techniques.losses.lightglue_loss as module
+
+        def clipped(logits, target):
+            p = keras.ops.clip(keras.ops.sigmoid(logits), 1e-7, 1.0 - 1e-7)
+            return -(target * keras.ops.log(p) + (1.0 - target) * keras.ops.log(1.0 - p))
+
+        monkeypatch.setattr(module, "_bce_with_logits", clipped)
+        grad, _ = self._logit_gradient(20.0)
+        assert grad == 0.0                                  # what shipped before D-018
+        with pytest.raises(AssertionError):
+            self.test_gradient_does_not_die_at_saturation(20.0)
+
+    def test_bce_with_logits_closed_form_values(self):
+        # closed-form binary_cross_entropy_with_logits values for (z, t): (-30, 1) -> 30, (30, 0) -> 30, (0, 1) -> log 2, (2, 1) -> 0.126928
+        z = np.array([-30.0, 30.0, 0.0, 2.0], "float32")
+        t = np.array([1.0, 0.0, 1.0, 1.0], "float32")
+        from dl_techniques.losses.lightglue_loss import _bce_with_logits
+        got = _np(_bce_with_logits(z, t))
+        np.testing.assert_allclose(got, [30.0, 30.0, np.log(2.0), 0.12692805], rtol=1e-6, atol=1e-6)
 
 
 # --------------------------------------------------------------------------------------

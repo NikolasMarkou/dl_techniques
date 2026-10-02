@@ -34,8 +34,12 @@ Divergences from the source, all deliberate:
   masks the confidence term assumes no padding, exactly like the reference; with
   padded batches pass the masks, because padded log-assignment entries are 0 and would
   otherwise win the argmax);
-* BCE is applied to PROBABILITIES (the model emits ``sigmoid`` outputs), clipped to
-  ``[1e-7, 1 - 1e-7]``, which is the same value as ``BCEWithLogits`` up to the clip;
+* the BCE is computed from the pre-sigmoid LOGITS in the numerically stable form
+  ``max(z, 0) - z * t + log1p(exp(-|z|))``, i.e. exactly ``BCEWithLogitsLoss`` as in the
+  reference (the model exposes them as ``token_logits0/1``). An earlier version clipped
+  the sigmoid output to ``[1e-7, 1 - 1e-7]``, whose gradient is exactly 0 for a logit
+  beyond about 16.6 (a confidently wrong head could never recover); the logit form has
+  gradient ``sigmoid(z) - t`` everywhere (D-018);
 * ``nll_pos`` is taken from ``matches0`` (the reference carries a separate
   ``gt_assignment`` tensor; ``utils.keypoint_matching`` guarantees both agree);
 * the focal knob ``gamma_f`` (default 0, unused by ``weight_loss``) is not provided.
@@ -67,7 +71,20 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-_BCE_EPS: float = 1e-7
+
+def _bce_with_logits(logits: Any, target: Any) -> Any:
+    """Elementwise ``BCEWithLogits``, stable for any finite logit.
+
+    ``max(z, 0) - z * t + log1p(exp(-|z|))``; the gradient with respect to ``z`` is
+    ``sigmoid(z) - t``, never clipped to zero. Module-level so a test can replace it
+    with a clipped-probability version and watch the saturation guard go RED.
+
+    :param logits: Float32 logits, any shape.
+    :param target: Float32 targets in ``{0, 1}``, same shape.
+    :return: Float32 loss, same shape.
+    """
+    ops = keras.ops
+    return ops.relu(logits) - logits * target + ops.log1p(ops.exp(-ops.abs(logits)))
 
 
 def pack_matches(matches0: Any, matches1: Any) -> Any:
@@ -172,24 +189,25 @@ def lightglue_nll(
 
 def lightglue_confidence_loss(
     log_assignments: Any,
-    token_confidences0: Any,
-    token_confidences1: Any,
+    token_logits0: Any,
+    token_logits1: Any,
     mask0: Optional[Any] = None,
     mask1: Optional[Any] = None,
 ) -> Any:
-    """Token-confidence BCE against "layer i agrees with the final layer".
+    """Token-confidence BCE-with-logits against "layer i agrees with the final layer".
 
     Interface contract: ``log_assignments`` ``(B, L, M+1, N+1)``;
-    ``token_confidences0`` ``(B, L-1, M)`` and ``token_confidences1`` ``(B, L-1, N)``
-    are probabilities in ``[0, 1]``; ``mask0`` ``(B, M)`` / ``mask1`` ``(B, N)`` mark
+    ``token_logits0`` ``(B, L-1, M)`` and ``token_logits1`` ``(B, L-1, N)`` are the
+    PRE-sigmoid confidence logits (the model's ``token_logits0/1``; a probability here
+    would be a silent error, apply ``log(p / (1 - p))`` first); ``mask0`` ``(B, M)`` / ``mask1`` ``(B, N)`` mark
     real keypoints (default: all real, as in the reference). Targets come from detached
     log assignments, argmax over the dustbin-inclusive axis. Padded columns/rows are
     pushed to a large negative value before the argmax so they cannot win. Returns
     float32 ``(B,)``; 0 when ``L == 1`` or no real keypoint.
 
     :param log_assignments: Log assignments of all layers.
-    :param token_confidences0: Confidences of image-0 tokens for layers ``0..L-2``.
-    :param token_confidences1: Confidences of image-1 tokens for layers ``0..L-2``.
+    :param token_logits0: Confidence logits of image-0 tokens for layers ``0..L-2``.
+    :param token_logits1: Confidence logits of image-1 tokens for layers ``0..L-2``.
     :param mask0: Optional real-keypoint mask of image 0.
     :param mask1: Optional real-keypoint mask of image 1.
     :return: Per-sample loss ``(B,)``.
@@ -217,15 +235,14 @@ def lightglue_confidence_loss(
     correct0 = ops.cast(row_arg[:, :-1] == row_arg[:, -1:], "float32")   # (B, L-1, M)
     correct1 = ops.cast(col_arg[:, :-1] == col_arg[:, -1:], "float32")
 
-    def _bce(prob: Any, target: Any, real: Any) -> Any:
-        prob = ops.clip(ops.cast(prob, "float32"), _BCE_EPS, 1.0 - _BCE_EPS)
-        bce = -(target * ops.log(prob) + (1.0 - target) * ops.log(1.0 - prob))
+    def _bce(logit: Any, target: Any, real: Any) -> Any:
+        bce = _bce_with_logits(ops.cast(logit, "float32"), target)
         r = real[:, None, :]                                             # (B,1,T)
         denom = ops.maximum(ops.sum(r, axis=-1), 1.0)                    # (B,1)
         return ops.sum(bce * r, axis=-1) / denom                         # (B, L-1)
 
-    per_layer = (_bce(token_confidences0, correct0, real0)
-                 + _bce(token_confidences1, correct1, real1)) / 2.0
+    per_layer = (_bce(token_logits0, correct0, real0)
+                 + _bce(token_logits1, correct1, real1)) / 2.0
     return ops.sum(per_layer, axis=1) / float(num_layers - 1)
 
 
@@ -243,9 +260,9 @@ class LightGlueLoss(keras.losses.Loss):
     * :meth:`call` (``compile(loss=LightGlueLoss())`` with stock ``fit``): packed
       ``y_true`` int ``(B, M + N)`` from :func:`pack_matches`, ``y_pred`` =
       ``log_assignments``; returns the NLL term only (the confidence term needs the
-      token confidences, which are not part of a single ``y_pred`` tensor).
+      token logits, which are not part of a single ``y_pred`` tensor).
     * :meth:`compute` (``add_loss`` in a pipeline): labels, ``log_assignments`` and
-      token confidences; returns the full per-sample objective
+      token confidence logits; returns the full per-sample objective
       ``nll + confidence_weight * confidence``.
 
     :param gamma: Layer weighting, ``> 0`` gives ``gamma ** (L - 1 - i)``, ``<= 0``
@@ -295,8 +312,8 @@ class LightGlueLoss(keras.losses.Loss):
         log_assignments: Any,
         matches0: Any,
         matches1: Any,
-        token_confidences0: Optional[Any] = None,
-        token_confidences1: Optional[Any] = None,
+        token_logits0: Optional[Any] = None,
+        token_logits1: Optional[Any] = None,
         mask0: Optional[Any] = None,
         mask1: Optional[Any] = None,
     ) -> Any:
@@ -305,19 +322,19 @@ class LightGlueLoss(keras.losses.Loss):
         :param log_assignments: ``(B, L, M+1, N+1)``.
         :param matches0: ``(B, M)`` int labels.
         :param matches1: ``(B, N)`` int labels.
-        :param token_confidences0: ``(B, L-1, M)`` probabilities, or None to skip the
-            confidence term.
-        :param token_confidences1: ``(B, L-1, N)`` probabilities, or None.
+        :param token_logits0: ``(B, L-1, M)`` pre-sigmoid confidence logits, or None to
+            skip the confidence term.
+        :param token_logits1: ``(B, L-1, N)`` pre-sigmoid confidence logits, or None.
         :param mask0: Optional real-keypoint mask ``(B, M)`` for the confidence term.
         :param mask1: Optional real-keypoint mask ``(B, N)`` for the confidence term.
         :return: ``(B,)`` float32; reduce with ``keras.ops.mean`` for ``add_loss``.
         """
         total = lightglue_nll(
             log_assignments, matches0, matches1, self.gamma, self.nll_balancing)
-        if (self.confidence_weight > 0.0 and token_confidences0 is not None
-                and token_confidences1 is not None):
+        if (self.confidence_weight > 0.0 and token_logits0 is not None
+                and token_logits1 is not None):
             total = total + self.confidence_weight * lightglue_confidence_loss(
-                log_assignments, token_confidences0, token_confidences1, mask0, mask1)
+                log_assignments, token_logits0, token_logits1, mask0, mask1)
         return total
 
     def get_config(self) -> Dict[str, Any]:
