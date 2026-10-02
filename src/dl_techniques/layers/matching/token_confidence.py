@@ -34,7 +34,10 @@ class MatchTokenConfidence(keras.layers.Layer):
 
     Computes ``sigmoid(token_0(stop_gradient(desc)))`` for each image with one set of
     weights. The result is cast to at least float32 (``mask_dtype``) because it is
-    compared against thresholds.
+    compared against thresholds. With ``return_logits=True`` the pre-sigmoid logits are
+    returned as well, so a loss can use a numerically stable log-sigmoid form
+    (``BCEWithLogits``) instead of a clipped probability whose gradient dies when the
+    head saturates.
 
     :param dim: Descriptor width.
     :type dim: int
@@ -45,6 +48,9 @@ class MatchTokenConfidence(keras.layers.Layer):
     Call arguments:
         desc0: ``(B, M, dim)``.
         desc1: ``(B, N, dim)``.
+        return_logits: Python bool, default ``False``. When ``True`` the output is the
+            4-tuple ``(confidence0, confidence1, logit0, logit1)``; the default 2-tuple
+            API is unchanged.
 
     Output:
         ``(confidence0 (B, M), confidence1 (B, N))`` in ``(0, 1)``. The gradient with
@@ -83,14 +89,26 @@ class MatchTokenConfidence(keras.layers.Layer):
         self.token_0.build((None, None, self.dim))
         super().build(desc0_shape)
 
-    def _confidence(self, desc: Any) -> Any:
+    def _logit(self, desc: Any) -> Any:
+        """Pre-sigmoid logit ``(B, N)`` in at least float32; the input is detached."""
         md = mask_dtype(self.compute_dtype)
         logit = self.token_0(keras.ops.stop_gradient(desc))
-        return keras.ops.sigmoid(keras.ops.cast(logit, md))[..., 0]
+        return keras.ops.cast(logit, md)[..., 0]
 
-    def call(self, desc0: Any, desc1: Any) -> Tuple[Any, Any]:
-        """Return the two ``(B, N)`` confidence maps."""
-        return self._confidence(desc0), self._confidence(desc1)
+    def _confidence(self, desc: Any) -> Any:
+        return keras.ops.sigmoid(self._logit(desc))
+
+    def call(self, desc0: Any, desc1: Any, return_logits: bool = False) -> Tuple[Any, ...]:
+        """Return the two ``(B, N)`` confidence maps, plus the logits on request.
+
+        :param return_logits: If True return ``(conf0, conf1, logit0, logit1)``.
+        :return: ``(conf0, conf1)`` or ``(conf0, conf1, logit0, logit1)``.
+        """
+        logit0, logit1 = self._logit(desc0), self._logit(desc1)
+        conf0, conf1 = keras.ops.sigmoid(logit0), keras.ops.sigmoid(logit1)
+        if return_logits:
+            return conf0, conf1, logit0, logit1
+        return conf0, conf1
 
     def compute_output_shape(self, desc0_shape: Tuple[Any, ...],
                              desc1_shape: Tuple[Any, ...]) -> Tuple[Tuple[Any, ...], Tuple[Any, ...]]:

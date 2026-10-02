@@ -39,8 +39,8 @@ def _layer(cdt, seed=0, cls=MatchTokenConfidence):
 class _NoStopGradient(MatchTokenConfidence):
     """MUTANT: the confidence head without the detach."""
 
-    def _confidence(self, desc):
-        return keras.ops.sigmoid(keras.ops.cast(self.token_0(desc), "float32"))[..., 0]
+    def _logit(self, desc):
+        return keras.ops.cast(self.token_0(desc), "float32")[..., 0]
 
 
 def _input_gradient(layer, x0, x1):
@@ -102,6 +102,77 @@ class TestStopGradient:
         layer, _ = _layer("float32", cls=_NoStopGradient)
         g0, g1 = _input_gradient(layer, *self._data())
         assert np.abs(g0).max() > 0.0 and np.abs(g1).max() > 0.0
+
+
+class _LogitsFromProbability(MatchTokenConfidence):
+    """MUTANT: the 'logits' are recovered from the clipped probability, so they saturate."""
+
+    def call(self, desc0, desc1, return_logits=False):
+        c0, c1 = super().call(desc0, desc1)
+        if not return_logits:
+            return c0, c1
+        eps = 1e-7
+        inv = lambda p: keras.ops.log(keras.ops.clip(p, eps, 1 - eps) / (1 - keras.ops.clip(p, eps, 1 - eps)))
+        return c0, c1, inv(c0), inv(c1)
+
+
+class TestLogits:
+    def _data(self, scale=1.0):
+        rng = np.random.RandomState(5)
+        return (rng.normal(size=(2, 5, D)).astype("float32") * scale,
+                rng.normal(size=(2, 6, D)).astype("float32") * scale)
+
+    def test_default_call_is_the_two_tuple(self):
+        layer, _ = _layer("float32")
+        assert len(layer(*self._data())) == 2
+
+    def test_logits_shape_dtype_and_sigmoid_consistency(self):
+        layer, _ = _layer("float32")
+        c0, c1, l0, l1 = layer(*self._data(), return_logits=True)
+        assert tuple(l0.shape) == (2, 5) and tuple(l1.shape) == (2, 6)
+        assert keras.backend.standardize_dtype(l0.dtype) == "float32"
+        np.testing.assert_allclose(keras.ops.convert_to_numpy(c0),
+                                   1.0 / (1.0 + np.exp(-keras.ops.convert_to_numpy(l0))), atol=1e-6)
+        d0, d1 = layer(*self._data())
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(d0), keras.ops.convert_to_numpy(c0))
+
+    def test_logits_match_dense_head(self):
+        layer, _ = _layer("float32")
+        x0, x1 = self._data()
+        _, _, l0, _ = layer(x0, x1, return_logits=True)
+        want = x0 @ layer.token_0.kernel.numpy()[:, 0] + layer.token_0.bias.numpy()[0]
+        np.testing.assert_allclose(keras.ops.convert_to_numpy(l0), want, atol=1e-5)
+
+    @staticmethod
+    def _logit_grad_at_saturation(cls):
+        """d logit / d kernel stays 1 per element even when sigmoid(logit) rounds to 1."""
+        layer, _ = _layer("float32", cls=cls)
+        layer.token_0.kernel.assign(np.ones((D, 1), np.float32))
+        x = np.full((1, 2, D), 3.0, np.float32)           # logit = 48 + bias, far past 17
+        a, b = tf.constant(x), tf.constant(x)
+        with tf.GradientTape() as tape:
+            _, _, l0, l1 = layer(a, b, return_logits=True)
+            loss = tf.reduce_sum(l0) + tf.reduce_sum(l1)
+        g = tape.gradient(loss, layer.token_0.kernel).numpy()
+        return g
+
+    def test_logit_gradient_survives_saturation(self):
+        g = self._logit_grad_at_saturation(MatchTokenConfidence)
+        np.testing.assert_allclose(g[:, 0], 12.0, rtol=1e-6)    # 4 tokens x input 3.0
+
+    def test_gradient_guard_is_red_when_logits_come_from_the_clipped_probability(self):
+        g = self._logit_grad_at_saturation(_LogitsFromProbability)
+        assert np.abs(g).max() == 0.0
+
+    def test_input_gradient_still_zero_with_logits(self):
+        layer, _ = _layer("float32")
+        a, b = [tf.constant(x) for x in self._data()]
+        with tf.GradientTape() as tape:
+            tape.watch([a, b])
+            _, _, l0, l1 = layer(a, b, return_logits=True)
+            loss = tf.reduce_sum(l0) + tf.reduce_sum(l1)
+        grads = tape.gradient(loss, [a, b])
+        assert all(g is None or np.all(g.numpy() == 0) for g in grads)
 
 
 class TestConstruction:
