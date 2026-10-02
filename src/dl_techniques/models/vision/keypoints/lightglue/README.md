@@ -98,9 +98,11 @@ metric `dl_techniques.metrics.keypoint_matching.KeypointMatchMetric`, and the ut
 `dl_techniques.utils.keypoint_extraction` (batched SuperPoint decode) and
 `dl_techniques.utils.keypoint_matching` (homography ground-truth labels).
 
-Tests: `tests/test_models/test_lightglue/` (model, numpy-oracle parity, shared-oracle adoption)
-and `tests/test_layers/test_matching/`. The parity oracle is `tests/lightglue_reference_numpy.py`,
-an explicit-loop transcription of the official reference forward.
+Tests: `tests/test_models/test_lightglue/` (model, `match()`, numpy-oracle parity, shared-oracle
+adoption, and the frozen torch reference check) and `tests/test_layers/test_matching/`. Two
+independent oracles: `tests/lightglue_reference_numpy.py`, an explicit-loop transcription of the
+official forward (same author as the model, so it can share a misreading), and the frozen output
+of the official torch model itself (see "Pretrained weights and conversion").
 
 ---
 
@@ -110,7 +112,7 @@ an explicit-loop transcription of the official reference forward.
 | :--- | :--- | :--- |
 | **`LightGlue`** | `models.lightglue.model.LightGlue` | The subclassed `keras.Model`, static masked path. |
 | **`create_lightglue`** | `models.lightglue.model.create_lightglue` | Factory with the published size as defaults. |
-| **`normalize_keypoints`** | `models.lightglue.model.normalize_keypoints` | Pixel to normalised coordinates, in float32 under any dtype policy. |
+| **`normalize_keypoints`** | `models.lightglue.model.normalize_keypoints` | Pixel to normalised coordinates in a never-narrowing work dtype: float32 for float16, bfloat16, float32 and integer inputs, float64 when the inputs or the model policy are float64. |
 
 ### Constructor parameters
 
@@ -157,19 +159,41 @@ A dict. Every per-layer tensor is batch-first so `predict()` can concatenate bat
 
 **No pretrained weights are distributed here**, and no converter script is shipped; the
 trainer in `src/train/lightglue/` produces weights for the in-repo SuperPoint. A checkpoint
-of the official PyTorch model can be loaded by the following rule, which is exactly what the
-test-only helper `tests/test_models/test_lightglue/weight_loading.py::load_torch_weights`
-does and what the parity tests exercise against the numpy oracle:
+of the official PyTorch model can be loaded by the rule below, which is what the test-only
+helper `tests/test_models/test_lightglue/weight_loading.py::load_torch_weights` does:
 
 - every `Linear` weight is copied **transposed** (torch `(out, in)` to Keras `(in, out)`);
 - every bias, and every LayerNorm `weight` / `bias` (to `gamma` / `beta`), is copied as is;
 - there is **no permutation**: the fused `Wqkv` keeps the torch `(heads, head_dim, 3)` column
-  layout, and the sublayers are named like the torch state dict (`input_proj`, `posenc.Wr`,
-  `transformers.i.self_attn.*`, `transformers.i.cross_attn.*`, `log_assignment.i.*`,
-  `token_confidence.i.*`).
+  layout (D-009 of the plan that added the model, guarded by a value test);
+- the Keras sublayers are NOT named like the torch state dict, so the mapping also renames.
+  The real Keras names are `input_proj`, `posenc`, `self_attn_{i}`, `cross_attn_{i}`,
+  `log_assignment_{i}` and `token_confidence_{i}` (only for `i < num_layers - 1`); inside a
+  block the attributes are `Wqkv`, `out_proj`, `to_qk`, `to_v`, `to_out`, `ffn_0`, `ffn_1`
+  (LayerNorm), `ffn_3`, `matchability`, `final_proj` and `token_0`. Torch name to Keras variable:
 
-The mapping has been exercised against the numpy transcription of the reference code, not
-against a real downloaded checkpoint (PyTorch is not installed in this environment).
+  | torch | Keras |
+  |---|---|
+  | `input_proj.{weight,bias}` | `input_proj.{kernel,bias}` |
+  | `posenc.Wr.weight` | `posenc.kernel` (transposed) |
+  | `transformers.i.self_attn.{Wqkv,out_proj}.*` | `self_attn_i.{Wqkv,out_proj}.{kernel,bias}` |
+  | `transformers.i.cross_attn.{to_qk,to_v,to_out}.*` | `cross_attn_i.{to_qk,to_v,to_out}.{kernel,bias}` |
+  | `transformers.i.{self_attn,cross_attn}.ffn.{0,3}.*` | `{self_attn_i,cross_attn_i}.{ffn_0,ffn_3}.{kernel,bias}` |
+  | `transformers.i.{self_attn,cross_attn}.ffn.1.{weight,bias}` | `{self_attn_i,cross_attn_i}.ffn_1.{gamma,beta}` |
+  | `log_assignment.i.{matchability,final_proj}.*` | `log_assignment_i.{matchability,final_proj}.{kernel,bias}` |
+  | `token_confidence.i.token.0.*` | `token_confidence_i.token_0.{kernel,bias}` |
+
+**What was verified.** `tests/test_models/test_lightglue/data/torch_reference.npz` is a frozen
+run of the OFFICIAL `cvg/LightGlue` `lightglue.py` (commit and recipe in
+`data/generate_torch_reference.py`; torch is imported only inside that script, so the tests need
+no torch): state dict, inputs and outputs of a 3 layer, 32 wide, 4 head model with a live
+`input_proj`, plus three adaptive runs (early exit, pruning, both).
+`test_torch_reference.py` loads it through the mapping above and asserts the static log
+assignments within a derived bound (float64), identical static matches, and that `match()`
+reproduces the official stop layer, prune counters and matches. That proves the layer
+arithmetic, the rotary and `(H, Dh, 3)` conventions and the mapping on random weights. It does
+not prove behaviour with a real downloaded checkpoint or the official SuperPoint coordinate
+convention; no converted checkpoint was tried.
 
 ### Why there is no `MODEL_VARIANTS`
 

@@ -13,7 +13,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.lightglue.eval_homography --help
 ```
 
 This is **stage 1 only** (synthetic homography pairs). There is no MegaDepth stage 2 and no
-pretrained weight is distributed; see section 9.
+pretrained weight is distributed; see section 10.
 
 ## 1. Files
 
@@ -65,13 +65,18 @@ LightGlue (static masked path, mask0 / mask1)  -> per-layer log assignments, con
   warps outside the other image is also dustbin (an extension, not in glue-factory). Everything
   else that is not positive, a real keypoint with a one-sided candidate in range that did not
   win the pair contest, is ignored (label -2, no loss, no metric). Padded slots are ignored.
-  The same threshold is used for positives and dustbin (glue-factory's 3 px). Rule and
-  history: `decisions.md` D-011 (first reading, two-sided max) superseded by D-016 of the plan
-  that added this trainer.
+  The same threshold is used for positives and dustbin (glue-factory's 3 px). The rule, its
+  history (a first reading took the dustbin from the two-sided max distance and mislabelled 3.3%
+  of real keypoints that glue-factory ignores) and the guard tests are in the module docstring
+  and the decision anchor of `dl_techniques/utils/keypoint_matching.py`; the frozen
+  glue-factory output it is checked against is `tests/test_utils/data/glue_factory_homography_labels.npz`.
 - **Loss under stock `fit`, no custom `train_step`.** `LightGlueLoss.compute` (the glue-factory
   form: balanced negative log-likelihood per layer, layer weights `gamma ** (L - 1 - i)`,
   plus a token-confidence binary cross-entropy against the detached final layer) is
-  registered with `add_loss` inside the wrapper's `call`, and the trainer compiles without a
+  computed from the pre-sigmoid **logits** (`token_logits0/1`, D-018) in the stable form
+  `max(z, 0) - z * t + log1p(exp(-|z|))`, so its gradient is `sigmoid(z) - t` at every logit.
+  The loss functions (`lightglue_confidence_loss`, `LightGlueLoss.compute`) take logits; a
+  probability passed by mistake is a silent error. The objective is registered with `add_loss` inside the wrapper's `call`, and the trainer compiles without a
   loss and with `jit_compile=False`. `fit` receives the dataset dict as `x` and no `y`. The
   confidence term needs the real-keypoint masks under padding, so the loss is computed in
   `call`, where the masks are known (D-012, D-014).
@@ -81,23 +86,25 @@ LightGlue (static masked path, mask0 / mask1)  -> per-layer log assignments, con
   the **LightGlue alone** whenever the monitored value improves. A base SuperPoint is tens of
   megabytes of weights that never change, and `eval_homography` only needs the matcher.
   `predict` mutates the wrapper's metric attributes (D-013); the trainer never calls it.
-- **Data.** `make_pair_dataset` decodes a photograph to grayscale, centre-crops the longer
-  side to the view aspect ratio and resizes it to a source frame `source_scale`
-  (default 1.5, a `make_pair_dataset` argument, not a trainer flag) times the view size (a smaller photograph is resized up).
-  Both images are then independent warped patches of that source, with NO pixel reading
-  outside the source frame, so there is no black border (glue-factory's pair is border-free
-  too, and a zero-filled wedge would be a learnable dustbin shortcut). Per view a homography
-  is drawn (rotation 20 degrees, scale 0.8 to 1.2, perspective 0.001, translation 0.08,
-  per view, so the relative homography spans about twice that) and the patch is shrunk about
-  the source centre until its corners fit. Photometric jitter is applied to image 1 after the
-  warp. Remaining differences to glue-factory (quad shrunk to fit instead of corners sampled
-  with a convexity floor, no photometric `dark` mode, no right-only mode) are listed in the
-  `train/lightglue/data.py` docstring. The seed of each pair is `[seed, stream index]`, so a
-  run is reproducible and epochs differ. `H0to1` is the forward map between the two views: a
-  point `p` of image 0 appears at `H0to1 @ p` in image 1. A corrupt file is skipped
-  (`ignore_errors`) in training.
+- **Data.** `make_pair_dataset` decodes a photograph to grayscale, centre-crops the **longer**
+  side to the view aspect ratio (the shorter side is kept whole) and resizes it to a source
+  frame `source_scale` times the view size (default 1.5, a `make_pair_dataset` argument, not a
+  trainer flag; a smaller photograph is resized up). Both images are then independent warped
+  patches of that source (D-017): per view `sample_homography_tf` perturbs the view rectangle
+  (rotation 20 degrees, scale 0.8 to 1.2, perspective 0.001, translation 0.08, per view, so the
+  relative homography spans about twice that), the quad is centred in the source and shrunk
+  about the centre by the largest factor that keeps all four corners one pixel inside the
+  frame (capped at source resolution). No output pixel reads outside the source frame, so
+  there is no black border: glue-factory's pair is border-free too, and a zero-filled wedge was
+  a learnable dustbin shortcut in the first version of this pipeline. Photometric jitter is
+  applied to image 1 after the warp. `H0to1` is the forward map between the views (a point `p`
+  of image 0 appears at `H0to1 @ p` in image 1). Each view's randomness is stateless per pair,
+  `[seed, i]` for view 1 and `[seed + 16, i]` for view 0, so a run is reproducible and epochs
+  differ. A corrupt file is skipped (`ignore_errors`) in training. Remaining differences to
+  glue-factory's sampler are in section 11.
 - **Optimizer.** AdamW with linear warmup then cosine decay, decoupled weight decay that
-  excludes biases and norm parameters, global-norm clipping, built by
+  excludes only variables named bias, gamma or beta (so it also decays the positional-encoding
+  frequency `kernel`; see section 11), global-norm clipping, built by
   `dl_techniques.optimization`.
 
 ## 3. Flags (`train_lightglue`)
@@ -219,49 +226,58 @@ smoke run reported 118,271 training images with 16 held out). Step 3 refuses to 
 
 ## 7. Smoke run evidence (plumbing only, NOT a quality result)
 
-Run 2026-10-02 on one GPU shared with other work, with tiny settings, to show that the pieces
-run end to end. A SuperPoint (tiny, 128 pixels, 2 x 30 steps on synthetic shapes) was frozen
-under a full-size LightGlue (9 layers, 256 wide, 4 heads; 11,851,601 trainable parameters;
-the frozen SuperPoint has 12,559,393):
+Run 2026-10-02 with tiny settings, after the label, data and loss fixes of sections 2 and 11,
+to show that the pieces run end to end. A SuperPoint (tiny, 128 pixels, 2 x 30 steps on
+synthetic shapes) was frozen under a full-size LightGlue (9 layers, 256 wide, 4 heads;
+11,851,601 trainable parameters; the frozen SuperPoint has 12,559,393). Device selection was
+`CUDA_VISIBLE_DEVICES=1` alone (section 8), run summaries report GPU index 1.
 
 ```bash
-MPLBACKEND=Agg .venv/bin/python -m train.lightglue.train_lightglue \
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m train.lightglue.train_lightglue \
     --superpoint-checkpoint results/smoke_superpoint_20261002/final_model.keras \
-    --image-size 128 --max-keypoints 128 --batch-size 4 --epochs 2 --steps-per-epoch 30 \
-    --validation-steps 4 --val-images 16 --warmup-steps 10 --experiment-name smoke_lightglue_20261002
+    --image-size 128 --max-keypoints 128 --batch-size 4 --epochs 6 --steps-per-epoch 100 \
+    --validation-steps 4 --val-images 16 --warmup-steps 10 --experiment-name smoke_lightglue_v3_20261002
 ```
 
-The command above omits the device selection; the run itself passed `--gpu 0` (section 8).
-
-- Training loss, epoch means: 8.18 then 4.53; validation loss 4.51 then 4.05. Finite, not
-  constant, decreasing over 60 steps. That shows the loss is wired, and nothing more.
-- Label statistics of one training batch: 21% of the keypoints are positives, 79% dustbin,
-  none ignored, 128 keypoints per image (measured under the superseded two-sided dustbin rule of D-011; the one-sided rule of D-016 makes a few percent ignored, so these fractions were not re-measured).
-- Last-epoch training precision 0.04, recall 0.005; validation 0.08 and 0.015. These are
-  near zero after 60 steps, as expected.
+- Training loss, epoch means over 6 x 100 steps: 6.50 falling to 4.02; validation loss 4.34
+  falling to 3.95. Finite and decreasing. (The 2 x 30 step run of the same flags: loss 10.23 then
+  5.34.) That shows the loss is wired, and nothing more.
+- Label statistics of one training batch: positive 0.27, dustbin 0.72, ignored 0.012, about 127
+  keypoints per image. The ignored class is non-zero, as expected under the one-sided rule.
+- Last-epoch training precision 0.18, recall 0.011; validation 0.21 and 0.012.
 - `lightglue.keras` reloaded in a fresh process as a `LightGlue` with the same parameter
   count (`lightglue_reload_verified: true`).
-- `eval_homography` on 8 pairs ran and wrote a strict-JSON summary: for 6 of 8 pairs the
-  matcher produced fewer than 4 matches, so the homography failed and was counted at
-  `--max-error`. The mutual-nearest-neighbour baseline had no failures.
+- `eval_homography` on 64 pairs (`--border` left at the trainer default 4):
 
-**These numbers describe a matcher that has seen 60 steps and a detector trained for 60
-steps on synthetic shapes. They say nothing about matching quality**, and no comparison
-between the matcher and the baseline can be drawn from them.
+  | method | mean matches | failed estimates | mean corner error | precision | recall |
+  |---|---|---|---|---|---|
+  | lightglue | 1.8 | 54 of 64 | 862 px | 0.107 | 0.013 |
+  | mnn | 96.2 | 0 | 29.7 px | 0.039 | 0.097 |
+
+  (failed estimates are counted at `--max-error` 1000.)
+
+**LightGlue still loses to the mutual-nearest-neighbour baseline here**: after 600 steps on a
+near-random tiny SuperPoint (the baseline's own precision is 0.04) it emits one or two matches
+per pair. The mean stop layer is 2.0, but a diagnostic eval with adaptive depth and pruning off
+(`--depth-confidence -1 --width-confidence -1`, stop layer 9.0) still gave about 3 matches per
+pair and 52 of 64 failures, so early exit is not the cause. The pipeline does overfit one fixed
+batch to precision and recall 1.0 in 200 steps (independent reviewer probe), so the wiring
+works; whether a properly trained detector and a long run recover matches is **untested**.
+These numbers prove plumbing only and support no comparison and no quality claim.
 
 ## 8. GPU note
 
 `--gpu N` calls `train.common.setup_gpu`, which **overwrites** `CUDA_VISIBLE_DEVICES` with `N`.
-Setting `CUDA_VISIBLE_DEVICES=1` and also passing `--gpu 0` therefore runs on physical GPU 0.
-This was observed in the smoke runs: the SuperPoint and LightGlue runs executed on GPU 0
-because `--gpu 0` was passed, while the evaluation run, which omitted `--gpu`, ran on GPU 1.
-Select the device one way only: `CUDA_VISIBLE_DEVICES=1` alone, or `--gpu 1` alone.
+`CUDA_VISIBLE_DEVICES=1` together with `--gpu 0` therefore runs on physical GPU 0 (this
+happened in the first smoke run and was found by reading the run summaries). Select the device
+one way only: `CUDA_VISIBLE_DEVICES=1` alone, or `--gpu 1` alone. Every command in this
+README uses the first form.
 
 ## 9. Evaluation metrics (`eval_homography`)
 
 Pairs are built from a folder of photographs (default COCO `val2017`; the first `--num-pairs`
 sorted images, one pair each) with the trainer's data pipeline: a fixed seed, no photometric
-jitter, the same wide homography ranges. The frozen SuperPoint supplies keypoints and
+jitter, the same per-view homography ranges as training (border-free views, `--border` as in training). The frozen SuperPoint supplies keypoints and
 descriptors, matches become a homography with `cv2.findHomography` (RANSAC, threshold
 `--ransac-threshold`), and the homography is scored against the sampled one. Definitions are
 transcribed from glue-factory.
@@ -297,7 +313,35 @@ keypoints, with an optional `--mnn-ratio` test).
   HPatches or MegaDepth benchmark and must not be compared to its numbers.
 - `eval_homography` needs `opencv-python`.
 
-## 11. Tests
+## 11. Differences from glue-factory training
+
+Reference: `gluefactory/configs/superpoint+lightglue_homography.yaml` and `train.py` defaults of
+cvg/glue-factory `main`, read 2026-10-02. "Intentional" means chosen for this trainer's
+circumstances; "unmeasured" means the effect on accuracy was not tested.
+
+| Aspect | glue-factory | here | Intentional |
+|---|---|---|---|
+| Detector | `gluefactory_nonfree.superpoint` (official SuperPoint weights) | in-repo SuperPoint, frozen, you supply the checkpoint | yes (user decision; no official weights) |
+| `nms_radius` | 3 | 4 (`--nms-radius`) | yes, the trainer's own default; unmeasured |
+| `detection_threshold`, `force_num_keypoints` | 0.0 with `force_num_keypoints: True` (always 512 real keypoints, no padding) | 0.005, top-k to `--max-keypoints`, padded and masked | yes, padding is handled by masks; fewer real keypoints on weak images |
+| Keypoint border | the extractor's default | `--border 4` | yes |
+| Optimizer | Adam, no weight decay | AdamW, weight decay 0.01, which also decays the positional-encoding `kernel` (exclusion list is bias, gamma, beta only) | decay itself yes; decaying `posenc` is NOT deliberate, unmeasured |
+| Gradient clipping | none (`clip_grad: None`) | global norm 1.0 (`--clip-norm`) | yes |
+| LR schedule | constant 1e-4, then exponential decay from epoch 20 (10 epochs per factor 10) | peak 1e-4, 500 linear warmup steps, cosine decay to the end | yes |
+| Epochs, batch | 40 epochs, batch 128, `train_size` 150000 pairs | `--epochs` 10, batch 16, an epoch is one pass over the images; the suggested full run in section 6 is 40 x 5000 steps of batch 8, which is 1.6 million pairs | yes (12 GB GPU) |
+| Dataset | revisitop1m (Oxford-Paris distractors) | COCO train2017, `--val-images` held out | yes (local data) |
+| Image size | patches of 640 x 480 (dataset default `patch_shape`) | square, fixed by the SuperPoint checkpoint (240 suggested) | yes |
+| Views | image 0 is a warped patch too (`right_only` off), corners sampled by `sample_homography_corners` (difficulty 0.7, `max_angle` 45, convexity floor) | both views are warped patches, quad = perturbed rectangle shrunk to fit (D-017), per-view ranges: rotation 20 degrees, scale 0.8 to 1.2, perspective 0.001, translation 0.08 | yes, a smaller port; large perturbations cost zoom instead of being re-drawn; unmeasured |
+| Augmentation | `photometric: lg` on both views | brightness, contrast, gamma and noise jitter on image 1 only, no flag | simpler on purpose; the `lg` augmentation is not ported, unmeasured |
+| Labels | `gt_matches_from_homography`, thresholds 3 and 3 | same rule, equal on the frozen fixture; plus an extension that a keypoint warping outside the other image is dustbin | the extension is intentional |
+| Loss | NLL (`gamma` 1, `nll_balancing` 0.5) plus confidence BCE with logits | same, from logits (D-018); padded keypoints masked | yes (masks) |
+| Model | `flash: false`, `checkpointed: true` | no activation checkpointing, no flash path | yes |
+| Stage 2 | MegaDepth | none (no poses available) | yes |
+
+The model itself was checked against the official torch code, not only against a numpy
+transcription; see "Pretrained weights and conversion" in the model README.
+
+## 12. Tests
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest tests/test_train/test_lightglue \
