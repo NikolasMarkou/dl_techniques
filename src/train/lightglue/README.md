@@ -103,8 +103,9 @@ LightGlue (static masked path, mask0 / mask1)  -> per-layer log assignments, con
   differ. A corrupt file is skipped (`ignore_errors`) in training. Remaining differences to
   glue-factory's sampler are in section 11.
 - **Optimizer.** AdamW with linear warmup then cosine decay, decoupled weight decay that
-  excludes only variables named bias, gamma or beta (so it also decays the positional-encoding
-  frequency `kernel`; see section 11), global-norm clipping, built by
+  excludes biases, LayerNorm gamma/beta (name patterns) and the positional-encoding frequency
+  `posenc.kernel` (by variable, because its name is plain `kernel` like every Dense kernel; the
+  Dense and attention kernels still decay; see section 11), global-norm clipping, built by
   `dl_techniques.optimization`.
 
 ## 3. Flags (`train_lightglue`)
@@ -325,7 +326,7 @@ circumstances; "unmeasured" means the effect on accuracy was not tested.
 | `nms_radius` | 3 | 4 (`--nms-radius`) | yes, the trainer's own default; unmeasured |
 | `detection_threshold`, `force_num_keypoints` | 0.0 with `force_num_keypoints: True` (always 512 real keypoints, no padding) | 0.005, top-k to `--max-keypoints`, padded and masked | yes, padding is handled by masks; fewer real keypoints on weak images |
 | Keypoint border | the extractor's default | `--border 4` | yes |
-| Optimizer | Adam, no weight decay | AdamW, weight decay 0.01, which also decays the positional-encoding `kernel` (exclusion list is bias, gamma, beta only) | decay itself yes; decaying `posenc` is NOT deliberate, unmeasured |
+| Optimizer | Adam, no weight decay | AdamW, weight decay 0.01 on the Dense and attention kernels; biases, LayerNorm gamma/beta and the positional-encoding `kernel` are excluded (the encoding therefore matches glue-factory) | decay of the other kernels is a deliberate AdamW choice, unmeasured against no decay; guard `test_optimizer.py` |
 | Gradient clipping | none (`clip_grad: None`) | global norm 1.0 (`--clip-norm`) | yes |
 | LR schedule | constant 1e-4, then exponential decay from epoch 20 (10 epochs per factor 10) | peak 1e-4, 500 linear warmup steps, cosine decay to the end | yes |
 | Epochs, batch | 40 epochs, batch 128, `train_size` 150000 pairs | `--epochs` 10, batch 16, an epoch is one pass over the images; the suggested full run in section 6 is 40 x 5000 steps of batch 8, which is 1.6 million pairs | yes (12 GB GPU) |

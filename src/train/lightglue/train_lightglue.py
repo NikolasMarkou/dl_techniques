@@ -257,16 +257,29 @@ def split_images(paths: List[str], val_images: int, seed: int):
     return train, val
 
 
-def build_optimizer(config: LightGlueTrainConfig, steps_per_epoch: int):
+#: Name patterns excluded from weight decay (`re.search` on the variable's LEAF name).
+NO_DECAY_NAME_PATTERNS = ["bias", "gamma", "beta"]
+
+
+def build_optimizer(config: LightGlueTrainConfig, steps_per_epoch: int,
+                    lightglue: Optional[LightGlue] = None):
     """AdamW through `optimizer_builder` with a warmup + cosine schedule.
 
     Weight decay is applied once, by the optimizer (no kernel regularizer in the model).
+    Biases, LayerNorm gamma/beta and the learned-Fourier positional-encoding frequency are
+    excluded from decay (glue-factory uses Adam with no decay at all; the Dense and
+    attention kernels still decay, a deliberate AdamW choice). The frequency is a variable
+    named plain `kernel`, like every Dense kernel, so no name pattern can single it out: it
+    is excluded by variable identity, which needs `lightglue` BUILT before this call.
     The clipping key is `gradient_clipping_by_norm` (global norm); `optimizer_builder`
     renames its keys, so a literal `clipnorm` would be dropped silently.
 
     :param config: The run config.
     :param steps_per_epoch: Optimizer steps per epoch.
+    :param lightglue: The (built) LightGlue whose `posenc.kernel` is exempted from decay.
+        ``None`` skips that exemption (only for callers that never train a LightGlue).
     :return: The configured optimizer.
+    :raises ValueError: if ``lightglue`` is given but its positional encoding is not built.
     """
     total_steps = steps_per_epoch * config.epochs
     schedule = learning_rate_schedule_builder({
@@ -279,11 +292,24 @@ def build_optimizer(config: LightGlueTrainConfig, steps_per_epoch: int):
     optimizer_config: Dict[str, Any] = {
         "type": "adamw",
         "weight_decay": config.weight_decay,
-        "exclude_from_weight_decay": ["bias", "gamma", "beta"],
+        "exclude_from_weight_decay": NO_DECAY_NAME_PATTERNS,
     }
     if config.clip_norm > 0:
         optimizer_config["gradient_clipping_by_norm"] = config.clip_norm
-    return optimizer_builder(optimizer_config, schedule)
+    optimizer = optimizer_builder(optimizer_config, schedule)
+    if lightglue is not None:
+        # DECISION plan-2026-10-02T084508-dd2c07ac/D-019
+        # Exclude posenc.kernel by VARIABLE (var_list), not by a name pattern: its name is
+        # plain "kernel", shared with every Dense kernel, so adding "kernel" to the pattern
+        # list would switch decay off everywhere. exclude_from_weight_decay REPLACES the
+        # earlier call, so the name patterns are passed again here. Guard:
+        # tests/test_train/test_lightglue/test_optimizer.py. See decisions.md D-019.
+        kernel = lightglue.posenc.kernel
+        if kernel is None:
+            raise ValueError("build_optimizer needs a built LightGlue (posenc.kernel is None)")
+        optimizer.exclude_from_weight_decay(
+            var_list=[kernel], var_names=NO_DECAY_NAME_PATTERNS)
+    return optimizer
 
 
 # ---------------------------------------------------------------------
@@ -354,8 +380,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         # jit_compile=False and no loss: the objective is add_loss inside the wrapper's
         # call. Do NOT add a custom train_step "to reach the labels"; labels and loss are
         # computed in call() precisely so stock fit runs. See decisions.md D-014.
-        model.compile(optimizer=build_optimizer(config, steps_per_epoch), jit_compile=False)
+        # built BEFORE the optimizer: the posenc.kernel exclusion from decay needs the variable
         model.build({"image0": (None, *image_size, 1)})
+        model.compile(
+            optimizer=build_optimizer(config, steps_per_epoch, lightglue=lightglue),
+            jit_compile=False)
 
         monitor = "val_loss" if val_paths else "loss"
         callbacks, results_dir = create_callbacks(
