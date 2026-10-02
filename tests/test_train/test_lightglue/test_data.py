@@ -110,33 +110,58 @@ def test_epochs_differ_with_repeat(folder):
     ds = make_pair_dataset(paths, SIZE, 2, seed=3, shuffle=False, repeat=True)
     it = iter(ds)
     e0, e1 = next(it), next(it)
-    np.testing.assert_array_equal(e0["image0"].numpy(), e1["image0"].numpy())
+    # both views are re-sampled each epoch (image0 is a warped patch as well)
+    assert not np.allclose(e0["image0"].numpy(), e1["image0"].numpy())
     assert not np.allclose(e0["H0to1"].numpy(), e1["H0to1"].numpy())
 
 
+def _centroid(img):
+    ys, xs = np.mgrid[0:img.shape[0], 0:img.shape[1]]
+    w = img * (img > 0.3)
+    return np.array([(w * xs).sum(), (w * ys).sum()]) / w.sum()
+
+
 def test_marked_pixel_maps_through_h0to1(tmp_path):
-    for i in range(3):
+    """The centroid of the dot in image0, pushed through H0to1, lands on the dot of image1."""
+    for i in range(6):
         _write(tmp_path / f"d{i}.png", _dot_image(SIZE, SIZE, SRC, SRC + 8))
     params = dict(ZERO, rotation=0.3, scale=(0.9, 1.1), translation=0.05,
                   perspective=0.001)
-    ds = make_pair_dataset(list_images(str(tmp_path)), SIZE, 3, seed=5,
+    ds = make_pair_dataset(list_images(str(tmp_path)), SIZE, 6, seed=5,
                            homography_params=params, photometric_jitter=False,
                            shuffle=False)
     b = _first(ds)
     checked = 0
-    for k in range(3):
-        h = b["H0to1"].numpy()[k].astype(np.float64)
-        q = h @ np.array([SRC, SRC + 8, 1.0])
-        q = q[:2] / q[2]
-        if not (4 <= q[0] < SIZE - 4 and 4 <= q[1] < SIZE - 4):
+    for k in range(6):
+        i0, i1 = b["image0"].numpy()[k, ..., 0], b["image1"].numpy()[k, ..., 0]
+        if (i0 > 0.3).sum() < 2 or (i1 > 0.3).sum() < 2:
             continue
-        img = b["image1"].numpy()[k, ..., 0]
-        ys, xs = np.mgrid[0:SIZE, 0:SIZE]
-        w = img * (img > 0.2)
-        cen = np.array([(w * xs).sum(), (w * ys).sum()]) / w.sum()
-        assert np.abs(cen - q).max() < 1.0, (cen, q)
+        c0, c1 = _centroid(i0), _centroid(i1)
+        h = b["H0to1"].numpy()[k].astype(np.float64)
+        q = h @ np.append(c0, 1.0)
+        q = q[:2] / q[2]
+        assert np.abs(c1 - q).max() < 1.0, (c1, q)
         checked += 1
-    assert checked >= 1
+    assert checked >= 3
+
+
+def test_marked_pixel_wrong_direction_is_red(tmp_path):
+    """The inverse homography does NOT map the dot (the test above can fail)."""
+    for i in range(6):
+        _write(tmp_path / f"d{i}.png", _dot_image(SIZE, SIZE, SRC, SRC + 8))
+    params = dict(ZERO, rotation=0.3, scale=(0.9, 1.1), translation=0.05)
+    b = _first(make_pair_dataset(list_images(str(tmp_path)), SIZE, 6, seed=5,
+                                 homography_params=params, photometric_jitter=False,
+                                 shuffle=False))
+    worst = 0.0
+    for k in range(6):
+        i0, i1 = b["image0"].numpy()[k, ..., 0], b["image1"].numpy()[k, ..., 0]
+        if (i0 > 0.3).sum() < 2 or (i1 > 0.3).sum() < 2:
+            continue
+        h = np.linalg.inv(b["H0to1"].numpy()[k].astype(np.float64))
+        q = h @ np.append(_centroid(i0), 1.0)
+        worst = max(worst, np.abs(_centroid(i1) - q[:2] / q[2]).max())
+    assert worst > 1.0
 
 
 def test_identity_params_give_identity_pair(folder):
@@ -148,7 +173,57 @@ def test_identity_params_give_identity_pair(folder):
     np.testing.assert_allclose(b["image1"].numpy(), b["image0"].numpy(), atol=2e-3)
 
 
-def test_jitter_only_on_image1_and_out_of_frame_zero(folder):
+HARD = {"rotation": 0.6, "scale": (0.6, 1.5), "perspective": 0.003,
+        "translation": 0.3, "shear": 0.1}
+
+
+def _constant_folder(tmp_path):
+    # nonzero everywhere: any read of the fill value 0 is visible as a dark pixel
+    for i in range(4):
+        _write(tmp_path / f"c{i}.png", np.full((70, 90, 3), 128, np.uint8))
+    return list_images(str(tmp_path))
+
+
+def test_views_are_border_free(tmp_path):
+    """No pixel of either view reads outside the source frame, many seeds, hard ranges."""
+    paths = _constant_folder(tmp_path)
+    lo = 1.0
+    for seed in range(8):
+        ds = make_pair_dataset(paths, SIZE, 4, seed=seed, homography_params=HARD,
+                               photometric_jitter=False, shuffle=False, repeat=True)
+        for b in ds.take(6):
+            for key in ("image0", "image1"):
+                lo = min(lo, float(b[key].numpy().min()))
+    assert lo > 0.49, lo  # constant 128/255 = 0.502 everywhere, never the 0 fill
+
+
+def test_views_border_free_with_zero_fill_reinjected_is_red(tmp_path, monkeypatch):
+    """Reinjecting the old single-frame warp (no shrink to fit) brings the fill back."""
+    paths = _constant_folder(tmp_path)
+
+    def old(view_hw, source_hw, seed, params):
+        p = pair_data.sample_homography_tf(view_hw, seed, **params)
+        return tf.linalg.inv(tf.cast(p, tf.float64))  # image1 = warp of the full frame
+
+    monkeypatch.setattr(pair_data, "_view_to_source", old)
+    lo = 1.0
+    for seed in range(4):
+        ds = make_pair_dataset(paths, SIZE, 4, seed=seed, homography_params=HARD,
+                               photometric_jitter=False, shuffle=False, repeat=True)
+        for b in ds.take(4):
+            lo = min(lo, float(b["image1"].numpy().min()), float(b["image0"].numpy().min()))
+    assert lo < 0.1
+
+
+def test_small_source_is_resized_up(tmp_path):
+    for i in range(2):
+        _write(tmp_path / f"s{i}.png", np.full((20, 24, 3), 128, np.uint8))
+    b = _first(make_pair_dataset(list_images(str(tmp_path)), SIZE, 2, seed=2,
+                                 homography_params=HARD, photometric_jitter=False))
+    assert b["image0"].numpy().min() > 0.49 and b["image1"].numpy().min() > 0.49
+
+
+def test_both_views_are_warped_and_jitter_only_on_image1(folder):
     paths = list_images(str(folder))
     off = _first(make_pair_dataset(paths, SIZE, 2, seed=1, shuffle=False,
                                    homography_params=ZERO, photometric_jitter=False))
@@ -156,10 +231,10 @@ def test_jitter_only_on_image1_and_out_of_frame_zero(folder):
                                   homography_params=ZERO, photometric_jitter=True))
     np.testing.assert_array_equal(off["image0"].numpy(), on["image0"].numpy())
     assert np.abs(off["image1"].numpy() - on["image1"].numpy()).max() > 1e-3
-    shift = make_pair_dataset(paths, SIZE, 2, seed=1, shuffle=False,
-                              homography_params=dict(ZERO, translation=0.3))
-    b = _first(shift)
-    assert (b["image1"].numpy() == 0.0).mean() > 0.05
+    warped = _first(make_pair_dataset(paths, SIZE, 2, seed=1, shuffle=False,
+                                      photometric_jitter=False))
+    # image0 is a warped patch too: it differs from the identity view
+    assert np.abs(warped["image0"].numpy() - off["image0"].numpy()).max() > 1e-2
 
 
 def test_jitter_image0_flag(folder):
@@ -190,6 +265,8 @@ def test_bad_arguments(folder):
         make_pair_dataset(paths, SIZE, 2, homography_params={"bogus": 1.0})
     with pytest.raises(ValueError):
         make_pair_dataset(paths, SIZE, 0)
+    with pytest.raises(ValueError, match="source_scale"):
+        make_pair_dataset(paths, SIZE, 2, source_scale=0.5)
 
 
 def test_import_is_side_effect_free():

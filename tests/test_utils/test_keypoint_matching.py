@@ -324,8 +324,9 @@ class TestFrozenGlueFactory:
     Fixture ``data/glue_factory_homography_labels.npz`` (24 pairs, 128 px):
     keypoints are 128-slot padded SuperPoint detections (a 60-step smoke
     SuperPoint, NMS 4, border 4, threshold 0.005) on COCO val2017 pairs from
-    ``train.lightglue.data.make_pair_dataset`` (seed 0, no jitter); ``H`` is the
-    forward homography. ``g0``/``g1`` are the outputs of cvg/glue-factory
+    ``train.lightglue.data.make_pair_dataset`` (seed 0, no jitter) as it was BEFORE
+    the border-free rewrite of D-017 (the labels do not depend on the generator);
+    ``H`` is the forward homography. ``g0``/``g1`` are the outputs of cvg/glue-factory
     ``gt_matches_from_homography(kp0, kp1, H, pos_th=3, neg_th=3)`` run in
     float64 on CPU torch 2.14.1 on the REAL keypoints of each pair (padded
     slots set to -2), source commit bd356aa (2025-07-10), 2026-10-02. No torch

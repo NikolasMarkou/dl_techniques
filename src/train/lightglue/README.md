@@ -81,13 +81,21 @@ LightGlue (static masked path, mask0 / mask1)  -> per-layer log assignments, con
   the **LightGlue alone** whenever the monitored value improves. A base SuperPoint is tens of
   megabytes of weights that never change, and `eval_homography` only needs the matcher.
   `predict` mutates the wrapper's metric attributes (D-013); the trainer never calls it.
-- **Data.** `make_pair_dataset` decodes a photograph to grayscale, centre-crops its shorter
-  side, resizes it, draws a homography with ranges wider than the SuperPoint defaults
-  (rotation 30 degrees, scale 0.7 to 1.3, perspective 0.002, translation 0.15), warps the
-  image, and applies photometric jitter to image 1 before the warp, so out-of-frame pixels
-  stay 0. The seed of each pair is `[seed, stream index]`, so a run is reproducible and
-  epochs differ. `H0to1` is the forward map: a point `p` of image 0 appears at `H0to1 @ p` in
-  image 1. A corrupt file is skipped (`ignore_errors`) in training.
+- **Data.** `make_pair_dataset` decodes a photograph to grayscale, centre-crops the longer
+  side to the view aspect ratio and resizes it to a source frame `source_scale`
+  (default 1.5, a `make_pair_dataset` argument, not a trainer flag) times the view size (a smaller photograph is resized up).
+  Both images are then independent warped patches of that source, with NO pixel reading
+  outside the source frame, so there is no black border (glue-factory's pair is border-free
+  too, and a zero-filled wedge would be a learnable dustbin shortcut). Per view a homography
+  is drawn (rotation 20 degrees, scale 0.8 to 1.2, perspective 0.001, translation 0.08,
+  per view, so the relative homography spans about twice that) and the patch is shrunk about
+  the source centre until its corners fit. Photometric jitter is applied to image 1 after the
+  warp. Remaining differences to glue-factory (quad shrunk to fit instead of corners sampled
+  with a convexity floor, no photometric `dark` mode, no right-only mode) are listed in the
+  `train/lightglue/data.py` docstring. The seed of each pair is `[seed, stream index]`, so a
+  run is reproducible and epochs differ. `H0to1` is the forward map between the two views: a
+  point `p` of image 0 appears at `H0to1 @ p` in image 1. A corrupt file is skipped
+  (`ignore_errors`) in training.
 - **Optimizer.** AdamW with linear warmup then cosine decay, decoupled weight decay that
   excludes biases and norm parameters, global-norm clipping, built by
   `dl_techniques.optimization`.
