@@ -143,6 +143,13 @@ def _ffn_residual(block: keras.layers.Layer, x: Any, message: Any) -> Any:
     return x + block.ffn_3(hidden)
 
 
+# DECISION plan-2026-10-02T084508-dd2c07ac/D-009
+# The fused Wqkv columns are (H, Dh, 3), exactly torch's unflatten(-1, (H, -1, 3)). Do NOT
+# switch to the more usual (3, H, Dh): the shapes are identical, so only values show it, and
+# every converted official checkpoint would be silently permuted. Guards:
+# tests/test_layers/test_matching/test_lightglue_blocks.py::TestMutationGuards::
+# test_wrong_qkv_layout_is_caught and tests/test_models/test_lightglue/test_torch_reference.py.
+# See decisions.md D-009.
 def _split_qkv(qkv: Any, num_heads: int, head_dim: int) -> Tuple[Any, Any, Any]:
     """Split a fused ``(B, L, 3 * H * Dh)`` projection into q, k, v of ``(B, H, L, Dh)``.
 

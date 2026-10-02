@@ -72,6 +72,13 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-10-02T084508-dd2c07ac/D-018
+# The confidence BCE is computed from LOGITS in this stable form. Do NOT go back to
+# clipping sigmoid probabilities to [1e-7, 1 - 1e-7]: the gradient is exactly 0 beyond a
+# logit of about 16.6, so a confidently wrong head could never recover. Guards:
+# tests/test_losses/test_lightglue_loss.py::TestConfidence::
+# test_gradient_does_not_die_at_saturation and
+# test_saturation_guard_is_red_for_the_clipped_probability_form. See decisions.md D-018.
 def _bce_with_logits(logits: Any, target: Any) -> Any:
     """Elementwise ``BCEWithLogits``, stable for any finite logit.
 
@@ -223,6 +230,13 @@ def lightglue_confidence_loss(
         else ops.cast(mask0, "float32")
     real1 = ops.ones((batch, n), "float32") if mask1 is None \
         else ops.cast(mask1, "float32")
+    # DECISION plan-2026-10-02T084508-dd2c07ac/D-012
+    # Padded rows and columns are pushed to -big BEFORE the argmax. Do NOT drop the masks:
+    # padded log-assignment entries are 0 (above every real, negative entry), so they would
+    # win the argmax and corrupt the target. The reference has no padding; this is our
+    # extension. Guard: tests/test_losses/test_lightglue_loss.py::TestConfidence::
+    # test_matches_oracle_with_padding and tests/test_train/test_lightglue/test_pipeline.py::
+    # test_masks_reach_the_confidence_term. See decisions.md D-012.
     big = 1e9
     # extended masks include the dustbin (always selectable)
     col_ok = ops.concatenate([real1, ops.ones((batch, 1), "float32")], axis=1)  # (B,N+1)

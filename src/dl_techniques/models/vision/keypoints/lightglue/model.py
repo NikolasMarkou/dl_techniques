@@ -529,6 +529,14 @@ class LightGlue(keras.Model):
             "prune1": prune1,
         }
 
+    # DECISION plan-2026-10-02T084508-dd2c07ac/D-008
+    # call() is the static masked path and match() is a SEPARATE eager batch-1 method.
+    # Do NOT fold early exit and pruning into call(): their shapes depend on the data,
+    # which breaks fit, jit and masking. The two paths are kept in sync by tests, not by
+    # shared code. Guards: tests/test_models/test_lightglue/test_match.py
+    # TestEqualsStaticPath::test_disabled_knobs_equal_the_last_static_layer and
+    # test_torch_reference.py (match() against the official stop layer and prune counters).
+    # See decisions.md D-008.
     def match(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """Adaptive inference: early exit on depth confidence, point pruning on width confidence.
 

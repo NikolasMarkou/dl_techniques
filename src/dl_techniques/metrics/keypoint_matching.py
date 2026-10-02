@@ -104,6 +104,14 @@ class KeypointMatchMetric(keras.metrics.Metric):
         # labels1 at the predicted partner; clip keeps the -1 (no match) gather legal
         partner = keras.ops.clip(pred0, 0, n - 1)
         partner_label = keras.ops.take_along_axis(labels1, partner, axis=1)
+        # DECISION plan-2026-10-02T084508-dd2c07ac/D-013
+        # A predicted pair counts only when NEITHER keypoint is labelled -2 (ignored or
+        # padded). Do NOT count such pairs as false positives here: the fit-log precision and
+        # eval_homography's `precision` share this rule, `precision_strict` is the variant
+        # that keeps them. Guards: tests/test_metrics/test_keypoint_matching.py::TestHandCounts::
+        # test_ignored_partner_side_excluded and tests/test_train/test_lightglue/
+        # test_eval_homography.py::test_precision_matches_the_training_metric.
+        # See decisions.md D-013.
         is_pred = keras.ops.logical_and(pred0 >= 0, labels0 != -2)
         is_pred = keras.ops.logical_and(is_pred, partner_label != -2)
         is_tp = keras.ops.logical_and(is_pred, labels0 == pred0)
