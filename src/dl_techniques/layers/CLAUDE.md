@@ -47,6 +47,7 @@ see § Naming traps.
 | `acc_unet/` | — | ACC-UNet cluster: HANC block + layer (hierarchical-context aggregation), multi-level feature compilation (cross-scale fusion) |
 | `yolo12/` | — | YOLOv12 backbone blocks (`Bottleneck`, `C3k2Block`, `A2C2fBlock`) and task heads (detection/segmentation/classification) |
 | `tabular/` | — | TabM batched-ensemble MLP building blocks (D-007: named for the domain, not the paper acronym), one class per module: `scale_ensemble.py`, `linear_efficient_ensemble.py`, `nlinear.py`, `tabm_mlp_block.py`, `tabm_backbone.py`, plus the private `_ensemble_scaling.py` (the shared `EnsembleInitDistribution` alias + the `'ones'`/`'normal'`/`'random-signs'` resolver). The `'random-signs'` initializer itself is `initializers/random_signs.py::RandomSigns`, not a `tabular/` symbol |
+| `matching/` | — | LightGlue keypoint-matching building blocks, one concern per module, consumed by `models/vision/keypoints/lightglue/`: `learned_fourier_rotary.py` (`LearnedFourierRotaryEncoding`, learned-Fourier positional table applied as an interleaved rotary rotation, plus `apply_rotary_interleaved`), `lightglue_blocks.py` (`LightGlueSelfBlock`, `LightGlueCrossBlock`), `match_assignment.py` (`MatchAssignment` double log-softmax with a dustbin row/column, plus the `filter_matches` function), `token_confidence.py` (`MatchTokenConfidence`). Class names carry a `LightGlue*` / `Match*` prefix because bare `Attention` / `TokenConfidence` would collide in the registry. Exports nothing, no factory. Torch-layout weights and a numpy oracle in `tests/lightglue_reference_numpy.py` |
 
 ### Semantics worth knowing before you reuse
 
@@ -155,9 +156,9 @@ public surface, 17 export nothing — so neither shape is the default and you ha
 | Shape | Subpackages | How to import |
 |---|---|---|
 | **Curated re-export with `__all__`** (16) | `activations` (34 names), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (40), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (23), `sequence_pooling` (12), `time_series` (33), `tokenizers` (8), `transformers` (32) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
-| **Exports nothing** (17) | `acc_unet`, `blt`, `complex`, `conv_blocks`, `fusion`, `generative`, `geometric`, `graphs`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
+| **Exports nothing** (18) | `acc_unet`, `blt`, `complex`, `conv_blocks`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
 
-All 33 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
+All 34 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
 `fusion` is the only "exports nothing" entry whose `__init__.py` is not a zero-byte file — it is
 docstring-only and deliberately binds no name, and its docstring says so. Re-derive both rows and
 every `__all__` length with:

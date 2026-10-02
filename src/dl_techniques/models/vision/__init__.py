@@ -30,6 +30,7 @@ this bullet's edit, which only adds `fftnet/`.)
 - `image_restoration/pw_fnet/` — a 2-level U-Net with FFT token mixing and multi-scale
   supervision, for image restoration. The name misattributes; see `models/CLAUDE.md`
 - `image_restoration/scunet/` — SCUNet denoiser
+- `keypoints/lightglue/` — LightGlue keypoint matcher (consumes keypoints + descriptors)
 - `keypoints/superpoint/` — SuperPoint keypoint detector + descriptor
 - `levjepa/` — LeVJEPA joint-embedding video pretraining ViT encoder
 - `lewm/` — latent-energy world model

@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **97 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **98 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (97 of 97 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (98 of 98 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -75,6 +75,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `image_restoration/doc_scanner/` | DocScanner document unwarping — a U2NET-P localizer and a RAFT-lineage 12-iteration refiner that emits a dense BACKWARD map. The two stages train **independently**, so there are two trainers and the composite `DocScanner` is inference-only: the 0.5 mask threshold between them has no gradient |
 | `image_restoration/pw_fnet/` | 2-level U-Net, FFT token mixing, multi-scale supervision. No wavelet op despite the paper's pyramid-wavelet design |
 | `image_restoration/scunet/` | SCUNet denoiser |
+| `keypoints/lightglue/` | LightGlue keypoint matcher — consumes keypoints and descriptors from any extractor (SuperPoint, SIFT, ...), returns per-layer soft assignments with a dustbin; static masked `call()` for training plus an eager `match()` with early exit and pruning. Generic blocks live in `layers/matching/`; trained by `src/train/lightglue/` on a frozen SuperPoint |
 | `keypoints/superpoint/` | SuperPoint keypoint detector + descriptor |
 | `levjepa/` | LeVJEPA joint-embedding video pretraining ViT encoder |
 | `lewm/` | latent-energy world model |
@@ -184,7 +185,7 @@ docstring `__init__.py` and, like the families, exports nothing:
 | Subfamily | Members |
 |---|---|
 | `vision/image_restoration/` | `darkir`, `doc_res`, `doc_scanner`, `pw_fnet`, `scunet` — plus `README.md` and `BENCHMARKS.md`, a transcribed literature survey whose PSNR/SSIM numbers all come from papers and none from this repository |
-| `vision/keypoints/` | `superpoint` (one member today) |
+| `vision/keypoints/` | `lightglue`, `superpoint` |
 | `vision/super_resolution/` | `pft_sr` (one member today) |
 | `vision_language/sam/` | `sam1`, `sam2`, `sam3` |
 

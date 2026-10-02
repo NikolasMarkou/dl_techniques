@@ -20,12 +20,13 @@ Four families nest one level further (`vision/image_restoration`, `vision/keypoi
 wrong test. Re-derive any count with the command beside it; never quote one from memory.
 
 ```bash
-find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 114 packages
-find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 339 .py
+find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 115 packages
+find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 341 .py
 ```
 
-Both re-derived 2026-09-30 by running exactly those two commands. The previous readings
-here were **108 / 321** (2026-09-10); `general_purpose/hkan/` contributes 1 package and 3
+Both re-derived 2026-10-02 by running exactly those two commands (`keypoints/lightglue/`
+contributes 1 package and 2 `.py`; the previous readings were **114 / 339**, 2026-09-30). The
+readings before that were **108 / 321** (2026-09-10); `general_purpose/hkan/` contributes 1 package and 3
 `.py`, so 5 packages and 15 files arrived from other work that never re-ran the commands.
 The readings before that were **102 / 287**, and the drift is mostly not the port that noticed it: the
 `vision/image_restoration/doc_scanner/` package contributes 1 package and 5 `.py`, so
@@ -82,11 +83,11 @@ archives written before the registration migration keep loading.
 
 ```bash
 grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l  # 11
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 214
+grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 215
 ```
 
-Over 339 files (re-derived 2026-09-30; previously 12 / 204 over 321 files: 3, 195, 9, 114):
-Google-only **2**, Sphinx-only **205**, both **9**, neither **123**. **Match the file you are editing; never convert one wholesale** — that rule
+Over 341 files (re-derived 2026-10-02; previously 11 / 214 over 339 files: 2, 205, 9, 123):
+Google-only **2**, Sphinx-only **206**, both **9**, neither **124**. **Match the file you are editing; never convert one wholesale** — that rule
 is unchanged and the 2 remaining Google-only files are exactly the ones it protects.
 Perishable — re-run the greps. The unanchored instrument agrees here (bare `Args:` also
 returns 11); it did not always.

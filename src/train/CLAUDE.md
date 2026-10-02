@@ -23,7 +23,7 @@ Six shapes. Pick the closest exemplar and copy it; do not re-derive the scaffold
 | **Pattern 1: Vision classification** — `load_dataset()` + `create_base_argument_parser()` + the full evaluation pipeline | ConvNeXt, CapsNet, CoshNet, CliffordNet, PowerMLP (`load_dataset()` and the evaluation pipeline, but its own parser, not `create_base_argument_parser()`; see `src/train/power_mlp/README.md`), KAN, ViT, SOM, MobileNet | `src/train/vit/train_vit.py` | `val_accuracy` |
 | **Pattern 2: Time-series / probabilistic** — synthetic generators, local argparse (the base parser's `--dataset` choices do not apply), `include_terminate_on_nan=True`, analyzer behind a `--deep-analysis` flag | N-BEATS, PRISM, TiRex, MDN | `src/train/time_series/nbeats/` | `val_loss` |
 | **Pattern 3: NLP pretrain/finetune** — `train.common.nlp` for tokenization, text datasets, warmup LR, callbacks; model code stays local | BERT, FNet, tree_transformer, GPT-2, wave_field | `src/train/bert/pretrain.py`, `src/train/bert/finetune.py` | `val_loss` |
-| **Pattern 4: Denoising / detection / dense prediction** — file-based (or in-memory dense-label) datasets, domain callbacks appended to a `create_callbacks()` wrapper | BFCNN, BFUNet, ConvUNeXt denoiser (`bfunet/`), ConvUNext segmentation (`convunext/`), YOLO12-COCO, ResNet, DarkIR | `src/train/bfunet/train_bfcnn_denoiser.py` | `val_loss` / `val_psnr` |
+| **Pattern 4: Denoising / detection / dense prediction** — file-based (or in-memory dense-label) datasets, domain callbacks appended to a `create_callbacks()` wrapper | BFCNN, BFUNet, ConvUNeXt denoiser (`bfunet/`), ConvUNext segmentation (`convunext/`), YOLO12-COCO, ResNet, DarkIR, LightGlue (`lightglue/`: frozen SuperPoint front end, loss through `add_loss`, README lists the run directory and the flags) | `src/train/bfunet/train_bfcnn_denoiser.py` | `val_loss` / `val_psnr` |
 | **Pattern 5: Depth estimation** — `train.common.megadepth` pipeline, depth metrics + visualization callbacks from `dl_techniques` | Depth Anything | `src/train/depth_anything/train_depth_anything.py` | `val_loss` |
 | **Pattern 6: Byte-level LM pretrain** — no tokenizer at all: `dl_techniques.datasets.byte_lm` packs raw UTF-8 into causal windows, and the auxiliary loss arrives through the model's `add_loss` rather than a custom `train_step` | H-Net | `src/train/hnet/common.py` | `val_loss` |
 
@@ -148,7 +148,7 @@ substitute, because it resolves at epoch end by matching a compiled metric objec
 
 | Symbol | Notes |
 |---|---|
-| `setup_gpu(gpu_id)` | Memory growth + device selection. Every script supports `--gpu` and calls `setup_gpu(args.gpu)`: it sets `CUDA_VISIBLE_DEVICES` for a specific GPU, or enables memory growth on all of them when `None` |
+| `setup_gpu(gpu_id)` | Memory growth + device selection. Every script supports `--gpu` and calls `setup_gpu(args.gpu)`: it sets `CUDA_VISIBLE_DEVICES` for a specific GPU, or enables memory growth on all of them when `None`. It OVERWRITES a `CUDA_VISIBLE_DEVICES` already set in the environment, so `CUDA_VISIBLE_DEVICES=1 ... --gpu 0` runs on GPU 0: pick one mechanism |
 | `create_callbacks(...)` / `create_nlp_callbacks(...)` | See above |
 | `resolve_monitor_mode(monitor, mode=None)` | The ONE producer of a checkpoint-selection direction |
 | `create_base_argument_parser(description, default_dataset)` | Only for scripts using `load_dataset()` |

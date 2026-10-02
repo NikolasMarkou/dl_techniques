@@ -30,15 +30,26 @@ part in the result: padding a batch changes nothing for the real keypoints.
 
 The paper's adaptive behaviour (early exit when the confident fraction exceeds
 `depth_confidence`, pruning of unmatchable points with `width_confidence`) changes tensor
-shapes at run time and is a separate eager method, not part of `call()`. The constructor stores
-`depth_confidence` and `width_confidence` for it; `call()` ignores both.
+shapes at run time. It lives in a separate **eager** method, `LightGlue.match(inputs)`, which
+handles one image pair per call (batch size 1) and returns numpy values. The constructor
+stores `depth_confidence`, `width_confidence` and `pruning_min_kpts` for it; `call()` ignores
+all three. With both knobs disabled (`-1`), `match()` equals the last layer of `call()` (a test
+pins that).
+
+| | `call(inputs)` | `match(inputs)` |
+| :--- | :--- | :--- |
+| Layers run | all `num_layers` | stops early when `depth_confidence` is met |
+| Pruning | none | drops unmatchable points with `width_confidence` |
+| Batch | any `B`, padding via `mask0` / `mask1` | `B == 1` (raises `ValueError` otherwise) |
+| Graph / jit / `fit` | yes, this is the training path | no, eager numpy control flow |
+| Returns | tensors, per-layer log assignments and confidences | numpy: matches, scores, `stop`, `matches` pairs, `prune0/1` |
 
 ### One size, no variants
 
 The paper publishes a single configuration (9 layers, width 256, 4 heads), and the defaults
 equal it. There is therefore no `MODEL_VARIANTS` table and no `from_variant`: a table with one
-row would be a placeholder. There are no pretrained weights in this repository, so the
-factory takes no `pretrained` argument.
+row would be a placeholder. No pretrained weights are distributed with this repository, so
+`create_lightglue` has no `pretrained` argument (see "Pretrained weights" below).
 
 ### Data flow
 
@@ -67,10 +78,12 @@ LightGlue does not train the extractor.
 
 | File | Contents |
 | :--- | :--- |
-| `model.py` | `LightGlue` (the `keras.Model`), `create_lightglue` (factory), `normalize_keypoints`. |
+| `model.py` | `LightGlue` (the `keras.Model`), `create_lightglue` (factory), `normalize_keypoints`, and the pure helpers of `match()`: `confidence_threshold`, `get_pruning_mask`, `check_if_stop`. |
 | `__init__.py` | Re-exports `LightGlue` and `create_lightglue` under `__all__`. |
 
-The building blocks are generic and live in `src/dl_techniques/layers/matching/`:
+The building blocks are generic and live in `src/dl_techniques/layers/matching/`. That package
+exports nothing: import from the module, e.g.
+`from dl_techniques.layers.matching.match_assignment import MatchAssignment`.
 
 | File | Contents |
 | :--- | :--- |
@@ -78,6 +91,12 @@ The building blocks are generic and live in `src/dl_techniques/layers/matching/`
 | `lightglue_blocks.py` | `LightGlueSelfBlock`, `LightGlueCrossBlock` |
 | `match_assignment.py` | `MatchAssignment`, `filter_matches` |
 | `token_confidence.py` | `MatchTokenConfidence` |
+
+Training and evaluation code is not in this package. It is `src/train/lightglue/` (see its
+`README.md`), which uses the loss `dl_techniques.losses.lightglue_loss.LightGlueLoss`, the
+metric `dl_techniques.metrics.keypoint_matching.KeypointMatchMetric`, and the utilities
+`dl_techniques.utils.keypoint_extraction` (batched SuperPoint decode) and
+`dl_techniques.utils.keypoint_matching` (homography ground-truth labels).
 
 Tests: `tests/test_models/test_lightglue/` (model, numpy-oracle parity, shared-oracle adoption)
 and `tests/test_layers/test_matching/`. The parity oracle is `tests/lightglue_reference_numpy.py`,
@@ -104,6 +123,7 @@ an explicit-loop transcription of the official reference forward.
 | `filter_threshold` | `0.1` | Match threshold on `exp(score)` for the final `filter_matches`. |
 | `depth_confidence` | `0.95` | Early-exit confidence of the adaptive path; `-1` disables. Ignored by `call()`. |
 | `width_confidence` | `0.99` | Pruning confidence of the adaptive path; `-1` disables. Ignored by `call()`. |
+| `pruning_min_kpts` | `-1` | `match()` prunes an image only while it has MORE than this many points alive; `-1` always prunes (the reference's CPU setting, the reference uses 1024 on a GPU). Ignored by `call()`. |
 | `add_scale_ori` | `False` | Append keypoint scale and orientation to the position encoding (feature width 4). |
 | `gamma` | `1.0` | Positional-encoding frequency initialiser scale (kernel std `gamma ** -2`). |
 
@@ -132,12 +152,27 @@ A dict. Every per-layer tensor is batch-first so `predict()` can concatenate bat
 
 `log_assignments` is not a normalised distribution; see the `MatchAssignment` docstring.
 
-### Weight conversion from the official PyTorch checkpoint
+### Pretrained weights and conversion from the official PyTorch checkpoint
 
-Sublayer names follow the torch state dict and the fused `Wqkv` keeps the torch
-`(heads, head_dim, 3)` column layout, so conversion is a **transpose** of every `Linear` weight
-and nothing else (no permutation). `tests/test_models/test_lightglue/weight_loading.py` is the
-mapping, exercised by the parity tests. No converter script is shipped.
+**No pretrained weights are distributed here**, and no converter script is shipped; the
+trainer in `src/train/lightglue/` produces weights for the in-repo SuperPoint. A checkpoint
+of the official PyTorch model can be loaded by the following rule, which is exactly what the
+test-only helper `tests/test_models/test_lightglue/weight_loading.py::load_torch_weights`
+does and what the parity tests exercise against the numpy oracle:
+
+- every `Linear` weight is copied **transposed** (torch `(out, in)` to Keras `(in, out)`);
+- every bias, and every LayerNorm `weight` / `bias` (to `gamma` / `beta`), is copied as is;
+- there is **no permutation**: the fused `Wqkv` keeps the torch `(heads, head_dim, 3)` column
+  layout, and the sublayers are named like the torch state dict (`input_proj`, `posenc.Wr`,
+  `transformers.i.self_attn.*`, `transformers.i.cross_attn.*`, `log_assignment.i.*`,
+  `token_confidence.i.*`).
+
+The mapping has been exercised against the numpy transcription of the reference code, not
+against a real downloaded checkpoint (PyTorch is not installed in this environment).
+
+### Why there is no `MODEL_VARIANTS`
+
+See "One size, no variants" above: a single published configuration does not make a table.
 
 ---
 
@@ -145,19 +180,38 @@ mapping, exercised by the parity tests. No converter script is shipped.
 
 ```python
 import keras
+import numpy as np
 from dl_techniques.models.vision.keypoints.lightglue import create_lightglue
+
+rng = np.random.default_rng(0)
+B, N = 2, 64
+inputs = {
+    "keypoints0": rng.uniform(0, 128, (B, N, 2)).astype("float32"),   # pixels (x, y)
+    "keypoints1": rng.uniform(0, 128, (B, N, 2)).astype("float32"),
+    "descriptors0": rng.normal(size=(B, N, 256)).astype("float32"),
+    "descriptors1": rng.normal(size=(B, N, 256)).astype("float32"),
+    "image_size0": np.full((B, 2), 128.0, "float32"),                  # (w, h)
+    "image_size1": np.full((B, 2), 128.0, "float32"),
+    "mask0": np.ones((B, N), "float32"),                               # optional, 1 = real
+    "mask1": np.ones((B, N), "float32"),
+}
 
 model = create_lightglue(input_dim=256)
 
-out = model({
-    "keypoints0": kp0, "keypoints1": kp1,            # (B, N, 2) pixels
-    "descriptors0": d0, "descriptors1": d1,          # (B, N, 256)
-    "image_size0": size0, "image_size1": size1,      # (B, 2) as (w, h)
-    "mask0": mask0, "mask1": mask1,                  # optional, (B, N), 1 = real
-})
+# Static masked path: batched, graph-safe, what the trainer calls.
+out = model(inputs)
 out["matches0"]            # (B, N) int32, -1 = unmatched
 out["log_assignments"]     # (B, 9, N+1, N+1)
+
+# Adaptive eager path: one pair, early exit and pruning.
+single = {k: v[:1] for k, v in inputs.items()}
+res = model.match(single)
+res["matches0"], res["stop"]   # (1, N) numpy, 1-based layer whose assignment was used
+res["matches"]                 # (S, 2) index pairs
 ```
+
+With random weights the matches carry no meaning; the snippet only shows the call contract.
+Training is described in `src/train/lightglue/README.md`.
 
 ---
 
@@ -186,3 +240,11 @@ sublayer casts its own inputs.
   Neural Networks.* CVPR 2020. https://arxiv.org/abs/1911.11763
 - Li, Si, Li, Hsieh, Bengio. *Learnable Fourier Features for Multi-Dimensional Spatial
   Positional Encoding.* NeurIPS 2021. https://arxiv.org/abs/2106.02795
+- Su, Lu, Pan, Murtadha, Wen, Liu. *RoFormer: Enhanced Transformer with Rotary Position
+  Embedding.* 2021. https://arxiv.org/abs/2104.09864 (the rotary rule the encoding applies)
+- DeTone, Malisiewicz, Rabinovich. *SuperPoint: Self-Supervised Interest Point Detection and
+  Description.* CVPRW 2018. https://arxiv.org/abs/1712.07629 (the detector the trainer uses;
+  see `models/vision/keypoints/superpoint/`)
+- Official implementation: https://github.com/cvg/LightGlue. Training code and the
+  homography benchmark definitions the trainer and evaluation follow:
+  https://github.com/cvg/glue-factory.
