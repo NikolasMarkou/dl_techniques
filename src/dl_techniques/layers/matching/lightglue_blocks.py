@@ -186,7 +186,7 @@ def _check_build_shape(name: str, shape: Tuple[Any, ...], dim: int) -> None:
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.matching.lightglue_self_block")
+@register_dl_technique("dl_techniques.layers.matching.lightglue_blocks")
 class LightGlueSelfBlock(keras.layers.Layer):
     """LightGlue self-attention block with learned-Fourier rotary and the concat-FFN.
 
@@ -329,7 +329,7 @@ class LightGlueSelfBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.matching.lightglue_cross_block")
+@register_dl_technique("dl_techniques.layers.matching.lightglue_blocks")
 class LightGlueCrossBlock(keras.layers.Layer):
     """LightGlue bidirectional cross-attention block.
 

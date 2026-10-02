@@ -28,7 +28,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.matching.match_token_confidence")
+@register_dl_technique("dl_techniques.layers.matching.token_confidence")
 class MatchTokenConfidence(keras.layers.Layer):
     """Per-keypoint confidence head shared by both images of a pair.
 
