@@ -316,6 +316,7 @@ class TestLightGlueSmokeContract:
             assert isinstance(out, dict), f"LightGlue.call returns a dict, got {type(out)}"
             assert set(out) == {
                 "log_assignments", "token_confidences0", "token_confidences1",
+                "token_logits0", "token_logits1",
                 "matches0", "matches1", "matching_scores0", "matching_scores1",
             }, f"unexpected key set {sorted(out)}"
             assert tuple(out["log_assignments"].shape) == (2, L, M + 1, N + 1), tuple(out["log_assignments"].shape)
@@ -361,9 +362,9 @@ class TestLightGlueMixedPrecision:
             seen = {}
             original = lightglue_model.normalize_keypoints
 
-            def spy(keypoints, image_size):
+            def spy(keypoints, image_size, dtype=None):
                 seen["kp"] = keras.ops.convert_to_numpy(keypoints)
-                return original(keypoints, image_size)
+                return original(keypoints, image_size, dtype)
 
             lightglue_model.normalize_keypoints = spy
             try:

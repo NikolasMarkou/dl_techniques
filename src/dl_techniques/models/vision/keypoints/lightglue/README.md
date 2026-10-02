@@ -147,6 +147,7 @@ A dict. Every per-layer tensor is batch-first so `predict()` can concatenate bat
 | :--- | :--- | :--- |
 | `log_assignments` | `(B, L, M+1, N+1)` | Per-layer log assignment; the dustbin row and column are the last index. Padded rows and columns are 0. Float32 or wider. |
 | `token_confidences0`, `token_confidences1` | `(B, L-1, M)`, `(B, L-1, N)` | Per-layer confidence that a keypoint is already decided. |
+| `token_logits0`, `token_logits1` | `(B, L-1, M)`, `(B, L-1, N)` | The pre-sigmoid logits of the confidences (`confidences = sigmoid(logits)`); the training loss reads these so its gradient does not die when a head saturates. |
 | `matches0`, `matches1` | `(B, M)`, `(B, N)` | Final-layer mutual matches: partner index, or `-1`. Int32. |
 | `matching_scores0`, `matching_scores1` | `(B, M)`, `(B, N)` | `exp(score)` of mutual pairs, 0 elsewhere. |
 

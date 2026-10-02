@@ -221,7 +221,7 @@ class TestParityMutations:
 
     def test_per_axis_normalisation_is_caught(self, monkeypatch):
         """Dividing each axis by its own half-size instead of max(size)/2 (images are not square)."""
-        def per_axis(keypoints, image_size):
+        def per_axis(keypoints, image_size, dtype=None):
             size = keras.ops.cast(image_size, "float32")[:, None, :]
             return (keras.ops.cast(keypoints, "float32") - size / 2.0) / (size / 2.0)
 
@@ -254,3 +254,54 @@ class TestParityMutations:
                 _padded_parity_holds(model, w)
         finally:
             del model.call
+
+
+class TestFloat64Parity:
+    """Under a float64 policy nothing on the path may narrow to float32 (reviewer concern 7).
+
+    The oracle runs in float64, so the whole model must agree to float64 round-off. With
+    ``normalize_keypoints`` hard-cast to float32 the error was about 5e-5.
+    """
+
+    _TOL = 1e-9
+
+    @staticmethod
+    def _max_error(seed=0):
+        rng = np.random.RandomState(seed)
+        w = ref.random_weights(rng, D, H, L, m=2, input_dim=D)
+        model = LightGlue(input_dim=D, descriptor_dim=D, num_layers=L, num_heads=H,
+                          filter_threshold=THRESHOLD, dtype="float64")
+        model.build(None)
+        load_torch_weights(model, w)
+        data = {k: v.astype("float64") for k, v in
+                random_inputs(np.random.RandomState(1), 2, M, N, D, size=(640.0, 480.0)).items()}
+        out = model(data)
+        exp = np.stack([np.stack(o["log_assignments"]) for o in oracle_forward(w, data, L, H)])
+        got = keras.ops.convert_to_numpy(out["log_assignments"])
+        assert got.dtype == np.float64
+        return float(np.abs(got - exp).max())
+
+    def test_float64_model_agrees_with_the_float64_oracle(self):
+        assert self._max_error() < self._TOL
+
+    def test_guard_is_red_when_normalisation_narrows_to_float32(self, monkeypatch):
+        def narrowing(keypoints, image_size, dtype=None):
+            k = keras.ops.cast(keypoints, "float32")
+            s = keras.ops.cast(image_size, "float32")
+            return (k - s[:, None, :] / 2.0) / (keras.ops.max(s, axis=-1, keepdims=True)[:, None, :] / 2.0)
+
+        monkeypatch.setattr(lightglue_model, "normalize_keypoints", narrowing)
+        assert self._max_error() > 1e-8
+
+    def test_normalize_keypoints_work_dtype(self):
+        k32 = np.array([[[10.0, 20.0]]], "float32")
+        s32 = np.array([[64.0, 48.0]], "float32")
+        assert keras.backend.standardize_dtype(lightglue_model.normalize_keypoints(k32, s32).dtype) == "float32"
+        assert keras.backend.standardize_dtype(
+            lightglue_model.normalize_keypoints(k32, s32, "float16").dtype) == "float32"
+        assert keras.backend.standardize_dtype(
+            lightglue_model.normalize_keypoints(k32, s32, "float64").dtype) == "float64"
+        assert keras.backend.standardize_dtype(lightglue_model.normalize_keypoints(
+            k32.astype("float64"), s32.astype("float64")).dtype) == "float64"
+        assert keras.backend.standardize_dtype(lightglue_model.normalize_keypoints(
+            k32.astype("int32"), s32.astype("int32")).dtype) == "float32"

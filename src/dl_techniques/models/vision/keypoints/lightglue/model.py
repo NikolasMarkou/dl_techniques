@@ -49,7 +49,8 @@ Architecture:
 Output layout. Every per-layer tensor is BATCH-FIRST so that ``predict()`` can
 concatenate batches along axis 0: ``log_assignments`` is ``(B, L, M+1, N+1)`` (the
 dustbin row and column are the last index) and ``token_confidences0/1`` are
-``(B, L-1, M)`` / ``(B, L-1, N)``. One stacked tensor per quantity, instead of a list,
+``(B, L-1, M)`` / ``(B, L-1, N)``, with ``token_logits0/1`` (pre-sigmoid) of the same
+shapes. One stacked tensor per quantity, instead of a list,
 makes ``compute_output_shape`` a plain shape dict and lets a per-layer loss read layer
 ``i`` as ``log_assignments[:, i]``.
 
@@ -84,20 +85,30 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 
-def normalize_keypoints(keypoints: Any, image_size: Any) -> Any:
-    """Map pixel keypoints to roughly ``[-1, 1]`` per image, in float32.
+def normalize_keypoints(keypoints: Any, image_size: Any, dtype: Optional[str] = None) -> Any:
+    """Map pixel keypoints to roughly ``[-1, 1]`` per image, in a never-narrowing dtype.
 
     Interface contract. ``keypoints`` is ``(B, N, 2)`` pixel ``(x, y)``; ``image_size``
     is ``(B, 2)`` as ``(width, height)``. The result is ``(p - size / 2) / (max(size) / 2)``
-    in float32 whatever the policy, so a pixel coordinate of several hundred is not
-    rounded to float16 before it is scaled. Pure function, no variables.
+    in a work dtype that is the widest of the input dtypes and ``dtype`` (typically the
+    model compute dtype), floored at float32: float32 for float16, bfloat16, float32
+    and integer inputs, float64 when any of them is float64. So a pixel coordinate of
+    several hundred is never rounded to float16 before it is scaled, and a float64 model
+    is not narrowed to float32 (same rule as ``LearnedFourierRotaryEncoding``). Pure
+    function, no variables.
 
     :param keypoints: ``(B, N, 2)`` pixel coordinates.
     :param image_size: ``(B, 2)`` ``(width, height)``.
-    :return: ``(B, N, 2)`` float32.
+    :param dtype: Optional compute dtype of the caller; only ``"float64"`` changes the
+        result.
+    :return: ``(B, N, 2)`` in the work dtype (float32 or float64).
     """
-    kpts = keras.ops.cast(keypoints, "float32")
-    size = keras.ops.cast(image_size, "float32")
+    names = [keras.backend.standardize_dtype(getattr(t, "dtype", "float32"))
+             for t in (keypoints, image_size)]
+    names.append(dtype or "float32")
+    work = "float64" if "float64" in names else "float32"
+    kpts = keras.ops.cast(keypoints, work)
+    size = keras.ops.cast(image_size, work)
     shift = size / 2.0                                              # (B, 2)
     scale = keras.ops.max(size, axis=-1, keepdims=True) / 2.0       # (B, 1)
     return (kpts - shift[:, None, :]) / scale[:, None, :]
@@ -256,7 +267,9 @@ class LightGlue(keras.Model):
     Output:
         A dict with ``log_assignments`` ``(B, L, M+1, N+1)`` (float32 or wider; padded
         rows and columns are 0), ``token_confidences0`` ``(B, L-1, M)`` and
-        ``token_confidences1`` ``(B, L-1, N)``, and from the last layer
+        ``token_confidences1`` ``(B, L-1, N)`` (sigmoid outputs), their pre-sigmoid logits
+        ``token_logits0`` / ``token_logits1`` of the same shapes (what a loss should read:
+        ``confidences = sigmoid(logits)``), and from the last layer
         ``matches0`` ``(B, M)`` / ``matches1`` ``(B, N)`` int32 (partner index or -1) and
         ``matching_scores0`` / ``matching_scores1``.
 
@@ -407,10 +420,11 @@ class LightGlue(keras.Model):
 
     def _positions(self, inputs: Dict[str, Any], side: str) -> Any:
         """Normalised keypoints, with scale and orientation appended when configured."""
-        kpts = normalize_keypoints(inputs["keypoints" + side], inputs["image_size" + side])
+        kpts = normalize_keypoints(
+            inputs["keypoints" + side], inputs["image_size" + side], self.compute_dtype)
         if self.add_scale_ori:
-            scales = keras.ops.cast(inputs["scales" + side], "float32")[..., None]
-            oris = keras.ops.cast(inputs["oris" + side], "float32")[..., None]
+            scales = keras.ops.cast(inputs["scales" + side], kpts.dtype)[..., None]
+            oris = keras.ops.cast(inputs["oris" + side], kpts.dtype)[..., None]
             kpts = keras.ops.concatenate([kpts, scales, oris], axis=-1)
         return kpts
 
@@ -453,23 +467,28 @@ class LightGlue(keras.Model):
         desc0 = self._embed(inputs["descriptors0"])
         desc1 = self._embed(inputs["descriptors1"])
 
-        log_assignments, conf0, conf1 = [], [], []
+        log_assignments, conf0, conf1, logit0, logit1 = [], [], [], [], []
         for i in range(self.num_layers):
             desc0, desc1 = self._run_layer(i, desc0, desc1, freqs0, freqs1, mask0, mask1)
             scores, _ = self.assignments[i](desc0, desc1, mask0, mask1)
             log_assignments.append(scores)
             if i < self.num_layers - 1:
-                c0, c1 = self.confidences[i](desc0, desc1)
+                c0, c1, z0, z1 = self.confidences[i](desc0, desc1, return_logits=True)
                 conf0.append(c0)
                 conf1.append(c1)
+                logit0.append(z0)
+                logit1.append(z1)
 
         if conf0:
             token_confidences0 = keras.ops.stack(conf0, axis=1)
             token_confidences1 = keras.ops.stack(conf1, axis=1)
+            token_logits0 = keras.ops.stack(logit0, axis=1)
+            token_logits1 = keras.ops.stack(logit1, axis=1)
         else:
             # a single layer has no confidence head: empty (B, 0, M) / (B, 0, N)
             token_confidences0 = keras.ops.zeros_like(log_assignments[0][:, None, :-1, 0])[:, :0]
             token_confidences1 = keras.ops.zeros_like(log_assignments[0][:, None, 0, :-1])[:, :0]
+            token_logits0, token_logits1 = token_confidences0, token_confidences1
 
         matches0, matches1, scores0, scores1 = filter_matches(
             log_assignments[-1], self.filter_threshold, mask0, mask1)
@@ -477,6 +496,8 @@ class LightGlue(keras.Model):
             "log_assignments": keras.ops.stack(log_assignments, axis=1),
             "token_confidences0": token_confidences0,
             "token_confidences1": token_confidences1,
+            "token_logits0": token_logits0,
+            "token_logits1": token_logits1,
             "matches0": matches0,
             "matches1": matches1,
             "matching_scores0": scores0,
@@ -644,6 +665,8 @@ class LightGlue(keras.Model):
             "log_assignments": (batch, self.num_layers, m_plus, n_plus),
             "token_confidences0": (batch, self.num_layers - 1, m_pts),
             "token_confidences1": (batch, self.num_layers - 1, n_pts),
+            "token_logits0": (batch, self.num_layers - 1, m_pts),
+            "token_logits1": (batch, self.num_layers - 1, n_pts),
             "matches0": (batch, m_pts),
             "matches1": (batch, n_pts),
             "matching_scores0": (batch, m_pts),

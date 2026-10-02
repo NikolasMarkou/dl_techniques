@@ -27,6 +27,7 @@ D, H, L = 16, 2, 3
 M, N = 12, 9
 OUT_KEYS = {
     "log_assignments", "token_confidences0", "token_confidences1",
+    "token_logits0", "token_logits1",
     "matches0", "matches1", "matching_scores0", "matching_scores1",
 }
 
@@ -127,9 +128,20 @@ class TestForward:
         assert tuple(out["log_assignments"].shape) == (2, L, M + 1, N + 1)
         assert tuple(out["token_confidences0"].shape) == (2, L - 1, M)
         assert tuple(out["token_confidences1"].shape) == (2, L - 1, N)
+        assert tuple(out["token_logits0"].shape) == (2, L - 1, M)
+        assert tuple(out["token_logits1"].shape) == (2, L - 1, N)
         assert tuple(out["matches0"].shape) == (2, M) and tuple(out["matches1"].shape) == (2, N)
         assert tuple(out["matching_scores0"].shape) == (2, M)
         assert tuple(out["matching_scores1"].shape) == (2, N)
+
+    def test_confidences_are_the_sigmoid_of_the_logits(self, model):
+        out = model(_inputs())
+        for side in ("0", "1"):
+            z = keras.ops.convert_to_numpy(out["token_logits" + side]).astype("float64")
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(out["token_confidences" + side]),
+                1.0 / (1.0 + np.exp(-z)), rtol=0, atol=1e-6)
+            assert np.abs(z).max() > 0.0, "vacuous: all-zero logits"
 
     def test_dtypes(self, model):
         out = model(_inputs())
@@ -257,10 +269,14 @@ class TestNormalizeKeypoints:
         np.testing.assert_allclose(out[0, 0], [0.0, 0.0], atol=1e-6)
         np.testing.assert_allclose(out[1, 0], [-0.5, 0.0], atol=1e-6)
 
-    @pytest.mark.parametrize("dtype", ["float32", "float64", "int32"])
-    def test_result_is_float32_whatever_the_input_dtype(self, dtype):
+    @pytest.mark.parametrize("dtype", ["float16", "float32", "int32"])
+    def test_result_is_float32_for_narrower_input_dtypes(self, dtype):
         out = normalize_keypoints(np.ones((1, 2, 2), dtype), np.full((1, 2), 64, dtype))
         assert out.dtype == tf.float32
+
+    def test_result_stays_float64_for_float64_input(self):
+        out = normalize_keypoints(np.ones((1, 2, 2), "float64"), np.full((1, 2), 64, "float64"))
+        assert out.dtype == tf.float64
 
 
 class TestSaveLoad:
@@ -301,6 +317,8 @@ class TestComputeOutputShape:
         assert shapes["log_assignments"] == (None, L, None, 8)
         assert shapes["token_confidences0"] == (None, L - 1, None)
         assert shapes["token_confidences1"] == (None, L - 1, 7)
+        assert shapes["token_logits0"] == (None, L - 1, None)
+        assert shapes["token_logits1"] == (None, L - 1, 7)
         assert shapes["matches1"] == (None, 7)
 
     def test_matches_actual_call(self):
