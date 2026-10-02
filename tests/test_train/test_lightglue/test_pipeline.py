@@ -8,12 +8,18 @@ import keras
 import numpy as np
 import pytest
 
+from dl_techniques.layers.matching.learned_fourier_rotary import LearnedFourierRotaryEncoding
+from dl_techniques.layers.matching.token_confidence import MatchTokenConfidence
 from dl_techniques.models.vision.keypoints.lightglue.model import LightGlue
 from dl_techniques.models.vision.keypoints.superpoint.model import SuperPoint
 from train.lightglue import pipeline
 from train.lightglue.data import list_images, make_pair_dataset
 from train.lightglue.pipeline import (
     LightGlueCheckpoint, LightGlueTrainingModel, load_superpoint,
+)
+
+from tests.test_models.test_sam.dead_component_oracle import (
+    fit_one_step_moved_variables, variable_labels,
 )
 
 from .conftest import SIZE, make_lightglue, make_superpoint, write_images
@@ -79,6 +85,71 @@ def test_lightglue_variables_moved(fitted):
     assert any(moved)
 
 
+def _one_step_report(images, confidence_weight=1.0):
+    """One stock fit step on a fresh wrapper; returns (labels, report)."""
+    model = _model()
+    model.objective.confidence_weight = confidence_weight
+    model.build({"image0": (None, SIZE, SIZE, 1)})
+    model.compile(optimizer=keras.optimizers.Adam(1e-3), jit_compile=False)
+    labels = variable_labels(model)
+    train = _dataset(images, repeat=True)
+    return labels, fit_one_step_moved_variables(model, train, steps_per_epoch=1)
+
+
+# every group of LightGlue weights that must receive gradient under the pipeline objective
+_REQUIRED_GROUPS = (
+    "posenc", "self_attn_0", "self_attn_1", "cross_attn_0", "cross_attn_1",
+    "log_assignment_0/matchability", "log_assignment_0/final_proj",
+    "log_assignment_1/matchability", "log_assignment_1/final_proj",
+    "token_confidence_0",
+)
+
+
+def _unmoved_required(labels, report):
+    """Required groups with no label at all (a vacuous guard) and labels that did not move."""
+    missing = [g for g in _REQUIRED_GROUPS if not any(g in label for label in labels)]
+    return missing, list(report.unmoved)
+
+
+def test_every_trainable_lightglue_variable_moves_in_one_fit_step(images):
+    labels, report = _one_step_report(images)
+    missing, unmoved = _unmoved_required(labels, report)
+    assert not missing, f"guard is vacuous, no variable named {missing}; labels={labels}"
+    assert report.total == len(labels) > 20
+    assert not unmoved, report.summary()
+
+
+def test_guard_is_red_when_the_confidence_logits_are_detached(images, monkeypatch):
+    original = MatchTokenConfidence._logit
+
+    def detached(self, desc):
+        """MUTANT: the confidence logits are cut from the graph."""
+        return keras.ops.stop_gradient(original(self, desc))
+
+    monkeypatch.setattr(MatchTokenConfidence, "_logit", detached)
+    labels, report = _one_step_report(images)
+    _, unmoved = _unmoved_required(labels, report)
+    assert unmoved and all("token_confidence_0" in u for u in unmoved), unmoved
+
+
+def test_guard_is_red_when_the_confidence_term_is_dropped(images):
+    labels, report = _one_step_report(images, confidence_weight=0.0)
+    _, unmoved = _unmoved_required(labels, report)
+    assert unmoved and all("token_confidence_0" in u for u in unmoved), unmoved
+
+
+def test_guard_is_red_when_the_positional_encoding_is_cut(images, monkeypatch):
+    original = LearnedFourierRotaryEncoding.call
+
+    def cut(self, *args, **kwargs):
+        return keras.ops.stop_gradient(original(self, *args, **kwargs))
+
+    monkeypatch.setattr(LearnedFourierRotaryEncoding, "call", cut)
+    labels, report = _one_step_report(images)
+    _, unmoved = _unmoved_required(labels, report)
+    assert unmoved and any("posenc" in u for u in unmoved), unmoved
+
+
 def test_superpoint_variables_are_bitwise_unchanged(fitted):
     model = fitted["model"]
     assert _frozen(model)
@@ -108,7 +179,9 @@ def test_logged_loss_equals_the_add_loss_value(fitted):
         model(batch, training=False)
         per_batch.append(float(sum(model.losses)))
     evaluated = model.evaluate(fitted["val"].take(2), verbose=0, return_dict=True)["loss"]
-    assert evaluated == pytest.approx(float(np.mean(per_batch)), rel=1e-5)
+    # eager call versus the compiled evaluate graph differ by float32 reduction order;
+    # measured 1.6e-5 relative once on GPU (log1p/exp BCE), so the bound is 1e-4
+    assert evaluated == pytest.approx(float(np.mean(per_batch)), rel=1e-4)
 
 
 def test_masks_reach_the_confidence_term(images):
@@ -121,7 +194,7 @@ def test_masks_reach_the_confidence_term(images):
     out = model(batch, training=False)
     registered = float(sum(model.losses))
     args = (out["log_assignments"], labels0, labels1,
-            out["token_confidences0"], out["token_confidences1"])
+            out["token_logits0"], out["token_logits1"])
     masked = float(keras.ops.mean(model.objective.compute(*args, mask0, mask1)))
     unmasked = float(keras.ops.mean(model.objective.compute(*args)))
     assert registered == pytest.approx(masked, rel=1e-5)

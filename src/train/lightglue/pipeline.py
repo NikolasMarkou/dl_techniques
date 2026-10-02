@@ -292,7 +292,7 @@ class LightGlueTrainingModel(keras.Model):
         # assignments and would otherwise win the argmax target (D-012).
         per_sample = self.objective.compute(
             output["log_assignments"], labels0, labels1,
-            output["token_confidences0"], output["token_confidences1"], mask0, mask1)
+            output["token_logits0"], output["token_logits1"], mask0, mask1)
         self.add_loss(keras.ops.mean(per_sample))
 
         packed = pack_matches(labels0, labels1)
