@@ -21,7 +21,7 @@ Contents: :func:`polar_encode`, :func:`polar_decode` and the
     **Docstring style.** This file is Sphinx/reST like the rest of
     ``layers/norms/``. It was converted from Google ``Args:`` style in a knowing,
     recorded deviation from the "never convert a file wholesale" rule in
-    ``src/dl_techniques/CLAUDE.md``. The reasoning: that rule exists to stop a
+    ``src/dl_techniques/AGENTS.md``. The reasoning: that rule exists to stop a
     blanket style claim being applied to a mixed tree, and this package is not
     mixed. Measured at the time, ``layers/norms/`` was 15 of 17 files Sphinx, this
     one file Google and zero files carrying both, so this file was a lone outlier

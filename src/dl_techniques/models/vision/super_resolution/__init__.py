@@ -17,5 +17,5 @@ the leaf package:
 
     from dl_techniques.models.vision.super_resolution.pft_sr import create_pft_sr
 
-See ``models/CLAUDE.md`` for why containers under ``models/`` do not re-export.
+See ``models/AGENTS.md`` for why containers under ``models/`` do not re-export.
 """

@@ -256,7 +256,7 @@ class SigLIPVisionTransformer(keras.Model):
     }
 
     # `MODEL_VARIANTS` is the canonical name across `models/` (see
-    # `models/CLAUDE.md` § House Model Module Shape). `SCALE_CONFIGS` remains the
+    # `models/AGENTS.md` § House Model Module Shape). `SCALE_CONFIGS` remains the
     # definition because the `scale=` constructor argument and the tests already
     # name it; this is an alias to the same dict, not a copy.
     MODEL_VARIANTS = SCALE_CONFIGS

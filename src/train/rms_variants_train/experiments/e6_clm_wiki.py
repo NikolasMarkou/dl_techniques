@@ -1,6 +1,6 @@
 """E6 — 4-layer causal-LM × Wikipedia 10k (RMS-norm variants).
 
-Pattern-3 NLP trainer (see ``src/train/CLAUDE.md``). Mirrors the
+Pattern-3 NLP trainer (see ``src/train/AGENTS.md``). Mirrors the
 ``gpt2/pretrain.py`` shape but builds a *very* small 4-layer / d=192 / 4-head
 causal transformer directly from
 ``dl_techniques.layers.transformers.transformer.TransformerLayer`` so that the

@@ -191,6 +191,6 @@ Accept an `ax=None` kwarg if you want your plugin to be usable inside `create_da
 
 ## See also
 
-- `CLAUDE.md` — module map.
+- `AGENTS.md` — module map.
 - `dl_techniques/optimization/train_vision/framework.py` — the largest in-repo consumer; a
   working example of registering ~12 templates and driving them from a Keras callback.

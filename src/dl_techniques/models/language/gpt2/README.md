@@ -452,7 +452,7 @@ combined with your padding mask. `gpt2.py` contains no masking code at all.
 
 ### The factory-adoption audit
 
-The repo's layer-reuse policy (`models/CLAUDE.md`) says to reach for a factory before hand-rolling
+The repo's layer-reuse policy (`models/AGENTS.md`) says to reach for a factory before hand-rolling
 a layer. This package was audited against it and found to have **zero adoptable sites**:
 
 - Everything except the head is delegated to `TextDecoder`, which already uses `TransformerLayer`,

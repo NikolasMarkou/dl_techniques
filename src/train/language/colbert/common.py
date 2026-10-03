@@ -142,7 +142,7 @@ class TrainingConfig:
     # There is deliberately no second static ``save_dir``: the timestamped run
     # directory returned by ``train.common.callbacks.create_callbacks`` is the
     # ONE place artifacts go, and a parallel config path is exactly the
-    # divergent-spelling defect `src/train/CLAUDE.md` documents at length.
+    # divergent-spelling defect `src/train/AGENTS.md` documents at length.
     output_root: str = "results"
     results_dir_prefix: str = "colbert"
 

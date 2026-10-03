@@ -13,7 +13,7 @@ This package exports nothing; import from the subpackage directly::
 
 Every family and subfamily container under ``models/`` carries a docstring
 and no public surface, so a caller always imports from the leaf package
-(see ``models/CLAUDE.md``). The three SAM generations also define
+(see ``models/AGENTS.md``). The three SAM generations also define
 same-named components (encoders, necks, decoders) that would collide with
 each other in a shared namespace.
 """

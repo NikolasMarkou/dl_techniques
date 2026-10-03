@@ -363,7 +363,7 @@ Our `research/` directory contains over 120 articles providing the theoretical f
 Five LaTeX manuscripts written against this codebase live under [`research/papers/`](./research/papers), several with built PDFs: `band_rms` (band-constrained RMS normalization), `bfunet` (bias-free denoisers as image priors), `cliffordnet_extensions`, `correlations`, and `logical_net`.
 
 ### API Reference (per-module docs)
-There is **no committed documentation directory and no doc generator** — `generate_docs.py` and the `make docs` target were deleted as deprecated. For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `CLAUDE.md` describing its conventions, patterns, and components. Every one of the 84 leaf model packages carries its own `README.md`. The `research/` guides above complement these with the underlying theory.
+There is **no committed documentation directory and no doc generator** — `generate_docs.py` and the `make docs` target were deleted as deprecated. For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `AGENTS.md` describing its conventions, patterns, and components. Every one of the 84 leaf model packages carries its own `README.md`. The `research/` guides above complement these with the underlying theory.
 
 ---
 
@@ -443,7 +443,7 @@ We welcome contributions from the research community. Whether you are implementi
 ### Development Standards
 -   **Code Quality**: Follow PEP 8, use type hints, and rely on centralized logging via `dl_techniques.utils.logger` (no `print`).
 -   **Testing**: Develop in the `.venv` environment and write comprehensive tests using `pytest`, scoped to the modules you change (`make test` runs the full ~1.5h suite). Set `MPLBACKEND=Agg` when running training scripts on headless machines.
--   **Documentation**: Document every public symbol, and update relevant guides in the `research/` directory. Docstring style is **not** uniform across this repo — `layers/` is predominantly Sphinx/reST (`:param:`), `models/` is measurably mixed with the Sphinx exemplar `models/language/bert/model.py` as the model for new packages, and `losses/`/`metrics/`/`utils/`/`optimization/`/`analyzer/`/`visualization/` are Google-`Args:`-majority. Match the package you are editing and never convert a file wholesale; the measured counts and the greps that re-derive them are in `src/dl_techniques/CLAUDE.md` § Core Conventions → Code Style.
+-   **Documentation**: Document every public symbol, and update relevant guides in the `research/` directory. Docstring style is **not** uniform across this repo — `layers/` is predominantly Sphinx/reST (`:param:`), `models/` is measurably mixed with the Sphinx exemplar `models/language/bert/model.py` as the model for new packages, and `losses/`/`metrics/`/`utils/`/`optimization/`/`analyzer/`/`visualization/` are Google-`Args:`-majority. Match the package you are editing and never convert a file wholesale; the measured counts and the greps that re-derive them are in `src/dl_techniques/AGENTS.md` § Core Conventions → Code Style.
 -   **Validation**: Include benchmarks or comparisons against reference implementations where applicable.
 
 ### Contribution Types

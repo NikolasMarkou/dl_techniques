@@ -94,12 +94,12 @@ returns 11); it did not always.
 
 > **This refutes a claim two other files still carry.** The reading previously printed here
 > was *"over 287 files: Google-only 80, Sphinx-only 87, both 8, neither 112 — no
-> package-wide rule"*, and `src/dl_techniques/CLAUDE.md` plus the repo-root `CLAUDE.md`
+> package-wide rule"*, and `src/dl_techniques/AGENTS.md` plus the repo-root `AGENTS.md`
 > both still describe `models/` as **"measurably MIXED"** on the strength of it. At 195
 > Sphinx-only against 3 Google-only that characterisation is no longer what the numbers
 > say. The drift is inherited — a docstring-conversion campaign, not any one model port —
 > and correcting those two files is owed a pass of its own. The numbers live HERE; that is
-> also why the repo-root pointer sending you to `src/dl_techniques/CLAUDE.md`
+> also why the repo-root pointer sending you to `src/dl_techniques/AGENTS.md`
 > § Core Conventions → Code Style for them is itself stale (that section prints none).
 
 ## Tests are FLAT and do not mirror this layout

@@ -4,10 +4,10 @@ The core library: model architectures, custom layers, losses, metrics and toolin
 TensorFlow 2.18.
 
 Environment, the `make` targets, dependencies, the full-suite runtime and the `git push
---no-verify` default live in the repo-root `CLAUDE.md`. The package layout, the model/trainer/test
+--no-verify` default live in the repo-root `AGENTS.md`. The package layout, the model/trainer/test
 triangle and the test-tree exceptions live in `REPO_MAP.md`. The model family taxonomy and the
-package catalogue live in `models/README.md`; the authoring rules in `models/CLAUDE.md`. Each
-subpackage has its own `CLAUDE.md`.
+package catalogue live in `models/README.md`; the authoring rules in `models/AGENTS.md`. Each
+subpackage has its own `AGENTS.md`.
 
 ## Core Conventions
 
@@ -63,7 +63,7 @@ round-trip serialization via `get_config()`; models save/load with `model.save("
 
 Python 3.11+ with comprehensive type hints; centralized logging via `dl_techniques.utils.logger`,
 no print statements; `__init__.py` files either export a curated public API (with `__all__`) or are
-empty — see `layers/CLAUDE.md` for which is which in `layers/`.
+empty — see `layers/AGENTS.md` for which is which in `layers/`.
 
 **Docstring style: two are in use. Match the package you are editing; never convert a file
 wholesale.** Docstrings carry mathematical formulations where relevant.
@@ -85,7 +85,7 @@ entirely Sphinx/reST, as are `models/language/gpt2/gpt2.py` and `models/language
 ### Factory Pattern
 
 Subpackages with `factory.py` support config-driven construction: a `type` string plus a config
-dict returns a configured layer. **`layers/CLAUDE.md` § Layer Reuse Policy owns the factory
+dict returns a configured layer. **`layers/AGENTS.md` § Layer Reuse Policy owns the factory
 contract, the per-domain entry points and the registry sizes**, and is not restated here — two
 homes for one rule is a hand-maintained lockstep invariant, i.e. a latent defect.
 
@@ -100,7 +100,7 @@ homes for one rule is a hand-maintained lockstep invariant, i.e. a latent defect
 | CI | **there is none.** No `.github/` directory exists; nothing runs these tests except you |
 | Hooks | `.pre-commit-config.yaml` *declares* a local pytest hook with `always_run: true`, but hook installation is per-clone and untracked — run `ls .git/hooks/` to see yours. On the author's machine only `pre-push` is installed, so the suite fires on push, not commit |
 
-Scope pytest to the modules you changed; the root `CLAUDE.md` explains why, and why the standing push default is `--no-verify`.
+Scope pytest to the modules you changed; the root `AGENTS.md` explains why, and why the standing push default is `--no-verify`.
 
 ### Layout
 

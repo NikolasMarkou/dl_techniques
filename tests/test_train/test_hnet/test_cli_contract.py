@@ -51,7 +51,7 @@ and ``train`` on the trainer module and over ``set_seeds``, ``build_model``,
 ``build_datasets`` and ``build_optimizer`` on ``common``; each records contact.
 :func:`test_help_prints_usage_and_allocates_nothing` asserts every one of them
 was reached ZERO times and that stdout starts with ``usage:``. Asserting only
-``exit == 0`` is measurably weaker -- ``src/train/CLAUDE.md`` records that a
+``exit == 0`` is measurably weaker -- ``src/train/AGENTS.md`` records that a
 script with no parser at all ignores ``--help``, runs its whole job and exits 0
 -- and :class:`TestTheExitCodeAssertionIsVacuous` proves that weakness
 executably, by passing the exit-code form against a parser-less stub.
@@ -552,7 +552,7 @@ def test_help_prints_usage_and_allocates_nothing(monkeypatch, capsys):
 class TestTheExitCodeAssertionIsVacuous:
     """Why the arm above asserts ``usage:`` and not ``exit == 0``.
 
-    ``src/train/CLAUDE.md`` states the rule; this measures it. A stub with no
+    ``src/train/AGENTS.md`` states the rule; this measures it. A stub with no
     parser at all -- the exact defect -- runs its whole job on ``--help`` and
     exits 0, so the exit-code form PASSES against it while the ``usage:`` form
     fails. The claim is executable rather than quoted.

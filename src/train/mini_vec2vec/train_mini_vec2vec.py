@@ -70,7 +70,7 @@ See ``train/mini_vec2vec/__init__.py``'s module docstring.
     ``args, config = parse_arguments(argv)`` is the first statement, so
     ``--help`` prints a ``usage:`` line and exits without generating data,
     seeding RNGs, or constructing the aligner. This HARD invariant
-    (``src/train/CLAUDE.md``) applies to every entry point regardless of the
+    (``src/train/AGENTS.md``) applies to every entry point regardless of the
     training loop's shape, algorithmic or ``fit()``-based alike.
 
 THE FILE IS ``train_mini_vec2vec.py``, NEVER ``train.py``.

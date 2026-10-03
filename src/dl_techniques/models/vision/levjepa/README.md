@@ -87,7 +87,7 @@ reasoning behind each of these and the LayerScale-removal correction.
 `encoder.py` and `blocks.py` (Step 4), plus `layers/embedding/patch_embed_3d.py`
 and `layers/embedding/video_rope.py` (Step 2), previously imported
 `from keras import ops` rather than the house convention `import keras` +
-qualify at the call site (`src/dl_techniques/CLAUDE.md` § Core Conventions).
+qualify at the call site (`src/dl_techniques/AGENTS.md` § Core Conventions).
 Flagged by `plan.md` Success Criterion 12's own check
 (`grep -rn "from keras import ops" ...`), which found 4 sites, not the 2
 self-reported at the end of Step 6. Fixed in the iter-1 completion-fix round

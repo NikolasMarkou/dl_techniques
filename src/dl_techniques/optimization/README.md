@@ -319,6 +319,6 @@ arXiv:2411.02433.
 
 ## See also
 
-- `CLAUDE.md` in this directory — module map and authoring rules.
+- `AGENTS.md` in this directory — module map and authoring rules.
 - `train_vision/README.md` — the vision training pipeline built on these builders.
 - Tests: `tests/test_optimization/`.

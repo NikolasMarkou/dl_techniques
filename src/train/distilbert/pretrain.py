@@ -11,7 +11,7 @@ teacher-student distillation loss: ``DistilBERT`` (see
 model with no distillation-specific hook, so this script is a plain MLM
 pretrain of the (randomly initialized) student architecture, not a
 BERT-teacher distillation run. Following the bert/fnet/tree_transformer
-non-harmonization precedent (``src/train/CLAUDE.md`` "bert / fnet /
+non-harmonization precedent (``src/train/AGENTS.md`` "bert / fnet /
 tree_transformer drifts, deliberately not harmonized"), this file does not
 import from ``train.bert.pretrain`` -- small per-model config drift (here:
 no ``token_type_ids``, DistilBERT has none) is expected, not technical debt.

@@ -21,7 +21,7 @@ there is exactly one place to read and exactly one place a defect can hide.
     ``args, config = parse_arguments(argv)`` is the first statement, so
     ``--help`` prints a ``usage:`` line and exits without claiming a GPU,
     seeding the process, opening the Wikipedia Arrow cache, instantiating a
-    tokenizer, or constructing a model. ``src/train/CLAUDE.md`` states the
+    tokenizer, or constructing a model. ``src/train/AGENTS.md`` states the
     trap this avoids: **exit 0 is not a passing** ``--help``. A script with
     no parser at all ignores ``--help``, runs its whole job and exits 0
     anyway.
@@ -32,7 +32,7 @@ NOTHING EAGER AT MODULE SCOPE.
 THE FILE IS ``train_gemma.py``, NEVER ``train.py``.
     A module named ``train.py`` inside a package on ``sys.path`` shadows the
     ``train`` package itself and breaks ``from train.common import ...``
-    (``src/train/CLAUDE.md`` § File naming).
+    (``src/train/AGENTS.md`` § File naming).
 
 SEEDING IS NOT REPEATED HERE.
     ``common.train`` calls ``set_seeds(config.seed)`` as its first statement.

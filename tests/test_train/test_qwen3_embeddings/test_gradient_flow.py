@@ -3,7 +3,7 @@ a nonzero, finite gradient from its REAL compiled loss.
 
 Reuses `tests/test_models/gradient_flow_oracle.py::assert_gradients_reach_
 every_trainable_weight` (found by grep before writing a second copy -- see
-`src/train/CLAUDE.md` DRY discipline and
+`src/train/AGENTS.md` DRY discipline and
 `plans/plan-2026-09-13T073704-245ab5d5/decisions.md`), matching the existing
 `tests/test_train/test_omnipoint/test_train_omnipoint_cli.py` precedent for
 importing this oracle from `tests/test_train/`.

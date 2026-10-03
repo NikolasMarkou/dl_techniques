@@ -24,7 +24,7 @@ What this file owes, and why each piece is where it is
     ``args, config = parse_arguments(argv)`` is the first statement, so
     ``--help`` prints a ``usage:`` line and exits without claiming a GPU,
     seeding the process, opening the Arrow cache or constructing a model.
-    ``src/train/CLAUDE.md`` states the trap this avoids: **exit 0 is not a
+    ``src/train/AGENTS.md`` states the trap this avoids: **exit 0 is not a
     passing** ``--help``. A script with no parser at all ignores ``--help``,
     runs its whole job and exits 0 anyway, so
     ``tests/test_train/test_hnet/test_cli_contract.py`` asserts the ``usage:``
@@ -34,12 +34,12 @@ NOTHING EAGER AT MODULE SCOPE.
     No ``tf.`` call runs at import time -- this module does not import
     ``tensorflow`` at all. An eager op here would initialise the eager context
     and with it a GPU device, for every importer, ``--help`` included
-    (``src/train/CLAUDE.md``).
+    (``src/train/AGENTS.md``).
 
 THE FILE IS ``train_hnet.py``, NEVER ``train.py``.
     A module named ``train.py`` inside a package on ``sys.path`` shadows the
     ``train`` package itself and breaks ``from train.common import ...``
-    (``src/train/CLAUDE.md`` § File naming).
+    (``src/train/AGENTS.md`` § File naming).
 
 SEEDING IS NOT REPEATED HERE.
     ``common.train`` calls ``set_seeds(config.seed)`` as its first statement

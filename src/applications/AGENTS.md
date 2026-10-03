@@ -43,7 +43,7 @@ surviving reference pattern.
   `print`), type hints, `MPLBACKEND=Agg` guard for any matplotlib use.
 - Docstrings here are Google-style (`Args:`). That holds for `src/applications/` only — it is
   **not** a repo-wide rule: `layers/` is predominantly Sphinx/reST and `models/` is measurably
-  mixed. See `src/dl_techniques/CLAUDE.md` § Code Style.
+  mixed. See `src/dl_techniques/AGENTS.md` § Code Style.
 
 ## Dependencies
 

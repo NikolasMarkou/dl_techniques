@@ -10,7 +10,7 @@
     neither trained nor read. (D-034)
 (d) The per-package catalogue filed the package as "Neural additive model"; it
     is a Neural Arithmetic MODULE. The catalogue has since moved out of
-    `models/CLAUDE.md` into `models/README.md`, which is why the guard below
+    `models/AGENTS.md` into `models/README.md`, which is why the guard below
     selects its row BY TABLE STRUCTURE and holds no file line number: an
     address-based citation rots silently, the rule does not.
 
@@ -314,7 +314,7 @@ def _assert_rows_name_the_architecture(rows, source):
             f"{source} holds NO Markdown table row whose first cell is exactly "
             f"{NAM_CATALOGUE_KEY} — the per-package catalogue this guard reads "
             "has moved or been restructured again (it already migrated out of "
-            "models/CLAUDE.md once). The claim it pins is that NAM is a Neural "
+            "models/AGENTS.md once). The claim it pins is that NAM is a Neural "
             "Arithmetic MODULE, not a Neural Additive Model; it is also stated "
             "in the same file's 'Names that misattribute' table and, primarily, "
             "in the first line of the neural_computer/nam package docstring. "

@@ -7,7 +7,7 @@ Assembled transformer blocks and complete modality stacks. Each block composes t
 and no registry: blocks are imported by class from `dl_techniques.layers.transformers` (or from their
 own module) and constructed directly. The type strings you pass *into* them are the attention / FFN /
 normalization registry keys, which are documented in the sibling packages and in
-`src/dl_techniques/layers/CLAUDE.md`.
+`src/dl_techniques/layers/AGENTS.md`.
 
 ## What is in here
 

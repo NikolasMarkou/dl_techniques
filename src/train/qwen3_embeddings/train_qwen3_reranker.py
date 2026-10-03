@@ -16,7 +16,7 @@ Usage::
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES="" .venv/bin/python -m \
         train.qwen3_embeddings.train_qwen3_reranker --smoke
 
-``main()`` PARSES FIRST, so `--help` costs nothing (`src/train/CLAUDE.md`).
+``main()`` PARSES FIRST, so `--help` costs nothing (`src/train/AGENTS.md`).
 """
 
 from __future__ import annotations

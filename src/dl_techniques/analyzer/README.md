@@ -397,6 +397,6 @@ correlation traps are in `CORRELATION_TRAPS.md`.
 
 ## See also
 
-- `CLAUDE.md` — module map and authoring rules.
+- `AGENTS.md` — module map and authoring rules.
 - `SETOL.md`, `CORRELATION_TRAPS.md` — the theory behind the spectral metrics.
 - Tests: `tests/test_analyzer/`.

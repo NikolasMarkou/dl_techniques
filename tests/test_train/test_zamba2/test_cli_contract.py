@@ -7,7 +7,7 @@ Step 8's real smoke run is the end-to-end proof):
 
 1. **Exit 0 is not a passing ``--help``.** A script with no parser at all
    ignores ``--help``, runs its whole job and exits 0 anyway
-   (``src/train/CLAUDE.md``). ``--help`` must print a ``usage:`` line AND
+   (``src/train/AGENTS.md``). ``--help`` must print a ``usage:`` line AND
    must not reach ``setup_gpu``/``build_datasets``/``train`` -- sentinels
    installed over all three are asserted uncalled.
 2. **``argv -> config`` must wire, not silently default.** A flag parsed

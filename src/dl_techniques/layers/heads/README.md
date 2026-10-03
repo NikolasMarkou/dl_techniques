@@ -89,9 +89,9 @@ from dl_techniques.layers.heads.vlm import create_vlm_head, VLMTaskConfig
   `dl_techniques.layers.heads.vision.factory>EnhancementHead`. The
   helper additionally binds the legacy `Custom>ClassName` as an alias to the same object —
   and that alias is keyed on the **bare class name**, which is why the names must stay
-  verbatim and why a `git mv` costs nothing. See `CLAUDE.md` in this directory.
+  verbatim and why a `git mv` costs nothing. See `AGENTS.md` in this directory.
 - **NLP pooling reuse.** `BaseNLPHead` delegates `cls`/`mean`/`max` pooling to
   the shared `SequencePooling` layer; the learnable `attention` pooling stays
-  inline (a distinct mechanism + weight set). See `CLAUDE.md`.
+  inline (a distinct mechanism + weight set). See `AGENTS.md`.
 - **`VisionTaskType` / `TaskType` alias.** Vision's task enum was renamed to
   `VisionTaskType`; a `TaskType` alias is retained for back-compat.

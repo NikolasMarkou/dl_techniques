@@ -4,7 +4,7 @@ The `dl_techniques.initializers` module provides a collection of advanced weight
 
 ## Overview
 
-This module offers ten specialized initializers that go beyond standard random distributions (the table below covers the seven with a dedicated section here; `LinearUpInitializer`, `IdentityPlusNoise` and `KANInitializer` are described in `CLAUDE.md`, which lists the complete public surface). They leverage principles from linear algebra and signal processing—such as orthogonality, wavelet theory, and polar/hyperspherical geometry—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
+This module offers ten specialized initializers that go beyond standard random distributions (the table below covers the seven with a dedicated section here; `LinearUpInitializer`, `IdentityPlusNoise` and `KANInitializer` are described in `AGENTS.md`, which lists the complete public surface). They leverage principles from linear algebra and signal processing—such as orthogonality, wavelet theory, and polar/hyperspherical geometry—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
 
 ## Available Initializers
 

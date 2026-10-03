@@ -700,7 +700,7 @@ def create_ffn_moe(
 
     Every accepted keyword is declared. An undeclared keyword raises
     ``ValueError`` rather than being filtered out -- see the factory contract in
-    ``src/dl_techniques/layers/CLAUDE.md``. In particular ``use_bias=`` is *not*
+    ``src/dl_techniques/layers/AGENTS.md``. In particular ``use_bias=`` is *not*
     accepted: it names a bias that exists in two different sub-components, so the
     caller must say which (``gate_use_bias=`` or ``ffn_config['use_bias']``).
 

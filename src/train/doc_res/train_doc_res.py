@@ -23,7 +23,7 @@ What this file owes, and why each piece is where it is
     ``args, config = parse_arguments(argv)`` is the first statement, so
     ``--help`` prints a ``usage:`` line and exits without claiming a GPU,
     building a model or walking the staging volume.
-    ``src/train/CLAUDE.md`` states the trap this avoids: **exit 0 is not a
+    ``src/train/AGENTS.md`` states the trap this avoids: **exit 0 is not a
     passing** ``--help``. A script with no parser at all ignores ``--help``,
     runs its whole job and exits 0 anyway, so
     ``tests/test_train/test_doc_res/test_cli_contract.py`` asserts the

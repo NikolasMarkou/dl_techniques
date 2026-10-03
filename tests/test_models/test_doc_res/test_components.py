@@ -483,7 +483,7 @@ def test_both_layer_normalizations_use_the_upstream_epsilon():
 
     Dropping the explicit ``epsilon=`` kwarg is a 100x change in every
     denominator with no shape symptom and no warning, which is exactly the
-    failure ``layers/CLAUDE.md`` rule 5 exists for.
+    failure ``layers/AGENTS.md`` rule 5 exists for.
     """
     assert RESTORMER_LAYERNORM_EPSILON == 1e-5
     block = RestormerTransformerBlock(dim=DIM, num_heads=2)

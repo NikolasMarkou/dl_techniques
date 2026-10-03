@@ -133,7 +133,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 #
 #   * The alternative, a `doc_scanner/losses.py` inside the model package,
 #     would put the one loss of this port in the one place a user of this repo
-#     does not look for a loss, and `losses/CLAUDE.md` states the convention
+#     does not look for a loss, and `losses/AGENTS.md` states the convention
 #     explicitly ("All losses are exported from `__init__.py`").
 #   * Re-deriving the bilinear sampler here instead is the DRY violation this
 #     port has already refused twice: `warp.py` exists precisely so that the

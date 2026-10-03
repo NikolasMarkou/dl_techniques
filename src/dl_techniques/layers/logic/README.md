@@ -126,7 +126,7 @@ The factory:
 - **raises `ValueError` on any key the target type does not declare**:
   `create_logic_layer("logic", bogus_key=1)` raises, naming the count, the key
   and the accepted set, on all 4 registry keys. This matches every other factory
-  in `layers/` (`layers/CLAUDE.md` § The factory contract). The check lives in
+  in `layers/` (`layers/AGENTS.md` § The factory contract). The check lives in
   `validate_logic_config`, so calling that directly rejects the same key, and
   every message carries `STRICT_UNSUPPORTED_KEY_MARKER` for tests to match on.
   Read the accepted set off the error or off `get_logic_info()` and correct the

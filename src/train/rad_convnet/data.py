@@ -15,7 +15,7 @@ from typing import List, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 
-# Reuses the repo's own ImageNet normalization constants (dl_techniques.CLAUDE.md
+# Reuses the repo's own ImageNet normalization constants (dl_techniques.AGENTS.md
 # has no DTD-specific constant, and ImageNet statistics are the standard default
 # for natural-image classification when a dataset-specific one is not computed).
 from train.common.datasets import IMAGENET_MEAN, IMAGENET_STD

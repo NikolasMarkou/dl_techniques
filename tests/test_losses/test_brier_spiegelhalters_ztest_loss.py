@@ -411,7 +411,7 @@ def _all_losses():
 
 @pytest.mark.parametrize("name,loss", _all_losses(), ids=[n for n, _ in _all_losses()])
 def test_call_returns_one_value_per_sample(name, loss):
-    """The house rule in losses/CLAUDE.md. A scalar return does not IGNORE
+    """The house rule in losses/AGENTS.md. A scalar return does not IGNORE
     sample_weight -- it broadcasts against it and charges every row the batch
     aggregate."""
     y_true, y_pred = _binary_batch(32, seed=9)

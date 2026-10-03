@@ -26,7 +26,7 @@ retracted.** MEASURED on matplotlib 3.10.0, this host:
   ``savefig`` works.
 
 matplotlib's own headless fallback already covers the X11 case the repository
-root ``CLAUDE.md`` warns about under "Running Training Scripts". So the value
+root ``AGENTS.md`` warns about under "Running Training Scripts". So the value
 here is uniformity and one documented default, not a crash fix.
 
 The default, and how an explicit request is respected

@@ -32,7 +32,7 @@ What this file owes, and why each piece is where it is
 ``main()`` PARSES FIRST.
     ``args, config = parse_arguments(argv)`` is the first statement, so
     ``--help`` prints a ``usage:`` line and exits without claiming a GPU,
-    building a model or walking a corpus. ``src/train/CLAUDE.md`` states the
+    building a model or walking a corpus. ``src/train/AGENTS.md`` states the
     trap this avoids: **exit 0 is not a passing** ``--help`` -- a script with
     no parser at all ignores ``--help``, runs its whole job and exits 0 anyway,
     so ``tests/test_train/test_doc_scanner/test_cli_contract.py`` asserts the

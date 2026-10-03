@@ -944,7 +944,7 @@ redundancy — but it is also, today, a provable no-op for every current consume
 - **(c) Do nothing and rely on Keras.** *Buys* zero diff **at the cost of** a
   correctness property that depends on no sibling in the entire call tree ever forcing a
   `training` value — an invariant this package cannot enforce and does not check.
-- **(d) Write the rationale into `CLAUDE.md` / the package guide** and forward
+- **(d) Write the rationale into `AGENTS.md` / the package guide** and forward
   opportunistically. *Buys* the knowledge surviving **at the cost of** no enforcement.
 
 **Blast radius.** Package-wide by construction. Note the fix already landed at two sites

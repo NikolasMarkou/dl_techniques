@@ -465,7 +465,7 @@ Use it as research code; do not read its numbers as comparable to the V1/V2 trai
 
 ## Tests
 
-Scoped to what this package touches (never run the full suite; see the repository `CLAUDE.md`):
+Scoped to what this package touches (never run the full suite; see the repository `AGENTS.md`):
 
 ```bash
 # the ConvNeXt trainer: CLI contract, one real tiny end-to-end run, schedule / split / geometry guards

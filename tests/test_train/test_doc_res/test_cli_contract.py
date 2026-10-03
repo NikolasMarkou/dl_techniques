@@ -38,7 +38,7 @@ on the trainer module and over ``set_seeds``, ``build_model`` and
 ``create_dataset`` on ``common``; each records contact.
 :func:`test_help_prints_usage_and_allocates_nothing` asserts every one of them
 was reached ZERO times and that stdout starts with ``usage:``. Asserting only
-``exit == 0`` is measurably weaker -- ``src/train/CLAUDE.md`` records that a
+``exit == 0`` is measurably weaker -- ``src/train/AGENTS.md`` records that a
 script with no parser at all ignores ``--help``, runs its whole job and exits 0.
 :class:`TestStartupOrder` then drives a REAL ``main()`` at a task with no staged
 corpus and asserts the ``MissingTrainingDataError`` arrives with the GPU and the

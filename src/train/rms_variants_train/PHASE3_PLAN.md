@@ -337,5 +337,5 @@ Total optimistic: ~55h. Total realistic: 5-6 overnight chunks ≤ 18h + 1 analys
 - Decisions (prior plans): plan_2026-05-18_e1f12eab (D-001 hypotheses, D-002 dist-shift, D-003 max-cells), plan_2026-05-18_63121227 (D-001 8-tuple, D-002 GPU env hard-set).
 - Hypothesis registry: `src/train/rms_variants_train/hypotheses.py:VARIANT_HYPOTHESES` + `evaluate_hypothesis(variant, df) -> Verdict`.
 - Frozen analysis rules: `report.py:OVERALL_RULES` + `compute_overall_recommendation`.
-- Pattern-3 NLP conventions: `src/train/CLAUDE.md` — train.common.nlp helpers (`preprocess_clm_packed_dataset`, `estimate_clm_steps_per_epoch`, `build_clm_metrics`, `prepare_dict_keyed_compile`).
+- Pattern-3 NLP conventions: `src/train/AGENTS.md` — train.common.nlp helpers (`preprocess_clm_packed_dataset`, `estimate_clm_steps_per_epoch`, `build_clm_metrics`, `prepare_dict_keyed_compile`).
 - Failure-mode log: `plans/LESSONS.md` (L110 sweep-launch, L111 sweep is user-operated, L113 design-plan LOC undershoot, L114 TFDS pre-warm).

@@ -80,7 +80,7 @@ Three helpers — `activation_spec(activation)`, `resolve_activation(activation)
 (canonicalize on the way in, resolve to a callable in `call()`, serialize back out for
 `get_config()`). They are a **thin, Layer-rejecting convenience wrapper** (partial delegation, see
 decisions.md D-002/D-003) around `utils/activation_serialization.py`'s
-`serialize_activation`/`deserialize_activation` pair — **`utils/CLAUDE.md`** owns the underlying
+`serialize_activation`/`deserialize_activation` pair — **`utils/AGENTS.md`** owns the underlying
 mechanism (the dl_techniques factory-key passthrough contract, the `allow_layer` parameter, the
 `get_config`/`__init__`-never-`from_config` call-site rule); this section only covers what
 `common.py` adds on top.
@@ -113,7 +113,7 @@ the same file, so migrating it would be inert. Full reasoning for each: `decisio
 ### `heads/`
 
 One merged package with `nlp/`, `vision/` and `vlm/` sub-packages, a `create_head(domain, ...)`
-dispatch facade and per-domain factories. **`heads/CLAUDE.md` owns it** — read that, not this file.
+dispatch facade and per-domain factories. **`heads/AGENTS.md` owns it** — read that, not this file.
 
 ### Standalone layers (top-level files)
 

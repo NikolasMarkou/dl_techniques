@@ -44,7 +44,7 @@ Do not quote any of them as a reproduction of the paper.
     applied by the optimizer and by NOTHING else: no ``kernel_regularizer``
     exists anywhere in the doc_scanner package, because AdamW's decoupled decay
     plus an L2 penalty decays the same parameter twice
-    (``src/train/CLAUDE.md``).
+    (``src/train/AGENTS.md``).
 
 ``gradient_clipping`` -- **global norm 1.0**.
     RAFT clips at global norm 1.0, and a 12-step recurrent unroll whose loss is
@@ -363,7 +363,7 @@ class DocScannerTrainingConfig:
 
     Every field is read by something other than the config dump. A field that
     only reaches ``save_config_json`` is a knob that silently does nothing and
-    is deleted rather than wired (``src/train/CLAUDE.md``,
+    is deleted rather than wired (``src/train/AGENTS.md``,
     ``tests/test_train/test_config_fields_are_live.py``, where this class is
     REGISTERED).
 
@@ -1630,7 +1630,7 @@ def build_optimizer(
     including the clipping, whose keys that builder RENAMES
     (``gradient_clipping_by_norm`` becomes ``global_clipnorm``). A literal
     ``"clipnorm"`` key here would be silently ignored and the run would train
-    unclipped with no error (``src/train/CLAUDE.md``).
+    unclipped with no error (``src/train/AGENTS.md``).
 
     Weight decay is applied by the optimizer and by NOTHING else: no layer in
     the ``doc_scanner`` package carries a ``kernel_regularizer``, because
@@ -1774,7 +1774,7 @@ def train(config: DocScannerTrainingConfig) -> Tuple[keras.Model, Any, str]:
         # The epoch analyzer inspects a single-tensor output. Neither stage has
         # one: the segmenter emits SEVEN maps and the rectifier emits a rank-5
         # iteration sequence under `training=True`. This is the documented
-        # reason `src/train/CLAUDE.md` asks for at a callbacks section that
+        # reason `src/train/AGENTS.md` asks for at a callbacks section that
         # departs from the default.
         include_analyzer=False,
     )

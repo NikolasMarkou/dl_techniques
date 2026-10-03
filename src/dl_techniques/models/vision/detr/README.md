@@ -305,7 +305,7 @@ constructing the model.
 - **More than `num_queries` objects in an image.** They cannot all be detected. Raise
   `num_queries`; the paper uses 100 for COCO.
 
-Authoring conventions: [`models/CLAUDE.md`](../../CLAUDE.md). Mandatory guide for new models and
+Authoring conventions: [`models/AGENTS.md`](../../AGENTS.md). Mandatory guide for new models and
 layers: `research/2026_keras_custom_models_instructions_v2.md`.
 
 ## 11. Citation

@@ -318,11 +318,11 @@ class TestSHGCNWholeGraphInvocation:
 
 
 # ---------------------------------------------------------------------
-# fastvit: the variant-registry alias models/CLAUDE.md asserted (step 19, F-30)
+# fastvit: the variant-registry alias models/AGENTS.md asserted (step 19, F-30)
 # ---------------------------------------------------------------------
 
 def test_fastvit_exposes_the_canonical_model_variants_alias():
-    """`models/CLAUDE.md` claimed `fastvit` carried both `MODEL_VARIANTS` and
+    """`models/AGENTS.md` claimed `fastvit` carried both `MODEL_VARIANTS` and
     `SCALE_CONFIGS`; it carried neither, so `getattr(cls, "MODEL_VARIANTS")` --
     the pattern `vit`, `vit_hmlp` and `distilbert` all support -- raised
     `AttributeError`. The alias must be the SAME dict, not a copy.

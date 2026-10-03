@@ -260,7 +260,7 @@ def create_clm_loss_fn(config: Any) -> keras.losses.Loss:
 # `data_seed: int = 42` default that was DEAD (its single caller passes
 # `data_seed=data_seed` explicitly, at train_cliffordnet_nlp.py:443-444).
 # WHAT NOT TO DO: do NOT re-add `= 42`. A default here turns the CLM resume-seeding
-# contract (`src/train/CLAUDE.md` Pattern 3 / D-006: `data_seed = config.seed +
+# contract (`src/train/AGENTS.md` Pattern 3 / D-006: `data_seed = config.seed +
 # initial_step`) from a `TypeError` at the call site into a SILENT wrong article
 # ordering on resume -- a resumed run would quietly replay the first N chunks.
 # WHAT NOT TO DO (2): do NOT shorten the ValueError message below to just

@@ -26,5 +26,5 @@ from the leaf package:
 
 Re-exporting here would save one import line at the cost of an eager import of every
 package in the subfamily. See ``plan-2026-08-24T205033-8fd4f20d/D-002`` and
-``models/CLAUDE.md`` for the reasoning.
+``models/AGENTS.md`` for the reasoning.
 """

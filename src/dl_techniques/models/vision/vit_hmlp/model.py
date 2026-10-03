@@ -283,7 +283,7 @@ class ViTHMLP(keras.Model):
     }
 
     # `MODEL_VARIANTS` is the canonical name across `models/` (see
-    # `models/CLAUDE.md` § House Model Module Shape). `SCALE_CONFIGS` is kept as
+    # `models/AGENTS.md` § House Model Module Shape). `SCALE_CONFIGS` is kept as
     # the definition because tests and the `scale=` constructor argument already
     # name it; this is an alias to the same dict, not a copy.
     MODEL_VARIANTS = SCALE_CONFIGS

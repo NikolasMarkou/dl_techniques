@@ -181,7 +181,7 @@ class SAM(keras.Model):
     """
 
     #: Public-name registry of the three published SAM 1 checkpoint geometries
-    #: (models/CLAUDE.md Axis 2). Hoisted verbatim out of ``from_variant``'s body
+    #: (models/AGENTS.md Axis 2). Hoisted verbatim out of ``from_variant``'s body
     #: on 2026-08-19: the table was a local ``configs`` dict, so nothing outside
     #: the method could enumerate the variants -- ``getattr(SAM, "MODEL_VARIANTS")``
     #: raised ``AttributeError``, the same failure mode ``fastvit`` had.

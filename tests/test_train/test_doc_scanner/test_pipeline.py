@@ -22,7 +22,7 @@ TWO THINGS MEASURED HERE THAT ARE NOT VISIBLE ANYWHERE ELSE
 -----------------------------------------------------------
 1. ``optimizer_builder`` RENAMES the clipping keys. A literal ``"clipnorm"``
    key is silently ignored and the run trains unclipped with no error and no
-   warning (``src/train/CLAUDE.md``). :class:`TestTheOptimizerRecipes` reads
+   warning (``src/train/AGENTS.md``). :class:`TestTheOptimizerRecipes` reads
    the constructed optimizer, not the config dict.
 2. ``DocScannerRectifier`` uses Keras' ``training`` flag to select its output
    RANK, so a plain ``fit(validation_data=...)`` hands the compiled loss a

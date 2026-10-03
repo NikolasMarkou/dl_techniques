@@ -504,7 +504,7 @@ because the number is wrong.
 | New `losses/` classes | **0** (budget allowed 0 or 1; the probe made it 0) |
 | New package files | **10 / 10** — 8 modules + `README.md` + this file |
 | New trainer files | **3 / 3** — `__init__.py`, `synthetic_data.py`, `train_bit_diffusion.py` |
-| Existing files edited | **8 / 8** — `embedding/factory.py`, `embedding/__init__.py`, `embedding/README.md`, `layers/CLAUDE.md`, `test_embedding_factory.py`, `test_config_fields_are_live.py`, `vision_language/__init__.py`, `models/README.md` (the cap was renegotiated 5→7→8, both breaches declared: D-013, D-024) |
+| Existing files edited | **8 / 8** — `embedding/factory.py`, `embedding/__init__.py`, `embedding/README.md`, `layers/AGENTS.md`, `test_embedding_factory.py`, `test_config_fields_are_live.py`, `vision_language/__init__.py`, `models/README.md` (the cap was renegotiated 5→7→8, both breaches declared: D-013, D-024) |
 | New non-test `src/` lines | **6,355** of a ≤5,500 cap — 4,537 package + 1,450 trainer + 368 `ClassLabelEmbedding`. **Over cap; see §6.** |
 | New test lines | 7,556 (package) + 914 (trainer) + 321 (`ClassLabelEmbedding`) = **8,791** (uncapped by design) |
 | Tests | **523 pass / 1 skip** package · **115** trainer · **33** `ClassLabelEmbedding` |

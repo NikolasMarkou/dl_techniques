@@ -343,7 +343,7 @@ Guards: `tests/test_models/test_depth_anything/test_train_step.py`.
 
 - `src/train/depth_anything/` — Pattern-5 training scaffold for this model
   (MegaDepth + masked depth loss + visualization callbacks).
-- `src/train/CLAUDE.md` § "Pattern 5: Depth Estimation (MegaDepth)" — the pattern
+- `src/train/AGENTS.md` § "Pattern 5: Depth Estimation (MegaDepth)" — the pattern
   this trainer implements. `train_depth_anything.py` is the only Pattern-5 trainer.
 - `src/dl_techniques/models/vision/depth_anything/components.py` — `DPTDecoder` source.
 - `src/dl_techniques/models/vision/depth_anything/model.py` — `DepthAnything` source.

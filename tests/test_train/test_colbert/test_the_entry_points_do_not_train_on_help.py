@@ -4,7 +4,7 @@ Why a subprocess, and why not an exit-code check
 ------------------------------------------------
 
 A green import proves nothing about ``--help``: the failure this guards is a
-module whose ``main()`` does work BEFORE parsing. ``src/train/CLAUDE.md`` records
+module whose ``main()`` does work BEFORE parsing. ``src/train/AGENTS.md`` records
 two measured instances -- ``bert/wikipedia/*`` reached ``MirroredStrategy`` and a
 full TFDS dataset build, and ``train.tabm.train_tabm`` ran all five example
 pipelines to completion and **exited 0 with no usage line**, so a repo-wide

@@ -1,6 +1,6 @@
 """OmniPoint metric point-cloud training script.
 
-Pattern-5-shaped trainer (`src/train/CLAUDE.md`) for
+Pattern-5-shaped trainer (`src/train/AGENTS.md`) for
 `dl_techniques.models.vision.omnipoint.OmniPoint` on the combined KITTI-depth + MegaDepth
 pipeline built in Step 8 (`train.omnipoint.data.CombinedOmniPointDataset`). Structurally closest
 to `src/train/depth_anything/train_depth_anything.py` (dataclass config, `create_base_argument_
@@ -231,7 +231,7 @@ def _downsample_gt_to_grid(
 #
 # This is Pre-Mortem #3's fallback (plan.md), realized as a training-only WRAPPER model
 # using `add_loss` inside `call()` -- not a custom `train_step` override (the repo's hard
-# invariant, `src/train/CLAUDE.md` Pattern 6 precedent: `src/train/hnet/` already
+# invariant, `src/train/AGENTS.md` Pattern 6 precedent: `src/train/hnet/` already
 # supervises its auxiliary loss the same way, through `add_loss` inside `call()`, with a
 # stock `fit()`). The REAL `OmniPoint` instance (`self.omnipoint`) is what gets
 # saved/exported after training -- this wrapper exists only to make `fit()` see a scalar

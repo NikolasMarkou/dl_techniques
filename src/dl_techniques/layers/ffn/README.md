@@ -6,7 +6,7 @@ classes — `glu`, `reglu` and `bilinear` are three configurations of `GLUFFN`),
 the target class does not declare, fills in the registry defaults and constructs. A keyword the type
 does not accept is a `ValueError`, never a silently dropped argument.
 
-The factory contract and the registry sizes are owned by `src/dl_techniques/layers/CLAUDE.md`.
+The factory contract and the registry sizes are owned by `src/dl_techniques/layers/AGENTS.md`.
 
 ## Catalogue
 

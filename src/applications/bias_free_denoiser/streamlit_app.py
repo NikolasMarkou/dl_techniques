@@ -31,7 +31,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 # `streamlit run` executes this file as __main__, so make `src/` importable.
 # (The sibling app this pattern was mirrored from, `anomaly_detection/`, was deleted
-# on 2026-08-10; the convention it established is documented in ../CLAUDE.md.)
+# on 2026-08-10; the convention it established is documented in ../AGENTS.md.)
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _SRC not in sys.path:

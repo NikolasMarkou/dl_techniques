@@ -72,7 +72,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # construction site in this port therefore passes this value explicitly.
 # `norms/factory.py`'s 18 registry keys contain neither instance nor group
 # norm, so the layer is constructed directly rather than through
-# `create_normalization_layer`; `layers/CLAUDE.md` requires exactly this when a
+# `create_normalization_layer`; `layers/AGENTS.md` requires exactly this when a
 # normalization layer is built by hand -- state the epsilon, cite the source.
 INSTANCE_NORM_EPSILON: float = 1e-5
 

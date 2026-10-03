@@ -7,7 +7,7 @@ variants (``--model-variant``):
 
 - ``rbf_protonet`` (default): ``RBFProtoNet``'s CNN backbone. Modeled on
   ``train.vit.train_vit`` (the repo's Pattern-1 vision-classification
-  exemplar, see ``src/train/CLAUDE.md``), with the deviations required by the
+  exemplar, see ``src/train/AGENTS.md``), with the deviations required by the
   RBF head documented inline where they occur (see decisions.md D-003 for
   this plan).
 - ``clifford_rbf_protonet``: ``CliffordRBFProtoNet``'s isotropic

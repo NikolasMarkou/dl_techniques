@@ -1,6 +1,6 @@
 """The mirrored RED proof for the shared instrument ``tests/complex_dead_knob_ast.py``.
 
-`src/dl_techniques/CLAUDE.md` § Testing: "A **shared instrument** carries **no
+`src/dl_techniques/AGENTS.md` § Testing: "A **shared instrument** carries **no
 ``test_`` prefix**, so pytest does not collect it; each has a mirrored
 ``test_<name>.py`` RED proof". `complex_dead_knob_ast.py` shipped without one at
 `91713b820`, and the gap was not cosmetic. MEASURED at `0dc3bc1ed`: with the

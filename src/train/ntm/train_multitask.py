@@ -294,7 +294,7 @@ def parse_arguments() -> argparse.Namespace:
     """Build and run the trainer's command-line parser.
 
     # DECISION plan-2026-08-03T161943-02be1d7e/D-005
-    This is a LOCAL parser (`src/train/CLAUDE.md` Pattern 2), not
+    This is a LOCAL parser (`src/train/AGENTS.md` Pattern 2), not
     `train.common.create_base_argument_parser`. Do NOT "restore" the shared
     parser here: it has no opt-out, so it forced five flags this trainer never
     reads (`--dataset`, `--image-size`, `--weight-decay`, `--lr-schedule`,

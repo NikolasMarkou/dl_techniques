@@ -7,7 +7,7 @@ sparse.
 
 The package exports five names: `MixtureOfExperts`, `create_ffn_moe`, and the three config
 dataclasses `MoEConfig`, `ExpertConfig`, `GatingConfig`. The strict-kwargs factory contract is owned
-by `src/dl_techniques/layers/CLAUDE.md`.
+by `src/dl_techniques/layers/AGENTS.md`.
 
 ## Pick a gating type
 

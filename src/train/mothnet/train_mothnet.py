@@ -772,7 +772,7 @@ def main(argv=None) -> int:
     # DECISION plan-2026-09-18T045308-c89cdf76/D-011: `--gpu` was declared but never
     # wired at Step 1, a REFLECT-adversarial-review CRITICAL finding — every trainer
     # in this repo supports `--gpu` and calls `setup_gpu(args.gpu)`
-    # (`src/train/CLAUDE.md` § What lives in `train.common`); fixed here rather than
+    # (`src/train/AGENTS.md` § What lives in `train.common`); fixed here rather than
     # deferred, since a stale README example (`README.md`'s "Larger-scale run") was
     # already instructing users to pass `--gpu 1` with no effect.
     setup_gpu(gpu_id=args.gpu)

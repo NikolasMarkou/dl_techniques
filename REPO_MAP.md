@@ -3,7 +3,7 @@
 A router: *where code of a given kind lives*, *how the pieces are wired together*, and
 *which of the repo's many in-tree docs answers your question*.
 
-It is not a replacement for the in-tree `CLAUDE.md` files — those are the authority on
+It is not a replacement for the in-tree `AGENTS.md` files — those are the authority on
 their own subtree — and it is not an API reference. Restating subtree content here is how
 the repo's older maps drifted into describing code that no longer exists, so the omission
 is the design.
@@ -25,7 +25,7 @@ is the design.
 ├── results/                 # LOCAL ONLY — gitignored, training outputs + checkpoints
 ├── plans/                   # LOCAL ONLY — gitignored, planner state
 ├── data/                    # LOCAL ONLY — untracked, local datasets
-├── CLAUDE.md                # repo-wide agent/contributor instructions
+├── AGENTS.md                # repo-wide agent/contributor instructions
 ├── README.md                # project overview
 ├── Makefile                 # test / clean / structure targets
 ├── pyproject.toml           # src-layout packaging + dependency pins
@@ -36,7 +36,7 @@ is the design.
 
 There is no committed documentation tree and no doc generator: `generate_docs.py` and the
 `make docs` target were deleted as deprecated. Documentation lives in the in-tree
-`CLAUDE.md` and `README.md` files, and this map routes to them.
+`AGENTS.md` and `README.md` files, and this map routes to them.
 
 `src/` is the import root. The editable install puts it on `sys.path` process-wide, so the
 library is imported as `dl_techniques.*`, the trainers as `train.*`, and the apps as
@@ -51,7 +51,7 @@ half of every Python file under `src/`. The other eleven combined are smaller th
 | Subpackage | Role |
 |---|---|
 | **`layers/`** | The largest package. Themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus a large set of loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see *The registry / factory surface*. |
-| **`models/`** | The second largest, and the only subpackage that is not flat. Leaf model packages are grouped into family directories: `vision`, `language`, `vision_language`, `time_series`, `general_purpose`, `graph`, `neural_computer`, `common`, `memory`, `point_cloud`, `tabular`, `embeddings_experimental`. Four of those nest a third level: `vision/image_restoration/`, `vision/keypoints/`, `vision/super_resolution/`, `vision_language/sam/`. Catalogue: `src/dl_techniques/models/CLAUDE.md`; family taxonomy: `src/dl_techniques/models/README.md`. |
+| **`models/`** | The second largest, and the only subpackage that is not flat. Leaf model packages are grouped into family directories: `vision`, `language`, `vision_language`, `time_series`, `general_purpose`, `graph`, `neural_computer`, `common`, `memory`, `point_cloud`, `tabular`, `embeddings_experimental`. Four of those nest a third level: `vision/image_restoration/`, `vision/keypoints/`, `vision/super_resolution/`, `vision_language/sam/`. Catalogue: `src/dl_techniques/models/AGENTS.md`; family taxonomy: `src/dl_techniques/models/README.md`. |
 | `losses/` | Loss families, one module each; `losses/any_loss.py` holds the single dict-based loss registry. |
 | `utils/` | Cross-cutting helpers — `utils/logger.py` (mandatory central logging), `utils/masking/` (the canonical mask factory), plus tensor, alignment and geometry helpers. |
 | `datasets/` | Dataset loaders and synthetic generators, with `arc`, `document_rectification`, `document_restoration`, `graphs`, `time_series` and `vision` subtrees. The two `document_*` ones are distinct and easy to conflate: `document_restoration` feeds `models/vision/image_restoration/doc_res/` (task-spec driven), `document_rectification` feeds `doc_scanner/` (a synthetic warped-page generator plus a UVDoc reader, both emitting a dense backward map). |
@@ -64,7 +64,7 @@ half of every Python file under `src/`. The other eleven combined are smaller th
 | `visualization/` | Plotting helpers for training curves, classification, regression, time series. |
 | `constraints/` | Weight constraints; just `constraints/value_range_constraint.py`. The smallest package. |
 
-Every one of the 13 has its own `CLAUDE.md` — start there, not here.
+Every one of the 13 has its own `AGENTS.md` — start there, not here.
 
 ## What a fresh clone actually contains
 
@@ -240,7 +240,7 @@ the checkpoints; `src/train/common/compare_runs.py` reads exactly that layout. `
 gitignored, so a run directory exists only where it was produced.
 
 **Applications.** One Streamlit app, following the GUI-free-core plus thin-entry split
-documented in `src/applications/CLAUDE.md`:
+documented in `src/applications/AGENTS.md`:
 `src/applications/bias_free_denoiser/streamlit_app.py` (denoiser-as-prior inverse-problem
 solver; also has a headless `main.py`). Launch:
 
@@ -278,7 +278,7 @@ The reliable way to find one is a grep, not a directory listing:
 
 ## Conventions
 
-The root `CLAUDE.md` and `src/dl_techniques/CLAUDE.md` state the house conventions. How
+The root `AGENTS.md` and `src/dl_techniques/AGENTS.md` state the house conventions. How
 strongly they hold:
 
 - **Serialization is near-universal.** Almost every module under `src/dl_techniques/` that
@@ -291,7 +291,7 @@ strongly they hold:
   exception, unless it is genuinely unmigratable (FFT, SVD).
 - **Docstring style is split repo-wide.** Sphinx/reST `:param:` and Google-style `Args:`
   are both in wide use and some modules carry both, so they are not a partition. Read the
-  root `CLAUDE.md`'s "Google-style docstrings" line as a preference for new code, not a
+  root `AGENTS.md`'s "Google-style docstrings" line as a preference for new code, not a
   description of the tree. **Match the file you are editing; never convert one wholesale.**
 
 **Before writing a new layer or model, read
@@ -321,7 +321,7 @@ only for this one subtree.
 
 Named exceptions to the `tests/test_<x>/` rule:
 
-- **`src/dl_techniques/visualization/` has no test directory at all.** It has a `CLAUDE.md`;
+- **`src/dl_techniques/visualization/` has no test directory at all.** It has a `AGENTS.md`;
   it has no tests, and no test module anywhere imports it.
 - **`tests/test_models/test_lewm.py` is a loose file**, where every other model gets a
   directory. Any directory-to-directory comparison reports `lewm` as untested. It is not.
@@ -366,32 +366,32 @@ before you commit:
 
 ## Which doc answers which question
 
-The repo carries a `CLAUDE.md` per subpackage and well over a hundred in-tree README and
+The repo carries a `AGENTS.md` per subpackage and well over a hundred in-tree README and
 GUIDE files; the map's job is to route you to the right one, not to paraphrase it.
 
 | Your question | Read |
 |---|---|
 | How do I write a new layer or model? | `research/2026_keras_custom_models_instructions_v2.md` (mandatory) |
-| What are the library-wide conventions? | `src/dl_techniques/CLAUDE.md` |
+| What are the library-wide conventions? | `src/dl_techniques/AGENTS.md` |
 | What attention variants exist, and which do I pick? | `src/dl_techniques/layers/attention/README.md`, then `.../attention/GUIDE.md` |
 | What activations / sequence-pooling options exist? | `src/dl_techniques/layers/activations/GUIDE.md`, `.../sequence_pooling/GUIDE.md` |
-| How is a layer subpackage organized? | `src/dl_techniques/layers/CLAUDE.md`, plus that subpackage's own `README.md` |
-| What task heads exist, and how is `create_head` dispatched? | `src/dl_techniques/layers/heads/CLAUDE.md` |
+| How is a layer subpackage organized? | `src/dl_techniques/layers/AGENTS.md`, plus that subpackage's own `README.md` |
+| What task heads exist, and how is `create_head` dispatched? | `src/dl_techniques/layers/heads/AGENTS.md` |
 | What does model `<name>` do? | `src/dl_techniques/models/<family>/<name>/README.md` — every leaf has one. If you do not know the family: `find src/dl_techniques/models -maxdepth 3 -type d -name '<name>'` |
 | Which family is a model in, and what else is in it? | `src/dl_techniques/models/README.md`, then that family's `__init__.py` docstring |
-| How are model packages meant to be structured? | `src/dl_techniques/models/CLAUDE.md` |
-| How do I add or run a trainer? | `src/train/CLAUDE.md`, then that trainer's own `README.md` |
-| How do the Streamlit apps split GUI from core? | `src/applications/CLAUDE.md` |
-| Which loss / metric / optimizer should I use? | the `CLAUDE.md` in `src/dl_techniques/losses/`, `.../metrics/`, `.../optimization/` |
-| Which callback should I use — or where is it? | *Where the callbacks actually are*, above, **first**; only then `src/dl_techniques/callbacks/CLAUDE.md`, which documents that one package and not the callbacks outside it |
-| How do I analyze a trained model? | `src/dl_techniques/analyzer/CLAUDE.md` |
-| What helpers already exist (masking, tensors, geometry)? | `src/dl_techniques/utils/CLAUDE.md` — check here before writing a helper |
-| What datasets can I load? | `src/dl_techniques/datasets/CLAUDE.md` |
+| How are model packages meant to be structured? | `src/dl_techniques/models/AGENTS.md` |
+| How do I add or run a trainer? | `src/train/AGENTS.md`, then that trainer's own `README.md` |
+| How do the Streamlit apps split GUI from core? | `src/applications/AGENTS.md` |
+| Which loss / metric / optimizer should I use? | the `AGENTS.md` in `src/dl_techniques/losses/`, `.../metrics/`, `.../optimization/` |
+| Which callback should I use — or where is it? | *Where the callbacks actually are*, above, **first**; only then `src/dl_techniques/callbacks/AGENTS.md`, which documents that one package and not the callbacks outside it |
+| How do I analyze a trained model? | `src/dl_techniques/analyzer/AGENTS.md` |
+| What helpers already exist (masking, tensors, geometry)? | `src/dl_techniques/utils/AGENTS.md` — check here before writing a helper |
+| What datasets can I load? | `src/dl_techniques/datasets/AGENTS.md` |
 | What is the project about, at a glance? | `README.md` |
 | Which dependency pin is authoritative? | `pyproject.toml` — but see below |
 
 This map records where things live. It does not audit what the documents it routes to
-*say*, so treat a subtree `CLAUDE.md` as authoritative on its own subject and re-derive any
+*say*, so treat a subtree `AGENTS.md` as authoritative on its own subject and re-derive any
 number you intend to quote out of one.
 
 ## Dependency pins

@@ -31,7 +31,7 @@ Sentinels are installed over ``setup_gpu``, ``require_training_data`` and
 ``create_dataset`` on ``common``; each records contact.
 :func:`test_help_prints_usage_and_allocates_nothing` asserts every one of them
 was reached ZERO times and that stdout starts with ``usage:``. Asserting only
-``exit == 0`` is measurably weaker -- ``src/train/CLAUDE.md`` records that a
+``exit == 0`` is measurably weaker -- ``src/train/AGENTS.md`` records that a
 script with no parser at all ignores ``--help``, runs its whole job and exits 0.
 :class:`TestStartupOrder` then drives a REAL ``main()`` at a corpus root that
 does not exist and asserts the ``MissingTrainingDataError`` arrives with the GPU

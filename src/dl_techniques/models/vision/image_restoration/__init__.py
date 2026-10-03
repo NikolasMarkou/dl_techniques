@@ -16,7 +16,7 @@ variants that handle several degradations with one network.
   calibration constant, which is carried for fidelity to the reference rather than
   calibrated for a from-scratch model.
 * ``pw_fnet/`` — a 2-level U-Net with FFT token mixing and multi-scale supervision. Its
-  name misattributes on two of three words; see ``models/CLAUDE.md`` § Names that
+  name misattributes on two of three words; see ``models/AGENTS.md`` § Names that
   misattribute before trusting it.
 * ``scunet/`` — SCUNet, a swin-conv U-Net denoiser.
 

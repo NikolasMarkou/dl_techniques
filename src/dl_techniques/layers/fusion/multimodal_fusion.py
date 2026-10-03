@@ -397,7 +397,7 @@ class MultiModalFusion(keras.layers.Layer):
         # Resolve strings to activation, initializer and regularizer objects.
         # DECISION plan-2026-09-15T094955-31fbe3db/D-010: this file is a
         # documented EXEMPTION from the "resolve only in __init__, never in
-        # from_config" placement rule (utils/CLAUDE.md; applied elsewhere by
+        # from_config" placement rule (utils/AGENTS.md; applied elsewhere by
         # this same plan's Steps 6-7, D-008). from_config must discriminate a
         # `keras.layers.*`-module dict (a serialized Layer) from any other
         # dict (a serialized activation function) BEFORE this line runs, and

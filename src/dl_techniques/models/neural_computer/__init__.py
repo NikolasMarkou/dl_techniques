@@ -2,7 +2,7 @@
 controller.
 
 - `nam/` — a tree-transformer parse, NTM memory and TRM halting stack that evaluates
-  arithmetic expressions. The name misattributes; see `models/CLAUDE.md`
+  arithmetic expressions. The name misattributes; see `models/AGENTS.md`
 - `ntm/` — Neural Turing Machine
 
 Import from the leaf package, not from here — this family package carries no re-exports

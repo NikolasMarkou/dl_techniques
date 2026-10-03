@@ -15,7 +15,7 @@ invisible to the trainer: ``ModernBERT`` still exposes ``hidden_size`` and
 ``MaskedLanguageModel`` wraps it exactly like any other encoder. No
 teacher-student distillation loss (not applicable to ModernBERT either).
 Following the bert/fnet/tree_transformer/distilbert non-harmonization
-precedent (``src/train/CLAUDE.md`` "bert / fnet / tree_transformer drifts,
+precedent (``src/train/AGENTS.md`` "bert / fnet / tree_transformer drifts,
 deliberately not harmonized"), this file does not import from
 ``train.bert.pretrain`` or ``train.distilbert.pretrain`` -- small per-model
 config drift is expected, not technical debt.

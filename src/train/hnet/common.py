@@ -35,7 +35,7 @@ Two things this module deliberately does NOT do:
   custom optimizer or several optimizers stepping disjoint variable sets --
   neither of which stock ``fit()` supports. The knob is therefore **absent
   from the config rather than declared and unread**: a field nothing consumes
-  is a knob that silently does nothing (``src/train/CLAUDE.md`` § Config
+  is a knob that silently does nothing (``src/train/AGENTS.md`` § Config
   fields must be live). The reference's own ``configs/*.json`` carry no
   ``lr_multiplier`` values either, so there is not even a number to port. See
   ``decisions.md`` D-026.
@@ -124,7 +124,7 @@ RESULTS_DIR_PREFIX: str = "hnet"
 TRAIN_MONITOR: str = "val_loss"
 """The monitored metric. Its DIRECTION is never spelled here: ``create_callbacks``
 resolves it through ``train.common.resolve_monitor_mode``, the one producer of a
-checkpoint-selection direction (``src/train/CLAUDE.md``). Hand-writing
+checkpoint-selection direction (``src/train/AGENTS.md``). Hand-writing
 ``mode='min'`` beside a monitor name is how a run ends up restoring its worst
 epoch when the monitor later changes."""
 
@@ -139,7 +139,7 @@ SET of excluded tensors matches.
 
 Weight decay is applied by the optimizer and by NOTHING else: no
 ``kernel_regularizer`` is ever attached, because AdamW's decoupled decay plus
-an L2 penalty decays the same parameter twice (``src/train/CLAUDE.md``)."""
+an L2 penalty decays the same parameter twice (``src/train/AGENTS.md``)."""
 
 DEV_VARIANT: str = "dev"
 """Name of the tiny, non-reference architecture below."""
@@ -220,7 +220,7 @@ class HNetTrainingConfig:
     Every annotated field is read by something other than the config dump.
     ``asdict`` / ``save_config_json`` / ``prepare_run_dir`` serialize the whole
     config, which RECORDS a field without consuming it; a field that reaches
-    nothing else is deleted rather than wired (``src/train/CLAUDE.md``,
+    nothing else is deleted rather than wired (``src/train/AGENTS.md``,
     ``tests/test_train/test_config_fields_are_live.py``). That is why there is
     no ``chunk_size`` here -- the Mamba-2 chunk size the reference JSONs carry
     is not a knob this port has (``SSMSpec`` drops it) -- and no
@@ -435,7 +435,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     The four flags every CLM script in this tree exposes so users can switch
     scripts without relearning -- ``--steps-per-epoch``, ``--seed``,
     ``--min-article-length``, ``--shuffle-shards`` -- are all present and
-    spelled identically (``src/train/CLAUDE.md``).
+    spelled identically (``src/train/AGENTS.md``).
 
     :param parser: The parser to extend.
     :type parser: argparse.ArgumentParser
@@ -707,7 +707,7 @@ def build_optimizer(
     ``optimizer_builder`` RENAMES the clipping keys, so the clip is passed as
     ``gradient_clipping_by_norm_local`` and never as a literal ``"clipnorm"``:
     an unrecognised key is dropped silently, with no error and no warning, and
-    gradient clipping would simply vanish (``src/train/CLAUDE.md``). The
+    gradient clipping would simply vanish (``src/train/AGENTS.md``). The
     optimizer is never mutated after construction either -- Keras requires
     clipping in the constructor.
 

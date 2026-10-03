@@ -43,7 +43,7 @@ This package has **no factory and no registry**.
     # DECISION plan-2026-09-09T042752-6d66ac56/D-015: the SAME ruling, restated
     # at the step that actually created this package surface, so the anchor
     # audit can link both entries to the site. D-015 also records that every
-    # count `layers/CLAUDE.md` states about this package was RE-DERIVED rather
+    # count `layers/AGENTS.md` states about this package was RE-DERIVED rather
     # than incremented; if you add or remove a class here, re-run the commands
     # printed beside those numbers instead of editing them.
 

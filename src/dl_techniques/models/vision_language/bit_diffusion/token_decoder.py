@@ -320,7 +320,7 @@ def create_shared_token_decoder(
     decoder's geometry is fully determined by the
     :class:`~.config.BridgeConfig` it reads and by the tokenizer's vocabulary,
     so a named-variant table here would be an invented axis. See
-    ``models/CLAUDE.md`` "When the shape does not apply".
+    ``models/AGENTS.md`` "When the shape does not apply".
 
     :param vocab_size: Number of output logits per token position.
     :type vocab_size: int

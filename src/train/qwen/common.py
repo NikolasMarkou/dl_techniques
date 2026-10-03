@@ -16,7 +16,7 @@ scoped-out gap).
 
 ``Qwen3`` (``dl_techniques.models.language.qwen.qwen3.Qwen3``) is a standard
 subword causal LM, so this module follows the Pattern-3 shape
-(``src/train/CLAUDE.md``, exemplar ``src/train/bert/pretrain.py``), the same
+(``src/train/AGENTS.md``, exemplar ``src/train/bert/pretrain.py``), the same
 as ``src/train/zamba2/common.py`` / ``src/train/mamba/common.py`` /
 ``src/train/gemma/common.py`` -- and deliberately mirrors the gemma module's
 structure (config dataclass + argparse + ``config_from_args``
@@ -174,7 +174,7 @@ class Qwen3TrainingConfig:
 
     Every annotated field is read by something other than the config dump
     (``save_config_json``/``asdict`` serialize the whole config, which
-    RECORDS a field without consuming it -- ``src/train/CLAUDE.md``).
+    RECORDS a field without consuming it -- ``src/train/AGENTS.md``).
 
     :param variant: A member of :data:`VARIANT_NAMES`.
     :param dataset_root: Arrow cache directory holding the Wikipedia dump.
@@ -405,7 +405,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     The four flags every CLM script in this tree exposes --
     ``--steps-per-epoch``, ``--seed``, ``--min-article-length``,
     ``--shuffle-shards`` -- are all present and spelled identically
-    (``src/train/CLAUDE.md``).
+    (``src/train/AGENTS.md``).
 
     :param parser: The parser to extend.
     :type parser: argparse.ArgumentParser
@@ -671,7 +671,7 @@ def build_optimizer(
     ``optimizer_builder`` RENAMES the clipping keys, so the clip is passed as
     ``gradient_clipping_by_norm_local`` and never as a literal ``"clipnorm"``:
     an unrecognised key is dropped silently, with no error and no warning
-    (``src/train/CLAUDE.md``).
+    (``src/train/AGENTS.md``).
 
     :param config: The run config.
     :type config: Qwen3TrainingConfig

@@ -202,5 +202,5 @@ The extra `<experiment_name>/<timestamp>/` nesting under `visualizations/` comes
 
 - `../README.md` — the builders this pipeline drives, including the `optimizer_builder` key-
   renaming trap.
-- `../CLAUDE.md` — package map.
+- `../AGENTS.md` — package map.
 - `dl_techniques/analyzer/README.md`, `dl_techniques/visualization/README.md`.

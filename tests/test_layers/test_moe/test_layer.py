@@ -1617,7 +1617,7 @@ class TestFactoryAndShapeContract:
         assert "ffn_config['use_bias']" in message
 
     def test_undeclared_keyword_raises_instead_of_being_dropped(self):
-        """The repo factory contract (layers/CLAUDE.md rule 1): never filter-and-drop."""
+        """The repo factory contract (layers/AGENTS.md rule 1): never filter-and-drop."""
         with pytest.raises(ValueError, match="undeclared keyword"):
             create_ffn_moe(
                 num_experts=4,

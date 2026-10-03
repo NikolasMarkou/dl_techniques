@@ -519,7 +519,7 @@ def plot_results(
 # ignored -- which is exactly the dead-knob problem this step closes).
 def _drop_base_parser_args(parser: argparse.ArgumentParser, *dests: str) -> None:
     """Removes CLI arguments this script inherits from
-    `create_base_argument_parser()` but never reads, per `src/train/CLAUDE.md`'s
+    `create_base_argument_parser()` but never reads, per `src/train/AGENTS.md`'s
     "config fields must be live" convention.
 
     `--dataset` and `--patience` are dead here: `train_kan.py`'s data is 100%

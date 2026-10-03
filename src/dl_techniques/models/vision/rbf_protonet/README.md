@@ -45,7 +45,7 @@ output already matches `feature_dim` and no projection `Dense` is created.
 **No `MODEL_VARIANTS` table** — this package intentionally ships without one. There is exactly
 one baseline architecture here; inventing named size multipliers (e.g. a fake `_small` /
 `_base` split) with no genuine use case would reproduce the "forcing an ill-fitting template"
-anti-pattern `models/CLAUDE.md` § "When the shape does not apply" warns against, and the
+anti-pattern `models/AGENTS.md` § "When the shape does not apply" warns against, and the
 pre-mortem in this plan's `plan.md` names it as a STOP-IF condition. See `decisions.md` D-004.
 
 ## Math
@@ -257,5 +257,5 @@ across the full block stack.
 
 ### Authoring rules
 
-Conventions: [`models/CLAUDE.md`](../../CLAUDE.md). Mandatory guide:
+Conventions: [`models/AGENTS.md`](../../AGENTS.md). Mandatory guide:
 `research/2026_keras_custom_models_instructions_v2.md`.

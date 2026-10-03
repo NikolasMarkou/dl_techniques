@@ -742,7 +742,7 @@ class TestTheSecondaryContractsThisLayerAdvertises:
     def test_every_normalization_branch_runs_at_the_house_epsilon(self, normalization):
         """D-004: all three branches at 1e-6, matching `norms/factory.py`.
 
-        `layers/CLAUDE.md` § Layer Reuse Policy rule 5: Keras' stock `1e-3` is
+        `layers/AGENTS.md` § Layer Reuse Policy rule 5: Keras' stock `1e-3` is
         1000x the factory's `1e-6` with no shape symptom and no warning. There
         is no cited reference for `1e-3` here -- it was the stock default taken
         by accident, and this file's own `'rms'` branch already disagreed with

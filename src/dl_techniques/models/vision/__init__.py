@@ -4,7 +4,7 @@ The largest family: 39 leaf packages listed below, five of which sit one level d
 under a task subdirectory (`image_restoration/`, `keypoints/`, `super_resolution/`).
 (This list has a pre-existing gap of 3 undocumented leaf packages — `omnipoint/`,
 `image_restoration/doc_res/`, `image_restoration/doc_scanner/` — tracked in
-`models/CLAUDE.md`'s package-count drift note; fixing that gap is out of scope for
+`models/AGENTS.md`'s package-count drift note; fixing that gap is out of scope for
 this bullet's edit, which only adds `fftnet/`.)
 
 - `accunet/` — AccuNet
@@ -28,7 +28,7 @@ this bullet's edit, which only adds `fftnet/`.)
 - `fractalnet/` — FractalNet
 - `image_restoration/darkir/` — DarkIR image restoration
 - `image_restoration/pw_fnet/` — a 2-level U-Net with FFT token mixing and multi-scale
-  supervision, for image restoration. The name misattributes; see `models/CLAUDE.md`
+  supervision, for image restoration. The name misattributes; see `models/AGENTS.md`
 - `image_restoration/scunet/` — SCUNet denoiser
 - `keypoints/lightglue/` — LightGlue keypoint matcher (consumes keypoints + descriptors)
 - `keypoints/superpoint/` — SuperPoint keypoint detector + descriptor
@@ -49,7 +49,7 @@ this bullet's edit, which only adds `fftnet/`.)
 - `vit/` — Vision Transformer
 - `vit_hmlp/` — ViT with hierarchical MLP
 - `vit_siglip/` — ViT with a two-stage conv patch-embedding stem. The name
-  misattributes; see `models/CLAUDE.md`
+  misattributes; see `models/AGENTS.md`
 - `vq_vae/` — VQ-VAE
 - `vq_vae_rotation/` — VQ-VAE with rotation-based codebook updates
 - `yolo12/` — YOLOv12 detection

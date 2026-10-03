@@ -5,7 +5,7 @@ stream, plus the promptable segmenters that grew out of them.
 - `clip/` — CLIP
 - `clifford_clip/` — CliffordCLIP, a Clifford-algebra (geometric-algebra) variant of CLIP
 - `fastvlm/` — a vision-only hybrid backbone (MobileOne stem + RepMixer + attention
-  stages). The name misattributes; see `models/CLAUDE.md`
+  stages). The name misattributes; see `models/AGENTS.md`
 - `ideogram4/` — Ideogram4 text-to-image flow-matching DiT
 - `mobile_clip/` — MobileCLIP, both generations in one package: `mobile_clip_v1.py` is
   deliberately non-faithful on the image side, `mobile_clip_v2.py` is the faithful port

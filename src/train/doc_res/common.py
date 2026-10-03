@@ -27,7 +27,7 @@ The data path generalises ``src/train/bfunet/common.py`` from a single
 
 Public surface:
     * :class:`DocResTrainingConfig` -- the run knobs. Every field is consumed by
-      something other than the config dump; see ``src/train/CLAUDE.md``.
+      something other than the config dump; see ``src/train/AGENTS.md``.
     * :func:`add_common_arguments` -- the task-agnostic CLI flags.
     * :func:`config_from_args` -- namespace -> config, the one wiring site.
     * :func:`collect_task_triplets` / :func:`split_triplets` -- path worklists.
@@ -159,7 +159,7 @@ class DocResTrainingConfig:
     batch 10, ``AdamW(lr=2e-4, weight_decay=5e-4)`` and a cosine decay to
     ``1e-6``. Every field is read by something other than the config dump; a
     field that is only serialized is a knob that silently does nothing and is
-    deleted rather than wired (``src/train/CLAUDE.md``,
+    deleted rather than wired (``src/train/AGENTS.md``,
     ``tests/test_train/test_config_fields_are_live.py``).
 
     :param task: A key of ``TASKS``. The single task this run trains.
@@ -1039,7 +1039,7 @@ def build_optimizer(
     Weight decay is applied by the optimizer and by NOTHING else: no
     ``kernel_regularizer`` is ever attached to the model, because AdamW's
     decoupled decay plus an L2 penalty decays the same parameter twice
-    (``src/train/CLAUDE.md``).
+    (``src/train/AGENTS.md``).
 
     :param config: The run config.
     :return: The optimizer.

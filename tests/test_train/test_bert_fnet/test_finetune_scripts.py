@@ -16,7 +16,7 @@ What is pinned, and why each pin is not satisfied-by-construction:
 * ``test_argv_maps_onto_the_config`` -- VALUE-carrying, and the reason this
   module exists at all: it pins ``max_seq_length`` = **256 for bert** and
   **128 for fnet** as a FACT, so a shared scaffold cannot silently harmonize
-  them (that drift is deliberate-untouched, see ``src/train/CLAUDE.md``).
+  them (that drift is deliberate-untouched, see ``src/train/AGENTS.md``).
 
 The encoder is built and saved by this module (tiny variant, small vocab) --
 ``create_sentiment_model`` loads it from ``config.pretrained_encoder_path``,

@@ -17,7 +17,7 @@ and
 :class:`~dl_techniques.layers.ffn.gated_dconv_ffn.GatedDConvFeedForward`,
 live in the shared ``layers/`` packages and are imported DIRECTLY here rather
 than through ``create_attention_layer`` / ``create_ffn_layer``. That is a
-deliberate exception to the factory-first rule in ``layers/CLAUDE.md``: the
+deliberate exception to the factory-first rule in ``layers/AGENTS.md``: the
 factories exist so a caller can make a *configurable slot* -- "put whatever
 attention the config names here" -- and these are not slots. Restormer's block
 is MDTA and GDFN by definition; substituting either produces a different
@@ -57,7 +57,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # `WithBias_LayerNorm` in `restormer_arch.py:66-77` divides by
 # `sqrt(sigma + 1e-5)`. Keras' `LayerNormalization` DEFAULTS to `epsilon=1e-3`
 # -- 100x larger, with no shape symptom and no warning -- so every construction
-# site below passes `epsilon=` explicitly. `layers/CLAUDE.md` § "The factory
+# site below passes `epsilon=` explicitly. `layers/AGENTS.md` § "The factory
 # contract", rule 5, requires exactly this: a directly-constructed
 # normalization layer states its epsilon with a cited reference.
 # ---------------------------------------------------------------------

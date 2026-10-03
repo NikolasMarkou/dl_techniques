@@ -41,7 +41,7 @@ There are **three**: `train_ntm.py`, `train_multitask.py` and
 tripwires `setup_gpu`.
 
 All three build a **local** `argparse.ArgumentParser` (the Pattern 2 shape
-documented in `src/train/CLAUDE.md`) rather than extending
+documented in `src/train/AGENTS.md`) rather than extending
 `train.common.create_base_argument_parser`, whose vision-oriented flags none of
 them reads.
 

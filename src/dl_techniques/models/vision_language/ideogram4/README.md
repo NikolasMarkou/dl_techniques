@@ -10,7 +10,7 @@ training code.
 > original Qwen3-VL-8B text/vision encoder is **not** reimplemented in Keras.
 > This is a **trainable architecture with a runnable tiny
 > preset**, NOT a drop-in for the released quantized checkpoint. See
-> `CLAUDE.md` for the full "what doesn't fit / skipped / changed" report.
+> `AGENTS.md` for the full "what doesn't fit / skipped / changed" report.
 
 ---
 
@@ -138,7 +138,7 @@ is deliberately left to the sampling level (the trainer), not the loss.
 | `RMSNorm` | `layers/norms/rms_norm.py` | `llm_cond_norm`, QK-norm, the block's 4-norm sandwich |
 | `SwiGLUFFN` | `layers/ffn/swiglu_ffn.py` | the block MLP (configured bias-free, `expansion=1`, `multiple_of=intermediate_size` so the rounded hidden equals `intermediate_size` exactly) |
 | `Sampling` | `layers/sampling.py` | VAE KL reparameterization |
-| `keras.layers.GroupNormalization` | Keras built-in | VAE `GroupNorm32(groups=32, eps=1e-6)` — NOT the repo norms factory (see CLAUDE.md) |
+| `keras.layers.GroupNormalization` | Keras built-in | VAE `GroupNorm32(groups=32, eps=1e-6)` — NOT the repo norms factory (see AGENTS.md) |
 | upsample (op sequence) | stock Keras (`UpSampling2D` + `Conv2D`) | A thin `Upsample` wrapper (UpSampling2D nearest×2 + Conv2D 3×3 same) built so the subclassed `Decoder` can OWN it, rather than a functional-graph helper. |
 
 Two layers are deliberately net-new instead of reusing near-misses:

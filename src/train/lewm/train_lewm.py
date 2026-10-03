@@ -177,7 +177,7 @@ def parse_args() -> argparse.Namespace:
     # inherited but unused by this script for their base-parser purpose
     # (--image-size does not control image size here -- use --img-size
     # instead; passing --image-size explicitly triggers a warning below).
-    # That drift is acceptable per train/CLAUDE.md guidance to prefer the
+    # That drift is acceptable per train/AGENTS.md guidance to prefer the
     # base parser for consistency.
     p = create_base_argument_parser(
         description="LeWM trainer (upstream defaults; --smoke for fast CPU iteration)",

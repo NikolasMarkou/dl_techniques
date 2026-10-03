@@ -483,7 +483,7 @@ undercount from exactly that). The profiler and its calibration and descent arms
 
 ### Authoring rules
 
-Conventions: [`models/CLAUDE.md`](../../CLAUDE.md). Mandatory guide:
+Conventions: [`models/AGENTS.md`](../../AGENTS.md). Mandatory guide:
 `research/2026_keras_custom_models_instructions_v2.md`.
 
 ## 18. Citation

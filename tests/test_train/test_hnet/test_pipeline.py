@@ -439,7 +439,7 @@ class TestOptimizer:
         """AdamW decays; no layer carries a kernel regularizer as well.
 
         Both halves matter: decaying twice inflates the loss AND decays the
-        parameter again (``src/train/CLAUDE.md``).
+        parameter again (``src/train/AGENTS.md``).
         """
         config = tiny_config(weight_decay=0.123)
         optimizer = build_optimizer(config, steps_per_epoch=10)

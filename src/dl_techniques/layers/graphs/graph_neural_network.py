@@ -477,7 +477,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             # (`normalization='layer'`), with no shape symptom and no warning. There is
             # no cited reference for 1e-3 here; it was the stock default taken by
             # accident, and this file's own `'rms'` branch already contradicted it
-            # (`layers/CLAUDE.md` § Layer Reuse Policy rule 5). This CHANGES default-
+            # (`layers/AGENTS.md` § Layer Reuse Policy rule 5). This CHANGES default-
             # config numerics, deliberately and once: on a seeded 2-block stack at
             # `(2, 5, 16)` the forward output moved by max|delta| 1.25e-03 ('layer',
             # 5.05e-04 relative) and 3.44e-03 ('batch', 9.99e-04 relative), inference

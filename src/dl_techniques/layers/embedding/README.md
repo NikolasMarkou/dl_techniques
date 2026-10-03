@@ -7,7 +7,7 @@ reachable through the factory; the other five are direct-import only.
 
 `create_embedding_layer(embedding_type, name=None, **kwargs)` looks the type up in `EMBEDDING_REGISTRY`, rejects any
 keyword the target class does not declare, fills in the registry defaults and constructs. The
-factory contract and the registry sizes are owned by `src/dl_techniques/layers/CLAUDE.md`.
+factory contract and the registry sizes are owned by `src/dl_techniques/layers/AGENTS.md`.
 
 The package `__init__` exports ten names — `AxialRoPE2D`, `ClassLabelEmbedding`,
 `TimestepEmbedding`, the three factory functions, `STRICT_DROPPED_KEY_MARKER` and the three

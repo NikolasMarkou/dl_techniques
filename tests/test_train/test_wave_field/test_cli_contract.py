@@ -6,7 +6,7 @@ flag stays in ``--help``, still parses, and silently does nothing.
 
 The row table is imported from ``tests/test_train/_cli_contract.py`` and SHARED
 with ``tests/test_train/test_gpt2/test_cli_contract.py``: the two CLM trainers
-are required to expose the same flag surface (`src/train/CLAUDE.md`, Pattern 3)
+are required to expose the same flag surface (`src/train/AGENTS.md`, Pattern 3)
 and now share one config base (D-010). One table means a flag that drifts onto
 only one of them turns that trainer's completeness test RED.
 

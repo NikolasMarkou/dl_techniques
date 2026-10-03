@@ -331,7 +331,7 @@ class DiT(keras.Model):
         >>> out = model([x, t, y])  # doctest: +SKIP
     """
 
-    #: House-contract alias for the variant registry (``models/CLAUDE.md``
+    #: House-contract alias for the variant registry (``models/AGENTS.md``
     #: § House Model Module Shape). Bound to the same object as
     #: :data:`~dl_techniques.models.vision.dit.config.DIT_VARIANTS`,
     #: not a copy, so the two never drift out of sync.

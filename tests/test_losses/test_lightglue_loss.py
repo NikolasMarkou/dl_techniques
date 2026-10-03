@@ -420,7 +420,7 @@ class TestLossObject:
         assert np.abs(tape.gradient(total, c).numpy()).sum() > 0
 
     def test_sample_weight_selects_rows(self, case):
-        # losses/CLAUDE.md: one value per sample, so a zero-weight row costs nothing
+        # losses/AGENTS.md: one value per sample, so a zero-weight row costs nothing
         la, m0, m1, _ = case
         packed = _np(pack_matches(m0, m1))
         loss = LightGlueLoss()

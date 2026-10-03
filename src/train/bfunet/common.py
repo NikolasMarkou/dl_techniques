@@ -1404,7 +1404,7 @@ class BFUnetTrainingConfig:
     # Decoupled (AdamW) weight decay. Default mirrors optimizer_builder's adamw default
     # (0.004) so behavior is unchanged; surfaced here so it lands in the saved config.json
     # and is tunable via --weight-decay. AdamW WD only -- no kernel_regularizer L2 (would
-    # double-penalize); see train/CLAUDE.md "Double Weight Decay".
+    # double-penalize); see train/AGENTS.md "Double Weight Decay".
     weight_decay: float = 0.004
     lr_schedule_type: str = "cosine_decay"
     warmup_epochs: Optional[int] = None  # None -> 10% of epochs (see __post_init__)

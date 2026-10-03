@@ -299,7 +299,7 @@ JSON returns it as a list and `(None,) + list` raises.
 - **Fine-tuning does not improve after unfreezing.** You changed `trainable` without calling
   `compile()` again.
 
-Authoring conventions: [`models/CLAUDE.md`](../../CLAUDE.md). Mandatory guide for new models and
+Authoring conventions: [`models/AGENTS.md`](../../AGENTS.md). Mandatory guide for new models and
 layers: `research/2026_keras_custom_models_instructions_v2.md`.
 
 ## 11. Citation

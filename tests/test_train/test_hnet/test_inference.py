@@ -12,7 +12,7 @@ What is pinned, and what each guard would catch
 1. **The CLI contract**: ``main(argv)`` parses FIRST, so ``--help`` prints a
    ``usage:`` line and exits 0 without claiming a GPU or reading a checkpoint
    off disk. Sentinels over ``setup_gpu`` and ``load_checkpoint`` MEASURE that
-   rather than inferring it from an exit code -- ``src/train/CLAUDE.md``'s trap
+   rather than inferring it from an exit code -- ``src/train/AGENTS.md``'s trap
    is that a script with no parser at all runs its whole job and exits 0 too.
 2. **Defensive decoding at UTF-8 boundaries.** The model emits BYTES and the
    sample is cut wherever ``--max-new-bytes`` says, which is routinely mid

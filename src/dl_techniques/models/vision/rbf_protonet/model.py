@@ -21,7 +21,7 @@ rather than hand-rolling ``Conv2D`` + ``BatchNormalization`` + activation in
 this file.
 
 This package intentionally ships without a ``MODEL_VARIANTS`` table (see
-``models/CLAUDE.md`` Section "When the shape does not apply" / the guide's
+``models/AGENTS.md`` Section "When the shape does not apply" / the guide's
 Section 5.6): there is exactly one baseline architecture here, and inventing
 named size multipliers with no genuine use case would be exactly the
 "forcing an ill-fitting template" anti-pattern the house shape warns against.

@@ -53,14 +53,14 @@ make structure  # display src tree
 > **NEVER delete anything under `results/`.** Not the tree, not a single run directory, not "test artifacts I just created" — no `rm -rf results/`, and no cleanup step that names `results/` by a relative path. `results/` is gitignored and untracked, so **deletion is unrecoverable**: there is no git history and no backup. If a probe or smoke run creates a run directory, leave it; the user removes them. On 2026-08-12 a badly-scoped cleanup instruction ("delete every `results/` dir you create afterwards") destroyed all 62 run directories at once — including a published paper's subject checkpoint — because the agent's own test had written to a pytest `tmp_path` and the relative paths in its log resolved against the repo root instead. Delete only absolute paths recorded at creation time and verified created, or do not delete at all.
 
 There is no documentation directory and no doc generator. `generate_docs.py` and the `make docs`
-target were deleted as deprecated; documentation lives in the in-tree `README.md` and `CLAUDE.md`
+target were deleted as deprecated; documentation lives in the in-tree `README.md` and `AGENTS.md`
 files, and `REPO_MAP.md` routes you to the right one.
 
 ### src/dl_techniques/ (core library)
 
-The main codebase. The package names are exactly: `src/dl_techniques/layers/`, `src/dl_techniques/models/`, `src/dl_techniques/losses/`, `src/dl_techniques/metrics/`, `src/dl_techniques/optimization/` (not "optimizers"), `src/dl_techniques/analyzer/` (not "analyzers"), `src/dl_techniques/visualization/`, `src/dl_techniques/datasets/`, `src/dl_techniques/utils/`, `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/`, `src/dl_techniques/regularizers/`. Has its own `CLAUDE.md` with detailed documentation, and each subpackage has one as well.
+The main codebase. The package names are exactly: `src/dl_techniques/layers/`, `src/dl_techniques/models/`, `src/dl_techniques/losses/`, `src/dl_techniques/metrics/`, `src/dl_techniques/optimization/` (not "optimizers"), `src/dl_techniques/analyzer/` (not "analyzers"), `src/dl_techniques/visualization/`, `src/dl_techniques/datasets/`, `src/dl_techniques/utils/`, `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/`, `src/dl_techniques/regularizers/`. Has its own `AGENTS.md` with detailed documentation, and each subpackage has one as well.
 
-`src/dl_techniques/models/` is **not flat** — leaf packages are grouped into family directories, some nesting one level further. A family is a grouping, **not** a namespace: every family `__init__.py` holds a docstring and nothing else, so always import from the leaf package (`dl_techniques.models.vision.resnet.model`, never `dl_techniques.models.vision`). `time_series/` is the single exception and does re-export its children. The families are listed in `REPO_MAP.md`; the catalogue is `src/dl_techniques/models/README.md`; the authoring rules are `src/dl_techniques/models/CLAUDE.md`.
+`src/dl_techniques/models/` is **not flat** — leaf packages are grouped into family directories, some nesting one level further. A family is a grouping, **not** a namespace: every family `__init__.py` holds a docstring and nothing else, so always import from the leaf package (`dl_techniques.models.vision.resnet.model`, never `dl_techniques.models.vision`). `time_series/` is the single exception and does re-export its children. The families are listed in `REPO_MAP.md`; the catalogue is `src/dl_techniques/models/README.md`; the authoring rules are `src/dl_techniques/models/AGENTS.md`.
 
 ### src/applications/
 
@@ -72,7 +72,7 @@ Production-grade training pipelines — one directory per runnable pipeline. Mos
 
 ### tests/
 
-Pytest test suite mirroring the `src/dl_techniques/` structure — with named exceptions (an untested package, a loose test module, and a few directories named for the leaf rather than its path) catalogued in `REPO_MAP.md` § Tests. See `src/dl_techniques/CLAUDE.md` for testing conventions.
+Pytest test suite mirroring the `src/dl_techniques/` structure — with named exceptions (an untested package, a loose test module, and a few directories named for the leaf rather than its path) catalogued in `REPO_MAP.md` § Tests. See `src/dl_techniques/AGENTS.md` for testing conventions.
 
 **`tests/test_models/` deliberately does NOT mirror the model family nesting.** It stays flat: leaf package `x` is tested by `tests/test_models/test_<x>/`, with no `test_vision/` or `test_language/` level in between. This is a ruling, not an unfinished migration — many relative imports of the form `from ..<oracle>` reach shared oracle modules living directly at `tests/test_models/*.py`, and a family level changes what `..` resolves to across all of them for zero behavioural gain. Do not "finish the job" by nesting them. `REPO_MAP.md` § Tests has the detail.
 
@@ -107,10 +107,10 @@ MPLBACKEND=Agg .venv/bin/python -m train.<model>.train_<script> [args]
   | New `models/` package | follow `models/language/bert/model.py`, which is entirely Sphinx/reST |
 
   **Match the file you are editing; never convert a file wholesale.** The measured per-package
-  counts, each printed beside the grep that re-derives it, live in `src/dl_techniques/CLAUDE.md`
+  counts, each printed beside the grep that re-derives it, live in `src/dl_techniques/AGENTS.md`
   § Core Conventions → Code Style — the single home for those numbers.
 - Centralized logging via `dl_techniques.utils.logger` — no print statements
 
 When instructed to create a new model or layer, follow the guide in `research/2026_keras_custom_models_instructions_v2.md`.
 
-See `src/dl_techniques/CLAUDE.md` for detailed conventions, patterns, and how to add new components.
+See `src/dl_techniques/AGENTS.md` for detailed conventions, patterns, and how to add new components.

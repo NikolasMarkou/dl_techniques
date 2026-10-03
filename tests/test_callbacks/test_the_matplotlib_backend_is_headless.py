@@ -23,7 +23,7 @@ guard now pins respect-the-caller instead.
 Why the behavioural arms need a FRESH SUBPROCESS, with an explicit child env
 ---------------------------------------------------------------------------
 Backend selection is process-global and effectively once-only, and this
-repository runs its whole suite under ``MPLBACKEND=Agg`` (repo ``CLAUDE.md``).
+repository runs its whole suite under ``MPLBACKEND=Agg`` (repo ``AGENTS.md``).
 An in-process assertion would therefore read the ENVIRONMENT rather than the
 code and pass no matter what the callback does -- a guard that cannot fail.
 :func:`_child_env` builds each child's environment explicitly: it POPS

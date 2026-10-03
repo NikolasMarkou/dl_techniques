@@ -81,7 +81,7 @@ DEFAULT_VOCAB_SIZE = 8192
 # SCALE_CONFIGS maps a scale to its architecture; MODEL_VARIANTS maps a public
 # name to a scale; _resolve_scale accepts either spelling.
 # DECISION plan-2026-08-24T074054-247151fd/D-009: keep these two tables
-# separate rather than merged into one, per the repo-wide CLAUDE.md rule that
+# separate rather than merged into one, per the repo-wide AGENTS.md rule that
 # SCALE_CONFIGS is not a stale spelling of MODEL_VARIANTS. See decisions.md.
 
 # DECISION plan-2026-08-11T012340-f63796dc/D-003: layer_scale_init_value

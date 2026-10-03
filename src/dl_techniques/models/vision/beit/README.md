@@ -482,7 +482,7 @@ stochastic-depth ramp; GELU MLP at 4x width; hard-argmax MIM targets; the block-
 algorithm including its under-fill; `use_absolute_position_embeddings=False`; and mean pooling with
 cls excluded.
 
-Authoring conventions: [`models/CLAUDE.md`](../../CLAUDE.md). Mandatory guide:
+Authoring conventions: [`models/AGENTS.md`](../../AGENTS.md). Mandatory guide:
 `research/2026_keras_custom_models_instructions_v2.md`. BEiT v2 (arXiv:2208.06366) keeps this backbone
 with a VQ-KD target and BEiT-3 (arXiv:2208.10442) generalizes it into a Multiway Transformer; neither
 is implemented here.

@@ -5,7 +5,7 @@ looks the type up in `ATTENTION_REGISTRY`, rejects any keyword the target class 
 fills in the registry defaults and constructs. Nothing on that path filters and drops: an undeclared
 keyword is a `ValueError`, never a discarded argument.
 
-- Factory contract and registry sizes: `src/dl_techniques/layers/CLAUDE.md`.
+- Factory contract and registry sizes: `src/dl_techniques/layers/AGENTS.md`.
 - Deeper design notes, including the shared-primitive contracts: `GUIDE.md` in this directory.
 
 The factory is **construction-only**. It standardizes how layers are built, not how they are called;

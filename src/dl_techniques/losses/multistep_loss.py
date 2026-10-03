@@ -361,7 +361,7 @@ def create_multistep_loss(name: str, **kwargs: Any) -> MultistepLoss:
     """Build a :class:`MultistepLoss` by aggregation name.
 
     Unknown names AND unknown keyword arguments both raise ``ValueError``,
-    per the house factory rule in ``src/dl_techniques/CLAUDE.md``: a factory
+    per the house factory rule in ``src/dl_techniques/AGENTS.md``: a factory
     that silently drops a keyword it does not recognise has previously shipped
     dead knobs repo-wide (``dropout=`` against a ``dropout_rate`` parameter,
     ``qkv_bias=`` against ``use_bias``), each invisible at every shape check.

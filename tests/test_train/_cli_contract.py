@@ -232,7 +232,7 @@ def assert_row_value_is_not_the_default(
 #: The 27 flags `train.gpt2.pretrain` and `train.wave_field.pretrain` share.
 #:
 #: ONE table, consumed by both packages' contract modules, because the two
-#: parsers are the same surface by design -- `src/train/CLAUDE.md` § Pattern 3
+#: parsers are the same surface by design -- `src/train/AGENTS.md` § Pattern 3
 #: requires every CLM consumer to expose the same flags so users can switch
 #: scripts without relearning, and both configs now inherit the single
 #: `ClmPretrainConfig` (D-010). A private copy per package is how that

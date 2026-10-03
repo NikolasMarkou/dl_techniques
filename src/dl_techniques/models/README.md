@@ -6,7 +6,7 @@ holds one architecture, its blocks, usually a factory, and a `README.md` (98 of 
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
-shape and the review findings, read [`CLAUDE.md`](CLAUDE.md) — it is the longer, normative
+shape and the review findings, read [`AGENTS.md`](AGENTS.md) — it is the longer, normative
 document and this README does not restate it.
 
 ## The one import rule
@@ -31,7 +31,7 @@ rather than 35, and its consumers rely on the re-exports.
 
 Counts are **leaf counts**, which for `vision` and `vision_language` are larger than the
 direct-child count, because those two nest one level further. Re-derive with the `find` in
-`CLAUDE.md` § Layout.
+`AGENTS.md` § Layout.
 
 | Family | Leaves | What it holds |
 |---|---|---|
@@ -196,7 +196,7 @@ shared `Forecast` / `ForecastMixin` — and the only one that re-exports its chi
 
 Three packages are named for something they are not. This is the full list; the evidence for
 each correction is in the named package's own source, cited below, so nothing is duplicated
-into `CLAUDE.md`.
+into `AGENTS.md`.
 
 | Package | Reads as | Actually is | Where the evidence sits |
 |---|---|---|---|
@@ -223,7 +223,7 @@ and `.py` under `models/` — including this file. Read its regexes before writi
 
 | | |
 |---|---|
-| [`CLAUDE.md`](CLAUDE.md) | authoring rules, house module shape, per-leaf census, layer-reuse policy, review findings |
+| [`AGENTS.md`](AGENTS.md) | authoring rules, house module shape, per-leaf census, layer-reuse policy, review findings |
 | `research/2026_keras_custom_models_instructions_v2.md` | **the mandatory guide** for creating any new model or any new layer inside one |
 | `REPO_MAP.md` | repo-wide navigation: which trainer trains which model, and how registry/factory dispatch is wired |
 | `tests/test_models/` | flat, one directory per leaf package; deliberately does not mirror this tree |

@@ -350,7 +350,7 @@ class FastVitImageEncoder(keras.Model):
     """
 
     # `MODEL_VARIANTS` is a class-level alias of `MCI_VARIANTS`, the same object,
-    # not a copy, per models/CLAUDE.md — tooling resolves a variant registry via
+    # not a copy, per models/AGENTS.md — tooling resolves a variant registry via
     # getattr(cls, 'MODEL_VARIANTS').
     MODEL_VARIANTS = MCI_VARIANTS
 
