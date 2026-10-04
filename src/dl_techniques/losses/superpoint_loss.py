@@ -91,14 +91,17 @@ class SuperPointDetectorLoss(keras.losses.Loss):
         y_true: keras.KerasTensor,
         y_pred: keras.KerasTensor,
     ) -> keras.KerasTensor:
-        """Compute per-cell sparse softmax cross-entropy from logits.
+        """Compute per-sample sparse softmax cross-entropy from logits.
 
         Args:
             y_true: Integer labels ``(B, Hc, Wc)`` in ``[0, 64]``.
             y_pred: Raw logits ``(B, Hc, Wc, 65)``.
 
         Returns:
-            Per-cell loss ``(B, Hc, Wc)``; the parent reduction yields the scalar.
+            Per-sample loss ``(B,)`` (mean over cells); the parent reduction
+            yields the scalar. Returning ``(B,)`` (not a scalar, not
+            ``(B, Hc, Wc)``) keeps ``sample_weight`` per-row semantics: a
+            scalar return would broadcast as ``batch_loss * mean(w)``.
         """
         # Sparse CE keeps memory low (no one-hot over 65 classes) and matches the
         # integer-label format. from_logits=True: the head emits raw logits.
@@ -106,7 +109,7 @@ class SuperPointDetectorLoss(keras.losses.Loss):
         per_cell = keras.losses.sparse_categorical_crossentropy(
             y_true, y_pred, from_logits=True
         )  # (B, Hc, Wc)
-        return per_cell
+        return ops.mean(per_cell, axis=[1, 2])  # (B,)
 
     def get_config(self) -> Dict[str, Any]:
         """Return the base config (no extra hyperparameters)."""
@@ -219,7 +222,9 @@ class SuperPointDescriptorLoss(keras.losses.Loss):
             correspondence: ``(B, N, N)`` indicator ``s_{ij}`` with ``N=Hc*Wc``.
 
         Returns:
-            Scalar loss (mean over the batch of the per-pair-averaged double sum).
+            Per-sample loss ``(B,)`` (mean over the ``N^2`` pairs); reduce
+            with ``ops.mean`` for a scalar. Returning ``(B,)`` keeps
+            ``sample_weight`` row semantics.
         """
         # Flatten the spatial grid to N = Hc * Wc cells, keeping channels.
         b = ops.shape(desc1)[0]
@@ -239,9 +244,10 @@ class SuperPointDescriptorLoss(keras.losses.Loss):
 
         per_pair = self.lambda_d * positive + negative  # (B, N, N)
 
-        # Average over the N^2 pairs (the 1 / N^2 factor), then mean over batch.
+        # Average over the N^2 pairs (the 1 / N^2 factor) -> per-sample (B,).
+        # Callers reduce with ops.mean for the scalar.
         per_sample = ops.mean(per_pair, axis=[1, 2])  # (B,)
-        return ops.mean(per_sample)
+        return per_sample
 
     def call(
         self,
@@ -260,7 +266,8 @@ class SuperPointDescriptorLoss(keras.losses.Loss):
             y_pred: Treated as ``desc1`` ``(B, Hc, Wc, C)``.
 
         Returns:
-            Scalar loss from :meth:`compute` with an identity correspondence.
+            Per-sample loss ``(B,)`` from :meth:`compute` with an identity
+            correspondence; the parent reduction yields the scalar.
         """
         desc1 = y_pred
         desc2 = y_true

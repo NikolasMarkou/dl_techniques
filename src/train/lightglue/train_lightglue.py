@@ -125,6 +125,8 @@ class LightGlueTrainConfig:
     num_layers: int = 9
     descriptor_dim: int = 256
     num_heads: int = 4
+    viz_every: int = 2
+    viz_pairs: int = 4
     seed: int = 42
     gpu: Optional[int] = None
     output_dir: Optional[str] = None
@@ -186,6 +188,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="LightGlue internal width (paper: 256).")
     parser.add_argument("--num-heads", type=int, default=default.num_heads,
                         help="LightGlue attention heads (paper: 4).")
+    parser.add_argument("--viz-every", type=int, default=default.viz_every,
+                        help="Epoch cadence for qualitative viz/ match panels.")
+    parser.add_argument("--viz-pairs", type=int, default=default.viz_pairs,
+                        help="Fixed pairs summarized each viz epoch (first plotted).")
     parser.add_argument("--seed", type=int, default=default.seed,
                         help="Seed of the weights, the pair sampling and the validation split.")
     parser.add_argument("--gpu", type=int, default=default.gpu, help="GPU index to use.")
@@ -396,6 +402,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         callbacks = [cb for cb in callbacks if not isinstance(cb, keras.callbacks.ModelCheckpoint)]
         checkpoint = LightGlueCheckpoint(best_checkpoint_path(results_dir), monitor=monitor)
         callbacks.append(checkpoint)
+
+        # Qualitative match panels on a fixed pair batch (fail-soft).
+        try:
+            from train.common.keypoint_viz import LightGlueVizCallback
+
+            viz_sample = next(iter(train_ds))
+            viz_batch = {
+                k: np.asarray(v)[: config.viz_pairs] for k, v in viz_sample.items()
+            }
+            callbacks.append(
+                LightGlueVizCallback(
+                    viz_dir=str(run_dir / "viz"),
+                    viz_batch=viz_batch,
+                    every_n=config.viz_every,
+                )
+            )
+        except Exception as e:
+            logger.warning(f"LightGlue viz batch capture failed (viz off): {e}")
 
         sample = next(iter(train_ds))
         label_stats = model.batch_statistics(sample)

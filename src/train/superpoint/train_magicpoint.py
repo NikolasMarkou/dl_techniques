@@ -85,6 +85,10 @@ class MagicPointConfig:
     # Monitoring
     early_stopping_patience: int = 15
 
+    # Visualization: epoch-end qualitative figures (viz/ PNGs).
+    viz_every: int = 5
+    viz_samples: int = 4
+
     # Reproducibility
     seed: int = 42
 
@@ -231,6 +235,22 @@ def train_magicpoint(config: MagicPointConfig) -> keras.Model:
         include_analyzer=False,
     )
 
+    # Qualitative viz on a fixed synthetic split (fail-soft; never aborts fit).
+    try:
+        from train.common.keypoint_viz import SuperPointVizCallback
+
+        viz_batch = next(iter(train_dataset))
+        viz_images = viz_batch[0][: config.viz_samples].numpy()
+        callbacks.append(
+            SuperPointVizCallback(
+                viz_dir=str(output_dir / "viz"),
+                viz_images=viz_images,
+                every_n=config.viz_every,
+            )
+        )
+    except Exception as e:
+        logger.warning(f"MagicPoint viz batch capture failed (viz off): {e}")
+
     start_time = time.time()
     history = model.fit(
         train_dataset,
@@ -273,6 +293,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--steps-per-epoch", type=int, default=500)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--early-stopping-patience", type=int, default=15)
+    parser.add_argument("--viz-every", type=int, default=5,
+                        help="Epoch cadence for qualitative viz/ PNGs.")
+    parser.add_argument("--viz-samples", type=int, default=4,
+                        help="Fixed viz images decoded each viz epoch.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)
@@ -299,6 +323,8 @@ def main():
         steps_per_epoch=args.steps_per_epoch,
         learning_rate=args.learning_rate,
         early_stopping_patience=args.early_stopping_patience,
+        viz_every=args.viz_every,
+        viz_samples=args.viz_samples,
         seed=args.seed,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,

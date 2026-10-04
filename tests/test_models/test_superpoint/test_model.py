@@ -314,11 +314,12 @@ def test_compute_output_shape_agrees_with_the_forward_pass(height, depths, dims)
         )
 
 
-def test_the_descriptor_head_is_deliberately_construction_time_fixed():
-    """The other half of the asymmetry -- do NOT 'fix' this one too."""
+def test_the_descriptor_head_follows_the_runtime_input_size():
+    """Descriptors track the fed size; keypoints and descriptors agree."""
     keras.utils.set_random_seed(0)
     model = SuperPoint(input_shape=(64, 64, 1), depths=(1, 1, 1), dims=(8, 8, 16),
                        drop_path_rate=0.0)
     for height in (32, 64, 128):
         out = model(keras.ops.zeros((2, height, height, 1)))
-        assert tuple(out["descriptors"].shape)[1:3] == (64, 64)
+        assert tuple(out["descriptors"].shape)[1:3] == (height, height)
+        assert tuple(out["keypoints"].shape)[1:3] == (height // 8, height // 8)

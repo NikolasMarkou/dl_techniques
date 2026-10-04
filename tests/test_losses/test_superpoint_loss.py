@@ -98,19 +98,19 @@ class TestDescriptorLoss:
         d1, d2 = desc
         loss = SuperPointDescriptorLoss()
         value = ops.convert_to_numpy(loss.compute(d1, d2, diagonal_corr))
-        assert value.shape == ()
-        assert np.isfinite(value)
-        assert value >= 0.0
+        assert value.shape == (2,)
+        assert np.isfinite(value).all()
+        assert (value >= 0.0).all()
 
     def test_identical_descriptors_low_loss(self, diagonal_corr):
         # Identical desc1 == desc2 with diagonal correspondence: positive pairs
         # have similarity 1.0 == positive_margin -> hinge(1.0 - 1.0) = 0.
         d = _l2norm(keras.random.normal((2, 8, 8, 16), seed=12))
         loss = SuperPointDescriptorLoss()
-        same = ops.convert_to_numpy(loss.compute(d, d, diagonal_corr))
+        same = float(np.mean(ops.convert_to_numpy(loss.compute(d, d, diagonal_corr))))
         # Compare against a mismatched pair, which should be larger.
         d_other = _l2norm(keras.random.normal((2, 8, 8, 16), seed=13))
-        diff = ops.convert_to_numpy(loss.compute(d, d_other, diagonal_corr))
+        diff = float(np.mean(ops.convert_to_numpy(loss.compute(d, d_other, diagonal_corr))))
         assert same < diff
         # Positive-pair term should be ~0 for identical descriptors; remaining
         # loss is only the (small) negative term over off-diagonal pairs.
@@ -123,7 +123,7 @@ class TestDescriptorLoss:
         d1 = tf.Variable(_l2norm(keras.random.normal((2, 8, 8, 16), seed=14)))
         d2 = tf.Variable(_l2norm(keras.random.normal((2, 8, 8, 16), seed=15)))
         with tf.GradientTape() as tape:
-            value = loss.compute(d1, d2, diagonal_corr)
+            value = tf.reduce_mean(loss.compute(d1, d2, diagonal_corr))
         grads = tape.gradient(value, [d1, d2])
         assert all(g is not None for g in grads)
         for g in grads:

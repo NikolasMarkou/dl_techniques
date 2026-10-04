@@ -161,6 +161,10 @@ class SuperPointConfig:
     # Monitoring
     early_stopping_patience: int = 15
 
+    # Visualization: epoch-end qualitative figures (viz/ PNGs).
+    viz_every: int = 5
+    viz_samples: int = 4
+
     # Reproducibility
     seed: int = 42
 
@@ -774,11 +778,13 @@ class SuperPointJointModel(keras.Model):
             out1 = self.superpoint(x, training=True)
             out2 = self.superpoint(warped, training=True)
 
-            det_loss = self.detector_loss_fn(label, out1["keypoints"])
+            det_per_sample = self.detector_loss_fn(label, out1["keypoints"])
+            det_loss = keras.ops.mean(det_per_sample)
 
             desc1 = self._coarse_descriptors(out1["descriptors"])
             desc2 = self._coarse_descriptors(out2["descriptors"])
-            desc_loss = self.descriptor_loss_fn.compute(desc1, desc2, corr)
+            desc_per_sample = self.descriptor_loss_fn.compute(desc1, desc2, corr)
+            desc_loss = keras.ops.mean(desc_per_sample)
 
             total = (
                 self.detector_weight * det_loss
@@ -786,8 +792,36 @@ class SuperPointJointModel(keras.Model):
             )
 
         grads = tape.gradient(total, self.superpoint.trainable_variables)
-        self.optimizer.apply_gradients(
-            zip(grads, self.superpoint.trainable_variables)
+        grads_vars = [
+            (g, v) for g, v in zip(grads, self.superpoint.trainable_variables)
+            if g is not None
+        ]
+        if grads_vars:
+            self.optimizer.apply_gradients(grads_vars)
+
+        self.loss_tracker.update_state(total)
+        self.det_tracker.update_state(det_loss)
+        self.desc_tracker.update_state(desc_loss)
+        return {m.name: m.result() for m in self.metrics}
+
+    def test_step(self, data):
+        x, y = data
+        label = y["keypoints"]
+        warped = y["warped_image"]
+        corr = y["correspondence"]
+
+        out1 = self.superpoint(x, training=False)
+        out2 = self.superpoint(warped, training=False)
+
+        det_loss = keras.ops.mean(self.detector_loss_fn(label, out1["keypoints"]))
+        desc1 = self._coarse_descriptors(out1["descriptors"])
+        desc2 = self._coarse_descriptors(out2["descriptors"])
+        desc_loss = keras.ops.mean(
+            self.descriptor_loss_fn.compute(desc1, desc2, corr)
+        )
+        total = (
+            self.detector_weight * det_loss
+            + self.descriptor_weight * desc_loss
         )
 
         self.loss_tracker.update_state(total)
@@ -888,6 +922,23 @@ def train_superpoint(config: SuperPointConfig) -> keras.Model:
         include_analyzer=False,
     )
 
+    # Qualitative viz on a fixed homography-pair split (image + warped).
+    try:
+        from train.common.keypoint_viz import SuperPointVizCallback
+
+        viz_x, viz_y = next(iter(train_dataset))
+        n_viz = min(config.viz_samples, int(viz_x.shape[0]))
+        callbacks.append(
+            SuperPointVizCallback(
+                viz_dir=str(output_dir / "viz"),
+                viz_images=viz_x[:n_viz].numpy(),
+                viz_warped=viz_y["warped_image"][:n_viz].numpy(),
+                every_n=config.viz_every,
+            )
+        )
+    except Exception as e:
+        logger.warning(f"SuperPoint viz batch capture failed (viz off): {e}")
+
     start_time = time.time()
     history = model.fit(
         train_dataset,
@@ -961,6 +1012,10 @@ def parse_arguments() -> argparse.Namespace:
         "weight handoff into the full SuperPoint model.",
     )
     parser.add_argument("--early-stopping-patience", type=int, default=15)
+    parser.add_argument("--viz-every", type=int, default=5,
+                        help="Epoch cadence for qualitative viz/ PNGs.")
+    parser.add_argument("--viz-samples", type=int, default=4,
+                        help="Fixed homography pairs decoded each viz epoch.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)
@@ -1012,6 +1067,8 @@ def main():
         descriptor_weight=args.descriptor_weight,
         magicpoint_checkpoint=args.magicpoint_checkpoint,
         early_stopping_patience=args.early_stopping_patience,
+        viz_every=args.viz_every,
+        viz_samples=args.viz_samples,
         seed=args.seed,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,

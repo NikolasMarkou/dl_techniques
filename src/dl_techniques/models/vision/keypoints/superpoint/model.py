@@ -284,9 +284,14 @@ class SuperPoint(keras.Model):
 
         # DECISION plan-2026-08-19T163559-499b6f0e/D-060: resize in float32 and cast back;
         # at float16 TensorFlow's ResizeBicubic returns a None gradient. See decisions.md.
+        # Resize targets the RUNTIME input size, not the construction-time one: a
+        # model built for (H, W) fed a different size must emit descriptors at the
+        # fed size, otherwise keypoints (H/8 grid, dynamic) and descriptors
+        # (fixed H x W) silently disagree. Symbolic dims fall back to construction.
+        runtime_hw = keras.ops.shape(inputs)[1:3]
         desc = keras.ops.image.resize(
             keras.ops.cast(desc_coarse, "float32"),
-            size=(self.input_height, self.input_width),
+            size=(runtime_hw[0], runtime_hw[1]),
             interpolation="bicubic",
         )
         desc = keras.ops.cast(desc, self.compute_dtype)
@@ -307,16 +312,18 @@ class SuperPoint(keras.Model):
         :return: Dict mapping `"keypoints"` and `"descriptors"` to their output shapes.
         """
         # DECISION plan-2026-08-19T163559-499b6f0e/D-119: only the detector grid reads
-        # input_shape; descriptors keep the construction-time size. See decisions.md.
+        # input_shape; descriptors follow the runtime input (see call()).
         batch = input_shape[0] if len(input_shape) == 4 else None
         stride = self.ENCODER_STRIDES ** len(self.depths)
         height = input_shape[-3] if len(input_shape) == 4 else self.input_height
         width = input_shape[-2] if len(input_shape) == 4 else self.input_width
         grid_h = height // stride if height is not None else None
         grid_w = width // stride if width is not None else None
+        desc_h = height if height is not None else self.input_height
+        desc_w = width if width is not None else self.input_width
         return {
             "keypoints": (batch, grid_h, grid_w, self.DETECTOR_CHANNELS),
-            "descriptors": (batch, self.input_height, self.input_width, self.descriptor_dim),
+            "descriptors": (batch, desc_h, desc_w, self.descriptor_dim),
         }
 
     def get_config(self) -> Dict[str, Any]:
