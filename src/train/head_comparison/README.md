@@ -103,3 +103,16 @@ against random-trunk class means (smoke: 93/100 classes moved at epoch
 2), so prototypes chase a moving target while the trunk is still noise.
 But the hierarchy still trails flat by 17pts, so warm-start is a
 palliative, not a fix.
+
+## Verdict
+
+- Ship flat harmonic with n ~= sqrt(D) as a calibrated softmax
+  drop-in: parity on fine/coarse/tail with a large ECE win
+  (`cfg_n13` 0.4492/0.5864/0.2263/0.19 vs softmax
+  0.4548/0.5871/0.2183/0.29).
+- Do not ship the tree head on this evidence: assignment learning
+  works (warm-start beats fixed and early-churn on all 3 seeds) but
+  the hierarchy itself costs ~17pts of fine accuracy on CIFAR-100,
+  and neither the paper's exponent nor taxonomy-aligned branching
+  recovers it. Next step is a new idea (loss, trunk co-design), not
+  another config.
