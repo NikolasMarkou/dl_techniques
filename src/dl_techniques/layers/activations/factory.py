@@ -66,6 +66,7 @@ from .expanded_activations import (
 from .golu import GoLU
 from .hard_sigmoid import HardSigmoid
 from .hard_swish import HardSwish
+from .harmax import HarMax
 from .mish import Mish, SaturatedMish
 from .monotonicity_layer import MonotonicityLayer
 from .relu_k import ReLUK
@@ -88,6 +89,7 @@ ActivationType = Literal[
     'golu',
     'hard_sigmoid',
     'hard_swish',
+    'harmax',
     'hierarchical_routing',
     'mish',
     'monotonicity',
@@ -189,6 +191,16 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': [],
         'optional_params': {},
         'use_case': 'High-performance activation for mobile-optimized models like MobileNetV3.'
+    },
+    'harmax': {
+        'class': HarMax,
+        'description': 'Harmonic-max normalization of distances: d_i^-n / sum_j d_j^-n.',
+        'required_params': [],
+        'optional_params': {'n': 1.0, 'epsilon': 1e-8, 'axis': -1},
+        'use_case': (
+            'Interpretable distance-based output layer trained with harmonic '
+            'loss, e.g. HarmonicDense(distances) + HarMax (Baek et al., 2025).'
+        )
     },
     'hierarchical_routing': {
         # RoutingProbabilitiesLayer in trainable mode. This key replaced the
@@ -448,8 +460,8 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
 
     Two checks run for every type: the key is in ``ACTIVATION_REGISTRY``, and
     every name in that entry's ``required_params`` is present in ``kwargs``.
-    After that, ten types get a hand-written value check
-    (``adaptive_softmax``, ``differentiable_step``, ``golu``,
+    After that, eleven types get a hand-written value check
+    (``adaptive_softmax``, ``differentiable_step``, ``golu``, ``harmax``,
     ``hierarchical_routing``, ``monotonicity``, ``relu``, ``relu_k``,
     ``routing_probabilities``, ``saturated_mish``, ``thresh_max``), and the
     three expanded activations get their initializer / regularizer /
@@ -514,6 +526,14 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
             val = kwargs.get(param, 1.0)
             if val <= 0.0:
                 raise ValueError(f"{param} must be positive, got {val}")
+
+    elif activation_type == 'harmax':
+        n = kwargs.get('n', 1.0)
+        if n <= 0:
+            raise ValueError(f"n must be positive, got {n}")
+        epsilon = kwargs.get('epsilon', 1e-8)
+        if epsilon <= 0:
+            raise ValueError(f"epsilon must be positive, got {epsilon}")
 
     elif activation_type == 'hierarchical_routing':
         output_dim = kwargs.get('output_dim')

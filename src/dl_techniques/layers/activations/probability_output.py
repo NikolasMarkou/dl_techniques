@@ -1,11 +1,11 @@
 """
-One wrapper over six ways to turn a tensor into a probability distribution.
+One wrapper over seven ways to turn a tensor into a probability distribution.
 
 ``ProbabilityOutput`` picks a strategy from a string and delegates to it, so
 swapping softmax for sparsemax is a config change rather than a model edit.
 Every strategy returns rows that sum to 1 over the chosen axis.
 
-The six strategies, and what they eat:
+The seven strategies, and what they eat:
 
 - **softmax** -- ``keras.layers.Softmax``. Standard exponential
   normalization. Takes logits.
@@ -14,6 +14,8 @@ The six strategies, and what they eat:
 - **threshmax** -- confidence gating against ``1/N``, then renormalization.
   Suppresses low-confidence classes but does not zero them. Takes logits.
 - **adaptive** -- entropy-driven temperature. Takes logits.
+- **harmax** -- harmonic normalization of distances,
+  ``d_i^-n / sum_j d_j^-n``. Takes **distances**, not logits.
 - **routing** -- deterministic, parameter-free hierarchical tree. Takes
   **features**, not logits, and does its own projection.
 - **hierarchical** -- the same tree with a learned projection. Takes
@@ -21,7 +23,7 @@ The six strategies, and what they eat:
 
 ``routing`` and ``hierarchical`` replace your final Dense layer, so the last
 dimension of the output is ``output_dim``, not the input width. The other
-four preserve the input shape.
+five preserve the input shape.
 """
 
 import keras
@@ -34,6 +36,7 @@ from typing import Optional, Dict, Any, Literal
 from .sparsemax import Sparsemax
 from .thresh_max import ThreshMax
 from .adaptive_softmax import AdaptiveTemperatureSoftmax
+from .harmax import HarMax
 from .routing_probabilities import RoutingProbabilitiesLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -46,6 +49,7 @@ ProbabilityType = Literal[
     "thresh_max",
     "adaptive",
     "adaptive_softmax",
+    "harmax",
     "routing",
     "deterministic_routing",
     "hierarchical",
@@ -76,13 +80,14 @@ class ProbabilityOutput(keras.layers.Layer):
                   └─────────────┬─────────────┘
                                 │
                    ┌────────────┴────────────┐
-                   │ logit strategies        │ routing strategies
+                   │ logit/distance        │ routing strategies
                    ▼                         ▼
         ┌─────────────────────┐   ┌─────────────────────┐
         │ Softmax             │   │ RoutingProbabili-   │
         │ Sparsemax           │   │ tiesLayer, mode     │
         │ ThreshMax           │   │ deterministic or    │
         │ AdaptiveTempSoftmax │   │ trainable           │
+        │ HarMax              │   │                     │
         └──────────┬──────────┘   └──────────┬──────────┘
                    │ [B, ..., D]             │ [B, ..., output_dim]
                    └────────────┬────────────┘
@@ -103,6 +108,7 @@ class ProbabilityOutput(keras.layers.Layer):
         thresh_max              ThreshMax
         adaptive                AdaptiveTemperatureSoftmax
         adaptive_softmax        AdaptiveTemperatureSoftmax
+        harmax                  HarMax
         routing                 RoutingProbabilitiesLayer
         deterministic_routing   RoutingProbabilitiesLayer
         hierarchical            RoutingProbabilitiesLayer(mode="trainable")
@@ -127,10 +133,10 @@ class ProbabilityOutput(keras.layers.Layer):
       gives a ``(4, 16)`` output instead of the class count you meant.
     - **Routing strategies change the last dimension.** Measured with
       ``type_config={"output_dim": 5}``, a ``(4, 16)`` input gives ``(4, 5)``
-      for both ``routing`` and ``hierarchical``, while all four logit
-      strategies give ``(4, 16)``.
+      for both ``routing`` and ``hierarchical``, while all five
+      logit/distance strategies give ``(4, 16)``.
 
-    :param probability_type: Which strategy to build. One of the ten keys in
+    :param probability_type: Which strategy to build. One of the eleven keys in
         the table above. Defaults to ``"softmax"``.
     :type probability_type: ProbabilityType
     :param type_config: Constructor arguments for the chosen strategy.
@@ -139,7 +145,7 @@ class ProbabilityOutput(keras.layers.Layer):
     :type type_config: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Layer base class.
 
-    :raises ValueError: If ``probability_type`` is not one of the ten keys,
+    :raises ValueError: If ``probability_type`` is not one of the eleven keys,
         or if it is ``"hierarchical"`` / ``"hierarchical_routing"`` and
         ``type_config`` has no ``"output_dim"``.
 
@@ -155,6 +161,7 @@ class ProbabilityOutput(keras.layers.Layer):
         "thresh_max",
         "adaptive",
         "adaptive_softmax",
+        "harmax",
         "routing",
         "deterministic_routing",
         "hierarchical",
@@ -180,7 +187,7 @@ class ProbabilityOutput(keras.layers.Layer):
         :type type_config: Optional[Dict[str, Any]]
         :param kwargs: Additional keyword arguments for the Layer base class.
 
-        :raises ValueError: If ``probability_type`` is not one of the ten
+        :raises ValueError: If ``probability_type`` is not one of the eleven
             accepted keys, or if a hierarchical type is asked for without
             ``"output_dim"`` in ``type_config``. Note that ``routing`` is
             **not** checked for ``output_dim``.
@@ -236,6 +243,9 @@ class ProbabilityOutput(keras.layers.Layer):
                 **self._type_config
             )
 
+        elif self._probability_type == "harmax":
+            return HarMax(name="harmax", **self._type_config)
+
         elif self._probability_type in ("routing", "deterministic_routing"):
             return RoutingProbabilitiesLayer(
                 name="routing_probs",
@@ -272,7 +282,8 @@ class ProbabilityOutput(keras.layers.Layer):
         """Forward to the strategy layer.
 
         :param inputs: Logits shaped ``(B, ..., C)`` for the four logit
-            strategies, or features shaped ``(B, ..., D)`` for ``routing``
+            strategies, distances shaped ``(B, ..., C)`` for ``harmax``,
+            or features shaped ``(B, ..., D)`` for ``routing``
             and ``hierarchical``.
         :type inputs: keras.KerasTensor
         :param training: Training or inference mode. Forwarded to every
@@ -297,7 +308,7 @@ class ProbabilityOutput(keras.layers.Layer):
         """Return the strategy layer's output shape.
 
         Delegated, because the routing strategies change the last dimension
-        and the other four do not.
+        and the other five do not.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: tuple

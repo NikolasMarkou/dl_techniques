@@ -25,7 +25,7 @@ which extends ``keras.activations.get`` with the tanh-GELU spellings.
 callable and rejects Layer instances, is **not** exported and must be
 imported as ``from .common import resolve_activation``.
 
-``__all__`` is a contract: 34 names. Every name in it must also appear in an
+``__all__`` is a contract: 35 names. Every name in it must also appear in an
 import above, or ``from ... import *`` raises ``AttributeError`` on that
 name. Add the import and the ``__all__`` entry in the same change.
 """
@@ -50,6 +50,7 @@ from .gelu_tanh import gelu_tanh, resolve_activation
 from .golu import GoLU
 from .hard_sigmoid import HardSigmoid
 from .hard_swish import HardSwish
+from .harmax import HarMax
 from .mish import Mish, SaturatedMish
 from .monotonicity_layer import MonotonicityLayer
 from .relu_k import ReLUK
@@ -85,6 +86,7 @@ __all__ = [
     "GoLU",
     "HardSigmoid",
     "HardSwish",
+    "HarMax",
     "Mish", "SaturatedMish",
     "MonotonicityLayer",
     "ReLUK",

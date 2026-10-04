@@ -20,6 +20,7 @@ The following layers are supported by the factory system:
 | `golu` | `GoLU` | Gompertz Linear Unit, asymmetrical self-gated activation. |
 | `hard_sigmoid` | `HardSigmoid` | Piecewise linear approximation of the sigmoid function. |
 | `hard_swish` | `HardSwish` | Computationally efficient approximation of Swish/SiLU. |
+| `harmax` | `HarMax` | Harmonic-max normalization of distances, `d_i^-n / sum_j d_j^-n`. |
 | `hierarchical_routing` | `RoutingProbabilitiesLayer(mode="trainable")` | Trainable probabilistic routing tree for `O(log N)` classification. |
 | `mish` | `Mish` | Self-regularized, non-monotonic activation. |
 | `monotonicity` | `MonotonicityLayer` | Enforces monotonic constraints (e.g., for quantile regression). |
