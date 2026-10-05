@@ -58,7 +58,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.models.hierarchical_reasoning_model.model")
+@register_dl_technique("dl_techniques.models.hrm.model")
 class HierarchicalReasoningModel(keras.Model):
     """Hierarchical Reasoning Model with Adaptive Computation Time.
 
@@ -613,7 +613,7 @@ class HierarchicalReasoningModel(keras.Model):
             # ``keras.random.uniform`` REQUIRES a floating point dtype and raises
             # unconditionally on an integer one (keras/src/random/random.py:121),
             # so the integer draw must come from ``keras.random.randint``. This
-            # mirrors tiny_recursive_model/model.py:341, which has always been
+            # mirrors trm/model.py:341, which has always been
             # correct; HRM was the un-migrated copy.
             if self.halt_exploration_prob > 0:
                 explore_mask = keras.random.uniform(keras.ops.shape(q_halt)) < self.halt_exploration_prob
@@ -637,7 +637,7 @@ class HierarchicalReasoningModel(keras.Model):
             # ``stop_gradient``-ed, so the Bellman target is neither stochastic
             # nor differentiable — otherwise the TD loss can be minimised by
             # dragging the target toward the prediction (standard target-network
-            # collapse). Ported from tiny_recursive_model/model.py:346-363 (B-3).
+            # collapse). Ported from trm/model.py:346-363 (B-3).
             next_inner_carry, next_outputs = self.core(
                 new_inner_carry,
                 {"token_ids": new_current_data["token_ids"],
@@ -663,7 +663,7 @@ class HierarchicalReasoningModel(keras.Model):
             # ran the full budget and the trained q_head was inert — which
             # contradicts the module docstring at :133 and the "Adaptive
             # Computation" claim at :45. Ported from
-            # tiny_recursive_model/model.py:365-382 (B-5).
+            # trm/model.py:365-382 (B-5).
             halted = is_last_step | (
                 outputs["q_halt_logits"] > outputs["q_continue_logits"]
             )

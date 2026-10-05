@@ -1,20 +1,20 @@
 """Language models — text and byte sequence encoders, decoders and training objectives.
 
 - `bert/` — BERT
-- `byte_latent_transformer/` — Byte Latent Transformer (BLT)
+- `blt/` — Byte Latent Transformer (BLT)
 - `colbert/` — ColBERT v1/v2 (late interaction)
 - `distilbert/` — DistilBERT
 - `fnet/` — FNet (Fourier token mixing)
 - `gemma/` — Gemma
 - `gpt2/` — GPT-2
-- `hierarchical_reasoning_model/` — HRM
+- `hrm/` — HRM
 - `hnet/` — H-Net (hierarchical dynamic chunking, byte-level)
 - `mamba/` — Mamba (state-space)
 - `masked_language_model/` — masked-language-model training head
 - `mini_vec2vec/` — Mini Vec2Vec
 - `modern_bert/` — ModernBERT
 - `qwen/` — Qwen
-- `tiny_recursive_model/` — tiny recursive model
+- `trm/` — tiny recursive model
 - `tree_transformer/` — Tree Transformer
 - `wave_field/` — wave-field LLM
 - `zamba2/` — Zamba2 (hybrid Mamba2 + shared-attention SSM/Transformer LM)

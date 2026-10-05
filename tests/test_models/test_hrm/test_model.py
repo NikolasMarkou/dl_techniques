@@ -11,7 +11,7 @@ import keras
 import pytest
 import numpy as np
 
-from dl_techniques.models.language.hierarchical_reasoning_model.model import (
+from dl_techniques.models.language.hrm.model import (
     create_hierarchical_reasoning_model,
 )
 from tests.optimizer_state import build_optimizer_state
@@ -68,7 +68,7 @@ class TestHRM:
 
         A differentiable target lets the TD loss be minimised by dragging the
         target toward the prediction instead of fitting it — the standard
-        target-network collapse. tiny_recursive_model already stop_gradients it.
+        target-network collapse. trm already stop_gradients it.
         """
         import tensorflow as tf
 

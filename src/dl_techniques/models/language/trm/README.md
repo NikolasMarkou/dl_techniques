@@ -119,7 +119,7 @@ pip install keras>=3.0 tensorflow>=2.16 numpy
 import keras
 import numpy as np
 
-from dl_techniques.models.language.tiny_recursive_model.model import TRM
+from dl_techniques.models.language.trm.model import TRM
 
 # 1. Create a TRM model
 model = TRM(
@@ -161,9 +161,9 @@ print(f"Any halted: {new_carry['halted'].numpy().any()}")
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`TRM`** | `...tiny_recursive_model.model` | The `keras.Model`. Manages carry state and executes one reasoning step per call. |
-| **`TRMInner`** | `...tiny_recursive_model.components` | Performs the core two-level (`z_L`, `z_H`) reasoning for one step. |
-| **`TRMReasoningModule`** | `...tiny_recursive_model.components` | A stack of `TransformerLayer` instances, used for both H- and L-level processing. |
+| **`TRM`** | `...trm.model` | The `keras.Model`. Manages carry state and executes one reasoning step per call. |
+| **`TRMInner`** | `...trm.components` | Performs the core two-level (`z_L`, `z_H`) reasoning for one step. |
+| **`TRMReasoningModule`** | `...trm.components` | A stack of `TransformerLayer` instances, used for both H- and L-level processing. |
 | **`TransformerLayer`** | `...layers.transformers` | The configurable block powering `TRMReasoningModule`. |
 
 `create_trm(...)` is a thin factory taking the same arguments as the constructor plus `name`.
@@ -197,7 +197,7 @@ TRM ships **no named variants**: there is no `MODEL_VARIANTS` table, because the
 Component choices pass through to `TransformerLayer`, so you can pick an architectural style directly. The defaults are already modern: `attention_type='group_query'`, `ffn_type='swiglu'`, `normalization_type='rms_norm'`.
 
 ```python
-from dl_techniques.models.language.tiny_recursive_model.model import TRM
+from dl_techniques.models.language.trm.model import TRM
 
 # Closer to the original "Attention Is All You Need" block
 classic_trm = TRM(
@@ -224,7 +224,7 @@ Because the number of steps depends on the data, the loop lives outside the mode
 import keras
 import numpy as np
 import tensorflow as tf
-from dl_techniques.models.language.tiny_recursive_model.model import TRM
+from dl_techniques.models.language.trm.model import TRM
 
 model = TRM(vocab_size=12, hidden_size=64, num_heads=2,
             expansion=2.0, seq_len=50, halt_max_steps=4)
@@ -274,7 +274,7 @@ print(f"Loop ran for {len(all_step_outputs)} steps, loss {total_loss.numpy():.4f
 Setting `no_act_continue=False` trains the halting head as a Q-function instead of a plain gate. In training mode the `outputs` dict then carries an extra `target_q_continue` key (§6.2), and you add a Bellman-style term to the loss:
 
 ```python
-from dl_techniques.models.language.tiny_recursive_model.model import TRM
+from dl_techniques.models.language.trm.model import TRM
 
 q_learning_model = TRM(
     vocab_size=12, hidden_size=64, num_heads=2,
@@ -329,7 +329,7 @@ Begin with `no_act_continue=True` and a small `halt_max_steps` (4 or 8) to confi
 
 ## 12. Serialization & Deployment
 
-`TRM`, `TRMInner` and `TRMReasoningModule` are fully serializable in the `.keras` format. Each is registered with `@register_dl_technique(...)` from `dl_techniques.utils.keras_registration`: `TRM` under `dl_techniques.models.tiny_recursive_model.model`, the two layers under `...tiny_recursive_model.components`, which is the defining module's dotted path with the `language/` family directory stripped.
+`TRM`, `TRMInner` and `TRMReasoningModule` are fully serializable in the `.keras` format. Each is registered with `@register_dl_technique(...)` from `dl_techniques.utils.keras_registration`: `TRM` under `dl_techniques.models.trm.model`, the two layers under `...trm.components`, which is the defining module's dotted path with the `language/` family directory stripped.
 
 ```python
 model = TRM(...)
@@ -347,14 +347,14 @@ assert loaded_model.hidden_size == model.hidden_size
 ## 13. Testing & Validation
 
 ```bash
-MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_tiny_recursive_model/ -q
+MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_trm/ -q
 ```
 
 A minimal state-transition check of your own:
 
 ```python
 import tensorflow as tf
-from dl_techniques.models.language.tiny_recursive_model.model import TRM
+from dl_techniques.models.language.trm.model import TRM
 
 def test_single_step_execution():
     model = TRM(vocab_size=12, hidden_size=64, num_heads=2, expansion=2.0, seq_len=50)

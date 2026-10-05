@@ -107,20 +107,20 @@ direct-child count, because those two nest one level further. Re-derive with the
 | Package | |
 |---|---|
 | `bert/` | BERT — `bert/model.py` is the normative exemplar for a new model package |
-| `byte_latent_transformer/` | Byte Latent Transformer (BLT) |
+| `blt/` | Byte Latent Transformer (BLT) |
 | `colbert/` | ColBERT v1/v2, late-interaction retrieval |
 | `distilbert/` | DistilBERT |
 | `fnet/` | FNet, Fourier token mixing |
 | `gemma/` | Gemma LLM |
 | `gpt2/` | GPT-2 architecture |
-| `hierarchical_reasoning_model/` | HRM |
+| `hrm/` | HRM |
 | `hnet/` | H-Net — tokenizer-free byte LM whose chunk boundaries are learned; a recursive encoder/chunk/inner/dechunk/decoder hierarchy over `layers/dynamic_chunking/`. No pretrained weights; the divergences from the reference are enumerated in its own README (`grep -c '^### 5\.'` re-derives the count there, rather than restating it here) |
 | `mamba/` | Mamba, selective state space |
 | `masked_language_model/` | MLM training |
 | `mini_vec2vec/` | Mini Vec2Vec |
 | `modern_bert/` | ModernBERT |
 | `qwen/` | Qwen LLM |
-| `tiny_recursive_model/` | tiny recursive model |
+| `trm/` | tiny recursive model |
 | `tree_transformer/` | Tree Transformer |
 | `wave_field/` | wave-field LLM |
 | `zamba2/` | Zamba2 — hybrid Mamba2 + shared-attention SSM/Transformer LM; per-depth `mamba/` Mamba2 blocks interleave with a small number of **shared** attention+MLP mem-blocks reused at multiple depths, each reuse carrying its own per-occurrence LoRA delta. No pretrained weights |

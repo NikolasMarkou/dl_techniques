@@ -55,13 +55,13 @@ __all__ = ["CHARGED_PACKAGES", "SUBJECTS", "subject_names",
 #: was a REAL fp16 defect with a package-specific before/after to record.
 CHARGED_PACKAGES: Tuple[str, ...] = (
     "SAM", "accunet", "beit", "bert", "bias_free_denoisers",
-    "byte_latent_transformer", "capsnet", "cbam", "cliffordnet", "convnext",
+    "blt", "capsnet", "cbam", "cliffordnet", "convnext",
     "convunext", "depth_anything", "fastvit", "fnet", "fractalnet", "gemma",
-    "gpt2", "hierarchical_reasoning_model", "ideogram4", "lewm",
+    "gpt2", "hrm", "ideogram4", "lewm",
     "masked_autoencoder", "masked_language_model", "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "ntm",
     "pft_sr", "power_mlp", "qwen", "relgt", "resnet", "scunet", "sd3_mmdit",
     "shgcn", "som", "squeezenet", "superpoint", "swin_transformer", "tabm",
-    "time_series", "tiny_recursive_model", "vae", "video_jepa", "vit",
+    "time_series", "trm", "vae", "video_jepa", "vit",
     "vit_hmlp", "vit_siglip", "vq_vae", "vq_vae_rotation", "wave_field",
     "yolo12",
 )
@@ -399,14 +399,14 @@ _sub("qwen", _b_qwen, lambda: _ids(64, 2, 16))
 
 
 def _b_blt():
-    from dl_techniques.models.language.byte_latent_transformer import create_blt_model
+    from dl_techniques.models.language.blt import create_blt_model
     return create_blt_model("micro", vocab_size=260, max_sequence_length=32)
 
 
 # ``allowed_none_grads=54``: MEASURED IDENTICAL under float32 -- 54 of 254 in
 # BOTH arms (fp16 ``grad_norm_sum`` 1.836834e+01, float32 1.848275e+01). BLT's
 # entropy model and its patching branch are not reached by a plain forward.
-_sub("byte_latent_transformer", _b_blt, lambda: _ids(256, 2, 32),
+_sub("blt", _b_blt, lambda: _ids(256, 2, 32),
      allowed_none_grads=54)
 
 
@@ -443,20 +443,20 @@ _sub("masked_language_model", _b_masked_language_model, lambda: _ids(64, 2, 16))
 
 
 def _b_hrm():
-    from dl_techniques.models.language.hierarchical_reasoning_model import (
+    from dl_techniques.models.language.hrm import (
         create_hierarchical_reasoning_model,
     )
     return create_hierarchical_reasoning_model(
         vocab_size=64, seq_len=16, variant="micro")
 
 
-_sub("hierarchical_reasoning_model", _b_hrm,
+_sub("hrm", _b_hrm,
      lambda: {"token_ids": _ids(64, 2, 16),
               "puzzle_ids": _ids(1000, 2, seed=1)})
 
 
 def _b_trm():
-    from dl_techniques.models.language.tiny_recursive_model import create_trm
+    from dl_techniques.models.language.trm import create_trm
     return create_trm(vocab_size=64, hidden_size=32, num_heads=2,
                       expansion=2.0, seq_len=16, puzzle_emb_len=4,
                       h_layers=1, l_layers=1, halt_max_steps=2)
@@ -479,7 +479,7 @@ def _trm_call(model, inputs, training):
     return outputs
 
 
-_sub("tiny_recursive_model", _b_trm, _trm_batch, call_fn=_trm_call)
+_sub("trm", _b_trm, _trm_batch, call_fn=_trm_call)
 
 
 # ---------------------------------------------------------------------------
@@ -851,7 +851,7 @@ def _sam_training_inputs():
 # Every entry below is a DEVIATION and every one states the measurement that
 # forced it. Do NOT add an entry that merely raises ``rtol`` to make a subject
 # pass: a tolerance above the signal asserts nothing, and the two subjects with
-# a genuinely large float32 delta (`yolo12`, `hierarchical_reasoning_model`)
+# a genuinely large float32 delta (`yolo12`, `hrm`)
 # are judged at float64 -- where the SAME assertion still runs -- precisely so
 # that no such entry is ever needed. See decisions.md D-075.
 #: name -> ``{"build": ..., "make_inputs": ..., **assert_xla_equivalence kwargs}``
@@ -906,7 +906,7 @@ XLA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     # precisions. At float64 the logits delta is 2.852738e-02 against
     # ``absmax`` 5.044708e+00, i.e. 5.655e-03 relative -- hence rtol 2e-2,
     # a 3.5x margin, chosen from the measurement rather than to make it pass.
-    "hierarchical_reasoning_model": {
+    "hrm": {
         "scope": "float64",
         "rtol": 2e-2,
     },
