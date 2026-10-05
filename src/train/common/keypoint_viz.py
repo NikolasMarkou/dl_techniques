@@ -202,6 +202,11 @@ class SuperPointVizCallback(keras.callbacks.Callback):
     heatmap | keypoints) and ``viz/epoch_{N:03d}_descriptors.png`` (PCA).
     With ``viz_warped`` also writes the warped companion panel, which is how
     a joint-training run checks the pair the descriptor loss sees.
+    With ``viz_homographies`` additionally writes
+    ``viz/epoch_{N:03d}_correspondence.png`` (pair 0: clean detections
+    reprojected by ``H`` vs warped detections, greedy 3px matches) and appends
+    one line per epoch to ``viz/repeatability.jsonl`` (mean over ALL stored
+    pairs, not just the plotted one) -- a plottable repeatability curve.
 
     The callback never raises: inference/plotting failures log WARNING.
 
@@ -261,7 +266,7 @@ class SuperPointVizCallback(keras.callbacks.Callback):
         try:
             from dl_techniques.utils.keypoint_extraction import decode_superpoint
             backbone = self._backbone()
-            outs = backbone(self.viz_images[:1], training=False)
+            outs = backbone(self.viz_images, training=False)
             heat_fn = None
             try:
                 from dl_techniques.utils.keypoint_extraction import (
@@ -278,9 +283,9 @@ class SuperPointVizCallback(keras.callbacks.Callback):
                 nms_radius=self.nms_radius,
                 border=self.border,
             )
-            kps = np.asarray(dec["keypoints"][0])
-            mask = np.asarray(dec["mask"][0]).astype(bool)
-            kps = kps[mask]
+            kp_all = np.asarray(dec["keypoints"])
+            mask_all = np.asarray(dec["mask"]).astype(bool)
+            kps = kp_all[0][mask_all[0]]
             heat = (
                 np.asarray(heat_fn(np.asarray(outs["keypoints"])))[0]
                 if heat_fn is not None else np.zeros(_to_gray(self.viz_images[0]).shape, dtype=np.float32)
@@ -297,7 +302,7 @@ class SuperPointVizCallback(keras.callbacks.Callback):
                 title=f"epoch {epoch + 1} descriptor PCA",
             )
             if self.viz_warped is not None:
-                outs_w = backbone(self.viz_warped[:1], training=False)
+                outs_w = backbone(self.viz_warped, training=False)
                 dec_w = decode_superpoint(
                     {"keypoints": np.asarray(outs_w["keypoints"]),
                      "descriptors": np.asarray(outs_w["descriptors"])},
@@ -306,9 +311,9 @@ class SuperPointVizCallback(keras.callbacks.Callback):
                     nms_radius=self.nms_radius,
                     border=self.border,
                 )
-                kps_w = np.asarray(dec_w["keypoints"][0])
-                mask_w = np.asarray(dec_w["mask"][0]).astype(bool)
-                kps_w = kps_w[mask_w]
+                kpw_all = np.asarray(dec_w["keypoints"])
+                maskw_all = np.asarray(dec_w["mask"]).astype(bool)
+                kps_w = kpw_all[0][maskw_all[0]]
                 heat_w = (
                     np.asarray(heat_fn(np.asarray(outs_w["keypoints"])))[0]
                     if heat_fn is not None else np.zeros_like(heat)
@@ -320,26 +325,48 @@ class SuperPointVizCallback(keras.callbacks.Callback):
                 )
                 if self.viz_homographies is not None:
                     from dl_techniques.utils.homography import warp_points
-                    h_mat = np.asarray(self.viz_homographies[0], dtype=np.float32)
-                    reproj = warp_points(kps, h_mat)
-                    finite = np.all(np.isfinite(reproj), axis=1)
-                    h_img, w_img = _to_gray(self.viz_warped[0]).shape
-                    inside = (
-                        finite & (reproj[:, 0] >= 0) & (reproj[:, 0] < w_img)
-                        & (reproj[:, 1] >= 0) & (reproj[:, 1] < h_img)
-                    )
-                    matches, scores, rep = reprojection_matches(
-                        reproj, inside, kps_w, thresh=3.0)
-                    plot_match_panel(
-                        self.viz_images[0], self.viz_warped[0], kps, kps_w,
-                        matches, scores,
-                        Path(self.viz_dir) / f"epoch_{epoch + 1:03d}_correspondence.png",
-                        title=(f"epoch {epoch + 1} reprojection: "
-                               f"repeatability {rep:.2f} "
-                               f"({int(inside.sum())} reprojectable)"),
-                    )
+                    n_pairs = min(len(self.viz_images), len(self.viz_warped),
+                                  len(self.viz_homographies))
+                    reps, reproj_counts = [], []
+                    first = None
+                    for i in range(n_pairs):
+                        ki = kp_all[i][mask_all[i]]
+                        wi = kpw_all[i][maskw_all[i]]
+                        h_mat = np.asarray(self.viz_homographies[i], dtype=np.float32)
+                        reproj = warp_points(ki, h_mat)
+                        finite = np.all(np.isfinite(reproj), axis=1)
+                        h_img, w_img = _to_gray(self.viz_warped[i]).shape
+                        inside = (
+                            finite & (reproj[:, 0] >= 0) & (reproj[:, 0] < w_img)
+                            & (reproj[:, 1] >= 0) & (reproj[:, 1] < h_img)
+                        )
+                        matches, scores, rep = reprojection_matches(
+                            reproj, inside, wi, thresh=3.0)
+                        reps.append(rep)
+                        reproj_counts.append(int(inside.sum()))
+                        if i == 0:
+                            first = (ki, wi, matches, scores, rep, int(inside.sum()))
+                    import json as _json
+                    with open(Path(self.viz_dir) / "repeatability.jsonl", "a") as f:
+                        f.write(_json.dumps({
+                            "epoch": epoch + 1,
+                            "mean_repeatability": float(np.mean(reps)) if reps else 0.0,
+                            "per_pair": [float(r) for r in reps],
+                            "reprojectable": reproj_counts,
+                        }) + "\n")
+                    if first is not None:
+                        ki, wi, matches, scores, rep, n_reproj = first
+                        plot_match_panel(
+                            self.viz_images[0], self.viz_warped[0], ki, wi,
+                            matches, scores,
+                            Path(self.viz_dir) / f"epoch_{epoch + 1:03d}_correspondence.png",
+                            title=(f"epoch {epoch + 1} reprojection: "
+                                   f"repeatability {rep:.2f} (pair 0, "
+                                   f"mean {float(np.mean(reps)):.2f} over {len(reps)})"),
+                        )
                     logger.info(
-                        f"SuperPointViz epoch {epoch + 1}: repeatability {rep:.3f}")
+                        f"SuperPointViz epoch {epoch + 1}: mean repeatability "
+                        f"{float(np.mean(reps)):.3f} over {len(reps)} pairs")
         except Exception as e:
             logger.warning(
                 f"SuperPointVizCallback: failed at epoch {epoch + 1}: {e}",
