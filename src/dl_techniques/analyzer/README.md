@@ -67,7 +67,7 @@ attributes.
 | `per_class_calibration_bins` | `None` (halves `calibration_bins`) | bin count for `per_class_ece` / `per_class_conditional_top1_ece`. It is a DIFFERENT number from `ece` on purpose — a per-class column carries far less mass than the pooled score — so the two published ECEs are not directly comparable. The effective value is recorded per model as `per_class_ece_bins`, and `ece`'s as `ece_bins`. |
 | `output_activation` | `None` (infer) | `'softmax'` / `'sigmoid'` / `'logits'`; pins what the head emits instead of inferring it |
 | `smooth_training_curves` / `smoothing_window` | `True` / `5` | |
-| `spectral_min_evals` / `spectral_max_evals` | `10` / `15000` | layers outside this eigenvalue range are skipped; above the cap the analyzer switches to truncated SVD |
+| `spectral_min_evals` / `spectral_max_evals` | `10` / `15000` | `spectral_min_evals` is an **admission gate**: a layer with fewer eigenvalues than this is skipped and never appears in the DataFrame. `spectral_max_evals` is a **truncation cap**, not a gate: a layer above it is still analyzed, via a `svds` decomposition whose `k` is bounded by the cap, and its whole-spectrum columns (`norm`, `stable_rank`, `entropy`, `matrix_rank`, `log_alpha_norm`, the distribution ratios) are NaN with `spectrum_truncated=True` — see [truncated spectra](#truncated-spectra) |
 | `spectral_bootstraps` | `50` | `pl_pvalue` resolution; `0` skips the test. **Its cost depends entirely on how much of the spectrum the fit selects as tail**, because each bootstrap refits a synthetic sample of length `n_tail`. Measured at n = 15000: on a genuine power law (`n_tail` = 100%) 50 bootstraps cost **117 s against a 1.57 s alpha fit**, ~75x; on a log-normal spectrum (`n_tail` = 6.7%) 1.3 s, ~0.9x; on a real Marchenko-Pastur weight spectrum (`n_tail` = 1.1%) **0.16 s, about a TENTH of the fit**. A flat "~100x" figure is wrong by roughly 700x in that last case. The alpha fit itself is **quadratic in the number of eigenvalues** — measured 0.018 / 0.213 / 1.61 s at n = 1000 / 5000 / 15000 (3x the data, 7.6x the time). Worst case for one layer at the defaults: **~119 s**, and it needs a spectrum that is power-law all the way down |
 | `spectral_concentration_analysis` | `True` | Gini / dominance / participation ratio / `critical_weight_count`. Measured on a square Gaussian Dense layer: 0.70 s at 2048x2048 and 2.88 s at 4096x4096, against 18.0 s for that layer's SVD |
 | `spectral_randomize` | `False` | randomized-weight comparison (slow). Now **~5x** what it used to cost: `spectral_n_randomizations` defaults to 5 and each draw runs a fresh full `compute_eigenvalues`, so the SVD is repeated per draw rather than the permutation being averaged over one decomposition |
@@ -82,7 +82,7 @@ attributes.
 | `max_layers_heatmap` / `max_layers_info_flow` | `12` / `8` | plot truncation |
 | `pareto_analysis_threshold` | `2` | minimum models for Pareto plots |
 | `memory_limit_mb` | `2048` | budget for the activations `InformationFlowAnalyzer` holds at once; `None` is explicitly unbounded. The resulting batch is shared by every model in the run (the minimum over them) — see the information-flow section for why |
-| `random_state` | `None` | seeds every stochastic site (data subsampling, spectral randomization, the goodness-of-fit bootstrap, power iteration); `None` is unseeded and NOT reproducible |
+| `random_state` | `None` | seeds every stochastic site the analyzer reaches (data subsampling, spectral randomization, the goodness-of-fit bootstrap); `None` is unseeded and NOT reproducible. It does **not** reach `_power_iteration` — see [notes](#notes) |
 | `verbose` | `True` | |
 
 `AnalysisConfig.setup_plotting_style()` is called in `ModelAnalyzer.__init__` and forces
@@ -356,6 +356,40 @@ separately:
 The full theory, including the ERG condition and the funnel diagnostic, is in `SETOL.md`;
 correlation traps are in `CORRELATION_TRAPS.md`.
 
+### Truncated spectra
+
+When a layer has more than `spectral_max_evals` eigenvalues, the analyzer computes only the
+LARGEST of them, with a `svds` decomposition whose `k` is bounded by the cap. The row is
+still produced and `spectrum_truncated` is `True` — but the small singular values were
+never computed, so any quantity that **integrates over the whole spectrum** is reported as
+`NaN` rather than as a number that silently omits a tail:
+
+| Column | Why a truncated spectrum cannot answer it |
+| --- | --- |
+| `norm`, `log_norm` | Σ λ — the missing tail is mass the sum never saw |
+| `stable_rank` | `(Σ λ) / λ_max` — a strict *under*-estimate, because the mass it integrates over is exactly what is absent. This is the damaging one: it is in `SPECTRAL_DEFAULT_SUMMARY_METRICS`, so before the policy existed it was averaged into `spectral_summary` and drawn on the dashboard as a real capacity-utilisation number |
+| `log_alpha_norm` | `log10 Σ λ^α` — integrates the entire spectrum |
+| `entropy`, `matrix_rank`, `weak_rank_loss`, `rank_loss` | defined over all λ |
+| `mp_softrank` | its λ⁺ is built from the whole-spectrum mean, so "the theoretical MP edge" was not this layer's edge |
+| `gini_coefficient`, `dominance_ratio`, `participation_ratio`, `min_participation_ratio` | Lorenz-curve and ratio quantities that divide by the total |
+
+What **survives** truncation, because a truncated SVD still returns it or it came from the
+weight matrix, which was read in full: `spectral_norm`, `log_spectral_norm`, `lambda_max`,
+`sv_max`, `alpha_weighted`, `alpha_hat`, `alpha_hat_normalized`, `concentration_score` and
+`critical_weight_count`.
+
+`_get_summary` filters with `notna()`, so a NaN never poisons a model-level mean. A model
+whose layers are *all* truncated simply has no `stable_rank` in `spectral_summary` at all —
+the key is absent rather than present-and-NaN.
+
+This policy was inert until `F-079`: `spectral_max_evals` appeared both as an admission
+gate and as the trigger for truncation, and with `n_comp` pinned to `M` the two conditions
+could never both hold. `spectrum_truncated` was `False` on every row the analyzer had
+produced. The gate now applies `spectral_min_evals` only, and `max_evals` actually bounds
+`k` — it previously only selected the branch, so a 20000-wide layer under a 15000 cap ran
+`svds(k=19999)`, a near-full ARPACK decomposition *more* expensive than the dense SVD it
+replaces. Pinned by `tests/test_analyzer/test_spectral_truncation_policy.py`.
+
 ## Gotchas
 
 - **`model_performance[m]['accuracy']` is `None` when the model has no accuracy metric, never
@@ -441,7 +475,8 @@ correlation traps are in `CORRELATION_TRAPS.md`.
      `(3,3,64,128)` kernel.
 - **Do not trust `alpha` when** `pl_pvalue < 0.1` (the ESD probably is not a power law),
   `sigma > alpha / 3` (the CI spans several phases), `num_pl_spikes < 50` (MLE variance too
-  high), or the layer exceeded `spectral_max_evals` (truncated SVD biases alpha upward).
+  high), or the layer exceeded `spectral_max_evals` (a truncated SVD fits `alpha` to a
+  truncated tail and biases it upward — see [truncated spectra](#truncated-spectra)).
 - `lambda_max` and every norm-based column (`norm`, `spectral_norm`, `log_norm`,
   `log_spectral_norm`, `log_alpha_norm`) are **not comparable across architectures**; `alpha` is
   roughly scale-invariant. `alpha_weighted` / `alpha_hat` are the exception WeightWatcher makes:
@@ -453,6 +488,12 @@ correlation traps are in `CORRELATION_TRAPS.md`.
   spatial structure. Spectral metrics describe the linear map, not the convolution.
 - `concentration_score` has no absolute scale — use it only to rank layers within one model.
 - Layers with fewer than `spectral_min_evals` eigenvalues never appear in the DataFrame at all.
+- `random_state` does **not** reach `_power_iteration`. That function is reachable only via
+  `get_top_eigenvectors(method='power_iteration', rng=...)`, and the analyzer's single call
+  site uses the default `method='direct'` and passes no `rng` — `direct` pins ARPACK's own
+  `v0` to a constant for reproducibility instead (see `spectral_metrics.py` D-003). No
+  configuration value can make a power-iteration result reproducible, so the field's
+  documentation no longer claims to.
 - Multi-input models are detected and warned about; calibration and information flow are
   limited for them.
 - Spectral analysis is the expensive part: an SVD per layer, x`spectral_bootstraps` if

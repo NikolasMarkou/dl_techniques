@@ -607,7 +607,21 @@ class SpectralAnalyzer(BaseAnalyzer):
                 continue
 
             Wmats, N, M, rf = spectral_utils.get_weight_matrices(weights, layer_type)
-            if M < self.config.spectral_min_evals or M > self.config.spectral_max_evals:
+            # DECISION plan-2026-10-05-analyzer-audit/F-079
+            # `spectral_max_evals` is a TRUNCATION CAP, not an admission gate. It used to
+            # appear in this condition as well, which made the truncated-SVD path
+            # unreachable: `compute_eigenvalues` truncates only when `n_comp < M or
+            # M > max_evals`, and D-002 pins `n_comp = M` always — so a layer had to have
+            # `M > spectral_max_evals` to truncate and was simultaneously rejected here for
+            # exactly that. `spectrum_truncated` was therefore False on every row the
+            # analyzer had ever produced, and the F-078 NaN policy had no referent.
+            #
+            # `spectral_min_evals` remains a genuine gate: a layer with fewer eigenvalues
+            # than that has no meaningful ESD tail to fit, so it is skipped outright.
+            # Do NOT re-add `M > spectral_max_evals` here. A layer above the cap is now
+            # ADMITTED and takes the capped `svds` path; its whole-spectrum columns are
+            # NaN (F-078) and its `spectrum_truncated` flag is True.
+            if M < self.config.spectral_min_evals:
                 continue
 
             rows.append({

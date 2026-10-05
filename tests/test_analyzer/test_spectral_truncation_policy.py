@@ -1,10 +1,11 @@
-"""A truncated spectrum must not publish whole-spectrum quantities (F-078).
+"""A truncated spectrum must not publish whole-spectrum quantities (F-078, F-079).
 
-The defect. When a layer exceeds `config.spectral_max_evals`, `compute_eigenvalues` takes
-the truncated-`svds` branch and returns only the LARGEST singular values; the small ones
-were never computed. D-019 correctly NaN-ed `weak_rank_loss`, `entropy` and `matrix_rank`
-for that case. But three more quantities that INTEGRATE over the whole spectrum were still
-published as ordinary numbers:
+Two decisions, tested together because F-079 is what gives F-078 a referent.
+
+F-078 — the POLICY. When a layer exceeds the cap, `compute_eigenvalues` returns only the
+LARGEST singular values; the small ones were never computed. D-019 correctly NaN-ed
+`weak_rank_loss`, `entropy` and `matrix_rank`, but three more quantities that INTEGRATE over
+the whole spectrum were still published as ordinary numbers:
 
 | column | why a truncated spectrum cannot answer it |
 |---|---|
@@ -23,7 +24,20 @@ distribution-derived concentration ratios `gini_coefficient` (a Lorenz-curve qua
 averaged into `spectral_summary` and drawn on the dashboard as a real capacity-utilisation
 number.
 
-What must SURVIVE. These are computed from quantities a truncated SVD still returns, and
+F-079 — the REACHABILITY. That policy was inert, because the two conditions could never
+both hold:
+
+- `_describe_model` rejected any layer with `M > spectral_max_evals`
+- `compute_eigenvalues` truncated only when `n_comp < M or M > max_evals`, and D-002 pins
+  `n_comp = M` always
+
+So `M > spectral_max_evals` was required to truncate and simultaneously forbidden by the
+gate: `spectrum_truncated` was False on every row the analyzer had ever produced. Both
+halves are now fixed — the gate admits the layer, and `max_evals` actually bounds `k` in the
+SVD (it previously only selected the branch, so a 20000-wide layer with a 15000 cap ran
+`svds(k=19999)`, a near-full decomposition MORE expensive than the dense SVD it replaced).
+
+What must SURVIVE truncation. These come from quantities a truncated SVD still returns, and
 NaN-ing them would throw away real information:
 
 - `spectral_norm`, `log_spectral_norm`, `lambda_max`, `sv_max` — the largest singular value
@@ -32,15 +46,13 @@ NaN-ing them would throw away real information:
 - `concentration_score`, `critical_weight_count` — derived from the weight matrix itself,
   which was read in full
 
-This module pins both halves, because a fix that NaN-ed everything would pass the first
-half and quietly destroy the second.
+This module pins both halves, because a fix that NaN-ed everything would pass the first half
+and quietly destroy the second.
 """
-
-import matplotlib
-matplotlib.use('Agg')
 
 import keras
 import numpy as np
+import pandas as pd
 import pytest
 
 from dl_techniques.analyzer.analyzers.spectral_analyzer import SpectralAnalyzer
@@ -59,6 +71,10 @@ MUST_BE_NAN = [
     MetricNames.STABLE_RANK,
     MetricNames.LOG_ALPHA_NORM,
     MetricNames.MP_SOFTRANK,
+    MetricNames.GINI_COEFFICIENT,
+    MetricNames.DOMINANCE_RATIO,
+    MetricNames.PARTICIPATION_RATIO,
+    MetricNames.MIN_PARTICIPATION_RATIO,
 ]
 
 #: Columns computed from λ_max or from the weight matrix, which stay VALID.
@@ -84,6 +100,7 @@ def _model(width):
 
 
 def _analyze(width=64, **config_kwargs):
+    """Run the analyzer END TO END. F-079 is what makes this exercise the policy."""
     kwargs = dict(analyze_spectral=True, spectral_randomize=False,
                   spectral_bootstraps=0)
     kwargs.update(config_kwargs)
@@ -93,110 +110,68 @@ def _analyze(width=64, **config_kwargs):
     return results.spectral_analysis
 
 
-def _analyze_layers_directly(width=64, max_evals=8):
-    """Drive `_analyze_layers` past `_describe_model`'s admission gate.
+class TestTheTruncatedPathIsNowReachable:
+    """F-079. The predecessor of this class asserted the OPPOSITE."""
 
-    THE TRUNCATED PATH IS UNREACHABLE THROUGH `analyze()` (F-079). `_describe_model`
-    admits a layer only when `spectral_min_evals <= M <= spectral_max_evals`, while
-    `compute_eigenvalues` truncates only when `n_comp < M or M > max_evals` -- and
-    D-002 pins `n_comp = M` always. So `M > spectral_max_evals` is required to truncate and
-    simultaneously forbidden by the admission gate. The two conditions can never both
-    hold, which means `spectrum_truncated` is False on every row the analyzer has ever
-    produced.
-
-    That is worth recording on its own, but it also means this policy cannot be exercised
-    end-to-end. This helper therefore calls `_analyze_layers` directly on a hand-built
-    frame with a small `max_evals`, which is exactly the code path F-078 changed.
-    """
-    analyzer = SpectralAnalyzer({'m': _model(width)},
-                                AnalysisConfig(spectral_bootstraps=0,
-                                               spectral_min_evals=4,
-                                               spectral_max_evals=max_evals))
-    details, all_layers = analyzer._describe_model(
-        _model(width))
-    assert details.empty, (
-        "the probe model produced no describable layers, so there is nothing to analyze"
-    )
-    # Rebuild a frame WITHOUT the M <= spectral_max_evals gate so the layer reaches
-    # `_analyze_layers`, where the truncation actually happens.
-    import pandas as pd
-    rows = []
-    for layer_id, layer in enumerate(all_layers):
-        from dl_techniques.analyzer import spectral_utils
-        from dl_techniques.analyzer.constants import LayerType
-        layer_type = spectral_utils.infer_layer_type(layer)
-        has_weights, weights, _, _ = spectral_utils.get_layer_weights_and_bias(layer)
-        if not has_weights or layer_type == LayerType.UNKNOWN:
-            continue
-        Wmats, N, M, rf = spectral_utils.get_weight_matrices(weights, layer_type)
-        rows.append({'layer_id': layer_id, 'name': layer.name,
-                     'layer_type': layer_type.value, 'N': N, 'M': M, 'rf': rf,
-                     'Q': N / M if M else -1,
-                     'num_params': int(np.prod(weights.shape)),
-                     MetricNames.NUM_EVALS: M})
-    details = pd.DataFrame(rows)
-    assert not details.empty
-    details.set_index('layer_id', inplace=True)
-
-    esds, rand_esds = {}, {}
-    analyzer._analyze_layers(details, all_layers, esds, rand_esds,
-                             rng=np.random.default_rng(0))
-    return details
-
-
-class TestTheTruncatedPathIsUnreachableThroughAnalyze:
-    """F-079: the precondition for everything below. Asserted, not assumed."""
-
-    def test_a_small_max_evals_rejects_the_layer_entirely(self):
-        """M > spectral_max_evals means no ROW AT ALL, not a truncated row.
-
-        `spectral_analysis` stays None (rather than an empty frame) when nothing is
-        admitted, so the assertion is on None-or-empty rather than `.empty`.
-        """
+    def test_a_cap_below_the_layer_width_now_yields_truncated_rows(self):
         frame = _analyze(width=64, spectral_min_evals=4, spectral_max_evals=8)
-        admitted = 0 if frame is None else len(frame)
-        assert admitted == 0, (
-            f"expected NO rows at spectral_max_evals=8, got {admitted}. If this now "
-            f"produces truncated rows, the admission gate has changed and F-079's "
-            f"unreachability claim -- and this module's need to bypass the gate -- is "
-            f"stale."
+        assert frame is not None and not frame.empty, (
+            "a layer of M=64 with spectral_max_evals=8 produced NO rows. F-079 removed "
+            "the `M > spectral_max_evals` rejection from the admission gate; if this is "
+            "empty again the gate has come back and the F-078 policy is inert."
+        )
+        assert bool(frame[MetricNames.SPECTRUM_TRUNCATED].any()), (
+            "rows were produced but none is flagged truncated, so the capped-SVD path "
+            "was not taken"
         )
 
-    def test_a_normal_run_reports_no_truncation(self):
-        frame = _analyze(width=64)
-        assert not frame.empty
-        assert not bool(frame[MetricNames.SPECTRUM_TRUNCATED].any())
+    def test_the_cap_actually_bounds_the_decomposition(self):
+        """F-079's second half: `max_evals` must bound `k`, not just pick the branch.
+
+        Without this, a layer above the cap ran `svds(k = M - 1)` — a near-full ARPACK
+        decomposition, more expensive than the dense SVD it replaces — while still
+        reporting `truncated=True`.
+        """
+        frame = _analyze(width=64, spectral_min_evals=4, spectral_max_evals=8)
+        truncated = frame[frame[MetricNames.SPECTRUM_TRUNCATED]]
+        assert not truncated.empty
+        assert (truncated[MetricNames.NUM_EVALS] <= 8).all(), (
+            f"num_evals should be bounded by the cap of 8, got "
+            f"{sorted(truncated[MetricNames.NUM_EVALS].tolist())} — `max_evals` is only "
+            f"selecting the branch, not bounding k (F-079)"
+        )
+        # And genuinely fewer than the full spectrum, so `truncated` is honest.
+        assert (truncated[MetricNames.NUM_EVALS] < truncated['M']).all()
 
 
-class TestAWholeSpectrumLayersAreUnaffected:
+class TestACompleteSpectrumLayersAreUnaffected:
     def test_nothing_is_nan_on_a_complete_spectrum(self):
         frame = _analyze(width=64)
-        assert not frame.empty, "the analyzer produced no rows at all"
+        assert frame is not None and not frame.empty
         for column in MUST_BE_NAN:
             if column in frame.columns:
-                values = pd_numeric(frame[column])
+                values = pd.to_numeric(frame[column], errors='coerce')
                 assert values.notna().all(), (
                     f"{column} is NaN on a COMPLETE spectrum: {frame[column].tolist()}"
                 )
 
-    def test_spectrum_truncated_is_false(self):
+    def test_spectrum_truncated_is_false_at_the_default_cap(self):
         frame = _analyze(width=64)
-        assert not bool(frame[MetricNames.SPECTRUM_TRUNCATED].any())
+        assert not bool(frame[MetricNames.SPECTRUM_TRUNCATED].any()), (
+            "a 64-wide layer is far below the 15000 default cap and must not truncate"
+        )
+
+    def test_num_evals_equals_min_dim_on_a_complete_spectrum(self):
+        frame = _analyze(width=64)
+        assert (frame[MetricNames.NUM_EVALS] == frame['M']).all()
 
 
 class TestATruncatedLayerNaNsOnlyWhatItCannotKnow:
     @pytest.fixture(scope="class")
     def truncated(self):
-        frame = _analyze_layers_directly(width=64, max_evals=8)
-        assert not frame.empty, "the direct probe produced no rows"
+        frame = _analyze(width=64, spectral_min_evals=4, spectral_max_evals=8)
+        assert frame is not None and not frame.empty
         return frame
-
-    def test_the_truncation_flag_is_set(self, truncated):
-        assert bool(truncated[MetricNames.SPECTRUM_TRUNCATED].any()), (
-            f"the direct probe did not produce a truncated spectrum, so the F-078 "
-            f"branch was never taken and this class is vacuous: "
-            f"{truncated[MetricNames.SPECTRUM_TRUNCATED].tolist()}"
-        )
 
     @pytest.mark.parametrize("column", MUST_BE_NAN)
     def test_a_whole_spectrum_column_is_nan(self, truncated, column):
@@ -213,7 +188,7 @@ class TestATruncatedLayerNaNsOnlyWhatItCannotKnow:
         """The other half of F-078: do not NaN what is genuinely known.
 
         A fix that NaN-ed every spectrum-derived column would pass the test above while
-        destroying real information -- λ_max is exactly what a truncated SVD returns, and
+        destroying real information — λ_max is exactly what a truncated SVD returns, and
         the weight matrix was read in full.
         """
         if column not in truncated.columns:
@@ -221,16 +196,9 @@ class TestATruncatedLayerNaNsOnlyWhatItCannotKnow:
         rows = truncated[truncated[MetricNames.SPECTRUM_TRUNCATED]]
         row = rows[column].iloc[0]
         assert not np.isnan(float(row)), (
-            f"{column} = {row!r} on a truncated spectrum, but it is computed from "
-            f"λ_max or from the weight matrix and IS knowable. F-078 NaN-ed "
-            f"whole-spectrum INTEGRALS only; this over-NaN-ed a valid column."
-        )
-
-    def test_num_evals_is_the_truncated_count_not_min_dim(self, truncated):
-        """The truncated row genuinely carries fewer eigenvalues than min(N, M)."""
-        rows = truncated[truncated[MetricNames.SPECTRUM_TRUNCATED]]
-        assert (rows[MetricNames.NUM_EVALS] < rows['M']).all(), (
-            "num_evals should be the number of singular values actually returned"
+            f"{column} = {row!r} on a truncated spectrum, but it is computed from λ_max "
+            f"or from the weight matrix and IS knowable. F-078 NaN-ed whole-spectrum "
+            f"INTEGRALS only; this over-NaN-ed a valid column."
         )
 
 
@@ -238,13 +206,12 @@ class TestSummaryMeansSkipTheNaNs:
     """A NaN in a layer row must not poison the model-level mean.
 
     `_get_summary` filters with `pd.to_numeric(...).notna()`, so the means are taken over
-    the surviving layers. This pins that, because the alternative -- a single NaN turning a
-    whole model's `stable_rank` into NaN -- is exactly the failure the NaN was meant to
+    the surviving layers. This is pinned because the alternative — a single NaN turning a
+    whole model's `stable_rank` into NaN — is exactly the failure the NaN was meant to
     avoid.
     """
 
     def test_a_summary_over_a_mixed_frame_stays_finite(self):
-        import pandas as pd
         frame = pd.DataFrame([
             {MetricNames.STATUS: 'success', MetricNames.STABLE_RANK: 10.0},
             {MetricNames.STATUS: 'success', MetricNames.STABLE_RANK: float('nan')},
@@ -254,11 +221,10 @@ class TestSummaryMeansSkipTheNaNs:
         summary = analyzer._get_summary(frame)
         assert summary[MetricNames.STABLE_RANK] == pytest.approx(15.0), (
             f"the mean over the non-NaN rows is 15.0, got "
-            f"{summary.get(MetricNames.STABLE_RANK)!r} -- a NaN leaked into the summary"
+            f"{summary.get(MetricNames.STABLE_RANK)!r} — a NaN leaked into the summary"
         )
 
     def test_an_all_nan_column_is_simply_absent_from_the_summary(self):
-        import pandas as pd
         frame = pd.DataFrame([
             {MetricNames.STATUS: 'success', MetricNames.STABLE_RANK: float('nan')},
             {MetricNames.STATUS: 'success', MetricNames.STABLE_RANK: float('nan')},
@@ -267,7 +233,13 @@ class TestSummaryMeansSkipTheNaNs:
         summary = analyzer._get_summary(frame)
         assert MetricNames.STABLE_RANK not in summary
 
-
-def pd_numeric(series):
-    import pandas as pd
-    return pd.to_numeric(series, errors='coerce')
+    def test_an_all_truncated_model_reports_no_stable_rank_at_all(self):
+        """The realistic worst case: every layer truncated. The mean must be absent, not NaN."""
+        frame = _analyze(width=64, spectral_min_evals=4, spectral_max_evals=8)
+        analyzer = SpectralAnalyzer({}, AnalysisConfig())
+        summary = analyzer._get_summary(frame)
+        assert MetricNames.STABLE_RANK not in summary, (
+            f"stable_rank is {summary.get(MetricNames.STABLE_RANK)!r} for a model whose "
+            f"every layer truncated; it must be absent, not a NaN that poisons a "
+            f"caller's own average"
+        )

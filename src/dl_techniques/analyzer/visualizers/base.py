@@ -101,7 +101,13 @@ class BaseVisualizer(ABC):
             include_all_models: Whether to include all available models or only those with data
             specific_models: Specific list of models to include in legend (overrides other options)
         """
-        # Determine which models to include in legend
+        # Determine which models to include in legend.
+        # DECISION plan-2026-10-05-analyzer-audit/F-087
+        # `include_all_models` is a real, load-bearing parameter — this `else` is the ONLY
+        # consumer of `False` — so it stays. What was wrong was the base default of
+        # `_get_models_with_data`, which made this branch indistinguishable from the one
+        # above it for any subclass that had not overridden it; that method is now
+        # `@abstractmethod` (see below), so `False` is guaranteed to differ from `True`.
         if specific_models:
             models_to_include = [m for m in specific_models if m in self.model_order]
         elif include_all_models:
@@ -148,18 +154,23 @@ class BaseVisualizer(ABC):
 
         logger.debug(f"Created figure legend with {len(legend_elements)} models")
 
+    @abstractmethod
     def _get_models_with_data(self) -> List[str]:
         """
-        Get list of models that have data in the current analysis results.
+        Get the models that have data for THIS visualization, in ``model_order``.
 
-        This is a fallback method that subclasses can override to provide
-        more specific logic for determining which models have relevant data.
+        Every concrete visualizer overrides this, because "has data" is
+        visualization-specific: a model can have calibration results and no spectral
+        ones. It is abstract rather than defaulted for that reason — the old base
+        implementation returned ``self.model_order`` (all models), which is what the
+        ``include_all_models=True`` branch of :meth:`_create_legend` already does, so
+        the base default could only ever return a model that has no data, under a name
+        that claimed it did. Anything relying on the lenient default now has to say so
+        explicitly.
 
         Returns:
-            List of model names that have data for this visualization
+            Model names with data for this visualization, ordered by ``model_order``.
         """
-        # Default implementation: return all models in order
-        return self.model_order
 
     def _get_model_color(self, model_name: str) -> str:
         """

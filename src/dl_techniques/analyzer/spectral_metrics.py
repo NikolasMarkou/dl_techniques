@@ -137,6 +137,13 @@ def compute_eigenvalues(
     # Do NOT re-inline the constant here. See decisions.md D-027.
     if max_evals is None:
         max_evals = SPECTRAL_DEFAULT_MAX_EVALS
+    # DECISION plan-2026-10-05-analyzer-audit/F-079
+    # A non-positive cap would make `k_target` negative and silently send every layer
+    # down the exception path into a full dense SVD — the exact opposite of what a cap
+    # of zero should mean. Clamp to 1, which ARPACK accepts, so a misconfiguration
+    # degrades to "1 singular value, everything else NaN" rather than to a silent
+    # full decomposition.
+    max_evals = max(1, int(max_evals))
 
     all_evals = []
     max_sv = 0.0
@@ -163,7 +170,20 @@ def compute_eigenvalues(
             try:
                 # Use scipy's sparse SVD for large matrices
                 # k must be strictly less than min(W.shape) for svds
-                k_target = min(n_comp, min(W.shape) - 1)
+                #
+                # DECISION plan-2026-10-05-analyzer-audit/F-079
+                # `max_evals` must bound `k`, not merely select this branch. It used to be
+                # absent from this line, so a layer with `M = 20000` and
+                # `max_evals = 15000` took the "truncated" path and ran `svds(k = 19999)`
+                # — 19999 of 20000 singular values, i.e. a near-full ARPACK
+                # decomposition that is far MORE expensive than the dense SVD it is
+                # supposed to replace, while still reporting `truncated=True`. The cap
+                # was decorative. Capping `k` is what makes "above the cap the analyzer
+                # switches to truncated SVD" true.
+                #
+                # `min(W.shape) - 1` is retained because `svds` requires
+                # `k < min(W.shape)`.
+                k_target = min(n_comp, min(W.shape) - 1, max_evals)
                 if k_target < 1:
                     # Fallback for extremely small matrices
                     sv = np.linalg.svd(W, compute_uv=False)
@@ -1557,11 +1577,20 @@ def _power_iteration(
             # DECISION plan-2026-10-05-analyzer-audit/F-028
             # Re-orthogonalise AGAINST the already-found eigenvectors on EVERY
             # iteration, not once before the loop. The single pre-loop pass was lost the
-            # moment `matrix @ q` reintroduced the previously-converged directions, so
-            # the returned vectors were not mutually orthogonal to machine precision —
-            # which is the entire purpose of deflation. In-loop placement is the
-            # standard two-pass modified Gram-Schmidt, at O(n*k) per iteration against
-            # an O(n^2) matvec.
+            # moment `matrix @ q` reintroduced the previously-converged directions.
+            # In-loop placement is the standard modified Gram-Schmidt, at O(n*k) per
+            # iteration against an O(n^2) matvec.
+            #
+            # Do NOT describe the result as orthogonal "to machine precision" at the
+            # default settings — it is not, and claiming so invites a test that fails.
+            # MEASURED on a 14x14 matrix at k=5, worst off-diagonal Gram entry:
+            #   tol=1e-05 -> 5.97e-06    tol=1e-12 -> 5.97e-13
+            #   tol=1e-08 -> 5.97e-09    tol=1e-15 -> 6.39e-16
+            # The result is proportional to `tol` across six decades, because the loop
+            # below breaks the moment the subspace projector stops moving by more than
+            # `tol` and the residual coupling is of that order. The honest claim is
+            # "orthogonal to `tol`"; with `tol=1e-15` it IS machine precision.
+            # Pinned by test_power_iteration_accuracy.py.
             for j in range(i):
                 prev_q = eigvecs[:, j].reshape(-1, 1)
                 q = q - prev_q @ (prev_q.T @ q)
