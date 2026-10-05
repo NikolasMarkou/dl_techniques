@@ -1011,6 +1011,69 @@ class TestCorrelationTrapsDocMatchesTheImplementation:
             "the divergence table still quotes the superseded c_TW of 1.0"
         )
 
+    def test_no_section_anywhere_asserts_a_superseded_c_tw_value(self):
+        """The whole file, not just the backtick-anchored literal in §0 (F-062).
+
+        The assertion above searched for the exact string
+        `` `SPECTRAL_TW_SAFETY_FACTOR = 1.0` ``. All FIVE stale sites wrote the value
+        inside a LARGER backtick span — `` `c_TW = SPECTRAL_TW_SAFETY_FACTOR = 1.0` `` —
+        so the literal never matched and **the guard passed while the document still
+        taught the superseded formula in §4 Step 6, §5.1, §9.1, Appendix A.2 and
+        Appendix B.1.** This is precisely the text-vs-substring trap the file's own
+        preamble warns about, and the fix used elsewhere in this module (``ast`` for the
+        forward-hook check) applies here too: match the VALUE, not one spelling of it.
+
+        Every occurrence of ``1.0`` within 120 characters of ``c_TW`` is now suspect
+        unless it is part of §0's measured false-positive table, which legitimately
+        quotes ``c_TW = 1.0`` as the PRE-FIX value it superseded.
+        """
+        import re
+
+        text = TRAPS_PATH.read_text(encoding="utf-8")
+        divergences_end = text.find("### Divergence from WeightWatcher")
+        assert divergences_end > 0, (
+            "CORRELATION_TRAPS.md no longer has the WeightWatcher divergence heading; "
+            "this guard cannot tell §0's legitimate historical table from a stale claim"
+        )
+
+        offenders = []
+        for match in re.finditer(r"c_TW", text):
+            start, end = match.start(), match.end()
+            window = text[max(0, start - 120):end + 120]
+            if "1.0" not in window:
+                continue
+            # §0's divergence table and its fixed-behaviour bullets legitimately quote
+            # c_TW = 1.0 as the superseded value, with measured rates attached.
+            in_divergence_section = start < divergences_end
+            looks_measured = "0.0900" in window or "false-positive" in window
+            if in_divergence_section and looks_measured:
+                continue
+            offenders.append(window.replace("\n", " ")[:160])
+
+        assert not offenders, (
+            f"{len(offenders)} site(s) outside §0 still associate c_TW with the value "
+            f"1.0. First offender:\n  {offenders[0] if offenders else ''}\n"
+            f"These are the superseded pre-D-005 threshold; see §0."
+        )
+
+    def test_no_section_asserts_the_superseded_sqrt_tw_threshold_form(self):
+        """The §0 rewrite changed the threshold FORM, not just its constant (F-062).
+
+        The shipped threshold is Johnstone's ``λ₊ + c_TW·λ₊·M^(-2/3)·Q^(-1/6)·(1+√Q)^(-2/3)``.
+        The pre-D-005 form was ``λ₊ + c_TW·√((1/√Q)·λ₊^(2/3)·M^(-2/3))``. Both the
+        constant and the functional form were restated across the document, and the
+        existing guards covered neither outside §0.
+        """
+        text = TRAPS_PATH.read_text(encoding="utf-8")
+        divergences_end = text.find("### Divergence from WeightWatcher")
+        body = text[divergences_end:] if divergences_end > 0 else text
+
+        stale_form = "√((1/√Q)·λ_+^(2/3)·M^(-2/3))"
+        assert stale_form not in body, (
+            f"a section after §0 still documents the superseded threshold form "
+            f"{stale_form!r}"
+        )
+
     def test_the_two_mp_edge_spellings_agree_under_their_own_conventions(self):
         """The §0 claim that the MP-edge 'contradiction' is a Q-convention artefact.
 

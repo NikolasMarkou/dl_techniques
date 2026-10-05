@@ -136,29 +136,15 @@ class AnalysisResults:
     analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     config: Optional['AnalysisConfig'] = None  # Forward reference
 
-    _non_serializable_fields: Set[str] = field(
-        default_factory=lambda: {'_non_serializable_fields'},
-        init=False,
-        repr=False
-    )
-
     def __post_init__(self):
-        """Post-initialization to set up any derived fields."""
-        if not isinstance(self.weight_stats_layer_order, dict):
-            self.weight_stats_layer_order = {}
-        if not isinstance(self.activation_stats, dict):
-            self.activation_stats = {}
-        if not isinstance(self.information_flow, dict):
-            self.information_flow = {}
+        """Post-initialization to set up any derived fields.
 
-    def add_non_serializable_field(self, field_name: str) -> None:
-        """Add a field to the non-serializable set."""
-        self._non_serializable_fields.add(field_name)
-
-    def get_serializable_dict(self) -> Dict[str, Any]:
-        """Get a dictionary representation excluding non-serializable fields."""
-        result = {}
-        for key, value in self.__dict__.items():
-            if key not in self._non_serializable_fields:
-                result[key] = value
-        return result
+        DECISION plan-2026-10-05-analyzer-audit/F-071: this method's three
+        `isinstance(..., dict)` repairs were DEAD. Every field it checked
+        (`weight_stats_layer_order`, `activation_stats`, `information_flow`) is declared
+        `Dict[...]` with a `default_factory=dict`, so a caller who passed a non-dict was
+        a caller who defeated the type annotation deliberately, and `WeightAnalyzer` /
+        `InformationFlowAnalyzer` both assign fresh dicts rather than mutating one.
+        Keeping a runtime repair for a type error is a second, silently-different code
+        path. Do NOT restore it as "defensive"; fix the caller.
+        """

@@ -54,11 +54,22 @@ ALPHA_ANNOTATION_BOX = 0.7
 CONFIDENCE_INTERVAL_MULTIPLIER = 1.96
 AXIS_LIMIT_MIN = 0
 AXIS_LIMIT_MAX = 1
+# DECISION plan-2026-10-05-analyzer-audit/F-036
+# An ad-hoc +1 continuity correction in the normal approximation, NOT a Bayesian or
+# Wilson prior. Documented at the call site, which is why the figure no longer claims a
+# "95% CI". Do NOT rename this to something implying a real interval.
 BINOMIAL_EPSILON = 1
+# Alpha for the measured in-bin mean confidence overlay (F-035).
+ALPHA_MEASURED_CONFIDENCE = 0.7
+
+# "No data" panel message (F-039)
+NO_DATA_MESSAGE_FONT_SIZE = 12
 
 # Text Positioning Constants
-MODEL_NAME_TRUNCATE_LENGTH = 8
-MODEL_NAME_ELLIPSIS = '...'
+# DECISION plan-2026-10-05-analyzer-audit/F-037: these two were declared here and never
+# referenced in this file; the identical pair is USED in `weight_visualizer.py` and
+# `information_flow_visualizer.py:330` re-implemented the truncation inline as a literal.
+# Do NOT reintroduce a third copy of the number.
 ANNOTATION_Y_POSITION_FACTOR = 0.98
 ANNOTATION_X_CENTER = 0.5
 ANNOTATION_Y_CENTER = 0.5
@@ -137,26 +148,77 @@ class CalibrationVisualizer(BaseVisualizer):
             rel_data = self.results.reliability_data[model_name]
             color = self._get_model_color(model_name)
 
-            # Plot main line
-            ax.plot(rel_data['bin_centers'], rel_data['bin_accuracies'],
+            # DECISION plan-2026-10-05-analyzer-audit/F-035
+            # Plot bin CENTERS on x and MASK the empty bins, rather than plotting the
+            # `0.0` placeholder `compute_reliability_data` used to publish for an
+            # empty bin's accuracy. With the default 10 bins and a confident model,
+            # bins 0-8 are empty, so the curve previously dragged along y=0 for nine
+            # tenths of the axis and a perfectly calibrated confident model rendered
+            # as grossly miscalibrated. `calibration_metrics` now returns NaN there;
+            # this is the consumer side of that contract, and BOTH arrays are masked.
+            centers = np.asarray(rel_data['bin_centers'], dtype=float)
+            accuracies = np.asarray(rel_data['bin_accuracies'], dtype=float)
+            confidences = np.asarray(
+                rel_data.get('bin_confidences', np.full_like(accuracies, np.nan)),
+                dtype=float)
+
+            if 'bin_counts' in rel_data:
+                occupied = np.asarray(rel_data['bin_counts']) > 0
+            else:
+                occupied = np.isfinite(accuracies)
+            # Never trust a finite accuracy in a bin with no samples, whatever a
+            # hand-edited artifact claims.
+            occupied &= np.isfinite(accuracies)
+
+            if not occupied.any():
+                logger.warning(
+                    f"Model '{model_name}' has no occupied reliability bin; its "
+                    f"reliability curve is not drawn.")
+                continue
+
+            ax.plot(centers[occupied], accuracies[occupied],
                     'o-', color=color, linewidth=LINE_WIDTH_STANDARD,
                     markersize=MARKER_SIZE_STANDARD)
 
-            # Add shaded confidence region if we have sample counts
-            if 'bin_counts' in rel_data:
-                # Simple confidence interval based on binomial proportion
-                counts = rel_data['bin_counts']
-                props = rel_data['bin_accuracies']
-                se = np.sqrt(props * (1 - props) / (counts + BINOMIAL_EPSILON))
+            # DECISION plan-2026-10-05-analyzer-audit/F-036
+            # The band is drawn only over OCCUPIED bins. For an empty bin the old code
+            # evaluated `sqrt(0 * (1 - 0) / (0 + 1)) = 0` and drew a ZERO-HEIGHT band at
+            # y=0, reinforcing the phantom point F-035 removed from the line.
+            #
+            # This remains a normal-approximation interval on the OBSERVED ACCURACY with
+            # an ad-hoc `+1` continuity correction — NOT a Wilson interval, and not an
+            # interval on the confidence-vs-accuracy gap the diagram is really about.
+            # Both limits are documented rather than fixed: for a bin with p=0 and n=5 the
+            # true Wilson interval is [0, 0.49] where this draws [0, 0]. The title no
+            # longer claims "95% CI" because the correction is not one. Do NOT restore
+            # that title without replacing the estimator.
+            occupied_counts = np.asarray(
+                rel_data.get('bin_counts', np.ones_like(centers)),
+                dtype=float)[occupied]
+            occupied_props = accuracies[occupied]
+            se = np.sqrt(
+                occupied_props * (1.0 - occupied_props)
+                / (occupied_counts + BINOMIAL_EPSILON))
 
-                ax.fill_between(rel_data['bin_centers'],
-                                props - CONFIDENCE_INTERVAL_MULTIPLIER * se,
-                                props + CONFIDENCE_INTERVAL_MULTIPLIER * se,
-                                alpha=ALPHA_CONFIDENCE_FILL, color=color)
+            ax.fill_between(centers[occupied],
+                            occupied_props - CONFIDENCE_INTERVAL_MULTIPLIER * se,
+                            occupied_props + CONFIDENCE_INTERVAL_MULTIPLIER * se,
+                            alpha=ALPHA_CONFIDENCE_FILL, color=color)
 
-        ax.set_xlabel('Mean Predicted Probability')
+            # Plot the MEASURED in-bin confidence too when it differs from the centre.
+            # The band above is the interval on the observed accuracy; this is the
+            # model's actual mean confidence in each bin, which is the quantity the
+            # "predicted probability" axis claims to show.
+            finite_conf = occupied & np.isfinite(confidences)
+            if finite_conf.any() and not np.allclose(
+                    confidences[finite_conf], centers[finite_conf], atol=1e-12):
+                ax.plot(centers[finite_conf], confidences[finite_conf],
+                        'x', color=color, markersize=MARKER_SIZE_STANDARD * 0.8,
+                        alpha=ALPHA_MEASURED_CONFIDENCE)
+
+        ax.set_xlabel('Predicted probability (bin centre; × = measured in-bin mean)')
         ax.set_ylabel('Fraction of Positives')
-        ax.set_title('Reliability Diagrams with 95% CI')
+        ax.set_title('Reliability Diagrams (occupied bins only)')
         # REMOVED: Individual legend - will use figure-level legend
         ax.grid(True, alpha=ALPHA_GRID_LIGHT)
         ax.set_xlim([AXIS_LIMIT_MIN, AXIS_LIMIT_MAX])
@@ -255,24 +317,50 @@ class CalibrationVisualizer(BaseVisualizer):
             # Sort models to match color order
             model_order = self._sort_models_consistently(list(df['Model'].unique()))
             n_models = len(model_order)
-            n_classes = len(df['Class'].unique())
+            all_classes = sorted(df['Class'].unique(), key=lambda c: int(c))
 
-            x = np.arange(n_classes)
+            # DECISION plan-2026-10-05-analyzer-audit/F-038
+            # Index EACH MODEL's bars by CLASS LABEL, not by its own row order. `x` was
+            # built from the UNION of classes while `model_data['ECE']` was that model's
+            # own (shorter) series, so two models with different class counts — K=3 and
+            # K=5 — raised `ValueError: shape mismatch` from `ax.bar`. That propagated
+            # out of `create_visualizations`, which `ModelAnalyzer._create_visualizations`
+            # calls with no try, so the whole `analyze()` aborted BEFORE
+            # `save_results()` and every metric was lost to a plotting bug. A model with
+            # fewer classes now simply contributes bars for the classes it has, and the
+            # union axis is shared so the models remain comparable.
+            x = np.arange(len(all_classes), dtype=float)
             width = BAR_WIDTH_FACTOR / n_models
 
             for i, model in enumerate(model_order):
-                model_data = df[df['Model'] == model]
+                model_data = df[df['Model'] == model].set_index('Class')
+                # Reindex onto the shared class axis; a class this model does not
+                # report becomes NaN, which `bar` renders as absent rather than 0.0 —
+                # a missing class is not a zero-error class.
+                values = model_data['ECE'].reindex(all_classes)
                 color = self._get_model_color(model)
-                ax.bar(x + i * width, model_data['ECE'], width,
+                ax.bar(x + i * width, values.to_numpy(dtype=float), width,
                        alpha=ALPHA_BAR_STANDARD, color=color)
 
             ax.set_xlabel('Class')
             ax.set_ylabel('Expected Calibration Error')
             ax.set_title('Per-Class Calibration Error')
             ax.set_xticks(x + width * (n_models - 1) / 2)
-            ax.set_xticklabels([str(i) for i in range(n_classes)])
+            ax.set_xticklabels(all_classes)
             # REMOVED: Individual legend - will use figure-level legend
             ax.grid(True, alpha=ALPHA_GRID_STANDARD, axis='y')
+        else:
+            # DECISION plan-2026-10-05-analyzer-audit/F-039
+            # This branch had NO `else`, so a run where no model carried
+            # `per_class_ece` left the axes completely bare — no title, no message —
+            # unlike every sibling panel. An axis with nothing on it reads as a
+            # rendering failure rather than as "not computed".
+            ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
+                    'No per-class calibration data available',
+                    ha='center', va='center',
+                    transform=ax.transAxes, fontsize=NO_DATA_MESSAGE_FONT_SIZE)
+            ax.set_title('Per-Class Calibration Error')
+            ax.axis('off')
 
     def _plot_uncertainty_landscape(self, ax) -> None:
         """Plot uncertainty landscape with density contours for each model."""

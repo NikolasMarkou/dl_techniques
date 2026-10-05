@@ -170,13 +170,18 @@ def compute_eigenvalues(
             except Exception as e:
                 logger.debug(f"Sparse SVD failed: {e}, falling back to full SVD")
                 sv = np.linalg.svd(W, compute_uv=False)
-                if len(sv) > n_comp:
-                    sv = sv[:n_comp]
+            # DECISION plan-2026-10-05-analyzer-audit/F-019
+            # EVERY branch must apply the `n_comp` slice, not just the full-SVD one.
+            # The `k_target < 1` fallback and the exception fallback both returned the
+            # COMPLETE spectrum, so the two paths disagreed about what `n_comp` means.
+            # D-019's `spectrum_truncated` flag is derived from the returned count and
+            # so stayed honest either way, which is exactly why the inconsistency was
+            # invisible; the slice belongs here, after all three branches converge.
+            if len(sv) > n_comp:
+                sv = sv[:n_comp]
         else:
             # Use full SVD for smaller matrices
             sv = np.linalg.svd(W, compute_uv=False)
-            if len(sv) > n_comp:
-                sv = sv[:n_comp]
 
         # DECISION plan-2026-09-01T225724-e79ad4bd/D-019: truncation is decided from
         # the RESULT, not from the branch taken. `svds`, the `k_target < 1` fallback
@@ -220,8 +225,14 @@ def compute_eigenvalues(
         # Handle the case where min_sv was never updated
         min_sv = 0.0
 
-    # Sort all combined eigenvalues descending
-    return (np.sort(np.array(all_evals))[::-1], max_sv, min_sv, rank_loss,
+    # DECISION plan-2026-10-05-analyzer-audit/F-020
+    # Sort all combined eigenvalues DESCENDING and return an OWNED, positive-stride
+    # array. `np.sort(...)[::-1]` is a negative-stride VIEW of a temporary; the
+    # spectrum is handed to callers as `evals`, so one in-place write by any consumer
+    # would silently corrupt an array that looks private to it. Do NOT "simplify"
+    # this back to the view.
+    sorted_evals = np.ascontiguousarray(np.sort(np.array(all_evals))[::-1])
+    return (sorted_evals, max_sv, min_sv, rank_loss,
             spectrum_truncated)
 
 
@@ -313,8 +324,13 @@ def fit_powerlaw(
         # --- OPTIMIZATION END ---
 
         xmins = data[:-1]
-        alphas = np.zeros(N - 1, dtype=np.float64)
-        Ds = np.ones(N - 1, dtype=np.float64)
+        # DECISION plan-2026-10-05-analyzer-audit/F-023
+        # `np.empty`, not `np.zeros`/`np.ones`: the loop below writes EVERY index of
+        # both arrays (the `else` branch at Ds[i] = inf is unconditional), so the
+        # previous initialisers were dead. `empty` states that invariant instead of
+        # hiding it behind a value nothing reads.
+        alphas = np.empty(N - 1, dtype=np.float64)
+        Ds = np.empty(N - 1, dtype=np.float64)
 
         # Loop through possible xmins
         # Although we iterate, the heavy summation is now O(1) lookup
@@ -363,10 +379,17 @@ def fit_powerlaw(
 
         # 3. Select xmin.
         if N < SPECTRAL_SMALL_N_CUTOFF:
-            # WeightWatcher small-N path (fit_powerlaw_smallN): bias-corrected
-            # MLE alpha_bc = 1 + (n-1)/s, with xmin chosen by the penalized objective
+            # WeightWatcher small-N path (fit_powerlaw_smallN): the (n-1) MLE variant
+            # alpha_bc = 1 + (n-1)/s, with xmin chosen by the penalized objective
             # J = D_ks - 0.868/sqrt(n_tail). Only tails with n_tail >= k_min and s > eps
             # are considered.
+            # DECISION plan-2026-10-05-analyzer-audit/F-022
+            # This is NOT the Clauset/Shrunky bias correction, which has the different
+            # functional form `1 + n/(s - n(n-1)/(2*sum(log x)))`. It is the same
+            # (n-1)-for-n substitution WeightWatcher's `fit_powerlaw_smallN` applies,
+            # attributed below to that function rather than to the literature.
+            # Do NOT re-cite it as "bias-corrected MLE" (Clauset et al. 2009): the two
+            # are not the same estimator and the attribution was wrong.
             # DECISION plan_2026-06-03_bc986e52/D-008: small-N (<20) uses the (n-1)
             # bias correction + KS-tail-size penalty. The standard (>=20) path is
             # UNCHANGED. Do NOT apply the penalty or the (n-1) correction for N>=20.
@@ -398,8 +421,19 @@ def fit_powerlaw(
                 alpha = alphas_bc[best_i]
                 D = Ds[best_i]
             else:
-                # No valid small-N tail; fall back to the standard KS-argmin selection.
-                best_i = int(np.argmin(Ds))
+                # DECISION plan-2026-10-05-analyzer-audit/F-021
+                # Fall back to the standard KS-argmin selection, but RESTRICTED to the
+                # candidates this rule itself admits. Do NOT restore the bare
+                # `np.argmin(Ds)`: `Ds` still holds the STANDARD path's finite values
+                # for the trailing candidates whose tail is shorter than
+                # `SPECTRAL_SMALL_N_KMIN`, so a bare argmin could select exactly the
+                # tail the small-N rule just excluded — the fallback silently became a
+                # way around the rule it exists to honour.
+                eligible = np.arange(max(N - SPECTRAL_SMALL_N_KMIN + 1, 1))
+                eligible_Ds = Ds[eligible]
+                if eligible_Ds.size == 0 or not np.isfinite(eligible_Ds).any():
+                    return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, "No valid power-law fit found"
+                best_i = int(eligible[int(np.argmin(eligible_Ds))])
                 if Ds[best_i] == float('inf'):
                     return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, "No valid power-law fit found"
                 optimal_xmin = xmins[best_i]
@@ -468,7 +502,27 @@ def powerlaw_goodness_of_fit(
         p-value in [0, 1]. Values < 0.1 suggest the power-law is a poor fit.
         ``SPECTRAL_PVALUE_NOT_COMPUTED`` (-1.0) when the test could not be run at all —
         that is NOT a rejection of the power law.
+
+    Known divergences from Clauset et al. (2009). BOTH push the p-value DOWNWARD,
+    i.e. towards falsely rejecting the power law; neither is corrected here:
+
+    1. The OBSERVED distance is taken at the caller's fixed ``xmin`` (the reported
+       fit), while every synthetic draw is refitted with a FREE ``xmin`` search.
+       A free search minimises ``D_syn`` over a larger candidate set than the
+       observed fit was allowed, so ``D_syn`` is systematically smaller than
+       ``D_obs`` and ``count_ge`` is systematically too small.
+    2. Bootstrap draws whose own fit FAILS are dropped from the numerator while
+       the denominator stays ``n_bootstraps``, lowering the p-value again.
+
+    The single exit that returns a decisive ``0.0`` rather than the sentinel is
+    ``alpha <= 1.0 or xmin <= 0``: an unusable fit is a real rejection, not an
+    uncomputable test.
     """
+    # DECISION plan-2026-10-05-analyzer-audit/F-026
+    # This ONE exit returns a decisive 0.0, which is why the D-010 comment below
+    # says "every 'could not compute' exit" rather than "every exit". Do NOT
+    # generalise that comment to claim this branch returns the sentinel: it
+    # deliberately does not, and README.md:355-356 documents the exception.
     if alpha <= 1.0 or xmin <= 0:
         return 0.0
 
@@ -478,7 +532,9 @@ def powerlaw_goodness_of_fit(
         return SPECTRAL_PVALUE_NOT_COMPUTED
 
     # DECISION plan-2026-09-01T225724-e79ad4bd/D-010
-    # Every "could not compute" exit returns SPECTRAL_PVALUE_NOT_COMPUTED, never 0.0.
+    # Every "could not compute" exit BELOW this line returns
+    # SPECTRAL_PVALUE_NOT_COMPUTED, never 0.0. (The `alpha <= 1.0 / xmin <= 0` guard
+    # above is deliberately excluded and returns a decisive 0.0 — see F-026.)
     # Do NOT collapse these back to 0.0 for tidiness: 0.0 is a real, decisive p-value
     # meaning "certainly not a power law", and _generate_recommendations reports it to
     # the user as an unreliable alpha. Measured: 30% of layers (18 of 60) have a tail
@@ -570,14 +626,35 @@ def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
     # Δλ_min MUST stay signed (prior D-006 / SETOL §7.3) — do NOT wrap in abs(); the sign IS the
     # ERG boundary diagnostic (<0, ≈0 at the critical point, >0 normal).
     tail_count = compute_detX_constraint(ecs_evals)
-    sorted_asc = np.sort(rescaled)
-    if tail_count > 0 and tail_count <= len(sorted_asc):
-        boundary_idx = len(sorted_asc) - tail_count          # index of smallest eval IN the tail
-        boundary_idx = max(0, min(boundary_idx, len(sorted_asc) - 1))
-        erg_lambda_min = float(sorted_asc[boundary_idx])
-        delta_lambda_min = float(xmin * wscale * wscale - erg_lambda_min)   # SIGNED (keep prior D-006)
-    else:
+    # DECISION plan-2026-10-05-analyzer-audit/F-006
+    # The boundary index must be taken in the SAME BASIS the tail count is expressed in.
+    # `compute_detX_constraint`'s negative-tail path counts the rescaled eigenvalues
+    # ABOVE SPECTRAL_EPSILON, while this used to index the UNFILTERED ascending array —
+    # so whenever any rescaled ECS eigenvalue sat at or below the epsilon (routine, not
+    # exotic, given what `rescale_eigenvalues` does) the index shifted upward by the
+    # number dropped, `erg_lambda_min` became a strictly LARGER eigenvalue than the ERG
+    # boundary, and `erg_delta_lambda_min` — the y-axis of the funnel diagram — was
+    # biased.
+    #
+    # The count is CLAMPED into the pool it indexes rather than rejected when it
+    # overshoots. Rejecting (the old `tail_count <= len(sorted_asc)` guard) turned a
+    # merely-different basis into a `nan`; clamping keeps the boundary meaningful and
+    # is correct for the negative-tail path exactly, since that count is already a
+    # filtered-basis count. F-024 pins the two-basis inconsistency in the primitive, so
+    # the clamp here is what makes the contract safe — do NOT remove it, and do NOT
+    # "fix" the inconsistency in the primitive instead.
+    boundary_pool = np.sort(rescaled)
+    boundary_pool = boundary_pool[boundary_pool > SPECTRAL_EPSILON]
+    if len(boundary_pool) == 0:
         delta_lambda_min = float('nan')
+    else:
+        clamped_tail_count = min(int(tail_count), len(boundary_pool))
+        if clamped_tail_count <= 0:
+            delta_lambda_min = float('nan')
+        else:
+            boundary_idx = len(boundary_pool) - clamped_tail_count
+            erg_lambda_min = float(boundary_pool[boundary_idx])
+            delta_lambda_min = float(xmin * wscale * wscale - erg_lambda_min)   # SIGNED (keep prior D-006)
 
     return {
         'erg_log_det': erg_log_det,
@@ -851,57 +928,111 @@ def detect_correlation_trap(
 
 # ---------------------------------------------------------------------
 
+def calculate_matrix_entropy_from_evals(evals: np.ndarray, N: int) -> float:
+    """Normalised entropy of an eigenvalue spectrum, computed WITHOUT a sqrt round trip.
+
+    The analyzer holds ``evals`` (already ``sigma^2``). The historical call path
+    passed ``np.sqrt(evals)`` into :func:`calculate_matrix_entropy`, which squared it
+    straight back — a lossy round trip plus two full-size temporaries per layer.
+
+    Args:
+        evals: Eigenvalue spectrum (``sigma^2``), any order.
+        N: Maximum matrix dimension, used for the rank tolerance.
+
+    Returns:
+        Entropy in ``[0, 1]``; ``0.0`` on empty, degenerate or rank-deficient input.
+    """
+    if evals is None or len(evals) == 0:
+        return 0.0
+    return _normalized_entropy_from_evals(
+        np.asarray(evals, dtype=np.float64),
+        np.sqrt(np.asarray(evals, dtype=np.float64)),
+        N,
+    )
+
+
+def _normalized_entropy_from_evals(evals: np.ndarray, S: np.ndarray, N: int) -> float:
+    """Shared entropy kernel over an eigenvalue spectrum and its singular values.
+
+    Args:
+        evals: The ``sigma^2`` spectrum the entropy is taken over.
+        S: The corresponding singular values, used ONLY for the relative rank
+            tolerance. Pass the exact singular values of ``evals``; supplying
+            ``sqrt(evals)`` is exact enough and is what both public entry points do.
+        N: Maximum matrix dimension.
+
+    Returns:
+        Entropy in ``[0, 1]``, or ``0.0`` when undefined.
+    """
+    if len(evals) == 0 or np.max(S) < SPECTRAL_EPSILON:
+        return 0.0
+
+    # DECISION plan-2026-10-05-analyzer-audit/F-014
+    # The RANK (denominator) and the ENTROPY TERMS (numerator) were computed over two
+    # DIFFERENT filters: a RELATIVE tolerance here (`max(S) * N * eps`) and an ABSOLUTE
+    # one below (`p > 1e-10`). `rank` therefore counted singular values that the sum
+    # then discarded, so `log(rank)` exceeded the log of the number of terms actually
+    # summed and the result read systematically LOW against the `[0, 1]` range this
+    # function and README.md both claim. ONE filter now serves both.
+    tol = np.max(S) * N * np.finfo(S.dtype).eps
+    rank = np.count_nonzero(S > tol)
+    if rank == 0:
+        return 0.0
+
+    # A rank-1 spectrum has log(rank) == 0, so the normalised entropy is 0/0 and
+    # UNDEFINED. The old `log_rank = 1.0` fallback returned the UNNORMALISED value,
+    # which can exceed 1.0 and breaks the documented range. Report 0.0 — the same
+    # answer a single-term entropy gives — rather than dividing by 1.0.
+    if rank <= 1:
+        return 0.0
+
+    evals_sum = np.sum(evals)
+    if evals_sum < SPECTRAL_EPSILON:
+        return 0.0
+
+    p = evals / evals_sum
+
+    # Sum over the SAME `rank` values the denominator counts. Drop only exact zeros,
+    # which contribute 0 to the sum and are undefined in the log.
+    p_valid = p[S > tol]
+    p_valid = p_valid[p_valid > 0.0]
+    if len(p_valid) == 0:
+        return 0.0
+
+    entropy = -np.sum(p_valid * np.log(p_valid)) / np.log(rank)
+
+    if np.isnan(entropy):
+        return 0.0
+    return float(entropy)
+
+
 def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
     """
     Calculate the matrix entropy from singular values.
-
-    Updated to be more robust against NaNs and zeros.
 
     Args:
         singular_values: Array of singular values from SVD.
         N: Maximum dimension of the matrix for rank calculation.
 
     Returns:
-        Matrix entropy (float). Returns 0.0 if calculation fails.
+        Normalised entropy of the eigenvalue spectrum in ``[0, 1]``, where ``0.0``
+        indicates rank collapse and ``1.0`` a perfectly flat spectrum.
+
+    .. note::
+       DECISION plan-2026-10-05-analyzer-audit/F-014: the RANK (denominator) and the
+       ENTROPY TERMS (numerator) were computed over two DIFFERENT filters — a relative
+       tolerance here and an absolute ``p > 1e-10`` below — so ``rank`` counted singular
+       values the sum then discarded, ``log(rank)`` exceeded the log of the terms
+       actually summed, and the result read systematically LOW against the ``[0, 1]``
+       range this function and README.md both claim. ONE filter now serves both, and a
+       rank-1 spectrum reports ``0.0`` instead of an UNNORMALISED value that could
+       exceed 1.0. Do NOT restore the ``log_rank = 1.0`` fallback.
     """
     try:
-        if len(singular_values) == 0 or np.max(singular_values) < SPECTRAL_EPSILON:
+        if singular_values is None or len(singular_values) == 0:
             return 0.0
-
-        # 1. Calculate matrix rank using numpy-compatible tolerance
-        S = singular_values
-        tol = np.max(S) * N * np.finfo(S.dtype).eps
-        rank = np.count_nonzero(S > tol)
-
-        # 2. Calculate eigenvalues from singular values
-        evals = S * S
-
-        # 3. Calculate probabilities (normalized eigenvalues)
-        evals_sum = np.sum(evals)
-        if evals_sum < SPECTRAL_EPSILON:
-            return 0.0
-
-        p = evals / evals_sum
-
-        # 4. Compute Entropy: -sum(p * log(p)) / log(rank)
-        # Add epsilon to mask zeros before log
-        p_valid = p[p > SPECTRAL_EPSILON]
-
-        if len(p_valid) == 0:
-            return 0.0
-
-        entropy_unnormalized = -np.sum(p_valid * np.log(p_valid))
-
-        # Avoid division by zero if rank is 1
-        log_rank = np.log(rank) if rank > 1 else 1.0
-
-        entropy = entropy_unnormalized / log_rank
-
-        # Handle NaN results from numerical instability
-        if np.isnan(entropy):
-            return 0.0
-
-        return float(entropy)
+        S = np.asarray(singular_values, dtype=np.float64)
+        return _normalized_entropy_from_evals(S * S, S, N)
     except Exception as e:
         logger.debug(f"Error calculating matrix entropy: {e}")
         return 0.0
@@ -975,6 +1106,15 @@ def calc_mp_soft_rank(evals: np.ndarray, N: int, M: int) -> float:
     if lambda_max <= SPECTRAL_EPSILON:
         return 0.0
 
+    # DECISION plan-2026-10-05-analyzer-audit/F-013
+    # The whole-spectrum mean, NOT `estimate_bulk_variance`. This is a deliberate
+    # divergence from `detect_correlation_trap`, which measures the SPIKE-EXCLUDED bulk
+    # because there the spike is the signal being detected; here the ratio is computed
+    # on the ORIGINAL spectrum and there is no trap to exclude. Do NOT "unify" the two
+    # estimators — they answer different questions, and D-017's measurement (a 20x spike
+    # moving the mean 1.89x) is a statement about the RANDOMIZED spectrum only.
+    # README.md previously described this column as using "the layer's own BULK
+    # variance"; that was wrong and has been corrected.
     sigma_sq = float(np.mean(evals))
     if sigma_sq < SPECTRAL_EPSILON:
         return 0.0
@@ -986,11 +1126,24 @@ def calc_mp_soft_rank(evals: np.ndarray, N: int, M: int) -> float:
 # ---------------------------------------------------------------------
 
 def compute_mp_softrank(evals: np.ndarray, num_spikes: int = 0) -> float:
-    """
-    Marchenko-Pastur soft rank = lambda_plus / lambda_max (WeightWatcher RMT_Util.mp_soft_rank).
+    """Soft rank = largest non-spike eigenvalue / original lambda_max.
 
-    With num_spikes outliers removed from the top, lambda_plus is the largest remaining
-    (bulk) eigenvalue; the ratio to lambda_max is 1.0 when no spikes, < 1.0 when spikes
+    DECISION plan-2026-10-05-analyzer-audit/F-040: this is NOT WeightWatcher's
+    ``mp_soft_rank`` and was never claimed to be parity with it. The real
+    WeightWatcher quantity is :func:`calc_mp_soft_rank`, which computes a genuine
+    Marchenko-Pastur edge via ``calc_mp_edges``; here ``lambda_plus`` is merely the
+    largest SURVIVING empirical eigenvalue after dropping ``num_spikes`` off the top, so
+    it carries no random-matrix theory behind it. The docstring previously named
+    ``RMT_Util.mp_soft_rank`` as the source, conflating the two.
+
+    This function is also UNWIRED: D-013 deliberately routes the reported
+    ``mp_softrank`` column through :func:`calc_mp_soft_rank` instead, because this form
+    needs ``num_rand_spikes`` and that column is always 0 at the shipped
+    ``spectral_randomize=False`` default. It is retained as public API and is pinned by
+    ``test_spectral_metrics.py``.
+
+    With ``num_spikes`` outliers removed from the top, the numerator is the largest
+    remaining (bulk) eigenvalue; the ratio is 1.0 when no spikes, < 1.0 when spikes
     dominate the spectrum.
 
     Args:
@@ -998,7 +1151,7 @@ def compute_mp_softrank(evals: np.ndarray, num_spikes: int = 0) -> float:
         num_spikes: Number of top (spike) eigenvalues to drop before taking lambda_plus.
 
     Returns:
-        lambda_plus / lambda_max in (0, 1] for positive spectra; 0.0 on empty/degenerate input.
+        The ratio in (0, 1] for positive spectra; 0.0 on empty/degenerate input.
     """
     if evals is None or len(evals) == 0:
         return 0.0
@@ -1037,7 +1190,14 @@ def calculate_spectral_metrics(
     """
     alpha_unreliable = bool(alpha > SPECTRAL_ALPHA_SANITY_MAX)
 
-    if len(evals) == 0:
+    # DECISION plan-2026-10-05-analyzer-audit/F-030
+    # Every sibling kernel in this module (`compute_eigenvalues`, `calc_mp_soft_rank`,
+    # `detect_correlation_trap`, `compute_erg_condition`) treats a missing spectrum as
+    # a legitimate input and returns its documented empty result. This one raised a
+    # bare `TypeError: object of type 'NoneType' has no len()` from `len(evals)`.
+    # Do NOT remove the empty-spectrum branch below to "simplify" the two into one:
+    # they answer different questions (absent vs present-but-empty).
+    if evals is None or len(evals) == 0:
         return {
             "norm": 0.0, "log_norm": 0.0, "spectral_norm": 0.0,
             "log_spectral_norm": 0.0, "alpha_weighted": 0.0,
@@ -1074,6 +1234,18 @@ def calculate_spectral_metrics(
     # alpha_hat: SETOL-paper notation α̂ for alpha_weighted (alias; value identical).
     alpha_hat = alpha_weighted
 
+    # DECISION plan-2026-10-05-analyzer-audit/F-001
+    # stable_rank = (Σ λ) / max(λ) on the RAW spectrum, exactly as the module
+    # docstring and README.md state. Do NOT reuse `spectral_norm_safe` here: it exists
+    # to keep `log10` finite, and dividing the raw numerator by a FLOORED denominator
+    # collapses the ratio to ~1 whenever the whole spectrum sits below the floor.
+    # MEASURED on 100 eigenvalues all equal to 1e-12: the floored form published
+    # `stable_rank = 1.0` where the true value is 100 — a 100x under-report on a
+    # column that is averaged into `spectral_summary` and drawn on the dashboard.
+    # A rank is scale-free, so the floor has no business here at all. A genuinely
+    # empty-or-zero spectrum reports 0.0 rather than dividing by the floor.
+    stable_rank = float(norm / spectral_norm) if spectral_norm > 0.0 else 0.0
+
     # alpha_hat_normalized: non-WeightWatcher SETOL-theory variant using the
     # X=(1/N)WᵀW normalization, α · log₁₀(λ_max / N). NOT part of the WW metric set;
     # retained as a SETOL extra for layers of differing dimension.
@@ -1094,7 +1266,7 @@ def calculate_spectral_metrics(
         "alpha_hat": alpha_hat,
         "alpha_hat_normalized": alpha_hat_normalized,
         "log_alpha_norm": log_alpha_norm,
-        "stable_rank": norm / spectral_norm_safe,
+        "stable_rank": stable_rank,
         "alpha_unreliable": alpha_unreliable
     }
 
@@ -1285,9 +1457,36 @@ def get_top_eigenvectors(
                     # constant vector is a legitimate ARPACK start; it is not a
                     # sample, so no seed needs threading through the call chain.
                     # See decisions.md D-003.
-                    u, s, _ = svds(
-                        weight_matrix, k=k,
-                        v0=np.full(min_dim, 1.0 / np.sqrt(min_dim)))
+                    # DECISION plan-2026-10-05-analyzer-audit/F-029
+                    # ...but a DETERMINISTIC start is not automatically a SAFE one.
+                    # `np.full(min_dim, c)` has components summing to `c * min_dim`, so it
+                    # is exactly orthogonal to every vector that sums to ZERO — and ARPACK
+                    # handed a start inside the orthogonal complement of the invariant
+                    # subspace it wants converges to the WRONG singular vectors with no
+                    # error raised. A trained antisymmetric or column-sum-zero kernel
+                    # produces exactly such a top singular vector, so the determinism fix
+                    # traded a reproducibility wobble for a silent-correctness hazard.
+                    #
+                    # The replacement must be deterministic AND must have NO SYSTEMATIC
+                    # null. A half+/half-±1 ramp is deterministic but sums to ZERO for
+                    # even `min_dim`, which just swaps which family is null; it is not
+                    # acceptable. `arange(1, min_dim + 1)` is used instead: strictly
+                    # positive, so `v0.sum() != 0` (not in the zero-sum subspace), and
+                    # non-constant, so `v0 @ ones != 0` either. Neither the constant
+                    # family nor the zero-sum family is orthogonal to it.
+                    #
+                    # MEASURED consequence: this moves `svds` output in the last ~1e-13,
+                    # which moves the ARPACK-derived concentration columns
+                    # (`participation_ratio`, `min_participation_ratio`,
+                    # `concentration_score`, `critical_weight_count`) off their pinned
+                    # literals. Those pins are re-baselined in
+                    # `test_spectral_metrics.py` with the drift recorded, and pinned to a
+                    # RELATIVE tolerance rather than bit-identity — see F-029 there. The
+                    # spectral values themselves are unchanged: only ARPACK's choice
+                    # among a degenerate invariant subspace moved.
+                    v0 = np.arange(1.0, min_dim + 1.0)
+                    v0 = v0 / np.linalg.norm(v0)
+                    u, s, _ = svds(weight_matrix, k=k, v0=v0)
                     order = np.argsort(s)[::-1]  # svds returns ascending
                     return s[order] ** 2, u[:, order]
                 except Exception as e:
@@ -1326,6 +1525,12 @@ def _power_iteration(
         tol: Convergence tolerance on the eigenvector update.
         rng: Generator for the random start vectors. ``None`` builds an unseeded
             one, so the returned vectors are not reproducible.
+
+    .. note::
+       Not reached from ``ModelAnalyzer``: ``get_top_eigenvectors`` defaults to
+       ``method='direct'`` and the analyzer never requests power iteration. It is
+       public API and is exercised by ``test_analysis_is_reproducible.py``, so it is
+       held to the same correctness bar as the rest of the module (F-028).
     """
     n = matrix.shape[0]
     eigvals = np.zeros(k)
@@ -1344,21 +1549,34 @@ def _power_iteration(
     for i in range(k):
         q = Q[:, i].reshape(-1, 1)
 
-        # Deflate previously computed eigenvectors
-        for j in range(i):
-            prev_q = eigvecs[:, j].reshape(-1, 1)
-            q = q - prev_q @ (prev_q.T @ q)
-
         # Power iteration
         for _ in range(max_iter):
+            # DECISION plan-2026-10-05-analyzer-audit/F-028
+            # Re-orthogonalise AGAINST the already-found eigenvectors on EVERY
+            # iteration, not once before the loop. The single pre-loop pass was lost the
+            # moment `matrix @ q` reintroduced the previously-converged directions, so
+            # the returned vectors were not mutually orthogonal to machine precision —
+            # which is the entire purpose of deflation. In-loop placement is the
+            # standard two-pass modified Gram-Schmidt, at O(n*k) per iteration against
+            # an O(n^2) matvec.
+            for j in range(i):
+                prev_q = eigvecs[:, j].reshape(-1, 1)
+                q = q - prev_q @ (prev_q.T @ q)
+
             z = matrix @ q
             z_norm = np.linalg.norm(z)
             if z_norm < SPECTRAL_EPSILON:
                 break
             q_new = z / z_norm
 
-            # Check convergence
-            if np.linalg.norm(q_new - q) < tol:
+            # DECISION plan-2026-10-05-analyzer-audit/F-028
+            # Compare SUBSPACES, not vectors: `|q_new - q|` never goes to zero for a
+            # dominant NEGATIVE eigenvalue, because the iterate flips sign every step, so
+            # the test could never fire and all 100 iterations were burned. The projector
+            # `|q_new q_new^T - q q^T|` is sign-invariant. Unreachable from the analyzer
+            # (`W W^T` is PSD), but this is a public helper taking an arbitrary symmetric
+            # matrix, so it must be correct for one.
+            if np.linalg.norm(np.outer(q_new, q_new) - np.outer(q, q)) < tol:
                 q = q_new
                 break
             q = q_new
@@ -1600,7 +1818,17 @@ def jensen_shannon_distance(p: np.ndarray, q: np.ndarray) -> float:
 
     Returns:
         Jensen-Shannon distance in [0, 1]. ``1.0`` for an empty input, ``0.0``
-        when both spectra collapse to a single shared value.
+        when both spectra collapse to a single shared value, and ``nan`` when both
+        spectra are entirely sub-epsilon — see F-016 below.
+
+    .. note::
+       DECISION plan-2026-10-05-analyzer-audit/F-016: ``0.0`` previously also came back
+       when every value of BOTH inputs was sub-epsilon, because the ``maximum(eps)``
+       floor above puts them all at exactly ``log10(1e-10) = -10`` and the
+       flat-spectrum branch then fired — maximum similarity, the strongest possible
+       agreement, for two spectra that carry no resolvable structure at all. That case
+       returns ``nan`` instead: the quantity is undefined, not zero. Do NOT restore
+       the ``0.0``.
     """
     if len(p) == 0 or len(q) == 0:
         return 1.0
@@ -1619,6 +1847,16 @@ def jensen_shannon_distance(p: np.ndarray, q: np.ndarray) -> float:
     max_val = max(np.max(log_p), np.max(log_q))
 
     if min_val == max_val:
+        # DECISION plan-2026-10-05-analyzer-audit/F-016
+        # Distinguish "both spectra are the same single value" (a real 0.0) from "both
+        # spectra are entirely sub-epsilon and were flattened by the floor above"
+        # (undefined, not zero — maximum similarity is a real claim about two spectra
+        # and is not what two all-floored spectra have).
+        raw_p = np.asarray(p, dtype=float)
+        raw_q = np.asarray(q, dtype=float)
+        if (np.all(raw_p <= SPECTRAL_EPSILON) and
+                np.all(raw_q <= SPECTRAL_EPSILON)):
+            return float('nan')
         return 0.0
 
     p_hist, _ = np.histogram(log_p, bins=SPECTRAL_DEFAULT_BINS, range=(min_val, max_val), density=True)
@@ -1649,8 +1887,13 @@ def rescale_eigenvalues(evals: np.ndarray) -> Tuple[np.ndarray, float]:
         return evals, 1.0
 
     wnorm = np.sqrt(np.sum(evals))
+    # DECISION plan-2026-10-05-analyzer-audit/F-017
+    # The degenerate return hands the CALLER'S array back, not a copy. Every current
+    # caller only reads it, so this is safe today — but the aliasing is unguarded and
+    # one in-place write away from corrupting the caller's `evals`. Return a copy so
+    # the contract is "the returned array is yours to modify".
     if wnorm < SPECTRAL_EPSILON:
-        return evals, 1.0
+        return np.array(evals, copy=True), 1.0
 
     wscale = np.sqrt(N) / wnorm
     rescaled_evals = (wscale * wscale) * evals
@@ -1667,6 +1910,15 @@ def compute_detX_constraint(evals: np.ndarray) -> int:
     Returns:
         The size of the SMALLEST top-of-spectrum tail whose log-determinant is
         negative, or the full eigenvalue count when no such tail exists.
+
+    .. warning::
+       DECISION plan-2026-10-05-analyzer-audit/F-024: the two return paths are NOT
+       expressed in the same basis. The negative-tail path returns a count of the
+       eigenvalues **above** ``SPECTRAL_EPSILON`` (the array ``log_sorted``); the
+       no-negative-tail fallback returns ``len(sorted_evals)``, the UNFILTERED count.
+       This is deliberate and bit-identity pinned — see the anchor at the fallback — so
+       **a caller must not index an array with this value without clamping it into that
+       array's length.** ``compute_erg_condition`` clamps at F-006.
     """
     if evals is None or len(evals) < 2:
         return 0
@@ -1695,6 +1947,25 @@ def compute_detX_constraint(evals: np.ndarray) -> int:
         idx = int(negative_tails[-1]) + 1
         return len(log_sorted) - idx
 
+    # DECISION plan-2026-10-05-analyzer-audit/F-024
+    # This `return len(sorted_evals)` is INCONSISTENT with the return above, which
+    # counts `len(log_sorted)` — the same array, minus the sub-epsilon eigenvalues.
+    # It is DELIBERATELY left that way. Do NOT "fix" it to `len(log_sorted)`.
+    #
+    # Why: this function is a shared primitive whose return value is bit-identity
+    # pinned by `tests/test_analyzer/test_spectral_metrics.py::
+    # TestDetXConstraintIsUnchangedAndLinear` against a verbatim transcription of the
+    # pre-optimisation loop, and it feeds `int()` at
+    # `src/dl_techniques/optimization/ww_pgd_optimizer.py:361`, where the count selects
+    # a discrete projection rank. Changing the fallback changes that decision on
+    # exactly the degenerate spectra (many sub-epsilon eigenvalues) the pin exists to
+    # protect.
+    #
+    # The REAL defect this exposed is in the CONSUMER, not here:
+    # `compute_erg_condition` indexed the UNFILTERED ascending array with a count that
+    # the negative-tail path expresses in the filtered basis. That is fixed at the
+    # consumer by F-006, which clamps the count into the pool it indexes. Making this
+    # function self-consistent would fix the caller a second time and break the pin.
     return len(sorted_evals)
 
 

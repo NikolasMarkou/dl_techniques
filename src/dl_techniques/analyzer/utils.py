@@ -291,15 +291,46 @@ def safe_tight_layout(fig, **kwargs):
 
 
 def smooth_curve(values: np.ndarray, window_size: int = 5) -> np.ndarray:
-    """Apply smoothing to a curve using a moving average."""
-    if len(values) < window_size:
-        return values
+    """Apply smoothing to a curve using a moving average.
 
-    # Pad the array to handle edges
-    padded = np.pad(values, (window_size//2, window_size//2), mode='edge')
+    The returned array ALWAYS has the same length as ``values`` — an even
+    ``window_size`` included.
+
+    .. important::
+       DECISION plan-2026-10-05-analyzer-audit/F-042: the padding was asymmetric for an
+       even window. `np.pad(v, (w//2, w//2))` adds ``w - 1`` elements in total, but a
+       `'valid'` convolution of width ``w`` over that padded array emits
+       ``len(v) + (w - 1) - w + 1 = len(v)`` samples only when ``w`` is ODD. For even
+       ``w`` it emits ``len(v) + 1``: MEASURED ``window=4`` on 20 points returned 21,
+       ``window=6`` returned 21, while ``window=5`` and ``window=7`` returned 20. The
+       caller plotted the result against ``range(len(train_loss))``, so an even
+       `smoothing_window` produced a 21-point curve on a 20-point axis.
+
+       The padding is now computed so the total added is exactly ``w - 1``:
+       ``left = (w - 1) // 2``, ``right = w - 1 - left``. For odd ``w`` this reduces to
+       the original symmetric ``w//2`` on both sides, so the previously-correct odd case
+       is bit-identical.
+
+    .. note::
+       The short-input path returns a COPY. It used to return ``values`` itself, so
+       `TrainingMetrics.smoothed_curves[model][metric]` aliased the caller's history
+       list — mutating one mutated the other, and the "smoothed" series was the raw one
+       by reference rather than by accident of plotting.
+    """
+    values = np.asarray(values)
+    if window_size < 1:
+        raise ValueError(f"window_size must be >= 1, got {window_size}")
+    if len(values) < window_size:
+        return np.array(values, copy=True)
+
+    # Pad the array to handle edges, asymmetrically for even windows so that the
+    # 'valid' convolution returns exactly len(values) samples (F-042).
+    left = (window_size - 1) // 2
+    right = window_size - 1 - left
+    padded = np.pad(values, (left, right), mode='edge')
 
     # Apply moving average
-    smoothed = np.convolve(padded, np.ones(window_size)/window_size, mode='valid')
+    smoothed = np.convolve(padded, np.ones(window_size) / window_size, mode='valid')
 
     return smoothed
 
@@ -323,12 +354,12 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
     # Pass 1: Try exact matches (most reliable)
     for pattern in patterns:
         if pattern in history:
-            if not any(pattern.startswith(prefix) for prefix in exclude_prefixes):
+            if not _is_excluded(pattern, exclude_prefixes):
                 return history[pattern]
 
     # Pass 2: Try word-boundary pattern matching
     for key in history:
-        if any(key.startswith(prefix) for prefix in exclude_prefixes):
+        if _is_excluded(key, exclude_prefixes):
             continue
 
         key_components = _split_metric_name(key)
@@ -339,7 +370,7 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
 
     # Pass 3: Try fuzzy matching
     for key in history:
-        if any(key.startswith(prefix) for prefix in exclude_prefixes):
+        if _is_excluded(key, exclude_prefixes):
             continue
 
         for pattern in patterns:
@@ -347,6 +378,43 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
                 return history[key]
 
     return None
+
+
+# DECISION plan-2026-10-05-analyzer-audit/F-064
+# The spellings Keras uses for the SAME quantity. Prefixing `validation_data` with a
+# `tf.data.Dataset` makes every metric key `validation_*` instead of `val_*` (this is
+# documented Keras behaviour, not a hypothesis).
+#
+# Why it matters: the exclusion test was a bare `key.startswith('val_')`, so
+# `validation_loss` was NOT excluded. With `{'training_loss': ..., 'validation_loss': ...}`
+# in the history, `find_metric_in_history(history, LOSS_PATTERNS,
+# exclude_prefixes=['val_'])` returned the VALIDATION curve where the caller wanted the
+# TRAINING one — so `overfitting_index = mean(val_final) - mean(train_final)` compared
+# validation against itself and read exactly `0.0` for a model that was overfitting, and
+# `final_gap` did the same. A silent, plausible, completely wrong zero.
+#
+# Do NOT "fix" this by adding `'validation'` to every call site's exclude list: the
+# call sites already say `['val_']` and the two spellings are one quantity.
+_VALIDATION_PREFIXES = ('val_', 'validation_', 'valid_')
+
+
+def _is_excluded(key: str, exclude_prefixes: List[str]) -> bool:
+    """Whether ``key`` carries one of ``exclude_prefixes``, modulo the val spellings.
+
+    Args:
+        key: A metric name from a training history.
+        exclude_prefixes: Prefixes to reject. ``'val_'`` also rejects ``validation_*`` and
+            ``valid_*`` (F-064).
+
+    Returns:
+        ``True`` when the key must be skipped.
+    """
+    normalized = key
+    for spelling in _VALIDATION_PREFIXES[1:]:
+        if spelling != 'val_' and normalized.startswith(spelling):
+            normalized = 'val_' + normalized[len(spelling):]
+            break
+    return any(normalized.startswith(prefix) for prefix in exclude_prefixes)
 
 
 def _split_metric_name(name: str) -> List[str]:

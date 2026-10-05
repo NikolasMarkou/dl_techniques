@@ -893,12 +893,12 @@ class ModelAnalyzer:
             filename: Name of the output JSON file. Defaults to "analysis_results.json".
         """
         # DECISION plan-2026-09-01T225724-e79ad4bd/D-029
-        # Serialize the DECLARED public fields. Do NOT go back to
-        # `self.config.__dict__` minus a literal `'_original_rcParams'`: that filter
-        # is name-specific, so every other private attribute (and every attribute a
-        # caller happens to set) leaked into the artifact. MEASURED: a
-        # `config._probe_private_state` assignment reached the published `config`
-        # block. See decisions.md D-029.
+        # Serialize the DECLARED public fields, by iterating `dataclasses.fields`.
+        # Do NOT go back to `self.config.__dict__` minus a literal
+        # `'_original_rcParams'`: that filter is name-specific, so every other private
+        # attribute (and every attribute a caller happens to set) leaked into the
+        # artifact. MEASURED: a `config._probe_private_state` assignment reached the
+        # published `config` block. See decisions.md D-029.
         serializable_config = {
             f.name: getattr(self.config, f.name)
             for f in dataclasses.fields(self.config)
@@ -943,6 +943,14 @@ class ModelAnalyzer:
             if self.results.spectral_rand_esds:
                 results_dict['spectral_rand_esds'] = self.results.spectral_rand_esds
 
+        # DECISION plan-2026-10-05-analyzer-audit/F-040
+        # Everything below operates on a DEEP-ish COPY of the containers it prunes.
+        # `results_dict['activation_stats']` used to BE `self.results.activation_stats`
+        # and `results_dict['confidence_metrics']` the same object, so `del
+        # stats['sample_activations']` below permanently destroyed the live
+        # `AnalysisResults`: a second `save_results()` found the data gone, and
+        # re-saving with `json_include_per_sample_data=True` could never recover it.
+        # Serialization is a READ of the results and must not be a write to them.
         if not self.config.json_include_per_sample_data:
             pruned_confidence = {}
             for model_name, metrics in results_dict.get('confidence_metrics', {}).items():
@@ -962,11 +970,11 @@ class ModelAnalyzer:
                 pruned_confidence[model_name] = pruned_metrics
             results_dict['confidence_metrics'] = pruned_confidence
 
-            # Prune sample_activations from activation_stats
-            for model_name, layers in results_dict.get('activation_stats', {}).items():
-                for layer_name, stats in layers.items():
-                    if 'sample_activations' in stats:
-                        del stats['sample_activations']
+            # Prune sample_activations from a COPY of activation_stats.
+            for layers in results_dict.get('activation_stats', {}).values():
+                for stats in layers.values():
+                    if isinstance(stats, dict):
+                        stats.pop('sample_activations', None)
 
         # Add spectral analysis DataFrame if it exists
         if self.results.spectral_analysis is not None:
@@ -975,6 +983,14 @@ class ModelAnalyzer:
         def convert_numpy(obj: Any) -> Any:
             """
             Recursively convert numpy types and pandas DataFrames to JSON-serializable formats.
+
+            DECISION plan-2026-10-05-analyzer-audit/F-072: there is no per-key skip set
+            here. `AnalysisResults._non_serializable_fields` is gone (F-071): it contained
+            exactly one member — its own name — so the filter could only ever remove the
+            field it was defined on, and nothing in the package ever called
+            `add_non_serializable_field`. `save_results` builds its payload from DECLARED
+            fields and prunes only what its own config flags name, so a stray private key
+            cannot leak. Do NOT reintroduce a skip set without a caller.
 
             Args:
                 obj: Object to convert, may contain nested numpy arrays or pandas DataFrames.
@@ -1001,10 +1017,8 @@ class ModelAnalyzer:
             elif isinstance(obj, pd.DataFrame):
                 return obj.to_dict()
             elif isinstance(obj, dict):
-                # Respect non-serializable field markers if present
-                skip_fields = getattr(self.results, '_non_serializable_fields', set())
-                return {k: convert_numpy(v) for k, v in obj.items()
-                       if k not in skip_fields}
+                # F-072: no per-key skip set; see the anchor above.
+                return {k: convert_numpy(v) for k, v in obj.items()}
             elif isinstance(obj, list):
                 return [convert_numpy(item) for item in obj]
             else:
@@ -1035,12 +1049,30 @@ class ModelAnalyzer:
             Dictionary containing serializable training metrics data.
         """
         metrics = self.results.training_metrics
+        # DECISION plan-2026-10-05-analyzer-audit/F-041
+        # Emit ALL EIGHT declared `TrainingMetrics` fields. `stability_cv` and
+        # `relative_overfitting_index` were dropped here, which defeated the whole point
+        # of D-030: those two exist specifically because the raw keys are in LOSS UNITS
+        # and therefore not comparable across models with different loss functions — the
+        # multi-architecture case this package advertises. An artifact that omits them
+        # cannot be compared across architectures at all, which is the one thing a
+        # reader opens it to do. `smoothed_curves` is included too, so the plotted curves
+        # are reproducible from the artifact.
+        # Do NOT prune this dict back to five keys: `dataclasses.fields` is the honest
+        # source and this hand-written list is what drifted.
         return {
-            'epochs_to_convergence': metrics.epochs_to_convergence,
-            'training_stability_score': metrics.training_stability_score,
-            'overfitting_index': metrics.overfitting_index,
+            'epochs_to_convergence': dict(metrics.epochs_to_convergence),
+            'training_stability_score': dict(metrics.training_stability_score),
+            'stability_cv': dict(metrics.stability_cv),
+            'overfitting_index': dict(metrics.overfitting_index),
+            'relative_overfitting_index': dict(metrics.relative_overfitting_index),
             'peak_performance': metrics.peak_performance,
-            'final_gap': metrics.final_gap,
+            'final_gap': dict(metrics.final_gap),
+            'smoothed_curves': {
+                model: {name: np.asarray(values)
+                        for name, values in curves.items()}
+                for model, curves in metrics.smoothed_curves.items()
+            },
         }
 
     def get_summary_statistics(self) -> Dict[str, Any]:
@@ -1342,9 +1374,34 @@ class ModelAnalyzer:
                 evals = model_esds.get(layer_id, np.array([]))
                 num_smooth = spectral_metrics.compute_detX_constraint(evals)
             elif method == SmoothingMethod.LAMBDA_MIN:
-                num_smooth = int(row.get('num_pl_spikes', 0.5 * row.get('num_evals', 0)))
+                # DECISION plan-2026-10-05-analyzer-audit/F-043
+                # `num_pl_spikes` is -1 on a FAILED fit, and on a TRUNCATED spectrum it
+                # is a partial tail count rather than a rank. Either way it is not a
+                # component count. The old `int(row.get('num_pl_spikes', ...))` passed
+                # -1 straight to `smooth_matrix`, whose `s[n_comp:] = 0` then evaluated
+                # `s[-1:] = 0` — it ZEROED THE SMALLEST singular value, i.e. the exact
+                # opposite of smoothing, silently and with no warning. Fall back to half
+                # the eigenvalue count, which is the documented intent of this branch, and
+                # clamp into `[1, num_evals]` so no sentinel can reach the kernel.
+                num_evals = int(row.get('num_evals', 0) or 0)
+                spikes = row.get('num_pl_spikes', None)
+                try:
+                    spikes = int(spikes)
+                except (TypeError, ValueError):
+                    spikes = -1
+                if spikes <= 0 or num_evals <= 0:
+                    logger.warning(
+                        f"Layer {layer_id} ({layer.name}): method='lambda_min' has no "
+                        f"usable num_pl_spikes (got {spikes!r}); keeping half of "
+                        f"{num_evals} components instead.")
+                    num_smooth = num_evals // 2
+                else:
+                    num_smooth = min(spikes, num_evals)
             else:
                 num_smooth = int(percent * row.get('num_evals', 0))
+            # Never let a non-positive or over-long component count reach
+            # `smooth_matrix`, whatever the branch computed.
+            num_smooth = max(1, min(int(num_smooth), int(row.get('num_evals', 0) or 1)))
 
             logger.info(f"Layer {layer_id} ({layer.name}): keeping {num_smooth} components")
             Wmats, _, _, _ = spectral_utils.get_weight_matrices(old_weights, layer_type)

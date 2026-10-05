@@ -503,12 +503,25 @@ class SpectralVisualizer(BaseVisualizer):
             xmins, ks_dists = self._scan_ks_distances(evals_clean)
 
             if len(xmins) > 0:
-                ax_ks.plot(xmins, ks_dists, '-', linewidth=1, label='$D_{KS}$')
-                ax_ks.axvline(xmin, color='r', linestyle='-', alpha=0.6, label='Selected $x_{min}$')
-
-                # Point to the minimum
-                min_ks_idx = np.argmin(ks_dists)
-                ax_ks.scatter([xmins[min_ks_idx]], [ks_dists[min_ks_idx]], color='r', s=30)
+                # DECISION plan-2026-10-05-analyzer-audit/F-070
+                # Only the EVALUATED candidates are drawn and only they are eligible for
+                # the minimum marker. `ks_dists` now carries NaN for a skipped candidate,
+                # so `argmin` over it would still land on the first NaN if every
+                # candidate were skipped. Filtering on finiteness makes the marker
+                # impossible to fabricate.
+                evaluated = np.isfinite(ks_dists)
+                if evaluated.any():
+                    ax_ks.plot(xmins[evaluated], ks_dists[evaluated], '-',
+                              linewidth=1, label='$D_{KS}$')
+                    min_ks_idx = int(np.nanargmin(np.where(evaluated, ks_dists, np.nan)))
+                    ax_ks.scatter([xmins[min_ks_idx]], [ks_dists[min_ks_idx]],
+                                  color='r', s=30)
+                else:
+                    logger.debug(
+                        "No KS candidate could be evaluated for this layer; the "
+                        "landscape panel shows only the selected x_min.")
+                ax_ks.axvline(xmin, color='r', linestyle='-', alpha=0.6,
+                              label='Selected $x_{min}$')
 
             ax_ks.set_title(f"(d) KS Distance ($D_{{KS}}$) vs $x_{{min}}$")
             ax_ks.set_xlabel('$x_{min}$ candidate')
@@ -536,6 +549,14 @@ class SpectralVisualizer(BaseVisualizer):
 
         Only layers with randomization data (spectral_randomize=True) are plotted.
         Layers with detected traps get prominent spike markers.
+
+        .. note::
+           DECISION plan-2026-10-05-analyzer-audit/F-033: the randomized spectrum plotted
+           here is the one the analyzer stored as the REPRESENTATIVE (worst-severity)
+           draw, and ``trap_threshold``/``mp_lambda_plus``/``num_rand_spikes`` on the row
+           all come from that same draw. Before F-033 the markers were drawn from draw
+           #1 while the threshold was the MEAN over all draws, so the two vertical lines
+           on the plot could belong to different permutations.
         """
         df = self.results.spectral_analysis
         esds = self.results.spectral_esds
@@ -600,11 +621,23 @@ class SpectralVisualizer(BaseVisualizer):
 
         fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(16, 6))
 
-        trap_status = f"TRAP ({severity_label})" if has_trap else "Clean"
+        # DECISION plan-2026-10-05-analyzer-audit/F-068
+        # The title used to read "Clean" whenever `has_trap` was False, even if the
+        # severity LABEL said otherwise. Under the old majority-vote aggregation a layer
+        # could be titled "Clean" while carrying a `moderate` label; F-033 made
+        # `has_trap = any()` so the two agree, but the title is now derived from BOTH so
+        # a hand-edited or older artifact cannot show the contradiction either.
+        contradictory = has_trap != (severity_label != 'none')
+        if contradictory:
+            trap_status = (f"TRAP ({severity_label})" if has_trap
+                           else f"inconsistent: has_trap={has_trap}, "
+                                f"label={severity_label}")
+        else:
+            trap_status = f"TRAP ({severity_label})" if has_trap else "Clean"
         fig.suptitle(
             f'Correlation Trap Analysis: {model_name} / {layer_name} — [{trap_status}]',
             fontsize=14, fontweight='bold',
-            color='#c62828' if has_trap else '#2e7d32'
+            color='#c62828' if has_trap or contradictory else '#2e7d32'
         )
 
         # Shared bin range for both histograms
@@ -631,11 +664,20 @@ class SpectralVisualizer(BaseVisualizer):
             spike_evals = rand_clean[rand_clean > trap_threshold]
             if len(spike_evals) > 0:
                 ylim = ax_lin.get_ylim()
-                for spike in spike_evals[:3]:  # Mark up to 3 spikes
+                # DECISION plan-2026-10-05-analyzer-audit/F-069
+                # `num_spikes` is an INT again (F-033 made it the representative draw's
+                # count rather than a fractional mean), but it counts spikes across the
+                # WHOLE spectrum while only the first three are marked here. Print the
+                # marked count alongside it so the annotation cannot claim more spikes
+                # than the panel shows, and cannot say "2.4 spike(s)" any more.
+                marked = spike_evals[:3]
+                for spike in marked:  # Mark up to 3 spikes
                     ax_lin.axvline(spike, color='#d50000', linestyle='-', linewidth=2.5, alpha=0.8)
-                ax_lin.text(np.max(spike_evals), ylim[1] * 0.85, f'TRAP!\n{num_spikes} spike(s)',
-                           color='#d50000', fontsize=11, fontweight='bold', ha='center',
-                           bbox=dict(boxstyle='round,pad=0.3', facecolor='#ffcdd2', alpha=0.9))
+                label = (f'TRAP!\n{num_spikes} spike(s)' if num_spikes <= len(marked)
+                         else f'TRAP!\n{num_spikes} spikes\n({len(marked)} marked)')
+                ax_lin.text(np.max(spike_evals), ylim[1] * 0.85, label,
+                            color='#d50000', fontsize=11, fontweight='bold', ha='center',
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='#ffcdd2', alpha=0.9))
 
         ax_lin.set_xlabel('Eigenvalue $\\lambda$')
         ax_lin.set_ylabel('Density')
@@ -691,8 +733,34 @@ class SpectralVisualizer(BaseVisualizer):
         Calculate KS distance for a range of potential xmin values.
 
         Uses precomputed suffix sums for O(1) tail-sum lookups. Subsamples
-        scan points to ``max_scan_points`` for plotting performance — the
-        full scan on large matrices (768×768 = 590K eigenvalues) causes OOM.
+        scan points to ``max_scan_points`` for plotting performance.
+
+        .. important::
+           DECISION plan-2026-10-05-analyzer-audit/F-070. Three things were wrong here,
+           and each one made the PLOTTED curve disagree with the REPORTED fit:
+
+           1. **The CDF kernel.** ``1 - (data[i:] / xmin) ** (-alpha + 1)`` is exactly
+              the spelling ``spectral_metrics.fit_powerlaw`` removed in D-001, measured
+              there at 1.7e-10..9.4e-10 relative error against the log-domain
+              ``1 - exp((1 - alpha) * (log_data[i:] - log_data[i]))``. The two must stay
+              the same spelling or the red "selected x_min" marker need not sit on the
+              plotted minimum. Do NOT restore the literal power form here.
+           2. **The candidate set.** ``data`` was pre-filtered by the caller at
+              ``SPECTRAL_EPSILON`` (1e-10) while ``fit_powerlaw`` filters at
+              ``SPECTRAL_EVALS_THRESH`` (1e-5). Candidates in ``(1e-10, 1e-5]`` exist in
+              the plot and not in the fit.
+           3. **Skipped candidates.** ``ks_dists`` was initialised to ``ones`` and three
+              ``continue`` branches left skipped candidates at ``D = 1.0`` — the WORST
+              possible KS distance, substituted for "not evaluated". If every candidate
+              were skipped, ``argmin`` returned index 0 and the panel marked a fabricated
+              minimum. Skipped candidates are now ``nan``, which sorts last under
+              ``argmin`` for a positive value and cannot be mistaken for a real
+              measurement.
+
+           The OOM justification in the old docstring was also wrong: ``data[i:]`` is a
+           VIEW, so the sweep costs O(n_scan * N) arithmetic, not memory. The subsample
+           is kept because that arithmetic is real, but it is a speed cap, not a memory
+           cap — do not cite OOM for it again.
         """
         try:
             data = np.sort(evals)
@@ -701,13 +769,14 @@ class SpectralVisualizer(BaseVisualizer):
                 return np.array([]), np.array([])
 
             scan_indices = np.arange(0, N - 5)
-            # Subsample for plotting — full scan OOMs on large matrices
+            # Subsample for plotting; see the F-070 note on what this is and is not.
             if len(scan_indices) > max_scan_points:
                 scan_indices = scan_indices[
                     :: max(1, len(scan_indices) // max_scan_points)
                 ]
             xmins = data[scan_indices]
-            ks_dists = np.ones(len(scan_indices), dtype=np.float64)
+            # F-070: NaN, not 1.0, for a candidate that could not be evaluated.
+            ks_dists = np.full(len(scan_indices), np.nan, dtype=np.float64)
 
             log_data = np.log(data)
             # Precompute suffix sums for O(1) tail-sum lookups
@@ -730,7 +799,10 @@ class SpectralVisualizer(BaseVisualizer):
                     continue
 
                 cdf_emp = np.arange(n_tail) / n_tail
-                cdf_theo = 1 - (data[i:] / curr_xmin) ** (-alpha + 1.0)
+                # F-070: the log-domain spelling, identical to `fit_powerlaw`'s D-001
+                # kernel. Same array, same arithmetic, same answer.
+                cdf_theo = 1.0 - np.exp(
+                    (1.0 - alpha) * (log_data[i:] - log_data[i]))
                 ks_dists[j] = np.max(np.abs(cdf_emp - cdf_theo))
 
             return xmins, ks_dists

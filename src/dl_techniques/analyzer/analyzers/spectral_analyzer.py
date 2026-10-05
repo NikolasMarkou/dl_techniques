@@ -90,8 +90,8 @@ from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
 from ..constants import (
     LayerType, MetricNames, StatusCode, SPECTRAL_DEFAULT_SUMMARY_METRICS,
-    SPECTRAL_HIGH_CONCENTRATION_PERCENTILE, SPECTRAL_WEAK_RANK_LOSS_TOLERANCE,
-    SPECTRAL_PVALUE_NOT_COMPUTED
+    SPECTRAL_HIGH_CONCENTRATION_ABSOLUTE, SPECTRAL_WEAK_RANK_LOSS_TOLERANCE,
+    SPECTRAL_PVALUE_NOT_COMPUTED, SPECTRAL_TRAP_SEVERITY_MILD
 )
 from .. import spectral_metrics
 from .. import spectral_utils
@@ -300,9 +300,26 @@ class SpectralAnalyzer(BaseAnalyzer):
                 entropy = float('nan')
                 matrix_rank = float('nan')
             else:
-                weak_rank_loss = float(
-                    np.sum(evals < SPECTRAL_WEAK_RANK_LOSS_TOLERANCE))
-                entropy = spectral_metrics.calculate_matrix_entropy(np.sqrt(evals), N)
+                # DECISION plan-2026-10-05-analyzer-audit/F-011
+                # `weak_rank_loss` is a RELATIVE count, not an absolute one. The old
+                # `np.sum(evals < 1e-6)` is an ABSOLUTE threshold on raw eigenvalues, so
+                # every small-magnitude layer (a Glorot-divided conv, a low-scale init, a
+                # mean-centred kernel) reported `weak_rank_loss ≈ M` — a full-rank
+                # collapse — purely because of its units. Scale the tolerance by the
+                # layer's own largest eigenvalue: the same relative form `rank_loss`
+                # already uses in `compute_eigenvalues` (D-003). The neighbouring
+                # `rank_loss` is compared against `0.1 * M` in `_generate_recommendations`,
+                # so with an absolute tolerance the two rank columns sat on incomparable
+                # scales. Do NOT restore the absolute form: no WeightWatcher column
+                # corresponds to this quantity, so there is no parity to match.
+                eval_tol = (float(np.max(evals)) * SPECTRAL_WEAK_RANK_LOSS_TOLERANCE
+                            if len(evals) > 0 else 0.0)
+                weak_rank_loss = float(np.sum(evals < eval_tol))
+                # DECISION plan-2026-10-05-analyzer-audit/F-015
+                # `evals` already holds sigma^2, so `calculate_matrix_entropy` was
+                # handed `sqrt(evals)` and squared it straight back — a lossy round trip
+                # plus two full-size temporaries per layer. Compute from `evals` directly.
+                entropy = spectral_metrics.calculate_matrix_entropy_from_evals(evals, N)
                 matrix_rank = int(len(evals) - rank_loss)
             spectral_mets = spectral_metrics.calculate_spectral_metrics(evals, alpha, N=N)
 
@@ -331,14 +348,29 @@ class SpectralAnalyzer(BaseAnalyzer):
             randomization_metrics = {}
             if self.config.spectral_randomize and Wmats:
                 # DECISION plan-2026-09-01T225724-e79ad4bd/D-017
-                # Randomization is AVERAGED over `spectral_n_randomizations` independent
-                # draws. Do NOT collapse this back to one permutation per layer: a single
-                # unseeded draw makes every correlation-trap verdict a coin flip, and the
-                # spike count / severity it produces is a sample of size one.
-                # See decisions.md D-017.
+                # Randomization runs `spectral_n_randomizations` independent draws. Do
+                # NOT collapse this back to one permutation per layer: a single unseeded
+                # draw makes every correlation-trap verdict a coin flip. See D-017.
+                #
+                # DECISION plan-2026-10-05-analyzer-audit/F-033
+                # The draws are still all RUN, but the published row now describes ONE
+                # of them — the worst-severity draw — instead of a blend. The previous
+                # shape was `has_trap` = majority vote, `trap_severity`/`trap_threshold`/
+                # `num_rand_spikes`/the MP edges = MEANS, and the plotted spectrum =
+                # draw #1. Four published quantities therefore described four different
+                # permutations, and they could contradict each other: one trap in five
+                # draws at severity 2.0 gave mean severity 0.4 -> label 'moderate' while
+                # `has_trap` was False, and the overlay titled that layer "Clean" while
+                # carrying a 'moderate' label.
+                #
+                # Every trap column below, plus the spectrum stored in `rand_esds` and
+                # therefore every spike marker the overlay draws, now come from the SAME
+                # draw. The randomization-only DIAGNOSTICS (rand_sv_max, rand_distance,
+                # rand_sv_ratio) stay means — they are not trap verdicts, they have no
+                # threshold, and averaging them is the point. See decisions.md D-017
+                # and the F-033 anchor in README.md.
                 n_draws = max(1, int(self.config.spectral_n_randomizations))
                 draws = []
-                first_rand_evals = None
 
                 for _ in range(n_draws):
                     rand_Wmats = [
@@ -348,11 +380,10 @@ class SpectralAnalyzer(BaseAnalyzer):
                     rand_evals, rand_sv_max, _, _, _ = spectral_metrics.compute_eigenvalues(
                         rand_Wmats, N, M, n_comp,
                         max_evals=self.config.spectral_max_evals)
-                    if first_rand_evals is None:
-                        first_rand_evals = rand_evals
 
                     trap_result = spectral_metrics.detect_correlation_trap(rand_evals, N, M)
                     draws.append({
+                        'rand_evals': rand_evals,
                         'rand_sv_max': rand_sv_max,
                         'rand_distance': spectral_metrics.jensen_shannon_distance(
                             evals, rand_evals),
@@ -366,32 +397,64 @@ class SpectralAnalyzer(BaseAnalyzer):
                     })
 
                 def _mean(key: str) -> float:
-                    return float(np.mean([d[key] for d in draws]))
+                    return float(np.nanmean([d[key] for d in draws]))
 
-                def _trap_mean(key: str) -> float:
-                    return float(np.mean([d['trap'][key] for d in draws]))
+                # F-033: pick the ONE draw the published row describes. A trapping draw
+                # always wins over a non-trapping one (its severity is > 0 by
+                # construction); among trapping draws the most severe wins. With
+                # `has_trap = any()`, this is the draw that justifies the verdict, so
+                # the row can never report a verdict its own severity contradicts.
+                representative = max(
+                    draws,
+                    key=lambda d: (bool(d['trap']['has_trap']),
+                                   float(d['trap']['trap_severity'])),
+                )
+                trap = representative['trap']
 
-                # A trap is reported when it is seen in a MAJORITY of draws, not when a
-                # single lucky permutation produced one.
-                trap_fraction = _trap_mean('has_trap')
-                mean_severity = _trap_mean('trap_severity')
+                has_trap = any(bool(d['trap']['has_trap']) for d in draws)
+                severity = float(trap['trap_severity'])
+                severity_label = spectral_metrics.label_trap_severity(severity)
+
+                # DECISION plan-2026-10-05-analyzer-audit/F-034
+                # Floor the LABEL at 'mild' when a trap was detected, without touching
+                # the severity NUMBER. `label_trap_severity` returns 'none' below 0.1, so
+                # a genuine detection just over the threshold published `has_trap=True`
+                # beside `trap_severity_label='none'` — the boolean and the band
+                # contradicting each other in the same row, and the overlay printing
+                # "TRAP (none)". Only the human-readable band is floored; `trap_severity`
+                # stays exactly as computed, so nothing measured is laundered.
+                if has_trap and severity_label == 'none':
+                    severity_label = 'mild'
+                    logger.debug(
+                        f"Layer {layer_id}: a trap was detected with severity "
+                        f"{severity:.4f} (< {SPECTRAL_TRAP_SEVERITY_MILD}), so the "
+                        f"severity LABEL is floored to 'mild'; the severity NUMBER is "
+                        f"reported unchanged.")
 
                 randomization_metrics = {
                     MetricNames.RAND_SV_MAX: _mean('rand_sv_max'),
                     MetricNames.RAND_DISTANCE: _mean('rand_distance'),
                     MetricNames.RAND_SV_RATIO: _mean('rand_sv_ratio'),
-                    MetricNames.HAS_TRAP: bool(trap_fraction >= 0.5),
-                    MetricNames.NUM_RAND_SPIKES: _trap_mean('num_rand_spikes'),
-                    MetricNames.TRAP_SEVERITY: mean_severity,
-                    MetricNames.TRAP_SEVERITY_LABEL: spectral_metrics.label_trap_severity(
-                        mean_severity),
-                    MetricNames.MP_LAMBDA_PLUS: _trap_mean('mp_lambda_plus'),
-                    MetricNames.MP_LAMBDA_MINUS: _trap_mean('mp_lambda_minus'),
-                    MetricNames.TRAP_THRESHOLD: _trap_mean('trap_threshold'),
+                    # F-033: `any()`, not a majority vote. A trap present in ANY
+                    # permutation is evidence the layer holds atypically large weight
+                    # elements; requiring a majority silently discarded a real
+                    # single-draw detection. The reported severity is the WORST draw's,
+                    # so `has_trap` is consistent with what the row shows.
+                    MetricNames.HAS_TRAP: has_trap,
+                    # F-033: an int again, from ONE draw, rather than a fractional mean
+                    # over draws that the overlay printed as "2.4 spike(s)".
+                    MetricNames.NUM_RAND_SPIKES: int(trap['num_rand_spikes']),
+                    MetricNames.TRAP_SEVERITY: severity,
+                    MetricNames.TRAP_SEVERITY_LABEL: severity_label,
+                    MetricNames.MP_LAMBDA_PLUS: float(trap['mp_lambda_plus']),
+                    MetricNames.MP_LAMBDA_MINUS: float(trap['mp_lambda_minus']),
+                    MetricNames.TRAP_THRESHOLD: float(trap['trap_threshold']),
                 }
 
-                # Store one representative randomized spectrum for visualization.
-                rand_esds[layer_id] = first_rand_evals
+                # Store the REPRESENTATIVE randomized spectrum, so the markers the
+                # overlay draws and the threshold it draws them against are the same
+                # permutation's (F-033).
+                rand_esds[layer_id] = representative['rand_evals']
 
             metrics = {
                 MetricNames.HAS_ESD: True, MetricNames.NUM_EVALS: len(evals),
@@ -509,8 +572,26 @@ class SpectralAnalyzer(BaseAnalyzer):
         if 'concentration_score' in success_df.columns:
             score = pd.to_numeric(success_df['concentration_score'], errors='coerce').dropna()
             if not score.empty:
-                high_conc_threshold = score.quantile(SPECTRAL_HIGH_CONCENTRATION_PERCENTILE)
-                summary['high_concentration_layers'] = int(sum(score > high_conc_threshold))
+                # DECISION plan-2026-10-05-analyzer-audit/F-002
+                # An ABSOLUTE threshold, not this layer-set's own 80th percentile.
+                #
+                # Counting how many values exceed their own quantile is a tautology: it
+                # returns `ceil(0.2 * n)` for EVERY input, so the published
+                # "high_concentration_layers" was a constant function of the layer count
+                # and could not fail — it measured nothing about concentration. It was
+                # also self-contradictory with `_generate_recommendations`, which warns
+                # on the SAME column against the absolute constant 5.0.
+                #
+                # `SPECTRAL_HIGH_CONCENTRATION_ABSOLUTE` is that same 5.0: the threshold
+                # the recommendation already used, so the count and the warning now agree
+                # by construction. README.md documents `concentration_score` as having no
+                # absolute scale for RANKING layers — that remains true, and is why this
+                # counts a deliberately conservative "worst-case" set rather than
+                # pretending to a precise one.
+                summary['high_concentration_layers'] = int(
+                    (score > SPECTRAL_HIGH_CONCENTRATION_ABSOLUTE).sum())
+                summary['concentration_score_threshold'] = float(
+                    SPECTRAL_HIGH_CONCENTRATION_ABSOLUTE)
 
         return summary
 
@@ -548,7 +629,18 @@ class SpectralAnalyzer(BaseAnalyzer):
 
         # ERG condition check
         if 'erg_satisfied' in analysis_df.columns:
-            erg_satisfied = analysis_df['erg_satisfied'].sum()
+            # DECISION plan-2026-10-05-analyzer-audit/F-003
+            # Count the TRUTHS explicitly; never `Series.sum()`. `erg_satisfied` is
+            # written only for rows whose fit succeeded and whose `xmin > 0`, and
+            # `details.at[...] = value` enlarges a new column with NaN for every other
+            # row — so ONE failed fit anywhere makes the column a bool/NaN mix and
+            # `.sum()` returns NaN. `NaN > 0` is False, so the recommendation
+            # SILENTLY VANISHED (and had it fired it would have printed "nan/12").
+            # `== True` is the count of satisfied layers; the denominator stays every
+            # layer, which is the honest reading: a layer whose ERG could not be
+            # evaluated did not satisfy it.
+            erg_column = analysis_df['erg_satisfied']
+            erg_satisfied = int((erg_column == True).sum())  # noqa: E712 - NaN-safe
             total = len(analysis_df)
             if erg_satisfied > 0:
                 recommendations.append(

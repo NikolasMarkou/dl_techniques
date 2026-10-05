@@ -412,7 +412,20 @@ This derives the **AlphaHat metric** for the VHT regime.
 
 ### 7.1 Correlation Traps
 
-**Definition**: A Correlation Trap occurs when the weight matrix $\mathbf{W}$ has an anomalously large mean ($\bar{W}$), producing spurious large eigenvalues $\lambda_{\text{trap}}$ that do not arise from learned correlations but from rank-1 perturbations or unusually large matrix elements.
+**Definition**: A Correlation Trap occurs when the weight matrix $\mathbf{W}$ contains **unusually large individual weight elements**, which element-wise randomization leaves intact while destroying the learned structure around them, so they reappear as spurious eigenvalues $\lambda_{\text{trap}}$ beyond the Marchenko-Pastur edge of the randomized spectrum.
+
+> **Correction (F-058).** This section previously defined a trap by an *anomalously large
+> matrix mean* ($\bar{W}$) producing rank-1 perturbations. **That is not what the shipped
+> detector measures**, and it is not what `CORRELATION_TRAPS.md` §3 describes either — the two
+> documents in this package defined the same phenomenon differently, and only
+> `CORRELATION_TRAPS.md` matched the code.
+>
+> `spectral_metrics.detect_correlation_trap` takes the eigenvalues of an already-randomized
+> matrix. Randomization preserves the **element-value distribution**, so a few very large
+> elements survive and show up as spikes past the MP edge; a matrix with a large *mean* but
+> ordinary elements produces no such spike. `tests/test_analyzer/test_spectral_metrics.py`
+> plants the trap geometry as a single large **element** (`W[0,0] = 20.0`) and pins detection
+> power at `1.000`, which is the operational definition.
 
 **Causes**: Excessively small batch sizes (e.g., bs=1), very large learning rates, or failed SGD dynamics.
 
@@ -541,10 +554,25 @@ spectral_visualizer.py  # Generate diagnostic plots (ESD, funnel, etc.)
 #### Convolutional Layers
 For Conv2D with shape $(H \times W \times C_{\text{in}} \times C_{\text{out}})$:
 ```python
-# Matricization approach
+# Matricization approach — this is what the code does (F-057)
 reshaped = (H * W * C_in, C_out)
 ```
-This preserves spectral properties of the linear transformation. For multi-channel convolutions, eigenvalues may be computed per channel-to-channel operator and then pooled.
+
+> **Correction (F-057).** An earlier version of this section claimed the reshape "preserves
+> spectral properties of the linear transformation", and that "eigenvalues may be computed
+> per channel-to-channel operator and then pooled". **Both statements were wrong.**
+>
+> - The fold $(kh, kw, c_{in}) \to$ one row index makes that index a *mixed* $(dy, dx,
+>   c_{in})$ coordinate, which is not the contraction index of the convolution's linear
+>   map. The SVD-preserving matricization is the **traced** form $(kh \cdot kw,\,
+>   c_{in} \cdot c_{out})$, or a per-shift block.
+> - **There is no per-channel decomposition and no pooling step anywhere in this package.**
+>   `spectral_utils.get_weight_matrices` produces exactly one folded matrix per layer and
+>   `compute_eigenvalues` decomposes that. Nothing pools anything.
+>
+> The fold is nevertheless what the code ships, **deliberately**: it is WeightWatcher's
+> convention, so the numbers are comparable to published results. What the metrics
+> describe is the spectrum of the folded matrix, not of the convolution operator.
 
 #### Batch Normalization & Dropout
 - Skip these layers (no weight matrices to analyze)

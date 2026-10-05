@@ -55,7 +55,13 @@ HEIGHT_RATIOS_BOTTOM_HEAVY = [1, 1.5]
 
 # Heatmap Constants
 HEATMAP_VMIN = 0
-HEATMAP_VMAX = 1.0
+HEATMAP_VMAX = 1
+# DECISION plan-2026-10-05-analyzer-audit/F-055
+# The colour a heatmap cell with NO measurement is drawn in. Matches the
+# `BBOX_COLOR_GRAY` convention already used by `weight_visualizer.py`'s N/A cells.
+# Do NOT revert to filling those cells with 0.0: under a fixed `vmax=1.0` and a
+# one-directional colormap, 0.0 is the HEALTHIEST end of every one of these three scales.
+MISSING_DATA_COLOR = 'lightgray'
 COLORBAR_SHRINK = 0.6
 INTERPOLATION_METHOD = 'nearest'
 
@@ -63,7 +69,17 @@ INTERPOLATION_METHOD = 'nearest'
 BAR_LABEL_OFFSET = 0.02
 AXIS_LIMIT_MIN = 0
 AXIS_LIMIT_MAX = 1
-SATURATION_THRESHOLD = 0.9
+# DECISION plan-2026-10-05-analyzer-audit/F-053
+# `SATURATION_THRESHOLD = 0.9` is GONE, deliberately. It gated
+# `saturation = 1 - positive_ratio if positive_ratio > 0.9 else 0.0`, and
+# `positive_ratio` counts activations ABOVE ZERO — so a 95%-dead ReLU scored 0.05, failed
+# the `> 0.9` test, and was reported as having ZERO saturation: the most saturated layer
+# in the network marked healthy. The measure was also bounded above by 0.1 by
+# construction, so under the panel's fixed vmax it rendered as a uniformly blank block.
+# Saturation is now unconditionally `1 - positive_ratio`, which is the fraction of
+# activations that are non-positive — the quantity the panel's name refers to. Do NOT
+# reintroduce a threshold here; if a threshold is wanted it belongs on the DISPLAYED
+# value, not on the input.
 BALANCE_SCORE_MULTIPLIER = 2
 SPECIALIZATION_SCORE_COMPONENTS = 3.0
 
@@ -169,21 +185,49 @@ class InformationFlowVisualizer(BaseVisualizer):
             means = []
             stds = []
             layer_positions = []
-
+            # DECISION plan-2026-10-05-analyzer-audit/F-049
+            # Skip entries that carry no measurement, do NOT index them. The analyzer
+            # returns `{'error': ...}` for a layer whose activations could not be
+            # interpreted, and that dict has NO `mean_activation` key — the direct index
+            # raised `KeyError`, which propagated out of `create_visualizations` to
+            # `ModelAnalyzer._create_visualizations` (no try there) and aborted the whole
+            # `analyze()` BEFORE `save_results()`. One unreadable activation lost every
+            # metric every other model produced.
             for i, (layer_name, analysis) in enumerate(ordered_layers):
-                means.append(analysis['mean_activation'])
-                stds.append(analysis['std_activation'])
+                mean_value = analysis.get('mean_activation')
+                std_value = analysis.get('std_activation')
+                if mean_value is None or std_value is None:
+                    logger.debug(
+                        f"Model '{model_name}' layer '{layer_name}' has no activation "
+                        f"statistics ({analysis.get('error', 'keys absent')}); it is "
+                        f"omitted from the activation-flow panel.")
+                    continue
+                mean_value = float(mean_value)
+                std_value = float(std_value)
+                # DECISION plan-2026-10-05-analyzer-audit/F-050
+                # A non-finite activation is not a measurement. The analyzer does no
+                # finite check on captured activations, so a NaN reaching here would
+                # silently vanish from `min()`/`max()` autoscaling and paint a NaN cell
+                # in the health heatmap. Drop the layer and say so.
+                if not (np.isfinite(mean_value) and np.isfinite(std_value)):
+                    logger.warning(
+                        f"Model '{model_name}' layer '{layer_name}' produced "
+                        f"non-finite activation statistics "
+                        f"(mean={mean_value!r}, std={std_value!r}); omitted from the "
+                        f"activation-flow panel.")
+                    continue
+                means.append(mean_value)
+                stds.append(std_value)
                 layer_positions.append(i)
 
             if means:  # Check if we have data
-                # Plot mean with std as shaded region
                 means = np.array(means)
                 stds = np.array(stds)
 
                 color = self._get_model_color(model_name)
-                line = ax.plot(layer_positions, means, 'o-',
-                               linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_SMALL,
-                               color=color)
+                ax.plot(layer_positions, means, 'o-',
+                        linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_SMALL,
+                        color=color)
                 ax.fill_between(layer_positions, means - stds, means + stds,
                                 alpha=ALPHA_FILL, color=color)
 
@@ -204,15 +248,26 @@ class InformationFlowVisualizer(BaseVisualizer):
 
             ranks = []
             positions = []
-
+            # DECISION plan-2026-10-05-analyzer-audit/F-051
+            # Draw the rank as a SCATTER at each layer's OWN position, never a connected
+            # line through the layers that were skipped. The old `ax.plot(positions,
+            # ranks)` connected consecutive surviving points, so a network whose last four
+            # layers collapsed to rank 0 showed a RISING line that appeared to continue
+            # straight through them — hiding exactly the gap a reader opens this panel to
+            # see. This is the same "fabricated continuity" defect as F-035's phantom
+            # reliability points and F-055's heatmap fill, in a third place.
             for i, (layer_name, analysis) in enumerate(ordered_layers):
-                if 'effective_rank' in analysis and analysis['effective_rank'] > 0:
-                    ranks.append(analysis['effective_rank'])
-                    positions.append(i)
+                rank = analysis.get('effective_rank')
+                # `> 0` alone is not enough: `NaN > 0` is False, so a NaN rank would be
+                # silently dropped and read as "collapsed" (F-050). Test finiteness first.
+                if rank is None or not np.isfinite(float(rank)) or float(rank) <= 0:
+                    continue
+                ranks.append(float(rank))
+                positions.append(i)
 
             if ranks:
                 color = self._get_model_color(model_name)
-                ax.plot(positions, ranks, 'o-',
+                ax.plot(positions, ranks, 'o',
                         linewidth=LINE_WIDTH_STANDARD, markersize=MARKER_SIZE_LARGE,
                         color=color)
 
@@ -238,14 +293,49 @@ class InformationFlowVisualizer(BaseVisualizer):
             ordered_layers = self._get_ordered_layer_analysis(model_name)
 
             for i, (layer_name, analysis) in enumerate(ordered_layers):
-                # Calculate health metrics
-                sparsity = analysis.get('sparsity', 0.0)
-                positive_ratio = analysis.get('positive_ratio', 0.5)
-                mean_activation = abs(analysis.get('mean_activation', 0.0))
+                # DECISION plan-2026-10-05-analyzer-audit/F-052
+                # SKIP a layer with no measurement. The defaults used here were
+                # `sparsity -> 0.0`, `positive_ratio -> 0.5`, `mean_activation -> 0.0`,
+                # so an entry carrying only `{'error': ...}` — a layer that produced NO
+                # data at all — was rendered as a measured, unremarkable layer reading
+                # "zero dead neurons, not saturated, activation level 0.0", and the 0.5
+                # default even fed the SATURATION_THRESHOLD test. A missing measurement
+                # must be absent from the panel, not drawn as a healthy one.
+                sparsity = analysis.get('sparsity')
+                positive_ratio = analysis.get('positive_ratio')
+                mean_activation = analysis.get('mean_activation')
+
+                if (sparsity is None or positive_ratio is None
+                        or mean_activation is None):
+                    logger.debug(
+                        f"Model '{model_name}' layer '{layer_name}' has no health "
+                        f"statistics ({analysis.get('error', 'keys absent')}); omitted "
+                        f"from the health dashboard.")
+                    continue
+
+                # F-050: a non-finite statistic is not a measurement either.
+                if not all(np.isfinite(float(v))
+                           for v in (sparsity, positive_ratio, mean_activation)):
+                    logger.warning(
+                        f"Model '{model_name}' layer '{layer_name}' produced "
+                        f"non-finite health statistics; omitted from the dashboard.")
+                    continue
+
+                sparsity = float(sparsity)
+                positive_ratio = float(positive_ratio)
+                mean_activation = abs(float(mean_activation))
 
                 # Health indicators
                 dead_neurons = sparsity  # High sparsity indicates dead neurons
-                saturation = 1.0 - positive_ratio if positive_ratio > SATURATION_THRESHOLD else 0.0
+                # DECISION plan-2026-10-05-analyzer-audit/F-053
+                # Saturation is `1 - positive_ratio` for a layer that is ALMOST ENTIRELY
+                # NON-POSITIVE, not `positive_ratio > 0.9`. `positive_ratio` counts
+                # activations ABOVE ZERO, so a 95%-dead ReLU has positive_ratio ~= 0.05 and
+                # the old test scored its saturation 0.0 — "healthy" — while it is the
+                # most saturated layer in the network. The measure was also near-always
+                # zero by construction (it is < 0.1 whenever non-zero), which is why the
+                # panel rendered as a uniformly blank orange block under a fixed vmax.
+                saturation = 1.0 - positive_ratio
                 activation_magnitude = min(mean_activation,
                                            ACTIVATION_MAGNITUDE_NORMALIZER) / ACTIVATION_MAGNITUDE_NORMALIZER
 
@@ -288,30 +378,45 @@ class InformationFlowVisualizer(BaseVisualizer):
                 # Filter data for layers within our limit
                 df_filtered = df[df['Layer_Index'].isin(unique_layers)]
 
-                # Create pivot table for heatmap using layer index for proper ordering
+                # DECISION plan-2026-10-05-analyzer-audit/F-055
+                # Fill MISSING cells with NaN, not 0.0. `fill_value=0` rendered a model
+                # that failed to capture layers 5-8, or that reported no entry for them,
+                # as all-zero under the 'Reds'/'Greens' colormaps with a fixed vmax=1.0 —
+                # i.e. ZERO dead neurons and MINIMUM activation magnitude, the healthiest
+                # end of the scale. A cell with no measurement now renders as the colormap's
+                # "bad data" colour instead, which is the same convention
+                # `weight_visualizer.py` already uses for its N/A cells.
                 heatmap_data = df_filtered.pivot_table(
                     values=metric,
                     index='Model',
-                    columns='Layer_Index',
-                    fill_value=0
+                    columns='Layer_Index'
                 )
 
-                # Ensure we have the right models in the right order
-                heatmap_data = heatmap_data.reindex(models, fill_value=0)
+                # Ensure we have the right models in the right order. `reindex` WITHOUT
+                # `fill_value` leaves an absent model as all-NaN rather than as all-0.0
+                # for the same reason.
+                heatmap_data = heatmap_data.reindex(models)
 
-                # Ensure columns are in the right order
-                heatmap_data = heatmap_data.reindex(columns=unique_layers, fill_value=0)
+                # Ensure columns are in the right order. No `fill_value` — see F-055.
+                heatmap_data = heatmap_data.reindex(columns=unique_layers)
 
                 # Choose colormap based on metric
                 if metric == 'Dead Neurons':
-                    cmap = 'Reds'
+                    cmap_name = 'Reds'
                     vmax = HEATMAP_VMAX
                 elif metric == 'Saturation':
-                    cmap = 'Oranges'
+                    cmap_name = 'Oranges'
                     vmax = HEATMAP_VMAX
                 else:  # Activation Level
-                    cmap = 'Greens'
+                    cmap_name = 'Greens'
                     vmax = HEATMAP_VMAX
+
+                # F-055: give the colormap an explicit "no measurement" colour, the same
+                # convention `weight_visualizer.py` uses for its N/A cells. Without it
+                # matplotlib renders NaN as transparent, so a missing cell shows the
+                # white axes background — which under 'Greens' reads as healthy.
+                cmap = plt.get_cmap(cmap_name).copy()
+                cmap.set_bad(color=MISSING_DATA_COLOR)
 
                 # Create heatmap
                 im = ax_sub.imshow(heatmap_data.values, cmap=cmap, aspect='auto',
@@ -373,14 +478,52 @@ class InformationFlowVisualizer(BaseVisualizer):
                 # 2. Balanced positive ratio (not all saturated)
                 # 3. Good effective rank (diverse representations)
 
-                sparsity = analysis.get('sparsity', 1.0)
-                positive_ratio = analysis.get('positive_ratio', 0.5)
-                effective_rank = analysis.get('effective_rank', 1.0)
+                # DECISION plan-2026-10-05-analyzer-audit/F-052
+                # Skip a layer with no measurement; do NOT substitute defaults. The old
+                # `sparsity -> 1.0` default scored an absent layer's activation_health 0.0
+                # and `effective_rank -> 1.0` gave it rank_score 0.1 — a fabricated row in a
+                # ranking, not a missing one.
+                sparsity = analysis.get('sparsity')
+                positive_ratio = analysis.get('positive_ratio')
+                effective_rank = analysis.get('effective_rank')
+
+                if (sparsity is None or positive_ratio is None
+                        or effective_rank is None):
+                    logger.debug(
+                        f"Model '{model_name}' layer '{layer_name}' has no "
+                        f"specialization statistics ({analysis.get('error', 'keys absent')}); "
+                        f"omitted from the specialization panel.")
+                    continue
+
+                # F-050: non-finite is not a measurement.
+                if not all(np.isfinite(float(v))
+                           for v in (sparsity, positive_ratio, effective_rank)):
+                    logger.warning(
+                        f"Model '{model_name}' layer '{layer_name}' produced non-finite "
+                        f"specialization statistics; omitted from the panel.")
+                    continue
+
+                sparsity = float(sparsity)
+                positive_ratio = float(positive_ratio)
+                effective_rank = float(effective_rank)
 
                 # Calculate specialization score (0-1, higher is better)
                 activation_health = 1.0 - sparsity
                 balance_score = 1.0 - abs(positive_ratio - 0.5) * BALANCE_SCORE_MULTIPLIER
-                rank_score = min(effective_rank / LAYER_SPECIALIZATION_MAX_RANK, 1.0) if effective_rank > 0 else 0.0
+                # DECISION plan-2026-10-05-analyzer-audit/F-054
+                # `rank_score` divides by the MODULE constant
+                # `LAYER_SPECIALIZATION_MAX_RANK = 10.0`, which is unrelated to the
+                # capture batch. `effective_rank` is bounded above by that batch
+                # (`results.information_flow_batch_size`), so any run whose memory budget
+                # caps the batch below 10 — the DEFAULT 2048 MB does exactly that on a
+                # conv net — saturated EVERY conv layer's rank_score at 1.0 and the panel
+                # measured nothing. Normalise by the batch actually used, so the score
+                # means "fraction of the available dimensionality retained".
+                rank_scale = float(getattr(self.results, 'information_flow_batch_size', 0)
+                                   or LAYER_SPECIALIZATION_MAX_RANK)
+                if rank_scale <= 0:
+                    rank_scale = LAYER_SPECIALIZATION_MAX_RANK
+                rank_score = min(max(effective_rank, 0.0) / rank_scale, 1.0)
 
                 # Combined specialization score
                 layer_spec = (activation_health + balance_score + rank_score) / SPECIALIZATION_SCORE_COMPONENTS
@@ -409,7 +552,14 @@ class InformationFlowVisualizer(BaseVisualizer):
             ax.set_xlabel('Layer Index (Network Depth)')
             ax.set_ylabel('Specialization Score')
             ax.grid(True, alpha=ALPHA_GRID)
-            ax.set_ylim(AXIS_LIMIT_MIN, AXIS_LIMIT_MAX)
+            # DECISION plan-2026-10-05-analyzer-audit/F-056
+            # Clamp to the components' actual range instead of pinning [0, 1].
+            # `activation_health + balance_score + rank_score` divided by 3 can exceed
+            # 1.0 — `balance_score = 1 - 2|posterior - 0.5|` is 1.0 exactly at
+            # positive_ratio 0.5 and, unlike the other two, is not bounded above by
+            # construction — so `set_ylim(0, 1)` silently cut the top of the score range
+            # off the chart. Clamp only the LOWER bound at 0; let the data set the top.
+            ax.set_ylim(bottom=AXIS_LIMIT_MIN)
         else:
             ax.text(ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
                    'Insufficient data for specialization analysis',

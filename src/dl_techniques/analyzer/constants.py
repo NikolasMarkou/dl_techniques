@@ -47,7 +47,18 @@ SPECTRAL_WEAK_RANK_LOSS_TOLERANCE = 1e-6
 SPECTRAL_DEFAULT_BINS = 100
 SPECTRAL_DEFAULT_FIG_SIZE = (10, 6)
 SPECTRAL_DEFAULT_DPI = 300
-SPECTRAL_HIGH_CONCENTRATION_PERCENTILE = 0.8
+# DECISION plan-2026-10-05-analyzer-audit/F-002
+# ABSOLUTE threshold for `concentration_score`, in that column's own units. This is the
+# same 5.0 `_generate_recommendations` already warns on, promoted to a named constant so
+# the count (`high_concentration_layers`) and the warning cannot drift apart.
+#
+# It REPLACES `SPECTRAL_HIGH_CONCENTRATION_PERCENTILE = 0.8`, which was a tautology: a
+# count of how many values exceed their own 80th percentile is `ceil(0.2 * n)` for every
+# input, so the published "high concentration" count was a constant function of the layer
+# count and could never fail. Do NOT restore a quantile here, and do NOT describe this as
+# the top-N% most concentrated layers — `concentration_score` has no absolute scale for
+# ranking (see README.md), so this is deliberately a conservative worst-case count.
+SPECTRAL_HIGH_CONCENTRATION_ABSOLUTE = 5.0
 SPECTRAL_CRITICAL_WEIGHT_THRESHOLD = 0.1
 SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED = 10
 SPECTRAL_SMALL_N_CUTOFF = 20             # WeightWatcher SMALL_N_CUTOFF: tails with N < 20 use bias-corrected alpha

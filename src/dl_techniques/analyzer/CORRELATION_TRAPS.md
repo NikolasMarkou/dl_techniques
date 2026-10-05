@@ -34,7 +34,36 @@ matrix (`X = WᵀW / 200`, seed 3, σ² over all eigenvalues = `1.006857`), and 
 | Tracy-Widom offset | `Δ_TW = c_TW · σ² · N^(-1/3)` (§4 Step 6, §5.1, Appendix A.2) | `Δ_TW = c_TW · λ₊ · M^(-2/3) · f(Q)`, `f(Q) = Q^(-1/6)·(1+√Q)^(-2/3)`; `threshold = λ₊ + Δ_TW` (Johnstone 2001's Tracy-Widom scale) | **Real divergence, and ALSO a divergence from WeightWatcher — see below.** Different functional form, not a rescaling. Measured threshold on the probe: doc `2.948685` (`Δ_TW = 0.683257`) vs shipped `2.388871` (`Δ_TW = 0.185813`) at the shipped `c_TW = 3.0`. |
 | `c_TW` | `≈ 2.0-3.0`, "typically 2.5" (§4 Step 6, §5.1, §9.1, Appendix B.1) | `SPECTRAL_TW_SAFETY_FACTOR = 3.0`, and it counts Tracy-Widom UNITS of headroom above `λ₊`, not multiples of `σ²·N^(-1/3)` | **Real divergence.** The two constants are not comparable because they scale different quantities. The shipped `3.0` is calibrated, not inherited: on 300 clean Gaussian Wisharts per shape the per-draw false-positive rate is `0.0900 / 0.1300 / 0.0967` at `c_TW = 1.0` for 200×50 / 100×100 / 500×100, against `0.0067 / 0.0100 / 0.0133` at `3.0`, while detection power against the §7.1 element-trap geometry stays `1.000` for amplitude ≥ 20. |
 | Bulk variance σ² | `sigma_sq = np.mean(eigenvalues)` over the **whole** spectrum (§9.1 Step 4, Appendix B.1) | `estimate_bulk_variance`: the mean is re-estimated over only the eigenvalues at or below the current MP edge, iterated to convergence | **Real divergence, deliberate (`D-017`).** The document's estimator counts a spike into the very edge meant to identify it: one 20× spike moved the mean `201.37 → 381.12` (1.89×) and the edge `453.09 → 857.52` with it, making the detector *conservative* exactly when it should fire hardest. On a clean probe the two differ mildly: `1.006857` (doc) vs `0.979137` (shipped). |
-| Number of draws | one randomization (§4 Step 4) | `config.spectral_n_randomizations` independent permutations (default 5); `has_trap` is a **majority vote** and every other trap quantity is the **mean** over the draws, so `num_rand_spikes` can be fractional | **Real divergence, deliberate (`D-017`).** |
+| Number of draws | one randomization (§4 Step 4) | `config.spectral_n_randomizations` independent permutations (default 5). `has_trap` is **`any()`**, and every published trap quantity — severity, label, spike count, MP edges, threshold, AND the spectrum the overlay plots spikes from — is taken from **one representative draw: the worst-severity one**. The randomization-only diagnostics (`rand_sv_max`, `rand_distance`, `rand_sv_ratio`) remain means. | **Real divergence, deliberate (`D-017`, restated by `F-033`).** See "One row, one draw" below. |
+
+### One row, one draw (`F-033`)
+
+The previous shape averaged the trap quantities and voted on the boolean, which meant **four
+published quantities described four different permutations**:
+
+| quantity | was | is |
+|---|---|---|
+| `has_trap` | majority vote over all draws | `any()` over all draws |
+| `trap_severity`, `trap_threshold`, `num_rand_spikes`, `mp_lambda_±` | **mean** over all draws | the **worst-severity draw** |
+| the spectrum plotted by `_plot_trap_overlay` | **draw #1** | the **worst-severity draw** |
+
+These could contradict each other. One trap in five draws at severity `2.0` gave mean severity
+`0.4` → label `moderate`, while `has_trap` was `False`; the overlay then titled that layer
+**"Clean"** while carrying a `moderate` severity label, and drew markers from draw #1 against the
+**mean** threshold of a different draw. `num_rand_spikes` was a fractional mean printed as a count —
+a layer could render `TRAP! 2.4 spike(s)`.
+
+Now the whole row, and every marker drawn against it, come from the same permutation.
+`num_rand_spikes` is an `int` again. The severity **label** is additionally floored at `mild`
+whenever `has_trap` is `True` (`F-034`), because `label_trap_severity` returns `none` below `0.1`
+and a genuine detection just over the threshold would otherwise publish `has_trap=True` beside
+`trap_severity_label='none'` — the overlay printed `TRAP (none)`. The severity **number** is never
+altered; only the human-readable band is floored.
+
+Consequence for a reader: `has_trap` is now more sensitive than it was (a single draw can fire it).
+That is the intended trade — a trap present in *any* permutation is evidence the layer holds
+atypically large weight elements, and the reported severity is the worst draw's, so the boolean is
+always consistent with what the row shows.
 
 ### Divergence from WeightWatcher, stated as one
 
@@ -538,8 +567,8 @@ where c_TW ≈ 2.0 - 3.0 (typically 2.5)
 
 > **Not what ships.** `detect_correlation_trap` uses WeightWatcher's form
 > `TW = (1/√Q)·λ₊^(2/3)·M^(-2/3)`, `threshold = λ₊ + c_TW·√TW`, with
-> `c_TW = SPECTRAL_TW_SAFETY_FACTOR = 1.0` multiplying `√TW` rather than `σ²·N^(-1/3)`. Measured
-> threshold on the §0 probe: `2.948685` here vs `2.452807` shipped. See §0.
+> `c_TW` multiplying `√TW` rather than `σ²·N^(-1/3)`. Measured
+> threshold on the §0 probe: `2.948685` here vs `2.388871` shipped. See §0 for the derivation and the measured false-positive rates behind the shipped `c_TW = 3.0`.
 
 ### Step 7: Identify Spikes (Traps)
 
@@ -585,7 +614,7 @@ where:
 ```
 
 > **Three shipped differences** (see §0): the TW offset is `c_TW·√TW` with
-> `TW = (1/√Q)·λ₊^(2/3)·M^(-2/3)`; `c_TW` is `1.0`, not `2.5`; and `σ²` is estimated over the bulk
+> `TW = (1/√Q)·λ₊^(2/3)·M^(-2/3)`; `c_TW` is NOT this document's `2.5`; and `σ²` is estimated over the bulk
 > with spikes excluded (`estimate_bulk_variance`), not as the mean of the whole spectrum.
 
 ### 5.2 Detailed Calculation Example
@@ -1046,7 +1075,7 @@ Input ═══════> L1 ═══╳═> L2 ══════> Output
 
 > **Teaching reference, NOT the shipped function.** The real
 > `dl_techniques.analyzer.spectral_metrics.detect_correlation_trap` takes the eigenvalues of the
-> already-randomized matrix plus `(N, M)`, defaults `c_TW` to `1.0`, estimates `sigma_sq` with
+> already-randomized matrix plus `(N, M)`, does NOT use this document's `c_TW = 2.5`, estimates `sigma_sq` with
 > spikes excluded, and uses the `√TW` threshold form. Its caller averages
 > `config.spectral_n_randomizations` draws. The block below is kept because it is the clearest
 > statement of the PROTOCOL; do not read it as documentation of the shipped numbers. See §0.
@@ -1461,7 +1490,7 @@ where c_TW ≈ 2-3 accounts for:
 ```
 
 > Shipped instead: `threshold = λ₊ + c_TW·√TW` with `TW = (1/√Q)·λ₊^(2/3)·M^(-2/3)` and
-> `c_TW = 1.0`. See §0.
+> the `√TW` form with this document's `c_TW = 2.5`. See §0.
 
 ---
 
@@ -1477,7 +1506,7 @@ where c_TW ≈ 2-3 accounts for:
 □ Compute σ² = mean(λ_i)          [shipped: bulk mean, spikes excluded]
 □ Compute Q = N/M                 [shipped: N = larger dim, so Q >= 1]
 □ Compute λ_+ = σ²(1 + √Q)²       [shipped: σ²(1 + 1/√Q)², same value under its own Q]
-□ Compute Δ_TW = 2.5 × σ² × N^(-1/3)   [shipped: 1.0 × √((1/√Q)·λ_+^(2/3)·M^(-2/3))]
+□ Compute Δ_TW = 2.5 × σ² × N^(-1/3)   [shipped: Johnstone scale, c_TW = 3.0 — see §0]
 □ Check: λ_max > λ_+ + Δ_TW ?     [shipped: majority vote over spectral_n_randomizations draws]
 □ If yes → TRAP DETECTED
 □ Compute severity: (λ_max - threshold)/λ_+

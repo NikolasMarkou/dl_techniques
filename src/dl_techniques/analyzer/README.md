@@ -63,7 +63,8 @@ attributes.
 | `weight_layer_types` | `None` (all) | e.g. `['Dense', 'Conv2D']` |
 | `analyze_biases` | `False` | |
 | `compute_weight_pca` | `True` | |
-| `calibration_bins` | `10` | ECE bin count |
+| `calibration_bins` | `10` | ECE bin count for the pooled top-1 `ece` |
+| `per_class_calibration_bins` | `None` (halves `calibration_bins`) | bin count for `per_class_ece` / `per_class_conditional_top1_ece`. It is a DIFFERENT number from `ece` on purpose — a per-class column carries far less mass than the pooled score — so the two published ECEs are not directly comparable. The effective value is recorded per model as `per_class_ece_bins`, and `ece`'s as `ece_bins`. |
 | `output_activation` | `None` (infer) | `'softmax'` / `'sigmoid'` / `'logits'`; pins what the head emits instead of inferring it |
 | `smooth_training_curves` / `smoothing_window` | `True` / `5` | |
 | `spectral_min_evals` / `spectral_max_evals` | `10` / `15000` | layers outside this eigenvalue range are skipped; above the cap the analyzer switches to truncated SVD |
@@ -278,12 +279,30 @@ Alpha phases:
 
 | `alpha` | Phase | Reading |
 |---|---|---|
-| `< 0` | failed | fit did not converge — use `stable_rank` / `entropy` instead |
-| `[1.0, 2.0)` | over-regularized | correlation traps / rank-1 spikes; lower the LR, raise the batch size |
-| `[2.0, 2.5)` | ideal | SETOL critical point |
-| `[2.5, 4.0)` | good | normal SOTA working range |
-| `(4.0, 6.0]` | fair | train longer, reduce regularization |
-| `> 6.0` | under-trained | nearly random; check the layer is receiving gradients |
+| `< 0` | `failed` | fit did not converge — use `stable_rank` / `entropy` instead |
+| `[0, 2.0)` | `over-trained` | very heavy-tailed (α<2 has infinite ESD variance); correlation traps / rank-1 spikes; lower the LR, raise the batch size |
+| `[2.0, 6.0]` | `good` | heavy-tailed, the normal SOTA working range. **This band contains SETOL's α≈2 critical point** — it is not subdivided here |
+| `> 6.0` | `under-trained` | nearly random; check the layer is receiving gradients |
+
+> **This table previously listed six labels — `failed`, `over-regularized`, `ideal`,
+> `good`, `fair`, `under-trained` — and three of them could never appear.**
+> `classify_learning_phase` returns exactly four: `failed`, `over-trained`, `good`,
+> `under-trained`. The narrow `ideal` band `[2.0, 2.5)` and the `fair` band were SETOL-
+> paper sub-ranges that decision **D-009 explicitly forbids** reinstating, because
+> WeightWatcher's labels are authoritative here (α<2 is literally "over-trained" in WW).
+> A user filtering `df['learning_phase'] == 'ideal'` — which this table told them to do —
+> got an empty result. The funnel diagram colours by these labels too, so it could never
+> produce the three phantom categories. **Do not re-add a sub-range label without
+> reversing D-009 in `decisions.md` first.**
+
+Two things the phase table does *not* tell you, both of which the analyzer reports
+separately:
+
+- `alpha_unreliable` is `True` above `SPECTRAL_ALPHA_SANITY_MAX = 8.0`. The value is
+  **flagged, never clamped** — a runaway alpha stays visible rather than being rewritten
+  into a plausible "under-trained" label.
+- A `failed` fit (`alpha < 0`) is a **sentinel**, and it is excluded from the summary
+  means by `status`, not by value. `spectral_summary['failed_layers']` reports how many.
 
 The full theory, including the ERG condition and the funnel diagnostic, is in `SETOL.md`;
 correlation traps are in `CORRELATION_TRAPS.md`.

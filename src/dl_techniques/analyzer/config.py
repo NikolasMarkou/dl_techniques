@@ -33,6 +33,15 @@ class AnalysisConfig:
 
     # Calibration options
     calibration_bins: int = 10
+    # DECISION plan-2026-10-05-analyzer-audit/F-044
+    # Bin count for the PUBLISHED `per_class_ece` / `per_class_conditional_top1_ece`.
+    # It used to be computed inline as `max(2, calibration_bins // 2)`, so at the
+    # defaults `ece` was a 10-bin ECE and `per_class_ece` a 5-bin ECE with nothing at
+    # the public surface saying so — a reader comparing the two was comparing different
+    # estimators. `None` keeps the halving; an int overrides it outright.
+    # Do NOT set this equal to `calibration_bins` by default: a per-class column holds
+    # far less mass than the pooled top-1 score, so it needs coarser bins to be stable.
+    per_class_calibration_bins: Optional[int] = None
     # DECISION plan-2026-09-01T225724-e79ad4bd/D-032
     # What the models' final layer emits. `None` infers it per model. Set it when
     # the inference is wrong or when you want the artifact to record the choice.

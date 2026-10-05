@@ -26,13 +26,30 @@ tensor of shape `(kernel_height, kernel_width, in_channels, out_channels)`.
 To analyze its spectral properties, this tensor must be "unfolded" or
 "matricized" into a 2D matrix.
 
-This module implements a standard matricization where the tensor is reshaped
-into a matrix `W_matrix` of shape
-`(kernel_height * kernel_width * in_channels, out_channels)`. This reshaping
-is not arbitrary; the resulting matrix represents the linear transformation
-applied by the convolutional filters. The spectrum of this matrix (i.e., its
-singular values) captures the properties of this transformation, such as its
-effective rank and the distribution of its principal components. The product
+This module implements the matricization WeightWatcher uses, where the tensor
+is reshaped into a matrix `W_matrix` of shape
+`(kernel_height * kernel_width * in_channels, out_channels)`.
+
+.. warning::
+   DECISION plan-2026-10-05-analyzer-audit/F-057: this reshaping does **NOT** yield the
+   spectrum of the convolution operator, and an earlier version of this docstring claimed
+   it did. For a channel-last kernel, folding `(kh, kw, in_c)` into one row index makes
+   that index a *mixed* `(dy, dx, c_in)` coordinate, which is not the contraction index of
+   the convolution's linear map. The SVD-preserving matricization is the **traced** form
+   `(kh*kw, in_c*out_c)`, or a per-shift block — not this one.
+
+   What is true, and what the metrics here actually describe: the singular values of
+   `W_matrix` are the singular values of a *linear operator built from the kernel's
+   entries*, weighted by the `kh*kw` fold. That is useful and is what WeightWatcher
+   reports, so the CONVENTION is kept deliberately — it is what makes these numbers
+   comparable to published WeightWatcher results, and it is asserted by
+   ``TestGlorotFactorMatchesKerasOwnFans``. Only the justification was wrong.
+   ``README.md`` states the correct version: *"Conv2D kernels are matricized
+   `(kh, kw, in_c, out_c) -> (kh*kw*in_c, out_c)`, which destroys spatial structure.
+   Spectral metrics describe the linear map, not the convolution."* Read the metrics as
+   describing the folded matrix, never as the convolution operator itself.
+
+The product
 of the kernel dimensions (`kernel_height * kernel_width`) is also extracted
 as the receptive field size (`rf`), which can be used for normalization in
 more advanced spectral analyses.
@@ -105,7 +122,17 @@ def infer_layer_type(layer: keras.layers.Layer) -> LayerType:
         return LayerType.LSTM
     elif 'gru' in layer_class:
         return LayerType.GRU
-    elif any(norm_type in layer_class for norm_type in ['layernorm', 'batchnorm', 'groupnorm']):
+    elif any(norm_type in layer_class for norm_type in
+             ['layernorm', 'batchnorm', 'groupnorm', 'rmsnormalization', 'rmsnorm',
+              'normalization']):
+        # DECISION plan-2026-10-05-analyzer-audit/F-065
+        # `rmsnormalization` and `normalization` were missing, so
+        # `keras.layers.RMSNormalization` and `keras.layers.Normalization` both fell to
+        # UNKNOWN and were dropped from the spectral frame entirely — even though the
+        # NORM branch exists precisely to SKIP them deliberately, with a recorded
+        # rationale (D-010: their ESD is degenerate). Being dropped silently by a
+        # substring miss is the same visible outcome for the wrong reason, and it is not
+        # the same as being skipped on purpose.
         return LayerType.NORM
     else:
         return LayerType.UNKNOWN
@@ -195,6 +222,17 @@ def get_weight_matrices(
     N, M, rf = 0, 0, 1.0
 
     if layer_type in [LayerType.DENSE, LayerType.EMBEDDING]:
+        # DECISION plan-2026-10-05-analyzer-audit/F-067
+        # `weights is None` (or not an array) is a legitimate input, not a caller error:
+        # `get_layer_weights_and_bias` returns `None` for a layer it cannot read, and a
+        # caller that forwards that value straight here used to get
+        # `AttributeError: 'NoneType' object has no attribute 'shape'` from inside this
+        # function — an unhelpful crash attributed to the wrong module. Return the
+        # documented empty result instead, exactly as the NORM and UNKNOWN branches
+        # already do.
+        if weights is None or not isinstance(weights, np.ndarray):
+            return [], 0, 0, 1.0
+
         Wmats = [weights]
         N, M = max(weights.shape), min(weights.shape)
 

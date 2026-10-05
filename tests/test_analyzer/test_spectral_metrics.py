@@ -2194,45 +2194,81 @@ class TestCriticalWeightEnumerationIsNotThePathsHotSpot:
     # rewrite is required to leave every one of these untouched, so it could
     # never have failed beforehand. It could not even be WRITTEN until D-003
     # made the columns reproducible.
+    #
+    # DECISION plan-2026-10-05-analyzer-audit/F-029
+    # The `v0` pinned by D-003 was `np.full(min_dim, 1/sqrt(min_dim))` — a CONSTANT
+    # vector, hence exactly orthogonal to every vector whose components sum to zero.
+    # ARPACK handed a start inside the orthogonal complement of the subspace it wants
+    # converges to the WRONG singular vectors with no error raised, so D-003 traded a
+    # reproducibility wobble for a silent-correctness hazard. `v0` is now
+    # `arange(1, min_dim + 1)`, which is neither constant nor zero-sum.
+    #
+    # That moved the four ARPACK-derived columns in the LAST few ULPs — measured
+    # relative drift 1.8e-16 to 7.1e-14 across the three shapes below, and
+    # `critical_weight_count` (an integer count) is UNCHANGED on all three. The
+    # movement is ARPACK choosing a different vector inside a numerically degenerate
+    # invariant subspace, not a change in the spectrum: `participation_ratio` is a
+    # function of the singular VALUES, which did not move.
+    #
+    # The float columns are therefore pinned to a RELATIVE tolerance of 1e-12 — three
+    # orders of magnitude above the observed drift (so a real semantic change is still
+    # caught) and far below anything a reader would act on. `critical_weight_count`
+    # stays EXACT: it is a discrete count and must not drift by one. Do NOT restore
+    # bit-identity on the float columns; that would re-pin the hazard.
     _HEAD_COLUMNS = {
         (256, 128): {
             "gini_coefficient": 0.3930767949900368,
             "dominance_ratio": 0.02291230997569063,
-            "participation_ratio": 84.29070051593679,
-            "min_participation_ratio": 61.344088474072535,
+            "participation_ratio": 84.29070051593702,
+            "min_participation_ratio": 61.344088474072656,
             "critical_weight_count": 24328,
-            "concentration_score": 0.00010684234675382042,
+            "concentration_score": 0.00010684234675382013,
         },
         (512, 512): {
             "gini_coefficient": 0.5413652974958952,
             "dominance_ratio": 0.008011775881888358,
-            "participation_ratio": 172.30052481656648,
-            "min_participation_ratio": 160.05657386575842,
+            "participation_ratio": 172.300524816574,
+            "min_participation_ratio": 160.0565738657697,
             "critical_weight_count": 190216,
-            "concentration_score": 2.5172545749375347e-05,
+            "concentration_score": 2.5172545749374246e-05,
         },
         (1024, 1024): {
             "gini_coefficient": 0.5413703917985958,
             "dominance_ratio": 0.003906777674791442,
-            "participation_ratio": 344.66938377223704,
-            "min_participation_ratio": 316.9058967868582,
+            "participation_ratio": 344.6693837722375,
+            "min_participation_ratio": 316.90589678685825,
             "critical_weight_count": 751140,
-            "concentration_score": 6.136336358374042e-06,
+            "concentration_score": 6.1363363583740345e-06,
         },
     }
 
+    #: Relative tolerance for the float columns. See the F-029 anchor above: the
+    #: measured drift from the start-vector change is 1.8e-16..7.1e-14, so 1e-12
+    #: catches a semantic change with three orders of magnitude of headroom.
+    _FLOAT_RTOL = 1e-12
+
     @pytest.mark.parametrize("shape", sorted(_HEAD_COLUMNS))
-    def test_every_published_concentration_column_is_bit_identical(self, shape):
+    def test_every_published_concentration_column_is_pinned(self, shape):
         weight_matrix, evals = _critical_weight_fixture(*shape)
         got = calculate_concentration_metrics(weight_matrix, evals=evals)
 
         for column, want in self._HEAD_COLUMNS[shape].items():
-            assert float(got[column]) == float(want), (
-                f"{shape} {column}: {got[column]!r} != the HEAD literal {want!r}. "
-                f"Skipping or restating the critical-weight enumeration is only "
-                f"admissible while every published column is untouched; "
-                f"critical_weight_count in particular reaches the analyzer's "
-                f"DataFrame, only the critical_weights LIST is filtered out."
+            if column == "critical_weight_count":
+                # A discrete count. Must not move by one.
+                assert int(got[column]) == int(want), (
+                    f"{shape} {column}: {got[column]!r} != the pinned count {want!r}. "
+                    f"Skipping or restating the critical-weight enumeration is only "
+                    f"admissible while every published column is untouched; "
+                    f"critical_weight_count in particular reaches the analyzer's "
+                    f"DataFrame, only the critical_weights LIST is filtered out."
+                )
+                continue
+            assert float(got[column]) == pytest.approx(
+                float(want), rel=self._FLOAT_RTOL, abs=0.0), (
+                f"{shape} {column}: {got[column]!r} != the pinned {want!r} within "
+                f"rtol={self._FLOAT_RTOL}. Skipping or restating the critical-weight "
+                f"enumeration is only admissible while every published column is "
+                f"untouched."
             )
 
     def test_the_count_column_is_large_enough_to_discriminate(self):
@@ -2260,9 +2296,14 @@ class TestCriticalWeightEnumerationIsNotThePathsHotSpot:
             f"the reported critical weights are not in descending |contribution| "
             f"order: {magnitudes}"
         )
-        assert magnitudes[0] == pytest.approx(0.43259411404973996, rel=0, abs=0), (
+        # DECISION plan-2026-10-05-analyzer-audit/F-029: relative tolerance, not
+        # bit-identity — the ARPACK start-vector change moves this in the last ULPs
+        # (measured 1.3e-15 relative). See the anchor on _HEAD_COLUMNS above. The
+        # ORDERING assertion above is the load-bearing one and is unchanged.
+        assert magnitudes[0] == pytest.approx(
+            0.4325941140497396, rel=1e-12, abs=0), (
             f"the largest reported contribution moved to {magnitudes[0]!r} from the "
-            f"HEAD literal 0.43259411404973996"
+            f"pinned 0.4325941140497396 (rtol=1e-12)"
         )
 
 

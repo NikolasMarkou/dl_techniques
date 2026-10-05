@@ -64,6 +64,15 @@ def _get_binary_bin_info(
         - Empty bins are RETAINED, with ``count = 0`` and zeroed statistics, so
           the returned list always has exactly ``n_bins`` entries in bin order.
 
+    .. warning::
+       DECISION plan-2026-10-05-analyzer-audit/F-035: the ``accuracy`` and
+       ``confidence`` of an EMPTY bin are ``0.0`` PLACEHOLDERS, not measurements. The
+       ECE/MCE reductions skip empty bins via ``prop_in_bin > 0`` so they are unaffected;
+       :func:`compute_reliability_data` re-expresses them as NaN because it EXPORTS them
+       to a plot. Any other consumer must test ``count > 0`` before reading them: a
+       ``0.0`` accuracy is the extreme of the axis it is plotted on, which is exactly how
+       the reliability diagram came to draw nine fabricated points at the origin.
+
     Args:
         outcomes (np.ndarray): Binary outcome per sample. Shape: (n_samples,)
         scores (np.ndarray): Forecast score per sample. Shape: (n_samples,)
@@ -178,7 +187,7 @@ def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 15) -> flo
         >>> y_prob = np.array([[0.9, 0.1], [0.3, 0.7], [0.2, 0.8],
         ...                    [0.8, 0.2], [0.4, 0.6]])
         >>> compute_ece(y_true, y_prob, n_bins=5)
-        0.16
+        0.24
     """
     bin_info = _get_bin_info(y_true, y_prob, n_bins)
 
@@ -250,7 +259,7 @@ def compute_adaptive_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 1
         >>> y_true = np.array([0, 1, 0, 1, 0, 1, 0, 1, 0, 1])
         >>> y_prob = np.array([[0.9, 0.1]]*5 + [[0.1, 0.9]]*5)
         >>> compute_adaptive_ece(y_true, y_prob, n_bins=2)
-        0.0
+        0.3
     """
     n_samples = len(y_true)
     y_pred = np.argmax(y_prob, axis=1)
@@ -338,16 +347,39 @@ def compute_reliability_data(
 
     Example:
         >>> y_true = np.array([0, 1, 1, 0, 1])
-        >>> y_prob = np.array([[0.9, 0.1], [0.3, 0.7], [0.2, 0.8], [0.8, 0.2]])
-        >>> data = compute_reliability_data(y_true[:4], y_prob[:4], n_bins=5)
+        >>> y_prob = np.array([[0.9, 0.1], [0.3, 0.7], [0.2, 0.8], [0.8, 0.2], [0.4, 0.6]])
+        >>> data = compute_reliability_data(y_true, y_prob, n_bins=5)
         >>> print(data['bin_centers'])
         [0.1 0.3 0.5 0.7 0.9]
+
+    .. important::
+       DECISION plan-2026-10-05-analyzer-audit/F-035: BOTH ``bin_accuracies`` and
+       ``bin_confidences`` are **NaN in an empty bin**, never 0.0 and never the bin
+       centre. Only ``bin_centers`` and ``bin_counts`` are defined for an empty bin.
+
+       Previously only ``bin_confidences`` was neutralised; ``bin_accuracies`` kept the
+       ``0.0`` placeholder that :func:`_get_bin_info` writes for an empty bin, and the
+       visualizer plots exactly that array. With the default ``calibration_bins=10`` and
+       any confident model, bins 0-8 are empty, so the reliability curve was drawn
+       through ``(0.1, 0.0) ... (0.9, 0.0)`` as if measured — MEASURED
+       ``bin_accuracies = [0. 0. 0. 0. 0. 0. 0. 0. 0. 1.]`` against
+       ``bin_counts = [0 0 0 0 0 0 0 0 0 20]``. A perfectly calibrated confident model
+       therefore rendered as grossly miscalibrated. Consumers MUST mask on
+       ``bin_counts > 0`` (or ``np.isfinite``); see ``calibration_visualizer.py``.
     """
     bin_info = _get_bin_info(y_true, y_prob, n_bins)
 
     bin_centers = np.array([b["center"] for b in bin_info])
-    bin_accuracies = np.array([b["accuracy"] for b in bin_info])
-    bin_confidences = np.array([b["confidence"] if b["count"] > 0 else b["center"] for b in bin_info])
+    # DECISION plan-2026-10-05-analyzer-audit/F-035 — see the `.. important::` block.
+    # An empty bin has NO measured accuracy and NO measured confidence. Substituting
+    # 0.0 for the accuracy fabricated the single most misleading point in the figure,
+    # because 0.0 is the extreme of the axis it is plotted on.
+    bin_accuracies = np.array([
+        b["accuracy"] if b["count"] > 0 else np.nan for b in bin_info
+    ])
+    bin_confidences = np.array([
+        b["confidence"] if b["count"] > 0 else np.nan for b in bin_info
+    ])
     bin_counts = np.array([b["count"] for b in bin_info])
 
     return {
@@ -384,7 +416,7 @@ def compute_brier_score(y_true_onehot: np.ndarray, y_prob: np.ndarray) -> float:
         >>> y_true_oh = np.array([[1, 0], [0, 1], [0, 1], [1, 0]])
         >>> y_prob = np.array([[0.8, 0.2], [0.3, 0.7], [0.1, 0.9], [0.9, 0.1]])
         >>> compute_brier_score(y_true_oh, y_prob)
-        0.135
+        0.075
     """
     squared_diffs = (y_prob - y_true_onehot) ** 2
     return np.mean(np.sum(squared_diffs, axis=1))
@@ -527,7 +559,7 @@ def compute_prediction_entropy_stats(y_prob: np.ndarray) -> Dict[str, float]:
         >>> y_prob = np.array([[0.9, 0.1], [0.5, 0.5], [0.1, 0.9], [0.8, 0.2]])
         >>> stats = compute_prediction_entropy_stats(y_prob)
         >>> print(f"{stats['mean_entropy']:.4f}")
-        0.4578
+        0.4609
     """
     epsilon = 1e-9
     y_prob_clipped = np.clip(y_prob, epsilon, 1 - epsilon)
