@@ -4,8 +4,11 @@ This package exports the SSM layers plus the factory interface that builds
 them from a config dict. Import a class directly, or call
 ``create_ssm_layer(type=...)`` when the type comes from configuration.
 
-``factory.py`` registers 2 keys: ``selective_ssm`` (generic S6 scan) and
-``context_mamba`` (MambaLCT temporal wrapper over it).
+``factory.py`` registers 4 keys: ``selective_ssm`` (generic S6 scan),
+``context_mamba`` (MambaLCT temporal wrapper), ``mamba`` (paper-named
+alias of the S6 scan) and ``mamba2`` (multi-head SSD scan). The residual
+wrappers (``MambaResidualBlock``, ``Mamba2ResidualBlock``) are
+direct-import classes, not factory keys.
 """
 
 from .factory import (
@@ -19,8 +22,9 @@ from .factory import (
     list_ssm_types,
     get_ssm_requirements,
 )
-from .selective_ssm import SelectiveSSMLayer
+from .selective_ssm import SelectiveSSMLayer, MambaLayer, MambaResidualBlock
 from .context_mamba import ContextMambaLayer
+from .mamba2 import Mamba2Layer, Mamba2ResidualBlock
 
 __all__ = [
     "SSM_REGISTRY",
@@ -33,5 +37,9 @@ __all__ = [
     "list_ssm_types",
     "get_ssm_requirements",
     "SelectiveSSMLayer",
+    "MambaLayer",
+    "MambaResidualBlock",
     "ContextMambaLayer",
+    "Mamba2Layer",
+    "Mamba2ResidualBlock",
 ]

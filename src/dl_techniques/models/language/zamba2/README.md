@@ -23,7 +23,7 @@ specialize per depth anyway, each invocation ("occurrence") of the shared MLP bl
 up-projection gets its own low-rank LoRA delta, selected by a monotonically increasing global
 occurrence counter that is independent of which physical mem-block slot is invoked.
 
-This package reuses `dl_techniques.models.language.mamba.components_v2.Mamba2ResidualBlock`
+This package reuses `dl_techniques.layers.ssm.mamba2.Mamba2ResidualBlock`
 directly for the SSM mixer (wrapped by `Zamba2MambaBlock`, a thin kwarg-translation adapter), and
 the repo's existing `RMSNorm`, `RotaryPositionEmbedding` and `'multi_head'` attention factory
 entry for the shared attention block. The only genuinely new primitive is `LoRAAdapter`

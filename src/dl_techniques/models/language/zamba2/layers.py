@@ -32,7 +32,7 @@ from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
 from dl_techniques.layers.attention.factory import create_attention_layer
-from dl_techniques.models.language.mamba.components_v2 import Mamba2ResidualBlock
+from dl_techniques.layers.ssm.mamba2 import Mamba2ResidualBlock
 
 # ---------------------------------------------------------------------
 
@@ -1030,7 +1030,7 @@ class Zamba2MambaBlock(keras.layers.Layer):
 
     A thin adapter that translates Zamba2's own constructor vocabulary
     (``d_model``/``d_state``/``d_conv``/``expand``/``headdim``) onto the
-    existing :class:`~dl_techniques.models.language.mamba.components_v2.Mamba2ResidualBlock`,
+    existing :class:`~dl_techniques.layers.ssm.mamba2.Mamba2ResidualBlock`,
     which already supplies the pre-norm RMSNorm and the selective-scan
     mixer; this class reimplements none of that and owns exactly one
     sub-layer. It differs from :class:`Zamba2SharedAttentionBlock` and
@@ -1091,7 +1091,7 @@ class Zamba2MambaBlock(keras.layers.Layer):
         When ``None`` (the default) it resolves to ``d_model * expand``,
         the same default ``Mamba2Layer`` applies internally -- resolved
         here because ``Mamba2ResidualBlock`` itself has no default for this
-        argument (confirmed against ``components_v2.py``). Must be
+        argument (confirmed against ``layers/ssm/mamba2.py``). Must be
         divisible by ``headdim`` (enforced by the wrapped ``Mamba2Layer``).
     :type d_ssm: Optional[int]
     :param ngroups: Forwarded to ``Mamba2ResidualBlock``. Defaults to 1.

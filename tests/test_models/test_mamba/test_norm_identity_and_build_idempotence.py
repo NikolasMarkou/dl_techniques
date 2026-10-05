@@ -28,8 +28,8 @@ import keras
 
 import dl_techniques.models.language.mamba as mamba_pkg
 from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.models.language.mamba.components import MambaLayer
-from dl_techniques.models.language.mamba.components_v2 import Mamba2Layer, Mamba2ResidualBlock
+from dl_techniques.layers.ssm.selective_ssm import MambaLayer
+from dl_techniques.layers.ssm.mamba2 import Mamba2Layer, Mamba2ResidualBlock
 
 D_MODEL = 16
 SHAPE = (2, 6, D_MODEL)

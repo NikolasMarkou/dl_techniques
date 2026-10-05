@@ -250,10 +250,10 @@ model.summary()
 
 | Layer | Location | Purpose |
 | :--- | :--- | :--- |
-| **`MambaLayer`** | `...mamba.components` (V1) | Core V1 block with sequential parameterization. |
-| **`Mamba2Layer`** | `...mamba.components_v2` | Core V2 block with multi-head SSM and parallel parameterization. |
-| **`MambaResidualBlock`** | `...mamba.components` (V1) | Pre-norm residual wrapper for `MambaLayer`. |
-| **`Mamba2ResidualBlock`**| `...mamba.components_v2`| Pre-norm residual wrapper for `Mamba2Layer`. |
+| **`MambaLayer`** | `layers.ssm.selective_ssm` (paper-named alias of `SelectiveSSMLayer`) | Core V1 block with sequential parameterization. |
+| **`Mamba2Layer`** | `layers.ssm.mamba2` | Core V2 block with multi-head SSM and parallel parameterization. |
+| **`MambaResidualBlock`** | `layers.ssm.selective_ssm` | Pre-norm residual wrapper for `MambaLayer`. |
+| **`Mamba2ResidualBlock`**| `layers.ssm.mamba2`| Pre-norm residual wrapper for `Mamba2Layer`. |
 
 ---
 

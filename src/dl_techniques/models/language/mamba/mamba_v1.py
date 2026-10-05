@@ -39,7 +39,7 @@ from typing import Optional, Union, Any, Dict
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 from dl_techniques.utils.model_build import materialize_sublayers
-from .components import MambaResidualBlock
+from dl_techniques.layers.ssm.selective_ssm import MambaResidualBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 

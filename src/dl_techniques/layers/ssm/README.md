@@ -8,6 +8,8 @@ Selective state space (SSM) layers with linear-time sequence modeling.
 |---|---|---|
 | `selective_ssm` | `SelectiveSSMLayer` | Generic S6 scan (Mamba v1): causal depthwise conv + input-dependent discretization, `(B, L, D)` in/out |
 | `context_mamba` | `ContextMambaLayer` | MambaLCT temporal wrapper: `(B, T, L, D)` frames + `(B, Nc, D)` context in, enhanced frames + updated context out |
+| `mamba` | `MambaLayer` | Paper-named alias of `SelectiveSSMLayer`, identical behavior/defaults |
+| `mamba2` | `Mamba2Layer` | Multi-head SSD scan (Mamba-2): grouped B/C, gated MLP path, RMSNorm gate |
 
 ## Factory
 
@@ -16,6 +18,7 @@ from dl_techniques.layers.ssm import create_ssm_layer
 
 ssm = create_ssm_layer("selective_ssm", d_model=512)
 ctx = create_ssm_layer("context_mamba", d_model=512)
+mamba2 = create_ssm_layer("mamba2", d_model=512)
 ```
 
 `create_ssm_layer` raises `ValueError` on any undeclared keyword. The

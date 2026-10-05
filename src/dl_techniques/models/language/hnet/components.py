@@ -94,7 +94,7 @@ from dl_techniques.models.language.hnet.config import (
     IsotropicSpec,
     parse_arch_layout,
 )
-from dl_techniques.models.language.mamba.components_v2 import Mamba2Layer
+from dl_techniques.layers.ssm.mamba2 import Mamba2Layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

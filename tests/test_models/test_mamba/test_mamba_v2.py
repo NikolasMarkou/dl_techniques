@@ -23,7 +23,7 @@ from typing import Dict, Any
 from unittest import mock
 
 from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
-from dl_techniques.models.language.mamba.components_v2 import Mamba2Layer
+from dl_techniques.layers.ssm.mamba2 import Mamba2Layer
 
 from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 from tests.numerics import reassociation_atol

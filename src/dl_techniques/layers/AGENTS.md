@@ -24,7 +24,7 @@ see § Naming traps.
 | `memory/` | Y | NTM family, SOM family, NeuroGrid — see below |
 | `mixtures/` | Y | `RBFLayer`, `KMeansLayer` (differentiable K-means), `GMMLayer` (differentiable GMM with isometric-kernel regularization) |
 | `sequence_pooling/` | Y | `(B, T, D)` → `(B, D)`. `SequencePooling` covers 18 strategies (positional `cls`/`first`/`last`/`middle`, statistical, composite, learnable `attention`/`multi_head_attention`/`weighted`, top-k, `none`/`flatten`); four are reused by `heads/nlp/`. Plus `attention_pooling.py`, `weighted_pooling.py`. Carries its own `README.md` + `GUIDE.md` |
-| `ssm/` | Y | Selective SSM (S6 scan) plus the temporal ContextMamba mixer, built via `create_ssm_layer()` |
+| `ssm/` | Y | Selective SSM (S6 scan, plus paper-named alias), Mamba-2 SSD scan, temporal ContextMamba mixer, and both residual wrappers, built via `create_ssm_layer()` (residual blocks are direct-import only) |
 | `transformers/` | — | Standard transformer, Swin block / conv block, perceiver, progressive focused, EoMT, free transformer, text encoder/decoder, vision encoder, `EnergyTransformer` + `HopfieldNetwork`, `GatedLinearAttentionBlock`, `AreaAttentionBlock` |
 | `fastvit/` | — | Channels-last transcriptions of timm's FastViT **MCi** image-tower primitives, consumed by `models/vision/fastvit/`. Curated `__init__`, no factory; train-time multi-branch form only, no reparameterization path. See `fastvit/README.md` |
 | `moe/` | — | Full MoE framework: `config.py`, `experts.py`, `gating.py`, `layer.py`, `integration.py` |
@@ -156,7 +156,7 @@ public surface, 18 export nothing — so neither shape is the default and you ha
 
 | Shape | Subpackages | How to import |
 |---|---|---|
-| **Curated re-export with `__all__`** (17) | `activations` (34 names), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (40), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (23), `sequence_pooling` (12), `ssm` (11), `time_series` (33), `tokenizers` (8), `transformers` (32) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
+| **Curated re-export with `__all__`** (17) | `activations` (34 names), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (40), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (23), `sequence_pooling` (12), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (32) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
 | **Exports nothing** (18) | `acc_unet`, `blt`, `complex`, `conv_blocks`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
 
 All 35 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.

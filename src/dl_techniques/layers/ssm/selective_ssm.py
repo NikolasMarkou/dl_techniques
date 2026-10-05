@@ -23,6 +23,7 @@ import keras
 import numpy as np
 from typing import Optional, Union, Any, Dict, Tuple
 
+from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -364,6 +365,197 @@ class SelectiveSSMLayer(keras.layers.Layer):
             "conv_bias": self.conv_bias,
             "use_bias": self.use_bias,
             "layer_idx": self.layer_idx,
+        })
+        return config
+
+# ---------------------------------------------------------------------
+
+
+@register_dl_technique("dl_techniques.layers.ssm.selective_ssm", legacy_packages=("dl_techniques.models.mamba.components",))
+class MambaLayer(SelectiveSSMLayer):
+    """Paper-named alias of :class:`SelectiveSSMLayer`.
+
+    Byte-identical behavior (no overridden methods): this subclass exists so
+    the pre-migration archive key
+    ``dl_techniques.models.mamba.components>MambaLayer`` and the
+    ``Custom>MambaLayer`` alias keep resolving, and so existing imports of
+    the paper name keep working. New code should use
+    :class:`SelectiveSSMLayer` (or the ``selective_ssm`` / ``mamba``
+    factory keys) directly.
+    """
+
+# ---------------------------------------------------------------------
+
+@register_dl_technique("dl_techniques.layers.ssm.selective_ssm", legacy_packages=("dl_techniques.models.mamba.components",))
+class MambaResidualBlock(keras.layers.Layer):
+    """
+    Wrap a MambaLayer in a pre-norm residual block.
+
+    The block adds the incoming residual to the hidden states, normalizes the
+    sum, and runs the Mamba layer on the normalized value. It returns the layer
+    output and the unnormalized sum as two tensors, so the caller carries the
+    residual into the next block instead of the block closing it. Normalizing
+    before the sublayer rather than after improves training stability in deep
+    networks.
+
+    Architecture:
+
+    .. code-block:: text
+
+          hidden_states [B, L, D]       residual [B, L, D]
+                     │                           │
+                     └─────────────┬─────────────┘
+                                   ▼
+                             new_residual
+                                   │
+                     ┌─────────────┴─────────────┐
+                     ▼                           │
+              ┌─────────────┐                    │
+              │    norm     │                    │
+              └─────────────┘                    │
+                     │                           │
+                     ▼                           │
+              ┌─────────────┐                    │
+              │    mamba    │                    │
+              └─────────────┘                    │
+                     │                           │
+                     ▼                           ▼
+               mamba_output                new_residual
+                 [B, L, D]                   [B, L, D]
+
+    ``residual`` arrives as an input and is ``None`` for the first block.
+
+    :param d_model: Dimensionality of the input and output.
+    :type d_model: int
+    :param norm_epsilon: Epsilon for layer normalization. Defaults to 1e-5.
+    :type norm_epsilon: float
+    :param mamba_kwargs: Keyword arguments to pass to MambaLayer constructor.
+        Should include parameters like d_state, d_conv, expand, etc.
+    :type mamba_kwargs: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for Layer base class.
+
+    Input shape:
+        - hidden_states: 3D tensor (batch_size, seq_len, d_model)
+        - residual: Optional 3D tensor (batch_size, seq_len, d_model) or None
+
+    Output shape:
+        Tuple of:
+        - mamba_output: 3D tensor (batch_size, seq_len, d_model)
+        - new_residual: 3D tensor (batch_size, seq_len, d_model)
+
+    :ivar norm: Layer normalization applied before the Mamba layer.
+    :vartype norm: keras.layers.Layer
+    :ivar mamba: The core Mamba SSM layer.
+    :vartype mamba: MambaLayer
+
+    Example:
+        .. code-block:: python
+
+            block = MambaResidualBlock(
+                d_model=768,
+                mamba_kwargs={
+                    "d_state": 16,
+                    "d_conv": 4,
+                    "expand": 2,
+                    "layer_idx": 0
+                }
+            )
+
+            x = keras.random.normal((2, 512, 768))
+            hidden, residual = block(x, residual=None)
+            hidden, residual = block(hidden, residual=residual)
+
+    Note:
+        The block never forms ``hidden_states + mamba_output``. It returns the
+        two tensors, and the next block adds them.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        norm_epsilon: float = 1e-5,
+        mamba_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        self.d_model = d_model
+        self.norm_epsilon = norm_epsilon
+        self.mamba_kwargs = mamba_kwargs or {}
+
+        self.norm = create_normalization_layer(
+            'layer_norm',
+            epsilon=self.norm_epsilon,
+            name="norm"
+        )
+
+        self.mamba = MambaLayer(
+            d_model=self.d_model,
+            **self.mamba_kwargs
+        )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build both sub-layers ``call`` runs: the pre-norm and the Mamba layer.
+
+        Both see the block's own input shape, because ``call`` normalizes the
+        residual sum, which has the input shape, and feeds it to the layer.
+
+        :param input_shape: Shape of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
+        self.norm.build(input_shape)
+        self.mamba.build(input_shape)
+
+        super().build(input_shape)
+
+    def call(
+        self,
+        hidden_states: keras.KerasTensor,
+        residual: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None,
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        """
+        Add the residual, normalize, and run the Mamba layer.
+
+        :param hidden_states: Main input tensor, shape (batch, seq_len, d_model).
+        :type hidden_states: keras.KerasTensor
+        :param residual: Optional residual from previous block. Defaults to None.
+        :type residual: Optional[keras.KerasTensor]
+        :param training: Whether in training mode. Defaults to None.
+        :type training: Optional[bool]
+        :return: Tuple of (mamba_output, new_residual).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+        """
+        # The sum is taken before normalization, so the residual stream stays
+        # unnormalized down the stack.
+        new_residual = (
+            hidden_states + residual if residual is not None else hidden_states
+        )
+
+        normalized = self.norm(new_residual, training=training)
+
+        mamba_output = self.mamba(normalized, training=training)
+
+        return mamba_output, new_residual
+
+    def compute_output_shape(self, input_shape):
+        """Returns tuple of (hidden_states, residual), both (batch, seq_len, d_model)."""
+        output_shape = (*input_shape[:-1], self.d_model)
+        return (output_shape, output_shape)
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return configuration for serialization.
+
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            "d_model": self.d_model,
+            "norm_epsilon": self.norm_epsilon,
+            "mamba_kwargs": self.mamba_kwargs,
         })
         return config
 

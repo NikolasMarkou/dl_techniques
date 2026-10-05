@@ -1,6 +1,7 @@
 """Zamba2: hybrid Mamba2 + shared-attention SSM/Transformer causal language model.
 
-Interleaves per-depth Mamba2 SSM blocks (reused directly from
+Interleaves per-depth Mamba2 SSM blocks (reused from
+:mod:`dl_techniques.layers.ssm.mamba2`, re-exported through
 :mod:`dl_techniques.models.language.mamba`) with a small number of **shared**
 attention+MLP "mem-blocks" invoked at multiple depths, where each reuse
 ("occurrence") of the shared MLP block's up-projection carries its own small

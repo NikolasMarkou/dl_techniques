@@ -21,7 +21,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.language.mamba.components_v2 import (
+from dl_techniques.layers.ssm.mamba2 import (
     Mamba2Layer,
     Mamba2ResidualBlock,
 )

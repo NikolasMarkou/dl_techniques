@@ -29,7 +29,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.models.mamba.components_v2")
+@register_dl_technique("dl_techniques.layers.ssm.mamba2", legacy_packages=("dl_techniques.models.mamba.components_v2",))
 class Mamba2Layer(keras.layers.Layer):
     """Apply a Mamba-2 selective state space layer to a sequence.
 
@@ -505,7 +505,7 @@ class Mamba2Layer(keras.layers.Layer):
         return config
 
 
-@register_dl_technique("dl_techniques.models.mamba.components_v2")
+@register_dl_technique("dl_techniques.layers.ssm.mamba2", legacy_packages=("dl_techniques.models.mamba.components_v2",))
 class Mamba2ResidualBlock(keras.layers.Layer):
     """Wrap a :class:`Mamba2Layer` in a pre-norm residual block.
 

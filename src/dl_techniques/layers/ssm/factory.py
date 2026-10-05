@@ -1,6 +1,6 @@
 """State space layer factory: one registry, one construction path.
 
-``SSM_REGISTRY`` maps 2 string keys to the SSM layers in this package plus
+``SSM_REGISTRY`` maps 4 string keys to the SSM layers in this package plus
 their metadata. ``create_ssm_layer`` is the single construction path: it
 looks the key up, rejects any keyword the target type does not declare,
 fills in the registry defaults, and constructs. Nothing on that path
@@ -23,6 +23,8 @@ Registered types:
 
     selective_ssm   SelectiveSSMLayer
     context_mamba   ContextMambaLayer
+    mamba           MambaLayer (paper-named alias of SelectiveSSMLayer)
+    mamba2          Mamba2Layer (multi-head SSD)
 """
 
 import keras
@@ -34,14 +36,15 @@ from typing import Dict, Any, Literal, Mapping, Optional, List, Sequence
 
 from dl_techniques.utils.logger import logger
 
-from .selective_ssm import SelectiveSSMLayer
+from .selective_ssm import SelectiveSSMLayer, MambaLayer
 from .context_mamba import ContextMambaLayer
+from .mamba2 import Mamba2Layer
 
 # ---------------------------------------------------------------------
 # Type Definitions
 # ---------------------------------------------------------------------
 
-SsmType = Literal['selective_ssm', 'context_mamba']
+SsmType = Literal['selective_ssm', 'context_mamba', 'mamba', 'mamba2']
 
 # ---------------------------------------------------------------------
 # SSM Layer Registry
@@ -111,6 +114,66 @@ SSM_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O((T*L + Nc) * D * N)',
         'paper': 'MambaLCT: Boosting Tracking via Long-term Context State Space Model',
+    },
+    'mamba': {
+        'class': MambaLayer,
+        'description': (
+            'Paper-named alias of SelectiveSSMLayer: the Mamba v1 selective '
+            'state space mixer with identical behavior and defaults. Prefer '
+            'this key when porting paper-named configs.'
+        ),
+        'required_params': ['d_model'],
+        'optional_params': {
+            'd_state': 16,
+            'd_conv': 4,
+            'expand': 2,
+            'dt_rank': 'auto',
+            'dt_min': 0.001,
+            'dt_max': 0.1,
+            'dt_init': 'random',
+            'dt_scale': 1.0,
+            'dt_init_floor': 1e-4,
+            'conv_bias': True,
+            'use_bias': False,
+            'layer_idx': None,
+        },
+        'use_case': (
+            'Paper-named door onto the selective SSM for language and '
+            'temporal sequence modeling.'
+        ),
+        'complexity': 'O(S * D * N) for S tokens, D channels, N states',
+        'paper': 'Mamba: Linear-Time Sequence Modeling with Selective State Spaces',
+    },
+    'mamba2': {
+        'class': Mamba2Layer,
+        'description': (
+            'Mamba-2 selective SSM on the State Space Duality framework: '
+            'grouped multi-head recurrence with a parallel gated-MLP path, '
+            'per-head decay and skip, and an RMSNorm gate.'
+        ),
+        'required_params': ['d_model'],
+        'optional_params': {
+            'd_state': 128,
+            'd_conv': 4,
+            'expand': 2,
+            'headdim': 64,
+            'ngroups': 1,
+            'd_ssm': None,
+            'rmsnorm': True,
+            'norm_epsilon': 1e-5,
+            'norm_before_gate': False,
+            'dt_min': 0.001,
+            'dt_max': 0.1,
+            'dt_init_floor': 1e-4,
+            'bias': False,
+            'conv_bias': True,
+        },
+        'use_case': (
+            'Long-sequence modeling with multi-head SSM structure and grouped '
+            'B/C projections (Zamba2, HNet mixers, Mamba-2 LMs).'
+        ),
+        'complexity': 'O(S * H * P * N) for S tokens, H heads, P head dim, N states',
+        'paper': 'Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality',
     },
 }
 """
@@ -208,7 +271,7 @@ def validate_ssm_config(ssm_type: str, **kwargs: Any) -> None:
             f"Required: {required}, Provided: {list(kwargs.keys())}"
         )
 
-    for param in ('d_model', 'd_state', 'd_conv', 'expand'):
+    for param in ('d_model', 'd_state', 'd_conv', 'expand', 'headdim', 'ngroups'):
         if param in kwargs and kwargs[param] is not None and kwargs[param] <= 0:
             raise ValueError(
                 f"Parameter '{param}' must be positive, got {kwargs[param]}"

@@ -11,8 +11,18 @@ from dl_techniques.layers.ssm import (
 
 
 def test_registry_keys_are_pinned() -> None:
-    assert sorted(SSM_REGISTRY.keys()) == ["context_mamba", "selective_ssm"]
-    assert sorted(list_ssm_types()) == ["context_mamba", "selective_ssm"]
+    assert sorted(SSM_REGISTRY.keys()) == [
+        "context_mamba",
+        "mamba",
+        "mamba2",
+        "selective_ssm",
+    ]
+    assert sorted(list_ssm_types()) == [
+        "context_mamba",
+        "mamba",
+        "mamba2",
+        "selective_ssm",
+    ]
 
 
 def test_create_selective_ssm_minimal() -> None:
@@ -25,6 +35,22 @@ def test_create_context_mamba_minimal() -> None:
     layer = create_ssm_layer("context_mamba", d_model=16)
     assert layer.d_model == 16
     assert layer.normalization_type == "layer_norm"
+
+
+def test_create_mamba_alias_matches_selective_ssm() -> None:
+    from dl_techniques.layers.ssm import MambaLayer, SelectiveSSMLayer
+
+    assert issubclass(MambaLayer, SelectiveSSMLayer)
+    layer = create_ssm_layer("mamba", d_model=16)
+    assert type(layer).__name__ == "MambaLayer"
+    assert layer.d_state == 16
+
+
+def test_create_mamba2_minimal() -> None:
+    layer = create_ssm_layer("mamba2", d_model=128)
+    assert layer.d_model == 128
+    assert layer.d_state == 128
+    assert layer.nheads == layer.d_ssm // layer.headdim
 
 
 def test_unknown_type_raises() -> None:

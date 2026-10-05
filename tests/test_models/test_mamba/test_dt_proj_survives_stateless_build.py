@@ -39,7 +39,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.models.language.mamba.components import MambaLayer
+from dl_techniques.layers.ssm.selective_ssm import MambaLayer
 from dl_techniques.models.language.mamba.mamba_v1 import Mamba
 
 D_MODEL, SEQ, VOCAB = 16, 8, 64

@@ -59,7 +59,7 @@ from dl_techniques.models.language.hnet.components import (
 )
 from dl_techniques.models.language.hnet import components as components_module
 from dl_techniques.models.language.hnet.config import MODEL_VARIANTS
-from dl_techniques.models.language.mamba.components_v2 import Mamba2Layer
+from dl_techniques.layers.ssm.mamba2 import Mamba2Layer
 from dl_techniques.layers.attention.group_query_attention import GroupedQueryAttention
 from tests.numerics import matmul_precision_atol, matmul_unit_roundoff
 

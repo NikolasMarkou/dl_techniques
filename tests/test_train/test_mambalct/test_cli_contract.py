@@ -22,7 +22,7 @@ def test_config_from_args_forwards_flags() -> None:
             "--template-size", "96", "--search-size", "192",
             "--batch-size", "8", "--epochs", "5",
             "--learning-rate", "1e-3", "--lr-schedule", "constant",
-            "--allow-custom-geometry",
+            "--allow-custom-geometry", "--momentum", "0.5",
         ]
     )
     config = train_mambalct.config_from_args(args)
@@ -35,3 +35,5 @@ def test_config_from_args_forwards_flags() -> None:
     assert config.epochs == 5
     assert config.learning_rate == 1e-3
     assert config.lr_schedule_type == "constant"
+    assert config.allow_custom_geometry is True
+    assert config.momentum == 0.5

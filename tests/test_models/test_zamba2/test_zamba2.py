@@ -711,7 +711,7 @@ class TestZamba2MambaBlock:
         assert block.headdim == block_config["headdim"]
         assert block.d_ssm == block_config["d_model"] * block_config["expand"]
         assert not block.built
-        from dl_techniques.models.language.mamba.components_v2 import Mamba2ResidualBlock
+        from dl_techniques.layers.ssm.mamba2 import Mamba2ResidualBlock
         assert isinstance(block.mamba_block, Mamba2ResidualBlock)
 
     def test_edge_cases(self) -> None:

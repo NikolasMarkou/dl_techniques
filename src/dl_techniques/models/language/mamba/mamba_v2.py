@@ -36,7 +36,7 @@ from typing import Optional, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from .components_v2 import Mamba2ResidualBlock
+from dl_techniques.layers.ssm.mamba2 import Mamba2ResidualBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -134,7 +134,7 @@ class Mamba2(keras.Model):
         smaller value routes the leading ``d_inner - d_ssm`` channels around the SSM
         as a gated MLP.
     :param norm_before_gate: Forwarded to every
-        :class:`~dl_techniques.models.language.mamba.components_v2.Mamba2Layer` in the
+        :class:`~dl_techniques.layers.ssm.mamba2.Mamba2Layer` in the
         stack; see that class for the semantics and for which checkpoints need
         ``True``.
     :param ngroups: Number of head groups sharing one ``B``/``C``. Forwarded to every

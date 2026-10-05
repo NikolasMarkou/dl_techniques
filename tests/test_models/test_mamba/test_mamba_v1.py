@@ -25,7 +25,7 @@ from typing import Dict, Any
 from unittest import mock
 
 from dl_techniques.models.language.mamba import Mamba
-from dl_techniques.models.language.mamba.components import MambaLayer
+from dl_techniques.layers.ssm.selective_ssm import MambaLayer
 
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,
