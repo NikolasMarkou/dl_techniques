@@ -20,12 +20,14 @@ Four families nest one level further (`vision/image_restoration`, `vision/keypoi
 wrong test. Re-derive any count with the command beside it; never quote one from memory.
 
 ```bash
-find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 119 packages
-find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 354 .py
+find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 121 packages
+find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 360 .py
 ```
 
 Both re-derived 2026-10-05 by running exactly those two commands
-(`vision/mambalct/` contributes 1 package and 3 `.py`: `__init__`,
+(`vision/alexnet/` contributes 1 package and 3 `.py`: `__init__`, `model`,
+`spatial_guard`; the previous readings that same day were **119 / 354**).
+Before that (`vision/mambalct/` contributes 1 package and 3 `.py`: `__init__`,
 `model`, `uca_encoder`; the previous readings that same day were
 **118 / 351**). Before that (`deepsort/` contributes 1 package and 6 `.py`: `__init__`,
 `appearance`, `kalman`, `matching`, `state`, `tracker`; the previous

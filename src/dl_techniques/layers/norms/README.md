@@ -4,7 +4,7 @@ The `dl_techniques.layers.norms` module provides a comprehensive collection of n
 
 ## Overview
 
-This module includes eighteen different normalization layer types, ranging from standard Keras layers to specialized variants for stability, efficiency, and advanced modeling like out-of-distribution detection. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these normalization mechanisms into your models.
+This module includes nineteen different normalization layer types, ranging from standard Keras layers to specialized variants for stability, efficiency, and advanced modeling like out-of-distribution detection. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these normalization mechanisms into your models.
 
 ## Weight Reparameterization (not factory-registered)
 
@@ -36,7 +36,8 @@ The following layers are supported by the factory system with automated paramete
 | `band_rms` | `BandRMS` | RMS normalization with a learnable, bounded magnitude constraint. | Imposing "thick spherical shell" constraints for stable training. | Arbitrary |
 | `adaptive_band_rms` | `AdaptiveBandRMS` | Adaptive RMS with scaling based on log-transformed RMS statistics. | Advanced training stability with input-adaptive scaling. | Arbitrary rank, but **resolution-locked** when a spatial/sequence axis is normalized (see note) |
 | `band_logit_norm` | `BandLogitNorm` | L2 normalization with a band-bounded scale. (Known limitation: the "adaptive" component is degenerate — see note in `band_logit_norm.py`; it reduces to a constant scale `1 - 0.5·max_band_width`.) | Classification tasks with constrained logit magnitude. | Arbitrary |
-| `global_response_norm`| `GlobalResponseNormalization` | Global Response Normalization (GRN) from ConvNeXt V2. | ConvNeXt-style architectures to enhance inter-channel competition. | 2D, 3D, or 4D tensors |
+| `global_response_norm`| `GlobalResponseNormalization` | Global Response Normalization (GRN) from ConvNeXt V2. **Not** a variant of LRN — see the note below. | ConvNeXt-style architectures to enhance inter-channel competition. | 2D, 3D, or 4D tensors |
+| `local_response_norm`| `LocalResponseNormalization` | Local Response Normalization (LRN) from AlexNet 2012: divides each channel by the squared energy of a centred window of *neighbouring channels* (`n = 2*depth_radius+1`). No weights. **Not** a variant of GRN — see the note below. | AlexNet-faithful CNNs, historical research baselines. | 3D or 4D tensors |
 | `logit_norm` | `LogitNorm` | Temperature-scaled L2 normalization for classification logits. | Classification with calibrated confidence estimates. | Arbitrary |
 | `max_logit_norm` | `MaxLogitNorm` | L2 normalization on logits to separate magnitude and direction. | Out-of-distribution (OOD) detection and uncertainty estimation. | Arbitrary |
 | `decoupled_max_logit` | `DecoupledMaxLogit` | Decouples MaxLogit into cosine similarity and L2 norm components. | Advanced OOD detection with component analysis. | Arbitrary |
@@ -45,6 +46,35 @@ The following layers are supported by the factory system with automated paramete
 | `dynamic_tanh` | `DynamicTanh` | Learnable scaled hyperbolic tangent as a LayerNorm alternative. | Normalization-free transformer architectures. | Arbitrary |
 | `bias_free_batch_norm` | `BiasFreeBatchNorm` | Variance-only, fixed-statistic normalization (no `moving_mean`, no `beta`); degree-1 homogeneous at inference. | Bias-free / homogeneous architectures (e.g. Miyasawa denoisers) requiring `f(a*x) = a*f(x)` at inference. | Arbitrary |
 | `energy_layer_norm` | `EnergyLayerNorm` | Energy Transformer layer norm: **scalar** `gamma` + **vector** `delta`; the output is `dL/dx` of a Lagrangian with a PSD Hessian. | Energy Transformer blocks, where the norm must be the derivative of a Lagrangian for the energy-descent guarantee to hold. | Arbitrary |
+
+## LRN vs GRN — two different "response normalizations"
+
+Both names are close and the algorithms are unrelated. Confusing them is easy and
+silently changes the network, so the difference is stated here rather than left to
+whichever docstring you happen to read first.
+
+| | `LocalResponseNormalization` (LRN) | `GlobalResponseNormalization` (GRN) |
+|---|---|---|
+| Paper | Krizhevsky et al. 2012 (AlexNet) | Liu et al. 2022 (ConvNeXt V2) |
+| Neighbourhood | **local**, across *channels* | **global*, over all spatial positions |
+| Operation | **divides** by a denominator | **multiplies** by a score, then adds the input back |
+| Formula | `X_c / (k + alpha * sum_{j=c-r}^{c+r} X_j^2)^beta` | `X + gamma * (X * norm_c / mean(norm)) + beta` |
+| Weights | none — `alpha`, `beta`, `k`, `depth_radius` are fixed | trainable `gamma` and `beta` |
+| Rank support | 3 or 4 | 2, 3 or 4 |
+| Still current practice | no — superseded by BatchNorm | yes |
+
+```python
+from dl_techniques.layers.norms import create_normalization_layer
+
+lrn = create_normalization_layer('local_response_norm', depth_radius=2,
+                                alpha=1e-4, beta=0.75, k=1.0)
+```
+
+Note the factory's `epsilon` argument does **not** apply here. LRN's stabilizing
+constant is `k`, named after the paper, so there is no `epsilon` in its signature
+and nothing for the factory to bind. (`tf.nn.local_response_normalization` spells
+that same constant `bias`; there is no separate `bias` argument here, so a caller
+cannot set two constants into the one slot.)
 
 ## Factory Interface
 

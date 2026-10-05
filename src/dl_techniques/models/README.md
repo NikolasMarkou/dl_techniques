@@ -49,11 +49,12 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`tabular/`](tabular/) | 1 | tabular-data models |
 | **Sum** | **102** | |
 
-### `vision/` (48)
+### `vision/` (49)
 
 | Package | |
 |---|---|
 | `accunet/` | AccuNet |
+| `alexnet/` | AlexNet (2012) with its local response normalization intact. Padding is transcribed from the released Caffe model because the paper states none; explicit `ZeroPadding2D` rather than `padding='same'`, which gives conv1 57 instead of the paper's 56. `conv2`-`conv5` use `groups=2` (the paper's 2-GPU split). No variant table — one architecture |
 | `beit/` | BEiT — masked image modeling over discrete visual tokens, plus classifier |
 | `bias_free_denoisers/` | bias-free denoiser models |
 | `capsnet/` | Capsule Networks |

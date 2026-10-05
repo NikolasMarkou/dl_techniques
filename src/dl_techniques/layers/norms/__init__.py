@@ -13,14 +13,15 @@ What is exported
 * **Logit family** - :class:`LogitNorm`, :class:`BandLogitNorm`,
   :class:`MaxLogitNorm`, :class:`DecoupledMaxLogit`, :class:`DMLPlus`.
 * **Others** - :class:`BiasFreeBatchNorm`, :class:`GlobalResponseNormalization`,
+  :class:`LocalResponseNormalization`,
   :class:`DynamicTanh`, :class:`EnergyLayerNorm`, :class:`PolarWeightNorm`,
   plus the module-level helpers :func:`polar_encode` and :func:`polar_decode`.
 * **Factory** - :func:`create_normalization_layer`,
   :func:`create_normalization_from_config`, :func:`get_normalization_info`,
   :func:`validate_normalization_config` and the ``NormalizationType`` alias.
 
-``__all__`` names 16 classes, 2 module-level functions, 4 factory functions and
-1 type alias: 23 names in total.
+``__all__`` names 17 classes, 2 module-level functions, 4 factory functions and
+1 type alias: 24 names in total.
 
 Choosing a layer
 ----------------
@@ -31,7 +32,7 @@ Prefer the factory when the layer type comes from a config::
 
     layer = create_normalization_layer("rms_norm", axis=-1)
 
-``NormalizationType`` lists the 18 accepted string keys. Import a class directly
+``NormalizationType`` lists the 19 accepted string keys. Import a class directly
 when the type is fixed at authoring time.
 
 Note
@@ -46,6 +47,16 @@ factor keeps the reduced axis at size 1 -- and ``dml_plus_focal`` a single
 ``(3, 5)`` tensor. ``max_logit_norm`` IS shape-preserving; ``(3, 5, 8)`` stays
 ``(3, 5, 8)`` and it returns a single tensor. Read the class docstring before
 dropping any of them into a shape-sensitive position.
+
+Naming trap
+------------
+
+``GlobalResponseNormalization`` and ``LocalResponseNormalization`` are **different
+algorithms**, not variants of one another. GRN (ConvNeXt V2) scores each channel
+over ALL spatial positions and *multiplies* by the score, adding the input back.
+LRN (AlexNet 2012) sums squared activations over a local window of *neighbouring
+channels* and *divides* by it. GRN has trainable ``gamma``/``beta``; LRN has no
+weights at all. Neither substitutes for the other.
 """
 
 from .rms_norm import RMSNorm
@@ -59,6 +70,7 @@ from .zero_centered_adaptive_band_rms_norm import ZeroCenteredAdaptiveBandRMS
 from .logit_norm import LogitNorm
 from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
 from .global_response_norm import GlobalResponseNormalization
+from .local_response_norm import LocalResponseNormalization
 from .dynamic_tanh import DynamicTanh
 from .energy_layer_norm import EnergyLayerNorm
 from .polar_weight_norm import PolarWeightNorm, polar_encode, polar_decode
@@ -84,6 +96,7 @@ __all__ = [
     "DecoupledMaxLogit",
     "DMLPlus",
     "GlobalResponseNormalization",
+    "LocalResponseNormalization",
     "DynamicTanh",
     "EnergyLayerNorm",
     "PolarWeightNorm",

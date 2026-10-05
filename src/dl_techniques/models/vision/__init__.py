@@ -1,6 +1,6 @@
 """Vision models — image backbones, detectors, segmenters, denoisers and generators.
 
-The largest family: 48 leaf packages, 45 listed below, five of which sit one level deeper
+The largest family: 49 leaf packages, 46 listed below, five of which sit one level deeper
 under a task subdirectory (`image_restoration/`, `keypoints/`, `super_resolution/`).
 (This list has a pre-existing gap of 3 undocumented leaf packages — `omnipoint/`,
 `image_restoration/doc_res/`, `image_restoration/doc_scanner/` — tracked in
@@ -8,6 +8,9 @@ under a task subdirectory (`image_restoration/`, `keypoints/`, `super_resolution
 this bullet's edit, which only adds `fftnet/`.)
 
 - `accunet/` — AccuNet
+- `alexnet/` — AlexNet (2012), including its local response normalization.
+  Padding transcribed from the released Caffe model (the paper states none); explicit
+  `ZeroPadding2D`, not `padding='same'`, which yields conv1 57 rather than 56
 - `beit/` — BEiT (masked image modeling over discrete visual tokens + classifier)
 - `bias_free_denoisers/` — bias-free denoiser models
 - `capsnet/` — Capsule Networks

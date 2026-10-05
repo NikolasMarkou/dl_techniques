@@ -16,7 +16,7 @@ see § Naming traps.
 |---|:-:|---|
 | `attention/` | Y | 35 registered attention types — multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, window / single-window, mobile MQA, non-local, CBAM, linear (Miyasawa-compliant O(N)), energy, area, FNet Fourier, and more, plus Restormer's channel-wise MDTA (rank-4 NHWC only) |
 | `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting, diff, logic, Swin MLP, residual block, Restormer GDFN (rank-4 NHWC only) |
-| `norms/` | Y | RMS family (RMS, zero-centered, band, adaptive band), logit-norm family, dynamic tanh, GRN, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (not factory-registered) |
+| `norms/` | Y | RMS family (RMS, zero-centered, band, adaptive band), logit-norm family, dynamic tanh, GRN, LRN, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (not factory-registered) |
 | `embedding/` | Y | Patch (1D/2D), learned positional, sinusoidal (2D / scalar / timestep), RoPE family (plain, dual, continuous, multi-axis), BERT / ModernBERT / ALBERT-factorized token embeddings, class-label table with a classifier-free-guidance dropout row. `HierarchicalCodebookEmbedding` is direct-import-only |
 | `activations/` | Y | GoLU, Mish, hard sigmoid/swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability / routing outputs, basis function. `common.py`'s `activation_spec`/`resolve_activation`/`serialize_activation` trio is the shared activation-argument helper for layers elsewhere in the package — see § `activations/common.py` below |
 | `heads/` | Y | Task heads in `nlp/`, `vision/`, `vlm/` — see below |
@@ -156,7 +156,7 @@ public surface, 18 export nothing — so neither shape is the default and you ha
 
 | Shape | Subpackages | How to import |
 |---|---|---|
-| **Curated re-export with `__all__`** (17) | `activations` (34 names), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (40), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (23), `sequence_pooling` (12), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (32) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
+| **Curated re-export with `__all__`** (17) | `activations` (34 names), `attention` (45), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (40), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (12), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (32) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
 | **Exports nothing** (18) | `acc_unet`, `blt`, `complex`, `conv_blocks`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
 
 All 35 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
@@ -201,7 +201,7 @@ Check in this precedence order; proceed to the next step only when nothing fits.
 
    | Domain | Factory entry point | Registered types |
    |--------|---------------------|------------------|
-   | Normalization | `create_normalization_layer()` in `norms/factory.py` | 18 |
+   | Normalization | `create_normalization_layer()` in `norms/factory.py` | 19 |
    | Attention | `create_attention_layer()` in `attention/factory.py` | 35 |
    | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 22 |
    | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 15 |

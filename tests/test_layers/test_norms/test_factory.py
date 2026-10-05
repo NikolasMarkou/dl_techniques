@@ -194,6 +194,11 @@ _PROBE_VALUES = {
     'max_band_width': 0.2, 'band_initializer': 'zeros', 'band_regularizer': None,
     'band_constraint': None, 'temperature': 1.0, 'constant': 1.0,
     'alpha_init_value': 0.5, 'delta_initializer': 'zeros',
+    # LocalResponseNormalization (LRN). `data_format` takes the string spelling
+    # rather than the Keras-internal `channels_last` constant, so the probe also
+    # exercises the public argument a caller would actually write.
+    'depth_radius': 3, 'alpha': 2e-4, 'beta': 0.6, 'k': 2.0,
+    'data_format': 'channels_last',
     'kernel_initializer': 'glorot_uniform', 'bias_initializer': 'zeros',
     'kernel_regularizer': None, 'bias_regularizer': None,
     'kernel_constraint': None, 'bias_constraint': None,

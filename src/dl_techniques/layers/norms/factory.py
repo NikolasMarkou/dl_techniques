@@ -25,7 +25,7 @@ tensor.** Measured on a ``(3, 5, 8)`` input at the default ``axis=-1``:
 
 **3. ``get_normalization_info()[t]['parameters']`` is documentation, not a
 whitelist.** The validator derives its accepted set from the target class's real
-constructor signature, in ``_accepted_params``. Measured at HEAD: for all 18 of 18
+constructor signature, in ``_accepted_params``. Measured at HEAD: for all 19 of 19
 types the curated list omits at least one kwarg the factory accepts, 107 such
 ``(type, kwarg)`` pairs in total. Using the curated list as the whitelist is
 exactly the bug that was fixed, twice.
@@ -61,6 +61,7 @@ from .band_rms import BandRMS
 from .adaptive_band_rms import AdaptiveBandRMS
 from .band_logit_norm import BandLogitNorm
 from .global_response_norm import GlobalResponseNormalization
+from .local_response_norm import LocalResponseNormalization
 from .logit_norm import LogitNorm
 from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
 from .dynamic_tanh import DynamicTanh
@@ -75,7 +76,8 @@ NormalizationType = Literal[
     'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm', 'zero_centered_rms_norm',
     'zero_centered_band_rms_norm', 'zero_centered_adaptive_band_rms_norm',
     'band_rms', 'adaptive_band_rms',
-    'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
+    'band_logit_norm', 'global_response_norm', 'local_response_norm',
+    'logit_norm', 'max_logit_norm',
     'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh',
     'energy_layer_norm'
 ]
@@ -102,6 +104,7 @@ _TYPE_TO_CLASS: Dict[str, type] = {
     'adaptive_band_rms': AdaptiveBandRMS,
     'band_logit_norm': BandLogitNorm,
     'global_response_norm': GlobalResponseNormalization,
+    'local_response_norm': LocalResponseNormalization,
     'logit_norm': LogitNorm,
     'max_logit_norm': MaxLogitNorm,
     'decoupled_max_logit': DecoupledMaxLogit,
@@ -112,7 +115,7 @@ _TYPE_TO_CLASS: Dict[str, type] = {
 }
 
 # Named parameters of `create_normalization_layer` ITSELF, valid for every type.
-# `epsilon` is universal on purpose. The factory takes it for all 18 types and adapts
+# `epsilon` is universal on purpose. The factory takes it for all 19 types and adapts
 # it per layer: aliased to `eps` for global_response_norm, popped for dynamic_tanh.
 # Rejecting it for those two types made the validator disagree with the builder.
 _FACTORY_LEVEL_PARAMS = frozenset({'name', 'epsilon'})
@@ -163,7 +166,7 @@ def _accepted_params(normalization_type: str) -> Set[str]:
     ``get_normalization_info()[t]['parameters']`` is a separate, curated
     DOCUMENTATION list of the parameters people commonly pass. It is no longer the
     validation whitelist, so it can be incomplete without breaking a caller. Measured
-    at HEAD, it is incomplete for all 18 of 18 types, by 107 ``(type, kwarg)`` pairs.
+    at HEAD, it is incomplete for all 19 of 19 types, by 113 ``(type, kwarg)`` pairs.
 
     :param normalization_type: A registered normalization type. Must be a key of
         ``_TYPE_TO_CLASS``.
@@ -196,9 +199,9 @@ def create_normalization_layer(
         epsilon: float = 1e-6,
         **kwargs: Any
 ) -> keras.layers.Layer:
-    """Build one of the 18 registered normalization layers.
+    """Build one of the 19 registered normalization layers.
 
-    One entry point for the two Keras normalization layers and the sixteen from this
+    One entry point for the two Keras normalization layers and the seventeen from this
     package. Unknown kwargs raise: for every registered type the builder calls
     :func:`validate_normalization_config` first, and that rejects any keyword the
     target class does not declare.
@@ -278,7 +281,7 @@ def create_normalization_layer(
        There is no ``epsilon=None`` sentinel meaning "use the class default". That
        was proposed and rejected; D-202 records why.
 
-    :param normalization_type: Which of the 18 registered types to build. The names
+    :param normalization_type: Which of the 19 registered types to build. The names
         are 'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm',
         'zero_centered_rms_norm', 'zero_centered_band_rms_norm',
         'zero_centered_adaptive_band_rms_norm', 'band_rms', 'adaptive_band_rms',
@@ -422,6 +425,14 @@ def create_normalization_layer(
             layer_kwargs['eps'] = epsilon
         return GlobalResponseNormalization(**layer_kwargs)
 
+    elif normalization_type == 'local_response_norm':
+        # Local Response Normalization (LRN, AlexNet 2012).
+        # NO epsilon setdefault here, and deliberately so: this layer's stabilizing
+        # constant is named `k` after the paper, exactly as GRN names its own `eps`.
+        # There is no `epsilon` in its signature, so the factory's 1e-6 has nothing
+        # to bind to; forwarding it anyway would raise on an undeclared keyword.
+        return LocalResponseNormalization(**layer_kwargs)
+
     elif normalization_type == 'logit_norm':
         # LogitNorm for classification tasks
         layer_kwargs.setdefault('epsilon', epsilon)
@@ -468,7 +479,8 @@ def create_normalization_layer(
             'zero_centered_band_rms_norm',
             'zero_centered_adaptive_band_rms_norm',
             'band_rms', 'adaptive_band_rms',
-            'band_logit_norm', 'global_response_norm', 'logit_norm',
+            'band_logit_norm', 'global_response_norm', 'local_response_norm',
+            'logit_norm',
             'max_logit_norm', 'decoupled_max_logit', 'dml_plus_focal',
             'dml_plus_center', 'dynamic_tanh', 'energy_layer_norm'
         ]
@@ -482,7 +494,7 @@ def create_normalization_layer(
 
 
 def get_normalization_info() -> Dict[str, Dict[str, Any]]:
-    """Describe all 18 registered normalization types.
+    """Describe all 19 registered normalization types.
 
     Each entry carries a ``'description'``, a ``'parameters'`` list and a
     ``'use_case'`` string. Intended for documentation, help text and configuration
@@ -491,7 +503,7 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
     .. warning::
        The ``'parameters'`` list is **documentation**, a curated set of the
        parameters callers commonly pass. It is **NOT** the validation whitelist and
-       is **NOT** exhaustive. Measured at HEAD: for all 18 of 18 types it omits at
+       is **NOT** exhaustive. Measured at HEAD: for all 19 of 19 types it omits at
        least one kwarg the factory accepts, 107 such ``(type, kwarg)`` pairs in
        total. ``layer_norm`` alone omits 12 and ``batch_norm`` 14, because both
        accept every Keras ``LayerNormalization`` / ``BatchNormalization`` kwarg.
@@ -564,6 +576,11 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
                            'gamma_regularizer', 'beta_regularizer', 'activity_regularizer'],
             'use_case': 'ConvNeXt-style architectures and vision_heads models'
         },
+        'local_response_norm': {
+            'description': 'Local Response Normalization (LRN) from AlexNet 2012: divides each channel by the squared energy of a centred neighbourhood of channels',
+            'parameters': ['depth_radius', 'alpha', 'beta', 'k', 'data_format'],
+            'use_case': 'AlexNet-faithful CNNs; historical research baselines. NOT a substitute for global_response_norm, which is a different algorithm'
+        },
         'logit_norm': {
             'description': 'Temperature-scaled normalization for classification',
             'parameters': ['temperature', 'axis', 'epsilon'],
@@ -607,7 +624,7 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
             # not the mechanism. The validator now derives its whitelist from the real
             # ctor signature via `_accepted_params`, so this list is documentation only
             # and cannot break a caller by being incomplete. Measured at HEAD: it is
-            # incomplete for all 18 of 18 types, by 107 (type, kwarg) pairs, and the
+            # incomplete for all 19 of 19 types, by 113 (type, kwarg) pairs, and the
             # validator accepts every one of them anyway.
             # The originating plan directory is gone; this comment is the record.
             'parameters': ['epsilon', 'gamma_initializer', 'delta_initializer',
