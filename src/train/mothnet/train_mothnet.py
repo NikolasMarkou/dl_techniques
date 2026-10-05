@@ -851,32 +851,30 @@ def main(argv=None) -> int:
     # this filename pattern — never a broader glob — since `training_dashboard.png`
     # is overwritten in place every epoch and must be left untouched here
     # (plan-2026-09-18T060057-c1cfc3d3 Step 5 / F-05).
-    for stale_png in viz_dir.glob("epoch_*_mb_sparsity.png"):
-        try:
-            stale_png.unlink()
-        except OSError as unlink_error:
-            logger.warning(f"Could not remove stale visualization {stale_png}: {unlink_error}")
-
-    # Same stale-cleanup shape as above, scoped to the three NEW periodic
-    # filename patterns this step introduces (plan.md Step 5, invariant 6 —
-    # must not silently collide with the existing mb_sparsity glob above).
-    for stale_png in viz_dir.glob("epoch_*_al_mb_activations_distribution.png"):
-        try:
-            stale_png.unlink()
-        except OSError as unlink_error:
-            logger.warning(f"Could not remove stale visualization {stale_png}: {unlink_error}")
-
-    for stale_png in viz_dir.glob("epoch_*_al_mb_activations_heatmap.png"):
-        try:
-            stale_png.unlink()
-        except OSError as unlink_error:
-            logger.warning(f"Could not remove stale visualization {stale_png}: {unlink_error}")
-
-    for stale_png in viz_dir.glob("epoch_*_confusion_matrix.png"):
-        try:
-            stale_png.unlink()
-        except OSError as unlink_error:
-            logger.warning(f"Could not remove stale visualization {stale_png}: {unlink_error}")
+    # The three `final_*` library-plugin figures below are ALSO swept, and they
+    # need it MORE than the periodic ones: their names are fixed, so they are
+    # normally overwritten in place — but `VisualizationManager.visualize`
+    # swallows a plugin error and returns None WITHOUT writing anything. A
+    # render that fails this run would therefore leave the PREVIOUS run's file
+    # sitting there looking current. `training_dashboard.png` needs no sweep for
+    # the opposite reason: it is unconditionally redrawn each epoch, so it is
+    # never stale.
+    for stale_pattern in (
+        "epoch_*_mb_sparsity.png",
+        "epoch_*_al_mb_activations_distribution.png",
+        "epoch_*_al_mb_activations_heatmap.png",
+        "epoch_*_confusion_matrix.png",
+        "final_classification_report.png",
+        "final_per_class_analysis.png",
+        "final_error_analysis.png",
+    ):
+        for stale_png in viz_dir.glob(stale_pattern):
+            try:
+                stale_png.unlink()
+            except OSError as unlink_error:
+                logger.warning(
+                    f"Could not remove stale visualization {stale_png}: {unlink_error}"
+                )
 
     # Opened once, before the loop, in write mode (never append: `prepare_run_dir`
     # creates the run directory with `exist_ok=True`, so a rerun into the same

@@ -331,14 +331,21 @@ only for this one subtree.
 
 Named exceptions to the `tests/test_<x>/` rule:
 
-- **`src/dl_techniques/visualization/` has no test directory at all.** It has a `AGENTS.md`;
-  it has no tests, and no test module anywhere imports it.
 - **`tests/test_models/test_lewm.py` is a loose file**, where every other model gets a
   directory. Any directory-to-directory comparison reports `lewm` as untested. It is not.
 - **`vision_language/sam/sam1/` is tested by `tests/test_models/test_sam/`**, a directory
   name that predates the `sam1` spelling.
 - **`embeddings_experimental/shared/` is tested by
   `tests/test_models/test_embeddings_shared/`.**
+
+**`src/dl_techniques/visualization/` used to be a named exception here** — the map claimed it had
+"no test directory at all" and that "no test module anywhere imports it". That was true when
+written and is now false: `tests/test_visualization/` exists (a single sentence-named guard,
+`test_per_class_axis_alignment.py`, mirroring the package), and three further test modules import
+the package (`test_train/test_mothnet/`, `test_train/test_power_mlp/`, and the new
+`test_train/test_common_evaluation_results.py`). The exception is removed rather than reworded:
+the package is tested by `tests/test_visualization/` like any other. Coverage remains thin — one
+guard, not a suite — so treat that package as **under-tested, not untested**.
 
 **Trainer tests live outside `tests/test_models/`**, in `tests/test_train/test_<trainer>/`, named for
 the trainer directory, not the model package: `src/train/convunext/` (segmentation) is tested by

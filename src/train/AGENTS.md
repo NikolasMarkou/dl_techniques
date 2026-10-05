@@ -28,6 +28,21 @@ Six shapes. Pick the closest exemplar and copy it; do not re-derive the scaffold
 | **Pattern 6: Byte-level LM pretrain** — no tokenizer at all: `dl_techniques.datasets.byte_lm` packs raw UTF-8 into causal windows, and the auxiliary loss arrives through the model's `add_loss` rather than a custom `train_step` | H-Net | `src/train/hnet/common.py` | `val_loss` |
 | **Pattern 7: Sequence-generative with a paper's own metrics** — a GENERATOR over unlabelled sequences, so the validation signal is the objective and the run's real output is a set of paper columns rather than a single monitor. `dl_techniques.datasets` owns the data semantics, the model owns a dict output, a `keras.losses.Loss` composes the ELBO, and the trainer evaluates with domain metrics that no stock callback provides | Topographic VAE (`topographic_vae/`): transformation sequences from `datasets/vision/transform_sequences.py`, `TopographicVAELoss`, and an evaluation block carrying `log p(x)` (IWAE) + `equivariance_error` + `capcorr` — the last two kept together because the first cannot distinguish equivariance from invariance | `src/train/topographic_vae/train_topographic_vae.py` | `val_loss` |
 
+**`src/train/mothnet/` fits none of the six patterns either**, and is the reference for
+*hand-assembling figures from `dl_techniques` plugins*. Its training loop is its own
+(`train_hebbian`), and it is the only trainer that registers library classification
+templates against a `ClassificationResults` it builds itself. Copy it for a bespoke loop
+that wants the library's figure families: `_visualize_or_warn` is the house answer to
+`visualize()` swallowing errors and returning `None`, and the trainer derives
+`class_names` from the classes **actually present** rather than a hardcoded range —
+required, because `ConfusionMatrixVisualization` calls sklearn's `confusion_matrix`
+without a `labels=` argument (decision D-007). Its `final_{classification_report,
+per_class_analysis,error_analysis}.png` trio renders on the LAST epoch only, reusing the
+object already in hand rather than re-predicting; `roc_pr_curves` is deliberately absent
+because MothNet carries no `y_prob`. It defines its own `run_model_analysis` — a local
+four-argument function, NOT `train.common`'s five-argument one, which also takes
+`test_data`.
+
 **`src/train/hkan/` fits none of the six patterns.** HKAN is a tabular regression model whose default
 training is a closed-form, layer-by-layer least-squares fit (`HKAN.fit_closed_form`), with stock `fit()`
 as an option (`--training-mode closed_form | backprop | closed_form_then_backprop`). Copy it for a model
@@ -156,7 +171,7 @@ substitute, because it resolves at epoch end by matching a compiled metric objec
 | `create_learning_rate_schedule(lr, type, epochs, steps_per_epoch)` | Cosine / exponential / constant. Defined in `dl_techniques.optimization.schedule` and re-exported here; both paths resolve to the same object |
 | `load_dataset(...)` / `get_class_names(...)` | See Data loading below |
 | `validate_model_loading(...)` / `run_model_analysis(...)` | Round-trip serialization check; full ModelAnalyzer pipeline |
-| `create_regression_results(...)` / `create_multi_model_regression(...)` / `create_timeseries_results(...)` | The constructors for `RegressionResults`, `MultiModelRegression` and `TimeSeriesEvaluationResults`. Every plugin in those two families type-checks its input with `isinstance`, so **without these seven plugins were unreachable** — not merely unregistered. Flatten and length-check the prediction pair; the timeseries builder promotes a bare 1-D array on either axis to a batch of ONE (consistent across both axes) and refuses quantiles without `quantile_levels`. Sibling of `create_classification_results`. Tested by `tests/test_train/test_common_evaluation_results.py` |
+| `create_regression_results(...)` / `create_multi_model_regression(...)` / `create_timeseries_results(...)` | The constructors for `RegressionResults`, `MultiModelRegression` and `TimeSeriesEvaluationResults`. Every plugin in those two families type-checks its input with `isinstance`, so **without these, six plugins were unreachable by construction** — not merely unregistered. Flatten and length-check the prediction pair; the timeseries builder promotes a bare 1-D array on either axis to a batch of ONE (consistent across both axes, so one call means the same thing whichever array it touches) and refuses quantiles without `quantile_levels`, which the plugin needs to label the bands. **No trainer calls these yet** — they are available infrastructure; see the figures section below. Sibling of `create_classification_results`. Tested by `tests/test_train/test_common_evaluation_results.py` |
 | `run_summary.run_data_free_analysis(model, sample, labels, history, model_name, run_dir, enabled=True)` | The end-of-run weights + spectral analysis for trainers whose data is not per-image labels (the ConvUNeXt denoiser and segmentation trainers). Never raises; the returned `analyzer` block (`{status, analyzers, error, path, seconds}`) is read back from `model_analysis/analysis_results.json` by `read_data_free_analysis_status`, not taken from the analyzer's return value. After an `ok` read-back it deletes the library's empty `model_analysis/summary_dashboard.png` and adds `removed: ["summary_dashboard.png"]` to the block (absent otherwise), and only while `model_metrics`, `calibration_metrics`, `confidence_metrics` and `weight_pca` of the returned result are all empty: a dashboard a panel has data for is kept. `data_free_analysis_config()` is the one `AnalysisConfig` behind it. The analyzer call runs inside `threadpool_limits(limits=1)`, scoped to that call (12 BLAS threads oversubscribed the host: 14.7 to 21.0 s against 6.1 to 6.6 s on one saved model). Do not write a per-trainer copy |
 | `run_summary.summary_head(config, run_dir, *, params, steps_per_epoch, devices)` | The summary keys the bfunet trainers (ConvUNeXt denoiser, unet, bfcnn) and the ConvUNext segmenter share: the config attributes named in `SUMMARY_CONFIG_KEYS`, `epochs_requested`, the sizes, the three device keys and `image_range` `[0.0, 1.0]` (the CLEAN images' range, not the noisy input, which `--no-clip` leaves unclipped; not `config.json`'s `data_range` string). A new shared fact is added there once; the ConvNeXt reference keeps its own `_summary_head` |
 | `TrainingDashboardCallback(..., best_key=None)` / `render_training_dashboard(..., best_epoch=None)` (`classification_viz`) | Opt-in best-epoch marker: pass `best_key="val_loss"` to draw a dashed line and star at the best value so far (the lowest, or the highest when `resolve_monitor_mode` says `max`, e.g. the segmentation trainer's `--monitor val_miou`). `None` draws nothing and leaves the PNG unchanged. A history that carries `miou` / `val_miou` columns (the segmentation trainer's) gets an extra mIoU panel; a history without them draws the same panels and the same PNG bytes as before |
@@ -189,6 +204,54 @@ set `optimizer.clipnorm` after construction. Two traps when you adopt it:
   **drops gradient clipping with no error and no warning**.
 - It **hard-codes `"name": "AdamW"`** against Keras' own `"adamw"` default. The name is the
   optimizer's variable scope — a checkpoint-compatibility consideration for every trainer using it.
+
+## Figures: what `dl_techniques.visualization` offers a trainer, and how to call it safely
+
+The library ships 25 plugin templates. **Prefer the house plotting modules in
+`train.common` for the figure families they already own**, and reach for a library
+plugin when you need a family nothing local draws (regression residuals, QQ, forecast
+bands). `train/common/classification_viz.py` has **outgrown** the library's
+classification plugins — `plot_confusion_matrix` bounds the image at `0.62 * n` inches
+per panel because 100 classes previously produced a 15585x7571 px file, uses `PowerNorm`
+for narrow count ranges, drops cell text below 0.5%, and adds a top-confused-pairs panel
+the library plugin does not have. Rewiring a Pattern-1 trainer from the house module to
+`ConfusionMatrixVisualization` would regress its figures.
+
+**A plugin needs BOTH halves to be reachable**: a registration, *and* something that
+constructs the container its `can_handle` type-checks against. The missing half is almost
+always the container. `create_regression_results`, `create_multi_model_regression` and
+`create_timeseries_results` exist for exactly that reason — before them, nothing in the
+tree constructed `RegressionResults` or `TimeSeriesEvaluationResults`, so the five
+regression plugins and `ForecastVisualization` were unreachable by construction and no
+`register_template` call could have fixed it. They are reachable now; **as of this commit
+no trainer calls them**, so treat them as available infrastructure rather than a live path.
+
+| Want | Do |
+|---|---|
+| training curves | `generate_training_curves(history, dir)` — the house path, already used by `callbacks.py` and `timeseries.py`. Registers an *instance*. |
+| classification dashboard / confusion matrix | `render_training_dashboard` + `plot_confusion_matrix` in `train/common/classification_viz.py`. Pattern 1's default. |
+| per-class breakdown, error analysis | register `classification_report`, `per_class_analysis`, `error_analysis` against a `ClassificationResults` |
+| regression residuals / QQ / prediction-error | `create_regression_results(...)`, then `prediction_error`, `residuals_plot`, `residual_distribution`, `qq_plot` |
+| forecast bands | `create_timeseries_results(...)`, then `forecast_visualization` |
+| a domain figure nothing provides | subclass `VisualizationPlugin` in the trainer and `register_template` it — `train/kan/train_kan.py` is the worked example |
+
+Four traps, all measured:
+
+- **`visualize()` swallows exceptions and returns `None`** (`visualization/core.py:508-512`).
+  A plugin that raises leaves you with a **missing file and no exception**. Callers that do
+  not check the return value will report a successful run with a missing figure. Check the
+  return, or assert the file exists — `train/mothnet`'s `_visualize_or_warn` is the house
+  pattern for exactly this, and it logs which figure was lost.
+- **A template key must equal the class's own `name`.** `visualize` registers the instance
+  under `plugin.name` and then re-reads `self.plugins[plugin_name]`, so a disagreeing key
+  misses that lookup with a bare `KeyError`. `ErrorAnalysisDashboard` is named
+  `"error_analysis"`, **not** `"error_analysis_dashboard"`.
+- **`ROCPRCurves` yields nothing without `y_prob`.** Its per-model loop skips such a model,
+  its `legend()` then raises, and `visualize` swallows it — so registering it on a
+  probability-free model produces an absent figure and nothing else. Every other
+  classification plugin degrades visibly instead.
+- **Never call `ax.legend()` on unlabelled artists**; this repo runs
+  `filterwarnings = ["error::UserWarning", ...]`, so that is a test failure.
 
 For weight transfer use `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`
 (layer-by-layer, from a saved `.keras` model). Not `model.load_weights(..., by_name=True)`, which

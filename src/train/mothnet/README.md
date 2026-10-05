@@ -88,7 +88,10 @@ results/<run>/
     ├── epoch_{NNN}_mb_sparsity.png                          (every --viz-freq epochs)
     ├── epoch_{NNN}_al_mb_activations_distribution.png       (every --viz-freq epochs)
     ├── epoch_{NNN}_al_mb_activations_heatmap.png            (every --viz-freq epochs)
-    └── epoch_{NNN}_confusion_matrix.png                     (every --viz-freq epochs)
+    ├── epoch_{NNN}_confusion_matrix.png                     (every --viz-freq epochs)
+    ├── final_classification_report.png                     (last epoch only)
+    ├── final_per_class_analysis.png                        (last epoch only)
+    └── final_error_analysis.png                           (last epoch only)
 ```
 
 See "Visualizations" below for what each of the five files shows.
@@ -116,8 +119,8 @@ See "Visualizations" below for what each of the five files shows.
   `confusion_matrix`) — only written when `--viz-freq > 0`; filenames are
   epoch-stamped (1-based, matching the CSV `epoch` column) so periodic renders
   never overwrite each other. **A rerun into the same `--experiment-name`
-  starts `visualizations/` clean of stale periodic PNGs**: at run start, each of
-  the four `epoch_*_<name>.png` glob patterns above is independently swept and
+  starts `visualizations/` clean of stale PNGs**: at run start, each of the
+  four `epoch_*_<name>.png` glob patterns above is independently swept and
   any file left over from a prior (possibly longer) run at that same name is
   deleted before the epoch loop begins — matching the fresh-open/overwrite
   behavior every other artifact class here already had (`training_log.csv` opened in
@@ -125,6 +128,19 @@ See "Visualizations" below for what each of the five files shows.
   overwritten in place by `model.save()`/`fig.savefig()`). `training_dashboard.png`
   is deliberately NOT globbed — it is overwritten in place every epoch, never
   epoch-stamped, so there is nothing stale to clean.
+- `visualizations/final_<name>.png` (three families — `classification_report`,
+  `per_class_analysis`, `error_analysis`) — `dl_techniques` library plugins
+  rendered against the `ClassificationResults` this trainer already builds for
+  the confusion matrix, so they cost no extra forward pass and no recomputed
+  argmax. **Last epoch only**, not on the `--viz-freq` cadence: three extra
+  multi-panel PNGs per epoch is figure bloat, and these are end-of-run summaries
+  rather than convergence traces. Each renders in its own `try`, so one failing
+  plugin cannot skip the next, and `roc_pr_curves` is deliberately NOT among
+  them — MothNet carries no `y_prob`, and that plugin would yield nothing while
+  saying so only in the log. These three names are fixed, so they are normally
+  overwritten in place; they are **still globbed at run start** because
+  `VisualizationManager.visualize` swallows a plugin error and writes no file,
+  which would otherwise leave the previous run's figure looking current.
 
 ---
 
