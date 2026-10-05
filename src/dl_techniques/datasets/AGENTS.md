@@ -41,6 +41,12 @@ Data loading, generation, and preprocessing utilities for various domains.
     crops, SiamFC radius labels, RPN anchor matching and grid packing.
     Tested by `tests/test_datasets/test_tracking.py`. NumPy + SciPy at
     module scope; TensorFlow/TFDS imported lazily.
+  - `reid.py` — person re-identification data: seeded synthetic identities
+    (:func:`synthetic_reid_generator`), the standard on-disk Market1501
+    reader (:func:`read_market1501_split`, junk identities skipped by
+    default), disjoint-identity validation splits and CMC/mAP evaluation.
+    Tested by `tests/test_datasets/test_reid.py`. NumPy + Pillow-lazy at
+    module scope.
   - `masked_patches.py` — `make_masked_patch_map_fn`, the per-sample
     `element_map_fn` for masked-image-modelling objectives
   - `multi_crop.py` — `make_multi_crop_map_fn`, the DINO multi-crop

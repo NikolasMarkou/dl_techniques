@@ -245,7 +245,7 @@ def create_callbacks(
         run_dir=run_dir,
         monitor="val_loss",
         patience=config.early_stopping_patience,
-        use_lr_schedule=True,
+        use_lr_schedule=config.lr_schedule_type != "constant",
     )
     return callbacks, results_dir
 
@@ -292,13 +292,19 @@ def train_dasiamrpn(
     )
     model.summary()
 
-    lr_schedule = learning_rate_schedule_builder({
-        "type": config.lr_schedule_type,
-        "learning_rate": config.learning_rate,
-        "decay_steps": steps_per_epoch * config.epochs,
-        "warmup_steps": steps_per_epoch * config.warmup_epochs,
-        "alpha": 0.01,
-    })
+    # The shared schedule builder knows decay schedules only; "constant"
+    # passes the bare float through and the plateau callback (not an
+    # external schedule) drives decay.
+    if config.lr_schedule_type == "constant":
+        lr: Any = config.learning_rate
+    else:
+        lr = learning_rate_schedule_builder({
+            "type": config.lr_schedule_type,
+            "learning_rate": config.learning_rate,
+            "decay_steps": steps_per_epoch * config.epochs,
+            "warmup_steps": steps_per_epoch * config.warmup_epochs,
+            "alpha": 0.01,
+        })
 
     use_adamw = config.optimizer_type.lower() == "adamw"
     opt_config: Dict[str, Any] = {
@@ -309,7 +315,7 @@ def train_dasiamrpn(
         opt_config["weight_decay"] = config.weight_decay
     elif config.optimizer_type.lower() == "sgd":
         opt_config["momentum"] = config.momentum
-    optimizer = optimizer_builder(opt_config, lr_schedule)
+    optimizer = optimizer_builder(opt_config, lr)
 
     model.compile(
         optimizer=optimizer,

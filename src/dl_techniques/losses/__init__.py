@@ -207,6 +207,12 @@ from .siamese_tracking_loss import (
     create_siamfc_label,
 )
 
+# from .reid_cosine_loss
+from .reid_cosine_loss import (
+    SoftmarginTripletLoss,
+    magnet_loss_fn,
+)
+
 # from .tabm_loss
 from .tabm_loss import TabMLoss
 
@@ -380,6 +386,9 @@ __all__ = [
     "DaSiamRPNClsLoss",
     "DaSiamRPNRegLoss",
     "create_siamfc_label",
+    # reid_cosine_loss
+    "SoftmarginTripletLoss",
+    "magnet_loss_fn",
     # tabm_loss
     "TabMLoss",
     # utilization_loss

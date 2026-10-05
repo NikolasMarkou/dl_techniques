@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **100 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **101 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (100 of 100 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (101 of 101 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -35,7 +35,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **45** | image backbones, detectors, segmenters, denoisers, generators |
+| [`vision/`](vision/) | **46** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 18 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
@@ -47,9 +47,9 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **99** | |
+| **Sum** | **100** | |
 
-### `vision/` (45)
+### `vision/` (46)
 
 | Package | |
 |---|---|
@@ -65,6 +65,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `depth_anything/` | depth estimation |
 | `detr/` | DEtection TRansformer |
 | `dasiamrpn/` | DaSiamRPN distractor-aware Siamese region-proposal tracker |
+| `deepsort/` | DeepSORT multi-object tracker |
 | `dino/` | DINO self-supervised |
 | `dit/` | DiT, the class-conditional latent Diffusion Transformer of Peebles & Xie: adaLN-Zero blocks over VAE latents, the twelve published variants, and the DDPM sampler (ancestral + DDIM, respacing, classifier-free guidance) |
 | `energy_transformer/` | Energy Transformer — masked image completion, plus classifier |

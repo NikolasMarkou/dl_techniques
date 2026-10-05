@@ -82,6 +82,12 @@ from dl_techniques.losses import (
   classification (2-way softmax CE) and regression (smooth-L1) losses with
   packed valid/positive masks; cls-vs-reg balance stays at compile time via
   `loss_weights`
+- `reid_cosine_loss.py` — batch-hard softmargin triplet loss (Hermans et
+  al., 2017) as serializable `SoftmarginTripletLoss`, plus the batch-level
+  unimodal magnet loss (Rippel et al., 2016) as the plain function
+  `magnet_loss_fn` (deliberately not a `keras.losses.Loss`: it couples the
+  whole batch). Cosine-softmax needs no class (stock sparse CE over the
+  `CosineClassifier` logits)
 - `tabm_loss.py` — TabM model loss
 - `thera_jacobian_tv.py` — THERA aliasing TV penalty over the exact analytic spatial Jacobian
 - `utilization_loss.py` — Utilization / load-balancing loss (e.g. MoE routing)
@@ -120,7 +126,7 @@ has gone stale before.
 - **Registration.** Every `Loss` subclass carries
   `@register_dl_technique("dl_techniques.losses.<module>")` from
   `dl_techniques.utils.keras_registration` — never a bare
-  `@keras.saving.register_keras_serializable()`. 48 of 50 modules register something; the
+  `@keras.saving.register_keras_serializable()`. 49 of 51 modules register something; the
   non-registering ones export plain functions only.
   `grep -rl register_dl_technique src/dl_techniques/losses --include=*.py | wc -l`
 
@@ -130,7 +136,7 @@ has gone stale before.
   `grep -rl "^from keras import ops" src/dl_techniques/losses --include=*.py | wc -l`
 
 - **Docstring style is Google-majority, and that is a fact, not a mandate.**
-  36 of 50 carry a Google `Args:` block, 14 carry Sphinx `:param `, 2 carry both.
+  37 of 51 carry a Google `Args:` block, 14 carry Sphinx `:param `, 2 carry both.
   **Match the file you are editing; never convert a file wholesale.** The newest modules
   (`colbert_loss.py`, `infonce_loss.py`) are Sphinx, so both styles are live and growing —
   an earlier claim that "Sphinx is the losses/ convention" was an overstatement the tree does not

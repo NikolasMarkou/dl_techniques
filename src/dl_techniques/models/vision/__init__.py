@@ -13,6 +13,7 @@ this bullet's edit, which only adds `fftnet/`.)
 - `capsnet/` — Capsule Networks
 - `cbam/` — CBAM attention model
 - `dasiamrpn/` — DaSiamRPN distractor-aware Siamese region-proposal tracker
+- `deepsort/` — DeepSORT multi-object tracker (appearance embedding + cascade)
 - `cliffordnet/` — Clifford-algebra networks
 - `convnext/` — ConvNeXt
 - `convunext/` — ConvUNeXt (U-Net + ConvNeXt)

@@ -35,7 +35,7 @@ References:
 
 import keras
 import numpy as np
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 # ---------------------------------------------------------------------
 # local imports
@@ -43,6 +43,7 @@ from typing import Any, Dict, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.losses.huber_loss import HuberLoss
 
 # ---------------------------------------------------------------------
 # label builders (pure NumPy, data-pipeline side)
@@ -304,6 +305,10 @@ class DaSiamRPNRegLoss(keras.losses.Loss):
         if huber_delta <= 0.0:
             raise ValueError(f"huber_delta must be positive, got {huber_delta}")
         self.huber_delta = huber_delta
+        # The per-coordinate smooth-L1 math lives in HuberLoss (single source
+        # for the piecewise formula); this class only adds the packed
+        # positive-mask reduction the RPN layout needs.
+        self._huber = HuberLoss(delta=huber_delta)
         logger.info(
             f"DaSiamRPNRegLoss initialized (smooth-L1, delta={huber_delta})"
         )
@@ -325,13 +330,13 @@ class DaSiamRPNRegLoss(keras.losses.Loss):
         target = y_true[..., :4]
         weight = y_true[..., 4]
         pred = _group_anchor_dim(y_pred, y_true, 4)
-        diff = keras.ops.abs(pred - target)
-        per_coord = keras.ops.where(
-            diff <= self.huber_delta,
-            0.5 * diff * diff,
-            self.huber_delta * (diff - 0.5 * self.huber_delta),
+        # Static S/A per the documented contract (_group_anchor_dim enforces
+        # it); only the batch stays dynamic.
+        grid, anchors = target.shape[1], target.shape[3]
+        per_anchor = self._huber.call(
+            keras.ops.reshape(target, (-1, 4)), keras.ops.reshape(pred, (-1, 4))
         )
-        per_anchor = keras.ops.mean(per_coord, axis=-1)
+        per_anchor = keras.ops.reshape(per_anchor, (-1, grid, grid, anchors))
         valid_count = keras.ops.maximum(
             keras.ops.sum(weight, axis=(1, 2, 3)), 1.0
         )

@@ -42,7 +42,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.siamfc.train_siamfc \
 | `--batch-size` / `--epochs` | 8 / 10 | |
 | `--learning-rate` | 1e-3 | AdamW default; the paper used SGD 1e-2→1e-5 |
 | `--optimizer` | `adamw` | `adamw` or `sgd` (momentum honored for `sgd`) |
-| `--lr-schedule` | `cosine_decay` | Plus `--warmup-epochs`, `--weight-decay` (AdamW only, never doubled with a kernel regularizer), `--gradient-clipping` |
+| `--lr-schedule` | `cosine_decay` | Plus `--warmup-epochs`, `--weight-decay` (AdamW only, never doubled with a kernel regularizer), `--gradient-clipping`, `--momentum` (`sgd` only) |
 | `--early-stopping-patience` | 10 | Monitor is `val_loss` |
 | `--output-dir` / `--experiment-name` | `results` / auto | Run dir holds `config.json`, `training_log.csv`, `best_model.keras`, `final_model.keras` |
 | `--gpu` | None | Passed to `setup_gpu`, not a config field |

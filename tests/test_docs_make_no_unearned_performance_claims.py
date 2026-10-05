@@ -335,6 +335,13 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # (tests/test_models/test_dasiamrpn/test_dasiamrpn.py). Both halves
         # checked.
         "dasiamrpn",
+        # deepsort: README section 2 names `pretrained=True` only to say it
+        # raises; appearance.py `create_deepsort_embedding` really does
+        # `raise NotImplementedError`, verified by EXECUTING
+        # `create_deepsort_embedding(pretrained=True)`
+        # (tests/test_models/test_deepsort/test_deepsort.py). Both halves
+        # checked.
+        "deepsort",
         # zamba2: README:9-10/148/153 name `pretrained=True` only to say it
         # raises; model.py:435 really does `raise NotImplementedError`. Both
         # halves checked (re-derived 2026-10-04; pre-existing drift).

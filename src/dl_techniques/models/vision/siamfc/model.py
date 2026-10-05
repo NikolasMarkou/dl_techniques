@@ -43,6 +43,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 # constants and pure shape helpers (single source of truth)
@@ -225,9 +226,15 @@ class SiamFCBackbone(keras.layers.Layer):
                 name=name,
             )
 
-        def _bn(name: str) -> layers.BatchNormalization:
-            return layers.BatchNormalization(
-                momentum=self.bn_momentum, epsilon=self.bn_epsilon, name=name
+        def _bn(name: str) -> keras.layers.Layer:
+            # Routed through the norms factory, which honors an explicitly
+            # passed epsilon (its 1e-6 is only the default): the transcribed
+            # torch-default epsilon is kept.
+            return create_normalization_layer(
+                "batch_norm",
+                momentum=self.bn_momentum,
+                epsilon=self.bn_epsilon,
+                name=name,
             )
 
         self.conv1 = _conv(96, 11, 2, "conv1")

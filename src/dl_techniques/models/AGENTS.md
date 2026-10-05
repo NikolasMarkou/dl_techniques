@@ -20,13 +20,14 @@ Four families nest one level further (`vision/image_restoration`, `vision/keypoi
 wrong test. Re-derive any count with the command beside it; never quote one from memory.
 
 ```bash
-find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 117 packages
-find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 345 .py
+find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 118 packages
+find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 351 .py
 ```
 
-Both re-derived 2026-10-04 by running exactly those two commands (`siamfc/`
-and `dasiamrpn/` contribute 1 package and 2 `.py` each; the previous readings
-were **115 / 341**, 2026-10-02). The
+Both re-derived 2026-10-05 by running exactly those two commands
+(`deepsort/` contributes 1 package and 6 `.py`: `__init__`,
+`appearance`, `kalman`, `matching`, `state`, `tracker`; the previous
+readings were **117 / 345**, 2026-10-04). The
 readings before that were **108 / 321** (2026-09-10); `general_purpose/hkan/` contributes 1 package and 3
 `.py`, so 5 packages and 15 files arrived from other work that never re-ran the commands.
 The readings before that were **102 / 287**, and the drift is mostly not the port that noticed it: the
@@ -87,8 +88,8 @@ grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*
 grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 215
 ```
 
-Over 345 files (re-derived 2026-10-04; previously 11 / 215 over 341 files: 2, 206, 9, 124):
-Google-only **2**, Sphinx-only **208**, both **9**, neither **126**. **Match the file you are editing; never convert one wholesale** — that rule
+Over 351 files (re-derived 2026-10-05; previously 11 / 217 over 345 files: 2, 208, 9, 126):
+Google-only **2**, Sphinx-only **213**, both **9**, neither **127**. **Match the file you are editing; never convert one wholesale** — that rule
 is unchanged and the 2 remaining Google-only files are exactly the ones it protects.
 Perishable — re-run the greps. The unanchored instrument agrees here (bare `Args:` also
 returns 11); it did not always.

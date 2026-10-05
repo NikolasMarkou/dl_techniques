@@ -46,6 +46,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 # constants and pure helpers (single source of truth)
@@ -118,6 +119,12 @@ def generate_dasiamrpn_anchors(
     total_stride: int = TOTAL_STRIDE,
 ) -> np.ndarray:
     """Anchor boxes for every score-grid position, transcribed from the reference.
+
+    Bespoke NumPy, not ``layers.AnchorGenerator``: that layer emits center
+    *points* on ``(j + 0.5) * stride`` FPN grids, while this layout is
+    anchor-major ``(cx, cy, w, h)`` *boxes* over five aspect ratios on a
+    ``-(score / 2) * stride`` origin. Adapting one to the other would break
+    the bit-identical transcription pinned in the test suite.
 
     For each ``(ratio, scale)`` pair a zero-centered ``(w, h)`` is formed from
     ``stride * stride`` area units, tiled over the grid whose origin sits at
@@ -312,9 +319,15 @@ class SiamRPNBackbone(keras.layers.Layer):
                 name=name,
             )
 
-        def _bn(name: str) -> layers.BatchNormalization:
-            return layers.BatchNormalization(
-                momentum=self.bn_momentum, epsilon=self.bn_epsilon, name=name
+        def _bn(name: str) -> keras.layers.Layer:
+            # Routed through the norms factory, which honors an explicitly
+            # passed epsilon (its 1e-6 is only the default): the transcribed
+            # torch-default epsilon is kept.
+            return create_normalization_layer(
+                "batch_norm",
+                momentum=self.bn_momentum,
+                epsilon=self.bn_epsilon,
+                name=name,
             )
 
         self.conv1 = _conv(channels[0], 11, 2, "conv1")
