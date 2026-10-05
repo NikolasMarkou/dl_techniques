@@ -30,7 +30,8 @@ see § Naming traps.
 | `moe/` | — | Full MoE framework: `config.py`, `experts.py`, `gating.py`, `layer.py`, `integration.py` |
 | `graphs/` | — | Graph neural network, relational graph transformer, simplified hyperbolic GCN, entity graph refinement, Fermi-Dirac decoder |
 | `geometric/` | — | Clifford algebra block, point cloud autoencoder, supernode pooling, and `fields/` (connection, field embedding, gauge-invariant attention, holonomic transformer, holonomy, manifold stress, parallel transport) |
-| `statistics/` | — | Deep kernel PCA, invertible kernel PCA, MDN layer, moving std, normalizing flow, residual ACF, scaler, split-conformal prediction interval |
+| `statistics/` | — | Deep kernel PCA, invertible kernel PCA, MDN layer, moving std, normalizing flow, residual ACF, scaler, split-conformal prediction interval, and `local_support_gate.py` (`LocalSupportGate` — a per-token GMM likelihood-ratio support gate, the gate half of Local Support Learning; composed with `adapters.GatedAdapter`). Google-style docstrings, unlike most of `layers/` |
+| `adapters/` | Y | `LoRAAdapter` (additive low-rank delta, `num_adapters` independent `A`/`B` pairs selected per call site — extracted here from `models/language/zamba2/layers.py`, where it was not reusable) plus `GatedAdapter`, its composition with one `LocalSupportGate` per phase. `factory.py` registers one key, `lora`; `GatedAdapter` is deliberately NOT a key. Carries its own `README.md` |
 | `time_series/` | — | Adaptive lag attention, DeepAR blocks, EMA layer, forecasting layers, mixed sequential block, N-BEATS/N-BEATSx blocks, PRISM blocks, quantile heads, TCN, temporal fusion, xLSTM blocks |
 | `reasoning/` | — | HRM reasoning core, reasoning module, sparse puzzle embedding |
 | `physics/` | — | Lagrange layer, approximate Lagrange layer |

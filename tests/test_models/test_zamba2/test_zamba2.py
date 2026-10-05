@@ -43,7 +43,7 @@ class TestLoRAAdapter:
             "output_dim": 32,
             "rank": 4,
             "alpha": 8.0,
-            "num_occurrences": 3,
+            "num_adapters": 3,
         }
 
     @pytest.fixture
@@ -58,7 +58,7 @@ class TestLoRAAdapter:
         assert layer.output_dim == layer_config["output_dim"]
         assert layer.rank == layer_config["rank"]
         assert layer.alpha == layer_config["alpha"]
-        assert layer.num_occurrences == layer_config["num_occurrences"]
+        assert layer.num_adapters == layer_config["num_adapters"]
         assert layer.scale == pytest.approx(
             layer_config["alpha"] / layer_config["rank"]
         )
@@ -69,16 +69,16 @@ class TestLoRAAdapter:
     def test_edge_cases(self) -> None:
         """Every positional hyperparameter must be validated as positive."""
         with pytest.raises(ValueError, match="output_dim must be positive"):
-            LoRAAdapter(output_dim=0, rank=4, alpha=8.0, num_occurrences=2)
+            LoRAAdapter(output_dim=0, rank=4, alpha=8.0, num_adapters=2)
 
         with pytest.raises(ValueError, match="rank must be positive"):
-            LoRAAdapter(output_dim=32, rank=0, alpha=8.0, num_occurrences=2)
+            LoRAAdapter(output_dim=32, rank=0, alpha=8.0, num_adapters=2)
 
         with pytest.raises(ValueError, match="alpha must be positive"):
-            LoRAAdapter(output_dim=32, rank=4, alpha=0.0, num_occurrences=2)
+            LoRAAdapter(output_dim=32, rank=4, alpha=0.0, num_adapters=2)
 
-        with pytest.raises(ValueError, match="num_occurrences must be positive"):
-            LoRAAdapter(output_dim=32, rank=4, alpha=8.0, num_occurrences=0)
+        with pytest.raises(ValueError, match="num_adapters must be positive"):
+            LoRAAdapter(output_dim=32, rank=4, alpha=8.0, num_adapters=0)
 
     def test_forward_pass_shape_and_zero_init(
         self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor
@@ -90,7 +90,7 @@ class TestLoRAAdapter:
         """
         layer = LoRAAdapter(**layer_config)
 
-        for occurrence_idx in range(layer_config["num_occurrences"]):
+        for occurrence_idx in range(layer_config["num_adapters"]):
             output = layer(sample_input, occurrence_idx=occurrence_idx)
             assert output.shape == (*sample_input.shape[:-1], layer_config["output_dim"])
 
@@ -103,23 +103,32 @@ class TestLoRAAdapter:
 
         assert layer.built
         assert layer.a.shape == (
-            layer_config["num_occurrences"], sample_input.shape[-1], layer_config["rank"]
+            layer_config["num_adapters"], sample_input.shape[-1], layer_config["rank"]
         )
         assert layer.b.shape == (
-            layer_config["num_occurrences"], layer_config["rank"], layer_config["output_dim"]
+            layer_config["num_adapters"], layer_config["rank"], layer_config["output_dim"]
         )
 
     def test_occurrence_idx_out_of_range_raises(
         self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor
     ) -> None:
-        """call() must reject an occurrence index outside [0, num_occurrences)."""
+        """call() must reject an occurrence index outside [0, num_adapters).
+
+        The message names ``adapter_idx`` -- the CURRENT spelling -- even when
+        the caller passed the deprecated ``occurrence_idx``. The range is
+        reported in terms of the current name because that is what a reader of
+        the error needs in order to fix the call.
+        """
         layer = LoRAAdapter(**layer_config)
 
-        with pytest.raises(ValueError, match="occurrence_idx must be in"):
-            layer(sample_input, occurrence_idx=layer_config["num_occurrences"])
+        with pytest.raises(ValueError, match="adapter_idx must be in"):
+            layer(sample_input, occurrence_idx=layer_config["num_adapters"])
 
-        with pytest.raises(ValueError, match="occurrence_idx must be in"):
+        with pytest.raises(ValueError, match="adapter_idx must be in"):
             layer(sample_input, occurrence_idx=-1)
+
+        with pytest.raises(ValueError, match="adapter_idx must be in"):
+            layer(sample_input, adapter_idx=layer_config["num_adapters"])
 
     def test_a_slices_are_independently_initialized(
         self, layer_config: Dict[str, Any], sample_input: keras.KerasTensor
@@ -139,11 +148,11 @@ class TestLoRAAdapter:
         layer.build(sample_input.shape)
 
         a_numpy = keras.ops.convert_to_numpy(layer.a)
-        num_occurrences = layer_config["num_occurrences"]
-        assert num_occurrences >= 2, "fixture must exercise at least 2 occurrences"
+        num_adapters = layer_config["num_adapters"]
+        assert num_adapters >= 2, "fixture must exercise at least 2 occurrences"
 
-        for i in range(num_occurrences):
-            for j in range(i + 1, num_occurrences):
+        for i in range(num_adapters):
+            for j in range(i + 1, num_adapters):
                 assert not np.array_equal(a_numpy[i], a_numpy[j]), (
                     f"A[{i}] and A[{j}] are bit-identical at construction -- "
                     "occurrences are not independently initialized"
@@ -284,7 +293,7 @@ class TestLoRAAdapter:
             assert reloaded_layer.output_dim == layer_config["output_dim"]
             assert reloaded_layer.rank == layer_config["rank"]
             assert reloaded_layer.alpha == layer_config["alpha"]
-            assert reloaded_layer.num_occurrences == layer_config["num_occurrences"]
+            assert reloaded_layer.num_adapters == layer_config["num_adapters"]
 
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
@@ -298,14 +307,14 @@ class TestLoRAAdapter:
         layer = LoRAAdapter(**layer_config)
         config = layer.get_config()
 
-        required_keys = {"output_dim", "rank", "alpha", "num_occurrences", "kernel_initializer"}
+        required_keys = {"output_dim", "rank", "alpha", "num_adapters", "kernel_initializer"}
         for key in required_keys:
             assert key in config, f"Missing {key} in get_config()"
 
         assert config["output_dim"] == layer_config["output_dim"]
         assert config["rank"] == layer_config["rank"]
         assert config["alpha"] == layer_config["alpha"]
-        assert config["num_occurrences"] == layer_config["num_occurrences"]
+        assert config["num_adapters"] == layer_config["num_adapters"]
 
 
 class TestZamba2SharedAttentionBlock:
@@ -494,6 +503,10 @@ class TestZamba2SharedMLPBlock:
         """Standard configuration for testing."""
         return {
             "d_model": 32,
+            # The BLOCK's own parameter keeps its Zamba2 name -- it counts depth
+            # positions sharing one mem-block. Only the LoRAAdapter's slot count
+            # was renamed (num_occurrences -> num_adapters), and this block
+            # forwards it.
             "num_occurrences": 3,
             "hidden_dim": 64,
             "lora_rank": 4,

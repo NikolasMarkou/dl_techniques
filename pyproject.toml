@@ -97,6 +97,7 @@ testpaths = [
 markers = [
     "slow: takes more than a few seconds; usually needs a GPU",
     "integration: exercises several components together rather than one unit",
+    "red_proof: rewrites library source to prove a guard fails on its own defect; must be run deliberately and never as a routine check",
 ]
 
 # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-250.

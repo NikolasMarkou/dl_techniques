@@ -8,12 +8,16 @@ attention+MLP "mem-blocks" invoked at multiple depths, where each reuse
 additive LoRA delta so the one physical block can specialize per depth
 without multiplying its parameter count (Zyphra's Zamba2 architecture).
 
+``LoRAAdapter`` is re-exported here for backward compatibility. It now lives in
+:mod:`dl_techniques.layers.adapters.lora`, since the adapter primitive is not
+Zamba2-specific; new code should import it from there.
+
 See ``plans/plan-2026-09-12T075714-035fd488/plan.md`` for the build sequence
 and `README.md` in this package for the architecture writeup.
 """
 
+from dl_techniques.layers.adapters.lora import LoRAAdapter
 from dl_techniques.models.language.zamba2.layers import (
-    LoRAAdapter,
     Zamba2MambaBlock,
     Zamba2SharedAttentionBlock,
     Zamba2SharedMLPBlock,

@@ -50,7 +50,7 @@ half of every Python file under `src/`. The other eleven combined are smaller th
 
 | Subpackage | Role |
 |---|---|
-| **`layers/`** | The largest package. Themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus a large set of loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see *The registry / factory surface*. |
+| **`layers/`** | The largest package. Themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus a large set of loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see *The registry / factory surface*. `adapters/` holds `LoRAAdapter` and `GatedAdapter`; `statistics/` holds `LocalSupportGate`, the gate half of Local Support Learning. |
 | **`models/`** | The second largest, and the only subpackage that is not flat. Leaf model packages are grouped into family directories: `vision`, `language`, `vision_language`, `time_series`, `general_purpose`, `graph`, `neural_computer`, `common`, `memory`, `point_cloud`, `tabular`, `embeddings_experimental`. Four of those nest a third level: `vision/image_restoration/`, `vision/keypoints/`, `vision/super_resolution/`, `vision_language/sam/`. Catalogue: `src/dl_techniques/models/AGENTS.md`; family taxonomy: `src/dl_techniques/models/README.md`. |
 | `losses/` | Loss families, one module each; `losses/any_loss.py` holds the single dict-based loss registry. |
 | `utils/` | Cross-cutting helpers — `utils/logger.py` (mandatory central logging), `utils/masking/` (the canonical mask factory), plus tensor, alignment and geometry helpers. |
@@ -112,6 +112,7 @@ style.
 | `LOGIC_REGISTRY` | `src/dl_techniques/layers/logic/factory.py` | `create_logic_layer` |
 | `SAMPLING_REGISTRY` | `src/dl_techniques/layers/sampling.py` | `create_sampling_layer` |
 | `MIXTURE_REGISTRY` | `src/dl_techniques/layers/mixtures/factory.py` | `create_mixture_layer` |
+| `ADAPTER_REGISTRY` | `src/dl_techniques/layers/adapters/factory.py` | `create_adapter_layer` |
 | `SEQUENCE_POOLING_REGISTRY` | `src/dl_techniques/layers/sequence_pooling/factory.py` | `create_sequence_pooling_layer` |
 
 **Grepping for `_REGISTRY` will not find all of the surface.** Three variants exist under
