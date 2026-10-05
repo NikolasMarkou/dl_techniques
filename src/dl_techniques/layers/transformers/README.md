@@ -18,6 +18,7 @@ normalization registry keys, which are documented in the sibling packages and in
 | `VisionEncoder` | Complete ViT encoder: patch embedding, optional `[CLS]`, a stack of `TransformerLayer`s, pooled output. | ViT-style image backbones. |
 | `TextEncoder` | Complete BERT-style bidirectional encoder: token/positional embeddings plus the stack. | NLU encoders. |
 | `TextDecoder` | Complete GPT-style causal decoder. | Autoregressive LM stacks. |
+| `PatchCausalTransformer` | Causal stack over **already-embedded** `(B, P, D)` vectors: learned positional embedding, N x `TransformerLayer` under a causal mask, final norm. No input embedding of its own. | When something upstream already pooled the sequence (BLT's patch reps, pooled frame features) and you want the expensive layers paid per patch, not per byte. |
 | `SwinTransformerBlock` | Windowed (W-MSA) and shifted-window (SW-MSA) attention on a 4D `(B, H, W, C)` map. | Swin backbones, dense prediction. |
 | `SwinConvBlock` | Parallel Swin path + conv path, split-transform-merge. **Input channels must equal `conv_dim + trans_dim`.** | Hybrid local/global vision blocks. |
 | `PerceiverTransformerLayer` | Asymmetric cross-attention: a small latent array queries a large byte array, `O(M*N)`. | Very large inputs behind a latent bottleneck. |
@@ -124,7 +125,8 @@ expert above it genuinely goes unused; switch the expert to `mlp` without a `hid
 ```python
 import keras
 from dl_techniques.layers.transformers import (
-    VisionEncoder, TextEncoder, TextDecoder, TransformerDecoderLayer,
+    VisionEncoder, TextEncoder, TextDecoder, PatchCausalTransformer,
+    TransformerDecoderLayer,
 )
 
 vit = VisionEncoder(                       # ViT-B/16
@@ -152,7 +154,21 @@ dec_block = TransformerDecoderLayer(
     normalization_position='pre', ffn_type='swiglu',
 )
 # y = dec_block(target_embeddings, encoder_output=memory)
+
+patch_stack = PatchCausalTransformer(     # over representations, NOT ids
+    dim=768, depth=12, num_heads=12, max_patches=512,
+)
+# y = patch_stack(patch_representations)   # (B, 512, 768) in, same out
 ```
+
+`PatchCausalTransformer` is the gap the other two stacks leave open:
+`TextDecoder` embeds token IDs itself and wants a padding mask,
+`VisionEncoder` embeds an image. This one starts after the embedding. Its
+`max_patches` is a **hard ceiling** — a statically longer input raises in
+`build()` rather than being truncated — and empty slots are NOT masked out, so
+a caller with genuinely variable-length patches must mask them itself first.
+`name_prefix` renames every sub-layer, so two instances can coexist in one
+model.
 
 `VisionEncoder` takes 27 constructor parameters, `TextEncoder` 34 and `TextDecoder` 18 (plus
 `**kwargs`); every
@@ -258,3 +274,12 @@ only: no patchify, no `MASK` token, no decoder.
   `progressive_focused_transformer_block`.
 - **`TransformerLayer`'s `dropout_rate` never applies after attention.** If you want dropout on the
   attention weights, that is `attention_dropout_rate`.
+- **A causal stack's final norm runs at `1e-3`, NOT the norm factory's `1e-6`.** Every layer built
+  on `causal_stack.py` — `PatchCausalTransformer` and the four BLT stacks — has a 1000x split
+  inside one model: its own final norm at `1e-3`, the in-block norms from `TransformerLayer` at
+  `1e-6`. That is deliberate, not an oversight. `create_normalization_layer` imposes `1e-6` via
+  `setdefault`, and adopting it here was measured at `max|delta| = 1.7e-03` on the forward pass;
+  decision D-202 rejected the same rewrite for `mobilenet`/`cbam`. `LAYER_NORM_EPSILON` in
+  `causal_stack.py` is the single place the value lives, and
+  `tests/test_models/test_the_norm_epsilon_provenance_is_stated.py` pins the resulting per-package
+  census so a later silent move fails in either direction.

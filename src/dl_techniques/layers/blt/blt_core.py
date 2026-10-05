@@ -39,7 +39,7 @@ from .byte_tokenizer import ByteTokenizer
 from .dynamic_patcher import DynamicPatcher
 from .entropy_model import EntropyModel
 from .local_encoder import LocalEncoder
-from .global_transformer import GlobalTransformer
+from ..transformers.patch_causal_transformer import PatchCausalTransformer
 from .local_decoder import LocalDecoder
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -92,7 +92,7 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
-        │  GlobalTransformer(proj(z_h))        │
+        │  PatchCausalTransformer(proj(z_h))    │
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
@@ -267,10 +267,10 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             name="local_encoder"
         )
 
-        self.global_transformer = GlobalTransformer(
-            global_dim=self.global_dim,
-            num_global_layers=self.h_layers,
-            num_heads_global=self.num_heads,
+        self.global_transformer = PatchCausalTransformer(
+            dim=self.global_dim,
+            depth=self.h_layers,
+            num_heads=self.num_heads,
             max_patches=self.max_patches,
             dropout_rate=self.dropout_rate,
             name="global_transformer"

@@ -2,8 +2,8 @@
 ByteLatentTransformer is a tokenizer-free byte-level language model, defined by the
 `ByteLatentTransformer` class and its `create_blt_model` factory. It runs as a funnel and a
 fan-out instead of paying full transformer width on every byte: `LocalEncoder` pools each
-patch's byte states into one vector, `GlobalTransformer` runs the expensive layers once per
-patch instead of once per byte, and `LocalDecoder` cross-attends back to patch context to
+patch's byte states into one vector, `PatchCausalTransformer` runs the expensive layers once
+per patch instead of once per byte, and `LocalDecoder` cross-attends back to patch context to
 produce per-byte logits. `DynamicPatcher` opens a new patch wherever a small entropy model
 finds a byte surprising, so predictable runs collapse into long patches and surprising
 regions get short ones. This implementation diverges from the paper: patches beyond
@@ -38,7 +38,7 @@ from dl_techniques.layers.blt.byte_tokenizer import ByteTokenizer
 from dl_techniques.layers.blt.dynamic_patcher import DynamicPatcher
 from dl_techniques.layers.blt.entropy_model import EntropyModel
 from dl_techniques.layers.blt.local_encoder import LocalEncoder
-from dl_techniques.layers.blt.global_transformer import GlobalTransformer
+from dl_techniques.layers.transformers.patch_causal_transformer import PatchCausalTransformer
 from dl_techniques.layers.blt.local_decoder import LocalDecoder
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -64,7 +64,7 @@ class ByteLatentTransformer(keras.Model):
         LocalEncoder ◄─────────────────────────────────────────────┘
               │  patches [B, P, global_dim]
               ▼
-        GlobalTransformer
+        PatchCausalTransformer
               │  context [B, P, global_dim]
               ▼
         LocalDecoder (cross-attends to context, gathered by patch_ids)
@@ -254,10 +254,10 @@ class ByteLatentTransformer(keras.Model):
             name='local_encoder'
         )
 
-        self.global_transformer = GlobalTransformer(
-            global_dim=global_dim,
-            num_global_layers=num_global_layers,
-            num_heads_global=num_heads_global,
+        self.global_transformer = PatchCausalTransformer(
+            dim=global_dim,
+            depth=num_global_layers,
+            num_heads=num_heads_global,
             max_patches=max_patches,
             dropout_rate=dropout_rate,
             name='global_transformer'

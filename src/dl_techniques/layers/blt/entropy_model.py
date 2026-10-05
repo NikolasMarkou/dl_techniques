@@ -21,16 +21,19 @@ from typing import Optional, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from ..transformers.transformer import TransformerLayer
+from ..transformers.causal_stack import (
+    CausalTransformerStackMixin,
+    build_causal_stack_norm,
+    build_causal_transformer_stack,
+)
 from ..embedding.positional_embedding import PositionalEmbedding
 
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.blt.entropy_model")
-class EntropyModel(keras.layers.Layer):
+class EntropyModel(CausalTransformerStackMixin, keras.layers.Layer):
     """Predict next-byte logits with a small causal transformer.
 
     ``call`` returns logits. Their Shannon entropy comes from a separate
@@ -115,25 +118,23 @@ class EntropyModel(keras.layers.Layer):
             name='token_embedding'
         )
 
-        self.positional_embedding = PositionalEmbedding(
-            max_seq_len=self.max_seq_len,
-            dim=self.hidden_dim,
-            dropout_rate=self.dropout_rate,
-            name='positional_embedding'
-        )
-
-        self.transformer_layers = []
-        for i in range(self.num_layers):
-            layer = TransformerLayer(
+        self.bind_causal_stack(
+            positional_embedding=PositionalEmbedding(
+                max_seq_len=self.max_seq_len,
+                dim=self.hidden_dim,
+                dropout_rate=self.dropout_rate,
+                name='positional_embedding'
+            ),
+            layers=build_causal_transformer_stack(
                 hidden_size=self.hidden_dim,
                 num_heads=self.num_heads,
-                intermediate_size=self.hidden_dim * 4,
+                depth=self.num_layers,
                 dropout_rate=self.dropout_rate,
-                name=f'transformer_layer_{i}'
-            )
-            self.transformer_layers.append(layer)
+                name_prefix='transformer_layer',
+            ),
+            final_norm=build_causal_stack_norm('final_layer_norm'),
+        )
 
-        self.layer_norm = keras.layers.LayerNormalization(name='final_layer_norm')
         self.output_projection = keras.layers.Dense(
             self.vocab_size,
             name='output_projection'
@@ -148,19 +149,9 @@ class EntropyModel(keras.layers.Layer):
         # Explicit builds, because a lazy first-call build leaves the weights
         # unloadable on a .keras reload.
         self.embedding.build(input_shape)
-
-        embedded_shape = self.embedding.compute_output_shape(input_shape)
-        pos_embedded_shape = self.positional_embedding.compute_output_shape(embedded_shape)
-
-        self.positional_embedding.build(embedded_shape)
-
-        current_shape = pos_embedded_shape
-        for layer in self.transformer_layers:
-            layer.build(current_shape)
-            current_shape = layer.compute_output_shape(current_shape)
-
-        self.layer_norm.build(current_shape)
-        norm_shape = current_shape
+        norm_shape = self.build_causal_stack(
+            self.embedding.compute_output_shape(input_shape)
+        )
         self.output_projection.build(norm_shape)
 
         super().build(input_shape)
@@ -181,18 +172,11 @@ class EntropyModel(keras.layers.Layer):
         """
         x = self.embedding(inputs)
 
-        x = self.positional_embedding(x, training=training)
-
         # Without the mask, the surprise at position i is computed from a state
         # that has already read byte i+1.
-        attend_mask = create_causal_attend_mask(x)
-        for layer in self.transformer_layers:
-            x = layer(x, attention_mask=attend_mask, training=training)
+        x = self.run_causal_stack(x, training=training)
 
-        x = self.layer_norm(x)
-        logits = self.output_projection(x)
-
-        return logits
+        return self.output_projection(x)
 
     def compute_entropy(self, logits: keras.KerasTensor) -> keras.KerasTensor:
         """Compute Shannon entropy ``H = -sum(p * log(p))`` from logits.

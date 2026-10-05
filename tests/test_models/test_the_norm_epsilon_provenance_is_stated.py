@@ -44,6 +44,14 @@ package               MEASURED census                      ruling
 ``masked_autoencoder`` 4 sites, all ``1e-03``              STATED
 ``cbam``              2 sites, all ``1e-03``               STATED
 ``time_series`` (MDN) 4 sites, all ``1e-03``               STATED
+``blt``               5x ``1e-03`` + 14x ``1e-06``         STATED -- an eleventh
+                                                          package, charged
+                                                          2026-10-06; the
+                                                          split is
+                                                          construction
+                                                          style, both
+                                                          values now
+                                                          explicit
 ===================== ==================================== =================
 
 Three of the audit's own counts were WRONG and are corrected by the
@@ -143,6 +151,20 @@ def _mdn():
                             use_batch_norm=True)
 
 
+def _blt():
+    """BLT, at the configuration named in the row below.
+
+    NOT the default variant: the census is a function of the configuration,
+    which is why every other builder here is pinned to an explicit tiny one.
+    """
+    from dl_techniques.models.language.blt.model import create_blt_model
+    return create_blt_model(
+        vocab_size=260, max_sequence_length=64, max_patches=8,
+        local_dim=32, global_dim=32, num_local_layers=1, num_global_layers=1,
+        num_heads_local=2, num_heads_global=2,
+    )
+
+
 #: package -> (builder, MEASURED census). Every entry was produced by running
 #: the builder beside it; none is copied from the audit, and three of the
 #: audit's numbers were wrong (see the module docstring).
@@ -167,6 +189,23 @@ CENSUS = {
     "masked_autoencoder": (_masked_autoencoder, {"1e-03": 4}),
     "cbam": (_cbam, {"1e-03": 2}),
     "time_series": (_mdn, {"1e-03": 4}),
+    # ``blt`` is a DELIBERATE two-epsilon package, split by construction style
+    # and not by choice: the five stack-final norms are built by
+    # ``transformers/causal_stack.build_causal_stack_norm`` at ``1e-3``, while
+    # the fourteen in-block norms come from ``TransformerLayer``, which routes
+    # through the norm factory at its own ``1e-6``. Both values are now STATED
+    # at their call sites -- the helper's signature makes ``epsilon`` a
+    # required-by-default argument nobody can forget, and
+    # ``LAYER_NORM_EPSILON`` records why the value stays ``1e-3``.
+    #
+    # MEASURED 2026-10-06, before adding the row: the split is exactly
+    # ``1e-3`` x 5 (``final_layer_norm``, ``local_encoder_norm``,
+    # ``global_transformer_norm``, ``decoder_norm``, ``cross_attention_norm_0``)
+    # and ``1e-6`` x 14. Moving the five to the factory's ``1e-6`` was measured
+    # on ``PatchCausalTransformer`` at ``dim=32, depth=2, max_patches=8``:
+    # ``max|delta| = 1.7e-03``, relative ``5.0e-04`` for a single norm. That is
+    # why this row PINS the values rather than unifying them.
+    "blt": (_blt, {"1e-03": 5, "1e-06": 14}),
 }
 
 
@@ -211,11 +250,18 @@ def test_the_census_can_actually_observe_a_moved_epsilon():
 def test_the_two_epsilon_split_packages_really_carry_two_values():
     """The 'two epsilons three orders apart in one model' shape, asserted.
 
-    ``mobilenet``, ``vit_hmlp``, ``fastvlm`` and ``mobile_clip`` each split
-    along factory-vs-bare construction. A future refactor that unified them
-    would be a real change and must not pass silently as "still green".
+    ``mobilenet``, ``vit_hmlp``, ``fastvlm``, ``mobile_clip`` and ``blt`` each
+    split along factory-vs-bare construction. A future refactor that unified
+    them would be a real change and must not pass silently as "still green".
+
+    ``blt``'s split is the one this file's own history created: routing
+    ``PatchCausalTransformer``'s final norm through
+    ``create_normalization_layer`` would divide its epsilon by 1000 and move
+    the forward pass by ``max|delta| = 1.7e-03``. It is in this list so that
+    someone who makes that change has to update the ``CENSUS`` row above,
+    where the reasoning is recorded.
     """
-    for package in ("mobilenet", "vit_hmlp", "fastvlm", "mobile_clip"):
+    for package in ("mobilenet", "vit_hmlp", "fastvlm", "mobile_clip", "blt"):
         _build, expected = CENSUS[package]
         assert len(expected) == 2, (
             f"{package} is recorded as a two-epsilon package but its census "

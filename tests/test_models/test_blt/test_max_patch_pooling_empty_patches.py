@@ -18,7 +18,7 @@ the fix -- this is not a rescale, it is a replacement of a constant that should
 never have been observable.
 
 The model's *logit* magnitude is NOT an instrument for this defect (4.55 legacy
-vs 4.22 fixed, same seed): the `GlobalTransformer`'s LayerNorm re-normalizes the
+vs 4.22 fixed, same seed): the `PatchCausalTransformer`'s LayerNorm re-normalizes the
 poisoned stream to O(1). The instrument is the pooled patch tensor itself, which
 is why every assertion here reads `PatchPooling`'s output rather than the
 model's.

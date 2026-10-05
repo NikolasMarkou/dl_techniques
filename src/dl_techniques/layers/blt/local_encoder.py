@@ -1,6 +1,7 @@
 """LocalEncoder: process bytes with causal attention, then pool them into
-patch representations, using the shared `create_causal_attend_mask` helper
-from `dl_techniques.utils.masking` and the sibling `PatchPooling` layer.
+patch representations, using the shared causal-stack skeleton in
+`dl_techniques.layers.transformers.causal_stack` and the sibling
+`PatchPooling` layer.
 """
 
 import keras
@@ -10,17 +11,20 @@ from typing import Optional, Dict, Any, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from ..transformers.transformer import TransformerLayer
+from ..transformers.causal_stack import (
+    CausalTransformerStackMixin,
+    build_causal_stack_norm,
+    build_causal_transformer_stack,
+)
 from ..embedding.positional_embedding import PositionalEmbedding
 from .patch_pooling import PatchPooling
 
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.blt.local_encoder")
-class LocalEncoder(keras.layers.Layer):
+class LocalEncoder(CausalTransformerStackMixin, keras.layers.Layer):
     """Process bytes with causal attention, then pool them into patches.
 
     Architecture:
@@ -119,23 +123,22 @@ class LocalEncoder(keras.layers.Layer):
             name='byte_embedding'
         )
 
-        self.positional_embedding = PositionalEmbedding(
-            max_seq_len=self.max_sequence_length,
-            dim=self.local_dim,
-            dropout_rate=self.dropout_rate,
-            name='positional_embedding'
-        )
-
-        self.transformer_layers = []
-        for i in range(self.num_local_layers):
-            layer = TransformerLayer(
+        self.bind_causal_stack(
+            positional_embedding=PositionalEmbedding(
+                max_seq_len=self.max_sequence_length,
+                dim=self.local_dim,
+                dropout_rate=self.dropout_rate,
+                name='positional_embedding'
+            ),
+            layers=build_causal_transformer_stack(
                 hidden_size=self.local_dim,
                 num_heads=self.num_heads_local,
-                intermediate_size=self.local_dim * 4,
+                depth=self.num_local_layers,
                 dropout_rate=self.dropout_rate,
-                name=f'local_transformer_{i}'
-            )
-            self.transformer_layers.append(layer)
+                name_prefix='local_transformer',
+            ),
+            final_norm=build_causal_stack_norm('local_encoder_norm'),
+        )
 
         self.patch_pooling = PatchPooling(
             pooling_method=self.patch_pooling_method,
@@ -144,8 +147,6 @@ class LocalEncoder(keras.layers.Layer):
             max_patches=self.max_patches,
             name='patch_pooling'
         )
-
-        self.layer_norm = keras.layers.LayerNormalization(name='local_encoder_norm')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the local encoder layers.
@@ -157,18 +158,9 @@ class LocalEncoder(keras.layers.Layer):
         # unloadable on a .keras reload.
         self.byte_embedding.build(input_shape)
 
-        embedded_shape = self.byte_embedding.compute_output_shape(input_shape)
-
-        self.positional_embedding.build(embedded_shape)
-        pos_embedded_shape = self.positional_embedding.compute_output_shape(embedded_shape)
-
-        current_shape = pos_embedded_shape
-        for layer in self.transformer_layers:
-            layer.build(current_shape)
-            current_shape = layer.compute_output_shape(current_shape)
-
-        self.layer_norm.build(current_shape)
-        norm_shape = current_shape
+        norm_shape = self.build_causal_stack(
+            self.byte_embedding.compute_output_shape(input_shape)
+        )
 
         self.patch_pooling.build(norm_shape)
 
@@ -194,19 +186,11 @@ class LocalEncoder(keras.layers.Layer):
         """
         x = self.byte_embedding(byte_tokens)
 
-        x = self.positional_embedding(x, training=training)
-
         # The pooled patch vectors feed a next-byte objective, so byte i must
         # not attend past itself.
-        attend_mask = create_causal_attend_mask(x)
-        for layer in self.transformer_layers:
-            x = layer(x, attention_mask=attend_mask, training=training)
+        x = self.run_causal_stack(x, training=training)
 
-        x = self.layer_norm(x)
-
-        patch_representations = self.patch_pooling(x, patch_ids, training=training)
-
-        return patch_representations
+        return self.patch_pooling(x, patch_ids, training=training)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape.

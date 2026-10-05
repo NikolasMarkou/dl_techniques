@@ -710,8 +710,15 @@ _REGISTRY_SWEEP_ROOTS = (MODELS_DIR, LAYERS_DIR / "transformers")
 #: the sweep still runs in well under a second. The single-file ``layers/blt`` module was
 #: split into 7 per-class files on 2026-09-15 (plan-2026-09-15T175707-5b389e31); its
 #: ``TransformerLayer(`` sites now live in ``layers/blt/entropy_model.py``,
-#: ``layers/blt/local_encoder.py``, ``layers/blt/global_transformer.py`` and
-#: ``layers/blt/local_decoder.py``, all still under the widened ``LAYERS_DIR`` root.
+#: ``layers/blt/local_encoder.py`` and ``layers/blt/local_decoder.py``.
+#:
+#: A fourth moved OUT on 2026-10-06: ``layers/blt/global_transformer.py`` became
+#: ``layers/transformers/patch_causal_transformer.py`` (``PatchCausalTransformer``).
+#: All four BLT stacks now build their blocks through
+#: ``transformers/causal_stack.build_causal_transformer_stack``, which is the
+#: single remaining ``TransformerLayer(`` construction site on the BLT side --
+#: and it lives INSIDE the widened root, so the sweep's widened root set is
+#: still load-bearing rather than merely historical.
 _NORM_SWEEP_ROOTS = (MODELS_DIR, LAYERS_DIR)
 
 #: The three factories whose registries declare a per-type parameter set. Maps

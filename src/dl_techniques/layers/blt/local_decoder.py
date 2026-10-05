@@ -1,9 +1,12 @@
-"""LocalDecoder, the Byte Latent Transformer's next-byte prediction stack,
-using the shared `create_causal_attend_mask` helper from
-`dl_techniques.utils.masking`.
+"""LocalDecoder, the Byte Latent Transformer's next-byte prediction stack.
 
 LocalDecoder combines local byte context with the preceding patch's global
-representation to produce next-byte logits.
+representation to produce next-byte logits. It is the one BLT stack that does
+NOT match `dl_techniques.layers.transformers.causal_stack`'s skeleton: its
+cross-attention to the gathered global context is interleaved BETWEEN blocks
+rather than appended, so it uses that module's `build_causal_transformer_stack`
+and `build_causal_stack_norm` helpers for the blocks and the final norm but
+keeps its own `build` / `call`.
 
 References:
     - Pagnoni et al., 2024. Byte Latent Transformer: Patches Scale Better
@@ -21,7 +24,10 @@ from typing import Optional, Dict, Any, Tuple
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from ..transformers.transformer import TransformerLayer
+from ..transformers.causal_stack import (
+    build_causal_stack_norm,
+    build_causal_transformer_stack,
+)
 from ..embedding.positional_embedding import PositionalEmbedding
 
 # ---------------------------------------------------------------------
@@ -127,7 +133,7 @@ class LocalDecoder(keras.layers.Layer):
             name='decoder_byte_embedding'
         )
 
-        self.positional_embedding = PositionalEmbedding(
+        self.stack_positional_embedding = PositionalEmbedding(
             max_seq_len=self.max_sequence_length,
             dim=self.local_dim,
             dropout_rate=self.dropout_rate,
@@ -142,32 +148,32 @@ class LocalDecoder(keras.layers.Layer):
                 name='context_projection'
             )
 
-        self.decoder_layers = []
-        self.cross_attention_layers = []
-        self.cross_attention_norms = []
+        # Interleaved, so these stay as three parallel lists rather than the
+        # mixin's single `stack_layers` list.
+        self.decoder_layers = build_causal_transformer_stack(
+            hidden_size=self.local_dim,
+            num_heads=self.num_heads_local,
+            depth=self.num_local_layers,
+            dropout_rate=self.dropout_rate,
+            name_prefix='decoder_transformer',
+        )
 
-        for i in range(self.num_local_layers):
-            decoder_layer = TransformerLayer(
-                hidden_size=self.local_dim,
-                num_heads=self.num_heads_local,
-                intermediate_size=self.local_dim * 4,
-                dropout_rate=self.dropout_rate,
-                name=f'decoder_transformer_{i}'
-            )
-            self.decoder_layers.append(decoder_layer)
-
-            cross_attention = keras.layers.MultiHeadAttention(
+        self.cross_attention_layers = [
+            keras.layers.MultiHeadAttention(
                 num_heads=self.num_heads_local,
                 key_dim=max(self.local_dim // self.num_heads_local, 1),
                 dropout=self.dropout_rate,
                 name=f'cross_attention_{i}'
             )
-            self.cross_attention_layers.append(cross_attention)
+            for i in range(self.num_local_layers)
+        ]
 
-            cross_norm = keras.layers.LayerNormalization(name=f'cross_attention_norm_{i}')
-            self.cross_attention_norms.append(cross_norm)
+        self.cross_attention_norms = [
+            build_causal_stack_norm(f'cross_attention_norm_{i}')
+            for i in range(self.num_local_layers)
+        ]
 
-        self.layer_norm = keras.layers.LayerNormalization(name='decoder_norm')
+        self.layer_norm = build_causal_stack_norm('decoder_norm')
         self.output_projection = keras.layers.Dense(
             self.vocab_size,
             name='output_projection'
@@ -185,8 +191,8 @@ class LocalDecoder(keras.layers.Layer):
 
         embedded_shape = self.byte_embedding.compute_output_shape(byte_input_shape)
 
-        self.positional_embedding.build(embedded_shape)
-        pos_embedded_shape = self.positional_embedding.compute_output_shape(embedded_shape)
+        self.stack_positional_embedding.build(embedded_shape)
+        pos_embedded_shape = self.stack_positional_embedding.compute_output_shape(embedded_shape)
 
         if self.context_projection is not None:
             global_context_shape = (embedded_shape[0], None, self.global_dim)
@@ -242,7 +248,7 @@ class LocalDecoder(keras.layers.Layer):
         """
         x = self.byte_embedding(byte_tokens)
 
-        x = self.positional_embedding(x, training=training)
+        x = self.stack_positional_embedding(x, training=training)
 
         if self.context_projection is not None:
             global_context = self.context_projection(global_context)

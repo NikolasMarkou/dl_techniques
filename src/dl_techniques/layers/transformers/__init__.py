@@ -19,6 +19,10 @@ factory-driven shape:
 - :class:`EomtTransformer` — masked self-attention with object queries for
   instance segmentation; `use_masked_attention=True` requires a maskable
   `attention_type` (not `'fnet'`/`'anchor'`/`'lighthouse'`).
+- :class:`PatchCausalTransformer` — a causal stack over ALREADY-EMBEDDED
+  sequence representations, the shape `TextDecoder` does not cover (it embeds
+  token IDs itself) and `VisionEncoder` does not cover (it embeds an image).
+  Its skeleton is shared with the four BLT layers, in `causal_stack.py`.
 - :class:`AdaLNZeroConditionalBlock` — DiT-style adaptive layer-norm
   zero-initialized conditional block.
 - :class:`AreaAttentionBlock` — the yolo12 attention stage over a 4D
@@ -83,6 +87,7 @@ from .text_decoder import TextDecoder
 
 from .swin_transformer_block import SwinTransformerBlock
 from .swin_conv_block import SwinConvBlock
+from .patch_causal_transformer import PatchCausalTransformer
 from .perceiver_transformer import PerceiverTransformerLayer
 from .eomt_transformer import EomtTransformer
 from .adaln_zero import AdaLNZeroConditionalBlock
@@ -129,6 +134,7 @@ __all__ = [
     # Specialized Blocks
     "SwinTransformerBlock",
     "SwinConvBlock",
+    "PatchCausalTransformer",
     "PerceiverTransformerLayer",
     "EomtTransformer",
     "AdaLNZeroConditionalBlock",
