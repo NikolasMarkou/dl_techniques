@@ -156,7 +156,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         # factory (HRM never populated `attention_args` at all, so even the
         # strict factory of D-011 could not surface it), and the whole reasoning
         # stack was exactly permutation-equivariant. MEASURED on CPU by
-        # `tests/test_models/test_hierarchical_reasoning_model/test_positional_signal.py::TestHRMIsPositionAware::test_reasoning_stack_is_not_permutation_equivariant`:
+        # `tests/test_models/test_hrm/test_positional_signal.py::TestHRMIsPositionAware::test_reasoning_stack_is_not_permutation_equivariant`:
         # `max|P f(x) - f(P x)| = 2.02656e-06` (float32 noise) before this
         # change. Same defect and same fix as TRM's D-007, ModernBERT's D-007
         # and DINOv3's D-010. See decisions.md D-012.

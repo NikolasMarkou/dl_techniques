@@ -44,7 +44,7 @@ import keras
 from dl_techniques.models.language.bert.model import BERT
 from dl_techniques.models.vision.masked_autoencoder.mae import MaskedAutoencoder
 from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
-from dl_techniques.models.language.hierarchical_reasoning_model.model import (
+from dl_techniques.models.language.hrm.model import (
     create_hierarchical_reasoning_model,
 )
 
@@ -213,7 +213,7 @@ def test_the_causal_language_model_survives_a_keras_round_trip(clm_on_bert):
 
 
 # ---------------------------------------------------------------------------
-# hierarchical_reasoning_model — R-066
+# hrm — R-066
 # ---------------------------------------------------------------------------
 
 def test_the_hrm_factory_returns_a_built_model():

@@ -179,8 +179,8 @@ same-named trainer is usually still trained, under another name:
 |---|---|
 | `models/vision/bias_free_denoisers/` | `src/train/bfunet/` — several `train_*.py` scripts |
 | `models/vision/convunext/` | TWO trainers: the bias-free denoiser arm is `src/train/bfunet/train_convunext_denoiser.py` (it stays under `bfunet/` because it shares `common.py` with the unet and bfcnn denoisers); the segmentation arm (`use_bias=True`, Oxford-IIIT Pet) is `src/train/convunext/train_convunext_segmentation.py` |
-| `models/language/byte_latent_transformer/` | `src/train/blt/train_blt.py` |
-| `models/language/hierarchical_reasoning_model/` | `src/train/hrm/train_hrm.py` |
+| `models/language/blt/` | `src/train/blt/train_blt.py` |
+| `models/language/hrm/` | `src/train/hrm/train_hrm.py` |
 
 **2. Some entries under `src/train/` are not model trainers.** `src/train/time_series/` and
 `src/train/language/` are family containers whose own `__init__.py` is a marker and whose

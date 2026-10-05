@@ -152,7 +152,7 @@ filterwarnings = [
     # RE-MEASURED 2026-08-23 (D-602) by escalating this family back to an error:
     # it STILL FIRES, 20 emissions over 4 of the 10 directories probed --
     # `test_beit` 4 (`beit_backbone/mask_token`), `test_video_jepa` 3
-    # (`mask_token`), `test_byte_latent_transformer` 2 (`entropy_model/
+    # (`mask_token`), `test_blt` 2 (`entropy_model/
     # token_embeddings`), `test_sam` 11 (`prompt_encoder/point_embeddings`,
     # `mask_downscaling`) -- every one of them a named, by-design-inert
     # component. The entry is earned, not inherited.

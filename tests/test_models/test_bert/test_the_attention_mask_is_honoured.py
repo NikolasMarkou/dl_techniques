@@ -9,7 +9,7 @@ anything, and a mask that is silently dropped (built, forwarded, and then not
 added to the attention logits) is invisible.
 
 The instrument is the both-ways pair from
-`test_byte_latent_transformer::test_future_byte_does_not_change_the_past` +
+`test_blt::test_future_byte_does_not_change_the_past` +
 `::test_the_model_still_responds_at_and_after_the_perturbation`. One half alone
 is not a guard: "nothing changed" is also what a model that ignores its input
 entirely produces.

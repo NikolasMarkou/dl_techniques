@@ -34,7 +34,7 @@ import pytest
 
 
 def _hrm_variants() -> Dict[str, Dict[str, Any]]:
-    from dl_techniques.models.language.hierarchical_reasoning_model.model import (
+    from dl_techniques.models.language.hrm.model import (
         HierarchicalReasoningModel,
     )
 
@@ -68,7 +68,7 @@ def _relgt_variants() -> Dict[str, Dict[str, Any]]:
 # package -> zero-arg loader for that package's variant table.
 # Loaders are lazy so one package failing to import cannot mask the others.
 VARIANT_TABLES: Dict[str, Callable[[], Dict[str, Dict[str, Any]]]] = {
-    "hierarchical_reasoning_model": _hrm_variants,
+    "hrm": _hrm_variants,
     "sd3_mmdit": _sd3_variants,
     "ntm": _ntm_variants,
     "pft_sr": _pft_sr_variants,
@@ -100,19 +100,19 @@ _SD3_URL = (
 UPSTREAM_PINS = [
     # sapientinc/HRM config/arch/hrm_v1.yaml -- the ONLY official HRM architecture
     # config. hidden_size -> embed_dim, H_* -> h_*, L_* -> l_*.
-    ("hierarchical_reasoning_model", "small", "embed_dim", 512,
+    ("hrm", "small", "embed_dim", 512,
      "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
-    ("hierarchical_reasoning_model", "small", "num_heads", 8,
+    ("hrm", "small", "num_heads", 8,
      "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
-    ("hierarchical_reasoning_model", "small", "h_layers", 4,
+    ("hrm", "small", "h_layers", 4,
      "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
-    ("hierarchical_reasoning_model", "small", "l_layers", 4,
+    ("hrm", "small", "l_layers", 4,
      "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
-    ("hierarchical_reasoning_model", "small", "h_cycles", 2,
+    ("hrm", "small", "h_cycles", 2,
      "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
-    ("hierarchical_reasoning_model", "small", "l_cycles", 2,
+    ("hrm", "small", "l_cycles", 2,
      "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
-    ("hierarchical_reasoning_model", "small", "halt_max_steps", 16,
+    ("hrm", "small", "halt_max_steps", 16,
      "https://raw.githubusercontent.com/sapientinc/HRM/main/config/arch/hrm_v1.yaml"),
 
     # stabilityai/stable-diffusion-3-medium-diffusers transformer/config.json.

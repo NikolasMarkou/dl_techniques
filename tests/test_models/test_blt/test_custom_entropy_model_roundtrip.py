@@ -22,7 +22,7 @@ import pytest
 from keras import ops
 
 from dl_techniques.layers.blt.entropy_model import EntropyModel
-from dl_techniques.models.language.byte_latent_transformer.model import ByteLatentTransformer
+from dl_techniques.models.language.blt.model import ByteLatentTransformer
 
 
 VOCAB = 64

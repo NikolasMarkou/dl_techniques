@@ -1,4 +1,4 @@
-"""Permanent build+forward smoke test for the hierarchical_reasoning_model family.
+"""Permanent build+forward smoke test for the hrm family.
 
 Part of the 2026-06-15 model build/forward sweep (plan_2026-06-15_b5cec9e4).
 
@@ -38,7 +38,7 @@ EXPECTED_SHAPES = {
 
 
 def _build():
-    from dl_techniques.models.language.hierarchical_reasoning_model.model import (
+    from dl_techniques.models.language.hrm.model import (
         create_hierarchical_reasoning_model,
     )
 

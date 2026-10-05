@@ -170,7 +170,7 @@ Initialize a standard BLT model using the configuration-driven pattern.
 
 ```python
 import keras
-from dl_techniques.models.language.byte_latent_transformer import create_blt_model
+from dl_techniques.models.language.blt import create_blt_model
 
 # 1. Define Configuration
 blt_config = {
@@ -213,7 +213,7 @@ print(f"Generated: {generated}")
 The main model class integrates `dl_techniques` factories.
 
 ```python
-from dl_techniques.models.language.byte_latent_transformer import ByteLatentTransformer
+from dl_techniques.models.language.blt import ByteLatentTransformer
 from dl_techniques.layers.norms import create_normalization_layer
 
 # Manual instantiation (advanced)
@@ -257,7 +257,7 @@ Use the `dl_techniques.optimization` module for proper scheduling and weight dec
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.language.byte_latent_transformer import create_blt_model
+from dl_techniques.models.language.blt import create_blt_model
 from dl_techniques.optimization import (
     optimizer_builder, 
     learning_rate_schedule_builder
@@ -395,7 +395,7 @@ keras.mixed_precision.set_global_policy('mixed_float16')
 
 ## 12. Serialization & Deployment
 
-BLT models are registered through `register_dl_technique` (`dl_techniques.utils.keras_registration`): `ByteLatentTransformer` resolves to `dl_techniques.models.byte_latent_transformer.model>ByteLatentTransformer`. Sub-layers pulled in from `dl_techniques/layers/` register under their own defining modules. The helper also binds a legacy `Custom>ClassName` alias, so older archives still load.
+BLT models are registered through `register_dl_technique` (`dl_techniques.utils.keras_registration`): `ByteLatentTransformer` resolves to `dl_techniques.models.blt.model>ByteLatentTransformer`. Sub-layers pulled in from `dl_techniques/layers/` register under their own defining modules. The helper also binds a legacy `Custom>ClassName` alias, so older archives still load.
 
 ```python
 # Save complete model including config

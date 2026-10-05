@@ -68,7 +68,7 @@ Ready-made applications that package models from `dl_techniques` for deployment.
 
 ### src/train/
 
-Production-grade training pipelines — one directory per runnable pipeline. Most correspond to a model architecture in `dl_techniques/models/` (e.g., `train/cliffordnet/`, `train/vit/`, `train/resnet/`), but two do not: `src/train/logic/` is a boolean-circuit / rule-learning research harness and `src/train/rms_variants_train/` is a normalization-layer ablation sweep, neither of which has a matching model package. Several trainer directories are also renamed relative to the model package they train — `src/dl_techniques/models/vision/bias_free_denoisers/` is trained by `src/train/bfunet/`, `src/dl_techniques/models/language/byte_latent_transformer/` by `src/train/blt/`, and `src/dl_techniques/models/language/hierarchical_reasoning_model/` by `src/train/hrm/` — so the absence of a same-named directory does not mean the model is untrained.
+Production-grade training pipelines — one directory per runnable pipeline. Most correspond to a model architecture in `dl_techniques/models/` (e.g., `train/cliffordnet/`, `train/vit/`, `train/resnet/`), but two do not: `src/train/logic/` is a boolean-circuit / rule-learning research harness and `src/train/rms_variants_train/` is a normalization-layer ablation sweep, neither of which has a matching model package. Several trainer directories are also renamed relative to the model package they train — `src/dl_techniques/models/vision/bias_free_denoisers/` is trained by `src/train/bfunet/`, `src/dl_techniques/models/language/blt/` by `src/train/blt/`, and `src/dl_techniques/models/language/hrm/` by `src/train/hrm/` — so the absence of a same-named directory does not mean the model is untrained.
 
 ### tests/
 

@@ -1,4 +1,4 @@
-"""Permanent build+forward smoke test for the byte_latent_transformer family.
+"""Permanent build+forward smoke test for the blt family.
 
 Part of the 2026-06-15 model build/forward sweep (plan_2026-06-15_b5cec9e4).
 
@@ -28,7 +28,7 @@ BATCH, SEQ_LEN, VOCAB_SIZE = 2, 16, 256
 
 
 def _build():
-    from dl_techniques.models.language.byte_latent_transformer.model import create_blt_model
+    from dl_techniques.models.language.blt.model import create_blt_model
 
     return create_blt_model(
         variant="micro",

@@ -382,7 +382,7 @@ dl_techniques/
 │   │   │                      #      yolo12, detr, vae, vq_vae, depth_anything, and the
 │   │   │                      #      nested image_restoration/, super_resolution/, keypoints/
 │   │   ├── language/          # 17 — bert, gemma, qwen, mamba, modern_bert, gpt2, colbert,
-│   │   │                      #      byte_latent_transformer, hierarchical_reasoning_model, ...
+│   │   │                      #      blt, hrm, ...
 │   │   ├── vision_language/   #  9 — clip, mobile_clip, fastvlm, nano_vlm, sd3_mmdit,
 │   │   │                      #      ideogram4, and the nested sam/{sam1,sam2,sam3}
 │   │   ├── time_series/       #  7 — tirex, nbeats, xlstm, deepar, prism, mdn, adaptive_ema

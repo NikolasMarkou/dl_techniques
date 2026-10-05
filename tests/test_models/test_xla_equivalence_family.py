@@ -112,7 +112,7 @@ def test_exactly_one_subject_is_documented_as_not_compiling():
 
 
 def test_the_hrm_xla_delta_is_conditioning_and_the_probe_says_so():
-    """The refutation behind ``hierarchical_reasoning_model``'s float64 scope.
+    """The refutation behind ``hrm``'s float64 scope.
 
     Its float32 eager-vs-XLA delta (7.26e+00) is LARGER than its own output
     (absmax 5.54e+00) with an eager spread of exactly 0.0, which reads as "XLA
@@ -131,7 +131,7 @@ def test_the_hrm_xla_delta_is_conditioning_and_the_probe_says_so():
     import keras
     from .precision_arm_oracle import default_call, flatten_tensors
 
-    build, make_inputs, _ = xla_subject("hierarchical_reasoning_model")
+    build, make_inputs, _ = xla_subject("hrm")
     keras.utils.set_random_seed(0)
     model = build()
     inputs = make_inputs()

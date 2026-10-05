@@ -46,7 +46,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.models.byte_latent_transformer.model")
+@register_dl_technique("dl_techniques.models.blt.model")
 class ByteLatentTransformer(keras.Model):
     """
     Byte Latent Transformer: hierarchical byte-level model with dynamic patching.
