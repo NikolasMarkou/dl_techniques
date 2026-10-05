@@ -479,6 +479,31 @@ class PerClassAnalysis(CompositeVisualization):
         self.add_subplot("Class Confusion", self._plot_class_confusion)
         self.add_subplot("Hardest Examples", self._plot_hardest_examples)
 
+    @staticmethod
+    def _axis_classes(class_names, n_classes: int) -> list:
+        """Return exactly ``n_classes`` tick labels for ``n_classes`` data points.
+
+        A caller that derives its class list from the labels actually PRESENT in
+        ``y_true``/``y_pred`` — which is what ``ConfusionMatrixVisualization``
+        requires, because it calls ``sklearn.metrics.confusion_matrix`` with no
+        ``labels=`` and sklearn's default is the sorted union of the two label
+        arrays — can end up with FEWER names than there are classes. The original
+        ``train/mothnet`` D-007 decision derives ``class_names`` that way
+        precisely so the confusion matrix stays aligned.
+
+        ``set_xticklabels`` then raises ``shape mismatch: objects cannot be
+        broadcast to a single shape`` because the tick count comes from the data
+        while the label count comes from ``class_names``. Pad a short list with
+        plain indices and trim a long one, so neither direction can raise and no
+        data point loses its bar.
+        """
+        if class_names is None:
+            return [str(i) for i in range(n_classes)]
+        names = list(class_names)
+        if len(names) >= n_classes:
+            return names[:n_classes]
+        return names + [str(i) for i in range(len(names), n_classes)]
+
     def _plot_class_distribution(self, ax: plt.Axes, data: Any, **kwargs):
         """Plot distribution of classes in predictions vs true."""
 
@@ -488,18 +513,32 @@ class PerClassAnalysis(CompositeVisualization):
             # Use first model for multi-model data
             results = list(data.results.values())[0]
 
-        classes = results.class_names if results.class_names else range(
-            max(max(results.y_true), max(results.y_pred)) + 1)
-
         # Count occurrences
         true_counts = np.bincount(results.y_true)
         pred_counts = np.bincount(results.y_pred)
 
-        x = np.arange(len(classes))
+        # The axis spans the widest class index either array mentions, so a
+        # class_names list derived from the labels actually present cannot
+        # under-count it (it used to be sliced to `len(classes)`, which
+        # silently dropped the tail bars).
+        #
+        # `np.bincount` returns length `max(label) + 1`, so the two count arrays
+        # can DIFFER in length whenever one label array's maximum is lower than
+        # the other's — e.g. y_true reaching class 9 while y_pred stops at 8
+        # gives lengths 10 and 9. `ax.bar` requires matching lengths and raises
+        # `shape mismatch: ... (10,) ... (9,)` otherwise, which is how this panel
+        # failed on a real run: the old code only sliced the counts DOWN to
+        # `len(classes)`, which never lengthened the short one. Pad both.
+        n_classes = max(len(true_counts), len(pred_counts))
+        classes = self._axis_classes(results.class_names, n_classes)
+        true_counts = np.pad(true_counts, (0, n_classes - len(true_counts)))
+        pred_counts = np.pad(pred_counts, (0, n_classes - len(pred_counts)))
+
+        x = np.arange(n_classes)
         width = 0.35
 
-        ax.bar(x - width / 2, true_counts[:len(classes)], width, label='True', alpha=0.8)
-        ax.bar(x + width / 2, pred_counts[:len(classes)], width, label='Predicted', alpha=0.8)
+        ax.bar(x - width / 2, true_counts, width, label='True', alpha=0.8)
+        ax.bar(x + width / 2, pred_counts, width, label='Predicted', alpha=0.8)
 
         ax.set_xlabel('Class')
         ax.set_ylabel('Count')
@@ -515,15 +554,22 @@ class PerClassAnalysis(CompositeVisualization):
             # Multiple models
             for idx, (model_name, results) in enumerate(data.results.items()):
                 accuracies = self._calculate_per_class_accuracy(results)
-                classes = results.class_names if results.class_names else range(len(accuracies))
                 color = self.config.color_scheme.get_model_color(model_name, idx)
                 ax.plot(range(len(accuracies)), accuracies, 'o-',
                         label=model_name, color=color, linewidth=2)
         else:
             # Single model
             accuracies = self._calculate_per_class_accuracy(data)
-            classes = data.class_names if data.class_names else range(len(accuracies))
-            ax.bar(range(len(accuracies)), accuracies, alpha=0.8)
+            classes = self._axis_classes(data.class_names, len(accuracies))
+            # Labelled because this panel calls `ax.legend()` further down, and an
+            # unlabelled bar makes that a `UserWarning: No artists with labels
+            # found to put in legend` — which this repo's pytest config
+            # (`filterwarnings = ["error::UserWarning", ...]` in pyproject.toml)
+            # promotes to a test failure. Naming the series is also simply correct:
+            # the legend was previously empty in every real run too.
+            ax.bar(
+                range(len(accuracies)), accuracies, alpha=0.8, label='Per-class accuracy'
+            )
             ax.set_xticks(range(len(classes)))
             ax.set_xticklabels(classes, rotation=45, ha='right')
 

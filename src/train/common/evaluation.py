@@ -19,6 +19,9 @@ from dl_techniques.visualization import (
     ModelComparisonBarChart,
     ROCPRCurves,
     ClassificationResults,
+    RegressionResults,
+    MultiModelRegression,
+    TimeSeriesEvaluationResults,
 )
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 
@@ -134,20 +137,223 @@ def convert_keras_history_to_training_history(
 
 # ---------------------------------------------------------------------
 
+def _as_prediction_pair(y_true: Any, y_pred: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """Flatten two prediction arrays to ``(N,)`` and assert they agree in length.
+
+    Every ``ClassificationResults`` / ``RegressionResults`` consumer indexes
+    ``y_true[i]`` against ``y_pred[i]``, so a length mismatch is a silent
+    truncation once a boolean mask is applied to one of them. Assert here,
+    where the message can name both shapes.
+    """
+    yt = np.asarray(y_true).flatten()
+    yp = np.asarray(y_pred).flatten()
+    if yt.shape[0] != yp.shape[0]:
+        raise ValueError(
+            f"y_true and y_pred must have the same length; got "
+            f"{yt.shape[0]} and {yp.shape[0]}."
+        )
+    if yt.shape[0] == 0:
+        raise ValueError("y_true and y_pred are both empty; nothing to visualize.")
+    return yt, yp
+
+
 def create_classification_results(
         y_true: np.ndarray,
         y_pred: np.ndarray,
-        y_prob: np.ndarray,
-        class_names: List[str],
-        model_name: str,
+        y_prob: Optional[np.ndarray] = None,
+        class_names: Optional[List[str]] = None,
+        model_name: Optional[str] = None,
 ) -> ClassificationResults:
-    """Create ClassificationResults object for visualization."""
+    """Create ClassificationResults object for visualization.
+
+    Args:
+        y_true: True labels, any shape; flattened to ``(N,)``.
+        y_pred: Predicted labels, flattened to ``(N,)``. Must match
+            ``y_true`` in length.
+        y_prob: Optional class probabilities. **Omitting it is a supported
+            mode, not a degraded one** — several classification plugins
+            degrade gracefully without it (``PerClassAnalysis`` renders a
+            ``'No probability data'`` panel) but ``ROCPRCurves`` does not:
+            its per-model loop is ``if results.y_prob is None: continue``,
+            so it builds an EMPTY figure and saves a blank PNG without
+            raising. Never register ``roc_pr_curves`` for a model built
+            without probabilities. Pinned by
+            ``tests/test_train/test_common_evaluation_results.py``.
+        class_names: One name per class.
+        model_name: Display name used in figure titles.
+    """
+    yt, yp = _as_prediction_pair(y_true, y_pred)
     return ClassificationResults(
-        y_true=y_true,
-        y_pred=y_pred,
+        y_true=yt,
+        y_pred=yp,
         y_prob=y_prob,
         class_names=class_names,
         model_name=model_name,
+    )
+
+
+def create_regression_results(
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        model_name: Optional[str] = None,
+        feature_names: Optional[List[str]] = None,
+) -> RegressionResults:
+    """Create ``RegressionResults``, the input every regression plugin requires.
+
+    ``dl_techniques.visualization.regression`` ships six plugins —
+    ``prediction_error``, ``residuals_plot``, ``residual_distribution``,
+    ``qq_plot``, ``regression_evaluation_dashboard`` and the
+    ``MultiModelRegression`` comparison dashboard — and every one of them
+    type-checks its input with ``isinstance(data, RegressionResults)``.
+    Nothing in the tree constructed this container, which is why all six
+    were unreachable; this is that constructor.
+
+    Args:
+        y_true: Ground-truth targets, flattened to ``(N,)``.
+        y_pred: Predicted targets, flattened to ``(N,)``. Must match
+            ``y_true`` in length.
+        model_name: Display name used in figure titles.
+        feature_names: Optional per-feature names.
+
+    Returns:
+        A ``RegressionResults`` carrying the flattened pair.
+    """
+    yt, yp = _as_prediction_pair(y_true, y_pred)
+    return RegressionResults(
+        y_true=yt,
+        y_pred=yp,
+        model_name=model_name,
+        feature_names=feature_names,
+    )
+
+
+def create_multi_model_regression(
+        results: Dict[str, Any],
+        dataset_name: Optional[str] = None,
+) -> MultiModelRegression:
+    """Bundle per-model ``RegressionResults`` for the comparison dashboard.
+
+    Args:
+        results: ``{model_name: RegressionResults}``, or ``{model_name:
+            (y_true, y_pred)}`` which is passed through
+            :func:`create_regression_results`. Mixing the two is allowed.
+        dataset_name: Optional dataset label for the figure title.
+    """
+    built = {
+        name: (
+            value
+            if isinstance(value, RegressionResults)
+            else create_regression_results(value[0], value[1], model_name=name)
+        )
+        for name, value in results.items()
+    }
+    if not built:
+        raise ValueError("results must contain at least one model.")
+    return MultiModelRegression(results=built, dataset_name=dataset_name)
+
+
+def create_timeseries_results(
+        all_inputs: np.ndarray,
+        all_true_forecasts: np.ndarray,
+        all_predicted_forecasts: Optional[np.ndarray] = None,
+        all_predicted_quantiles: Optional[np.ndarray] = None,
+        model_name: Optional[str] = None,
+        quantile_levels: Optional[List[float]] = None,
+) -> TimeSeriesEvaluationResults:
+    """Create ``TimeSeriesEvaluationResults``, the input ``ForecastVisualization`` requires.
+
+    ``ForecastVisualization`` is the only consumer of this container and it
+    type-checks with ``isinstance(data, TimeSeriesEvaluationResults)``, so
+    without a constructor it was unreachable from the tree as well.
+
+    Shape contract, taken from the container's own annotations:
+    ``all_inputs`` is ``(num_samples, input_length)`` and
+    ``all_true_forecasts`` is ``(num_samples, forecast_length)``. The two
+    must agree on ``num_samples`` — the plugin indexes forecasts by sample
+    index — and the forecast axis is kept as-is rather than squeezed,
+    because a ``forecast_length`` of 1 must stay two-dimensional.
+
+    A **1-D array on either axis describes ONE window** and is promoted to a
+    batch of one, so ``(10,)`` inputs with ``(3,)`` forecasts is the single
+    window that predicts three steps ahead. The alternative reading —
+    ``(3,)`` meaning three samples each one step ahead — is deliberately NOT
+    taken: it would make the promotion rule differ between the two axes, so
+    the same call site would mean different things depending on which array
+    it touched. Pass ``(N, 1)`` explicitly for N single-step samples.
+
+    Args:
+        all_inputs: Windowed history, ``(num_samples, input_length)``.
+        all_true_forecasts: Ground-truth futures,
+            ``(num_samples, forecast_length)``.
+        all_predicted_forecasts: Optional point forecasts, same shape as
+            ``all_true_forecasts``.
+        all_predicted_quantiles: Optional quantile forecasts,
+            ``(num_samples, forecast_length, len(quantile_levels))``.
+        model_name: Display name used in figure titles.
+        quantile_levels: The levels ``all_predicted_quantiles`` was built
+            at. Supplying quantiles without levels is an error rather than
+            a silent no-band, because the plugin needs the levels to draw
+            the legend.
+    """
+    inputs = np.asarray(all_inputs)
+    true_forecasts = np.asarray(all_true_forecasts)
+
+    # A 1-D array is ONE window on either axis — see the docstring's shape contract.
+    if inputs.ndim == 1:
+        inputs = inputs[None, :]
+    if true_forecasts.ndim == 1:
+        true_forecasts = true_forecasts[None, :]
+
+    if inputs.ndim != 2 or true_forecasts.ndim != 2:
+        raise ValueError(
+            f"all_inputs and all_true_forecasts must be 2-D after promotion; got "
+            f"{inputs.ndim}-D and {true_forecasts.ndim}-D."
+        )
+    if inputs.shape[0] != true_forecasts.shape[0]:
+        raise ValueError(
+            f"all_inputs and all_true_forecasts must agree on num_samples; got "
+            f"{inputs.shape[0]} and {true_forecasts.shape[0]}."
+        )
+    if inputs.shape[0] == 0:
+        raise ValueError("all_inputs is empty; nothing to visualize.")
+
+    predicted = None
+    if all_predicted_forecasts is not None:
+        predicted = np.asarray(all_predicted_forecasts)
+        if predicted.ndim == 1:
+            predicted = predicted[None, :]
+        if predicted.shape != true_forecasts.shape:
+            raise ValueError(
+                f"all_predicted_forecasts must match all_true_forecasts "
+                f"({true_forecasts.shape}); got {predicted.shape}."
+            )
+
+    quantiles = None
+    if all_predicted_quantiles is not None:
+        quantiles = np.asarray(all_predicted_quantiles)
+        if not quantile_levels:
+            raise ValueError(
+                "quantile_levels is required when all_predicted_quantiles is "
+                "given; without them the uncertainty bands cannot be labelled."
+            )
+        if quantiles.shape[:2] != true_forecasts.shape:
+            raise ValueError(
+                f"all_predicted_quantiles must lead with all_true_forecasts' "
+                f"shape ({true_forecasts.shape}); got {quantiles.shape}."
+            )
+        if quantiles.shape[2] != len(quantile_levels):
+            raise ValueError(
+                f"all_predicted_quantiles has {quantiles.shape[2]} quantile "
+                f"levels but {len(quantile_levels)} were declared."
+            )
+
+    return TimeSeriesEvaluationResults(
+        all_inputs=inputs,
+        all_true_forecasts=true_forecasts,
+        all_predicted_forecasts=predicted,
+        all_predicted_quantiles=quantiles,
+        model_name=model_name,
+        quantile_levels=quantile_levels,
     )
 
 

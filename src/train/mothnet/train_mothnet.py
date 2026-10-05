@@ -42,6 +42,7 @@ from dl_techniques.models.general_purpose.mothnet.model import MothNet
 from dl_techniques.visualization import (
     VisualizationManager, PlotConfig, ActivationData, ActivationVisualization,
     ClassificationResults, ConfusionMatrixVisualization,
+    ClassificationReportVisualization, PerClassAnalysis, ErrorAnalysisDashboard,
 )
 from train.common import (
     default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
@@ -573,6 +574,31 @@ def _create_visualization_manager(viz_dir: Path) -> VisualizationManager:
     )
     viz_manager.register_template("activations", ActivationVisualization)
     viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
+
+    # Classification plugins that consume the per-epoch `ClassificationResults`
+    # built below. `roc_pr_curves` is deliberately NOT among them: that plugin's
+    # per-model loop is `if results.y_prob is None: continue`
+    # (`dl_techniques/visualization/classification.py:269`), so with a model that
+    # carries no probabilities it draws no curves, its `legend()` then raises
+    # 'No artists with labels found', and `VisualizationManager.visualize`
+    # SWALLOWS that and returns None (core.py:508-512) — a silently absent
+    # figure, no exception at the call site. These three either need no
+    # probabilities or degrade honestly (`per_class_analysis` prints a
+    # 'No probability data' panel). See
+    # `train/common/evaluation.py::create_classification_results`, and the
+    # xfail RED proof in `tests/test_train/test_common_evaluation_results.py`.
+    viz_manager.register_template(
+        "classification_report", ClassificationReportVisualization
+    )
+    viz_manager.register_template("per_class_analysis", PerClassAnalysis)
+    # Registry key MUST equal the class's own `name` property, and that is
+    # "error_analysis", not "error_analysis_dashboard":
+    # `VisualizationManager.visualize` instantiates the template and registers it
+    # under `plugin.name`, then re-reads it with `self.plugins[plugin_name]`
+    # (`dl_techniques/visualization/core.py:479-483`). A key that disagrees with
+    # `ErrorAnalysisDashboard.name` therefore misses that lookup with a KeyError
+    # rather than a clean "not found".
+    viz_manager.register_template("error_analysis", ErrorAnalysisDashboard)
     return viz_manager
 
 
@@ -1084,6 +1110,34 @@ def main(argv=None) -> int:
                             plugin_name="confusion_matrix",
                             filename=f"epoch_{epoch + 1:03d}_confusion_matrix",
                         )
+
+                        # Once, on the LAST epoch only, render the richer
+                        # per-class breakdowns from the SAME
+                        # `classification_results` already in hand — no second
+                        # forward pass and no recomputed argmax. Deliberately not
+                        # on the per-epoch cadence the confusion matrix above
+                        # uses: three extra multi-panel PNGs per epoch is figure
+                        # bloat, and these are end-of-run summaries rather than
+                        # convergence traces. Each gets its OWN try/except so one
+                        # failing plugin cannot skip the next (invariant 1).
+                        if epoch + 1 == args.epochs:
+                            for _plugin_name in (
+                                "classification_report",
+                                "per_class_analysis",
+                                "error_analysis",
+                            ):
+                                try:
+                                    _visualize_or_warn(
+                                        viz_manager, classification_results, epoch=epoch,
+                                        description=_plugin_name,
+                                        plugin_name=_plugin_name,
+                                        filename=f"final_{_plugin_name}",
+                                    )
+                                except Exception as final_render_error:
+                                    logger.warning(
+                                        f"Epoch {epoch}: {_plugin_name} visualization "
+                                        f"failed: {final_render_error}"
+                                    )
                     except Exception as render_error:
                         logger.warning(
                             f"Epoch {epoch}: confusion_matrix visualization "
