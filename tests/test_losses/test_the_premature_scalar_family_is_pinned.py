@@ -170,6 +170,14 @@ def _siglip_pair():
     }
 
 
+def _mambalct_pair():
+    r = _rng()
+    return (
+        _t(r.uniform(0.2, 0.8, size=(BATCH, 2, 4))),
+        _t(r.uniform(0.2, 0.8, size=(BATCH, 2, 4))),
+    )
+
+
 # ---------------------------------------------------------------------
 # the pinned membership, derived by execution 2026-08-31
 # ---------------------------------------------------------------------
@@ -297,6 +305,10 @@ KNOWN_GOOD = [
         {},
         _calibration_pair,
     ),
+    # MambaLCTBoxLoss returns (batch,) over per-frame boxes with no
+    # constructor kwargs beyond the paper weights; the default-weighted
+    # fixture rejects the scalar predicate (measured margin ~2e-02).
+    ("mambalct_loss", "MambaLCTBoxLoss", {}, _mambalct_pair),
 ]
 
 

@@ -13,6 +13,7 @@ from dl_techniques.datasets.vision.tracking import (
     synthetic_tracking_generator,
     build_siamfc_example,
     build_rpn_example,
+    build_mambalct_clip_example,
 )
 from dl_techniques.models.vision.dasiamrpn.model import generate_dasiamrpn_anchors
 
@@ -112,3 +113,77 @@ class TestBuilders:
         labels = targets["cls"][..., 0].reshape(-1)
         assert int((labels == 1).sum()) > 0  # centered GT matches anchors
         assert int((labels == 0).sum()) > 0
+
+
+class TestMambaLCTClip:
+    def test_shapes(self):
+        image, box = next(synthetic_tracking_generator(2, seed=3))
+        (template, clip), labels = build_mambalct_clip_example(
+            image, box, clip_length=2, template_size=32, search_size=64,
+            rng=np.random.default_rng(0),
+        )
+        assert template.shape == (32, 32, 3)
+        assert clip.shape == (2, 64, 64, 3)
+        assert labels["scores"].shape == (2, 1)
+        assert labels["boxes"].shape == (2, 4)
+
+    def test_no_augment_is_exact_center(self):
+        image = np.full((256, 256, 3), 0.5, dtype=np.float32)
+        box = np.array([128.0, 128.0, 64.0, 64.0], dtype=np.float32)
+        _, labels = build_mambalct_clip_example(
+            image, box, clip_length=2, template_size=32, search_size=64,
+            augment=False,
+        )
+        np.testing.assert_allclose(labels["boxes"][:, 0], 0.5, atol=0, rtol=0)
+        np.testing.assert_allclose(labels["boxes"][:, 1], 0.5, atol=0, rtol=0)
+        np.testing.assert_allclose(labels["scores"], 1.0, atol=0, rtol=0)
+
+    def test_same_seed_is_deterministic(self):
+        image, box = next(synthetic_tracking_generator(2, seed=3))
+        kwargs = dict(
+            clip_length=2, template_size=32, search_size=64, augment=True
+        )
+        (t_a, c_a), labels_a = build_mambalct_clip_example(
+            image, box, rng=np.random.default_rng(0), **kwargs
+        )
+        (t_b, c_b), labels_b = build_mambalct_clip_example(
+            image, box, rng=np.random.default_rng(0), **kwargs
+        )
+        np.testing.assert_array_equal(t_a, t_b)
+        np.testing.assert_array_equal(c_a, c_b)
+        np.testing.assert_array_equal(labels_a["scores"], labels_b["scores"])
+        np.testing.assert_array_equal(labels_a["boxes"], labels_b["boxes"])
+
+    def test_rejects_degenerate(self):
+        image, box = next(synthetic_tracking_generator(2, seed=3))
+        with pytest.raises(ValueError):
+            build_mambalct_clip_example(
+                image, box, clip_length=0, template_size=32, search_size=64,
+                augment=False,
+            )
+        with pytest.raises(ValueError):
+            build_mambalct_clip_example(
+                image, box, clip_length=2, template_size=32, search_size=64,
+                augment=True, rng=None,
+            )
+
+    def test_max_shift_pushes_target_out_of_frame(self):
+        # The visibility score depends only on the center shift, not on
+        # where the box sits, so pinning a seed would be RNG-stream
+        # fragile. A stub returning the +bound shift deterministically
+        # places the center at 0.5 - 1.0 = -0.5, outside [0, 1].
+        class _MaxShiftRng:
+            def uniform(self, low, high, size=None):
+                if size is not None and tuple(np.atleast_1d(size).tolist()) == (2,):
+                    return np.full(2, float(high), dtype=np.float64)
+                return float((float(low) + float(high)) / 2.0)
+
+        image = np.full((512, 512, 3), 0.5, dtype=np.float32)
+        corner = np.array([20.0, 20.0, 40.0, 40.0], dtype=np.float32)
+        _, labels = build_mambalct_clip_example(
+            image, corner, clip_length=2, template_size=32, search_size=64,
+            max_shift_ratio=1.0, augment=True, rng=_MaxShiftRng(),
+        )
+        np.testing.assert_array_equal(
+            labels["scores"], np.zeros((2, 1), dtype=np.float32)
+        )

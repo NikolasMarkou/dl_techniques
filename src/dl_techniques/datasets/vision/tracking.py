@@ -557,3 +557,120 @@ def build_rpn_example(
         score_size,
     )
     return (z, x), {"cls": cls_grid.astype(np.float32), "reg": reg_grid.astype(np.float32)}
+
+
+# ---------------------------------------------------------------------
+# MambaLCT clip builder (NumPy, composed over the sources above)
+# ---------------------------------------------------------------------
+
+
+def build_mambalct_clip_example(
+    image: np.ndarray,
+    box_cxcywh: np.ndarray,
+    clip_length: int = 2,
+    template_size: int = 128,
+    search_size: int = 256,
+    max_shift_ratio: float = 0.1,
+    context: float = CONTEXT_AMOUNT,
+    brightness_delta: float = 0.125,
+    rng: Optional[np.random.Generator] = None,
+    augment: bool = True,
+) -> Tuple[Tuple[np.ndarray, np.ndarray], Dict[str, np.ndarray]]:
+    """Build one MambaLCT training clip from an image plus a target box.
+
+    The template is a centered crop of the target; each of the
+    ``clip_length`` search frames is cropped around a jittered center (a
+    still-image pseudo-motion standing in for real video when the source is
+    COCO or synthetic — see the trainer README). Boxes are reported per
+    frame in normalized search-crop ``(cx, cy, w, h)`` coordinates and the
+    score is 1.0 when the jittered box center stays inside the crop.
+
+    :param image: Array ``(H, W, 3)`` in [0, 1].
+    :type image: numpy.ndarray
+    :param box_cxcywh: Target ``(cx, cy, w, h)`` in original pixels.
+    :type box_cxcywh: numpy.ndarray
+    :param clip_length: Search frames in the clip, positive.
+    :type clip_length: int
+    :param template_size: Template output extent.
+    :type template_size: int
+    :param search_size: Search output extent.
+    :type search_size: int
+    :param max_shift_ratio: Uniform center-jitter bound as a fraction of the
+        search-crop physical side.
+    :type max_shift_ratio: float
+    :param context: Context amount forwarded to :func:`crop_pair`.
+    :type context: float
+    :param brightness_delta: Photometric brightness bound forwarded to jitter.
+    :type brightness_delta: float
+    :param rng: Seeded generator (required when ``augment`` is True).
+    :type rng: numpy.random.Generator or None
+    :param augment: Whether to apply center jitter and photometric jitter.
+    :type augment: bool
+    :return: ``((template, search_clip), {"scores": (T, 1), "boxes": (T, 4)})``
+        with template ``(E, E, 3)`` and search clip ``(T, S, S, 3)``.
+    :rtype: tuple
+    :raises ValueError: If ``clip_length`` is not positive or ``rng`` is
+        missing when ``augment`` is True.
+    """
+    if clip_length <= 0:
+        raise ValueError(f"clip_length must be positive, got {clip_length}")
+    if max_shift_ratio < 0:
+        raise ValueError(
+            f"max_shift_ratio must be non-negative, got {max_shift_ratio}"
+        )
+    if augment and rng is None:
+        raise ValueError("rng is required when augment is True")
+
+    cx, cy, w, h = (float(v) for v in box_cxcywh)
+    side_z = exemplar_side_for_box(w, h, context)
+    side_x = side_z * search_size / float(template_size)
+    template = resize_crop(
+        mean_pad_crop(image, cx, cy, int(round(side_z))), template_size
+    )
+    if augment:
+        assert rng is not None
+        template = photometric_jitter(
+            template, rng, brightness_delta=brightness_delta
+        )
+
+    frames = []
+    boxes = []
+    scores = []
+    for _ in range(clip_length):
+        if augment:
+            assert rng is not None
+            shift = rng.uniform(-max_shift_ratio, max_shift_ratio, size=2)
+            crop_cx = cx + shift[0] * side_x
+            crop_cy = cy + shift[1] * side_x
+        else:
+            crop_cx, crop_cy = cx, cy
+        frame = resize_crop(
+            mean_pad_crop(image, crop_cx, crop_cy, int(round(side_x))),
+            search_size,
+        )
+        if augment:
+            assert rng is not None
+            frame = photometric_jitter(
+                frame, rng, brightness_delta=brightness_delta
+            )
+        frames.append(frame.astype(np.float32))
+        boxes.append(
+            np.array(
+                [
+                    (cx - crop_cx) / side_x + 0.5,
+                    (cy - crop_cy) / side_x + 0.5,
+                    w / side_x,
+                    h / side_x,
+                ],
+                dtype=np.float32,
+            )
+        )
+        visible = (
+            0.0 <= boxes[-1][0] <= 1.0 and 0.0 <= boxes[-1][1] <= 1.0
+        )
+        scores.append([1.0 if visible else 0.0])
+    search_clip = np.stack(frames, axis=0)
+    return (template.astype(np.float32), search_clip), {
+        "scores": np.array(scores, dtype=np.float32),
+        "boxes": np.stack(boxes, axis=0),
+    }

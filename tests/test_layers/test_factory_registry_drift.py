@@ -202,6 +202,10 @@ FACTORIES = {
         "dl_techniques.layers.sequence_pooling.factory",
         "SEQUENCE_POOLING_REGISTRY",
     ),
+    "ssm": (
+        "dl_techniques.layers.ssm.factory",
+        "SSM_REGISTRY",
+    ),
 }
 
 # Keras base-layer kwargs and non-parameters. These are handled by the factories

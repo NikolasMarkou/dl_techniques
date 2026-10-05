@@ -207,6 +207,9 @@ from .siamese_tracking_loss import (
     create_siamfc_label,
 )
 
+# from .mambalct_loss
+from .mambalct_loss import MambaLCTBoxLoss
+
 # from .reid_cosine_loss
 from .reid_cosine_loss import (
     SoftmarginTripletLoss,
@@ -386,6 +389,8 @@ __all__ = [
     "DaSiamRPNClsLoss",
     "DaSiamRPNRegLoss",
     "create_siamfc_label",
+    # mambalct_loss
+    "MambaLCTBoxLoss",
     # reid_cosine_loss
     "SoftmarginTripletLoss",
     "magnet_loss_fn",

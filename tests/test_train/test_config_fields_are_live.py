@@ -127,6 +127,7 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/siamfc/train_siamfc.py", "SiamFCTrainingConfig"),
     ("train/dasiamrpn/train_dasiamrpn.py", "DaSiamRPNTrainingConfig"),
     ("train/deepsort/train_deepsort.py", "DeepSortTrainingConfig"),
+    ("train/mambalct/train_mambalct.py", "MambaLCTTrainingConfig"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this

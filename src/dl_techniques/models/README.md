@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **101 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **102 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (101 of 101 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (102 of 102 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -35,7 +35,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **46** | image backbones, detectors, segmenters, denoisers, generators |
+| [`vision/`](vision/) | **48** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 18 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
@@ -47,9 +47,9 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **100** | |
+| **Sum** | **102** | |
 
-### `vision/` (46)
+### `vision/` (48)
 
 | Package | |
 |---|---|
@@ -82,6 +82,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `levjepa/` | LeVJEPA joint-embedding video pretraining ViT encoder |
 | `lewm/` | latent-energy world model |
 | `masked_autoencoder/` | MAE |
+| `mambalct/` | MambaLCT long-term context tracker (hierarchical encoder + SSM temporal scanner, per-frame box/score head) |
 | `mobilenet/` | MobileNet V1, V2, V3, V4 |
 | `omnipoint/` | OmniPoint camera-agnostic monocular metric point-cloud model |
 | `rad_convnet/` | RADConvNet — ConvNeXt-shaped backbone built on RAD-Conv (Region-Aware Deformable Convolution, arXiv:2509.15436) |

@@ -40,7 +40,9 @@ Data loading, generation, and preprocessing utilities for various domains.
     (:func:`synthetic_tracking_generator`): context-square exemplar/search
     crops, SiamFC radius labels, RPN anchor matching and grid packing.
     Tested by `tests/test_datasets/test_tracking.py`. NumPy + SciPy at
-    module scope; TensorFlow/TFDS imported lazily.
+    module scope; TensorFlow/TFDS imported lazily. Also ships
+    :func:`build_mambalct_clip_example`, the MambaLCT clip builder
+    (centered template plus jittered search frames with per-frame boxes).
   - `reid.py` — person re-identification data: seeded synthetic identities
     (:func:`synthetic_reid_generator`), the standard on-disk Market1501
     reader (:func:`read_market1501_split`, junk identities skipped by
