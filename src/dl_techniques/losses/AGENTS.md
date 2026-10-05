@@ -77,6 +77,11 @@ from dl_techniques.losses import (
 - `smape_loss.py` — Symmetric MAPE
 - `sparsemax_loss.py` — Sparsemax loss
 - `superpoint_loss.py` — SuperPoint detector (65-class grid softmax CE) and descriptor losses
+- `siamese_tracking_loss.py` — SiamFC radius-based logistic loss (packed
+  ignore-ring label via `create_siamfc_label`) plus DaSiamRPN per-anchor
+  classification (2-way softmax CE) and regression (smooth-L1) losses with
+  packed valid/positive masks; cls-vs-reg balance stays at compile time via
+  `loss_weights`
 - `tabm_loss.py` — TabM model loss
 - `thera_jacobian_tv.py` — THERA aliasing TV penalty over the exact analytic spatial Jacobian
 - `utilization_loss.py` — Utilization / load-balancing loss (e.g. MoE routing)
@@ -115,7 +120,7 @@ has gone stale before.
 - **Registration.** Every `Loss` subclass carries
   `@register_dl_technique("dl_techniques.losses.<module>")` from
   `dl_techniques.utils.keras_registration` — never a bare
-  `@keras.saving.register_keras_serializable()`. 47 of 49 modules register something; the
+  `@keras.saving.register_keras_serializable()`. 48 of 50 modules register something; the
   non-registering ones export plain functions only.
   `grep -rl register_dl_technique src/dl_techniques/losses --include=*.py | wc -l`
 
@@ -125,7 +130,7 @@ has gone stale before.
   `grep -rl "^from keras import ops" src/dl_techniques/losses --include=*.py | wc -l`
 
 - **Docstring style is Google-majority, and that is a fact, not a mandate.**
-  35 of 49 carry a Google `Args:` block, 14 carry Sphinx `:param `, 2 carry both.
+  36 of 50 carry a Google `Args:` block, 14 carry Sphinx `:param `, 2 carry both.
   **Match the file you are editing; never convert a file wholesale.** The newest modules
   (`colbert_loss.py`, `infonce_loss.py`) are Sphinx, so both styles are live and growing —
   an earlier claim that "Sphinx is the losses/ convention" was an overstatement the tree does not

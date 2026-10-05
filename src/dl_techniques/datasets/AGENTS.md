@@ -35,6 +35,12 @@ Data loading, generation, and preprocessing utilities for various domains.
 - `vision/` — Computer vision dataset loaders:
   - `coco.py` — COCO dataset, `coco_multitask_local.py` — local multi-task COCO
     variant, `imagenet.py` — ImageNet, `common.py` — shared utilities
+  - `tracking.py` — Siamese-tracker pair pipeline over COCO boxes
+    (:func:`coco_tracking_generator`) or seeded synthetic targets
+    (:func:`synthetic_tracking_generator`): context-square exemplar/search
+    crops, SiamFC radius labels, RPN anchor matching and grid packing.
+    Tested by `tests/test_datasets/test_tracking.py`. NumPy + SciPy at
+    module scope; TensorFlow/TFDS imported lazily.
   - `masked_patches.py` — `make_masked_patch_map_fn`, the per-sample
     `element_map_fn` for masked-image-modelling objectives
   - `multi_crop.py` — `make_multi_crop_map_fn`, the DINO multi-crop

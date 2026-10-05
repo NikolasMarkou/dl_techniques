@@ -199,6 +199,14 @@ from .superpoint_loss import (
     SuperPointDescriptorLoss,
 )
 
+# from .siamese_tracking_loss
+from .siamese_tracking_loss import (
+    SiamFCLogisticLoss,
+    DaSiamRPNClsLoss,
+    DaSiamRPNRegLoss,
+    create_siamfc_label,
+)
+
 # from .tabm_loss
 from .tabm_loss import TabMLoss
 
@@ -367,6 +375,11 @@ __all__ = [
     # superpoint_loss
     "SuperPointDetectorLoss",
     "SuperPointDescriptorLoss",
+    # siamese_tracking_loss
+    "SiamFCLogisticLoss",
+    "DaSiamRPNClsLoss",
+    "DaSiamRPNRegLoss",
+    "create_siamfc_label",
     # tabm_loss
     "TabMLoss",
     # utilization_loss

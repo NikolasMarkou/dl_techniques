@@ -309,7 +309,36 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # reading the raise, not by grepping for the word. Both halves checked.
         "hnet",
         "gpt2", "kan", "masked_autoencoder", "mobile_clip", "mobilenet",
-        "modern_bert", "resnet", "tree_transformer", "vit", "wave_field",
+        "modern_bert",
+        # omnipoint: README:99 names `pretrained=True` only to say it raises;
+        # model.py:534 really does `raise NotImplementedError`. Both halves
+        # checked (re-derived 2026-10-04; pre-existing drift, not a new port).
+        "omnipoint",
+        # rbf_protonet: README:23/111/154/245 name `pretrained=True` only to
+        # say it raises; model.py:279/661/884 really do
+        # `raise NotImplementedError`. Both halves checked (re-derived
+        # 2026-10-04; pre-existing drift, not a new port).
+        "rbf_protonet",
+        "resnet",
+        # siamfc: README section 2 names `pretrained=True` only to say it
+        # raises; model.py `create_siamfc` really does
+        # `raise NotImplementedError`, verified by EXECUTING
+        # `create_siamfc(pretrained=True)` (tests/test_models/test_siamfc/
+        # test_siamfc.py::TestSiamFC::test_pretrained_true_raises). Both
+        # halves checked.
+        "siamfc",
+        "tree_transformer", "vit", "wave_field",
+        # dasiamrpn: README section 2 names `pretrained=True` only to say it
+        # raises; model.py `from_variant` really does
+        # `raise NotImplementedError`, verified by EXECUTING
+        # `create_dasiamrpn("otb", pretrained=True)`
+        # (tests/test_models/test_dasiamrpn/test_dasiamrpn.py). Both halves
+        # checked.
+        "dasiamrpn",
+        # zamba2: README:9-10/148/153 name `pretrained=True` only to say it
+        # raises; model.py:435 really does `raise NotImplementedError`. Both
+        # halves checked (re-derived 2026-10-04; pre-existing drift).
+        "zamba2",
     }, sorted(p.parent.name for p in with_pretrained_true)
 
 

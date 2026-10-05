@@ -12,6 +12,7 @@ this bullet's edit, which only adds `fftnet/`.)
 - `bias_free_denoisers/` — bias-free denoiser models
 - `capsnet/` — Capsule Networks
 - `cbam/` — CBAM attention model
+- `dasiamrpn/` — DaSiamRPN distractor-aware Siamese region-proposal tracker
 - `cliffordnet/` — Clifford-algebra networks
 - `convnext/` — ConvNeXt
 - `convunext/` — ConvUNeXt (U-Net + ConvNeXt)
@@ -41,6 +42,7 @@ this bullet's edit, which only adds `fftnet/`.)
 - `rbf_protonet/` — CNN backbone + RBF distance-based prototype classification head (CIFAR-100)
 - `resnet/` — ResNet architectures
 - `squeezenet/` — SqueezeNet
+- `siamfc/` — SiamFC fully-convolutional Siamese tracker
 - `super_resolution/pft_sr/` — super-resolution
 - `swin_transformer/` — Swin Transformer
 - `thera/` — THERA aliasing-free arbitrary-scale super-resolution
