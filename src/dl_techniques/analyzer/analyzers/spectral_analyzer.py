@@ -129,10 +129,30 @@ class SpectralAnalyzer(BaseAnalyzer):
         results.spectral_recommendations = {}
         results.spectral_summary_per_model = {}
 
+        # DECISION plan-2026-10-05-analyzer-audit/F-009
+        # ONE generator for the WHOLE PASS, built here and threaded down -- not
+        # `make_rng(self.config.random_state)` re-evaluated per model.
+        #
+        # D-031's own stated invariant is "one generator per analysis pass, not one per
+        # layer", with the correct reason: a generator rebuilt from the same seed hands
+        # every layer the identical permutation stream. The same defect survived one
+        # level up: at a fixed `random_state`, model A's layer 0 and model B's layer 0
+        # drew BYTE-IDENTICAL permutations and identical bootstrap streams, because
+        # each `_analyze_single_model` call constructed its own generator from the same
+        # seed. In a cross-model comparison that is correlated draws presented as
+        # independent evidence, and it was structurally invisible to the suite because
+        # every spectral reproducibility test uses a SINGLE model.
+        #
+        # Passing one generator down also keeps layers within a model distinct (each
+        # consumes from the same advancing stream) while making distinct models distinct
+        # too. Do NOT "simplify" this back to a per-model `make_rng`.
+        pass_rng = make_rng(self.config.random_state)
+
         for model_name, model in self.models.items():
             logger.info(f"Starting spectral analysis for model: {model.name}")
             (details_df, esds, rand_esds,
-             recommendations, model_summary) = self._analyze_single_model(model)
+             recommendations, model_summary) = self._analyze_single_model(
+                 model, rng=pass_rng)
 
             if not details_df.empty:
                 details_df['model_name'] = model_name
@@ -161,7 +181,8 @@ class SpectralAnalyzer(BaseAnalyzer):
             logger.warning("Spectral analysis did not produce any results for any model.")
 
     def _analyze_single_model(
-            self, model: keras.Model
+            self, model: keras.Model,
+            rng: Optional[np.random.Generator] = None,
     ) -> Tuple[pd.DataFrame, Dict[int, np.ndarray], Dict[int, np.ndarray],
                List[str], Dict[str, float]]:
         """
@@ -169,12 +190,19 @@ class SpectralAnalyzer(BaseAnalyzer):
 
         Args:
             model: The Keras model to analyze.
+            rng: Generator for every stochastic step of this model's layers. It MUST be
+                the pass-level generator threaded down by :meth:`analyze` (F-009), not
+                one built here from ``config.random_state``: a per-model generator gives
+                two models byte-identical permutations at a fixed seed. ``None`` builds
+                an unseeded one, which is the historical behaviour.
 
         Returns:
             Tuple of ``(details, esds, rand_esds, recommendations, summary)``. On a
             model with no analyzable layers ``details`` is empty and the remaining
             artifacts are empty containers.
         """
+        if rng is None:
+            rng = make_rng(self.config.random_state)
         # Create basic description of the model to find analyzable layers
         # This now returns both the details DataFrame and the flattened list of layers.
         details, all_layers = self._describe_model(model)
@@ -207,9 +235,10 @@ class SpectralAnalyzer(BaseAnalyzer):
             # generator built from the same seed would hand every layer the identical
             # permutation stream, and the `spectral_n_randomizations` draws within a
             # layer must differ from each other (D-017). See decisions.md D-031.
-            self._analyze_layers(
-                details, all_layers, esds, rand_esds,
-                rng=make_rng(self.config.random_state))
+            # F-009 extends the same invariant one level up, to the MODEL: `rng` is the
+            # pass-level generator from `analyze`, so two models no longer draw
+            # byte-identical permutations at a fixed seed.
+            self._analyze_layers(details, all_layers, esds, rand_esds, rng=rng)
 
         # Generate the per-model summary and recommendations. The summary is kept (not
         # discarded after the recommendations) so callers can read a per-model figure
