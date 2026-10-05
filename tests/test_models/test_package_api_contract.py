@@ -4158,7 +4158,7 @@ _CREATE_DELEGATION_WAIVERS = {
     ("models/vision/beit/model.py", "create_beit_backbone"): "ROUTE step 19 -- constructs BeitModel(...) directly, bypassing BeitModel.from_variant",
     ("models/vision/fastvit/model.py", "create_fastvit_image_encoder"): "ROUTE step 19 -- constructs FastVitImageEncoder(...) directly",
     ("models/vision_language/sd3_mmdit/vae.py", "create_sd3_vae"): "ROUTE step 19 -- resolves PRESETS itself and constructs AutoEncoder(...) directly",
-    ("models/language/hierarchical_reasoning_model/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 -- `if variant is not None` branch plus optimizer construction and compile",
+    ("models/language/hrm/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 -- `if variant is not None` branch plus optimizer construction and compile",
     # (f) SEVERE -- the factory compiled, ran, or asserted. DISPOSED at step 19
     # (D-078). Three were repaired and one is refuted; all four still trip the
     # predicate because a compile call, a `build()` call and a derived log line
@@ -4232,7 +4232,7 @@ _CREATE_FACTORIES_THAT_COMPILE = {
     ("models/vision/capsnet/model.py", "create_capsnet"): "no `variant` param -- was invisible to R-051 until D-071. Docstring: 'Create and compile a CapsNet model'; compiles with loss=None because CapsNet owns its loss in train_step",
     ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"): "no `variant` param (`stem`, not `variant`) -- was invisible until D-071. Docstring: 'Create and compile ... with the modern training recipe'; AdamW + cosine + EMA IS the product",
     ("models/vision/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract; the from_logits=True loss default is a load-bearing anti-mistrain guard",
-    ("models/language/hierarchical_reasoning_model/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 (R-051 waiver, unchanged) -- constructs an optimizer and compiles inside a `if variant is not None` branch",
+    ("models/language/hrm/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 (R-051 waiver, unchanged) -- constructs an optimizer and compiles inside a `if variant is not None` branch",
     ("models/language/masked_language_model/utils.py", "create_mlm_training_model"): "no `variant` param -- was invisible until D-071. Docstring: 'A compiled MaskedLanguageModel ready for training'; the MLM head + optimizer pairing is the whole point of the helper",
     ("models/general_purpose/power_mlp/model.py", "create_power_mlp"): "no `variant` param -- was invisible until D-071. Docstring: 'Create and compile a PowerMLP model'; its compile DERIVES from_logits from output_activation (D-053), which is a guard, not incidental",
     ("models/vision/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its asserts are gone; the compile stays as documented contract",
@@ -5818,7 +5818,7 @@ def _sweep_step_overrides(roots=None, src_root=None):
 #: dead key linger until a LATER, DIFFERENT ``train_step`` at the same key was
 #: silently permitted.
 _FROZEN_STEP_OVERRIDES = {
-    ("src/dl_techniques/models/language/byte_latent_transformer/model.py",
+    ("src/dl_techniques/models/language/blt/model.py",
      "ByteLatentTransformer", "train_step"),
     ("src/dl_techniques/models/vision/capsnet/model.py", "CapsNet", "test_step"),
     ("src/dl_techniques/models/vision/capsnet/model.py", "CapsNet", "train_step"),
@@ -5858,6 +5858,14 @@ _FROZEN_STEP_OVERRIDES = {
     ("src/train/nano_vlm/train_nano_vlm.py", "NanoVLMTrainer", "train_step"),
     ("src/train/sd3_mmdit/train_sd3_mmdit.py", "SD3FlowTrainer", "train_step"),
     ("src/train/superpoint/train_superpoint.py", "SuperPointJointModel", "train_step"),
+    # DECISION 2026-10-05/superpoint-test-step: the evaluate path needs the
+    # same joint two-view computation as train_step (stock test_step calls
+    # compute_loss, but compile() takes no loss= by design, and the outputs
+    # are two-view dicts). Unavoidable; mirrors the frozen train_step above.
+    # XLA is out of reach (measured: ResizeBicubic has no XLA kernel), so the
+    # execution proof is eager at the trainer's own jit_compile=False — see
+    # TestJointTestStep in tests/test_train/test_superpoint/.
+    ("src/train/superpoint/train_superpoint.py", "SuperPointJointModel", "test_step"),
     ("src/train/thera/train_thera.py", "TheraTrainingModel", "test_step"),
     ("src/train/thera/train_thera.py", "TheraTrainingModel", "train_step"),
     ("src/train/tiny_recursive_model/train_trm.py", "TRMTrainer", "train_step"),
@@ -5885,12 +5893,12 @@ class Injected(keras.Model):
 class TestCustomStepOverridePopulationIsFrozen:
     """The custom ``train_step`` population may not grow (R-067/R-097/R-100).
 
-    Why a freeze and not a ban: 5 of the 32 implement genuinely non-stock
+    Why a freeze and not a ban: 5 of the 33 implement genuinely non-stock
     objectives (VAE ELBO, VQ-VAE codebook, MAE masking, V-JEPA EMA target,
     CapsNet margin+reconstruction),
     and step 4 measured none of them defective on any of the three rules. Why a
     freeze and not nothing: the same measurement found 2 LIVE CRITICALs
-    (``byte_latent_transformer`` and ``latent_gmm_registration`` cannot train
+    (``blt`` and ``latent_gmm_registration`` cannot train
     through stock ``fit()`` on GPU at the default ``jit_compile``) and four
     sites silently under-updating gradients by 2.05e4-6.38e4x under
     ``mixed_float16``. Every new override is another instance of that risk
@@ -5976,14 +5984,14 @@ class TestCustomStepOverridePopulationIsFrozen:
         set decay to 27 unnoticed.
         """
         _rows, counts = _sweep_step_overrides()
-        assert len(_FROZEN_STEP_OVERRIDES) == 32
+        assert len(_FROZEN_STEP_OVERRIDES) == 33
         assert counts["n_overrides"] >= 1, "the AST walk found no step override at all"
         assert (counts["n_train_step"], counts["n_test_step"], counts["n_predict_step"]) == (
             20,
-            11,
+            12,
             1,
         ), (
-            "the step-override mix moved off the measured 20/11/1; reconcile "
+            "the step-override mix moved off the measured 20/12/1; reconcile "
             f"_FROZEN_STEP_OVERRIDES with decisions.md before editing it ({counts})"
         )
 

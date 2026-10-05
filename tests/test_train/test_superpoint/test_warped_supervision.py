@@ -24,7 +24,10 @@ from dl_techniques.datasets.synthetic_shapes import (
     DEFAULT_CELL,
     keypoints_to_grid_labels,
 )
-from dl_techniques.losses.superpoint_loss import SuperPointDetectorLoss
+from dl_techniques.losses.superpoint_loss import (
+    SuperPointDescriptorLoss,
+    SuperPointDetectorLoss,
+)
 from dl_techniques.models.vision.keypoints.superpoint import create_superpoint
 from dl_techniques.models.vision.keypoints.superpoint.model import SuperPoint
 from dl_techniques.utils.homography import sample_homography, warp_points
@@ -261,3 +264,56 @@ class TestDualViewDetectorLoss:
 
         out = model.train_step((x, y))
         assert float(out["detector_loss"]) == pytest.approx(expected, abs=1e-4)
+
+
+# ---------------------------------------------------------------------
+# Joint test_step execution proof (frozen-override record)
+# ---------------------------------------------------------------------
+
+
+class TestJointTestStep:
+
+    def test_test_step_reports_all_losses_and_matches_manual(self):
+        """Execution proof for the frozen ``SuperPointJointModel.test_step``.
+
+        The override mirrors ``train_step`` without gradients: stock
+        ``test_step`` cannot run here since ``compile()`` takes no ``loss=``
+        by design and the objective needs both views. Eager at the
+        trainer's own ``jit_compile=False`` — XLA is unreachable
+        (measured: ``ResizeBicubic`` has no ``XLA_GPU_JIT`` kernel), so a
+        jit variant would pin a falsehood. A revert to a loss-less or
+        single-view ``test_step`` goes RED on the value asserts.
+        """
+        config = SuperPointConfig(
+            input_size=H, batch_size=2, variant="tiny",
+            steps_per_epoch=2, epochs=1,
+        )
+        ds = create_dataset(config)
+        x, y = next(iter(ds.take(1)))
+
+        backbone = create_superpoint("tiny", input_shape=(H, W, 1))
+        backbone.build((None, H, W, 1))
+        model = SuperPointJointModel(superpoint=backbone)
+        model.compile(optimizer=keras.optimizers.SGD(1e-3), jit_compile=False)
+
+        # Expected values from the pre-step weights (deterministic: no dropout).
+        o1 = backbone(x, training=False)
+        o2 = backbone(y["warped_image"], training=False)
+        det_fn = SuperPointDetectorLoss()
+        expected_det = (
+            float(keras.ops.mean(det_fn(y["keypoints"], o1["keypoints"])))
+            + float(keras.ops.mean(
+                det_fn(y["warped_keypoints"], o2["keypoints"])))
+        ) / 2.0
+        desc_fn = SuperPointDescriptorLoss()
+        expected_desc = float(keras.ops.mean(desc_fn.compute(
+            model._coarse_descriptors(o1["descriptors"]),
+            model._coarse_descriptors(o2["descriptors"]),
+            y["correspondence"],
+        )))
+
+        out = model.test_step((x, y))
+        assert set(out) == {"loss", "detector_loss", "descriptor_loss"}
+        assert all(np.isfinite(float(out[k])) for k in out)
+        assert float(out["detector_loss"]) == pytest.approx(expected_det, abs=1e-4)
+        assert float(out["descriptor_loss"]) == pytest.approx(expected_desc, abs=1e-4)

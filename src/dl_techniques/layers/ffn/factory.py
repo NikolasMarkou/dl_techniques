@@ -114,6 +114,11 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'counting_scope': 'causal',
             'activation': 'gelu',
             'use_bias': True,
+            'gate_bias_init': -2.0,
+            'decay_min_window': 4.0,
+            'decay_max_window': 512.0,
+            'trainable_decay': True,
+            'epsilon': 1e-6,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
@@ -139,6 +144,8 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'branch_activation': 'gelu',
             'dropout_rate': 0.0,
             'use_bias': True,
+            'tie_branches': True,
+            'epsilon': 1e-6,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
@@ -492,9 +499,16 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'optional_params': {
             'intersection_reduction': 'product',
             'difference_reduction': 'subtractmatch',
+            'non_negative_contrast': True,
+            'normalize_by_features': False,
+            'chunk_size': None,
+            'softmin_temperature': 1.0,
+            'shared_feature_bank': None,
+            'shared_prototypes': None,
             'prototype_initializer': 'glorot_uniform',
             'feature_initializer': 'glorot_uniform',
-            'contrast_initializer': 'ones'
+            'contrast_initializer': 'ones',
+            'epsilon': 1e-6
         },
         'use_case': 'Asymmetric, psychologically-grounded similarity-based projection alternative to Dense (rank-2 only)'
     },
