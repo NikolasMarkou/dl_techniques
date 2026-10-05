@@ -62,7 +62,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.models.trm.components", legacy_packages=("dl_techniques.models.tiny_recursive_model.components",))
+@register_dl_technique("dl_techniques.models.trm.components")
 class TRMReasoningModule(keras.layers.Layer):
     """
     A stack of ``TransformerLayer`` instances applied to an injected latent state.
@@ -360,7 +360,7 @@ class TRMReasoningModule(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.models.trm.components", legacy_packages=("dl_techniques.models.tiny_recursive_model.components",))
+@register_dl_technique("dl_techniques.models.trm.components")
 class TRMInner(keras.layers.Layer):
     """
     One step of TRM's hierarchical reasoning, plus the ACT halting signal.

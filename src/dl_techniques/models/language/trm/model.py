@@ -50,7 +50,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.models.trm.model", legacy_packages=("dl_techniques.models.tiny_recursive_model.model",))
+@register_dl_technique("dl_techniques.models.trm.model")
 class TRM(keras.Model):
     """Run one Adaptive Computation Time step of the recursive reasoning module.
 
