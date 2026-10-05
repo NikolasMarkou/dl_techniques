@@ -23,7 +23,7 @@ References:
 
 import keras
 from keras import ops
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
