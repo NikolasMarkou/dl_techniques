@@ -83,7 +83,13 @@ from ..calibration_metrics import (
     compute_ece_binary,
     compute_brier_score,
     compute_reliability_data,
-    compute_prediction_entropy_stats
+    compute_prediction_entropy_stats,
+    # DECISION plan-2026-10-05-analyzer-audit/F-081: the head-type router and the
+    # convention-aware confidence statistics. `is_multilabel_output` re-derives what
+    # `ModelAnalyzer._infer_output_activation` decides and then discards, so the two
+    # cannot disagree about which convention applies.
+    is_multilabel_output,
+    compute_confidence_statistics,
 )
 
 # ---------------------------------------------------------------------
@@ -154,22 +160,53 @@ class CalibrationAnalyzer(BaseAnalyzer):
             try:
                 y_true = np.asarray(model_cache['y_data'])
 
-                # Convert to class indices if needed
-                y_true_idx = self._labels_to_indices(y_true, y_pred_proba)
+                # DECISION plan-2026-10-05-analyzer-audit/F-081
+                # Route the metrics to the convention the HEAD actually implies.
+                #
+                # `ModelAnalyzer._infer_output_activation` already distinguishes a sigmoid
+                # multi-label head from a softmax one and throws the answer away — the
+                # activation name never reaches this analyzer. `is_multilabel_output`
+                # re-derives it from the same row-sum test on the same array, so the two
+                # cannot disagree.
+                #
+                # What changes under it:
+                #   * `brier_score` uses the per-label (mean over classes) convention, not
+                #     the multiclass sum. Applying the sum to independent sigmoids charged
+                #     one sample K times over — F-080.
+                #   * the pooled top-1 `ece`, the reliability diagram and
+                #     `per_class_conditional_top1_ece` are NOT computed and are reported
+                #     as None, because "was the single top class right" is not a
+                #     calibration question when there is no single correct class.
+                #   * `per_class_ece` IS computed, and is the right metric for a sigmoid
+                #     head: each column is an independent probability calibrated against
+                #     its own 0/1 indicator (D-015's classwise form).
+                #   * the confidence statistics report the multi-label quantities and NaN
+                #     the single-label ones (F-081).
+                multilabel = is_multilabel_output(y_pred_proba)
 
-                # Compute calibration-specific metrics
-                ece = compute_ece(y_true_idx, y_pred_proba, self.config.calibration_bins)
-                reliability_data = compute_reliability_data(
-                    y_true_idx, y_pred_proba, self.config.calibration_bins)
+                # Convert to class indices if needed
+                y_true_idx = self._labels_to_indices(
+                    y_true, y_pred_proba, multilabel=multilabel)
+
+                num_classes = y_pred_proba.shape[1]
+                if multilabel:
+                    # Top-1 quantities are undefined; per-class and the Brier score are not.
+                    ece = None
+                    reliability_data = None
+                else:
+                    ece = compute_ece(y_true_idx, y_pred_proba,
+                                      self.config.calibration_bins)
+                    reliability_data = compute_reliability_data(
+                        y_true_idx, y_pred_proba, self.config.calibration_bins)
 
                 # Brier score requires one-hot encoded true labels. Convert if necessary.
-                num_classes = y_pred_proba.shape[1]
                 if len(y_true.shape) == 1 or y_true.shape[1] == 1:
                     y_true_one_hot = np.zeros((y_true_idx.size, num_classes))
                     y_true_one_hot[np.arange(y_true_idx.size), y_true_idx] = 1
                 else:
                     y_true_one_hot = y_true
-                brier_score = compute_brier_score(y_true_one_hot, y_pred_proba)
+                brier_score = compute_brier_score(
+                    y_true_one_hot, y_pred_proba, multilabel=multilabel)
 
                 # Compute per-class ECE
                 per_class_ece = []
@@ -192,23 +229,37 @@ class CalibrationAnalyzer(BaseAnalyzer):
                     # re-running the top-1 ECE on them — that quantity is blind to the
                     # entire off-diagonal and reports 0.0 for a class the model never
                     # predicts, however wrong its column is. See decisions.md D-015.
+                    #
+                    # F-081: `y_true_idx` is the INDICATOR matrix for a multi-label head,
+                    # so `y_true_idx[:, c]` is that label's 0/1 column. The same line
+                    # therefore serves both conventions.
+                    if multilabel:
+                        outcomes_c = y_true_idx[:, c].astype(float)
+                    else:
+                        outcomes_c = (y_true_idx == c).astype(float)
                     per_class_ece.append(
                         compute_ece_binary(
-                            (y_true_idx == c).astype(float),
+                            outcomes_c,
                             y_pred_proba[:, c],
                             per_class_bins,
                         )
                     )
 
-                    # The legacy quantity, kept under an honest name.
-                    class_mask = y_true_idx == c
-                    if np.any(class_mask):
-                        per_class_conditional_top1_ece.append(
-                            compute_ece(y_true_idx[class_mask], y_pred_proba[class_mask],
-                                        per_class_bins)
-                        )
+                    # The legacy quantity, kept under an honest name. It is a TOP-1
+                    # quantity, so it does not exist for a multi-label head (F-081):
+                    # reported as None there rather than as a fabricated 0.0.
+                    if multilabel:
+                        per_class_conditional_top1_ece.append(None)
                     else:
-                        per_class_conditional_top1_ece.append(0.0)
+                        class_mask = y_true_idx == c
+                        if np.any(class_mask):
+                            per_class_conditional_top1_ece.append(
+                                compute_ece(y_true_idx[class_mask],
+                                            y_pred_proba[class_mask],
+                                            per_class_bins)
+                            )
+                        else:
+                            per_class_conditional_top1_ece.append(0.0)
 
                 # Store only calibration-specific metrics (no entropy here)
                 results.calibration_metrics[model_name] = {
@@ -218,14 +269,25 @@ class CalibrationAnalyzer(BaseAnalyzer):
                     'per_class_ece': per_class_ece,
                     'per_class_ece_bins': per_class_bins,
                     'per_class_conditional_top1_ece': per_class_conditional_top1_ece,
+                    # F-081: which convention produced the numbers above, so a reader
+                    # never has to infer it from the magnitudes.
+                    'multilabel': bool(multilabel),
                 }
 
-                # Store reliability data separately (for plotting)
-                results.reliability_data[model_name] = reliability_data
+                # Store reliability data separately (for plotting). A multi-label head
+                # has no top-1 correctness forecast, so there is no reliability diagram.
+                if reliability_data is not None:
+                    results.reliability_data[model_name] = reliability_data
 
-                # Consolidate ALL confidence-related metrics including entropy
-                confidence_metrics = self._compute_confidence_metrics(y_pred_proba)
-                entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
+                # Consolidate ALL confidence-related metrics including entropy. F-081:
+                # entropy is the Shannon entropy of a DISTRIBUTION and is undefined over
+                # independent sigmoids, so it is not computed for a multi-label head.
+                confidence_metrics = compute_confidence_statistics(
+                    y_pred_proba, multilabel=multilabel)
+                if multilabel:
+                    entropy_stats = {}
+                else:
+                    entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
 
                 # Combine all confidence-related metrics into one place
                 all_confidence_metrics = {**confidence_metrics, **entropy_stats}
@@ -262,7 +324,8 @@ class CalibrationAnalyzer(BaseAnalyzer):
         return max(2, int(self.config.calibration_bins) // 2)
 
     def _labels_to_indices(
-            self, y_true: np.ndarray, y_pred_proba: np.ndarray
+            self, y_true: np.ndarray, y_pred_proba: np.ndarray,
+            *, multilabel: bool = False,
     ) -> np.ndarray:
         """Reduce a label array to one integer class index per sample.
 
@@ -280,6 +343,26 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 caller isolates the model on any exception (F-046).
         """
         num_classes = int(y_pred_proba.shape[1]) if y_pred_proba.ndim > 1 else 0
+
+        # DECISION plan-2026-10-05-analyzer-audit/F-081
+        # For a multi-label head the 0/1 INDICATOR is the right reduction, not an index:
+        # `per_class_ece` needs `(indicator[:, c] == 1)` per class, and the Brier score
+        # needs the indicator itself. Return the indicator's row indices as booleans
+        # cast to float is NOT wanted, so the indicator is returned unchanged and the
+        # caller treats it as a matrix. This is the one place a "class index" is not an
+        # index, which is why the return type is documented as "an index array OR the
+        # indicator matrix".
+        if multilabel:
+            if y_true.ndim < 2 or y_true.shape[1] != num_classes:
+                raise ValueError(
+                    f"a multi-label head needs a (n_samples, {num_classes}) indicator "
+                    f"matrix of labels, got shape {y_true.shape}")
+            indicator = np.asarray(y_true, dtype=float)
+            if not np.all(np.isin(indicator, (0.0, 1.0))):
+                raise ValueError(
+                    f"a multi-label indicator must be 0/1; found values outside "
+                    f"[0, 1] (min {indicator.min():.3g}, max {indicator.max():.3g})")
+            return indicator
 
         if y_true.ndim > 1 and y_true.shape[1] > 1:
             # DECISION plan-2026-10-05-analyzer-audit/F-047
@@ -345,25 +428,19 @@ class CalibrationAnalyzer(BaseAnalyzer):
 
         return indices
 
-    def _compute_confidence_metrics(self, probabilities: np.ndarray) -> Dict[str, np.ndarray]:
-        """Compute various confidence metrics (excluding entropy which comes from entropy_stats)."""
-        max_prob = np.max(probabilities, axis=1)
-
-        # Handle single-class case for margin and gini
-        if probabilities.shape[1] > 1:
-            # Sort probabilities to find the top two for margin calculation
-            sorted_probs = np.sort(probabilities, axis=1)
-            margin = sorted_probs[:, -1] - sorted_probs[:, -2]
-            gini = 1 - np.sum(sorted_probs**2, axis=1)
-        else:
-            # Margin and Gini are not well-defined for a single class output
-            margin = np.full(probabilities.shape[0], np.nan)
-            gini = np.zeros(probabilities.shape[0])
-
-        return {
-            'max_probability': max_prob,
-            'margin': margin,
-            'gini_coefficient': gini
-        }
-
 # ---------------------------------------------------------------------
+# DECISION plan-2026-10-05-analyzer-audit/F-081
+# `_compute_confidence_metrics` is GONE, superseded by
+# `calibration_metrics.compute_confidence_statistics(probabilities, multilabel=...)`.
+# It could not express the multi-label case: it unconditionally took the top-1/top-2
+# margin and `1 - Σp²` of what it assumed was a distribution. The replacement is a
+# public function, is unit-testable on its own, and is shared with any other caller.
+#
+# It also carried two defects the replacement fixes: `gini` was computed from the SORTED
+# probabilities (harmless, since the sum of squares is order-free, but it sorted a whole
+# row to no purpose), and the single-class case returned `gini = 0.0` — the value a
+# perfectly UNIFORM distribution gives, published for a model that had no distribution to
+# be uniform over. That is the same "a plausible zero standing in for an undefined
+# quantity" failure this audit removed elsewhere; it is now NaN.
+#
+# Do NOT reintroduce a private copy of this logic.

@@ -352,6 +352,42 @@ class SpectralAnalyzer(BaseAnalyzer):
                 matrix_rank = int(len(evals) - rank_loss)
             spectral_mets = spectral_metrics.calculate_spectral_metrics(evals, alpha, N=N)
 
+            # DECISION plan-2026-10-05-analyzer-audit/F-078
+            # COMPLETING D-019. The truncated branch above NaN-ed `weak_rank_loss`,
+            # `entropy` and `matrix_rank`, but three of the quantities `calculate_spectral_
+            # metrics` returns INTEGRATE over the whole spectrum and were still published
+            # as ordinary numbers:
+            #
+            #   norm             = Σ λ           the missing tail is mass the sum never saw
+            #   log_norm         = log10(Σ λ)    ditto
+            #   stable_rank      = (Σ λ)/max(λ)  a strict UNDER-estimate: the mass it
+            #                                   integrates over is exactly what is missing
+            #   log_alpha_norm   = log10 Σ λ^α   integrates the entire spectrum
+            #
+            # `stable_rank` is the damaging one: it is in
+            # `SPECTRAL_DEFAULT_SUMMARY_METRICS`, so it was averaged into
+            # `spectral_summary` and drawn on the dashboard as a real capacity-utilisation
+            # number. The D-019 rationale already quoted at the branch above -- "every
+            # quantity that counts or integrates over the WHOLE spectrum is unknowable" --
+            # is the argument that condemns these four too.
+            #
+            # DELIBERATELY NOT NaN-ed, because they are KNOWN on a truncated spectrum:
+            # `spectral_norm` and `log_spectral_norm` (the largest singular value is
+            # exactly what a truncated SVD returns), `alpha_weighted`/`alpha_hat`/
+            # `alpha_hat_normalized` (all derived from that same λ_max), `alpha_unreliable`,
+            # `num_evals` and `sv_max`. See D-019 and decisions.md D-019.
+            if spectrum_truncated:
+                for key in (MetricNames.NORM, MetricNames.LOG_NORM,
+                            MetricNames.STABLE_RANK,
+                            MetricNames.LOG_ALPHA_NORM):
+                    if key in spectral_mets:
+                        spectral_mets[key] = float('nan')
+                logger.debug(
+                    f"Layer {layer_id} ({layer.name}): spectrum truncated, so the "
+                    f"whole-spectrum integrals (norm, log_norm, stable_rank, "
+                    f"log_alpha_norm) are NaN. Mass-based columns derived from λ_max "
+                    f"(spectral_norm, alpha_weighted, alpha_hat) remain valid.")
+
             # SETOL: Learning phase classification
             learning_phase = spectral_metrics.classify_learning_phase(alpha)
 
@@ -373,6 +409,32 @@ class SpectralAnalyzer(BaseAnalyzer):
             if self.config.spectral_concentration_analysis and Wmats:
                 concentration_metrics = spectral_metrics.calculate_concentration_metrics(
                     Wmats[0], evals=evals)
+                # DECISION plan-2026-10-05-analyzer-audit/F-078
+                # `gini_coefficient`, `dominance_ratio`, `participation_ratio` and
+                # `min_participation_ratio` are functions of the eigenvalue DISTRIBUTION
+                # over the whole spectrum: the Gini is a Lorenz-curve quantity, the
+                # dominance ratio divides by the sum of the REST, and participation
+                # divides by the total. On a truncated spectrum the small eigenvalues were
+                # never computed, so each is computed over a sub-distribution and is not
+                # a smaller version of the truth -- it is a different quantity that looks
+                # like the published one.
+                #
+                # `concentration_score` is derived FROM the participation ratio and
+                # `critical_weight_count` from the weight matrix itself, so the count
+                # stays valid; only the distribution-derived ratios are NaN-ed.
+                # See decisions.md D-019.
+                if spectrum_truncated:
+                    for key in (MetricNames.GINI_COEFFICIENT,
+                                MetricNames.DOMINANCE_RATIO,
+                                MetricNames.PARTICIPATION_RATIO,
+                                MetricNames.MIN_PARTICIPATION_RATIO):
+                        if key in concentration_metrics:
+                            concentration_metrics[key] = float('nan')
+                    logger.debug(
+                        f"Layer {layer_id} ({layer.name}): spectrum truncated, so the "
+                        f"distribution-derived concentration ratios are NaN. The weight "
+                        f"matrix itself was read in full, so concentration_score and "
+                        f"critical_weight_count remain valid.")
 
             randomization_metrics = {}
             if self.config.spectral_randomize and Wmats:
@@ -504,10 +566,18 @@ class SpectralAnalyzer(BaseAnalyzer):
                 MetricNames.SIGMA: sigma, MetricNames.NUM_PL_SPIKES: num_pl_spikes,
                 MetricNames.STATUS: status, MetricNames.WARNING: warning,
                 MetricNames.ENTROPY: entropy,
-                # WW mp_softrank = theoretical MP edge / λ_max, computed from the
-                # ORIGINAL spectrum's own bulk (WW RMT_Util.calc_mp_soft_rank). The
-                # spike-count form is NOT wired here — see D-013.
-                MetricNames.MP_SOFTRANK: spectral_metrics.calc_mp_soft_rank(evals, N, M),
+                # DECISION plan-2026-10-05-analyzer-audit/F-078
+                # `mp_softrank` is `lambda_plus / lambda_max`, and `lambda_plus` comes
+                # from the MEAN of the whole spectrum. On a truncated spectrum that mean
+                # is a mean over a sub-distribution, so the "theoretical MP edge" it
+                # compares against is not the layer's theoretical edge at all -- the
+                # column kept a plausible number describing a different question. NaN.
+                # `spectral_norm` / `log_spectral_norm` / `lambda_max` are NOT NaN-ed:
+                # the largest singular value is exactly what a truncated SVD still
+                # returns (see `compute_eigenvalues`), so those remain valid.
+                MetricNames.MP_SOFTRANK: (
+                    float('nan') if spectrum_truncated
+                    else spectral_metrics.calc_mp_soft_rank(evals, N, M)),
                 'learning_phase': learning_phase,
                 'pl_pvalue': pl_pvalue,
                 **erg_metrics,

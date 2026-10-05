@@ -139,11 +139,44 @@ that panel (see `D-033`).
 | `brier_score` | MSE between predicted probabilities and one-hot labels | 0 |
 | `per_class_ece` | **classwise ECE** (Kull et al. 2019): class `c`'s probability COLUMN over ALL samples against the indicator `y_true == c` | 0 |
 | `per_class_conditional_top1_ece` | the legacy quantity under an honest name: top-1 ECE over only the samples whose true label is `c` | 0 |
-| `mean_entropy`, `std_entropy`, `median_entropy`, `min_entropy`, `max_entropy` | Shannon entropy of the predictive distribution (in `results.confidence_metrics`) | context-dependent |
-| `max_probability`, `margin`, `gini_coefficient` | per-sample confidence arrays (in `results.confidence_metrics`) | — |
+| `mean_entropy`, `std_entropy`, `median_entropy`, `min_entropy`, `max_entropy` | Shannon entropy of the predictive distribution (in `results.confidence_metrics`). **Absent entirely for a multi-label head** | context-dependent |
+| `max_probability`, `margin`, `gini_coefficient`, `simpson_index` | per-sample confidence arrays (in `results.confidence_metrics`). The single-label ones are NaN for a multi-label head | — |
+| `multilabel` | `True` when the head was detected as an independent per-label (sigmoid) output. Records which convention produced the numbers above | — |
 
 `mean_confidence` is not stored on the results object; it is computed in
 `get_summary_statistics()`.
+
+> **`brier_score`'s CONVENTION now depends on the head.** For a softmax head it is unchanged:
+> multiclass, `mean(sum_c (p_c - o_c)^2)`, on a `[0, 2]` scale. For a **multi-label (sigmoid)
+> head** it is the per-label form, `mean` over all `N·K` entries, on a `[0, 1]` scale. The two
+> are not comparable: the multiclass convention *sums* over classes and inflates a multi-label
+> score by exactly `K` — **MEASURED 3.0x on a 3-label probe**. An artifact written before this
+> change carries the multiclass number under the same key for a sigmoid head.
+
+> **A sigmoid multi-label head gets DIFFERENT metrics, not the same ones mis-scored.**
+> `ModelAnalyzer` already distinguishes a sigmoid head from a softmax one (rows in `[0,1]`
+> that do not sum to 1) and `calibration_metrics.is_multilabel_output` re-derives it from the
+> same row-sum test, so the two cannot disagree. For such a head:
+>
+> - `ece` is `None` and **no reliability diagram is produced**: "was the single top class
+>   right" is not a calibration question when there is no single correct class.
+> - `per_class_conditional_top1_ece` is `None` per class, not a fabricated `0.0`.
+> - the single-label confidence quantities (`max_probability`, `margin`, entropy) are `NaN`
+>   or absent. Over independent sigmoids `-Σ p log p` is not a Shannon entropy and its
+>   maximum is not `log K`.
+> - `per_class_ece` **is** still computed, and is the right metric here: each column is an
+>   independent probability against its own 0/1 indicator.
+>
+> Set `config.output_activation` explicitly if the row-sum inference is wrong for your head. A
+> multi-hot **target** whose rows do not each sum to 1 is rejected with a clear error rather
+> than argmaxed — a multi-hot row has no single correct class, so a top-1 reduction would
+> silently invent one.
+
+> **`gini_coefficient` is misnamed, and the wrong name is kept for compatibility.** The
+> quantity is `1 - Σ p²`, which is the **Simpson index** (Gini *impurity*). The Gini *coefficient*
+> is a Lorenz-curve quantity — the relative mean difference — and is a different number. The old
+> key is published unchanged so no stored artifact breaks; the accurate name `simpson_index`
+> carries the same values alongside it.
 
 > **`per_class_ece` CHANGED MEANING and kept its name.** It used to be the masked top-1 ECE now
 > published as `per_class_conditional_top1_ece`. That quantity is blind to the whole off-diagonal
@@ -255,16 +288,32 @@ Contextual / expensive columns: `participation_ratio`, `min_participation_ratio`
   (WeightWatcher's unreliable-fit bound). The value is **flagged, never clamped** — a runaway alpha
   stays visible instead of being rewritten into a plausible "under-trained" label.
 - `spectrum_truncated` is `True` when the SVD returned fewer singular values than `min(N, M)`. On
-  that path `sv_min`, `rank_loss`, `weak_rank_loss`, `entropy` and `matrix_rank` are `NaN`, not `0` —
-  a complete healthy spectrum also produces zeros, so zeros could not be told apart from truncation.
+  that path **every column that counts or integrates over the WHOLE spectrum is `NaN`, not `0`** — a
+  complete healthy spectrum also produces zeros, so zeros could not be told apart from truncation.
+  That is `sv_min`, `rank_loss`, `weak_rank_loss`, `entropy`, `matrix_rank`, `norm`, `log_norm`,
+  `stable_rank`, `log_alpha_norm`, `mp_softrank`, and the distribution-derived concentration ratios
+  (`gini_coefficient`, `dominance_ratio`, `participation_ratio`, `min_participation_ratio`).
+  Deliberately **not** NaN-ed, because they are computed from what a truncated SVD still returns:
+  `spectral_norm`, `log_spectral_norm`, `lambda_max`, `sv_max`, `alpha_weighted` / `alpha_hat` /
+  `alpha_hat_normalized` (all from that λ_max), plus `concentration_score` and
+  `critical_weight_count`, which come from the weight matrix itself — that matrix was read in full.
+  `stable_rank` mattered most: it is in `SPECTRAL_DEFAULT_SUMMARY_METRICS`, so it was being
+  averaged into `spectral_summary` and drawn on the dashboard as a real capacity figure while
+  systematically under-reporting (the mass it integrates over is exactly what is missing).
 - `gini_coefficient`, `dominance_ratio`, `participation_ratio`, `min_participation_ratio`,
   `concentration_score` and `critical_weight_count` require `spectral_concentration_analysis=True`
   (the default), and are absent from the frame when it is off.
 - `spectral_randomize=True` adds `has_trap`, `num_rand_spikes`, `trap_severity`,
   `trap_severity_label`, `trap_threshold`, `mp_lambda_minus`, `mp_lambda_plus`, `rand_sv_max`,
-  `rand_sv_ratio` and `rand_distance`. Each is the mean over `spectral_n_randomizations`
-  independent permutations, so `num_rand_spikes` can be fractional; `has_trap` is a majority vote
-  over those draws, not an `any()`.
+  `rand_sv_ratio` and `rand_distance`. **`has_trap` is `any()` over the
+  `spectral_n_randomizations` permutations**, and every other trap column — including
+  `num_rand_spikes`, which is an `int` again — plus the spectrum the overlay plots its spike
+  markers from come from **ONE representative draw: the worst-severity one**. Only the
+  randomization-only diagnostics (`rand_sv_max`, `rand_distance`, `rand_sv_ratio`) are means.
+  This was a blend before, which meant four published quantities could describe four different
+  permutations and contradict each other. The severity **label** is floored at `mild` whenever
+  `has_trap` is `True` (the severity **number** is never altered), because a genuine detection
+  just over the 0.1 threshold would otherwise publish `has_trap=True` beside `label='none'`.
 - **The trap threshold changed on 2026-09-02, and `schema_version` went 2 -> 3 with it.**
   `trap_threshold` is now `λ₊ + c_TW·λ₊·M^(-2/3)·f(Q)` with `f(Q) = Q^(-1/6)·(1+√Q)^(-2/3)`,
   Johnstone's (2001) Tracy-Widom scale, and `SPECTRAL_TW_SAFETY_FACTOR` is `3.0` rather than `1.0`.

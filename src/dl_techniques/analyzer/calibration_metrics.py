@@ -394,23 +394,51 @@ def compute_reliability_data(
 # Probabilistic Scoring and Uncertainty Metrics
 # ------------------------------------------------------------------------------
 
-def compute_brier_score(y_true_onehot: np.ndarray, y_prob: np.ndarray) -> float:
+def compute_brier_score(
+        y_true_onehot: np.ndarray, y_prob: np.ndarray, *, multilabel: bool = False
+) -> float:
     """
-    Compute Brier Score for multiclass probabilistic predictions.
+    Compute Brier Score for multiclass (or multilabel) probabilistic predictions.
 
     The Brier Score is the mean squared difference between predicted
     probabilities and actual outcomes. Lower values are better.
 
-    Mathematically: BS = (1/N) * Σ(i=1 to N) Σ(j=1 to K) (p_ij - o_ij)²
+    Mathematically (MULTICLASS, the default):
+        BS = (1/N) * Σ(i=1..N) Σ(j=1..K) (p_ij - o_ij)²
+    Mathematically (MULTILABEL):
+        BS = (1/(N*K)) * Σ(i=1..N) Σ(j=1..K) (p_ij - o_ij)²
+
+    .. important::
+       DECISION plan-2026-10-05-analyzer-audit/F-080. The two conventions differ by a
+       factor of K, and which one is correct depends on whether the K outputs are
+       MUTUALLY EXCLUSIVE.
+
+       The multiclass form SUMS over classes and averages over samples, because exactly
+       one class is correct per sample and the squared errors of the K-1 wrong classes
+       are all part of that sample's error.
+
+       The multilabel form also AVERAGES over classes, because each label is an
+       independent Bernoulli forecast whose error is its own; summing over them would
+       charge a single sample K times over. Applying the multiclass form to a sigmoid
+       multi-label head therefore inflates the score by exactly K — e.g. 3x for a 3-label
+       task — which is a number no reader can interpret, since it depends on the label
+       count rather than on the model.
+
+       This function previously had no such switch and its only in-library caller
+       (``CalibrationAnalyzer``) applied the multiclass form unconditionally.
 
     Args:
-        y_true_onehot (np.ndarray): True labels in one-hot encoded format.
-            Shape: (n_samples, n_classes)
-        y_prob (np.ndarray): Predicted class probabilities.
-            Shape: (n_samples, n_classes)
+        y_true_onehot (np.ndarray): True labels, one-hot for multiclass or a 0/1
+            indicator matrix for multilabel. Shape: (n_samples, n_classes)
+        y_prob (np.ndarray): Predicted probabilities. Shape: (n_samples, n_classes).
+            For multiclass these should sum to 1 along axis 1; for multilabel they are
+            independent and need not.
+        multilabel: ``True`` for independent per-label (sigmoid) forecasts. Keyword-only
+            so the existing positional call is unchanged.
 
     Returns:
-        float: Brier Score. Lower is better.
+        float: Brier Score. Lower is better. In ``[0, 1]`` for multilabel and in
+        ``[0, 2]`` for multiclass.
 
     Example:
         >>> y_true_oh = np.array([[1, 0], [0, 1], [0, 1], [1, 0]])
@@ -419,7 +447,122 @@ def compute_brier_score(y_true_onehot: np.ndarray, y_prob: np.ndarray) -> float:
         0.075
     """
     squared_diffs = (y_prob - y_true_onehot) ** 2
-    return np.mean(np.sum(squared_diffs, axis=1))
+    if multilabel:
+        # Average over BOTH axes (F-080).
+        return float(np.mean(squared_diffs))
+    return float(np.mean(np.sum(squared_diffs, axis=1)))
+
+
+def is_multilabel_output(y_prob: np.ndarray, tol: float = 1e-3) -> bool:
+    """Whether a probability array looks like independent per-label (sigmoid) output.
+
+    A softmax head emits rows summing to 1. A sigmoid multi-label head emits values in
+    ``[0, 1]`` whose rows generally do NOT. The test is the row sum, which is exactly the
+    distinction ``ModelAnalyzer._infer_output_activation`` already makes before deciding
+    whether to softmax.
+
+    .. important::
+       DECISION plan-2026-10-05-analyzer-audit/F-081. ``_infer_output_activation`` makes
+       this distinction and then THROWS the answer away: the activation name is not put in
+       the prediction cache, so ``CalibrationAnalyzer`` cannot see it and applies
+       single-label metrics to a multi-label head. This helper is the recovery path, and
+       the analyzer uses it to route the metric to the right convention.
+
+       The test is deliberately the same one, so the two cannot disagree: both accept a
+       1-D array or a 2-D array, both require a row sum of 1 within ``tol``, and both
+       require every value in ``[0, 1]``.
+
+    Args:
+        y_prob: Predicted probabilities.
+        tol: Tolerance on the row-sum test.
+
+    Returns:
+        ``True`` when the rows do not sum to 1, i.e. the head is a multi-label sigmoid.
+    """
+    probabilities = np.asarray(y_prob, dtype=float)
+    if probabilities.ndim == 1:
+        return False
+    if probabilities.size == 0:
+        return False
+    if not np.all(np.isfinite(probabilities)):
+        return False
+    in_unit_range = (probabilities.min() >= 0.0
+                     and probabilities.max() <= 1.0 + 1e-5)
+    if not in_unit_range:
+        return False
+    return not bool(np.allclose(probabilities.sum(axis=-1), 1.0, atol=tol))
+
+
+def compute_confidence_statistics(y_prob: np.ndarray, *, multilabel: bool = False
+                                 ) -> Dict[str, np.ndarray]:
+    """Per-sample confidence statistics for a probabilistic forecast.
+
+    The single-label and multi-label quantities are DIFFERENT questions, and only the
+    single-label ones have an obvious name:
+
+    - ``max_probability`` / ``margin`` are properties of a RANKING over one distribution's
+      classes. For independent sigmoids the largest value is "the most confident label",
+      which is a different thing, and ``margin`` (top-1 minus top-2) is not a margin over
+      alternatives.
+    - ``entropy`` ``-Σ p log p`` is the Shannon entropy of a DISTRIBUTION. Over
+      independent sigmoids it is not an entropy, and its maximum is not ``log K``.
+
+    For a multi-label head this returns the quantities that ARE well defined — per-label
+    mean absolute error against the 0/1 indicator, and the mean predicted positive rate —
+    and reports the single-label ones as NaN rather than as plausible wrong numbers.
+
+    .. important::
+       DECISION plan-2026-10-05-analyzer-audit/F-081. Previously every one of these was
+       computed unconditionally, so a sigmoid head published a `gini` of a
+       non-distribution and an `entropy` whose maximum was not ``log K``.
+
+    Args:
+        y_prob: ``(n_samples, n_classes)`` probabilities.
+        multilabel: Whether these are independent per-label forecasts.
+
+    Returns:
+        Dict of per-sample arrays. Under ``multilabel`` the keys are
+        ``label_mae``, ``mean_predicted_probability`` and ``predicted_positive_rate``;
+        otherwise they are ``max_probability``, ``margin`` and ``gini_coefficient``.
+    """
+    probabilities = np.asarray(y_prob, dtype=float)
+    max_prob = np.max(probabilities, axis=1)
+
+    if multilabel:
+        # The honest per-label quantities. `target` is supplied by the caller via the
+        # 0/1 indicator matrix; with no labels available, report the predicted positive
+        # rate alone and leave the error term NaN rather than guessing.
+        return {
+            'mean_predicted_probability': np.mean(probabilities, axis=1),
+            'predicted_positive_rate': np.mean(probabilities > 0.5, axis=1),
+            'label_mae': np.full(len(probabilities), np.nan),
+            'max_probability': np.full(len(probabilities), np.nan),
+            'margin': np.full(len(probabilities), np.nan),
+            'gini_coefficient': np.full(len(probabilities), np.nan),
+        }
+
+    if probabilities.shape[1] > 1:
+        sorted_probs = np.sort(probabilities, axis=1)
+        margin = sorted_probs[:, -1] - sorted_probs[:, -2]
+    else:
+        margin = np.full(len(probabilities), np.nan)
+
+    # DECISION plan-2026-10-05-analyzer-audit/F-082
+    # This quantity is `1 - Σ p²`, which is the SIMPSON INDEX (a.k.a. Gini IMPURITY), not
+    # the Gini COEFFICIENT — the latter is a Lorenz-curve quantity, also called the
+    # relative mean difference, and is a different number. The name `gini_coefficient`
+    # was propagated into `AnalysisResults.confidence_metrics`, the saved artifact and
+    # README.md. It is kept as the key so no stored artifact breaks, and corrected in
+    # the docs; the new `simpson_index` key carries the accurate name. Do NOT silently
+    # rename the published key.
+    simpson = 1.0 - np.sum(np.square(probabilities), axis=1)
+
+    return {
+        'max_probability': max_prob,
+        'margin': margin,
+        'gini_coefficient': simpson,
+        'simpson_index': simpson,
+    }
 
 # ------------------------------------------------------------------------------
 
