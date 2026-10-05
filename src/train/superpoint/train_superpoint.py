@@ -3,9 +3,11 @@
 This is stage 4 of the SuperPoint training recipe (DeTone et al., CVPRW 2018):
 the detector AND descriptor heads are trained jointly on homography image pairs.
 For each base image a random homography ``H`` is sampled; the model sees both the
-image and its warped copy, the detector head is supervised on the (image's)
-65-class grid label, and the descriptor head is trained with the bespoke hinge
-correspondence loss between the two coarse descriptor maps under the homography.
+image and its warped copy, the detector head is supervised on BOTH views' 65-class
+grid labels (the warped label is the clean keypoints warped through ``H`` and
+re-encoded -- warp-out points fall back to dustbin), and the descriptor head is
+trained with the bespoke hinge correspondence loss between the two coarse
+descriptor maps under the homography.
 
 Descriptor-loss design (CHOICE = (a), the honest SuperPoint formulation)
 -----------------------------------------------------------------------
@@ -264,17 +266,160 @@ def _cell_correspondence(
     return corr
 
 
+def _warped_grid_label(
+    keypoints: np.ndarray, homography: np.ndarray, H: int, W: int, cell: int
+) -> np.ndarray:
+    """Encode the 65-class detector label of the WARPED view from CLEAN keypoints.
+
+    Warps each clean-frame ``(x, y)`` keypoint forward through ``homography``
+    (:func:`warp_points`) and re-encodes the survivors with
+    :func:`keypoints_to_grid_labels`. Points warping out of bounds are dropped,
+    so their destination cells fall back to dustbin -- the warped view is
+    supervised exactly like a directly-labeled image. Warping the POINTS (not
+    the label grid) is required: a class index is a within-cell offset and does
+    not survive resampling.
+
+    Args:
+        keypoints: ``(N, 2)`` ``(x, y)`` keypoints in the clean frame.
+        homography: ``(3, 3)`` forward homography (image -> warped).
+        H: Image height in pixels.
+        W: Image width in pixels.
+        cell: Detector/descriptor cell size.
+
+    Returns:
+        ``(H // cell, W // cell)`` ``int32`` label map, values in
+        ``[0, cell*cell]``.
+    """
+    pts = np.asarray(keypoints, dtype=np.float32).reshape(-1, 2)
+    if pts.size == 0:
+        return keypoints_to_grid_labels(
+            np.zeros((0, 2), dtype=np.float32), H, W, cell=cell
+        )
+    warped = warp_points(pts, homography)  # (N, 2) as (x, y)
+    finite = np.all(np.isfinite(warped), axis=1)
+    inside = (
+        (warped[:, 0] >= 0.0) & (warped[:, 0] < W)
+        & (warped[:, 1] >= 0.0) & (warped[:, 1] < H)
+    )
+    kept = warped[finite & inside]
+    return keypoints_to_grid_labels(kept, H, W, cell=cell)
+
+
+def _warp_points_tf(
+    keypoints: "tf.Tensor", h_mat: "tf.Tensor"
+) -> Tuple["tf.Tensor", "tf.Tensor"]:
+    """Forward-warp ``(K, 2)`` points through ``H`` in-graph (tf port).
+
+    Pure-tf equivalent of :func:`warp_points` for the homogeneous divide part:
+    ``[x', y', w'] = H @ [x, y, 1]``, ``out = [x, y] / w``. Points with
+    ``w <= 1e-6`` or non-finite projections (at/behind the horizon) are flagged
+    invalid and MUST be excluded downstream: their coordinates read as zeros
+    and would otherwise mislabel cell (0, 0).
+
+    Args:
+        keypoints: ``(K, 2)`` ``float32`` ``(x, y)`` pixels.
+        h_mat: ``(3, 3)`` ``float32`` forward homography.
+
+    Returns:
+        ``(warped (K, 2) f32, ok (K,) bool)``; ``warped`` is zero where invalid.
+    """
+    kp = tf.cast(keypoints, tf.float64)
+    h64 = tf.cast(h_mat, tf.float64)
+    ones = tf.ones([tf.shape(kp)[0], 1], dtype=tf.float64)
+    homo = tf.concat([kp, ones], axis=1)  # (K, 3)
+    out = tf.matmul(homo, h64, transpose_b=True)  # (K, 3)
+    w = out[:, 2:3]
+    ok = (w > 1e-6) & tf.math.is_finite(w) & tf.math.is_finite(out[:, :2])
+    ok = tf.reduce_all(ok, axis=1)
+    xy = out[:, :2] / tf.where(ok[:, None], w, tf.ones_like(w))
+    xy = tf.where(ok[:, None], xy, tf.zeros_like(xy))
+    return tf.cast(xy, tf.float32), ok
+
+
+def _grid_labels_tf(
+    keypoints: "tf.Tensor",
+    count: "tf.Tensor",
+    valid: "tf.Tensor",
+    H: int,
+    W: int,
+    cell: int,
+) -> "tf.Tensor":
+    """In-graph 65-class grid-label encode (tf port of :func:`keypoints_to_grid_labels`).
+
+    Pure-tf equivalent of :func:`keypoints_to_grid_labels` over a PADDED
+    ``(K, 2)`` point set: per-cell class is the within-cell index
+    ``row_in * cell + col_in`` of the nearest-to-center point, empty cells read
+    dustbin ``cell*cell``. Only the first ``count`` points participate (padding
+    is ``-1``-filled and additionally fails the bounds test); ``valid`` excludes
+    horizon-invalid warps. Ties resolve to the lowest point index --
+    ``tf.math.argmin`` returns the first minimum -- matching the numpy loop's
+    strict-``<`` first-wins rule. Gated by parity tests against the numpy
+    reference (same plan as ``_cell_correspondence_tf``).
+
+    Args:
+        keypoints: ``(K,)``-padded ``(K, 2)`` ``float32`` ``(x, y)`` pixels.
+        count: scalar ``int32`` real-point count (padding starts at ``count``).
+        valid: ``(K,)`` bool extra validity (warp horizon mask).
+        H: Image height in pixels.
+        W: Image width in pixels.
+        cell: Detector cell size.
+
+    Returns:
+        ``(H // cell, W // cell)`` ``int32`` label map, values in
+        ``[0, cell*cell]``.
+    """
+    Hc, Wc = H // cell, W // cell
+    n = Hc * Wc
+    dustbin = cell * cell
+    kp = tf.cast(keypoints, tf.float32)
+    k = tf.shape(kp)[0]
+
+    cx = tf.floor(kp[:, 0] / cell)
+    cy = tf.floor(kp[:, 1] / cell)
+    in_bounds = (cx >= 0) & (cx < Wc) & (cy >= 0) & (cy < Hc)
+    real = tf.range(k) < tf.cast(count, tf.int32)
+    ok = in_bounds & real & tf.cast(valid, tf.bool)
+
+    # Within-cell pixel offsets, clamped exactly like the numpy reference.
+    col_in = tf.clip_by_value(
+        tf.floor(kp[:, 0]) - cx * cell, 0.0, float(cell - 1))
+    row_in = tf.clip_by_value(
+        tf.floor(kp[:, 1]) - cy * cell, 0.0, float(cell - 1))
+    cls = tf.cast(row_in * cell + col_in, tf.int32)
+    center = (float(cell) - 1.0) / 2.0
+    dist = (col_in - center) ** 2 + (row_in - center) ** 2
+
+    cell_id = tf.cast(cy * Wc + cx, tf.int32)
+    safe_id = tf.where(ok, cell_id, tf.zeros_like(cell_id))
+    oh = tf.one_hot(safe_id, n, dtype=tf.float32)  # (K, N)
+    oh = oh * tf.cast(ok[:, None], tf.float32)
+    big = tf.constant(1e30, dtype=tf.float32)
+    dmat = dist[:, None] * oh + (1.0 - oh) * big  # (K, N)
+    best_pt = tf.math.argmin(dmat, axis=0, output_type=tf.int32)  # (N,)
+    has = tf.reduce_max(oh, axis=0) > 0.0  # (N,)
+    best_cls = tf.gather(cls, best_pt)  # (N,)
+    flat = tf.where(has, best_cls, tf.fill([n], tf.constant(dustbin, tf.int32)))
+    return tf.reshape(flat, [Hc, Wc])
+
+
 def _pair_generator(
     config: SuperPointConfig,
-) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    """Yield ``(image, warped_image, grid_label, correspondence)`` tuples.
+) -> Iterator[Tuple[np.ndarray, ...]]:
+    """Yield ``(image, warped_image, grid_label, warped_label, H, correspondence)``.
 
     Synthetic-shapes base image -> sample a homography -> warp the image and build
-    the H/8 correspondence. The detector label is the IMAGE's 65-class grid label.
+    the H/8 correspondence. BOTH views carry a 65-class detector label: the clean
+    view's from its synthetic keypoints, the warped view's from the
+    homography-warped keypoints (:func:`_warped_grid_label`), so the detector
+    head trains on the rotated / zero-filled distribution too (DeTone joint
+    training supervises both views; supervising only the clean one leaves the
+    warped distribution out-of-distribution -- plan-2026-10-05_warped-detector).
 
     Yields:
         ``image (H, W, 1) f32``, ``warped (H, W, 1) f32``,
-        ``grid_label (Hc, Wc) i32``, ``correspondence (N, N) f32``.
+        ``grid_label (Hc, Wc) i32``, ``warped_label (Hc, Wc) i32``,
+        ``H (3, 3) f32`` forward homography,
+        ``correspondence (N, N) f32``.
     """
     H = W = config.input_size
     rng = np.random.default_rng(config.seed)
@@ -287,37 +432,46 @@ def _pair_generator(
         label = keypoints_to_grid_labels(kps, H, W, cell=config.cell)
         h_mat = sample_homography((H, W), rng=rng)
         warped = warp_image(img, h_mat).numpy()  # (H, W, 1)
+        warped_label = _warped_grid_label(kps, h_mat, H, W, config.cell)
         corr = _cell_correspondence(h_mat, H, W, config.cell)
         yield (
             img.astype(np.float32),
             warped.astype(np.float32),
             label.astype(np.int32),
+            warped_label.astype(np.int32),
+            h_mat.astype(np.float32),
             corr,
         )
 
 
 # DECISION plan_2026-06-18_8ecab001/D-002: pseudo mode reloads the REAL source
-# image via the imported _load_real_image and loads grid_label DIRECTLY from the
-# npz; do NOT re-encode grid_label from keypoints (it is already (Hc,Wc) i32
-# [0..64], identical to the synthetic detector-label format) and do NOT
-# reimplement image I/O. Everything after the (image, grid_label) source load is
-# copied verbatim from _pair_generator (homography sample/warp/correspondence is
+# image via the imported _load_real_image and loads the CLEAN grid_label
+# DIRECTLY from the npz; do NOT re-encode the clean grid_label from keypoints
+# (it is already (Hc,Wc) i32 [0..64], identical to the synthetic detector-label
+# format) and do NOT reimplement image I/O. The WARPED grid_label is necessarily
+# encoded fresh via _warped_grid_label from the npz keypoints: no stored warped
+# label exists, and warping class indices is meaningless (a class is a
+# within-cell offset). Everything after the source load is copied verbatim from
+# _pair_generator (homography sample/warp/correspondence is
 # image-content-independent), so this generator stays a thin source swap. See
 # decisions.md D-002.
 def _pseudo_pair_generator(
     config: SuperPointConfig,
-) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    """Yield ``(image, warped_image, grid_label, correspondence)`` from HA labels.
+) -> Iterator[Tuple[np.ndarray, ...]]:
+    """Yield ``(image, warped_image, grid_label, warped_label, H, correspondence)``.
 
     Reads the stage-3 HA manifest at ``<pseudo_labels_dir>/manifest.json``,
     reloads each entry's REAL source image via :func:`_load_real_image`, loads the
-    pre-encoded ``grid_label`` directly from the npz, then synthesizes the
-    homography pair exactly as :func:`_pair_generator`. Loops with wraparound over
-    the manifest entries (infinite generator), mirroring ``_pair_generator``.
+    pre-encoded clean ``grid_label`` directly from the npz, encodes the warped
+    view's label from the npz keypoints warped through the sampled homography,
+    then synthesizes the homography pair exactly as :func:`_pair_generator`.
+    Loops with wraparound over the manifest entries (infinite generator),
+    mirroring ``_pair_generator``.
 
     Yields:
         ``image (H, W, 1) f32``, ``warped (H, W, 1) f32``,
-        ``grid_label (Hc, Wc) i32``, ``correspondence (N, N) f32``.
+        ``grid_label (Hc, Wc) i32``, ``warped_label (Hc, Wc) i32``,
+        ``H (3, 3) f32``, ``correspondence (N, N) f32``.
     """
     H = W = config.input_size
     rng = np.random.default_rng(config.seed)
@@ -360,39 +514,52 @@ def _pseudo_pair_generator(
             )
 
         image = _load_real_image(entry["source_path"], config.input_size, config.channels)
-        grid_label = np.load(pseudo_dir / entry["npz"])["grid_label"].astype(np.int32)
+        with np.load(pseudo_dir / entry["npz"]) as npz:
+            grid_label = npz["grid_label"].astype(np.int32)
+            src_keypoints = npz["keypoints"].astype(np.float32)
 
         h_mat = sample_homography((H, W), rng=rng)
         warped = warp_image(image, h_mat).numpy()  # (H, W, 1)
+        warped_label = _warped_grid_label(
+            src_keypoints, h_mat, H, W, config.cell
+        )
         corr = _cell_correspondence(h_mat, H, W, config.cell)
         yield (
             image.astype(np.float32),
             warped.astype(np.float32),
             grid_label,
+            warped_label.astype(np.int32),
+            h_mat.astype(np.float32),
             corr,
         )
 
 
 def _load_pseudo_sources(
     config: SuperPointConfig,
-) -> Tuple[list, np.ndarray]:
-    """Read the HA manifest and preload all source paths + grid labels.
+) -> Tuple[list, np.ndarray, np.ndarray, np.ndarray]:
+    """Read the HA manifest and preload all source paths + labels + keypoints.
 
     Build-time (Python, once) half of the in-graph pseudo pipeline. Reuses the
     EXACT fail-loud validation of :func:`_pseudo_pair_generator` (manifest
     ``input_size``/``cell`` must match config, every entry must carry a
     ``source_path``) so the new path fails identically, but instead of yielding
-    per sample it returns the full source-path list and ONE stacked
-    ``(num_entries, Hc, Wc) int32`` grid-label array -- removing the per-sample
-    ``np.load`` from the hot path (A4 / D-002).
+    per sample it returns the full source-path list, ONE stacked
+    ``(num_entries, Hc, Wc) int32`` grid-label array, ONE padded
+    ``(num_entries, maxN, 2) float32`` keypoint array (``-1``-filled past each
+    image's count) and the ``(num_entries,) int32`` counts -- removing the
+    per-sample ``np.load`` from the hot path (A4 / D-002). The padded keypoints
+    feed the in-graph warped-label encode (:func:`_grid_labels_tf` consumes
+    exactly this ``(points, count)`` contract).
 
     Args:
         config: Training configuration (``data_mode == "pseudo"``).
 
     Returns:
-        ``(source_paths, grid_labels)`` where ``source_paths`` is a list of
-        absolute image paths and ``grid_labels`` is ``(num_entries, Hc, Wc)``
-        ``int32``.
+        ``(source_paths, grid_labels, keypoints, counts)`` where
+        ``source_paths`` is a list of absolute image paths, ``grid_labels`` is
+        ``(num_entries, Hc, Wc)`` ``int32``, ``keypoints`` is
+        ``(num_entries, maxN, 2)`` ``float32`` and ``counts`` is
+        ``(num_entries,)`` ``int32``.
     """
     pseudo_dir = Path(config.pseudo_labels_dir)
     with open(pseudo_dir / "manifest.json") as f:
@@ -414,6 +581,7 @@ def _load_pseudo_sources(
 
     source_paths = []
     grids = []
+    all_kps = []
     for entry in entries:
         if "source_path" not in entry:
             raise ValueError(
@@ -421,25 +589,33 @@ def _load_pseudo_sources(
                 "'source_path'; re-run HA with the patched writer"
             )
         source_paths.append(entry["source_path"])
-        grids.append(
-            np.load(pseudo_dir / entry["npz"])["grid_label"].astype(np.int32)
-        )
+        with np.load(pseudo_dir / entry["npz"]) as npz:
+            grids.append(npz["grid_label"].astype(np.int32))
+            all_kps.append(npz["keypoints"].astype(np.float32).reshape(-1, 2))
 
     grid_labels = np.stack(grids, axis=0)  # (num_entries, Hc, Wc) i32
+    counts = np.array([len(k) for k in all_kps], dtype=np.int32)
+    max_n = int(counts.max()) if len(counts) else 0
+    keypoints = np.full((len(all_kps), max_n, 2), -1.0, dtype=np.float32)
+    for i, k in enumerate(all_kps):
+        if len(k):
+            keypoints[i, : len(k)] = k
     logger.info(
         f"superpoint pseudo pipeline: H={config.input_size} W={config.input_size} "
         f"cell={config.cell} seed={config.seed} entries={len(entries)} "
-        f"grid_labels={grid_labels.shape} dir={pseudo_dir}"
+        f"grid_labels={grid_labels.shape} keypoints={keypoints.shape} dir={pseudo_dir}"
     )
-    return source_paths, grid_labels
+    return source_paths, grid_labels, keypoints, counts
 
 
 def _decode_grayscale(
     path: "tf.Tensor",
     label: "tf.Tensor",
+    keypoints: "tf.Tensor",
+    count: "tf.Tensor",
     input_size: int,
     channels: int,
-) -> Tuple["tf.Tensor", "tf.Tensor"]:
+) -> Tuple["tf.Tensor", "tf.Tensor", "tf.Tensor", "tf.Tensor"]:
     """In-graph decode+resize of a source image path (graph-safe ``.map`` fn).
 
     In-graph equivalent of :func:`_load_real_image` (which returns numpy and is
@@ -447,16 +623,20 @@ def _decode_grayscale(
     [rgb_to_grayscale] -> resize bilinear``. ``decode_image`` handles both DIV2K
     PNGs and COCO JPEGs; ``expand_animations=False`` keeps a static rank.
     ``set_shape`` restores the spatial/channel shape that ``from_tensor_slices``
-    drops (so downstream warp + batch see a known shape).
+    drops (so downstream warp + batch see a known shape). Label, padded
+    keypoints and count pass through untouched.
 
     Args:
         path: scalar string tensor (absolute image path).
         label: ``(Hc, Wc)`` ``int32`` grid label, passed through untouched.
+        keypoints: ``(maxN, 2)`` ``float32`` padded keypoints, passed through.
+        count: scalar ``int32`` real-point count, passed through.
         input_size: target square spatial size.
         channels: 1 (grayscale) or 3.
 
     Returns:
-        ``(image (input_size, input_size, channels) f32, label)``.
+        ``(image (input_size, input_size, channels) f32, label, keypoints,
+        count)``.
     """
     raw = tf.io.read_file(path)
     img = tf.io.decode_image(raw, channels=3, expand_animations=False)
@@ -465,31 +645,37 @@ def _decode_grayscale(
         img = tf.image.rgb_to_grayscale(img)
     img = tf.image.resize(img, (input_size, input_size), method="bilinear")
     img.set_shape((input_size, input_size, channels))
-    return img, label
+    return img, label, keypoints, count
 
 
 def _warp_and_correspond(
     image: "tf.Tensor",
     label: "tf.Tensor",
+    keypoints: "tf.Tensor",
+    count: "tf.Tensor",
     idx: "tf.Tensor",
     base_seed: int,
     input_size: int,
     channels: int,
     cell: int,
-) -> Tuple["tf.Tensor", "tf.Tensor", "tf.Tensor", "tf.Tensor"]:
-    """In-graph homography pair + correspondence for one element (``.map`` fn).
+) -> Tuple["tf.Tensor", ...]:
+    """In-graph homography pair + warped label + correspondence (``.map`` fn).
 
     Per-element STATELESS seeding: each element gets ``seed=[base_seed, idx]``
     (``idx`` from a zipped counter), so the sampled homography is distinct per
     element yet reproducible (A6 / D-002) -- preferred over a stateful
     ``tf.random`` draw. Samples ``H`` via :func:`sample_homography_tf`, warps the
-    image via :func:`warp_image_tf`, and builds the H/8 correspondence via
+    image via :func:`warp_image_tf`, encodes the warped view's detector label by
+    warping the padded keypoints (:func:`_warp_points_tf`) and re-encoding
+    (:func:`_grid_labels_tf`), and builds the H/8 correspondence via
     :func:`_cell_correspondence_tf`. ``set_shape`` restores the static shapes
     that the graph ops lose so ``.batch`` sees known dims.
 
     Args:
         image: ``(input_size, input_size, channels) f32`` source image.
-        label: ``(Hc, Wc) i32`` grid label, passed through.
+        label: ``(Hc, Wc) i32`` clean grid label, passed through.
+        keypoints: ``(maxN, 2) f32`` padded source keypoints.
+        count: scalar ``i32`` real-point count.
         idx: scalar ``int64`` per-element counter (from a zipped Counter).
         base_seed: python int base seed (the second seed component is ``idx``).
         input_size: square spatial size (== H == W).
@@ -497,7 +683,8 @@ def _warp_and_correspond(
         cell: detector/descriptor cell size.
 
     Returns:
-        ``(image, warped, label, corr)`` -- ``corr`` is ``(N, N) f32``.
+        ``(image, warped, label, warped_label, h_mat, corr)`` -- ``corr`` is
+        ``(N, N) f32`` and ``h_mat`` is ``(3, 3) f32``.
     """
     H = W = input_size
     Hc, Wc = H // cell, W // cell
@@ -506,19 +693,25 @@ def _warp_and_correspond(
     seed = tf.stack([tf.constant(base_seed, dtype=tf.int32), tf.cast(idx, tf.int32)])
     h_mat = sample_homography_tf((H, W), seed)
     warped = warp_image_tf(image, h_mat)
+    warped_pts, ok = _warp_points_tf(keypoints, h_mat)
+    warped_label = _grid_labels_tf(warped_pts, count, ok, H, W, cell)
     corr = _cell_correspondence_tf(h_mat, H, W, cell)
 
     image.set_shape((input_size, input_size, channels))
     warped.set_shape((input_size, input_size, channels))
     label.set_shape((Hc, Wc))
+    warped_label.set_shape((Hc, Wc))
+    h_mat.set_shape((3, 3))
     corr.set_shape((n, n))
-    return image, warped, label, corr
+    return image, warped, label, warped_label, h_mat, corr
 
 
 def _pack_dict(
     image: "tf.Tensor",
     warped: "tf.Tensor",
     label: "tf.Tensor",
+    warped_label: "tf.Tensor",
+    h_mat: "tf.Tensor",
     corr: "tf.Tensor",
 ) -> Tuple["tf.Tensor", dict]:
     """Pack the joint-training tuple into the SAME dict the ``train_step`` reads."""
@@ -526,7 +719,9 @@ def _pack_dict(
         image,
         {
             "keypoints": label,
+            "warped_keypoints": warped_label,
             "warped_image": warped,
+            "homography": h_mat,
             "correspondence": corr,
         },
     )
@@ -535,15 +730,17 @@ def _pack_dict(
 def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
     """Build an infinite tf.data stream of homography-pair joint-training examples.
 
-    Yields ``(image, {"keypoints": label, "warped_image": warped,
-    "correspondence": corr})`` -- the custom ``train_step`` consumes the dict.
+    Yields ``(image, {"keypoints": label, "warped_keypoints": warped_label,
+    "warped_image": warped, "homography": H, "correspondence": corr})`` -- the
+    custom ``train_step`` consumes the labels/image/corr (``homography`` is for
+    the viz callback's reprojection overlay).
 
     Two backends, byte-contract-identical output:
 
     - ``data_mode == "synthetic"``: the unchanged single-thread
       ``_pair_generator`` + ``from_generator`` path.
     - ``data_mode == "pseudo"``: the in-graph parallel pipeline
-      (``from_tensor_slices`` of preloaded paths+labels -> parallel
+      (``from_tensor_slices`` of preloaded paths+labels+keypoints -> parallel
       decode -> parallel warp+correspondence -> batch -> prefetch).
 
     Args:
@@ -569,10 +766,11 @@ def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
         # per-element via a zipped Counter for stateless reproducibility (A6) --
         # the realized RNG sequence differs from the numpy serial RNG by design
         # (D-001), distribution preserved. See decisions.md D-002.
-        source_paths, grid_labels = _load_pseudo_sources(config)
+        source_paths, grid_labels, keypoints, counts = _load_pseudo_sources(config)
 
         ds = tf.data.Dataset.from_tensor_slices(
-            (tf.constant(source_paths), tf.constant(grid_labels))
+            (tf.constant(source_paths), tf.constant(grid_labels),
+             tf.constant(keypoints), tf.constant(counts))
         )
         ds = ds.shuffle(
             len(source_paths),
@@ -604,7 +802,8 @@ def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
             cell=config.cell,
         )
         ds = ds.map(
-            lambda img_lbl, idx: warp_fn(img_lbl[0], img_lbl[1], idx),
+            lambda img_lbl_kp_c, idx: warp_fn(
+                img_lbl_kp_c[0], img_lbl_kp_c[1], img_lbl_kp_c[2], img_lbl_kp_c[3], idx),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
 
@@ -613,11 +812,14 @@ def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
         ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds
 
-    # --- synthetic branch: BYTE-IDENTICAL to before (untouched path) ---
+    # --- synthetic branch: same single-thread from_generator path, extended with
+    # the warped detector label + homography (see _pair_generator). ---
     output_signature = (
         tf.TensorSpec(shape=(H, W, config.channels), dtype=tf.float32),
         tf.TensorSpec(shape=(H, W, config.channels), dtype=tf.float32),
         tf.TensorSpec(shape=(Hc, Wc), dtype=tf.int32),
+        tf.TensorSpec(shape=(Hc, Wc), dtype=tf.int32),
+        tf.TensorSpec(shape=(3, 3), dtype=tf.float32),
         tf.TensorSpec(shape=(n, n), dtype=tf.float32),
     )
 
@@ -627,11 +829,13 @@ def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
     )
 
     dataset = dataset.map(
-        lambda img, warped, label, corr: (
+        lambda img, warped, label, warped_label, h_mat, corr: (
             img,
             {
                 "keypoints": label,
+                "warped_keypoints": warped_label,
                 "warped_image": warped,
+                "homography": h_mat,
                 "correspondence": corr,
             },
         ),
@@ -723,9 +927,10 @@ class SuperPointJointModel(keras.Model):
     """Wraps a SuperPoint backbone with a joint detector+descriptor ``train_step``.
 
     The wrapped ``superpoint`` model is run on BOTH the image and its warped copy.
-    The detector loss supervises the image's ``keypoints`` head; the descriptor
-    loss is the hinge correspondence loss between the two H/8 descriptor maps under
-    the data-supplied homography correspondence (design (a)).
+    The detector loss supervises BOTH ``keypoints`` heads (clean label and the
+    homography-warped label); the descriptor loss is the hinge correspondence
+    loss between the two H/8 descriptor maps under the data-supplied homography
+    correspondence (design (a)).
     """
 
     def __init__(
@@ -771,6 +976,7 @@ class SuperPointJointModel(keras.Model):
     def train_step(self, data):
         x, y = data
         label = y["keypoints"]
+        warped_label = y["warped_keypoints"]
         warped = y["warped_image"]
         corr = y["correspondence"]
 
@@ -778,8 +984,14 @@ class SuperPointJointModel(keras.Model):
             out1 = self.superpoint(x, training=True)
             out2 = self.superpoint(warped, training=True)
 
-            det_per_sample = self.detector_loss_fn(label, out1["keypoints"])
-            det_loss = keras.ops.mean(det_per_sample)
+            # Detector on BOTH views (DeTone joint training): the warped label
+            # is the clean keypoints warped through H, so the head also trains
+            # on the rotated / zero-filled distribution. Mean keeps the
+            # detector_weight scale of the single-view form.
+            det_clean = keras.ops.mean(self.detector_loss_fn(label, out1["keypoints"]))
+            det_warped = keras.ops.mean(
+                self.detector_loss_fn(warped_label, out2["keypoints"]))
+            det_loss = (det_clean + det_warped) / 2.0
 
             desc1 = self._coarse_descriptors(out1["descriptors"])
             desc2 = self._coarse_descriptors(out2["descriptors"])
@@ -807,13 +1019,17 @@ class SuperPointJointModel(keras.Model):
     def test_step(self, data):
         x, y = data
         label = y["keypoints"]
+        warped_label = y["warped_keypoints"]
         warped = y["warped_image"]
         corr = y["correspondence"]
 
         out1 = self.superpoint(x, training=False)
         out2 = self.superpoint(warped, training=False)
 
-        det_loss = keras.ops.mean(self.detector_loss_fn(label, out1["keypoints"]))
+        det_loss = (
+            keras.ops.mean(self.detector_loss_fn(label, out1["keypoints"]))
+            + keras.ops.mean(self.detector_loss_fn(warped_label, out2["keypoints"]))
+        ) / 2.0
         desc1 = self._coarse_descriptors(out1["descriptors"])
         desc2 = self._coarse_descriptors(out2["descriptors"])
         desc_loss = keras.ops.mean(
@@ -828,6 +1044,64 @@ class SuperPointJointModel(keras.Model):
         self.det_tracker.update_state(det_loss)
         self.desc_tracker.update_state(desc_loss)
         return {m.name: m.result() for m in self.metrics}
+
+
+# DECISION plan-2026-10-05_warped-detector/D-001
+# The best checkpoint is the SuperPoint BACKBONE, not the joint wrapper. Do NOT
+# put the stock ModelCheckpoint of create_callbacks back "for consistency": it
+# saves the wrapper, whose config carries no `superpoint` entry, so the file
+# does not reload (SuperPointJointModel.__init__() missing 'superpoint') while
+# final_model.keras (the backbone) does. Same trap LightGlue fixed with
+# LightGlueCheckpoint. Guard: test_backbone_checkpoint_reloads_as_superpoint.
+class SuperPointBackboneCheckpoint(keras.callbacks.Callback):
+    """Save the joint model's backbone whenever the monitored value improves.
+
+    Mirrors :class:`train.lightglue.pipeline.LightGlueCheckpoint`: the stock
+    ``ModelCheckpoint`` would write the training scaffold (here the
+    :class:`SuperPointJointModel` wrapper), which is not the reusable artifact
+    and does not deserialize. This callback writes only ``model.superpoint``,
+    which is what downstream consumers (homographic adaptation, the LightGlue
+    front end) load. It is not serialised with a model (callbacks never are).
+
+    :param filepath: ``.keras`` path (use ``best_checkpoint_path(run_dir)``).
+    :param monitor: Log key, e.g. ``"loss"``.
+    :param mode: ``"min"``, ``"max"`` or None to resolve it from the key name.
+    """
+
+    def __init__(self, filepath: str, monitor: str = "loss", mode: Optional[str] = None) -> None:
+        super().__init__()
+        self.filepath = filepath
+        self.monitor = monitor
+        self.best: Optional[float] = None
+        self.best_epoch: Optional[int] = None
+        self._mode = mode
+
+    def on_train_begin(self, logs=None) -> None:
+        from train.common.callbacks import resolve_monitor_mode
+        if self._mode is None:
+            self._mode = resolve_monitor_mode(self.monitor, None)
+
+    def _improved(self, value: float) -> bool:
+        if self.best is None:
+            return True
+        return value < self.best if self._mode == "min" else value > self.best
+
+    def on_epoch_end(self, epoch: int, logs=None) -> None:
+        """Save ``model.superpoint`` when ``logs[monitor]`` is a finite improvement."""
+        value = (logs or {}).get(self.monitor)
+        if value is None or value != value:
+            logger.warning(
+                f"SuperPointBackboneCheckpoint: {self.monitor!r} missing or NaN "
+                f"at epoch {epoch}"
+            )
+            return
+        value = float(value)
+        if self._improved(value):
+            self.best, self.best_epoch = value, epoch
+            self.model.superpoint.save(self.filepath)
+            logger.info(
+                f"Epoch {epoch + 1}: {self.monitor} improved to {value:.6g}, saved "
+                f"{self.filepath}")
 
 
 # ---------------------------------------------------------------------
@@ -911,6 +1185,8 @@ def train_superpoint(config: SuperPointConfig) -> keras.Model:
     )
 
     # Callbacks: monitor train loss (no validation split in the smoke stream).
+    # The stock ModelCheckpoint would save the joint WRAPPER (unreloadable,
+    # D-001 above); the backbone alone is the artifact.
     callbacks, _ = create_common_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix="superpoint",
@@ -921,8 +1197,13 @@ def train_superpoint(config: SuperPointConfig) -> keras.Model:
         include_terminate_on_nan=True,
         include_analyzer=False,
     )
+    from train.common.callbacks import best_checkpoint_path
+    callbacks = [cb for cb in callbacks if not isinstance(cb, keras.callbacks.ModelCheckpoint)]
+    backbone_checkpoint = SuperPointBackboneCheckpoint(best_checkpoint_path(str(output_dir)))
+    callbacks.append(backbone_checkpoint)
 
-    # Qualitative viz on a fixed homography-pair split (image + warped).
+    # Qualitative viz on a fixed homography-pair split (image + warped + H for
+    # the reprojection overlay).
     try:
         from train.common.keypoint_viz import SuperPointVizCallback
 
@@ -933,6 +1214,7 @@ def train_superpoint(config: SuperPointConfig) -> keras.Model:
                 viz_dir=str(output_dir / "viz"),
                 viz_images=viz_x[:n_viz].numpy(),
                 viz_warped=viz_y["warped_image"][:n_viz].numpy(),
+                viz_homographies=viz_y["homography"][:n_viz].numpy(),
                 every_n=config.viz_every,
             )
         )

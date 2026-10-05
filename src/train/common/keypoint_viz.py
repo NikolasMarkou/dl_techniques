@@ -208,6 +208,12 @@ class SuperPointVizCallback(keras.callbacks.Callback):
     :param viz_dir: Directory for the PNGs (created).
     :param viz_images: Fixed ``(V, H, W, C)`` images.
     :param viz_warped: Optional fixed warped companions ``(V, H, W, C)``.
+    :param viz_homographies: Optional ``(V, 3, 3)`` forward homographies
+        (image -> warped). When given WITH ``viz_warped``, an extra
+        ``viz/epoch_{N:03d}_correspondence.png`` overlays the clean-view
+        detections reprojected by ``H`` against the warped-view detections
+        (greedy 3px matches, repeatability in the title) -- the direct "do the
+        keypoints warp" check.
     :param every_n: Figure cadence in epochs (1 = every epoch).
     :param max_keypoints: Decode slot count.
     :param threshold: Heatmap probability threshold.
@@ -220,6 +226,7 @@ class SuperPointVizCallback(keras.callbacks.Callback):
         viz_dir: PathLike,
         viz_images: np.ndarray,
         viz_warped: Optional[np.ndarray] = None,
+        viz_homographies: Optional[np.ndarray] = None,
         every_n: int = 5,
         max_keypoints: int = 256,
         threshold: float = 0.005,
@@ -232,6 +239,10 @@ class SuperPointVizCallback(keras.callbacks.Callback):
         self.viz_images = np.asarray(viz_images, dtype=np.float32)
         self.viz_warped = (
             None if viz_warped is None else np.asarray(viz_warped, dtype=np.float32)
+        )
+        self.viz_homographies = (
+            None if viz_homographies is None
+            else np.asarray(viz_homographies, dtype=np.float32)
         )
         self.every_n = max(1, int(every_n))
         self.max_keypoints = int(max_keypoints)
@@ -297,20 +308,81 @@ class SuperPointVizCallback(keras.callbacks.Callback):
                 )
                 kps_w = np.asarray(dec_w["keypoints"][0])
                 mask_w = np.asarray(dec_w["mask"][0]).astype(bool)
+                kps_w = kps_w[mask_w]
                 heat_w = (
                     np.asarray(heat_fn(np.asarray(outs_w["keypoints"])))[0]
                     if heat_fn is not None else np.zeros_like(heat)
                 )
                 plot_superpoint_panel(
-                    self.viz_warped[0], heat_w, kps_w[mask_w],
+                    self.viz_warped[0], heat_w, kps_w,
                     Path(self.viz_dir) / f"epoch_{epoch + 1:03d}_detection_warped.png",
                     title=f"epoch {epoch + 1} detection (warped)",
                 )
+                if self.viz_homographies is not None:
+                    from dl_techniques.utils.homography import warp_points
+                    h_mat = np.asarray(self.viz_homographies[0], dtype=np.float32)
+                    reproj = warp_points(kps, h_mat)
+                    finite = np.all(np.isfinite(reproj), axis=1)
+                    h_img, w_img = _to_gray(self.viz_warped[0]).shape
+                    inside = (
+                        finite & (reproj[:, 0] >= 0) & (reproj[:, 0] < w_img)
+                        & (reproj[:, 1] >= 0) & (reproj[:, 1] < h_img)
+                    )
+                    matches, scores, rep = reprojection_matches(
+                        reproj, inside, kps_w, thresh=3.0)
+                    plot_match_panel(
+                        self.viz_images[0], self.viz_warped[0], kps, kps_w,
+                        matches, scores,
+                        Path(self.viz_dir) / f"epoch_{epoch + 1:03d}_correspondence.png",
+                        title=(f"epoch {epoch + 1} reprojection: "
+                               f"repeatability {rep:.2f} "
+                               f"({int(inside.sum())} reprojectable)"),
+                    )
+                    logger.info(
+                        f"SuperPointViz epoch {epoch + 1}: repeatability {rep:.3f}")
         except Exception as e:
             logger.warning(
                 f"SuperPointVizCallback: failed at epoch {epoch + 1}: {e}",
                 exc_info=True,
             )
+
+
+def reprojection_matches(
+    src_warped: np.ndarray,
+    src_valid: np.ndarray,
+    dst: np.ndarray,
+    thresh: float = 3.0,
+) -> tuple:
+    """Greedy nearest-neighbor matches of reprojected points to detections.
+
+    For each VALID reprojected source point, the nearest destination detection
+    within ``thresh`` pixels is its match (greedy, non-mutual -- the
+    repeatability convention, not the matcher convention). This answers "do the
+    keypoints warp": a detector covariant with the homography scores near 1.
+
+    :param src_warped: ``(M, 2)`` source points mapped into the target frame.
+    :param src_valid: ``(M,)`` bool (warped-out / horizon-invalid excluded).
+    :param dst: ``(N, 2)`` target-frame detections (may be empty).
+    :param thresh: Maximum match distance in pixels (strict ``<``).
+    :return: ``(matches0 (M,) int with -1, scores0 (M,) float in [0, 1],
+        repeatability float)``; repeatability is matched / valid, 0 when no
+        valid source point. Scores are ``1 - dist / thresh``.
+    """
+    src = np.asarray(src_warped, dtype=np.float32).reshape(-1, 2)
+    valid = np.asarray(src_valid, dtype=bool).reshape(-1)
+    pts = np.asarray(dst, dtype=np.float32).reshape(-1, 2)
+    matches = -np.ones(len(src), dtype=np.int64)
+    scores = np.zeros(len(src), dtype=np.float32)
+    if not valid.any() or len(pts) == 0:
+        return matches, scores, 0.0
+    dist = np.sqrt(((src[valid, None, :] - pts[None, :, :]) ** 2).sum(-1))
+    nn = np.argmin(dist, axis=1)
+    best = dist[np.arange(dist.shape[0]), nn]
+    hit = best < thresh
+    idx = np.nonzero(valid)[0][hit]
+    matches[idx] = nn[hit]
+    scores[idx] = 1.0 - best[hit] / thresh
+    return matches, scores, float(hit.mean())
 
 
 class LightGlueVizCallback(keras.callbacks.Callback):

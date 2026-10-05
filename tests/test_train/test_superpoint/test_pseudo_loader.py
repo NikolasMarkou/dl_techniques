@@ -136,13 +136,18 @@ class TestPseudoPairGeneratorContract:
 
         items = list(itertools.islice(_pseudo_pair_generator(config), 4))
         assert len(items) == 4
-        for image, warped, grid_label, corr in items:
+        for image, warped, grid_label, warped_label, h_mat, corr in items:
             assert image.shape == (INPUT_SIZE, INPUT_SIZE, 1)
             assert image.dtype == np.float32
             assert warped.shape == (INPUT_SIZE, INPUT_SIZE, 1)
             assert warped.dtype == np.float32
             assert grid_label.shape == (HC, HC)
             assert grid_label.dtype == np.int32
+            assert warped_label.shape == (HC, HC)
+            assert warped_label.dtype == np.int32
+            assert set(np.unique(warped_label)).issubset(set(range(65)))
+            assert h_mat.shape == (3, 3)
+            assert h_mat.dtype == np.float32
             assert corr.shape == (N, N)
             assert corr.dtype == np.float32
 
@@ -152,7 +157,7 @@ class TestPseudoPairGeneratorContract:
 
         # First yielded entry is img0 (idx starts at 0, entries in write order).
         first = next(_pseudo_pair_generator(config))
-        _, _, grid_label, _ = first
+        _, _, grid_label, _, _, _ = first
         assert np.array_equal(grid_label, grid_labels["img0"])
 
     def test_wraparound_cycles_entries(self, tmp_path):
@@ -200,10 +205,20 @@ class TestPseudoPipelineContract:
         assert tuple(keypoints.shape) == (4, HC, HC)
         assert keypoints.dtype == tf.int32
 
+        # warped_keypoints: (B, Hc, Wc) i32
+        warped_keypoints = targets["warped_keypoints"]
+        assert tuple(warped_keypoints.shape) == (4, HC, HC)
+        assert warped_keypoints.dtype == tf.int32
+
         # warped_image: (B, H, W, 1) f32
         warped = targets["warped_image"]
         assert tuple(warped.shape) == (4, INPUT_SIZE, INPUT_SIZE, 1)
         assert warped.dtype == tf.float32
+
+        # homography: (B, 3, 3) f32
+        h_mat = targets["homography"]
+        assert tuple(h_mat.shape) == (4, 3, 3)
+        assert h_mat.dtype == tf.float32
 
         # correspondence: (B, N, N) f32  with N = Hc*Wc
         corr = targets["correspondence"]
