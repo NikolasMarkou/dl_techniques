@@ -26,6 +26,7 @@ from unittest import mock
 
 from dl_techniques.models.language.mamba import Mamba
 from dl_techniques.layers.ssm.selective_ssm import MambaLayer
+from dl_techniques.models.common.masked_language_model import CausalLanguageModel
 
 from ..knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,
@@ -1163,9 +1164,10 @@ class TestMambaComparison:
 class TestMambaCausalLanguageModelSurface:
     """Test the two additive members `CausalLanguageModel` needs from a backbone.
 
-    Mirrors `Mamba2`'s D-009 fix (plan-2026-09-12T195532-422091c3), ported here as
-    D-012 (plan-2026-09-13T073704-245ab5d5) -- see the `# DECISION` anchor at
-    `mamba_v1.py`'s `get_embedding_matrix` for the mechanism.
+    The embedding matrix used to come from a per-model
+    `get_embedding_matrix()` adapter (D-012); `CausalLanguageModel` now
+    locates the singular `embedding` attribute generically, so these tests
+    pin the tying behavior at its new home instead of the deleted method.
     """
 
     def test_hidden_size_aliases_d_model(self):
@@ -1178,40 +1180,46 @@ class TestMambaCausalLanguageModelSurface:
         _ = model({"input_ids": input_ids}, training=False)
         assert model.hidden_size == 256
 
-    def test_get_embedding_matrix_shape_and_identity(self):
-        """The returned matrix must be `(vocab_size, d_model)` and the real embedding weight."""
-        model = Mamba(vocab_size=500, d_model=128, num_layers=2, d_state=8)
+    def test_clm_ties_mamba_embedding(self):
+        """CLM must tie to the backbone table without any adapter method."""
+        backbone = Mamba(vocab_size=500, d_model=128, num_layers=2, d_state=8)
+        assert not hasattr(backbone, "get_embedding_matrix")
+        clm = CausalLanguageModel(backbone=backbone, vocab_size=500)
+        clm.build((None, 8))
 
-        matrix = model.get_embedding_matrix()
-        assert tuple(matrix.shape) == (500, 128)
-        # Must be the actual `embedding.embeddings` weight, not a copy -- so
-        # mutating one is reflected in the other (this is what makes it usable
-        # for external weight tying).
-        assert matrix is model.embedding.embeddings
+        assert clm.use_weight_tying is True
+        # Must be the actual `embedding.embeddings` weight, not a copy --
+        # mutating one is reflected in the other.
+        assert clm.embedding_weights is backbone.embedding.embeddings
+        assert tuple(clm.embedding_weights.shape) == (500, 128)
 
-    def test_get_embedding_matrix_before_call_builds_the_embedding(self):
-        """Calling before any forward pass must still return a real, built matrix.
+    def test_clm_ties_before_any_forward(self):
+        """Tying must engage even when the backbone never ran forward.
 
-        `Mamba.build()` (via `materialize_sublayers`) already builds `self.embedding`
-        as a side effect, so this exercises that path rather than the defensive
-        `if not self.embedding.built` guard directly -- both must produce the same
-        observable result: a built embedding layer with the right shape.
+        Without the unbuilt-`Embedding` guard in the generic probe, the
+        lookup finds no variables and silently unties here.
         """
-        model = Mamba(vocab_size=200, d_model=64, num_layers=1, d_state=4)
-        assert not model.embedding.built
+        backbone = Mamba(vocab_size=200, d_model=64, num_layers=1, d_state=4)
+        assert not backbone.embedding.built
 
-        matrix = model.get_embedding_matrix()
-        assert model.embedding.built
-        assert tuple(matrix.shape) == (200, 64)
+        clm = CausalLanguageModel(backbone=backbone, vocab_size=200)
+        clm.build((None, 8))
 
-    def test_get_embedding_matrix_matches_embedding_lookup(self):
-        """The returned matrix must be numerically the same table `call()` indexes into."""
-        model = Mamba(vocab_size=100, d_model=32, num_layers=1, d_state=4)
+        assert backbone.embedding.built
+        assert clm.use_weight_tying is True
+        assert tuple(clm.embedding_weights.shape) == (200, 64)
+
+    def test_tied_weights_match_embedding_lookup(self):
+        """The tied matrix must be numerically the table `call()` indexes."""
+        backbone = Mamba(vocab_size=100, d_model=32, num_layers=1, d_state=4)
         input_ids = keras.ops.array([[3, 7, 42]], dtype="int32")
-        _ = model({"input_ids": input_ids}, training=False)
+        _ = backbone({"input_ids": input_ids}, training=False)
 
-        matrix = keras.ops.convert_to_numpy(model.get_embedding_matrix())
-        direct = keras.ops.convert_to_numpy(model.embedding(input_ids))
+        clm = CausalLanguageModel(backbone=backbone, vocab_size=100)
+        clm.build((None, 3))
+
+        matrix = keras.ops.convert_to_numpy(clm.embedding_weights)
+        direct = keras.ops.convert_to_numpy(backbone.embedding(input_ids))
         expected = matrix[keras.ops.convert_to_numpy(input_ids)]
 
         np.testing.assert_allclose(direct, expected, rtol=1e-6, atol=1e-6)

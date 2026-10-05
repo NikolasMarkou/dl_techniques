@@ -19,11 +19,13 @@ fixes): ``Mamba`` gained a ``hidden_size`` property alias for ``d_model``
 (``CausalLanguageModel.__init__`` requires the attribute when
 ``skip_head=False``), and a ``get_embedding_matrix()`` method (the weight-
 tying lookup chain's FIRST check) so ``config.tie_word_embeddings=True``
-genuinely ties rather than silently falling back to an untied ``Dense``. See
-``mamba_v1.py``'s ``# DECISION plan-2026-09-13T073704-245ab5d5/D-012``
-anchor for the mechanism, and this plan's ``decisions.md`` D-012 for the
-verification (both members read against ``mamba_v2.py``'s already-proven
-implementation before porting).
+genuinely ties rather than silently falling back to an untied ``Dense``. The
+adapter is since deleted (SUPERSEDED 2026-10-05: the chain probes the
+singular `embedding` attribute generically); the historical anchor was at
+``mamba_v1.py`` ``# DECISION plan-2026-09-13T073704-245ab5d5/D-012`` -- see
+that plan's ``decisions.md`` D-012 for the verification as run then (both
+members read against ``mamba_v2.py``'s already-proven implementation
+before porting).
 
 ``Mamba.MODEL_VARIANTS`` already lists ``"base"`` as a first-class key (no
 separate ``VARIANT_ALIASES`` dict the way ``Mamba2`` has one) -- confirmed by

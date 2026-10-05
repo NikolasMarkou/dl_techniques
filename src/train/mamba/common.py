@@ -38,6 +38,8 @@ tying silently fell back to an untied ``Dense`` regardless of the flag), and
 D-009 fixed it by adding ``Mamba2.get_embedding_matrix()`` (the lookup
 chain's FIRST check) rather than leaving it as documented debt -- see
 ``plans/plan-2026-09-12T195532-422091c3/decisions.md`` D-008/D-009.
+SUPERSEDED 2026-10-05: the adapter is deleted; the lookup chain now
+probes the singular `embedding` attribute generically.
 
 **No ``ClmPretrainConfig``/``load_train_val_datasets`` reuse.** That
 wrapper wraps every label tensor as ``{"logits": y}`` because its four
@@ -686,6 +688,9 @@ def build_datasets(
 # `Mamba2.get_embedding_matrix()` (see mamba_v2.py); genuine weight tying is
 # restored as of that commit, not merely documented as a known gap. See
 # decisions.md D-008/D-009.
+# SUPERSEDED 2026-10-05: the adapter is deleted; `CausalLanguageModel`
+# probes the singular `embedding` attribute generically (with the same
+# unbuilt-Embedding guard), so tying engages with no per-model method.
 def build_optimizer(
         config: Mamba2TrainingConfig,
         steps_per_epoch: int,

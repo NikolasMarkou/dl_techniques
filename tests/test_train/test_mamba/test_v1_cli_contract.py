@@ -16,8 +16,9 @@ things it exists to catch:
 Plus one cheap, fast build check (not a training run): ``build_model``
 constructs a real, tiny ``Mamba`` (v1) backbone wrapped in
 ``CausalLanguageModel`` -- proving the headless-backbone wiring (this plan's
-D-012 ``hidden_size``/``get_embedding_matrix`` port) actually produces a
-model, without running ``fit()`` or touching a dataset/GPU.
+D-012 ``hidden_size`` port; the accompanying ``get_embedding_matrix``
+adapter is since deleted, tying now resolved generically) actually
+produces a model, without running ``fit()`` or touching a dataset/GPU.
 
 Nothing here trains, allocates a GPU, reads the Wikipedia cache, or writes
 into the repo-root ``results/``.

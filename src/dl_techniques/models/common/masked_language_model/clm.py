@@ -442,6 +442,29 @@ class CausalLanguageModel(keras.Model):
             if located is not None:
                 return located
 
+        # Singular `embedding` (Mamba v1/v2, TreeTransformer, Zamba2): a bare
+        # keras.layers.Embedding carrying the (vocab, hidden) matrix. This
+        # rule replaces the per-model get_embedding_matrix() adapters
+        # (ex-Mamba D-009/D-012): the shape-match inside
+        # _embedding_variable_of identifies the matrix without any
+        # name-specific weight access. Probed after `token_embeddings` so an
+        # explicit plural still wins. The unbuilt-guard below moves with the
+        # rule: without it an unbuilt Embedding yields no variables and the
+        # lookup silently unties (Mamba v2 defines no build() override, so
+        # CLM.build's backbone.build() alone does not build it).
+        embedding = getattr(self.backbone, "embedding", None)
+        if embedding is not None:
+            if hasattr(embedding, "build") and not getattr(
+                embedding, "built", True
+            ):
+                try:
+                    embedding.build(None)
+                except Exception:  # noqa: BLE001 -- fall through to untied
+                    pass
+            located = self._embedding_variable_of(embedding)
+            if located is not None:
+                return located
+
         # Hugging Face nests the matrix under `embeddings`.
         embeddings = getattr(self.backbone, "embeddings", None)
         if embeddings is not None:
