@@ -34,7 +34,7 @@ Data loading, generation, and preprocessing utilities for various domains.
   - `arc_converters.py`, `arc_keras.py`, `arc_utilities.py`
 - `vision/` — Computer vision dataset loaders:
   - `coco.py` — COCO dataset, `coco_multitask_local.py` — local multi-task COCO
-    variant, `imagenet.py` — ImageNet, `common.py` — shared utilities
+    variant, `imagenet.py` — ImageNet
   - `tracking.py` — Siamese-tracker pair pipeline over COCO boxes
     (:func:`coco_tracking_generator`) or seeded synthetic targets
     (:func:`synthetic_tracking_generator`): context-square exemplar/search

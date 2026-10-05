@@ -365,5 +365,4 @@ duplicated.
 - `AGENTS.md` in this directory — module map and authoring rules.
 - `ssp/README.md` — the Spectrum-to-Signal Principle, its closed forms and its gotchas.
 - `metrics/README.md` — `pass@k` and the other pool-level metrics.
-- `train_vision/README.md` — the vision training pipeline built on these builders.
 - Tests: `tests/test_optimization/`.

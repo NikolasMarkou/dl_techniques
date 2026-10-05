@@ -192,5 +192,8 @@ Accept an `ax=None` kwarg if you want your plugin to be usable inside `create_da
 ## See also
 
 - `AGENTS.md` — module map.
-- `dl_techniques/optimization/train_vision/framework.py` — the largest in-repo consumer; a
-  working example of registering ~12 templates and driving them from a Keras callback.
+- `src/train/common/evaluation.py` — the largest remaining driver of this registry; a working
+  example of registering five templates against a `VisualizationManager`. It lives **outside**
+  this package on purpose, and there is currently no in-library caller of `register_template`
+  at all — the registry is public API driven entirely by the trainers in `src/train/`, so a
+  change here is only observable through one of them.

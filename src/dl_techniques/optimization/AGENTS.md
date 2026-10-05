@@ -38,8 +38,6 @@ from dl_techniques.optimization import (
 - `constants.py` — Optimization constants and defaults
 
 ### Subpackages
-- `train_vision/` — Vision training framework:
-  - `framework.py` — End-to-end vision training pipeline
 - `ssp/` — Spectrum-to-Signal Principle. Two phases, four operations, one config:
   - `spectrum.py` — pool profiling, per-subdomain specialist selection, coverage→sampler weights
   - `fusion.py` — weight schemes, linear + task-arithmetic fusion, greedy soup

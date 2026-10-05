@@ -115,9 +115,15 @@ def _find_norm_layers(
 class GradientNormCallback(keras.callbacks.Callback):
     """Log global gradient L2 norm per epoch on a fixed probe batch.
 
-    Adapts the pattern at ``src/dl_techniques/optimization/train_vision/
-    framework.py:506-519``. Lazily captures a probe batch from
-    ``calibration_data`` on the first ``on_epoch_end`` call.
+    Measuring a gradient norm needs a batch, and reaching into the live
+    training data for one would either perturb the run or force the trainer
+    to thread a batch through every epoch. So this captures ONE small fixed
+    probe batch from ``calibration_data`` and reuses it: each epoch end it
+    runs a fresh forward/backward under ``tf.GradientTape`` with
+    ``training=False`` and records ``global_norm``/``max_norm``. Because the
+    forward is inference-mode and no optimizer step follows it, the probe
+    never updates weights and never advances dropout, batchnorm or any other
+    training-time state — the measurement is strictly a spectator.
 
     Output CSV columns: ``epoch, grad_norm_global, grad_norm_max``.
 
