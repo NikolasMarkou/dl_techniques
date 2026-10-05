@@ -103,13 +103,15 @@ class HuberLoss(keras.losses.Loss):
         # Combine them using a threshold
         loss = ops.where(abs_error <= self.delta, quadratic, linear)
 
-        # Reduce over the FEATURE axis only, leaving the batch axis intact, so
-        # that `call()` returns one value per sample -- the same shape stock
-        # `keras.losses.Huber` returns. `keras.losses.Loss.__call__` multiplies
-        # by `sample_weight` BEFORE reducing, so a scalar returned here would
-        # broadcast and charge every row the batch aggregate, making both
-        # `sample_weight` and `reduction=` dead knobs.
-        return keras.ops.mean(loss, axis=-1)
+        # Reduce over ALL non-batch axes, leaving the batch axis intact, so
+        # that `call()` returns one value per sample. `axis=-1` is insufficient
+        # for rank > 2 inputs (e.g. (B, H, W, C) would return (B, H, W)).
+        # `keras.losses.Loss.__call__` multiplies by `sample_weight` BEFORE
+        # reducing, so a scalar returned here would broadcast and charge every
+        # row the batch aggregate, making both `sample_weight` and `reduction=`
+        # dead knobs.
+        non_batch_axes = tuple(range(1, len(loss.shape)))
+        return keras.ops.mean(loss, axis=non_batch_axes)
 
     def get_config(self) -> dict:
         """Get loss configuration."""

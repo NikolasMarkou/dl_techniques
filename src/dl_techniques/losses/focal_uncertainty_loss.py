@@ -232,8 +232,9 @@ class FocalUncertaintyLoss(keras.losses.Loss):
             probs = ops.softmax(y_pred, axis=-1)
         else:
             # Input is already probabilities, but clip for numerical stability
-            # Prevent log(0) by ensuring all probabilities are in [epsilon, 1-epsilon]
+            # then renormalize so rows still sum to 1 (cf. GoodhartAwareLoss).
             probs = ops.clip(y_pred, self.epsilon, 1.0 - self.epsilon)
+            probs = probs / ops.sum(probs, axis=-1, keepdims=True)
 
         # ============================================================================
         # CONDITIONAL ENTROPY H(Y|X) COMPUTATION
@@ -247,13 +248,12 @@ class FocalUncertaintyLoss(keras.losses.Loss):
 
         # Compute per-sample entropy: -∑ p_i * log(p_i) for each sample
         # Shape: (batch_size, num_classes) -> (batch_size,)
+        # NOTE: kept per-sample (not batch-averaged) so each row carries only
+        # its own entropy. The old ops.mean-first form returned the correct
+        # shape but charged w=0 rows the batch entropy.
         conditional_entropy_per_sample = -ops.sum(
             probs * ops.log(probs + self.epsilon), axis=-1
         )
-
-        # Average across the batch to get mean conditional entropy
-        # Shape: (batch_size,) -> scalar
-        h_conditional = ops.mean(conditional_entropy_per_sample)
 
         # ============================================================================
         # LOSS COMBINATION: MINIMIZE FOCAL LOSS, MAXIMIZE CONDITIONAL ENTROPY
@@ -269,10 +269,13 @@ class FocalUncertaintyLoss(keras.losses.Loss):
         # - Uncertainty regularization prevents overconfident predictions
         # - The combination improves both accuracy and calibration
 
-        uncertainty_regularization = self.uncertainty_weight * h_conditional
+        uncertainty_regularization = (
+            self.uncertainty_weight * conditional_entropy_per_sample
+        )
 
         # Combine focal loss with uncertainty regularization
         # Subtract regularization term to maximize entropy (minimize negative entropy)
+        # Both terms are (batch,); batch mean matches the old mean-first form.
         total_loss = focal_loss - uncertainty_regularization
 
         return total_loss

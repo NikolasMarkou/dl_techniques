@@ -10,7 +10,6 @@ from keras import ops
 from dl_techniques.losses.multi_labels_loss import (
     PerChannelBinaryLoss,
     WeightedBinaryFocalLoss,
-    DiceLossPerChannel,
     create_multilabel_segmentation_loss,
 )
 from tests.optimizer_state import build_optimizer_state
@@ -97,71 +96,6 @@ class TestWeightedBinaryFocalLoss:
         assert restored.alpha == 0.3
         assert restored.gamma == 1.5
         assert restored.from_logits is True
-
-
-class TestDiceLossPerChannel:
-    """Tests for DiceLossPerChannel."""
-
-    def test_output_is_scalar(self):
-        """Dice loss should return a scalar."""
-        loss_fn = DiceLossPerChannel(smooth=1.0)
-        y_true = keras.random.uniform((2, 8, 8, 3), minval=0, maxval=1)
-        y_true = ops.cast(y_true > 0.5, "float32")
-        y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9)
-
-        loss_val = loss_fn.call(y_true, y_pred)
-
-        assert ops.shape(loss_val) == ()
-
-    def test_loss_range(self):
-        """Dice loss should be in [0, 1]."""
-        loss_fn = DiceLossPerChannel(smooth=1.0)
-        y_true = keras.random.uniform((4, 16, 16, 5), minval=0, maxval=1)
-        y_true = ops.cast(y_true > 0.5, "float32")
-        y_pred = keras.random.uniform((4, 16, 16, 5), minval=0.0, maxval=1.0)
-
-        loss_val = float(loss_fn.call(y_true, y_pred))
-
-        assert 0.0 <= loss_val <= 1.0
-
-    def test_perfect_overlap(self):
-        """Perfect overlap should yield loss close to 0."""
-        loss_fn = DiceLossPerChannel(smooth=1e-7)
-        y_true = ops.ones((2, 8, 8, 2))
-        y_pred = ops.ones((2, 8, 8, 2))
-
-        loss_val = float(loss_fn.call(y_true, y_pred))
-
-        assert loss_val < 0.01
-
-    def test_no_overlap(self):
-        """No overlap should yield loss close to 1."""
-        loss_fn = DiceLossPerChannel(smooth=1e-7)
-        y_true = ops.ones((2, 8, 8, 2))
-        y_pred = ops.zeros((2, 8, 8, 2))
-
-        loss_val = float(loss_fn.call(y_true, y_pred))
-
-        assert loss_val > 0.99
-
-    def test_smooth_prevents_nan(self):
-        """Smooth factor should prevent NaN with zero inputs."""
-        loss_fn = DiceLossPerChannel(smooth=1.0)
-        y_true = ops.zeros((2, 8, 8, 2))
-        y_pred = ops.zeros((2, 8, 8, 2))
-
-        loss_val = loss_fn.call(y_true, y_pred)
-
-        assert not np.isnan(float(loss_val))
-
-    def test_serialization(self):
-        """Test get_config and from_config."""
-        loss_fn = DiceLossPerChannel(smooth=0.5)
-        config = loss_fn.get_config()
-
-        restored = DiceLossPerChannel.from_config(config)
-
-        assert restored.smooth == 0.5
 
 
 class TestPerChannelBinaryLoss:
@@ -299,7 +233,8 @@ class TestCreateMultilabelSegmentationLoss:
             smooth=0.5
         )
 
-        assert isinstance(loss_fn, DiceLossPerChannel)
+        # New implementation uses a thin wrapper around shared backend
+        assert hasattr(loss_fn, 'smooth')
         assert loss_fn.smooth == 0.5
 
     def test_bce_loss_creation(self):
@@ -398,7 +333,7 @@ class TestModelSaveLoad:
 
     def test_save_load_with_dice_loss(self, tmp_path):
         """Test model save/load with dice loss."""
-        loss_fn = DiceLossPerChannel(smooth=0.5)
+        loss_fn = create_multilabel_segmentation_loss(loss_type='dice', smooth=0.5)
 
         inputs = keras.layers.Input(shape=(16, 16, 3))
         x = keras.layers.Conv2D(8, 3, padding='same', activation='relu')(inputs)
@@ -449,7 +384,7 @@ class TestNumericalStability:
 
     def test_dice_loss_all_zeros_prediction(self):
         """Test dice loss with all zeros prediction."""
-        loss_fn = DiceLossPerChannel(smooth=1.0)
+        loss_fn = create_multilabel_segmentation_loss(loss_type='dice', smooth=1.0)
         y_true = ops.ones((2, 8, 8, 2))
         y_pred = ops.zeros((2, 8, 8, 2))
 
@@ -493,7 +428,7 @@ class TestGradientFlow:
         """Verify gradients flow through dice loss."""
         import tensorflow as tf
 
-        loss_fn = DiceLossPerChannel(smooth=1.0)
+        loss_fn = create_multilabel_segmentation_loss(loss_type='dice', smooth=1.0)
         y_true = ops.ones((2, 4, 4, 2))
         y_pred = tf.Variable(ops.ones((2, 4, 4, 2)) * 0.5)
 

@@ -10,6 +10,13 @@ objects, independent attributes).
 The core component is ``PerChannelBinaryLoss``, which allows computing
 losses independently per channel and aggregating them using adaptive weights
 based on class presence, stabilizing training for imbalanced datasets.
+
+``WeightedBinaryFocalLoss`` is a two-sided focal loss (positive + negative
+terms) that returns element-wise values for the wrapper to reduce.
+
+Dice loss for multi-label is now provided by the shared backend in
+``segmentation_metrics.dice_per_sample`` (and ``dice_scalar`` for batch-mean
+compatibility). The old ``DiceLossPerChannel`` class was removed as a duplicate.
 """
 
 import keras
@@ -21,8 +28,11 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.losses.segmentation_metrics import dice_per_sample, dice_scalar
+
 
 # ---------------------------------------------------------------------
+
 
 @register_dl_technique("dl_techniques.losses.multi_labels_loss")
 class PerChannelBinaryLoss(keras.losses.Loss):
@@ -38,7 +48,7 @@ class PerChannelBinaryLoss(keras.losses.Loss):
     The adaptive weighting formula is:
 
     .. math::
-        w_c = \\sqrt{\\frac{\\text{count}_c}{\\text{total\\_pixels}}} + 0.1
+        w_c = \sqrt{\frac{\text{count}_c}{\text{total\_pixels}}} + 0.1
 
     This ensures that rare classes are not completely overwhelmed but also
     prevents common classes from dominating the gradient purely by volume.
@@ -193,6 +203,7 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
+
 @register_dl_technique("dl_techniques.losses.multi_labels_loss")
 class WeightedBinaryFocalLoss(keras.losses.Loss):
     """
@@ -201,7 +212,7 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
     The Focal Loss formula is defined as:
 
     .. math::
-        FL(p_t) = -\\alpha (1 - p_t)^{\\gamma} \\log(p_t)
+        FL(p_t) = -\alpha (1 - p_t)^{\gamma} \log(p_t)
 
     This implementation returns the element-wise loss (no reduction) to allow
     wrappers (like :class:`PerChannelBinaryLoss`) to handle adaptive weighting
@@ -293,25 +304,19 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
+
 @register_dl_technique("dl_techniques.losses.multi_labels_loss")
 class DiceLossPerChannel(keras.losses.Loss):
     """
-    Dice Loss applied per channel for multi-label segmentation.
+    Dice Loss for multi-label segmentation using the shared backend.
 
-    The Dice Coefficient is defined as:
-
-    .. math::
-        Dice = \\frac{2 |X \\cap Y|}{|X| + |Y| + \\epsilon}
-
-    The loss is defined as :math:`1 - Dice`. This implementation computes
-    the metric for each channel over the spatial dimensions and the batch,
-    then averages the results.
+    This is a thin wrapper around ``segmentation_metrics.dice_scalar`` that
+    provides a serializable Keras Loss class.
 
     Parameters
     ----------
     smooth : float, default=1.0
-        Smoothing factor (Laplace smoothing) to avoid division by zero
-        and reduce overfitting.
+        Smoothing factor (Laplace smoothing) to avoid division by zero.
     reduction : str, default='sum_over_batch_size'
         Standard Keras loss reduction argument.
     name : str, default='dice_loss_per_channel'
@@ -330,7 +335,7 @@ class DiceLossPerChannel(keras.losses.Loss):
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Compute Dice loss.
+        Compute Dice loss using shared per-sample backend.
 
         Parameters
         ----------
@@ -344,34 +349,7 @@ class DiceLossPerChannel(keras.losses.Loss):
         keras.KerasTensor
             Scalar loss value.
         """
-        y_true = ops.cast(y_true, "float32")
-        y_pred = ops.cast(y_pred, "float32")
-
-        # Get shape info
-        input_shape = ops.shape(y_true)
-        batch_size = input_shape[0]
-        num_channels = input_shape[-1]
-
-        # Flatten spatial dimensions but keep batch and channels separate
-        # Target Shape: (batch, height*width, channels)
-        y_true_flat = ops.reshape(y_true, (batch_size, -1, num_channels))
-        y_pred_flat = ops.reshape(y_pred, (batch_size, -1, num_channels))
-
-        # Compute per-channel intersection and union
-        # Sum over the spatial dimension (axis 1)
-        intersection = ops.sum(y_true_flat * y_pred_flat, axis=1)
-
-        # Denominator: sum(y_true) + sum(y_pred)
-        union = ops.sum(y_true_flat, axis=1) + ops.sum(y_pred_flat, axis=1)
-
-        # Compute Dice Coefficient
-        smooth_tensor = ops.convert_to_tensor(self.smooth, dtype="float32")
-        dice = (2.0 * intersection + smooth_tensor) / (union + smooth_tensor)
-
-        # Average over batch and channels to get scalar loss
-        dice_mean = ops.mean(dice)
-
-        return 1.0 - dice_mean
+        return dice_scalar(y_true, y_pred, from_logits=False, smooth=self.smooth)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -379,6 +357,7 @@ class DiceLossPerChannel(keras.losses.Loss):
         return config
 
 # ---------------------------------------------------------------------
+
 
 def create_multilabel_segmentation_loss(
     loss_type: str = 'focal',
@@ -395,7 +374,7 @@ def create_multilabel_segmentation_loss(
     loss_type : str
         Type of loss to create. Options:
         - 'focal': Weighted Binary Focal Loss (default)
-        - 'dice': Dice Loss
+        - 'dice': Dice Loss (uses shared per-sample backend)
         - 'bce': Standard Binary Crossentropy
         - 'weighted_bce': Binary Crossentropy with fixed positive class weighting
     alpha : float, default=0.75

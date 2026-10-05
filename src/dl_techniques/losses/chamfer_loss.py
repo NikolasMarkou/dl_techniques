@@ -17,7 +17,7 @@ class ChamferLoss(keras.losses.Loss):
         name: Name of the loss instance.
 
     Returns:
-        Scalar loss value representing the Chamfer distance.
+        Per-sample Chamfer distance of shape (batch_size,).
 
     Examples:
         >>> loss_fn = ChamferLoss()
@@ -29,15 +29,17 @@ class ChamferLoss(keras.losses.Loss):
     def __init__(
             self,
             reduction: str = "sum_over_batch_size",
-            name: str = "chamfer_loss"
+            name: str = "chamfer_loss",
+            **kwargs,
     ):
         """Initialize the ChamferLoss.
 
         Args:
             reduction: Type of reduction to apply to the loss.
             name: Name of the loss instance.
+            **kwargs: Additional keyword arguments (e.g. dtype).
         """
-        super().__init__(reduction=reduction, name=name)
+        super().__init__(reduction=reduction, name=name, **kwargs)
 
     def call(
             self,
@@ -66,6 +68,10 @@ class ChamferLoss(keras.losses.Loss):
         chamfer_dist = keras.ops.mean(dist_1, axis=-1) + keras.ops.mean(dist_2, axis=-1)
 
         return chamfer_dist
+
+    def get_config(self) -> dict:
+        """Return configuration for serialization."""
+        return super().get_config()
 
 # ---------------------------------------------------------------------
 

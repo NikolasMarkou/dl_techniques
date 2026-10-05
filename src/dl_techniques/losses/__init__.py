@@ -124,6 +124,15 @@ from .hrm_loss import HRMLoss, StableMaxCrossEntropy, create_hrm_loss
 
 from .huber_loss import HuberLoss
 
+from .image_restoration_loss import (
+    CharbonnierLoss,
+    FrequencyLoss,
+    EdgeLoss,
+    VGGLoss,
+    EnhanceLoss,
+    DarkIRCompositeLoss,
+)
+
 # from .infonce_loss
 from .infonce_loss import (
     SymmetricInfoNCELoss,
@@ -135,6 +144,13 @@ from .lpips_loss import LPIPSLoss
 from .harmonic_loss import HarmonicCausalLMLoss, harmonic_logits
 from .masked_causal_lm_loss import MaskedCausalLMLoss, PrefixMaskedCausalLMLoss
 from .mase_loss import MASELoss, mase_metric
+
+from .multi_labels_loss import (
+    PerChannelBinaryLoss,
+    WeightedBinaryFocalLoss,
+    DiceLossPerChannel,
+    create_multilabel_segmentation_loss,
+)
 
 from .multistep_loss import (
     MULTISTEP_AGGREGATIONS,
@@ -239,6 +255,9 @@ from .yolo12_multitask_loss import (
     create_yolov12_crack_loss,
 )
 
+# from .clifford_detection_loss
+from .clifford_detection_loss import CliffordDetectionLoss
+
 # from .omnipoint_losses
 from .omnipoint_losses import (
     RayDirectionLoss,
@@ -250,6 +269,18 @@ from .omnipoint_losses import (
     OmniPointCombinedLoss,
     compute_optimal_scale,
 )
+
+# from .chamfer_loss
+from .chamfer_loss import ChamferLoss
+
+# from .sam2_video_loss
+from .sam2_video_loss import SAM2GatedMaskLoss, mask_presence_gate
+
+# from .sam3_detection_loss
+from .sam3_detection_loss import Sam3DetectionLoss
+
+# from .sparsemax_loss
+from .sparsemax_loss import SparsemaxLoss
 
 
 # Define __all__ for a clean public API
@@ -411,6 +442,8 @@ __all__ = [
     "create_yolov12_multitask_loss",
     "create_yolov12_coco_loss",
     "create_yolov12_crack_loss",
+    # clifford_detection_loss
+    "CliffordDetectionLoss",
     # omnipoint_losses
     "RayDirectionLoss",
     "PointDistanceLoss",
@@ -420,4 +453,25 @@ __all__ = [
     "LocalConsistencyLoss",
     "OmniPointCombinedLoss",
     "compute_optimal_scale",
+    # chamfer_loss
+    "ChamferLoss",
+    # sam2_video_loss
+    "SAM2GatedMaskLoss",
+    "mask_presence_gate",
+    # sam3_detection_loss
+    "Sam3DetectionLoss",
+    # sparsemax_loss
+    "SparsemaxLoss",
+    # image_restoration_loss
+    "CharbonnierLoss",
+    "FrequencyLoss",
+    "EdgeLoss",
+    "VGGLoss",
+    "EnhanceLoss",
+    "DarkIRCompositeLoss",
+    # multi_labels_loss
+    "PerChannelBinaryLoss",
+    "WeightedBinaryFocalLoss",
+    "DiceLossPerChannel",
+    "create_multilabel_segmentation_loss",
 ]

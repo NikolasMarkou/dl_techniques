@@ -11,6 +11,12 @@ Key Features:
     - Configurable parameters for each loss function
     - Comprehensive documentation and examples
     - Memory-efficient tensor operations
+
+The core per-sample metric implementations live in ``segmentation_metrics.py``;
+this module provides the ``LossConfig`` dataclass, the ``SegmentationLosses``
+calculator class (which returns scalar batch means for SAM compatibility), and
+the legacy ``create_loss_function`` factory (deprecated, use
+``SegmentationWrapperLoss`` directly).
 """
 
 import dataclasses
@@ -25,6 +31,16 @@ from typing import Optional, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# Import the per-sample backend; SegmentationLosses uses the *_scalar variants
+# to preserve the historical scalar (batch-mean) behavior required by SAM.
+from dl_techniques.losses.segmentation_metrics import (
+    dice_scalar,
+    tversky_scalar,
+    focal_tversky_scalar,
+    focal_scalar,
+    cross_entropy_scalar,
+)
 
 # ---------------------------------------------------------------------
 
@@ -181,19 +197,7 @@ class SegmentationLosses:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred, weights)
-        y_true = ops.cast(y_true, "float32")
-
-        # Add epsilon to prevent log(0)
-        epsilon = 1e-7
-        y_pred = ops.clip(y_pred, epsilon, 1.0 - epsilon)
-
-        ce_loss = -ops.sum(y_true * ops.log(y_pred), axis=-1)
-
-        if weights is not None:
-            weights = ops.cast(weights, "float32")
-            ce_loss = ce_loss * ops.sum(y_true * weights, axis=-1)
-
-        return ops.mean(ce_loss)
+        return cross_entropy_scalar(y_true, y_pred, weights, from_logits=False)
 
     def dice_loss(
             self,
@@ -216,28 +220,23 @@ class SegmentationLosses:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = ops.cast(y_true, "float32")
-
-        numerator = 2 * ops.sum(y_true * y_pred, axis=[1, 2])
-        denominator = (
-                ops.sum(y_true, axis=[1, 2]) +
-                ops.sum(y_pred, axis=[1, 2])
-        )
-
-        dice_coef = (numerator + self.config.smooth_factor) / (
-                denominator + self.config.smooth_factor
-        )
-        return 1.0 - ops.mean(dice_coef)
+        return dice_scalar(y_true, y_pred, from_logits=False, smooth=self.config.smooth_factor)
 
     def focal_loss(
             self,
             y_true: Any,
             y_pred: Any
     ) -> Any:
-        """Implement Focal loss.
+        """Implement Focal loss (single-sided, SAM-compatible version).
 
-        Focal loss addresses class imbalance by down-weighting easy examples
-        and focusing on hard examples.
+        This is the legacy single-sided focal loss that only computes the
+        positive class term: -alpha * (1-p)^gamma * log(p). It ignores the
+        negative class term -(1-alpha) * p^gamma * log(1-p).
+
+        This version is kept for SAM 1 compatibility (SAMMaskLoss uses it).
+        For the mathematically correct two-sided version, use
+        ``segmentation_metrics.focal_scalar`` or the AnyLoss framework's
+        ``FocalTverskyLoss`` / custom focal wrappers.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
@@ -282,22 +281,13 @@ class SegmentationLosses:
             ValueError: If input tensors have invalid shapes
         """
         self._validate_inputs(y_true, y_pred)
-        y_true = ops.cast(y_true, "float32")
-
-        numerator = ops.sum(y_true * y_pred, axis=[1, 2])
-        false_positives = ops.sum((1 - y_true) * y_pred, axis=[1, 2])
-        false_negatives = ops.sum(y_true * (1 - y_pred), axis=[1, 2])
-
-        denominator = (
-                numerator +
-                self.config.tversky_alpha * false_positives +
-                self.config.tversky_beta * false_negatives
+        return tversky_scalar(
+            y_true, y_pred,
+            alpha=self.config.tversky_alpha,
+            beta=self.config.tversky_beta,
+            from_logits=False,
+            smooth=self.config.smooth_factor,
         )
-
-        tversky_coef = (numerator + self.config.smooth_factor) / (
-                denominator + self.config.smooth_factor
-        )
-        return 1.0 - ops.mean(tversky_coef)
 
     def focal_tversky_loss(
             self,
@@ -319,25 +309,14 @@ class SegmentationLosses:
         Raises:
             ValueError: If input tensors have invalid shapes
         """
-        # Calculate Tversky coefficient first
-        y_true_cast = ops.cast(y_true, "float32")
-        numerator = ops.sum(y_true_cast * y_pred, axis=[1, 2])
-        false_positives = ops.sum((1 - y_true_cast) * y_pred, axis=[1, 2])
-        false_negatives = ops.sum(y_true_cast * (1 - y_pred), axis=[1, 2])
-
-        denominator = (
-                numerator +
-                self.config.tversky_alpha * false_positives +
-                self.config.tversky_beta * false_negatives
+        return focal_tversky_scalar(
+            y_true, y_pred,
+            alpha=self.config.tversky_alpha,
+            beta=self.config.tversky_beta,
+            gamma=self.config.focal_tversky_gamma,
+            from_logits=False,
+            smooth=self.config.smooth_factor,
         )
-
-        tversky_coef = (numerator + self.config.smooth_factor) / (
-                denominator + self.config.smooth_factor
-        )
-
-        # Apply focal mechanism
-        focal_tversky = ops.power(1.0 - tversky_coef, self.config.focal_tversky_gamma)
-        return ops.mean(focal_tversky)
 
     def lovasz_softmax_loss(
             self,
@@ -558,6 +537,12 @@ def create_loss_function(
 ) -> keras.losses.Loss:
     """Create a Keras loss function from the specified loss.
 
+    .. deprecated:: 2026
+        Use :class:`dl_techniques.losses.SegmentationWrapperLoss` directly
+        or :func:`dl_techniques.losses.create_segmentation_wrapper_loss`
+        instead. This factory is a backward-compat shim and will be removed
+        in a future release.
+
     Args:
         loss_name: Name of the loss function to create. Available options:
             'cross_entropy', 'dice', 'focal', 'tversky', 'focal_tversky',
@@ -575,6 +560,16 @@ def create_loss_function(
         >>> loss_fn = create_loss_function('focal', config)
         >>> model.compile(optimizer='adam', loss=loss_fn)
     """
+    # DEPRECATED: this factory delegates to SegmentationWrapperLoss.
+    # Use SegmentationWrapperLoss or create_segmentation_wrapper_loss directly.
+    import warnings
+    warnings.warn(
+        "create_loss_function is deprecated; use SegmentationWrapperLoss "
+        "or create_segmentation_wrapper_loss directly",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     # DECISION plan_2026-05-10_17633038/D-002 — this factory now delegates to
     # `SegmentationWrapperLoss` (defined in `segmentation_wrapper_loss.py`).
     # Validation + ValueError on unknown `loss_name` lives there as the single

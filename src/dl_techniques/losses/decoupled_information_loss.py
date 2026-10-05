@@ -226,8 +226,10 @@ class DecoupledInformationLoss(keras.losses.Loss):
             probs = ops.softmax(y_pred, axis=-1)
         else:
             # Input is already probabilities, but clip for numerical stability
-            # Prevent log(0) by ensuring all probabilities are in [epsilon, 1-epsilon]
+            # Prevent log(0) by ensuring all probabilities are in [epsilon, 1-epsilon],
+            # then renormalize so rows still sum to 1 (cf. GoodhartAwareLoss).
             probs = ops.clip(y_pred, self.epsilon, 1.0 - self.epsilon)
+            probs = probs / ops.sum(probs, axis=-1, keepdims=True)
 
         # ============================================================================
         # COMPONENT 2: CONDITIONAL ENTROPY H(Y|X) COMPUTATION
@@ -238,13 +240,14 @@ class DecoupledInformationLoss(keras.losses.Loss):
 
         # Compute per-sample entropy: -∑ p_i * log(p_i) for each sample
         # Shape: (batch_size, num_classes) -> (batch_size,)
+        # NOTE: kept per-sample (not batch-averaged). The conditional term is
+        # exactly decomposable per row, so it rides inside the (batch,) vector.
+        # Only the marginal H(Y) diversity term below is irreducibly
+        # batch-level: it is a scalar broadcast into every row, so a w=0 row
+        # still carries the batch marginal. See GoodhartAwareLoss docs.
         conditional_entropy_per_sample = -ops.sum(
             probs * ops.log(probs + self.epsilon), axis=-1
         )
-
-        # Average across the batch to get mean conditional entropy
-        # Shape: (batch_size,) -> scalar
-        h_conditional = ops.mean(conditional_entropy_per_sample)
 
         # ============================================================================
         # COMPONENT 3: MARGINAL ENTROPY H(Y) COMPUTATION
@@ -275,10 +278,15 @@ class DecoupledInformationLoss(keras.losses.Loss):
         # - Maximizing H(Y|X) prevents overconfidence (uncertainty regularization)
         # - Maximizing H(Y) encourages diverse predictions (diversity regularization)
 
-        uncertainty_regularization = self.uncertainty_weight * h_conditional
+        uncertainty_regularization = (
+            self.uncertainty_weight * conditional_entropy_per_sample
+        )
         diversity_regularization = self.diversity_weight * h_marginal
 
         # Combine all components (subtract regularization terms to maximize entropy)
+        # ce_loss (batch,) - per-sample entropy (batch,) - broadcast scalar.
+        # Batch mean is unchanged vs the old mean-first form; row-selection
+        # via sample_weight is now exact at diversity_weight=0.
         total_loss = ce_loss - uncertainty_regularization - diversity_regularization
 
         return total_loss
