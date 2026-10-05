@@ -51,6 +51,10 @@ this bullet's edit, which only adds `fftnet/`.)
 - `super_resolution/pft_sr/` — super-resolution
 - `swin_transformer/` — Swin Transformer
 - `thera/` — THERA aliasing-free arbitrary-scale super-resolution
+- `topographic_vae/` — Topographic VAE (Keller & Welling 2022): a Student-t
+  topographic prior built from two Gaussian posteriors, with a temporal-coherence
+  window whose length biases the latent variables toward capsules that ROLL as the
+  input transforms
 - `vae/` — Variational Autoencoder with a ResNet encoder/decoder
 - `video_jepa/` — Video JEPA (joint embedding predictive)
 - `vit/` — Vision Transformer

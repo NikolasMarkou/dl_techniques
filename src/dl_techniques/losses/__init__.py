@@ -14,6 +14,7 @@ The collection includes losses for:
     - Self-Supervised Learning (CLIP, DINO, iBOT, SigLIP)
     - Information-Theoretic Regularization (Goodhart, DecoupledInformationLoss)
     - Generative Adversarial Networks (WassersteinLoss, WGAN-GP)
+    - Topographic Generative Models (TopographicVAELoss, the two-KL ELBO)
     - Specialized Architectures (Capsule Networks, YOLOv12, NanoVLM)
     - Computer Vision Tasks (Segmentation, Feature Alignment, Affine Invariance)
 
@@ -237,6 +238,13 @@ from .tabm_loss import TabMLoss
 
 from .utilization_loss import MANNUtilizationLoss, GNNUtilizationLoss
 
+# from .topographic_vae_loss
+from .topographic_vae_loss import (
+    TopographicVAELoss,
+    REQUIRED_PREDICTION_KEYS,
+    VARIANCE_PREDICTION_KEYS,
+)
+
 # from .wasserstein_loss
 from .wasserstein_loss import (
     WassersteinLoss,
@@ -430,6 +438,10 @@ __all__ = [
     # utilization_loss
     "MANNUtilizationLoss",
     "GNNUtilizationLoss",
+    # topographic_vae_loss
+    "TopographicVAELoss",
+    "REQUIRED_PREDICTION_KEYS",
+    "VARIANCE_PREDICTION_KEYS",
     # wasserstein_loss
     "WassersteinLoss",
     "WassersteinGradientPenaltyLoss",

@@ -1398,6 +1398,33 @@ def _b_hkan():
 _extra("hkan", _b_hkan, lambda: _f32(2, 3))
 
 
+def _b_topographic_vae():
+    """The Topographic VAE at the smallest geometry that runs its own paths.
+
+    The frame is 16x16 rather than the variant's 28x28 because the oracle
+    perturbs every weight and re-runs the forward, so the cost is quadratic in
+    the frame area for no extra coverage. ``use_variance_variables=True`` keeps
+    the ``TopographicProduct`` in the graph: the baseline mode removes a whole
+    subtree, and R-072's disabled-component arm is a separate table entry.
+    """
+    from dl_techniques.models.vision.topographic_vae import create_topographic_vae
+    return create_topographic_vae(
+        "mnist",
+        input_shape=(16, 16, 1),
+        sequence_length=6,
+        num_capsules=4,
+        capsule_dim=4,
+        coherence_window=2,
+        neighborhood_size=2,
+        encoder_hidden_dims=[16],
+        decoder_hidden_dims=[16],
+    )
+
+
+_extra("topographic_vae", _b_topographic_vae,
+       lambda: _f32(2, 6, 16, 16, 1))
+
+
 #: The one ``models/`` package with NO round-trip subject, and why. Its own
 #: ``__init__.py`` states it: "nothing subclasses ``keras.Model``, so there is
 #: nothing for a model factory to build". ``PowerSampler`` is a sampling

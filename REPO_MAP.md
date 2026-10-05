@@ -205,6 +205,15 @@ the `sam1` spelling (`sam2` and `sam3` do have same-named directories); and
 there binds the name `SAM2` at the family level and shadows the `sam2/` subpackage; that
 init's docstring carries the reasoning and the exact `ImportError`.
 
+**6. A model package may be tested by a loose file rather than a directory.**
+`vision/topographic_vae/` is the current example on the dataset side: its trainer's
+data-generation contract lives in `tests/test_datasets/test_transform_sequences.py`, because
+`dl_techniques/datasets/vision/transform_sequences.py` is the module that owns the split
+semantics the trainer depends on — `tests/test_train/test_topographic_vae/` covers the
+trainer, and `tests/test_models/test_topographic_vae/` the model. All three exist; the point
+is that the dataset's own suite is filed under `test_datasets/`, not duplicated under the
+model or the trainer.
+
 Nearly every leaf model package binds a `create_*` factory in its own `__init__.py`,
 declares a curated `__all__`, and carries a `README.md`. The exceptions that bind no factory
 are the four `time_series` leaves (`mdn`, `deepar`, `prism`, `tirex` — the family init

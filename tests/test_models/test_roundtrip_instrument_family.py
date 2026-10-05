@@ -124,6 +124,20 @@ STOCHASTIC_OUTPUT = {
     "vae": "calibrate",
     "sd3_mmdit": "calibrate",
     "relgt": "calibrate",
+    # Samples z AND u at inference, so a reproduction is sampled twice over, and
+    # the latent `t` is amplified by the topographic product's `1/sqrt(energy)`.
+    # MEASURED: self spread 5.24e+07 on `t` against 1.00e+00 on the
+    # reconstruction -- the sigmoid saturates, so the visible image looks nearly
+    # stable while the latent underneath is not -- and the round trip moved
+    # `t` by 4.49e+07, a ratio of 0.86 against that self spread. The oracle
+    # takes the MAX over leaves, so the latent's 5.24e+07 is the calibration
+    # base and `CALIBRATION_FACTOR` has ample headroom over 0.86.
+    #
+    # The number is enormous because the oracle PERTURBS every weight including
+    # the non-trainable window stack, and the product divides by the energy that
+    # stack defines. It is a property of the instrument, not of the model: an
+    # unperturbed instance's self spread is O(1) on the reconstruction.
+    "topographic_vae": "calibrate",
     # Not stochastic in the same sense: its own two calls agree to 9.31e-10, a
     # float32 reduction-order difference, so a fixed small bound is honest and
     # `calibrate` would be flaky at exactly 0.0.

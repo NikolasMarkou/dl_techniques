@@ -35,8 +35,8 @@ direct-child count, because those two nest one level further. Re-derive with the
 
 | Family | Leaves | What it holds |
 |---|---|---|
-| [`vision/`](vision/) | **48** | image backbones, detectors, segmenters, denoisers, generators |
-| [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
+| [`vision/`](vision/) | **50** | image backbones, detectors, segmenters, denoisers, generators |
+| [`language/`](language/) | 18 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
@@ -47,9 +47,9 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **102** | |
+| **Sum** | **105** | |
 
-### `vision/` (49)
+### `vision/` (50)
 
 | Package | |
 |---|---|
@@ -94,6 +94,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `super_resolution/pft_sr/` | PFT-SR progressive focused transformer |
 | `swin_transformer/` | Swin Transformer |
 | `thera/` | THERA aliasing-free arbitrary-scale super-resolution |
+| `topographic_vae/` | Topographic VAE (Keller & Welling 2022): Student-t topographic prior with temporal coherence, two Gaussian posteriors, capsule traversal |
 | `vae/` | Variational Autoencoder, ResNet encoder/decoder, Gaussian / hypersphere / vMF sampling |
 | `video_jepa/` | Video JEPA, joint embedding predictive |
 | `vit/` | Vision Transformer |

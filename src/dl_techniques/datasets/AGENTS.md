@@ -51,6 +51,21 @@ Data loading, generation, and preprocessing utilities for various domains.
     module scope.
   - `masked_patches.py` — `make_masked_patch_map_fn`, the per-sample
     `element_map_fn` for masked-image-modelling objectives
+  - `transform_sequences.py` — transformation SEQUENCES for the Topographic VAE
+    (Keller & Welling 2022 Sections A.8/A.9): MNIST over rotation / colour /
+    scale and dSprites over orientation / x / y / scale, each a sequence where
+    exactly one factor varies and the ground-truth value is returned alongside so
+    `metrics/topographic.py`'s CapCorr has something to correlate against. The
+    warps are **pure NumPy**: `gen_image_ops.image_projective_transform_v3` was
+    tried first and MEASURED non-deterministic in this build (three identical
+    processes returned sums of 0.0, 0.0 and then the correct value), so
+    `_affine_warp` / `_bilinear_sample` / `_hsl_to_rgb` replace it and
+    `tests/test_datasets/test_transform_sequences.py` guards the determinism
+    across processes. The dSprites `.npz` is cached under
+    `/media/arxwn/data0_4tb/datasets/dsprites/` and is **never deleted** — it
+    lives on a data volume, not in git, and re-downloading is 19 MB each time.
+    Its `latents_values` is an `(N, 6)` array of REAL values, not one-hot, and
+    there is no `color_values` key.
   - `multi_crop.py` — `make_multi_crop_map_fn`, the DINO multi-crop
     (2 global + N local views) `element_map_fn`; local views are rendered at the
     global pixel resolution, so `local_crop_size != global_crop_size` raises

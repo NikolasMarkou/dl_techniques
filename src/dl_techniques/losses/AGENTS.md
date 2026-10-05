@@ -19,7 +19,7 @@ from dl_techniques.losses import (
     BrierScoreLoss, SpiegelhalterZLoss, CombinedCalibrationLoss,
     BrierScoreMetric, SpiegelhalterZMetric,
     # Generative
-    WassersteinLoss,
+    WassersteinLoss, TopographicVAELoss,
     # Specialized
     CapsuleMarginLoss, SegmentationLosses, SegmentationWrapperLoss,
     # Confidence-penalty / information-theoretic regularizers
@@ -90,6 +90,7 @@ from dl_techniques.losses import (
   whole batch). Cosine-softmax needs no class (stock sparse CE over the
   `CosineClassifier` logits)
 - `tabm_loss.py` — TabM model loss
+- `topographic_vae_loss.py` — `TopographicVAELoss`, the ELBO of the Topographic VAE (Keller & Welling 2022 Eq. 12): a Bernoulli reconstruction term plus **two** Gaussian KL terms, over a model's dict output. `call()` returns `(batch,)`. The `u` pair (`VARIANCE_PREDICTION_KEYS`) is **conditional** — a model built with `use_variance_variables=False` emits neither key and its `KL_u` is absent rather than zero, which is what lets the paper's plain-VAE baseline be trained with this loss; HALF the pair raises. `kl_loss_weight` is **not** the literature's `beta` under the default mean-over-pixels reduction; `effective_beta` reports the corrected value and the trainer logs both
 - `thera_jacobian_tv.py` — THERA aliasing TV penalty over the exact analytic spatial Jacobian
 - `utilization_loss.py` — Utilization / load-balancing loss (e.g. MoE routing)
 - `wasserstein_loss.py` — Wasserstein/WGAN-GP loss
