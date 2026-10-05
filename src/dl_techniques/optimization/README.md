@@ -2,7 +2,9 @@
 
 Config-driven builders for Keras 3 optimizers, learning-rate schedules and deep-supervision
 weights, plus four custom optimizers (`Muon`, `SGLD`, `VSGD`, `Gefen`), a warmup schedule
-wrapper, a SLED logits processor and a WeightWatcher-style spectral projection callback.
+wrapper, a SLED logits processor, a WeightWatcher-style spectral projection callback, and
+the **Spectrum-to-Signal Principle** (`ssp/`) — diversity-first checkpoint selection and
+fusion, plus max-entropy-weighted group advantages.
 
 Everything is built from plain `dict` config, so a whole training recipe can live in JSON.
 
@@ -50,9 +52,15 @@ model.compile(optimizer=optimizer, loss="sparse_categorical_crossentropy")
 | `WarmupSchedule` | `(warmup_steps, warmup_start_lr=1e-8, primary_schedule=None)` | linear ramp then `primary_schedule(step - warmup_steps)` |
 | `Muon`, `SGLD`, `VSGD`, `Gefen` | Keras optimizer classes | see below |
 | `WWTailConfig`, `ww_pgd_project`, `WWPGDProjectionCallback` | spectral tail projection | see below |
+| `ssp_builder`, `SSPStrategy`, `SSPStrategyConfig` | Spectrum-to-Signal strategy | see below |
 
 `sled_builder` / `SledLogitsProcessor` are **not** re-exported; import them from
 `dl_techniques.optimization.sled_supervision`.
+
+The rest of the SSP surface (`spectrum_profile`, `select_specialists`,
+`spectrum_sampling_weights`, `fuse_specialists`, `max_entropy_weight`,
+`mgpo_advantages`, `mgpo_surrogate`, `MGPOObjective`, `greedy_soup`, …) lives in
+`dl_techniques.optimization.ssp` and is listed in that package's `README.md`.
 
 ## `optimizer_builder`
 
@@ -303,6 +311,38 @@ and returns the original final-layer logits unchanged.
 
 arXiv:2411.02433.
 
+## Spectrum-to-Signal Principle (SSP)
+
+Two phases, four operations, one config. The Spectrum phase scores a candidate by
+**coverage** (`pass@k`) instead of first-guess accuracy, keeps the diversity-maximising
+checkpoint per subdomain, and consolidates them by weighted parameter fusion. The
+Signal phase weights each group of rollouts by how **uncertain** the policy was on it
+and applies that weight to the group-relative advantage.
+
+```python
+from dl_techniques.optimization import ssp_builder
+
+ssp = ssp_builder({"type": "ssp_v1", "config": {
+    "enable": True, "pass_at_k": 8, "mgpo_lambda": 2.0,
+}})
+```
+
+The generalisation is the point: `max_entropy_weight` is a per-group weight vector that
+multiplies *any* advantage, so the same array serves group-relative policy optimisation,
+RLOO, or — dropping the RL entirely — a per-example curriculum weight in supervised
+training, which `spectrum_sampling_weights` already builds.
+
+Three things to know before using it, all detailed in `ssp/README.md`:
+
+* `enable=False` is a strict no-op on every operation (the A/B control).
+* The batch mean of `MGPOObjective` is `0.0` for **every** `lambda` — the weighting
+  shows up in the gradient, never in the logged loss.
+* The report's printed max-entropy deviation is not a KL divergence, and its
+  low-probability-trace term has no formula anywhere; neither is transcribed.
+
+`pass@k` itself lives in `dl_techniques.metrics.pass_at_k` and is imported, not
+duplicated.
+
 ## Gotchas
 
 - `optimizer_builder`'s second argument is **positional** (`lr_schedule`). There is no
@@ -316,9 +356,14 @@ arXiv:2411.02433.
 - There is no `"constant"` schedule type in `learning_rate_schedule_builder` — pass a plain float
   as the `lr_schedule` argument instead.
 - `Muon` and the WW-PGD tools are not reachable from `optimizer_builder`.
+- `ssp_builder` takes the same `{"type": ..., "config": {...}}` shape; an unknown key
+  inside `"config"` raises `TypeError` rather than being ignored, so a typo like
+  `mgpo_lamda` fails loudly instead of reading as "SSP did not help".
 
 ## See also
 
 - `AGENTS.md` in this directory — module map and authoring rules.
+- `ssp/README.md` — the Spectrum-to-Signal Principle, its closed forms and its gotchas.
+- `metrics/README.md` — `pass@k` and the other pool-level metrics.
 - `train_vision/README.md` — the vision training pipeline built on these builders.
 - Tests: `tests/test_optimization/`.

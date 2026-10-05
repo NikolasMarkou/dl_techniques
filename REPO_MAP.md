@@ -57,7 +57,7 @@ half of every Python file under `src/`. The other eleven combined are smaller th
 | `datasets/` | Dataset loaders and synthetic generators, with `arc`, `document_rectification`, `document_restoration`, `graphs`, `time_series` and `vision` subtrees. The two `document_*` ones are distinct and easy to conflate: `document_restoration` feeds `models/vision/image_restoration/doc_res/` (task-spec driven), `document_rectification` feeds `doc_scanner/` (a synthetic warped-page generator plus a UVDoc reader, both emitting a dense backward map). |
 | `analyzer/` | Post-hoc model analysis — `analyzer/model_analyzer.py` is the entry point; calibration and spectral metrics, plus its own visualizers. |
 | `metrics/` | Keras metrics (PSNR, SSIM, perplexity, depth, forecasting, Brier). |
-| `optimization/` | Custom optimizers (Muon, VSGD, SGLD, …), LR schedules, deep-supervision weighting. |
+| `optimization/` | Custom optimizers (Muon, VSGD, SGLD, …), LR schedules, deep-supervision weighting, and `ssp/` — the Spectrum-to-Signal Principle (diversity-first selection + fusion, max-entropy-weighted group advantages). `pass@k` itself lives in `metrics/pass_at_k.py`. |
 | `callbacks/` | Reusable Keras callbacks — but **most callbacks in this repo are not here**; see *Where the callbacks actually are*. |
 | `initializers/` | Structured initializers (Gabor, Haar, orthonormal, KAN, polar). |
 | `regularizers/` | Orthogonality (SRIP, soft-orthogonal), entropy, preference regularizers. |

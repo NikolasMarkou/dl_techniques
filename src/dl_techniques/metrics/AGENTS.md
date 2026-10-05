@@ -7,6 +7,7 @@ Custom Keras metrics for specialized evaluation tasks.
 - `capsule_accuracy.py` — Accuracy metric for capsule network outputs
 - `clip_accuracy.py` — CLIP model retrieval accuracy
 - `hrm_metrics.py` — Hierarchical reasoning model metrics
+- `pass_at_k.py` — Sampling **coverage**: `pass_at_k` (unbiased and plug-in estimators), `pass_at_k_curve`, `per_problem_pass_at_k`, `solved_counts`. Plain functions on an `(n_problems, n_samples)` outcome matrix — the shape a verifier-scored sampler produces, not a `keras.metrics.Metric`, because every quantity is a functional of the whole matrix (see Conventions). `> 0` marks a sample solved; threshold partial credit upstream. Consumed by `dl_techniques.optimization.ssp` — do not add a second estimator anywhere else
 - `multi_label_metrics.py` — Multi-label classification metrics (F1, precision, recall per label)
 - `perplexity_metric.py` — Language model perplexity
 - `psnr_metric.py` — Peak Signal-to-Noise Ratio for image quality

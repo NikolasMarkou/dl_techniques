@@ -17,6 +17,31 @@ This module offers stateful Keras `Metric` subclasses that are fully serializabl
 | `keypoint_matching` | `KeypointMatchMetric` | Precision, recall or F1 of mutual-nearest keypoint matches extracted from a final-layer log assignment, scored against homography labels (ignored and padded keypoints excluded). | Evaluating LightGlue-style matchers; pass via `compile(metrics={"log_assignments": [...]})`. |
 | `hrm_metrics` | `HRMMetrics` | A container for a suite of metrics for the Hierarchical Reasoning Model, including accuracy, Q-halt accuracy, and step counts. | Custom evaluation within the training loop of an HRM model. |
 
+## `pass@k` (plain functions, not a `Metric`)
+
+`pass_at_k` measures **coverage** — "does a correct solution exist in my candidate pool"
+— which is a different question from "how good is my first guess". It is the quantity
+the Spectrum phase of the Spectrum-to-Signal Principle scores checkpoints by.
+
+```python
+import numpy as np
+from dl_techniques.metrics.pass_at_k import pass_at_k, pass_at_k_curve
+
+# (n_problems, n_samples); > 0 marks a sample solved.
+outcomes = np.array([[1, 0, 1, 0],
+                     [0, 0, 0, 0]], dtype=float)
+pass_at_k(outcomes, k=1)   # 0.25   mean single-sample success rate
+pass_at_k(outcomes, k=2)   # 0.4167 unbiased coverage; the plug-in would say 0.5
+pass_at_k_curve(outcomes)  # {1: 0.25, 2: 0.4167, 4: 1.0}
+```
+
+`estimator="unbiased"` (the default) is Chen et al. 2021's `1 - C(n-c, k)/C(n, k)`;
+`"plug_in"` is the naive any-of-`n`. **Quote one, not both** — for `k < n` the plug-in
+is an upper bound, so quoting both invites a false comparison. Threshold partial
+credit upstream (`outcomes > 0.5`); the `> 0` rule is blunt on purpose.
+
+Consumed by `dl_techniques.optimization.ssp`; see that package's `README.md`.
+
 ## Basic Usage
 
 Most metrics can be directly added to the `metrics` list in `model.compile()`.

@@ -116,3 +116,32 @@ DEFAULT_GEFEN_EPSILON       = 1e-8
 DEFAULT_GEFEN_WEIGHT_DECAY  = 0.0
 DEFAULT_GEFEN_MAX_BLOCK_SIZE = 1024
 DEFAULT_GEFEN_MIN_BLOCK_SIZE = 8
+
+# ==============================================================================
+# SSP (Spectrum-to-Signal Principle) Defaults
+# ==============================================================================
+# Defaults mirror ssp/signal.py, ssp/fusion.py and ssp/config.py exactly so the
+# factory builder cannot silently diverge from the function and class defaults.
+# `schedule.py` does `from .constants import *`, so these must stay module-level.
+
+# -- Spectrum phase (diversity, Pass@K) -------------------------------------
+DEFAULT_SSP_PASS_AT_K = 8                    # k for the coverage score
+DEFAULT_SSP_ESTIMATOR = "unbiased"           # metrics.pass_at_k estimator
+DEFAULT_SSP_FUSION_MODE = "linear"           # 'linear' | 'task_arithmetic'
+DEFAULT_SSP_FUSION_SCHEME = "uniform"        # 'uniform' | 'score_softmax'
+DEFAULT_SSP_FUSION_TEMPERATURE = 1.0         # score-softmax sharpness
+DEFAULT_SSP_FUSION_COEFFICIENT = 1.0         # task-arithmetic scaling
+DEFAULT_SSP_SAMPLING_MODE = "max_entropy"    # how Pass@K becomes a sampler
+
+# -- Signal phase (MGPO max-entropy weighting) -------------------------------
+DEFAULT_MGPO_LAMBDA = 1.0                    # sharpening; 0.0 disables weighting
+DEFAULT_MGPO_P0 = 0.5                        # target success probability
+DEFAULT_MGPO_EPS = 1e-6                      # advantage denominator stabilizer
+DEFAULT_MGPO_DDOF = 0                        # population std; defined for G == 1
+DEFAULT_MGPO_NORMALIZE_WEIGHTS = False       # rescale weights to mean 1
+DEFAULT_MGPO_CLIP_EPS = 0.2                  # PPO clip range half-width
+
+# -- SSP shared -------------------------------------------------------------
+DEFAULT_SSP_TOKEN_REDUCTION = "per_sequence_mean"   # the paper's two-stage mean
+DEFAULT_SSP_ZERO_VARIANCE = "zero"                  # 'zero' | 'raise'
+DEFAULT_SSP_ENABLED = False                         # master switch (opt-in)
