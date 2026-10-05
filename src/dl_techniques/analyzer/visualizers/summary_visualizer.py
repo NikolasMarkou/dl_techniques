@@ -230,9 +230,24 @@ class SummaryVisualizer(BaseVisualizer):
             ]
 
         # Process each model's metrics using consistent ordering
+        #
+        # DECISION plan-2026-10-05-analyzer-audit/F-077
+        # `row_data[0]` holds the DISPLAY name, but `_create_styled_table` used it as the
+        # colour key too. `_get_model_color` looks the name up in `self.model_colors`,
+        # which is keyed by the FULL name, so any model longer than 12 characters missed
+        # and fell back to the literal '#333333' -- EVERY long-named model was drawn in
+        # the same grey, and therefore indistinguishable, in a tool whose entire purpose is
+        # comparing models. Two long names rendered identically rather than wrongly.
+        #
+        # The real name is carried alongside for styling. Do NOT "fix" this by
+        # un-truncating the display cell: the truncation exists so the name does not
+        # overflow the table.
+        display_to_model: Dict[str, str] = {}
         for model_name in self._sort_models_consistently(list(self.results.model_metrics.keys())):
             # truncate model name to never overflow from the table
-            row_data: List[str] = [truncate_model_name(model_name)]
+            display_name = truncate_model_name(model_name)
+            row_data: List[str] = [display_name]
+            display_to_model[display_name] = model_name
             model_metrics: Dict[str, Any] = self.results.model_metrics.get(
                 model_name, {}
             )
@@ -251,8 +266,9 @@ class SummaryVisualizer(BaseVisualizer):
 
             table_data.append(row_data)
 
-        # Create and style the performance table
-        self._create_styled_table(ax, table_data, headers)
+        # Create and style the performance table. F-077: the display->real name map is
+        # what lets a truncated row keep its model's colour.
+        self._create_styled_table(ax, table_data, headers, display_to_model)
 
     def _add_training_metrics_to_row(
             self,
@@ -349,7 +365,8 @@ class SummaryVisualizer(BaseVisualizer):
             self,
             ax: Axes,
             table_data: List[List[str]],
-            headers: List[str]
+            headers: List[str],
+            display_to_model: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Create and style the performance metrics table.
@@ -358,6 +375,10 @@ class SummaryVisualizer(BaseVisualizer):
             ax: Matplotlib axes object for the table.
             table_data: 2D list containing table cell data.
             headers: List of column header strings.
+            display_to_model: Maps a DISPLAY name (possibly truncated) back to the full
+                model name, for colour lookup. Without it a truncated name misses
+                ``self.model_colors`` and every long-named model renders in the same
+                fallback grey, i.e. indistinguishable — see F-077.
         """
 
         if not table_data:
@@ -395,7 +416,10 @@ class SummaryVisualizer(BaseVisualizer):
 
         # Style data rows with model-specific colors using consistent ordering
         for i, row_data in enumerate(table_data, 1):
-            model_name = row_data[0]
+            display_name = row_data[0]
+            # F-077: resolve the FULL model name for the colour lookup. `row_data[0]` is
+            # the truncated display string, which misses `self.model_colors`.
+            model_name = (display_to_model or {}).get(display_name, display_name)
             model_color = self._get_model_color(model_name)
             light_color = self._lighten_color(model_color, COLOR_LIGHTEN_FACTOR)
 

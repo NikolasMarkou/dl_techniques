@@ -88,7 +88,10 @@ from dl_techniques.analyzer.constants import (
     SPECTRAL_TW_SAFETY_FACTOR,
     SPECTRAL_SMALL_N_CUTOFF, SPECTRAL_SMALL_N_KMIN,
     SPECTRAL_TRAP_SEVERITY_MILD, SPECTRAL_TRAP_SEVERITY_MODERATE,
-    SPECTRAL_TRAP_SEVERITY_SEVERE, SPECTRAL_TRAP_SEVERITY_CRITICAL
+    SPECTRAL_TRAP_SEVERITY_SEVERE, SPECTRAL_TRAP_SEVERITY_CRITICAL,
+    # DECISION plan-2026-10-05-analyzer-audit/F-075: these two published column names
+    # were bare string literals here. Named, and used at their write sites.
+    MetricNames,
 )
 
 # ---------------------------------------------------------------------
@@ -1203,7 +1206,7 @@ def calculate_spectral_metrics(
             "log_spectral_norm": 0.0, "alpha_weighted": 0.0,
             "alpha_hat": 0.0, "alpha_hat_normalized": 0.0,
             "log_alpha_norm": 0.0, "stable_rank": 0.0,
-            "alpha_unreliable": alpha_unreliable
+            MetricNames.ALPHA_UNRELIABLE: alpha_unreliable
         }
 
     norm = np.sum(evals)
@@ -1267,7 +1270,7 @@ def calculate_spectral_metrics(
         "alpha_hat_normalized": alpha_hat_normalized,
         "log_alpha_norm": log_alpha_norm,
         "stable_rank": stable_rank,
-        "alpha_unreliable": alpha_unreliable
+        MetricNames.ALPHA_UNRELIABLE: alpha_unreliable
     }
 
 
@@ -1796,7 +1799,7 @@ def calculate_concentration_metrics(
         'gini_coefficient': gini,
         'dominance_ratio': dominance,
         'participation_ratio': mean_pr,
-        'min_participation_ratio': min_pr,
+        MetricNames.MIN_PARTICIPATION_RATIO: min_pr,
         'critical_weight_count': critical_weight_count,
         'critical_weights': critical_weights,
         'concentration_score': np.log1p(concentration_score)

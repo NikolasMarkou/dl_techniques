@@ -59,6 +59,14 @@ TABLE_HEADER_COLOR = '#E8E8E8'
 TABLE_DEFAULT_COLOR = '#F5F5F5'
 COLOR_LIGHTEN_FACTOR = 0.8
 
+# DECISION plan-2026-10-05-analyzer-audit/F-077
+# The table's name-truncation length. This was an inline `12` with a literal `'...'`,
+# while `weight_visualizer.py` declares the same pair as named constants and
+# `information_flow_visualizer.py:330` spells `name[:8] + '...'` as literals again -- three
+# copies of one number. They are named here and used; do NOT add a fourth inline copy.
+MODEL_NAME_TRUNCATE_LENGTH = 12
+MODEL_NAME_ELLIPSIS = '...'
+
 # Annotation Constants
 ANNOTATION_OFFSET_X = 5
 ANNOTATION_OFFSET_Y = 5
@@ -336,9 +344,19 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
         table_data = []
         headers = ['Model', 'Final Acc', 'Best Acc', 'Best Epoch', 'Conv. Speed',
                   'Stability', 'Overfit Index', 'Final Gap']
+        # DECISION plan-2026-10-05-analyzer-audit/F-077
+        # Display name -> full model name, for the colour lookup in the styling loop
+        # below. `row_data[0]` is TRUNCATED, and `_get_model_color` is keyed by the full
+        # name, so every model longer than the truncation length missed and fell back to
+        # the literal '#333333' -- all long-named models drawn in the same grey, and so
+        # indistinguishable, in a comparison table.
+        display_to_model: dict = {}
 
         for model_name in self._sort_models_consistently(list(self.results.training_history.keys())):
-            row = [model_name[:12] + '...' if len(model_name) > 12 else model_name]  # Truncate long names
+            display_name = model_name[:MODEL_NAME_TRUNCATE_LENGTH] + MODEL_NAME_ELLIPSIS \
+                if len(model_name) > MODEL_NAME_TRUNCATE_LENGTH else model_name
+            row = [display_name]
+            display_to_model[display_name] = model_name
 
             # Final accuracy - using robust method
             val_acc, _ = self._get_metric_data(model_name, VAL_ACC_PATTERNS)
@@ -390,7 +408,9 @@ class TrainingDynamicsVisualizer(BaseVisualizer):
 
         # Color model rows with consistent colors
         for i, row_data in enumerate(table_data, 1):
-            model_name = row_data[0]
+            display_name = row_data[0]
+            # F-077: resolve the full name for the colour lookup.
+            model_name = display_to_model.get(display_name, display_name)
             color = self._get_model_color(model_name)
             light_color = self._lighten_color(color, COLOR_LIGHTEN_FACTOR)
 

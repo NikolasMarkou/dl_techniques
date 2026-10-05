@@ -166,6 +166,18 @@ class MetricNames:
     PARTICIPATION_RATIO = 'participation_ratio'
     CONCENTRATION_SCORE = 'concentration_score'
     CRITICAL_WEIGHT_COUNT = 'critical_weight_count'
+    # DECISION plan-2026-10-05-analyzer-audit/F-075
+    # The two published columns that had NO constant and were therefore written and
+    # read as bare string literals at every call site -- a typo in any of them was
+    # silent. Both are named here and used at their write sites; do NOT reintroduce a
+    # bare literal for either.
+    #
+    # `alpha_unreliable`: True when the fitted alpha exceeds SPECTRAL_ALPHA_SANITY_MAX.
+    # FLAGGED, never clamped -- a runaway alpha stays visible instead of being rewritten
+    # into a plausible "under-trained" label.
+    ALPHA_UNRELIABLE = 'alpha_unreliable'
+    # The smaller of the two participation ratios reported by the concentration path.
+    MIN_PARTICIPATION_RATIO = 'min_participation_ratio'
     LEARNING_PHASE = 'learning_phase'
     PL_PVALUE = 'pl_pvalue'
     ERG_LOG_DET = 'erg_log_det'
