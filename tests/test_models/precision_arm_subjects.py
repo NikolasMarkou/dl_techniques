@@ -432,7 +432,7 @@ _sub("wave_field", _b_wave_field, lambda: _ids(64, 2, 16),
 
 def _b_masked_language_model():
     from dl_techniques.models.language.bert import BERT
-    from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
+    from dl_techniques.models.common.masked_language_model import MaskedLanguageModel
     encoder = BERT(vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
                    intermediate_size=64, max_position_embeddings=32,
                    hidden_dropout_rate=0.0, attention_probs_dropout_rate=0.0)

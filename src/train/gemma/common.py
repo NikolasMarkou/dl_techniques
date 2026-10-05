@@ -70,7 +70,7 @@ from dl_techniques.datasets.nlp import (
     load_wikipedia_train_val,
 )
 from dl_techniques.models.language.gemma.gemma3 import Gemma3
-from dl_techniques.models.language.masked_language_model.clm import (
+from dl_techniques.models.common.masked_language_model.clm import (
     CausalLanguageModel,
 )
 from dl_techniques.optimization import (

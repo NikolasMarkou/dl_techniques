@@ -36,14 +36,14 @@ direct-child count, because those two nest one level further. Re-derive with the
 | Family | Leaves | What it holds |
 |---|---|---|
 | [`vision/`](vision/) | **48** | image backbones, detectors, segmenters, denoisers, generators |
-| [`language/`](language/) | 18 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
+| [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 4 | architecture-level MLP replacements, modality-agnostic |
 | [`graph/`](graph/) | 3 | models over explicit graph inputs |
 | [`neural_computer/`](neural_computer/) | 2 | external-memory / differentiable-computer architectures |
-| [`common/`](common/) | 1 | model-agnostic inference machinery |
+| [`common/`](common/) | 2 | model-agnostic machinery (training heads, inference sampling) |
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
@@ -102,7 +102,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `vq_vae_rotation/` | VQ-VAE with rotation-based codebook updates |
 | `yolo12/` | YOLOv12 detection |
 
-### `language/` (18)
+### `language/` (17)
 
 | Package | |
 |---|---|
@@ -116,7 +116,6 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `hrm/` | HRM |
 | `hnet/` | H-Net — tokenizer-free byte LM whose chunk boundaries are learned; a recursive encoder/chunk/inner/dechunk/decoder hierarchy over `layers/dynamic_chunking/`. No pretrained weights; the divergences from the reference are enumerated in its own README (`grep -c '^### 5\.'` re-derives the count there, rather than restating it here) |
 | `mamba/` | Mamba, selective state space |
-| `masked_language_model/` | MLM training |
 | `mini_vec2vec/` | Mini Vec2Vec |
 | `modern_bert/` | ModernBERT |
 | `qwen/` | Qwen LLM |
@@ -173,6 +172,7 @@ image-patch input modality now matches its filing.)
 | `neural_computer/nam/` | Neural Arithmetic **Module**. Name misattributes |
 | `neural_computer/ntm/` | Neural Turing Machine |
 | `common/power_sampling/` | inference-time power sampling for any causal LM/VLM — model-agnostic, which is why it is not under `language/` |
+| `common/masked_language_model/` | MLM/CLM training heads — consumed by every language trainer, filed here (not under `language/`) because they wrap any backbone rather than implementing one |
 | `memory/som/` | Self-Organizing Maps |
 | `point_cloud/latent_gmm_registration/` | latent GMM registration |
 | `tabular/tabm/` | TabM |

@@ -62,7 +62,7 @@ from dl_techniques.datasets.nlp import (
     DEFAULT_WIKIPEDIA_CONFIG,
     load_wikipedia_train_val,
 )
-from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.models.language.zamba2 import MODEL_VARIANTS, create_zamba2
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
@@ -614,7 +614,7 @@ def build_model(
         variant table's own ``DEFAULT_VOCAB_SIZE``.
     :type vocab_size: int
     :returns: The compiled model, a
-        :class:`~dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel`
+        :class:`~dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel`
         wrapping a bare :class:`Zamba2Model` backbone. ``skip_head=True``
         since ``Zamba2Model.call()`` already bakes its own tied head and
         returns logits directly as a plain tensor -- no second,

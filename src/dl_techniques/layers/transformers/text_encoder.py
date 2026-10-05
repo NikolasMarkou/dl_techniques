@@ -254,7 +254,7 @@ class TextEncoder(keras.layers.Layer):
                 "output/vocabulary projection to tie the word embedding to, so "
                 "there is nothing to share with. Use 'learned' here and perform "
                 "the tying in the model that owns the output projection (see "
-                "models/language/masked_language_model/clm.py's tie_weights). "
+                "models/common/masked_language_model/clm.py's tie_weights). "
                 "Legal values: 'learned', 'factorized'."
             )
         if embedding_type not in ('learned', 'factorized'):

@@ -488,7 +488,7 @@ class HNet(keras.Model):
         a constructor argument, so ``get_config``/``from_config`` are
         unaffected. Mirrors ``Mamba2Model.hidden_size``'s alias of
         ``d_model``. Non-blocking for
-        ``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel``,
+        ``dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel``,
         whose ``__init__`` only requires ``hidden_size`` when built with
         ``skip_head=False`` -- HNet already bakes its own head, so it is
         always wrapped with ``skip_head=True`` -- but adds attribute-surface

@@ -62,7 +62,7 @@ from dl_techniques.layers.attention.wave_field_attention import (
 from dl_techniques.initializers.identity_plus_noise import (
     IdentityPlusNoise,
 )
-from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 

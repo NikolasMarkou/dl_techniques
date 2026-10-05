@@ -3268,7 +3268,7 @@ def _references_section_state(doc) -> str:
 #:
 #: **Step 19.1 (D-086) closed all twenty ROUTED rows**: 16 modules gained a
 #: ``References`` section and 2 (``vision/masked_autoencoder/utils.py``,
-#: ``language/masked_language_model/utils.py``) gained a module docstring outright. The
+#: ``common/masked_language_model/utils.py``) gained a module docstring outright. The
 #: waiver set is down to the TWO genuine exemptions -- composition modules whose
 #: citations live on the siblings they compose. Step 7 shipped the guard; step
 #: 19.1 shipped the docstrings, and this list shrank by eighteen in the same
@@ -4233,7 +4233,7 @@ _CREATE_FACTORIES_THAT_COMPILE = {
     ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"): "no `variant` param (`stem`, not `variant`) -- was invisible until D-071. Docstring: 'Create and compile ... with the modern training recipe'; AdamW + cosine + EMA IS the product",
     ("models/vision/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract; the from_logits=True loss default is a load-bearing anti-mistrain guard",
     ("models/language/hrm/model.py", "create_hierarchical_reasoning_model"): "ROUTE step 19 (R-051 waiver, unchanged) -- constructs an optimizer and compiles inside a `if variant is not None` branch",
-    ("models/language/masked_language_model/utils.py", "create_mlm_training_model"): "no `variant` param -- was invisible until D-071. Docstring: 'A compiled MaskedLanguageModel ready for training'; the MLM head + optimizer pairing is the whole point of the helper",
+    ("models/common/masked_language_model/utils.py", "create_mlm_training_model"): "no `variant` param -- was invisible until D-071. Docstring: 'A compiled MaskedLanguageModel ready for training'; the MLM head + optimizer pairing is the whole point of the helper",
     ("models/general_purpose/power_mlp/model.py", "create_power_mlp"): "no `variant` param -- was invisible until D-071. Docstring: 'Create and compile a PowerMLP model'; its compile DERIVES from_logits from output_activation (D-053), which is a guard, not incidental",
     ("models/vision/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its asserts are gone; the compile stays as documented contract",
     ("models/vision/vae/model.py", "create_vae_from_config"): "no `variant` param -- was invisible until D-071. Docstring: 'Compiled VAE model'; carries the same vmf jit_compile=False opt-out as create_vae (D-005), so it is the sibling of an already-ruled site",
@@ -4502,7 +4502,7 @@ class TestFactoriesThatCompileAreAllVisible:
         widened_in = {
             ("models/vision/capsnet/model.py", "create_capsnet"),
             ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"),
-            ("models/language/masked_language_model/utils.py", "create_mlm_training_model"),
+            ("models/common/masked_language_model/utils.py", "create_mlm_training_model"),
             ("models/general_purpose/power_mlp/model.py", "create_power_mlp"),
             ("models/vision/vae/model.py", "create_vae_from_config"),
         }
@@ -5831,13 +5831,13 @@ _FROZEN_STEP_OVERRIDES = {
      "MaskedAutoencoder", "test_step"),
     ("src/dl_techniques/models/vision/masked_autoencoder/mae.py",
      "MaskedAutoencoder", "train_step"),
-    ("src/dl_techniques/models/language/masked_language_model/clm.py",
+    ("src/dl_techniques/models/common/masked_language_model/clm.py",
      "CausalLanguageModel", "test_step"),
-    ("src/dl_techniques/models/language/masked_language_model/clm.py",
+    ("src/dl_techniques/models/common/masked_language_model/clm.py",
      "CausalLanguageModel", "train_step"),
-    ("src/dl_techniques/models/language/masked_language_model/mlm.py",
+    ("src/dl_techniques/models/common/masked_language_model/mlm.py",
      "MaskedLanguageModel", "test_step"),
-    ("src/dl_techniques/models/language/masked_language_model/mlm.py",
+    ("src/dl_techniques/models/common/masked_language_model/mlm.py",
      "MaskedLanguageModel", "train_step"),
     ("src/dl_techniques/models/time_series/deepar/model.py", "DeepAR", "predict_step"),
     ("src/dl_techniques/models/vision/vae/model.py", "VAE", "test_step"),

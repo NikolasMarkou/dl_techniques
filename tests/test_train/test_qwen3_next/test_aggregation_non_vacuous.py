@@ -23,7 +23,7 @@ from __future__ import annotations
 import keras
 import numpy as np
 
-from dl_techniques.models.language.masked_language_model.clm import (
+from dl_techniques.models.common.masked_language_model.clm import (
     CausalLanguageModel,
 )
 from dl_techniques.models.language.qwen.qwen3_next import Qwen3Next

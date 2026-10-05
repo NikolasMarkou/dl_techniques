@@ -741,7 +741,7 @@ class DepthAnything(keras.Model):
             y_pred = self(x, training=True)
             # Keras-3 canonical train_step — replaces deprecated
             # compiled-loss / compiled-metrics calls.
-            # See dl_techniques/models/language/masked_language_model/mlm.py:309-343.
+            # See dl_techniques/models/common/masked_language_model/mlm.py:309-343.
             loss = self.compute_loss(x=x, y=y, y_pred=y_pred)
             loss = loss * self.loss_weights.get('labeled', 1.0)
             scaled_loss = self.optimizer.scale_loss(loss)

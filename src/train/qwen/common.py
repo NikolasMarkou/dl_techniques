@@ -96,7 +96,7 @@ from dl_techniques.datasets.nlp import (
     DEFAULT_WIKIPEDIA_CONFIG,
     load_wikipedia_train_val,
 )
-from dl_techniques.models.language.masked_language_model.clm import (
+from dl_techniques.models.common.masked_language_model.clm import (
     CausalLanguageModel,
 )
 from dl_techniques.models.language.qwen.qwen3 import Qwen3

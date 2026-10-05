@@ -12,7 +12,7 @@ Two things this module deliberately does NOT do:
 * **No trainer-local custom ``train_step``.** The ratio loss reaches the
   optimizer through ``HNet.call``'s ``add_loss`` (``model.py:461-466``).
   ``build_model`` wraps ``HNet`` in
-  ``dl_techniques.models.language.masked_language_model.CausalLanguageModel``
+  ``dl_techniques.models.common.masked_language_model.CausalLanguageModel``
   with ``aggregate_backbone_losses=True``, so the wrapper's own (already
   ``scale_loss``-aware) ``train_step``/``test_step`` add
   ``sum(self.backbone.losses)`` to the cross-entropy scalar right after
@@ -83,7 +83,7 @@ from dl_techniques.models.language.hnet.config import (
 )
 from dl_techniques.models.language.hnet.losses import DEFAULT_TARGET_RATIO
 from dl_techniques.models.language.hnet.model import RATIO_LOSS_ALPHA, HNet
-from dl_techniques.models.language.masked_language_model.clm import (
+from dl_techniques.models.common.masked_language_model.clm import (
     CausalLanguageModel,
 )
 from dl_techniques.optimization import (
@@ -758,7 +758,7 @@ def build_model(
 
     The trained loss is the next-byte cross-entropy plus the auxiliary
     boundary-ratio term, aggregated exactly once: ``HNet`` is wrapped in
-    :class:`~dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel`
+    :class:`~dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel`
     with ``aggregate_backbone_losses=True``, which is now the SINGLE place
     the ratio term (contributed through ``HNet.call``'s ``add_loss``) enters
     the trained scalar -- ``compile()`` receives only the optimizer, so there

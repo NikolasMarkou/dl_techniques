@@ -335,7 +335,7 @@ Guards: `tests/test_models/test_depth_anything/test_train_step.py`.
 - Oquab, Maxime et al. **"DINOv2: Learning Robust Visual Features without
   Supervision."** 2023.
 - In-tree canonical Keras-3 `train_step` pattern:
-  `src/dl_techniques/models/language/masked_language_model/mlm.py`.
+  `src/dl_techniques/models/common/masked_language_model/mlm.py`.
 
 ---
 

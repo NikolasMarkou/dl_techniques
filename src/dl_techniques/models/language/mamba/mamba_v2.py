@@ -308,7 +308,7 @@ class Mamba2(keras.Model):
         Additive only: ``d_model`` is not renamed or removed, and this is not
         a constructor argument, so ``get_config``/``from_config`` are
         unaffected. See
-        ``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel``,
+        ``dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel``,
         whose ``__init__`` requires a ``hidden_size`` attribute on any
         backbone built with ``skip_head=False``.
 
@@ -329,7 +329,7 @@ class Mamba2(keras.Model):
 
         Additive only: :attr:`embedding` itself is untouched, this is not a
         constructor argument, so ``get_config``/``from_config`` are unaffected. See
-        ``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel``,
+        ``dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel``,
         whose ``_locate_embedding_weights`` checks for this method FIRST, before
         falling back to name-based lookups that do not match this model's
         ``embedding`` attribute name. See decisions.md

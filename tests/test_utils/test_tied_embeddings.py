@@ -286,7 +286,7 @@ class TestRealModelForwardPass:
     def test_clm_tied_branch_returns_float32_under_mixed_float16(
         self, restore_global_policy
     ):
-        from dl_techniques.models.language.masked_language_model.clm import (
+        from dl_techniques.models.common.masked_language_model.clm import (
             CausalLanguageModel,
         )
 

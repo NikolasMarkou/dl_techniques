@@ -55,7 +55,7 @@ from train.common.nlp import (
 from train.common.clm_pretrain import create_clm_loss_fn
 
 from dl_techniques.datasets.nlp import load_hf_text_dataset
-from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 

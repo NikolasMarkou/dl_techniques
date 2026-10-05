@@ -139,7 +139,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.models.language.bert.model import BERT
-from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.common.masked_language_model import MaskedLanguageModel
 
 VOCAB, SEQ = 500, 32
 
@@ -190,7 +190,7 @@ With a real tokenizer, `vocab_size=tokenizer.vocab_size`,
 | `create_mlm_training_model` | Factory; returns a **compiled** model. |
 | `visualize_mlm_predictions` | Prints decoded original / masked / reconstruction. |
 
-All four import from `dl_techniques.models.language.masked_language_model`.
+All four import from `dl_techniques.models.common.masked_language_model`.
 
 ```python
 MaskedLanguageModel(
@@ -328,7 +328,7 @@ raises on an unbuilt layer.
 
 ```python
 from dl_techniques.models.language.bert.model import BERT
-from dl_techniques.models.language.masked_language_model import (
+from dl_techniques.models.common.masked_language_model import (
     create_mlm_training_model,
 )
 
@@ -356,7 +356,7 @@ is already reported under that key.
 import keras
 
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.common.masked_language_model import MaskedLanguageModel
 
 
 # The package string is the defining module's dotted path: `my_project.<module>` for your

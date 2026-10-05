@@ -22,7 +22,7 @@ from train.common.nlp import (
 )
 
 from dl_techniques.models.language.fnet import FNet
-from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.common.masked_language_model import MaskedLanguageModel
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------

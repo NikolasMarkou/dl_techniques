@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.models.language.bert.model import BERT
-from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
 
 VOCAB = 64
 HIDDEN = 32

@@ -118,7 +118,7 @@ def build_packed_mlm_dataset(
     """Build a padding-free MLM dataset from a stream of raw texts.
 
     The masking itself is NOT done here: it is dynamic and lives in
-    :class:`~dl_techniques.models.language.masked_language_model.mlm.MaskedLanguageModel`,
+    :class:`~dl_techniques.models.common.masked_language_model.mlm.MaskedLanguageModel`,
     which corrupts ``input_ids`` inside its own ``train_step`` so a token is
     masked differently on each epoch.
 

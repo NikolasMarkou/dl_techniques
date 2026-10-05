@@ -43,7 +43,7 @@ import keras
 
 from dl_techniques.models.language.bert.model import BERT
 from dl_techniques.models.vision.masked_autoencoder.mae import MaskedAutoencoder
-from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.models.language.hrm.model import (
     create_hierarchical_reasoning_model,
 )

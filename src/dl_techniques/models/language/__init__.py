@@ -10,7 +10,6 @@
 - `hrm/` — HRM
 - `hnet/` — H-Net (hierarchical dynamic chunking, byte-level)
 - `mamba/` — Mamba (state-space)
-- `masked_language_model/` — masked-language-model training head
 - `mini_vec2vec/` — Mini Vec2Vec
 - `modern_bert/` — ModernBERT
 - `qwen/` — Qwen

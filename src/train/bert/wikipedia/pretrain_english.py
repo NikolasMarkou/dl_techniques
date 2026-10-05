@@ -22,7 +22,7 @@ from typing import Generator, Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.models.language.bert import BERT
-from dl_techniques.models.language.masked_language_model import MaskedLanguageModel
+from dl_techniques.models.common.masked_language_model import MaskedLanguageModel
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.optimization import learning_rate_schedule_builder

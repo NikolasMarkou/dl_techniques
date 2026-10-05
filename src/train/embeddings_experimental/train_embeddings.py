@@ -55,7 +55,7 @@ from dl_techniques.layers.tokenizers.ascii_char import (
     PAD_ID,
     SEP_ID,
 )
-from dl_techniques.models.language.masked_language_model.mlm import (
+from dl_techniques.models.common.masked_language_model.mlm import (
     MaskedLanguageModel,
 )
 from dl_techniques.optimization import optimizer_builder

@@ -73,7 +73,7 @@ from typing import Any, Dict, List, Set, Tuple
 import pytest
 
 from dl_techniques.models.language.hnet.model import HNet
-from dl_techniques.models.language.masked_language_model.clm import (
+from dl_techniques.models.common.masked_language_model.clm import (
     CausalLanguageModel,
 )
 from train.hnet import common

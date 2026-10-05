@@ -44,7 +44,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.models.language.gpt2 import GPT2
-from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.losses import MaskedCausalLMLoss
 
 from train.gpt2 import finetune as ft

@@ -17,7 +17,7 @@ SUPERSEDES the mechanism chosen by ``plan-2026-09-12T173329-e20362c4``'s own
 D-004). ``build_model`` wraps a bare ``Mamba2.from_variant(...)`` --
 genuinely headless, ``call()`` returns only ``{"last_hidden_state": ...}``
 -- in
-``dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel(
+``dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel(
 skip_head=False, pre_shifted=True, verify_causality=True)``. This replaces
 the local ``build_causal_lm_model`` functional wrapper this module used to
 define, once ``CausalLanguageModel`` gained a ``pre_shifted`` flag (so it no
@@ -92,7 +92,7 @@ from dl_techniques.datasets.nlp import (
     load_wikipedia_train_val,
 )
 from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
-from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
@@ -748,7 +748,7 @@ def build_model(
         encoding actually used to pack the corpus.
     :type vocab_size: int
     :returns: The compiled model, a
-        :class:`~dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel`
+        :class:`~dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel`
         wrapping a bare :class:`Mamba2` backbone. ``skip_head=False`` since
         ``Mamba2`` is genuinely headless (``call()`` returns only
         ``{"last_hidden_state": ...}``) -- unlike gemma/qwen's ``skip_head=True``

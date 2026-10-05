@@ -50,7 +50,7 @@ from dl_techniques.datasets.byte_lm import BYTE_VOCAB_SIZE
 from dl_techniques.losses import MaskedCausalLMLoss
 from dl_techniques.models.language.hnet.config import MODEL_VARIANTS
 from dl_techniques.models.language.hnet.model import RATIO_LOSS_ALPHA, HNet
-from dl_techniques.models.language.masked_language_model.clm import (
+from dl_techniques.models.common.masked_language_model.clm import (
     CausalLanguageModel,
 )
 from train.common import resolve_monitor_mode

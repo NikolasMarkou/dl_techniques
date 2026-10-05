@@ -76,7 +76,7 @@ from dl_techniques.datasets.nlp import (
     load_wikipedia_train_val,
 )
 from dl_techniques.models.language.mamba.mamba_v1 import Mamba
-from dl_techniques.models.language.masked_language_model.clm import CausalLanguageModel
+from dl_techniques.models.common.masked_language_model.clm import CausalLanguageModel
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
@@ -687,7 +687,7 @@ def build_model(
         encoding actually used to pack the corpus.
     :type vocab_size: int
     :returns: The compiled model, a
-        :class:`~dl_techniques.models.language.masked_language_model.clm.CausalLanguageModel`
+        :class:`~dl_techniques.models.common.masked_language_model.clm.CausalLanguageModel`
         wrapping a bare :class:`Mamba` backbone. ``skip_head=False`` since
         ``Mamba`` is genuinely headless (``call()`` returns only
         ``{"last_hidden_state": ...}``) -- this class builds its OWN
