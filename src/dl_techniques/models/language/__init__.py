@@ -14,6 +14,7 @@
 - `modern_bert/` — ModernBERT
 - `qwen/` — Qwen
 - `trm/` — tiny recursive model
+- `topolm/` — TopoLM (topographic: units laid out on a 2D grid, spatial-smoothness penalty on both branch outputs)
 - `tree_transformer/` — Tree Transformer
 - `wave_field/` — wave-field LLM
 - `zamba2/` — Zamba2 (hybrid Mamba2 + shared-attention SSM/Transformer LM)

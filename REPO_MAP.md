@@ -56,7 +56,7 @@ half of every Python file under `src/`. The other eleven combined are smaller th
 | `utils/` | Cross-cutting helpers — `utils/logger.py` (mandatory central logging), `utils/masking/` (the canonical mask factory), plus tensor, alignment and geometry helpers. |
 | `datasets/` | Dataset loaders and synthetic generators, with `arc`, `document_rectification`, `document_restoration`, `graphs`, `time_series` and `vision` subtrees. The two `document_*` ones are distinct and easy to conflate: `document_restoration` feeds `models/vision/image_restoration/doc_res/` (task-spec driven), `document_rectification` feeds `doc_scanner/` (a synthetic warped-page generator plus a UVDoc reader, both emitting a dense backward map). |
 | `analyzer/` | Post-hoc model analysis — `analyzer/model_analyzer.py` is the entry point; calibration and spectral metrics, plus its own visualizers. |
-| `metrics/` | Keras metrics (PSNR, SSIM, perplexity, depth, forecasting, Brier). |
+| `metrics/` | Keras metrics (PSNR, SSIM, perplexity, depth, forecasting, Brier) **plus a growing set of plain NumPy functions** for quantities that cannot be a streaming `update_state` — an SVD, a mean over every pair, a ranking against a whole candidate pool. `spatial_autocorrelation.py` (Moran's I: standard, islands, permutation) and `topographic_selectivity.py` (t-map, joint BH-FDR, cluster growing) are the current examples: each needs the whole map at once. Check the module docstring before assuming a `keras.metrics.Metric`. |
 | `optimization/` | Custom optimizers (Muon, VSGD, SGLD, …), LR schedules, deep-supervision weighting, and `ssp/` — the Spectrum-to-Signal Principle (diversity-first selection + fusion, max-entropy-weighted group advantages). `pass@k` itself lives in `metrics/pass_at_k.py`. |
 | `callbacks/` | Reusable Keras callbacks — but **most callbacks in this repo are not here**; see *Where the callbacks actually are*. |
 | `initializers/` | Structured initializers (Gabor, Haar, orthonormal, KAN, polar). |
@@ -153,6 +153,28 @@ by string key, so `ATTENTION_REGISTRY` / `FFN_REGISTRY` keys are the vocabulary 
 transformer block's constructor arguments.
 
 ## The model / trainer / test triangle
+
+**A model that needs a tensor the shared blocks DISCARD must ship its own block.** The reusable
+transformers in `layers/transformers/` add each residual branch straight into the stream, so in the
+pre-norm path the branch tensor is a local that stochastic depth and layer scale overwrite before the
+add — it is gone by the time `call` returns. A regularizer that must be computed on that tensor,
+before normalization and before the add, cannot reach it: there is no flag, no hook, and no
+`activity_regularizer` that does. `models/language/topolm/` is the worked example; `TopoLMBlock`
+there composes `create_attention_layer` / `create_ffn_layer` / `create_normalization_layer` rather
+than reimplementing any of them, which keeps the reuse order unchanged (factories first, a bespoke
+layer last). Precedents for the same shape: `hnet`, `wave_field`, `tree_transformer`, `qwen3_next`.
+
+**`models/language/topolm/` is also the reference for a model with its own trainer conventions.** It
+is Pattern 8 in `src/train/AGENTS.md`, and the three deviations from an ordinary NLP pretrain each
+have a measured consequence worth knowing before reading either tree. The auxiliary term rides
+`add_loss`, so the head must be built with `aggregate_backbone_losses=True` — a reported training
+loss of 15.31 aggregated against 5.36 not, on identical weights, and the evaluation loss is the
+pure task loss either way. The validation cadence IS the virtual epoch length. And the reported
+loss must be SPLIT, because a rising curve can be a rising task loss with a falling penalty or the
+reverse, and the two look identical in one number. Its `paper` variant is the one row of its table
+that is quoted data and pinned against upstream; `small` and `tiny` are repo-authored scales and are
+deliberately unpinned.
+
 
 Three trees are meant to line up **by name**, and they have three different shapes:
 

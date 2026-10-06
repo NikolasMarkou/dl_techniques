@@ -787,7 +787,25 @@ _SCHEDULED_FIXES: set = set()
 #: ``TransformerLayer`` -- and forwarding its ``'gelu'`` default into the patch
 #: projection would make the stem nonlinear, which no ViT is. See the
 #: ``D-022`` anchor at that call site.
+#:
+#: Two more were added for `TopoLMBlock`'s SECOND feed-forward projection
+#: (`ffn_dense_2`), added 2026-10-06. Both are the ViT `activation` precedent again:
+#: `mlp` declares `activation` and `dropout_rate`, and `TopoLMBlock` stores both --
+#: but its `ffn_dense_2` is the FFN's OUTPUT projection, not its input one.
+#: `activation` belongs on `ffn_dense_1`, which receives it; putting it on the
+#: output projection would make the residual path nonlinear, and a GPT-2 FFN is
+#: linear between its activation and its residual add. `dropout_rate` is applied by
+#: the standalone `self.ffn_dropout` on the SAME tensor immediately after, so
+#: forwarding it too would stack two dropouts (effective `1-(1-p)^2`) -- the exact
+#: defect the Qwen3 `positional_learned` pair was refuted for. KEY GRANULARITY
+#: CAVEAT: the key carries the factory type, not the call site, so these two waive
+#: `mlp`/`activation` and `mlp`/`dropout_rate` for `TopoLMBlock` as a class. The
+#: first projection DOES forward both, so nothing is lost -- a waiver only
+#: suppresses a report the sweep raises, and no report is raised for the site that
+#: forwards correctly.
 _NAME_COLLISIONS = {
+    ("models/language/topolm/components.py", "TopoLMBlock", "mlp", "activation"),
+    ("models/language/topolm/components.py", "TopoLMBlock", "mlp", "dropout_rate"),
     ("models/vision/vit/model.py", "ViT", "patch_2d", "activation"),
     ("models/vision/vit/model.py", "ViT", "positional_learned", "scale"),
     ("models/vision/vit_hmlp/model.py", "ViTHMLP", "positional_learned", "scale"),

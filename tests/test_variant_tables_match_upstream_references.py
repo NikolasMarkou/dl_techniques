@@ -65,6 +65,12 @@ def _relgt_variants() -> Dict[str, Dict[str, Any]]:
     return RELGT.MODEL_VARIANTS
 
 
+def _topolm_variants() -> Dict[str, Dict[str, Any]]:
+    from dl_techniques.models.language.topolm.model import TopoLM
+
+    return TopoLM.MODEL_VARIANTS
+
+
 # package -> zero-arg loader for that package's variant table.
 # Loaders are lazy so one package failing to import cannot mask the others.
 VARIANT_TABLES: Dict[str, Callable[[], Dict[str, Dict[str, Any]]]] = {
@@ -73,6 +79,7 @@ VARIANT_TABLES: Dict[str, Callable[[], Dict[str, Dict[str, Any]]]] = {
     "ntm": _ntm_variants,
     "pft_sr": _pft_sr_variants,
     "relgt": _relgt_variants,
+    "topolm": _topolm_variants,
 }
 
 _RELGT_URL = (
@@ -87,6 +94,8 @@ _PFT_LIGHT_URL = (
     "https://raw.githubusercontent.com/CVL-UESTC/PFT-SR/master/options/train/"
     "101_PFT_light_SRx2_scratch.yml"
 )
+
+_TOPOLM_URL = "https://arxiv.org/abs/2410.11516"  # Rathi et al. 2025, Section 3
 
 _NTM_URL = "https://arxiv.org/abs/1410.5401"  # Graves et al. 2014, Tables 1 & 2
 
@@ -161,6 +170,17 @@ UPSTREAM_PINS = [
     ("relgt", "base", "num_heads", 4, _RELGT_URL),
     ("relgt", "base", "num_global_centroids", 4096, _RELGT_URL),
     ("relgt", "base", "num_transformer_blocks", 1, _RELGT_URL),
+
+    # Rathi et al. 2025 (TopoLM), Section 3: hidden size 784, 12 blocks, 16 heads,
+    # MLP width 3136, context 1024. The 784 is not a free parameter -- it is the
+    # only plausible hidden size near GPT-2 small that factors into a SQUARE unit
+    # grid (784 = 28 x 28), which is what the spatial loss needs. Head dim is 49.
+    # "small" and "tiny" are repo-authored scales and are deliberately NOT pinned.
+    ("topolm", "paper", "embed_dim", 784, _TOPOLM_URL),
+    ("topolm", "paper", "depth", 12, _TOPOLM_URL),
+    ("topolm", "paper", "num_heads", 16, _TOPOLM_URL),
+    ("topolm", "paper", "ffn_intermediate_size", 3136, _TOPOLM_URL),
+    ("topolm", "paper", "max_seq_len", 1024, _TOPOLM_URL),
 ]
 
 

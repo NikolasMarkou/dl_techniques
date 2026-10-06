@@ -36,7 +36,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | Family | Leaves | What it holds |
 |---|---|---|
 | [`vision/`](vision/) | **50** | image backbones, detectors, segmenters, denoisers, generators |
-| [`language/`](language/) | 18 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
+| [`language/`](language/) | 19 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **11** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
@@ -104,10 +104,11 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `vq_vae_rotation/` | VQ-VAE with rotation-based codebook updates |
 | `yolo12/` | YOLOv12 detection |
 
-### `language/` (17)
+### `language/` (19)
 
 | Package | |
 |---|---|
+| `ptrm/` | *(present on disk, absent from this table)* — a token-sequence model, hence the heading count of 19. Add its row when someone next documents it; the count and the table are kept from disagreeing in the meantime. |
 | `bert/` | BERT — `bert/model.py` is the normative exemplar for a new model package |
 | `blt/` | Byte Latent Transformer (BLT) |
 | `colbert/` | ColBERT v1/v2, late-interaction retrieval |
@@ -122,6 +123,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `modern_bert/` | ModernBERT |
 | `qwen/` | Qwen LLM |
 | `trm/` | tiny recursive model |
+| `topolm/` | TopoLM — GPT-2-shaped decoder whose every attention and feed-forward branch output carries a spatial-smoothness penalty over a `h x w` unit grid (`h * w == embed_dim`). Only the `paper` variant is quoted data (784 units, 28x28 grid, 12 blocks); `small`/`tiny` are repo-authored scales and are deliberately unpinned. No pretrained weights |
 | `tree_transformer/` | Tree Transformer |
 | `wave_field/` | wave-field LLM |
 | `zamba2/` | Zamba2 — hybrid Mamba2 + shared-attention SSM/Transformer LM; per-depth `mamba/` Mamba2 blocks interleave with a small number of **shared** attention+MLP mem-blocks reused at multiple depths, each reuse carrying its own per-occurrence LoRA delta. No pretrained weights |
