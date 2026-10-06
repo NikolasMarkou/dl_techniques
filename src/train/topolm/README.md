@@ -168,6 +168,20 @@ Every flag maps onto exactly one field of `TopoLMTrainingConfig`, so `--help` an
 real config builder to assert that every declared flag arrives, with set-equality
 against the parser so a newly added flag fails until it is given a row.
 
+### Two defaults that must match the tokenizer, not the paper
+
+Both of these were wrong and both killed the run on its first batch, so they are
+worth stating rather than leaving to `--help`:
+
+| Flag | Value that works | Why the other value fails |
+|---|---|---|
+| `--vocab-size` | `100277` (default) | `50257` is GPT-2's base vocabulary; `create_tokenizer` uses `cl100k_base`, whose special ids reach `100267`. Dies in `word_embeddings` with `indices[..] = 50259 is not in [0, 50257)`. |
+| `--max-seq-length` | `512` (default) | The data pipeline chunks to this, so the position table must match. `build_backbone` forwards it to `max_seq_len`; before it did, a `tiny` run kept the variant's 256-entry table against 512-token windows and died with `indices[256] = 256 is not in [0, 256)`. |
+
+Both are measured, not inferred: each was reproduced on a clean worktree at the
+pre-audit commit before being fixed here. `build_backbone` now also raises, rather
+than deferring the mismatch to the first forward.
+
 ### Run directory naming
 
 ```text
@@ -177,7 +191,40 @@ against the parser so a newly added flag fails until it is given a row.
 `alpha` is in the name because the control arm writes into the same tree, and the
 two must not be confusable when they are read back months apart. Contents:
 `config.json`, `training_history.json`, `training_curves.png`,
-`topography_report.json`, `checkpoints/`, `generation_probes/`.
+`topography_report.json`, `checkpoints/`, `generation_probes/`, plus the figures
+below when topography ran.
+
+### Figures
+
+| File | Contents |
+|---|---|
+| `t_maps_raw.png` | one t-map per tapped layer, shared diverging scale, rejected cells hatched, clusters outlined |
+| `t_maps_readout.png` | the same, after the simulated fMRI Gaussian readout |
+| `morans_i_raw.png`, `morans_i_readout.png` | standard Moran's I against depth |
+| `clusters.png` | one categorical cluster map, from the deepest tap that found a cluster |
+
+Three rules the figures follow, each of which exists because the obvious
+alternative misleads:
+
+- **One shared colour scale per row, diverging at zero.** Per-panel autoscaling
+  renders noise and signal at identical contrast, which is the cheapest way to
+  manufacture a topographic result out of an untrained model. The limit is a
+  pooled 99th percentile, not the maximum, so one diverging cell cannot flatten
+  the map.
+- **Rejected cells are hatched, and the hatch is measured.** `contourf` fills the
+  *unmasked* cells, so writing `masked_where(~sig, ones)` hatches the
+  **survivors**. Pinned by
+  `test_the_hatch_covers_rejected_cells_and_spares_surviving_ones`, which reads
+  the hatched region's extent off the axes rather than off the image.
+- **No contour lines around surviving cells.** At realistic BH-FDR densities
+  that is a dense mesh over the whole panel that buries the t-values it annotates.
+  Cluster edges come from the label grid instead, so a cluster outlined in a
+  figure is the cluster counted in the JSON — there is one source for both.
+
+The figures are drawn by `train.topolm.plotting` from the arrays
+`evaluate_topography` already computed, which it returns alongside the report.
+Matplotlib is imported lazily inside `plot_topography`, so importing `common` for
+its analysis does not pull in a plotting stack.
 
 > `results/` at the repo root is **gitignored and untracked**. There is no history
 > and no backup. Do not clean it up by name; route a test's config through
@@ -201,6 +248,14 @@ names the paper's own figure for comparison:
 Task cost of topography: control is +0.1090 nats versus the topographic model.
 The paper reports +0.109 for its own pair.
 ```
+
+`--no-topography` reaches **both** arms. The flag is a CLI argument arriving at
+`train_paired`, and it was originally dropped on this path, so `--paired
+--no-topography` still wrote a report and four figures for the topographic arm
+while the user had asked for no topography. A one-armed evaluation is worse than
+none: it reads as a result and invites comparison against a control that has
+nothing. Pinned by `test_no_topography_reaches_both_arms` and
+`test_topography_still_runs_on_both_arms_when_asked`.
 
 ---
 
@@ -247,8 +302,12 @@ set**. Neither is in this repository.
   are named in `PAPER_CONDITIONS`; `--contrast c d` selects which pair the t-map
   contrasts.
 
-The encoding probe, RSA, bootstrap CIs and `run_paired` are deferred to a later
-pass.
+The encoding probe, RSA and bootstrap CIs are deferred to a later pass.
+
+> On `run_paired`: there is no function by that name in this package. The paired
+> run is `train_paired`, reached with `--paired`, and it **is** implemented — see
+> §6. If a note elsewhere defers `run_paired`, it means this and should be read as
+> a stale reference to the same work, not as a gap.
 
 ---
 
@@ -263,6 +322,21 @@ and tokenizer replaced, because what is worth testing here is the cadence
 arithmetic, the objective wiring and the evaluation — none of which need
 Wikipedia. The substitution is explicit in `_patch_data`, not hidden in a fixture,
 and the run directory is redirected under `tmp_path` by an autouse fixture.
+
+The plotting tests (`test_topolm_plotting.py`) assert on **artists**, not on saved
+images. `contourf` is a single artist whose hatch lives on the set rather than on a
+per-level collection, so a test that reads `ax.collections[0].get_hatch()` sees
+`None` and passes vacuously; `_hatched` reads the set instead. The
+significance-direction assertion compares the hatched region's **extent** against
+the mask. Reading the pixels would work too, but it would not say *which* half of
+the panel was wrong.
+
+One note on the stub tokenizer: it takes a **list of strings**, which is what
+`TiktokenPreprocessor.__call__` accepts (`str` or `list`, and it raises `TypeError`
+on anything else). It used to take a `{"text": [...]}` mapping — a shape that
+matched neither the real preprocessor nor anything else — and that agreement
+between two unlike stubs is what hid the live `TypeError` in
+`extract_tap_activations` for the whole first pass of this code.
 
 **Do not run the full suite as a routine check.** It takes about 1.5 hours and is
 also the pre-push hook; scope pytest to the modules you touched.

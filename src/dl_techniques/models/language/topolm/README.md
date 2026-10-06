@@ -252,6 +252,16 @@ Two rules in that list are load-bearing and not interchangeable:
   patches of zero, and a patch of zeros is a patch of agreement, so the statistic
   jumps without any change in the underlying organisation.
 
+A run also **draws** the result: one t-map per tapped layer on a shared diverging
+scale with rejected cells hatched and clusters outlined, Moran's I against depth,
+and one categorical cluster map. That is `train.topolm.plotting`, called from
+`run_topographic_evaluation` on the same arrays the report counts. Its rules are
+in the trainer's README (`src/train/topolm/README.md` § *Figures*); the short
+version is that a topographic figure has exactly two ways of lying by
+construction — a per-panel autoscaled colour map, and a significance overlay on
+the wrong half of the cells — and both are pinned by tests that measure the
+artists rather than eyeballing a PNG.
+
 Two things the metrics do *not* do, deliberately:
 
 - **A simulator is not a result.** `GaussianReadout` exists so a model can be built
@@ -299,11 +309,21 @@ Two numerical rules, both measured rather than assumed:
 
 - the correlation block runs at `numpy.promote_types(input_dtype, "float32")` —
   a hard cast to `float32` *narrows* the reduction under a `float64` policy;
-- `add_loss` is skipped for a symbolic `KerasTensor`. Keras traces `call` once
-  before the first real batch, `add_loss` accepts a `KerasTensor` without
-  complaint, and the stored tensor never becomes a value — so an
-  otherwise-correct model would report a loss with no spatial term in it and
-  nothing would raise.
+- `add_loss` is skipped for a symbolic `KerasTensor`, so the penalty is never
+  computed from an unrealisable shape.
+
+**The second rule is belt-and-braces, and this README used to overstate it.** An
+earlier draft claimed `add_loss` accepts a `KerasTensor`, stores it, and that the
+stored tensor never becomes a value — so a training loss would silently lack the
+spatial term. That could not be reproduced. `add_loss` on a symbolic tensor here
+stores *nothing at all*, so the term is absent either way; and this model's
+`build()` materialises the tree without a forward pass, so no tap is ever reached
+with a `KerasTensor` in the normal lifecycle (measured: 0 symbolic tap calls after
+`build()`, 4 eager calls and 4 losses after the first `training=True` step).
+
+The honest reason the guard stays: the skip is free, and the alternative is a
+sampled 7260-term reduction whose result is discarded. A reader weighing whether
+to delete the line should know it buys no observable behaviour today.
 
 ---
 

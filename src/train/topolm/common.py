@@ -271,6 +271,14 @@ def build_backbone(config: TopoLMTrainingConfig) -> TopoLM:
     """
     variant_kwargs: Dict[str, Any] = {
         "vocab_size": config.vocab_size,
+        # The position table's size comes from HERE, not from the variant, because
+        # the data pipeline is chunked to config.max_seq_length. Without this the
+        # table keeps the variant's length while the batches are longer, and the
+        # run dies in `positional_embeddings` with an out-of-range Gather on the
+        # first step -- after the dataset has already been built. MEASURED with
+        # `--variant tiny --max-seq-length 512` (the CLI default) against the
+        # variant's 256: `indices[256] = 256 is not in [0, 256)`.
+        "max_seq_len": config.max_seq_length,
         "dropout_rate": config.dropout_rate,
         "attention_dropout_rate": config.attention_dropout_rate,
         "tie_word_embeddings": config.tie_word_embeddings,
@@ -288,6 +296,14 @@ def build_backbone(config: TopoLMTrainingConfig) -> TopoLM:
         variant_kwargs["num_heads"] = config.num_heads
 
     backbone = TopoLM.from_variant(config.model_variant, **variant_kwargs)
+
+    if backbone.max_seq_len != config.max_seq_length:  # pragma: no cover
+        raise ValueError(
+            f"the position table is {backbone.max_seq_len} but the data pipeline "
+            f"emits {config.max_seq_length}-token windows; these must agree or "
+            f"the first batch dies in positional_embeddings with an "
+            f"out-of-range Gather"
+        )
     height, width = backbone.grid_shape
     logger.info(
         f"Backbone: variant={config.model_variant}, "
@@ -550,10 +566,12 @@ def extract_tap_activations(
     if not prompts:
         raise ValueError("prompts must not be empty")
 
-    tokens = np.asarray(
-        preprocessor({"text": np.array(prompts, dtype=object)})["input_ids"],
-        dtype="int32",
-    )
+    # POSITIONAL, not a dict. `TiktokenPreprocessor.__call__` accepts a string
+    # or a LIST of strings and raises TypeError on anything else -- the mapping
+    # form is HF-dataset-shaped, which is what the *dataset* pipeline uses and
+    # not this callable. The padded result is fine here: activations are pooled
+    # over positions, so padding contributes an equal share to every condition.
+    tokens = np.asarray(preprocessor(prompts)["input_ids"], dtype="int32")
 
     if not backbone.built:
         # A subclassed model's sub-layers have no `path` until something has built
@@ -602,7 +620,7 @@ def evaluate_topography(
     min_cluster_size: int = 10,
     fdr_alpha: float = 0.05,
     is_smoke_set: bool = False,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, np.ndarray]]]:
     """Score the model's topographic organisation against one contrast.
 
     For each tap, in a raw arm and (when configured) a simulated-fMRI-readout arm:
@@ -642,8 +660,13 @@ def evaluate_topography(
     :param is_smoke_set: Record in the report that the stimuli are the built-in
         stand-in rather than a published set.
     :type is_smoke_set: bool
-    :return: The report dictionary.
-    :rtype: Dict[str, Any]
+    :return: ``(report, arrays)``. The report is the JSON summary for every arm.
+        ``arrays`` holds the t-maps, BH-FDR masks and cluster label grids for the
+        LAST arm computed -- the raw one unless a readout was configured -- so
+        :func:`plot_topography` draws from the same numbers the report counts
+        rather than recomputing them. Returned separately because a report is
+        JSON-serialisable and these are not.
+    :rtype: Tuple[Dict[str, Any], Dict[str, Dict[str, numpy.ndarray]]]
     :raises ValueError: If the two contrast conditions are absent from
         ``stimuli`` -- naming them.
     """
@@ -670,6 +693,10 @@ def evaluate_topography(
     }
 
     for arm in (["raw", "readout"] if readout_fwhm else ["raw"]):
+        # `plotted` collects the LAST arm's arrays for drawing. `report` keeps
+        # every arm's summary, so the two are consistent by construction: the
+        # figure is the raw arm unless a smoothed one was also computed.
+        plotted: Dict[str, np.ndarray] = {}
         per_condition = {
             condition: extract_tap_activations(
                 backbone, prompts, preprocessor
@@ -696,6 +723,8 @@ def evaluate_topography(
         corrected = fdr_across_layers(p_maps, alpha=fdr_alpha)
 
         tap_reports: Dict[str, Any] = {}
+        plotted_sig: Dict[str, np.ndarray] = {}
+        plotted_labels: Dict[str, np.ndarray] = {}
         for tap in backbone.tap_layers:
             name = tap.path
             sig_grid = np.asarray(
@@ -705,7 +734,7 @@ def evaluate_topography(
 
             clusters: Dict[str, List[List[int]]] = {}
             for sign, label in ((1, condition_a), (-1, condition_b)):
-                grown, _ = grow_clusters(
+                grown, label_grid = grow_clusters(
                     t_grid,
                     sig_grid,
                     sign=sign,
@@ -714,6 +743,14 @@ def evaluate_topography(
                     cell_to_unit=tap.layout.cell_to_unit,
                 )
                 clusters[label] = [cluster.tolist() for cluster in grown]
+                # Keep the dominant polarity's labels for the figure. One map
+                # cannot show both polarities' boundaries at once without
+                # inventing a distinction the label grid does not carry, so the
+                # positive one is drawn and the counts stay in the JSON.
+                if sign == 1:
+                    plotted[name] = t_grid
+                    plotted_sig[name] = sig_grid
+                    plotted_labels[name] = label_grid
 
             tap_reports[name] = {
                 "morans_i": morans_i_summary(t_grid, sig_grid),
@@ -753,7 +790,85 @@ def evaluate_topography(
             json.dump(report, handle, indent=2, sort_keys=True)
         logger.info(f"Topographic report written to {path}")
 
-    return report
+    return report, {
+        "t_maps": plotted,
+        "sig_grids": plotted_sig,
+        "label_grids": plotted_labels,
+    }
+
+
+def plot_topography(
+    report: Dict[str, Any],
+    arrays: Dict[str, Dict[str, np.ndarray]],
+    output_dir: str,
+) -> List[str]:
+    """Render the paper's figure set for every arm in ``report``.
+
+    Called after :func:`evaluate_topography`, from the same arrays that produced
+    the JSON, so a cluster outlined in a figure is the cluster counted in the
+    report -- the two cannot disagree because there is one source for both.
+
+    Imported lazily so that importing :mod:`train.topolm.common` does not pull
+    in matplotlib; the analysis is usable, and testable, without a display.
+
+    :param report: The report returned by :func:`evaluate_topography`.
+    :type report: Dict[str, Any]
+    :param arrays: The second return value of :func:`evaluate_topography`.
+    :type arrays: Dict[str, Dict[str, numpy.ndarray]]
+    :param output_dir: Directory for the PNGs.
+    :type output_dir: str
+    :return: Paths written.
+    :rtype: List[str]
+    """
+    from train.topolm.plotting import (  # local: keeps matplotlib off the
+        plot_cluster_overlay,  # analysis import path
+        plot_morans_i_profile,
+        plot_t_maps,
+    )
+
+    condition_a, condition_b = report["contrast"]
+    os.makedirs(output_dir, exist_ok=True)
+    written: List[str] = []
+
+    for arm, values in report["arms"].items():
+        written.append(
+            plot_t_maps(
+                arrays["t_maps"],
+                sig_grids=arrays["sig_grids"],
+                label_grids=arrays["label_grids"],
+                arm=arm,
+                condition_a=condition_a,
+                condition_b=condition_b,
+                output_path=os.path.join(output_dir, f"t_maps_{arm}.png"),
+            )
+        )
+        written.append(
+            plot_morans_i_profile(
+                {
+                    name: entry["morans_i"]["standard"]
+                    for name, entry in values["per_tap"].items()
+                },
+                output_path=os.path.join(output_dir, f"morans_i_{arm}.png"),
+                arm=arm,
+            )
+        )
+
+    # One cluster figure for the deepest tap that actually found a cluster,
+    # rather than the last tap: on an untrained or non-topographic run the last
+    # tap's grid is empty and the figure would show nothing.
+    labels = arrays["label_grids"]
+    populated = [name for name, grid in labels.items() if np.any(grid > 0)]
+    if populated:
+        deepest = populated[-1]
+        written.append(
+            plot_cluster_overlay(
+                labels[deepest],
+                output_path=os.path.join(output_dir, "clusters.png"),
+                title=deepest.split("/")[-1],
+            )
+        )
+
+    return [path for path in written if path is not None]
 
 
 def _sizes(tap_reports: Mapping[str, Any], key: str) -> List[List[int]]:
@@ -1025,7 +1140,7 @@ def run_topographic_evaluation(
     :return: The report dictionary.
     :rtype: Dict[str, Any]
     """
-    report = evaluate_topography(
+    report, arrays = evaluate_topography(
         backbone,
         config.stimuli if config.stimuli else SMOKE_STIMULI,
         config.contrast_conditions,
@@ -1044,6 +1159,9 @@ def run_topographic_evaluation(
             f"{values['total_clusters_a']} (for '{report['contrast'][0]}') / "
             f"{values['total_clusters_b']} (for '{report['contrast'][1]}')"
         )
+    figures = plot_topography(report, arrays, results_dir)
+    if figures:
+        logger.info(f"Topographic figures written: {', '.join(figures)}")
     if report["stimuli_are_smoke_set"]:
         logger.warning(
             "These topography numbers came from the BUILT-IN smoke stimuli, not "
@@ -1070,6 +1188,7 @@ def _run_dir(config: TopoLMTrainingConfig) -> str:
 def train_paired(
     config: TopoLMTrainingConfig,
     preprocessor=None,
+    run_topography: bool = True,
 ) -> Dict[str, Any]:
     """Train the topographic model and its ``alpha = 0`` control, back to back.
 
@@ -1084,6 +1203,13 @@ def train_paired(
         each build its own. Both arms must see the same one, since a tokenizer is
         part of the data pipeline the two arms are supposed to share.
     :type preprocessor: Any
+    :param run_topography: Run the post-hoc evaluation on BOTH arms, not just
+        the first. It has to reach both or the comparison cannot be made, and
+        this is forwarded rather than inferred because ``--no-topography`` is a
+        CLI flag that arrives here: without the forwarding, ``--paired
+        --no-topography`` still wrote a full report and figure set for the
+        topographic arm. MEASURED.
+    :type run_topography: bool
     :return: ``{"topographic": <result dict>, "control": <result dict>}``.
     :rtype: Dict[str, Any]
     :raises ValueError: If ``config.spatial_alpha`` is already ``0`` -- there is
@@ -1102,14 +1228,20 @@ def train_paired(
         f"ARM 1/2: topographic (alpha = {config.spatial_alpha}, "
         f"{config.spatial_radius}-radius neighbourhoods)"
     )
-    topographic = train_topolm(replace(config), preprocessor=preprocessor)
+    topographic = train_topolm(
+        replace(config),
+        preprocessor=preprocessor,
+        run_topography=run_topography,
+    )
 
     logger.info("=" * 60)
     logger.info(
         "ARM 2/2: non-topographic control (alpha = 0) -- identical weights, "
         "no spatial term in the objective"
     )
-    control_result = train_topolm(control, preprocessor=preprocessor)
+    control_result = train_topolm(
+        control, preprocessor=preprocessor, run_topography=run_topography
+    )
 
     for name, result in (
         ("topographic", topographic), ("control", control_result)

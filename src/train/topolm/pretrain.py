@@ -79,7 +79,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--vocab-size", type=int, default=50257, help="Vocabulary size"
+        "--vocab-size",
+        type=int,
+        default=100277,
+        help=(
+            "Vocabulary size. MUST exceed the tokenizer's, which is 100277 for "
+            "the default cl100k_base encoding used by create_tokenizer -- its "
+            "special ids reach 100267. The previous default of 50257 is "
+            "GPT-2's base vocabulary and is wrong for this tokenizer: it dies "
+            "in word_embeddings on the first batch with an out-of-range Gather "
+            "(`indices[..] = 50259 is not in [0, 50257)`). Measured."
+        ),
     )
     parser.add_argument(
         "--num-layers", type=int, default=None, help="Override the block count"
@@ -173,8 +183,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=512,
         help=(
-            "Packed chunk length, and the position table's size. The paper "
-            "trains at 1024."
+            "Packed chunk length, AND the position table's size -- "
+            "build_backbone forwards it to max_seq_len because the two must "
+            "agree. The paper trains at 1024."
         ),
     )
     parser.add_argument(
@@ -412,7 +423,9 @@ def main() -> None:
     )
 
     if args.paired:
-        results = train_paired(config)
+        results = train_paired(
+            config, run_topography=args.run_topography
+        )
         for name, result in results.items():
             logger.info(
                 f"{name}: wrote {result['results_dir']} "

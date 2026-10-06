@@ -43,6 +43,7 @@ from train.topolm import (
     extract_tap_activations,
     resolve_cadence,
     resolve_tap_sites,
+    run_topographic_evaluation,
     train_paired,
     train_topolm,
 )
@@ -66,10 +67,18 @@ class StubTokenizer:
     Character codes rather than random ids, so two calls with the same text
     produce the same ids -- a random tokenizer would let a test pass on a prompt
     ordering that never recurs.
+
+    Takes a LIST of strings, which is the shape
+    :class:`~dl_techniques.utils.tokenizer.TiktokenPreprocessor` actually
+    accepts. It took a ``{"text": [...]}`` mapping before, matching neither the
+    real preprocessor nor the trainer: ``__call__`` raises ``TypeError`` on
+    anything but a string or a list, so the stub was agreeing with no one and
+    hid a real defect. ``extract_tap_activations`` was passing the mapping and
+    only reached this stub in tests; the live run raised ``TypeError`` there.
     """
 
-    def __call__(self, batch):
-        texts = batch["text"]
+    def __call__(self, texts):
+        texts = [texts] if isinstance(texts, str) else texts
         ids = np.zeros((len(texts), LENGTH), dtype="int32")
         for row, text in enumerate(texts):
             for column, character in enumerate(str(text)[:LENGTH - 1]):
@@ -156,6 +165,22 @@ def _config(**overrides):
 
 
 class TestConfig:
+    def test_the_position_table_matches_the_data_window(self):
+        """The two lengths must agree, or the first batch cannot index it.
+
+        The CLI defaults them independently (`--max-seq-length 512`, and the
+        variant carries its own `max_seq_len`), so nothing forced them to match.
+        Before the forward, `build_backbone` wrote a 256-entry position table for
+        512-token windows and every run died in `positional_embeddings`.
+        """
+        backbone = build_backbone(_config(max_seq_length=96))
+        assert backbone.max_seq_len == 96
+
+    def test_a_window_longer_than_the_variant_is_forwarded(self):
+        """A 512-token window must resize the table, not be rejected."""
+        backbone = build_backbone(_config(max_seq_length=512))
+        assert backbone.max_seq_len == 512
+
     def test_it_is_additive_to_the_shared_clm_config(self):
         """A re-declared inherited field moves its position in the order.
 
@@ -546,7 +571,7 @@ class TestActivationExtraction:
         pooled = activations[backbone.tap_layers[0].path]
 
         captures = [TapCapture() for _ in backbone.tap_layers]
-        tokens = tokenizer({"text": np.array(prompts, dtype=object)})["input_ids"]
+        tokens = tokenizer(prompts)["input_ids"]
         backbone(tokens, training=False, taps=tuple(captures))
         raw = ops.convert_to_numpy(captures[0].value)
 
@@ -589,10 +614,11 @@ class TestEvaluation:
             is_smoke_set=False,
         )
         settings.update(overrides)
-        return backbone, evaluate_topography(backbone, **settings)
+        report, arrays = evaluate_topography(backbone, **settings)
+        return backbone, report, arrays
 
     def test_the_report_carries_every_tap_and_both_arms(self):
-        backbone, report = self._report()
+        backbone, report, _ = self._report()
         for arm in ("raw", "readout"):
             per_tap = report["arms"][arm]["per_tap"]
             assert set(per_tap) == {t.path for t in backbone.tap_layers}
@@ -604,12 +630,12 @@ class TestEvaluation:
         784-unit layer, and the map's threshold stops being a statement about
         the model.
         """
-        _, report = self._report()
+        _, report, _ = self._report()
         assert report["fdr_scope"] == "joint across all taps"
         assert report["fdr_alpha"] == 0.05
 
     def test_the_smoke_set_is_flagged_when_it_is_used(self):
-        _, report = self._report(is_smoke_set=True)
+        _, report, _ = self._report(is_smoke_set=True)
         assert report["stimuli_are_smoke_set"] is True
 
     def test_morans_i_is_scored_on_the_unthresholded_map(self):
@@ -618,7 +644,7 @@ class TestEvaluation:
         Asserting only that both are present would pass a pipeline that
         thresholded first, since a contiguous zero patch also scores positive.
         """
-        _, report = self._report()
+        _, report, _ = self._report()
         entry = next(iter(report["arms"]["raw"]["per_tap"].values()))
         summary = entry["morans_i"]
         assert set(summary) >= {"standard", "islands", "num_units"}
@@ -640,10 +666,10 @@ class TestEvaluation:
             preprocessor=StubTokenizer(),
             min_cluster_size=2,
         )
-        with_readout = evaluate_topography(
+        with_readout, _ = evaluate_topography(
             backbone, readout_fwhm=2.0, **shared
         )
-        without_readout = evaluate_topography(
+        without_readout, _ = evaluate_topography(
             backbone, readout_fwhm=None, **shared
         )
 
@@ -670,7 +696,7 @@ class TestEvaluation:
         )
 
     def test_disabling_the_fwhm_leaves_the_raw_arm_only(self):
-        _, report = self._report(readout_fwhm=0)
+        _, report, _ = self._report(readout_fwhm=0)
         assert list(report["arms"]) == ["raw"]
 
     def test_a_missing_contrast_condition_is_rejected_by_name(self):
@@ -689,6 +715,59 @@ class TestEvaluation:
             min_cluster_size=2,
         )
         assert (tmp_path / "report" / "topography_report.json").is_file()
+
+    def test_run_topographic_evaluation_writes_figures_beside_the_json(
+        self, tmp_path
+    ):
+        """The run entry point must produce the figures, not just the numbers.
+
+        A figure module that nothing calls is dead code, and the JSON alone
+        cannot show a topography. Asserted on the FILES because the point is
+        that a reader gets a figure per run.
+        """
+        backbone = build_backbone(_config())
+        run_topographic_evaluation(
+            backbone,
+            _config(),
+            StubTokenizer(),
+            str(tmp_path),
+        )
+        written = {path.name for path in tmp_path.iterdir()}
+        assert "topography_report.json" in written
+        assert "t_maps_raw.png" in written, sorted(written)
+        assert "morans_i_raw.png" in written, sorted(written)
+
+    def test_the_figures_are_drawn_from_the_reported_arrays(self):
+        """The t-map drawn is the t-map scored.
+
+        Pinned by comparing the returned arrays against a re-extraction, so a
+        figure cannot be sourced from a different pass than the report -- which
+        is the failure mode that makes a figure and its caption disagree.
+        """
+        backbone, report, arrays = self._report()
+        assert set(arrays["t_maps"]) == set(report["arms"]["raw"]["per_tap"])
+        assert set(arrays["sig_grids"]) == set(arrays["t_maps"])
+        assert set(arrays["label_grids"]) == set(arrays["t_maps"])
+        for name, values in arrays["t_maps"].items():
+            assert values.shape == tuple(report["grid_shape"])
+            assert np.asarray(arrays["sig_grids"][name]).shape == values.shape
+            assert np.asarray(arrays["label_grids"][name]).shape == values.shape
+
+    def test_a_figure_is_not_drawn_for_an_arm_that_was_not_computed(
+        self, tmp_path
+    ):
+        """No smoothed arm, no smoothed figure.
+
+        A stale PNG from a previous configuration sitting beside a fresh report
+        is worse than no figure: it is a result that was never recomputed.
+        """
+        backbone = build_backbone(_config())
+        config = _config()
+        config.readout_fwhm = None
+        run_topographic_evaluation(backbone, config, StubTokenizer(), str(tmp_path))
+        written = {path.name for path in tmp_path.iterdir()}
+        assert "t_maps_raw.png" in written
+        assert "t_maps_readout.png" not in written
 
     def test_every_tap_gets_its_own_readout_layout(self):
         """A single shared readout would blur every layer as one grid.
@@ -826,6 +905,40 @@ class TestPairedRun:
             "distinguishable when read back"
         )
         assert all(os.path.isdir(path) for path in directories.values())
+
+    def test_no_topography_reaches_both_arms(self, monkeypatch, tmp_path):
+        """`--no-topography --paired` must skip BOTH arms' reports.
+
+        The flag is a CLI argument that arrives here, and it was dropped on the
+        paired path: the topographic arm still wrote a report and a full figure
+        set while the user had asked for no topography at all. A partial
+        evaluation is worse than none -- it looks like a result for one arm and
+        invites comparison against a control that has none.
+        """
+        _patch_data(monkeypatch)
+        results = train_paired(
+            _config(save_dir="paired_notopo"),
+            preprocessor=StubTokenizer(),
+            run_topography=False,
+        )
+        for name, result in results.items():
+            written = os.listdir(result["results_dir"])
+            assert "topography_report.json" not in written, (name, written)
+            assert not any(path.endswith(".png") and "training_curves" not in path
+                           for path in written), (name, written)
+
+    def test_topography_still_runs_on_both_arms_when_asked(self, monkeypatch):
+        """The other arm of the flag: forwarding must not disable it by default."""
+        _patch_data(monkeypatch)
+        results = train_paired(
+            _config(save_dir="paired_topo"),
+            preprocessor=StubTokenizer(),
+            run_topography=True,
+        )
+        for name, result in results.items():
+            assert os.path.isfile(
+                os.path.join(result["results_dir"], "topography_report.json")
+            ), name
 
     def test_the_control_arm_is_only_alpha_that_differs(self):
         from dataclasses import replace

@@ -745,14 +745,38 @@ class SpatialSmoothness(keras.layers.Layer):
         if training is True and self.alpha > 0.0 and not isinstance(
             inputs, keras.KerasTensor
         ):
-            # The isinstance guard is load-bearing, not defensive. Keras traces
-            # `call` once with symbolic inputs before the first real batch, and
-            # `add_loss` accepts a KerasTensor without complaint -- it stores it,
-            # and that stored symbolic tensor never becomes a value. A model
-            # fitted once from scratch then reports a loss with no spatial term
-            # in it, and nothing raises. Skipping the trace is correct: the
-            # traced graph is a shape description, and the real graph is built on
-            # the first eager call.
+            # Skips SYMBOLIC inputs. What that buys, measured on Keras 3.8 / TF
+            # backend rather than assumed: nothing observable. With the guard
+            # REMOVED, the loss is unchanged on every path tried -- three that
+            # hand the tap a `KerasTensor` (a bare `keras.Input`, a subclassed
+            # model called with one, and a functional model wrapping the tap) all
+            # end with an empty `losses` either way, because Keras discards the
+            # losses collected during a symbolic-input call. So the guard is
+            # belt-and-braces, not load-bearing.
+            #
+            # It is kept for two reasons. The first is that the skip is cheap and
+            # the alternative -- a sampled 7260-term reduction against an
+            # unrealisable shape -- is work whose result is thrown away. The
+            # second is that the ORIGINAL justification, recorded in an earlier
+            # draft of this comment, was that `add_loss` accepts a `KerasTensor`,
+            # stores it, and the stored tensor never becomes a value, so a
+            # training loss would silently lack the spatial term. That could NOT
+            # be reproduced and was withdrawn. Two parts of it were wrong in
+            # opposite directions: nothing is left in `losses`, and inside a
+            # `tf.function` -- the path a training step actually takes -- the tap
+            # receives a CONCRETE traced tensor, the guard does not apply, and the
+            # term is added and stored exactly as it should be.
+            #
+            # A third thing this comment used to assert, that the guard is
+            # reachable, is not asserted anywhere in the test suite because it
+            # proved PATH-DEPENDENT: identical code saw a `KerasTensor` in one
+            # context and an eager tensor in another.
+            #
+            # What the guard does NOT do is protect the model below: its `build()`
+            # materialises the tree without a forward pass, so no tap is reached
+            # with a `KerasTensor` in that model's lifecycle. MEASURED: 0 tap
+            # calls after `TopoLM.build(...)`, 4 eager calls and 4 losses after the
+            # first `training=True` step.
             flat = ops.reshape(
                 ops.cast(inputs, _promoted_dtype(inputs.dtype)),
                 (-1, self._num_units),

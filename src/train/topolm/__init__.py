@@ -30,6 +30,14 @@ with identical seeds, data order and every other hyperparameter. The control's
 taps are still created and still built, so the arms differ in their objective
 alone rather than in their weights.
 
+Rendering
+---------
+A run writes three figures beside the JSON report: a row of per-layer t-maps with
+the rejected region hatched and clusters outlined, Moran's I against depth, and
+one categorical cluster map. They are drawn by :mod:`train.topolm.plotting` from
+the same arrays the report counts, so a cluster in a figure is the cluster in the
+JSON by construction.
+
 References:
     - Rathi, Mehrer, AlKhamissi, Binhuraib, Blauch & Schrimpf, 2025. TopoLM.
       ICLR 2025. (https://arxiv.org/abs/2410.11516)
@@ -46,6 +54,7 @@ from .common import (
     create_topolm_model,
     evaluate_topography,
     extract_tap_activations,
+    plot_topography,
     resolve_cadence,
     resolve_tap_sites,
     run_topographic_evaluation,
@@ -64,6 +73,7 @@ __all__ = [
     "create_topolm_model",
     "evaluate_topography",
     "extract_tap_activations",
+    "plot_topography",
     "resolve_cadence",
     "resolve_tap_sites",
     "run_topographic_evaluation",
