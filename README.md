@@ -47,7 +47,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <p>
 
 - **Next-Generation Language Models** (19 packages): Production-ready implementations of **`BERT`**, **`Gemma`**, **`Qwen`** (dense, `Qwen3Next`, embeddings), **`Mamba`**, **`ModernBERT`**, **`DistilBERT`**, **`GPT-2`**, **`PtrM`**, alongside the **`Byte Latent Transformer`** (BLT), the **`Hierarchical Reasoning Model`** (HRM), **`H-Net`**, the **`Tiny Recursive Model`**, **`TopoLM`**, **`Tree Transformer`**, **`Wave Field`**, **`Zamba2`**, late-interaction retrieval with **`ColBERT`** (v1 and v2), and Fourier token mixing in **`FNet`** and **`FFTNet`**.
-- **Vision & Multimodal Powerhouses** (61 packages across vision + vision_language): A comprehensive suite including **`CLIP`**, **`CliffordCLIP`**, **`MobileCLIP`** v1 and v2 in one package (v2 is the faithful port, on a faithful **`FastViT`** image tower; v1 is deliberately non-faithful on the image side and is kept, not deprecated), **`FastVLM`** (vision-only despite the name), **`NanoVLM`**, **`BiT Diffusion`**, **`DINOv1/v2/v3`**, **`ViT-SigLIP`** (a ViT with a two-stage conv patch stem, not SigLIP's sigmoid contrastive objective), **`BEiT`**, **`Swin Transformer`**, **`MAE`**, **`Video-JEPA`**, **`LeVJEPA`**, the latent-energy world model **`LEWM`**, object detection with **`DETR`**, **`YOLOv12`**, **`RADConvNet`**, keypoints with **`SuperPoint`**, **`LightGlue`**, **`DaSiamRPN`**, **`DeepSORT`**, **`SiamFC`**, **`MambaLCT`**, and **`Segment Anything`** (SAM 1, 2 and 3). Three packages are named for something they are not; each is listed with its measured correction in [`src/dl_techniques/models/README.md`](./src/dl_techniques/models/README.md) § *Names that misattribute*.
+- **Vision & Multimodal Powerhouses** (61 packages across vision + vision_language): A comprehensive suite including **`CLIP`**, **`CliffordCLIP`**, **`MobileCLIP`** v1 and v2 in one package (v2 is the faithful port on FastViT; v1 retained for compatibility), **`FastVLM`** (vision-only despite the name), **`NanoVLM`**, **`BiT Diffusion`**, **`DINOv1/v2/v3`**, **`ViT-SigLIP`** (a ViT with a two-stage conv patch stem, not SigLIP's sigmoid contrastive objective), **`BEiT`**, **`Swin Transformer`**, **`MAE`**, **`Video-JEPA`**, **`LeVJEPA`**, the latent-energy world model **`LEWM`**, object detection with **`DETR`**, **`YOLOv12`**, **`RADConvNet`**, keypoints with **`SuperPoint`**, **`LightGlue`**, **`DaSiamRPN`**, **`DeepSORT`**, **`SiamFC`**, **`MambaLCT`**, and **`Segment Anything`** (SAM 1, 2 and 3).
 - **Advanced CNNs** (50 vision packages): A rich collection including **`ConvNeXtV1/V2`**, **`ConvUNeXt`**, **`MobileNetV1-V4`**, **`ResNet`**, **`AlexNet`**, the recursively-defined **`FractalNet`**, the complex shearlet-based **`CoShNet`**, attention-augmented **`CBAM`**, and the ultra-efficient **`SqueezeNet`** family, plus **`OmniPoint`**, **`RBFProtoNet`**, **`AccuNet`**.
 - **Time Series & Forecasting** (8 packages): State-of-the-art forecasting models including the probabilistic **`TiRex`** with quantile prediction, an enhanced implementation of **`N-BEATS`** (with `NBEATSx`), autoregressive **`DeepAR`**, **`PRISM`**, the novel **`xLSTM`**, **`Mixture Density Networks`**, **`Adaptive EMA`**, and pure **`Exponential Smoothing (ETS)`**.
 - **Generative Modeling & Image Restoration**: Diffusion and flow-matching transformers (**`SD3 MMDiT`**, **`Ideogram4`**, **`BiT Diffusion`**, **`DiT`**), a complete **`Variational Autoencoder (VAE)`** framework with **`VQ-VAE`** variants (including rotation-based codebook updates), **`Topographic VAE`**, arbitrary-scale super-resolution (**`THERA`**, **`PFT-SR`**), and restoration/denoising backbones (**`DarkIR`**, **`SCUNet`**, **`ACC-UNet`**, `PW-FNet`, **`DocRes`**, **`DocScanner`**, and a family of bias-free denoisers).
@@ -75,7 +75,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 
 - **Holistic Model Analysis**: A powerful `ModelAnalyzer` to benchmark models across five critical dimensions: training dynamics, weight health, prediction calibration, information flow, and advanced spectral analysis. Its modular design includes specialized analyzers like `CalibrationAnalyzer`, `WeightAnalyzer`, and `InformationFlowAnalyzer`.
 - **Publication-Ready Visualizations**: Automatically generate insightful visualizations, interactive summary dashboards, and comparative analysis plots with integrated statistical significance testing.
-- **Predictive Generalization with Spectral Analysis**: Integrate the power of **WeightWatcher** through our `SpectralAnalyzer` to assess generalization potential by analyzing the spectral properties (eigenvalues) of weight matrices—often without needing test data.
+- **Predictive Generalization with Spectral Analysis**: Integrate the power of **[WeightWatcher](https://github.com/WeightWatcher/WeightWatcher)** through our `SpectralAnalyzer` to assess generalization potential by analyzing the spectral properties (eigenvalues) of weight matrices—often without needing test data.
 - **Deep Diagnostic Toolkit**: Move beyond accuracy to diagnose overconfidence (`CalibrationAnalyzer`), information bottlenecks (`InformationFlowAnalyzer`), weight decay and similarity (`WeightAnalyzer`), and learning efficiency (`TrainingDynamicsAnalyzer`).
 </p>
 </details>
@@ -363,7 +363,7 @@ Our `research/` directory contains over 120 articles providing the theoretical f
 Five LaTeX manuscripts written against this codebase live under [`research/papers/`](./research/papers), several with built PDFs: `band_rms` (band-constrained RMS normalization), `bfunet` (bias-free denoisers as image priors), `cliffordnet_extensions`, `correlations`, and `logical_net`.
 
 ### API Reference (per-module docs)
-There is **no committed documentation directory and no doc generator** — `generate_docs.py` and the `make docs` target were deleted as deprecated. For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `AGENTS.md` describing its conventions, patterns, and components. Every one of the **102 leaf model packages** carries its own `README.md`. The `research/` guides above complement these with the underlying theory.
+For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `AGENTS.md` describing its conventions, patterns, and components. Every one of the **102 leaf model packages** carries its own `README.md`. The `research/` guides above complement these with the underlying theory.
 
 ---
 
@@ -377,7 +377,6 @@ The repository is organized for clarity, maintainability, and ease of contributi
 dl_techniques/
 ├── src/dl_techniques/         # THE LIBRARY — 13 subpackages
 │   ├── models/                # 102 leaf model packages in 12 FAMILY directories
-│   │   │                      # full catalogue: src/dl_techniques/models/README.md
 │   │   ├── vision/            # 50 — resnet, convnext, vit, dino, swin_transformer, beit,
 │   │   │                      #      yolo12, detr, vae, vq_vae, depth_anything, alexnet,
 │   │   │                      #      and the nested image_restoration/, super_resolution/, keypoints/
@@ -426,7 +425,7 @@ dl_techniques/
 ├── src/applications/          # Deployable apps (today: bias_free_denoiser, Streamlit)
 ├── research/                  # 120+ in-depth articles, guides, and LaTeX papers
 ├── tests/                     # 1,558 test modules mirroring src/dl_techniques/
-└── REPO_MAP.md                # Path-verified router — read this first
+└── REPO_MAP.md
 ```
 
 ---
