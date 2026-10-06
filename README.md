@@ -8,7 +8,7 @@
   <img alt="Framework" src="https://img.shields.io/badge/Keras-3.8-red">
   <img alt="Backend" src="https://img.shields.io/badge/TensorFlow-2.18-orange">
   <a href="https://deepwiki.com/NikolasMarkou/dl_techniques/1-overview">
-    <img src="https://deepwiki.com/NikolasMarkou/dl_techniques/badge.svg" alt="Ask DeepWiki"></a>
+    <img src="https://img.shields.io/badge/Ask_DeepWiki-1_overview-blue" alt="Ask DeepWiki"></a>
   <a href="https://electiconsulting.com">
     <img alt="Sponsored by Electi Consulting" src="https://img.shields.io/badge/Sponsored%20by-Electi%20Consulting-8B1C34">
   </a>
