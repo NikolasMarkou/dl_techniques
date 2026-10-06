@@ -463,12 +463,24 @@ def morans_i_summary(
     sig_grid: Optional[np.ndarray] = None,
     connectivity: str = "queen",
     min_island_size: int = 3,
+    num_permutations: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> dict:
-    """Both Moran statistics for one contrast map, plus the input's shape.
+    """All three Moran statistics for one contrast map, plus the input's shape.
 
-    Bundled because the paper always reports the pair together: the standard
-    value for a map the reader can see, and the islands value for a map where
-    the significant set is small enough to need it.
+    Bundled because the paper always reports them together: the standard value
+    for a map the reader can see, the islands value for a map where the
+    significant set is small enough to need it, and the permutation p-value for
+    the question neither of the other two answers -- whether the standard value
+    exceeds what the same value multiset would produce with its spatial
+    arrangement destroyed.
+
+    The permutation statistic is OPT-IN via ``num_permutations`` because it costs
+    that many shuffles of the map, and the weight matrix is rebuilt per tap here
+    rather than cached: this function's contract is one map, and a cache keyed on
+    grid shape would outlive the caller holding it. Callers scoring 24 taps
+    should build the weights once and call :func:`morans_i_permutation_test`
+    directly.
 
     :param t_grid: ``(height, width)`` contrast values, unthresholded.
     :type t_grid: numpy.ndarray
@@ -480,8 +492,16 @@ def morans_i_summary(
     :type connectivity: str
     :param min_island_size: Smallest island the islands statistic will score.
     :type min_island_size: int
-    :return: ``{"standard", "islands", "num_units", "connectivity"}``.
+    :param num_permutations: Shuffles behind the permutation p-value, or ``None``
+        to skip it and report ``nan``. The p-value's floor is
+        ``1 / (num_permutations + 1)``.
+    :type num_permutations: Optional[int]
+    :param seed: Seed for the shuffles, so the p-value is reproducible.
+    :type seed: Optional[int]
+    :return: ``{"standard", "islands", "permutation_p", "num_permutations",
+        "num_units", "connectivity"}``.
     :rtype: dict
+    :raises ValueError: If ``num_permutations`` is not positive and not ``None``.
     """
     t_grid = _as_2d_map(t_grid)
     if sig_grid is None:
@@ -491,9 +511,23 @@ def morans_i_summary(
             t_grid, sig_grid, connectivity=connectivity,
             min_island_size=min_island_size,
         )
+
+    if num_permutations is None:
+        permutation_p = float("nan")
+    else:
+        height, width = t_grid.shape
+        _, permutation_p = morans_i_permutation_test(
+            t_grid,
+            grid_weights(height, width, connectivity=connectivity),
+            num_permutations=num_permutations,
+            seed=seed,
+        )
+
     return {
         "standard": morans_i_grid(t_grid, connectivity=connectivity),
         "islands": islands,
+        "permutation_p": float(permutation_p),
+        "num_permutations": num_permutations,
         "num_units": int(t_grid.size),
         "connectivity": connectivity,
     }

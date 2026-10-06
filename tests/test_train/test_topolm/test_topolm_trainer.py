@@ -43,11 +43,13 @@ from train.topolm import (
     extract_tap_activations,
     resolve_cadence,
     resolve_tap_sites,
+    plot_topography,
     run_topographic_evaluation,
     train_paired,
     train_topolm,
 )
 from train.topolm import common as C
+from dl_techniques.metrics.topographic_selectivity import contrast_tmap
 from train.common.clm_pretrain import ClmPretrainConfig
 
 from dl_techniques.models.language.topolm import MODEL_VARIANTS
@@ -602,6 +604,203 @@ class TestActivationExtraction:
 # ---------------------------------------------------------------------
 
 
+class TestThePermutationStatistic:
+    """The paper's third Moran statistic, and its plumbing.
+
+    ``standard`` and ``islands`` were in the report from the start;
+    ``permutation`` was in the spec's scope line and never reached a report at
+    all, because ``morans_i_permutation_test`` existed as a primitive that
+    nothing called.
+    """
+
+    def _report(self, **overrides):
+        backbone = build_backbone(_config())
+        settings = dict(
+            stimuli=SMOKE_STIMULI,
+            contrast_conditions=("a", "b"),
+            preprocessor=StubTokenizer(),
+            readout_fwhm=2.0,
+            min_cluster_size=2,
+            is_smoke_set=False,
+        )
+        settings.update(overrides)
+        report, arrays = evaluate_topography(backbone, **settings)
+        return backbone, report, arrays
+
+    def _stats(self, **overrides):
+        _, report, _ = self._report(**overrides)
+        return report["arms"]["raw"]["per_tap"]
+
+    def test_the_report_carries_the_statistic_once_asked_for(self):
+        per_tap = self._stats(permutation_p_value=True, num_permutations=19)
+        for name, entry in per_tap.items():
+            moran = entry["morans_i"]
+            assert moran["num_permutations"] == 19, name
+            assert 0.0 < moran["permutation_p"] <= 1.0, (
+                f"{name}: p={moran['permutation_p']} is outside (0, 1]"
+            )
+
+    def test_the_statistic_is_absent_by_default(self):
+        """Off by default: ~480k recomputations at the 9999 default."""
+        per_tap = self._stats()
+        for name, entry in per_tap.items():
+            assert entry["morans_i"]["num_permutations"] is None, name
+            assert np.isnan(entry["morans_i"]["permutation_p"]), name
+
+    def test_the_p_values_are_reproducible_from_the_seed(self):
+        """Same seed, same numbers -- so a report can be regenerated.
+
+        Guards against reaching for `hash()`, which is salted per process and
+        would make the p-values differ between two runs of one command.
+
+        This test uses a SINGLE backbone, so the activations are identical
+        across calls; only the permutation shuffles vary. Two calls to
+        evaluate_topography with the same seed must produce the same p-values.
+        """
+        backbone = build_backbone(_config())
+        settings = dict(
+            stimuli=SMOKE_STIMULI,
+            contrast_conditions=("a", "b"),
+            preprocessor=StubTokenizer(),
+            readout_fwhm=2.0,
+            min_cluster_size=2,
+            permutation_p_value=True,
+            num_permutations=19,
+        )
+        report1, _ = evaluate_topography(backbone, **settings)
+        report2, _ = evaluate_topography(backbone, **settings)
+        for name in report1["arms"]["raw"]["per_tap"]:
+            assert (
+                report1["arms"]["raw"]["per_tap"][name]["morans_i"]["permutation_p"]
+                == report2["arms"]["raw"]["per_tap"][name]["morans_i"]["permutation_p"]
+            ), name
+
+    def test_a_different_seed_changes_the_p_values(self):
+        """Otherwise reproducibility would be indistinguishable from a constant."""
+        first = self._stats(
+            permutation_p_value=True, num_permutations=19, seed=1
+        )
+        second = self._stats(
+            permutation_p_value=True, num_permutations=19, seed=2
+        )
+        values = [
+            entry["morans_i"]["permutation_p"] for entry in first.values()
+        ] + [entry["morans_i"]["permutation_p"] for entry in second.values()]
+        assert len(set(values)) > 1, (
+            "every p-value is identical across two different seeds; the seed is "
+            "not reaching the permutation"
+        )
+
+    def test_taps_do_not_share_a_shuffle_sequence(self):
+        """Two taps must not be correlated through one RNG stream.
+
+        Sharing a stream would make neighbouring layers' p-values move together
+        for a reason that has nothing to do with the maps.
+        """
+        seeds = [
+            C._permutation_seed(0, f"topolm/block_{i}/attention_tap")
+            for i in range(8)
+        ]
+        assert len(set(seeds)) == len(seeds), "tap paths collide into one seed"
+
+    def test_the_seed_derivation_is_stable_across_processes(self):
+        """A literal, not a hash: this value must not be process-salted."""
+        assert C._permutation_seed(3, "topolm/block_0/mlp_tap") == C._permutation_seed(
+            3, "topolm/block_0/mlp_tap"
+        )
+        # And it must depend on both inputs.
+        assert C._permutation_seed(
+            3, "a"
+        ) != C._permutation_seed(4, "a")
+        assert C._permutation_seed(3, "a") != C._permutation_seed(3, "b")
+
+    def test_a_non_positive_count_is_rejected_at_the_call_boundary(self):
+        with pytest.raises(ValueError, match="num_permutations must be positive"):
+            self._report(permutation_p_value=True, num_permutations=0)
+
+    def test_the_flag_reaches_the_run_entry_point(self, tmp_path):
+        config = _config(
+            permutation_p_value=True, num_permutations=9, save_dir="perm"
+        )
+        backbone = build_backbone(config)
+        report = run_topographic_evaluation(
+            backbone, config, StubTokenizer(), str(tmp_path)
+        )
+        per_tap = report["arms"]["raw"]["per_tap"]
+        assert all(
+            entry["morans_i"]["num_permutations"] == 9
+            for entry in per_tap.values()
+        )
+
+
+class TestTheVocabularyGuard:
+    """A vocabulary too small for the tokenizer used to fail on the first batch."""
+
+    def test_a_vocabulary_below_the_tokenizers_is_rejected_by_name(self):
+        class _Tok:
+            vocab_size = 100277
+
+        with pytest.raises(ValueError, match=r"--vocab-size"):
+            C._require_vocab_covers_tokenizer(_config(vocab_size=50257), _Tok())
+
+    def test_the_message_names_both_sizes_and_the_encoding(self):
+        class _Tok:
+            vocab_size = 100277
+            tokenizer = type("E", (), {"name": "cl100k_base"})()
+
+        with pytest.raises(ValueError) as excinfo:
+            C._require_vocab_covers_tokenizer(_config(vocab_size=50257), _Tok())
+        message = str(excinfo.value)
+        assert "50257" in message
+        assert "100277" in message
+        assert "cl100k_base" in message
+
+    def test_a_vocabulary_that_fits_is_accepted(self):
+        class _Tok:
+            vocab_size = 100277
+
+        C._require_vocab_covers_tokenizer(_config(vocab_size=100277), _Tok())
+        C._require_vocab_covers_tokenizer(_config(vocab_size=200000), _Tok())
+
+    def test_a_tokenizer_without_the_attribute_is_not_obstructed(self):
+        """A stub or a plain callable must still work.
+
+        Refusing here would break every test double standing in for the
+        tokenizer; the forward pass remains the backstop for those.
+        """
+        C._require_vocab_covers_tokenizer(_config(vocab_size=8), object())
+        C._require_vocab_covers_tokenizer(_config(vocab_size=8), lambda t: t)
+
+    def test_build_backbone_checks_a_supplied_requirement(self):
+        with pytest.raises(ValueError, match=r"--vocab-size"):
+            build_backbone(_config(vocab_size=50257), required_vocab_size=100277)
+        # And stays silent when told nothing.
+        assert build_backbone(_config(vocab_size=50257)) is not None
+
+    def test_the_guard_fires_before_the_dataset_is_built(self, monkeypatch):
+        """The point of the check's position, not just its existence.
+
+        Once `preprocess_clm_dataset` has run, the same error is an out-of-range
+        Gather from inside Embedding.call, naming no flag.
+        """
+        _patch_data(monkeypatch)
+        built = []
+        monkeypatch.setattr(
+            C, "load_train_val_datasets",
+            lambda *a, **k: built.append(True) or _load_synthetic(),
+        )
+
+        class _Tok:
+            vocab_size = 100277
+
+        config = _config(vocab_size=50257, save_dir="guard")
+        with pytest.raises(ValueError, match=r"--vocab-size"):
+            train_topolm(config, preprocessor=_Tok())
+        assert not built, (
+            "the dataset was built before the vocabulary was validated"
+        )
+
+
 class TestEvaluation:
     def _report(self, **overrides):
         backbone = build_backbone(_config())
@@ -737,21 +936,124 @@ class TestEvaluation:
         assert "t_maps_raw.png" in written, sorted(written)
         assert "morans_i_raw.png" in written, sorted(written)
 
-    def test_the_figures_are_drawn_from_the_reported_arrays(self):
-        """The t-map drawn is the t-map scored.
+    def test_each_arms_figure_is_fed_that_arms_own_t_maps(self):
+        """``t_maps_raw.png`` must be drawn from the RAW t-maps. It was not.
 
-        Pinned by comparing the returned arrays against a re-extraction, so a
-        figure cannot be sourced from a different pass than the report -- which
-        is the failure mode that makes a figure and its caption disagree.
+        The defect this pins: ``evaluate_topography`` computed t-maps for every
+        arm but returned ONE set of arrays -- the last arm's -- so
+        ``plot_topography`` wrote ``t_maps_raw.png`` and ``t_maps_readout.png``
+        from the same readout-smoothed numbers. The two panels came out
+        byte-identical (verified on a real run: max pixel difference 0), and
+        the one labelled "raw" was wrong by up to 22.99 t-units.
+
+        Each arm is therefore re-derived here INDEPENDENTLY -- extracted,
+        optionally blurred, contrasted -- and compared against the arrays that
+        arm's figure is fed. Comparing only shapes or key sets cannot catch this:
+        both arms have identical shapes and identical tap keys, which is exactly
+        why the previous version of this test passed on the broken code while its
+        docstring claimed to compare against a re-extraction.
         """
         backbone, report, arrays = self._report()
-        assert set(arrays["t_maps"]) == set(report["arms"]["raw"]["per_tap"])
-        assert set(arrays["sig_grids"]) == set(arrays["t_maps"])
-        assert set(arrays["label_grids"]) == set(arrays["t_maps"])
-        for name, values in arrays["t_maps"].items():
-            assert values.shape == tuple(report["grid_shape"])
-            assert np.asarray(arrays["sig_grids"][name]).shape == values.shape
-            assert np.asarray(arrays["label_grids"][name]).shape == values.shape
+
+        activations = {
+            condition: extract_tap_activations(backbone, prompts, StubTokenizer())
+            for condition, prompts in SMOKE_STIMULI.items()
+        }
+        grid = tuple(report["grid_shape"])
+        tap_path = backbone.tap_layers[0].path
+
+        expected = {}
+        expected["raw"] = contrast_tmap(
+            activations["a"][tap_path], activations["b"][tap_path]
+        )[0].reshape(grid)
+        smoothed = {
+            condition: C._apply_readout(values, backbone, 2.0, 1.0)
+            for condition, values in activations.items()
+        }
+        expected["readout"] = contrast_tmap(
+            smoothed["a"][tap_path], smoothed["b"][tap_path]
+        )[0].reshape(grid)
+
+        # The fixture must genuinely discriminate, or the assertions below are
+        # satisfied by an array that matches both arms.
+        assert not np.allclose(
+            expected["raw"], expected["readout"]
+        ), "the fixture's two arms are identical; this test proves nothing"
+
+        for arm, reference in expected.items():
+            assert set(arrays["arms"][arm]["t_maps"]) == {
+                t.path for t in backbone.tap_layers
+            }
+            np.testing.assert_allclose(
+                arrays["arms"][arm]["t_maps"][tap_path],
+                reference,
+                rtol=1e-6,
+                atol=1e-6,
+                err_msg=(
+                    f"the arrays feeding {arm}'s figure are not the {arm} "
+                    f"t-maps (max diff "
+                    f"{np.abs(arrays['arms'][arm]['t_maps'][tap_path] - reference).max():.4f})"
+                ),
+            )
+
+    def test_the_two_arms_produce_visibly_different_figures(self, tmp_path):
+        """End-to-end, on the PNGs a run actually writes.
+
+        This is the regression test for the defect measured on a real run: the
+        two arm figures came out with **byte-identical panel pixels** (max
+        difference 0), so `t_maps_raw.png` showed readout-smoothed data under
+        the name "raw". Reading the saved images is the only assertion that
+        covers the whole path -- evaluation, file naming, and rendering -- and
+        the earlier unit-level tests stop one layer short of it.
+
+        The title band is cropped before comparing, because the arm name is
+        printed there and would otherwise be the only difference.
+        """
+        iio = pytest.importorskip(
+            "imageio.v3", reason="imageio needed to read back the PNGs"
+        )
+        backbone = build_backbone(_config())
+        config = _config()
+        report, arrays = evaluate_topography(
+            backbone,
+            stimuli=SMOKE_STIMULI,
+            contrast_conditions=("a", "b"),
+            preprocessor=StubTokenizer(),
+            readout_fwhm=config.readout_fwhm,
+            readout_unit_spacing=config.readout_unit_spacing,
+            min_cluster_size=config.min_cluster_size,
+        )
+        written = plot_topography(report, arrays, str(tmp_path))
+        names = {os.path.basename(path) for path in written}
+        assert {"t_maps_raw.png", "t_maps_readout.png"} <= names, sorted(names)
+
+        def panels(name):
+            image = iio.imread(str(tmp_path / name))
+            return image[
+                int(image.shape[0] * 0.10) :,
+                int(image.shape[1] * 0.02) : int(image.shape[1] * 0.92),
+            ]
+
+        raw, readout = panels("t_maps_raw.png"), panels("t_maps_readout.png")
+        assert raw.shape == readout.shape
+        difference = np.abs(raw.astype(int) - readout.astype(int)).max()
+        assert difference > 0, (
+            "the raw and readout t-map figures are pixel-identical; one arm's "
+            "arrays are being drawn under both names"
+        )
+
+    def test_the_arrays_are_keyed_by_arm_and_cover_exactly_those_arms(self):
+        """Structural half of the contract: the keys, per arm."""
+        backbone, report, arrays = self._report()
+        assert set(arrays["arms"]) == set(report["arms"])
+        for arm in arrays["arms"]:
+            arm_arrays = arrays["arms"][arm]
+            assert set(arm_arrays) == {"t_maps", "sig_grids", "label_grids"}
+            assert set(arm_arrays["t_maps"]) == set(report["arms"][arm]["per_tap"])
+            for name, values in arm_arrays["t_maps"].items():
+                assert values.shape == tuple(report["grid_shape"])
+                assert np.asarray(arm_arrays["sig_grids"][name]).shape == values.shape
+                assert np.asarray(arm_arrays["label_grids"][name]).shape == values.shape
 
     def test_a_figure_is_not_drawn_for_an_arm_that_was_not_computed(
         self, tmp_path

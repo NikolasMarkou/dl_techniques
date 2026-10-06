@@ -201,7 +201,7 @@ below when topography ran.
 | `t_maps_raw.png` | one t-map per tapped layer, shared diverging scale, rejected cells hatched, clusters outlined |
 | `t_maps_readout.png` | the same, after the simulated fMRI Gaussian readout |
 | `morans_i_raw.png`, `morans_i_readout.png` | standard Moran's I against depth |
-| `clusters.png` | one categorical cluster map, from the deepest tap that found a cluster |
+| `clusters_raw.png`, `clusters_readout.png` | one categorical cluster map per arm, from the deepest tap that found a cluster |
 
 Three rules the figures follow, each of which exists because the obvious
 alternative misleads:
@@ -303,6 +303,12 @@ set**. Neither is in this repository.
   contrasts.
 
 The encoding probe, RSA and bootstrap CIs are deferred to a later pass.
+
+Moran's I **permutation test** is now implemented and reaches the report via
+`--permutation-p-value` (off by default). It is the paper's third Moran
+statistic; the standard and islands values are reported either way. The p-value
+is reproducible from the run seed and independent per tap, so re-running one arm
+regenerates exactly the same numbers.
 
 > On `run_paired`: there is no function by that name in this package. The paired
 > run is `train_paired`, reached with `--paired`, and it **is** implemented — see

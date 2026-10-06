@@ -481,16 +481,91 @@ class TestIslandsMoransI:
 
 
 class TestMoransISummary:
-    def test_both_statistics_are_reported_together(self):
+    def test_all_three_statistics_are_reported_together(self):
         t_grid = _ramp(9, 9)
         sig_grid = t_grid > np.median(t_grid)
         summary = morans_i_summary(t_grid, sig_grid)
-        assert set(summary) == {"standard", "islands", "num_units", "connectivity"}
+        assert set(summary) == {
+            "standard",
+            "islands",
+            "permutation_p",
+            "num_permutations",
+            "num_units",
+            "connectivity",
+        }
         assert summary["num_units"] == 81
         # A 9x9 ramp measures 0.816, consistent with the 0.790 at 8x8 and 0.866 at
         # 12x12 -- the border fraction, not the gradient, sets the ceiling.
         assert summary["standard"] == pytest.approx(0.816, abs=1e-3)
         assert not np.isnan(summary["islands"])
+
+    def test_the_permutation_statistic_is_skipped_unless_asked_for(self):
+        """Off by default, because it costs a shuffle per permutation.
+
+        A 24-tap, 2-arm run at the 9999 default is ~480k Moran's I
+        recomputations, so silently enabling it would make the default analysis
+        hundreds of times slower for a statistic most runs never read.
+        """
+        summary = morans_i_summary(_ramp(6, 6))
+        assert summary["num_permutations"] is None
+        assert np.isnan(summary["permutation_p"])
+
+    def test_a_smooth_map_is_far_from_spatial_randomness(self):
+        """The whole point of the permutation p-value: the two arms differ.
+
+        Without this, reporting a p-value would be reporting a number nobody has
+        checked is capable of being small.
+        """
+        t_grid = _ramp(9, 9)
+        summary = morans_i_summary(
+            t_grid, num_permutations=199, seed=7
+        )
+        assert summary["num_permutations"] == 199
+        assert summary["permutation_p"] == pytest.approx(1 / 200), (
+            f"a linear ramp has the most clustered arrangement possible, so its "
+            f"p-value should sit at the floor; got {summary['permutation_p']}"
+        )
+
+    def test_noise_is_not_distinguishable_from_randomness(self):
+        """The null arm: shuffled noise cannot beat itself consistently."""
+        generator = np.random.default_rng(11)
+        values = generator.normal(size=(9, 9))
+        summary = morans_i_summary(
+            values, num_permutations=199, seed=3
+        )
+        assert summary["permutation_p"] > 0.05, (
+            f"random data scored p={summary['permutation_p']}, which would make "
+            f"the statistic look informative about nothing"
+        )
+
+    def test_the_permutation_p_value_is_reproducible_from_its_seed(self):
+        """Two calls with one seed must agree exactly.
+
+        `hash()` would break this -- it is salted per process -- which is why the
+        seed is a plain integer mix rather than a digest of the tap's path.
+        """
+        t_grid = _ramp(8, 8)
+        first = morans_i_summary(t_grid, num_permutations=99, seed=5)
+        second = morans_i_summary(t_grid, num_permutations=99, seed=5)
+        assert first["permutation_p"] == second["permutation_p"]
+        # A different count of permutations must move the p-value's floor, which
+        # is the way to show the seed reaches the statistic at all rather than
+        # being accepted and discarded.
+        fewer = morans_i_summary(t_grid, num_permutations=49, seed=5)
+        assert fewer["permutation_p"] >= first["permutation_p"] - 0.05
+
+    def test_a_non_positive_permutation_count_is_rejected(self):
+        for bad in (0, -1):
+            with pytest.raises(ValueError, match="must be positive"):
+                morans_i_summary(_ramp(4, 4), num_permutations=bad)
+
+    def test_a_constant_map_reports_an_undefined_p_value(self):
+        """Moran's I is nan on a constant map, and nan must propagate, not zero."""
+        summary = morans_i_summary(
+            np.ones((6, 6)), num_permutations=19, seed=1
+        )
+        assert np.isnan(summary["standard"])
+        assert np.isnan(summary["permutation_p"])
 
     def test_omitting_the_significance_map_leaves_the_islands_value_undefined(self):
         """It does NOT quietly score the whole grid as a single island."""

@@ -300,6 +300,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Smallest cluster the post-hoc sweep keeps",
     )
     parser.add_argument(
+        "--permutation-p-value",
+        action="store_true",
+        help=(
+            "Also score Moran's I against spatial randomness by permutation. "
+            "The paper's third Moran statistic, and the expensive one: "
+            "--num-permutations shuffles per tap per arm, so 9999 x 24 x 2 is "
+            "about half a million recomputations. Off by default; the standard "
+            "and islands values are reported either way."
+        ),
+    )
+    parser.add_argument(
+        "--num-permutations",
+        type=int,
+        default=9999,
+        help=(
+            "Shuffles behind the permutation p-value, which also sets its floor "
+            "at 1/(num_permutations + 1). Only used with --permutation-p-value."
+        ),
+    )
+    parser.add_argument(
         "--contrast",
         type=str,
         nargs=2,
@@ -395,6 +415,8 @@ def _config_from_args(args: argparse.Namespace) -> TopoLMTrainingConfig:
         readout_fwhm=(args.readout_fwhm or None),
         readout_unit_spacing=args.readout_unit_spacing,
         min_cluster_size=args.min_cluster_size,
+        permutation_p_value=args.permutation_p_value,
+        num_permutations=args.num_permutations,
         contrast_conditions=(args.contrast[0], args.contrast[1]),
         # Output
         save_dir=args.save_dir,

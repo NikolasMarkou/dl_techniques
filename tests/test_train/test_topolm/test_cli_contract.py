@@ -142,6 +142,18 @@ TOPOLM_ROWS: tuple = (
         23,
     ),
     Row(
+        ("--permutation-p-value",),
+        ("--permutation-p-value",),
+        "permutation_p_value",
+        True,
+    ),
+    Row(
+        ("--num-permutations",),
+        ("--num-permutations", "1999"),
+        "num_permutations",
+        1999,
+    ),
+    Row(
         ("--contrast",),
         ("--contrast", "c", "d"),
         "contrast_conditions",

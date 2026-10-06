@@ -198,6 +198,11 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
         the smoothed arm of the evaluation.
     :ivar readout_unit_spacing: Inter-unit spacing for the readout kernel.
     :ivar min_cluster_size: Smallest cluster the post-hoc sweep keeps.
+    :ivar permutation_p_value: Also score Moran's I against spatial randomness
+        by permutation. The paper's third Moran statistic, off by default: it
+        costs ``num_permutations`` shuffles per tap per arm.
+    :ivar num_permutations: Shuffles behind the permutation p-value, which also
+        sets its floor at ``1 / (num_permutations + 1)``.
     :ivar stimuli: Optional ``{condition: [sentence, ...]}``. ``None`` selects
         :data:`SMOKE_STIMULI` and marks every report as such.
     :ivar contrast_conditions: The two conditions the t-map contrasts.
@@ -225,6 +230,8 @@ class TopoLMTrainingConfig(ClmPretrainConfig):
     readout_fwhm: Optional[float] = 2.0
     readout_unit_spacing: float = 1.0
     min_cluster_size: int = 10
+    permutation_p_value: bool = False
+    num_permutations: int = 9999
     stimuli: Optional[Dict[str, List[str]]] = None
     contrast_conditions: Tuple[str, str] = ("a", "b")
 
@@ -260,15 +267,77 @@ def resolve_tap_sites(tap_sites: str) -> Tuple[str, ...]:
     )
 
 
-def build_backbone(config: TopoLMTrainingConfig) -> TopoLM:
+def _require_vocab_covers_tokenizer(
+    config: TopoLMTrainingConfig, preprocessor: Any
+) -> None:
+    """Reject a vocabulary too small for the tokenizer that will feed it.
+
+    Checked HERE, immediately after the tokenizer exists and BEFORE the dataset
+    is built, because that is the last point at which the message can still name
+    the flag that caused it. Left to the forward pass it surfaces as
+    ``InvalidArgumentError: indices[..] = 50259 is not in [0, 50257)`` from
+    inside ``Embedding.call`` -- which names no argument and arrives only after
+    the dataset has been tokenized and cached.
+
+    The bound is the tokenizer's OWN ``vocab_size``, not a constant, so changing
+    ``encoding_name`` moves the requirement with it. That matters because the
+    natural wrong value is GPT-2's 50257, which is what this CLI used to default
+    to against a ``cl100k_base`` tokenizer whose ids reach 100267.
+
+    :param config: The run's configuration.
+    :type config: TopoLMTrainingConfig
+    :param preprocessor: Tokenizer whose ids must fit the embedding table.
+    :type preprocessor: Any
+    :raises ValueError: If ``config.vocab_size`` cannot represent every id the
+        tokenizer can emit -- naming the flag, the two sizes, and the encoding.
+    """
+    required = getattr(preprocessor, "vocab_size", None)
+    if required is None:
+        # A stub or a callable without the attribute. Refusing here would break
+        # every test double that stands in for the tokenizer; the forward pass
+        # remains the backstop.
+        return
+    if config.vocab_size >= int(required):
+        return
+    encoding = getattr(
+        getattr(preprocessor, "tokenizer", None), "name", "unknown"
+    )
+    raise ValueError(
+        f"vocab_size {config.vocab_size} cannot hold every id the "
+        f"{encoding!r} tokenizer emits (it needs at least {required}; ids run "
+        f"to {required - 1}). Raise --vocab-size, or lower --encoding-name to "
+        f"a tokenizer with a smaller vocabulary. Left unchecked this fails on "
+        f"the first batch as an out-of-range Gather in Embedding.call."
+    )
+
+
+def build_backbone(
+    config: TopoLMTrainingConfig,
+    required_vocab_size: Optional[int] = None,
+) -> TopoLM:
     """Build the bare :class:`TopoLM`, before any training head.
 
     :param config: The run's configuration.
     :type config: TopoLMTrainingConfig
+    :param required_vocab_size: The smallest vocabulary that can represent every
+        id the tokenizer will emit, or ``None`` to skip the check. Passed by
+        :func:`train_topolm` from the tokenizer it actually built; supplied here
+        so a direct caller of this function can get the same early error.
+    :type required_vocab_size: Optional[int]
     :return: A randomly initialised TopoLM matching ``config``.
     :rtype: TopoLM
-    :raises ValueError: If ``config.tap_sites`` is not a recognised value.
+    :raises ValueError: If ``config.tap_sites`` is not a recognised value, or
+        ``config.vocab_size`` is below ``required_vocab_size``.
     """
+    if required_vocab_size is not None and config.vocab_size < int(
+        required_vocab_size
+    ):
+        raise ValueError(
+            f"vocab_size {config.vocab_size} cannot hold every id the tokenizer "
+            f"emits (it needs at least {required_vocab_size}); raise "
+            f"--vocab-size, or use a tokenizer with a smaller vocabulary"
+        )
+
     variant_kwargs: Dict[str, Any] = {
         "vocab_size": config.vocab_size,
         # The position table's size comes from HERE, not from the variant, because
@@ -319,6 +388,7 @@ def build_backbone(config: TopoLMTrainingConfig) -> TopoLM:
 def create_topolm_model(
     config: TopoLMTrainingConfig,
     loss_fn: Optional[keras.losses.Loss] = None,
+    required_vocab_size: Optional[int] = None,
 ) -> Tuple[CausalLanguageModel, TopoLM]:
     """Wrap the backbone in the shared CLM training head.
 
@@ -343,7 +413,7 @@ def create_topolm_model(
     :return: ``(training_model, backbone)``.
     :rtype: Tuple[CausalLanguageModel, TopoLM]
     """
-    backbone = build_backbone(config)
+    backbone = build_backbone(config, required_vocab_size=required_vocab_size)
 
     head = CausalLanguageModel(
         backbone=backbone,
@@ -619,8 +689,11 @@ def evaluate_topography(
     readout_unit_spacing: float = 1.0,
     min_cluster_size: int = 10,
     fdr_alpha: float = 0.05,
+    permutation_p_value: bool = False,
+    num_permutations: int = 9999,
+    seed: int = 0,
     is_smoke_set: bool = False,
-) -> Tuple[Dict[str, Any], Dict[str, Dict[str, np.ndarray]]]:
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Dict[str, np.ndarray]]]]:
     """Score the model's topographic organisation against one contrast.
 
     For each tap, in a raw arm and (when configured) a simulated-fMRI-readout arm:
@@ -657,18 +730,32 @@ def evaluate_topography(
     :type min_cluster_size: int
     :param fdr_alpha: BH-FDR rejection threshold, applied ONCE across all taps.
     :type fdr_alpha: float
+    :param permutation_p_value: When ``True``, also score Moran's I against
+        spatial randomness by permutation and record the p-value per tap. This
+        is the third of the paper's three Moran statistics, and it is OFF by
+        default because it is not cheap: ``num_permutations`` shuffles of the
+        map per tap per arm, so the default 9999 costs 9999 x 24 x arms
+        recomputations. The standard and islands values come free with the map.
+    :type permutation_p_value: bool
+    :param num_permutations: Shuffles behind the permutation p-value. Also sets
+        its floor: the smallest attainable p-value is ``1 / (n + 1)``.
+    :type num_permutations: int
+    :param seed: Base seed for the permutation shuffles, mixed with each tap's
+        path so the p-values are reproducible across runs and independent across
+        taps.
+    :type seed: int
     :param is_smoke_set: Record in the report that the stimuli are the built-in
         stand-in rather than a published set.
     :type is_smoke_set: bool
     :return: ``(report, arrays)``. The report is the JSON summary for every arm.
-        ``arrays`` holds the t-maps, BH-FDR masks and cluster label grids for the
-        LAST arm computed -- the raw one unless a readout was configured -- so
-        :func:`plot_topography` draws from the same numbers the report counts
-        rather than recomputing them. Returned separately because a report is
-        JSON-serialisable and these are not.
-    :rtype: Tuple[Dict[str, Any], Dict[str, Dict[str, numpy.ndarray]]]
+        ``arrays["arms"][arm]`` holds the t-maps, BH-FDR masks and cluster label
+        grids **for that arm specifically**, so :func:`plot_topography` draws
+        each figure from the numbers that arm scored rather than recomputing
+        them. Returned separately because a report is JSON-serialisable and
+        these are not.
+    :rtype: Tuple[Dict[str, Any], Dict[str, Dict[str, Dict[str, numpy.ndarray]]]
     :raises ValueError: If the two contrast conditions are absent from
-        ``stimuli`` -- naming them.
+        ``stimuli`` -- naming them -- or ``num_permutations`` is not positive.
     """
     condition_a, condition_b = contrast_conditions
     missing = [
@@ -678,6 +765,14 @@ def evaluate_topography(
         raise ValueError(
             f"contrast conditions {missing} absent from the stimuli "
             f"(available: {sorted(stimuli)})"
+        )
+    # Validated HERE rather than left to morans_i_permutation_test, so the
+    # message names the caller's argument instead of surfacing from inside a
+    # 9999-iteration loop one call deeper.
+    if permutation_p_value and num_permutations <= 0:
+        raise ValueError(
+            f"num_permutations must be positive when permutation_p_value is set, "
+            f"got {num_permutations}"
         )
 
     grid_shape = backbone.grid_shape
@@ -692,11 +787,20 @@ def evaluate_topography(
         "arms": {},
     }
 
+    # PER-ARM. Keyed by arm, because the arms are NOT interchangeable and a
+    # single set of arrays cannot serve both: the readout arm's t-maps are a
+    # Gaussian-blurred version of the raw ones and differ from them by tens of
+    # t-units (MEASURED: max |raw - readout| = 22.99 on a four-prompt-per-
+    # condition contrast). Holding only the last arm's arrays and then writing a
+    # file per arm produced two byte-identical panels under different names, so
+    # `t_maps_raw.png` showed smoothed data labelled "raw". Keyed per arm, each
+    # figure is fed the arrays that arm scored.
+    plotted_arms: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
+
     for arm in (["raw", "readout"] if readout_fwhm else ["raw"]):
-        # `plotted` collects the LAST arm's arrays for drawing. `report` keeps
-        # every arm's summary, so the two are consistent by construction: the
-        # figure is the raw arm unless a smoothed one was also computed.
         plotted: Dict[str, np.ndarray] = {}
+        plotted_sig: Dict[str, np.ndarray] = {}
+        plotted_labels: Dict[str, np.ndarray] = {}
         per_condition = {
             condition: extract_tap_activations(
                 backbone, prompts, preprocessor
@@ -723,8 +827,6 @@ def evaluate_topography(
         corrected = fdr_across_layers(p_maps, alpha=fdr_alpha)
 
         tap_reports: Dict[str, Any] = {}
-        plotted_sig: Dict[str, np.ndarray] = {}
-        plotted_labels: Dict[str, np.ndarray] = {}
         for tap in backbone.tap_layers:
             name = tap.path
             sig_grid = np.asarray(
@@ -753,7 +855,20 @@ def evaluate_topography(
                     plotted_labels[name] = label_grid
 
             tap_reports[name] = {
-                "morans_i": morans_i_summary(t_grid, sig_grid),
+                # The permutation seed is DERIVED from the run seed and the tap's
+                # depth, not left to a global RNG: the p-values then depend only
+                # on (seed, map), so re-running one arm reproduces them and two
+                # taps are not correlated through a shared shuffle sequence.
+                "morans_i": morans_i_summary(
+                    t_grid,
+                    sig_grid,
+                    num_permutations=(
+                        num_permutations if permutation_p_value else None
+                    ),
+                    seed=None
+                    if not permutation_p_value
+                    else _permutation_seed(seed, name),
+                ),
                 "num_significant_units": int(sig_grid.sum()),
                 "cluster_sizes_a": [len(c) for c in clusters[condition_a]],
                 "cluster_sizes_b": [len(c) for c in clusters[condition_b]],
@@ -766,6 +881,14 @@ def evaluate_topography(
         significant = [
             entry["num_significant_units"] for entry in tap_reports.values()
         ]
+        # Recorded per arm, BEFORE the next iteration rebinds these names. The
+        # arrays are snapshots of this arm's own t-maps, masks and labels.
+        plotted_arms[arm] = {
+            "t_maps": plotted,
+            "sig_grids": plotted_sig,
+            "label_grids": plotted_labels,
+        }
+
         report["arms"][arm] = {
             "readout_fwhm": readout_fwhm if arm == "readout" else None,
             "per_tap": tap_reports,
@@ -790,35 +913,55 @@ def evaluate_topography(
             json.dump(report, handle, indent=2, sort_keys=True)
         logger.info(f"Topographic report written to {path}")
 
-    return report, {
-        "t_maps": plotted,
-        "sig_grids": plotted_sig,
-        "label_grids": plotted_labels,
-    }
+    return report, {"arms": plotted_arms}
+
+
+def _permutation_seed(base_seed: int, tap_path: str) -> int:
+    """A stable per-tap permutation seed, derived rather than drawn.
+
+    ``hash()`` is not used: it is salted per process, so the p-values would
+    change between runs of the same command and a report could not be
+    reproduced. This is a plain integer mix of the run seed and the tap's path,
+    so the same run seed and the same tap always give the same shuffles, and two
+    different taps never share a sequence.
+    """
+    digest = 0
+    for character in tap_path:
+        digest = (digest * 131 + ord(character)) % (2**31 - 1)
+    return int((base_seed * 1_000_003 + digest) % (2**31 - 1))
 
 
 def plot_topography(
     report: Dict[str, Any],
-    arrays: Dict[str, Dict[str, np.ndarray]],
+    arrays: Dict[str, Dict[str, Dict[str, np.ndarray]]],
     output_dir: str,
 ) -> List[str]:
     """Render the paper's figure set for every arm in ``report``.
 
-    Called after :func:`evaluate_topography`, from the same arrays that produced
-    the JSON, so a cluster outlined in a figure is the cluster counted in the
-    report -- the two cannot disagree because there is one source for both.
+    Called after :func:`evaluate_topography`, and each figure is fed that arm's
+    OWN arrays, so a cluster outlined in a figure is the cluster counted in that
+    arm's section of the JSON. Keying the arrays by arm is the whole point:
+    they are not interchangeable, and feeding one arm's arrays to another's
+    figure produced two byte-identical panels under different names --
+    ``t_maps_raw.png`` showing readout-smoothed data labelled "raw", wrong by up
+    to 22.99 t-units on a four-prompt contrast (MEASURED, on a real run's
+    artefacts: the two panels' pixels differed by 0).
 
     Imported lazily so that importing :mod:`train.topolm.common` does not pull
     in matplotlib; the analysis is usable, and testable, without a display.
 
     :param report: The report returned by :func:`evaluate_topography`.
     :type report: Dict[str, Any]
-    :param arrays: The second return value of :func:`evaluate_topography`.
-    :type arrays: Dict[str, Dict[str, numpy.ndarray]]
+    :param arrays: The second return value of :func:`evaluate_topography` --
+        ``{"arms": {arm: {"t_maps", "sig_grids", "label_grids"}}}``.
+    :type arrays: Dict[str, Dict[str, Dict[str, numpy.ndarray]]]
     :param output_dir: Directory for the PNGs.
     :type output_dir: str
     :return: Paths written.
     :rtype: List[str]
+    :raises ValueError: If ``arrays`` carries an arm the report does not, or
+        vice versa -- naming the difference, because that mismatch is what makes
+        a figure disagree with the report it sits beside.
     """
     from train.topolm.plotting import (  # local: keeps matplotlib off the
         plot_cluster_overlay,  # analysis import path
@@ -830,12 +973,21 @@ def plot_topography(
     os.makedirs(output_dir, exist_ok=True)
     written: List[str] = []
 
+    arms = arrays["arms"]
+    if set(arms) != set(report["arms"]):
+        raise ValueError(
+            f"arrays carry arms {sorted(arms)} but the report has "
+            f"{sorted(report['arms'])}; a figure drawn from one arm's arrays "
+            f"under another arm's name would silently misreport the result"
+        )
+
     for arm, values in report["arms"].items():
+        arm_arrays = arms[arm]
         written.append(
             plot_t_maps(
-                arrays["t_maps"],
-                sig_grids=arrays["sig_grids"],
-                label_grids=arrays["label_grids"],
+                arm_arrays["t_maps"],
+                sig_grids=arm_arrays["sig_grids"],
+                label_grids=arm_arrays["label_grids"],
                 arm=arm,
                 condition_a=condition_a,
                 condition_b=condition_b,
@@ -853,20 +1005,24 @@ def plot_topography(
             )
         )
 
-    # One cluster figure for the deepest tap that actually found a cluster,
-    # rather than the last tap: on an untrained or non-topographic run the last
-    # tap's grid is empty and the figure would show nothing.
-    labels = arrays["label_grids"]
-    populated = [name for name, grid in labels.items() if np.any(grid > 0)]
-    if populated:
-        deepest = populated[-1]
-        written.append(
-            plot_cluster_overlay(
-                labels[deepest],
-                output_path=os.path.join(output_dir, "clusters.png"),
-                title=deepest.split("/")[-1],
+    # One cluster figure PER ARM, and named for its arm. It used to be a single
+    # arm-less `clusters.png` built from whichever arrays survived the loop, so a
+    # reader could not tell which arm a categorical map belonged to.
+    for arm, arm_arrays in arms.items():
+        labels = arm_arrays["label_grids"]
+        # The deepest tap that actually found a cluster, rather than the last
+        # tap: on an untrained or non-topographic run the last tap's grid is
+        # empty and the figure would show nothing.
+        populated = [name for name, grid in labels.items() if np.any(grid > 0)]
+        if populated:
+            deepest = populated[-1]
+            written.append(
+                plot_cluster_overlay(
+                    labels[deepest],
+                    output_path=os.path.join(output_dir, f"clusters_{arm}.png"),
+                    title=f"{deepest.split('/')[-1]} ({arm})",
+                )
             )
-        )
 
     return [path for path in written if path is not None]
 
@@ -1029,6 +1185,12 @@ def train_topolm(
             config.mask_token_id,
         )
 
+    # Before the dataset is built: the message can only name --vocab-size while
+    # the flag is still the obvious suspect. After `preprocess_clm_dataset` has
+    # run, the same error is an out-of-range Gather from inside Embedding.call
+    # and reads like a model bug.
+    _require_vocab_covers_tokenizer(config, preprocessor)
+
     # Derived BEFORE the dataset is built and shifted by the resume point, so a
     # resumed run sees a new article ordering instead of replaying the first N
     # chunks.
@@ -1057,7 +1219,10 @@ def train_topolm(
         )
     )
 
-    model, backbone = create_topolm_model(config)
+    model, backbone = create_topolm_model(
+        config,
+        required_vocab_size=getattr(preprocessor, "vocab_size", None),
+    )
     compile_model(model, config, epochs, steps_per_epoch)
     callbacks = build_callbacks(config, model, results_dir, initial_step)
 
@@ -1149,6 +1314,9 @@ def run_topographic_evaluation(
         readout_fwhm=config.readout_fwhm,
         readout_unit_spacing=config.readout_unit_spacing,
         min_cluster_size=config.min_cluster_size,
+        permutation_p_value=config.permutation_p_value,
+        num_permutations=config.num_permutations,
+        seed=config.seed,
         is_smoke_set=config.stimuli is None,
     )
     for arm, values in report["arms"].items():
