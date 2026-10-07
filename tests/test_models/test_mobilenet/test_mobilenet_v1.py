@@ -104,7 +104,10 @@ class TestMobileNetV1:
         # First call should trigger building
         output = model(sample_inputs['imagenet'])
         assert model.built
-        assert output.shape == (2, default_config['num_classes'])
+        # Output is now a dict with 'logits' and 'probabilities' keys
+        assert isinstance(output, dict)
+        assert 'logits' in output and 'probabilities' in output
+        assert output['logits'].shape == (2, default_config['num_classes'])
 
     # ============================================================================
     # Critical Serialization Tests
@@ -123,8 +126,8 @@ class TestMobileNetV1:
             loaded_pred = loaded_model(sample_inputs['cifar'])
 
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_pred),
-                ops.convert_to_numpy(loaded_pred),
+                ops.convert_to_numpy(original_pred['logits']),
+                ops.convert_to_numpy(loaded_pred['logits']),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Standard model predictions differ after serialization"
             )
@@ -142,8 +145,8 @@ class TestMobileNetV1:
             loaded_pred = loaded_model(sample_inputs['custom'])
 
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_pred),
-                ops.convert_to_numpy(loaded_pred),
+                ops.convert_to_numpy(original_pred['logits']),
+                ops.convert_to_numpy(loaded_pred['logits']),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Small variant model predictions differ after serialization"
             )
@@ -224,7 +227,9 @@ class TestMobileNetV1:
         # With classification head
         model = MobileNetV1.from_variant("large", num_classes=10, input_shape=(32, 32, 3))
         output = model(sample_inputs['cifar'])
-        assert output.shape == (4, 10)
+        assert isinstance(output, dict)
+        assert 'logits' in output and 'probabilities' in output
+        assert output['logits'].shape == (4, 10)
 
         # As a feature extractor. Updated for D-066 (C-11): the global pooling
         # belongs to the head, so include_top=False returns the 4-D feature map,
@@ -243,7 +248,9 @@ class TestMobileNetV1:
         model = MobileNetV1.from_variant("small", num_classes=5, input_shape=input_shape)
         sample_input = keras.random.normal(shape=sample_shape)
         output = model(sample_input)
-        assert output.shape == (sample_shape[0], 5)
+        assert isinstance(output, dict)
+        assert 'logits' in output
+        assert output['logits'].shape == (sample_shape[0], 5)
 
     def test_batch_size_handling(self):
         """Test model handles different batch sizes correctly."""
@@ -251,7 +258,9 @@ class TestMobileNetV1:
         for batch_size in [1, 4, 16]:
             sample_input = keras.random.normal(shape=(batch_size, 32, 32, 3))
             output = model(sample_input)
-            assert output.shape == (batch_size, 10)
+            assert isinstance(output, dict)
+            assert 'logits' in output
+            assert output['logits'].shape == (batch_size, 10)
 
     # ============================================================================
     # Training and Gradient Tests
@@ -262,7 +271,7 @@ class TestMobileNetV1:
         model = MobileNetV1(**default_config)
         with tf.GradientTape() as tape:
             output = model(sample_inputs['cifar'], training=True)
-            loss = ops.mean(ops.square(output))
+            loss = ops.mean(ops.square(output['logits']))
         gradients = tape.gradient(loss, model.trainable_variables)
         assert len(gradients) > 0
         assert all(g is not None for g in gradients)
@@ -274,7 +283,9 @@ class TestMobileNetV1:
         """Test model behavior in different training modes."""
         model = MobileNetV1(**default_config)
         output = model(sample_inputs['cifar'], training=training)
-        assert output.shape == (4, default_config['num_classes'])
+        assert isinstance(output, dict)
+        assert 'logits' in output
+        assert output['logits'].shape == (4, default_config['num_classes'])
 
     def test_model_compilation_and_fit(self, sample_inputs):
         """Test model compiles and can run a training step."""
@@ -317,13 +328,14 @@ class TestMobileNetV1:
 
     def test_model_parameter_counts(self):
         """Test parameter counts are reasonable for different variants."""
-        # Expected params for ImageNet (num_classes=1000, input_shape=(224, 224, 3))
-        # From paper: 1.0 -> ~4.2M, 0.75 -> ~2.6M, 0.5 -> ~1.3M, 0.25 -> ~0.5M
+        # Updated for ClassificationHead migration (adds 2 dense blocks + classifier)
+        # Original paper: 1.0 -> ~4.2M, 0.75 -> ~2.6M, 0.5 -> ~1.3M, 0.25 -> ~0.5M
+        # With new head: ~1.0M additional params
         params_ranges = {
-            "large": (4.0e6, 4.5e6),
-            "medium": (2.4e6, 2.8e6),
-            "small": (1.2e6, 1.5e6),
-            "pico": (0.4e6, 0.6e6),
+            "large": (4.8e6, 5.2e6),
+            "medium": (3.1e6, 3.4e6),
+            "small": (1.8e6, 2.0e6),
+            "pico": (0.9e6, 1.1e6),
         }
         for variant, (min_p, max_p) in params_ranges.items():
             model = MobileNetV1.from_variant(
@@ -367,10 +379,13 @@ class TestMobileNetV1:
         assert len(results) == 2  # loss and accuracy
 
         predictions = model.predict(x_test, verbose=0)
-        assert predictions.shape == (10, 5)
-        pred_sums = ops.sum(predictions, axis=1)
+        # Output is a dict with 'logits' and 'probabilities'
+        assert isinstance(predictions, dict)
+        assert 'logits' in predictions and 'probabilities' in predictions
+        assert predictions['logits'].shape == (10, 5)
+        prob_sums = ops.sum(predictions['probabilities'], axis=1)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(pred_sums),
+            ops.convert_to_numpy(prob_sums),
             np.ones(10),
             rtol=1e-6, atol=1e-6,
             err_msg="Softmax predictions don't sum to 1"

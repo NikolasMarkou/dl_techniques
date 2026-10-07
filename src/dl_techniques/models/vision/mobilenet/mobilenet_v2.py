@@ -33,7 +33,7 @@ References:
 
 import keras
 from keras import layers, regularizers
-from typing import Tuple, Optional, Dict, Any, Union
+from typing import Tuple, Optional, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -47,6 +47,11 @@ from dl_techniques.models.vision.mobilenet.common import (
     materialize_for_summary,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -127,6 +132,8 @@ class MobileNetV2(keras.Model):
             kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -144,6 +151,10 @@ class MobileNetV2(keras.Model):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.include_top = include_top
         self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
+
+        # Head configuration
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self._build_model_layers()
 
@@ -211,17 +222,33 @@ class MobileNetV2(keras.Model):
         )
         self.last_relu = layers.ReLU(max_value=6, name='conv_last_relu6')
 
+        # Classification head using standardized factory
         if self.include_top:
-            self.global_avg_pool = layers.GlobalAveragePooling2D(name='global_avg_pool')
-            if self.dropout_rate > 0:
-                self.dropout = layers.Dropout(self.dropout_rate, name='dropout')
-            else:
-                self.dropout = None
-            self.classifier = layers.Dense(
-                self.num_classes, activation='softmax', name='classifier',
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer
-            )
+            self._build_head()
+        else:
+            self.classification_head = None
+
+    def _build_head(self) -> None:
+        """Build classification head using standardized vision head factory."""
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        head_config.update({
+            'num_classes': self.num_classes,
+            'dropout_rate': self.dropout_rate,
+            'normalization_type': 'layer_norm',
+            'activation_type': 'gelu',
+            'use_global_pooling': True,
+            'pooling_type': 'avg',
+            'use_attention': False,
+            'use_ffn': True,
+            'ffn_type': 'mlp',
+            'ffn_expansion_factor': 4,
+        })
+        if self._head_config_overrides:
+            head_config.update(self._head_config_overrides)
+
+        self.classification_head = create_vision_head(
+            VisionTaskType.CLASSIFICATION, **head_config
+        )
 
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer from `input_shape` by tracing `call`.
@@ -255,10 +282,7 @@ class MobileNetV2(keras.Model):
         x = self.last_relu(x)
 
         if self.include_top:
-            x = self.global_avg_pool(x)
-            if self.dropout:
-                x = self.dropout(x, training=training)
-            x = self.classifier(x)
+            return self.classification_head(x, training=training)
 
         return x
 
@@ -269,6 +293,8 @@ class MobileNetV2(keras.Model):
             num_classes: int = 1000,
             input_shape: Optional[Tuple[int, ...]] = None,
             width_multiplier: float = 1.0,
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> "MobileNetV2":
         """Create a MobileNetV2 model from a predefined variant.
@@ -277,6 +303,9 @@ class MobileNetV2(keras.Model):
         :param num_classes: Number of output classes.
         :param input_shape: Input shape; defaults to `(224, 224, 3)`.
         :param width_multiplier: Extra multiplier applied on top of the variant default.
+        :param head_config_preset: Classification head preset: `"default"`,
+            `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
+        :param head_config_overrides: Optional dict to override head configuration.
         :param kwargs: Passthrough to the constructor.
         :return: A configured `MobileNetV2` instance.
         """
@@ -291,6 +320,8 @@ class MobileNetV2(keras.Model):
             num_classes=num_classes,
             width_multiplier=effective_width,
             input_shape=input_shape,
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
             **kwargs
         )
 
@@ -305,8 +336,51 @@ class MobileNetV2(keras.Model):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,
+            "head_config_preset": self._head_config_preset,
+            "head_config_overrides": self._head_config_overrides,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MobileNetV2":
+        """Create model from configuration."""
+        if isinstance(config.get("kernel_initializer"), dict):
+            config["kernel_initializer"] = keras.initializers.deserialize(
+                config["kernel_initializer"]
+            )
+        head_config_preset = config.pop("head_config_preset", "default")
+        head_config_overrides = config.pop("head_config_overrides", None)
+        return cls(
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
+
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Compute the output shape of the model."""
+        current_shape = input_shape
+
+        # Initial conv
+        current_shape = self.initial_conv.compute_output_shape(current_shape)
+        current_shape = self.initial_bn.compute_output_shape(current_shape)
+        current_shape = self.initial_relu.compute_output_shape(current_shape)
+
+        # Blocks
+        for block in self.blocks:
+            current_shape = block.compute_output_shape(current_shape)
+
+        # Last conv
+        current_shape = self.last_conv.compute_output_shape(current_shape)
+        current_shape = self.last_bn.compute_output_shape(current_shape)
+        current_shape = self.last_relu.compute_output_shape(current_shape)
+
+        # Head
+        if self.include_top and self.classification_head is not None:
+            current_shape = self.classification_head.compute_output_shape(current_shape)
+            if isinstance(current_shape, dict):
+                current_shape = current_shape['logits']
+
+        return current_shape
 
     def summary(self, **kwargs):
         """Print the model summary, plus configuration and parameter count."""
@@ -339,6 +413,8 @@ def create_mobilenetv2(
         input_shape: Optional[Tuple[int, ...]] = None,
         width_multiplier: float = 1.0,
         pretrained: bool = False,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
 ) -> MobileNetV2:
     """Create a MobileNetV2 model.
@@ -349,6 +425,9 @@ def create_mobilenetv2(
     :param width_multiplier: Extra multiplier applied on top of the variant default.
     :param pretrained: Must be `False`; `True` raises `NotImplementedError`
         since no MobileNetV2 checkpoints ship with this package.
+    :param head_config_preset: Classification head preset: `"default"`,
+        `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
+    :param head_config_overrides: Optional dict to override head configuration.
     :param kwargs: Passthrough to the constructor.
     :return: A configured `MobileNetV2` instance.
 
@@ -376,6 +455,8 @@ def create_mobilenetv2(
         num_classes=num_classes,
         input_shape=input_shape,
         width_multiplier=width_multiplier,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs
     )
 

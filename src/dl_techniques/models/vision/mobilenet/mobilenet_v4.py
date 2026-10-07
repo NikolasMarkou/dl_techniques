@@ -37,7 +37,7 @@ References:
 
 import keras
 from keras import layers, regularizers
-from typing import List, Tuple, Optional, Dict, Any, Sequence
+from typing import List, Tuple, Optional, Dict, Any, Sequence, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -50,6 +50,11 @@ from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_EPSILON,
     REFERENCE_BN_MOMENTUM,
     materialize_for_summary,
+)
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -163,6 +168,8 @@ class MobileNetV4(keras.Model):
         kernel_initializer: str = "he_normal",
         include_top: bool = True,
         input_shape: Tuple[int, ...] = (224, 224, 3),
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -217,6 +224,10 @@ class MobileNetV4(keras.Model):
         self.include_top = include_top
         self._input_shape = input_shape
 
+        # Head configuration
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
+
         self.actual_dims = [int(dim * width_multiplier) for dim in dims]
 
         self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
@@ -229,7 +240,9 @@ class MobileNetV4(keras.Model):
             self.stages.append(stage_layers)
 
         if self.include_top:
-            self.head_layers = self._build_head()
+            self._build_head()
+        else:
+            self.classification_head = None
 
     def call(self, x, training=None):
         """Run the stem, stages, and optional head.
@@ -247,11 +260,8 @@ class MobileNetV4(keras.Model):
                 x = layer(x, training=training)
 
         if self.include_top:
-            for layer in self.head_layers:
-                if isinstance(layer, layers.Dropout):
-                    x = layer(x, training=training)
-                else:
-                    x = layer(x)
+            return self.classification_head(x, training=training)
+
         return x
 
     def _build_stem(self):
@@ -331,34 +341,27 @@ class MobileNetV4(keras.Model):
 
         return stage_layers
 
-    def _build_head(self):
-        """Build the pooling, hidden dense, and classifier layers."""
-        head_layers_list = []
-        gap = layers.GlobalAveragePooling2D(name="global_avg_pool")
-        head_layers_list.append(gap)
+    def _build_head(self) -> None:
+        """Build classification head using standardized vision head factory."""
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        head_config.update({
+            'num_classes': self.num_classes,
+            'dropout_rate': self.dropout_rate,
+            'normalization_type': 'layer_norm',
+            'activation_type': 'gelu',
+            'use_global_pooling': True,
+            'pooling_type': 'avg',
+            'use_attention': False,
+            'use_ffn': True,
+            'ffn_type': 'mlp',
+            'ffn_expansion_factor': 4,
+        })
+        if self._head_config_overrides:
+            head_config.update(self._head_config_overrides)
 
-        if self.HEAD_HIDDEN_DIM > 0:
-            hidden_dense = layers.Dense(
-                self.HEAD_HIDDEN_DIM,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name="head_hidden"
-            )
-            hidden_activation = layers.ReLU(name="head_hidden_relu")
-            hidden_dropout = layers.Dropout(self.dropout_rate, name="head_dropout")
-            head_layers_list.extend([hidden_dense, hidden_activation, hidden_dropout])
-
-        if self.num_classes > 0:
-            classifier = layers.Dense(
-                self.num_classes,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                activation='softmax',
-                name="classifier"
-            )
-            head_layers_list.append(classifier)
-
-        return head_layers_list
+        self.classification_head = create_vision_head(
+            VisionTaskType.CLASSIFICATION, **head_config
+        )
 
     @classmethod
     def from_variant(
@@ -367,6 +370,8 @@ class MobileNetV4(keras.Model):
         num_classes: int = 1000,
         input_shape: Optional[Tuple[int, ...]] = None,
         width_multiplier: float = 1.0,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
     ) -> "MobileNetV4":
         """Create a MobileNetV4 model from a predefined variant.
@@ -375,6 +380,9 @@ class MobileNetV4(keras.Model):
         :param num_classes: Number of output classes.
         :param input_shape: Input shape; defaults to `(224, 224, 3)`.
         :param width_multiplier: Channel-count multiplier.
+        :param head_config_preset: Classification head preset: `"default"`,
+            `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
+        :param head_config_overrides: Optional dict to override head configuration.
         :param kwargs: Passthrough to the constructor.
         :return: A configured `MobileNetV4` instance.
         :raises ValueError: If `variant` is not recognized.
@@ -408,6 +416,8 @@ class MobileNetV4(keras.Model):
             use_attention=config["use_attention"],
             attention_stages=config.get("attention_stages", cls.DEFAULT_ATTENTION_STAGES),
             input_shape=input_shape,
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
             **kwargs
         )
 
@@ -427,6 +437,8 @@ class MobileNetV4(keras.Model):
             "kernel_initializer": self.kernel_initializer,
             "include_top": self.include_top,
             "input_shape": self._input_shape,
+            "head_config_preset": self._head_config_preset,
+            "head_config_overrides": self._head_config_overrides,
         }
         base_config = super().get_config()
         return {**base_config, **config}
@@ -434,7 +446,35 @@ class MobileNetV4(keras.Model):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MobileNetV4":
         """Create a model from its `get_config()` output."""
-        return cls(**config)
+        head_config_preset = config.pop("head_config_preset", "default")
+        head_config_overrides = config.pop("head_config_overrides", None)
+        return cls(
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
+
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Compute the output shape of the model."""
+        current_shape = input_shape
+
+        # Stem
+        current_shape = self.stem_conv.compute_output_shape(current_shape)
+        current_shape = self.stem_bn.compute_output_shape(current_shape)
+        current_shape = self.stem_activation.compute_output_shape(current_shape)
+
+        # Stages
+        for stage_layers in self.stages:
+            for layer in stage_layers:
+                current_shape = layer.compute_output_shape(current_shape)
+
+        # Head
+        if self.include_top and self.classification_head is not None:
+            current_shape = self.classification_head.compute_output_shape(current_shape)
+            if isinstance(current_shape, dict):
+                current_shape = current_shape['logits']
+
+        return current_shape
 
     def summary(self, **kwargs):
         """Print the model summary, plus configuration and parameter count."""
@@ -473,6 +513,8 @@ def create_mobilenetv4(
     input_shape: Optional[Tuple[int, ...]] = None,
     width_multiplier: float = 1.0,
     pretrained: bool = False,
+    head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+    head_config_overrides: Optional[Dict[str, Any]] = None,
     **kwargs
 ) -> MobileNetV4:
     """Create a MobileNetV4 model.
@@ -483,6 +525,9 @@ def create_mobilenetv4(
     :param width_multiplier: Channel-count multiplier.
     :param pretrained: Must be `False`; `True` raises `NotImplementedError`
         since no MobileNetV4 checkpoints ship with this package.
+    :param head_config_preset: Classification head preset: `"default"`,
+        `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
+    :param head_config_overrides: Optional dict to override head configuration.
     :param kwargs: Passthrough to the constructor.
     :return: A configured `MobileNetV4` instance.
 
@@ -510,6 +555,8 @@ def create_mobilenetv4(
         num_classes=num_classes,
         input_shape=input_shape,
         width_multiplier=width_multiplier,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs
     )
 

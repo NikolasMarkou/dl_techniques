@@ -521,10 +521,13 @@ class TestMobileNetV4:
 
     def test_model_parameter_counts(self):
         """Test parameter counts are reasonable for different variants."""
+        # Updated for ClassificationHead migration (adds 2 dense blocks + classifier)
         variants_expected_range = {
-            'small': (1e5, 5e6),    # 100K - 5M parameters
-            'medium': (3e6, 20e6),  # 3M - 20M parameters
-            'large': (4e6, 50e6),  # 10M - 50M parameters
+            'small': (1.2e6, 1.4e6),      # ~1.26M params
+            'medium': (2.4e6, 2.7e6),     # ~2.55M params
+            'large': (3.8e6, 4.2e6),      # ~3.99M params
+            'hybrid_medium': (2.7e6, 3.0e6),  # ~2.86M params
+            'hybrid_large': (4.2e6, 4.6e6),   # ~4.44M params
         }
 
         for variant, (min_params, max_params) in variants_expected_range.items():

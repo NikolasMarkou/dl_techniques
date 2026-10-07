@@ -28,7 +28,7 @@ References:
 
 import keras
 from keras import layers, regularizers
-from typing import Tuple, Optional, Dict, Any, Union
+from typing import Tuple, Optional, Dict, Any, Union, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -40,6 +40,11 @@ from dl_techniques.models.vision.mobilenet.common import (
     REFERENCE_BN_EPSILON,
     REFERENCE_BN_MOMENTUM,
     materialize_for_summary,
+)
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -124,6 +129,8 @@ class MobileNetV1(keras.Model):
             kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -150,6 +157,10 @@ class MobileNetV1(keras.Model):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.include_top = include_top
         self._input_shape = input_shape
+
+        # Head configuration
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         # Create regularizer
         self.kernel_regularizer = regularizers.L2(weight_decay) if weight_decay > 0 else None
@@ -196,30 +207,33 @@ class MobileNetV1(keras.Model):
             )
             self.depthwise_blocks.append(block)
 
-        # Classification head (the global pool is part of it -- D-066)
+        # Classification head using standardized factory
         if self.include_top:
-            self.global_avg_pool = layers.GlobalAveragePooling2D(name='global_avg_pool')
+            self._build_head()
+        else:
+            self.classification_head = None
 
-            # Shape layer to ensure correct dimensions
-            self.reshape = layers.Reshape((1, 1, int(1024 * self.width_multiplier)), name='reshape')
+    def _build_head(self) -> None:
+        """Build classification head using standardized vision head factory."""
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        head_config.update({
+            'num_classes': self.num_classes,
+            'dropout_rate': self.dropout_rate,
+            'normalization_type': 'layer_norm',
+            'activation_type': 'gelu',
+            'use_global_pooling': True,
+            'pooling_type': 'avg',
+            'use_attention': False,
+            'use_ffn': True,
+            'ffn_type': 'mlp',
+            'ffn_expansion_factor': 4,
+        })
+        if self._head_config_overrides:
+            head_config.update(self._head_config_overrides)
 
-            # Dropout for regularization
-            self.dropout = layers.Dropout(self.dropout_rate, name='dropout')
-
-            # Final convolution as FC layer (MobileNetV1 uses Conv instead of Dense)
-            self.classifier_conv = layers.Conv2D(
-                filters=self.num_classes,
-                kernel_size=1,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name='conv_preds'
-            )
-
-            # Reshape to get proper output shape
-            self.output_reshape = layers.Reshape((self.num_classes,), name='output_reshape')
-
-            # Softmax activation
-            self.softmax = layers.Activation('softmax', name='act_softmax')
+        self.classification_head = create_vision_head(
+            VisionTaskType.CLASSIFICATION, **head_config
+        )
 
     def call(
             self,
@@ -236,15 +250,8 @@ class MobileNetV1(keras.Model):
         for block in self.depthwise_blocks:
             x = block(x, training=training)
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-066: pooling belongs to the head; do not move global_avg_pool outside this branch.
-        # Applied unconditionally, include_top=False would return a 2-D pooled vector instead of the 4-D feature map V2/V3/V4 return. See decisions.md.
         if self.include_top:
-            x = self.global_avg_pool(x)
-            x = self.reshape(x)
-            x = self.dropout(x, training=training)
-            x = self.classifier_conv(x)
-            x = self.output_reshape(x)
-            x = self.softmax(x)
+            return self.classification_head(x, training=training)
 
         return x
 
@@ -255,6 +262,8 @@ class MobileNetV1(keras.Model):
             num_classes: int = 1000,
             input_shape: Optional[Tuple[int, ...]] = None,
             width_multiplier: float = 1.0,
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> "MobileNetV1":
         """Create a MobileNetV1 model from a predefined variant.
@@ -263,6 +272,9 @@ class MobileNetV1(keras.Model):
         :param num_classes: Number of output classes.
         :param input_shape: Input shape; defaults to `(224, 224, 3)`.
         :param width_multiplier: Extra multiplier applied on top of the variant default.
+        :param head_config_preset: Classification head preset: `"default"`,
+            `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
+        :param head_config_overrides: Optional dict to override head configuration.
         :param kwargs: Passthrough to the constructor.
         :return: A configured `MobileNetV1` instance.
         :raises ValueError: If `variant` is not recognized.
@@ -292,6 +304,8 @@ class MobileNetV1(keras.Model):
             num_classes=num_classes,
             width_multiplier=effective_width,
             input_shape=input_shape,
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
             **kwargs
         )
 
@@ -305,6 +319,8 @@ class MobileNetV1(keras.Model):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "include_top": self.include_top,
             "input_shape": self._input_shape,
+            "head_config_preset": self._head_config_preset,
+            "head_config_overrides": self._head_config_overrides,
         }
         base_config = super().get_config()
         return {**base_config, **config}
@@ -317,7 +333,41 @@ class MobileNetV1(keras.Model):
             config["kernel_initializer"] = keras.initializers.deserialize(
                 config["kernel_initializer"]
             )
-        return cls(**config)
+        head_config_preset = config.pop("head_config_preset", "default")
+        head_config_overrides = config.pop("head_config_overrides", None)
+        return cls(
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
+
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Compute the output shape of the model.
+
+        :param input_shape: Input shape, channels-last.
+        :type input_shape: Tuple[int, ...]
+        :return: The corresponding output shape.
+        :rtype: Tuple[int, ...]
+        """
+        current_shape = input_shape
+
+        # Initial conv
+        current_shape = self.initial_conv.compute_output_shape(current_shape)
+        current_shape = self.initial_bn.compute_output_shape(current_shape)
+        current_shape = self.initial_relu.compute_output_shape(current_shape)
+
+        # Depthwise blocks
+        for block in self.depthwise_blocks:
+            current_shape = block.compute_output_shape(current_shape)
+
+        # Head
+        if self.include_top and self.classification_head is not None:
+            current_shape = self.classification_head.compute_output_shape(current_shape)
+            # classification_head returns dict, we want the logits shape
+            if isinstance(current_shape, dict):
+                current_shape = current_shape['logits']
+
+        return current_shape
 
     def summary(self, **kwargs):
         """Print the model summary, plus configuration and parameter count."""
@@ -350,6 +400,8 @@ def create_mobilenetv1(
         input_shape: Optional[Tuple[int, ...]] = None,
         width_multiplier: float = 1.0,
         pretrained: bool = False,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
 ) -> MobileNetV1:
     """Create a MobileNetV1 model.
@@ -360,6 +412,10 @@ def create_mobilenetv1(
     :param width_multiplier: Extra multiplier applied on top of the variant default.
     :param pretrained: Must be `False`; `True` raises `NotImplementedError`
         since no MobileNetV1 checkpoints ship with this package.
+    :param head_config_preset: Classification head preset: `"default"`,
+        `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
+    :param head_config_overrides: Optional dict to override head configuration
+        (e.g., `{'hidden_dim': 512, 'dropout_rate': 0.2}`). Defaults to None.
     :param kwargs: Passthrough to the constructor.
     :return: A configured `MobileNetV1` instance.
 
@@ -387,6 +443,8 @@ def create_mobilenetv1(
         num_classes=num_classes,
         input_shape=input_shape,
         width_multiplier=width_multiplier,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs
     )
 
