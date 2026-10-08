@@ -131,6 +131,7 @@ class MobileNetV1(keras.Model):
             input_shape: Optional[Tuple[int, ...]] = None,
             head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
+            return_dict: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -157,6 +158,7 @@ class MobileNetV1(keras.Model):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.include_top = include_top
         self._input_shape = input_shape
+        self.return_dict = return_dict
 
         # Head configuration
         self._head_config_preset = str(head_config_preset)
@@ -224,9 +226,7 @@ class MobileNetV1(keras.Model):
             'use_global_pooling': True,
             'pooling_type': 'avg',
             'use_attention': False,
-            'use_ffn': True,
-            'ffn_type': 'mlp',
-            'ffn_expansion_factor': 4,
+            'use_ffn': False,
         })
         if self._head_config_overrides:
             head_config.update(self._head_config_overrides)
@@ -251,7 +251,8 @@ class MobileNetV1(keras.Model):
             x = block(x, training=training)
 
         if self.include_top:
-            return self.classification_head(x, training=training)
+            out = self.classification_head(x, training=training)
+            return out if self.return_dict else out['logits']
 
         return x
 
@@ -264,6 +265,7 @@ class MobileNetV1(keras.Model):
             width_multiplier: float = 1.0,
             head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
             head_config_overrides: Optional[Dict[str, Any]] = None,
+            return_dict: bool = True,
             **kwargs: Any
     ) -> "MobileNetV1":
         """Create a MobileNetV1 model from a predefined variant.
@@ -275,6 +277,8 @@ class MobileNetV1(keras.Model):
         :param head_config_preset: Classification head preset: `"default"`,
             `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
         :param head_config_overrides: Optional dict to override head configuration.
+        :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
+            If False, return only the logits tensor for backward compatibility.
         :param kwargs: Passthrough to the constructor.
         :return: A configured `MobileNetV1` instance.
         :raises ValueError: If `variant` is not recognized.
@@ -306,6 +310,7 @@ class MobileNetV1(keras.Model):
             input_shape=input_shape,
             head_config_preset=head_config_preset,
             head_config_overrides=head_config_overrides,
+            return_dict=return_dict,
             **kwargs
         )
 
@@ -321,6 +326,7 @@ class MobileNetV1(keras.Model):
             "input_shape": self._input_shape,
             "head_config_preset": self._head_config_preset,
             "head_config_overrides": self._head_config_overrides,
+            "return_dict": self.return_dict,
         }
         base_config = super().get_config()
         return {**base_config, **config}
@@ -335,9 +341,11 @@ class MobileNetV1(keras.Model):
             )
         head_config_preset = config.pop("head_config_preset", "default")
         head_config_overrides = config.pop("head_config_overrides", None)
+        return_dict = config.pop("return_dict", True)
         return cls(
             head_config_preset=head_config_preset,
             head_config_overrides=head_config_overrides,
+            return_dict=return_dict,
             **config
         )
 
@@ -402,6 +410,7 @@ def create_mobilenetv1(
         pretrained: bool = False,
         head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
         head_config_overrides: Optional[Dict[str, Any]] = None,
+        return_dict: bool = True,
         **kwargs: Any
 ) -> MobileNetV1:
     """Create a MobileNetV1 model.
@@ -416,6 +425,8 @@ def create_mobilenetv1(
         `"efficient"`, or `"high_performance"`. Defaults to `"default"`.
     :param head_config_overrides: Optional dict to override head configuration
         (e.g., `{'hidden_dim': 512, 'dropout_rate': 0.2}`). Defaults to None.
+    :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
+        If False, return only the logits tensor for backward compatibility.
     :param kwargs: Passthrough to the constructor.
     :return: A configured `MobileNetV1` instance.
 
@@ -445,6 +456,7 @@ def create_mobilenetv1(
         width_multiplier=width_multiplier,
         head_config_preset=head_config_preset,
         head_config_overrides=head_config_overrides,
+        return_dict=return_dict,
         **kwargs
     )
 
