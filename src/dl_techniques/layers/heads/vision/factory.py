@@ -1298,10 +1298,10 @@ class ClassificationHead(BaseVisionHead):
     :type num_classes: int
     :param use_global_pooling: Collapse the spatial dimensions by pooling.
         When ``False``, ``call`` flattens them instead.
-    :type use_global_pooling: bool
+    :param pooling_type: Which pooling to build. ``avg`` or ``max`` for 4D feature maps; ``cls_token`` for 3D sequence inputs (extracts position 0).
     :param pooling_type: Which pooling to build, ``'avg'`` or ``'max'``.
         Read only when ``use_global_pooling`` is set.
-    :type pooling_type: Literal['avg', 'max']
+    :type pooling_type: Literal['avg', 'max', 'cls_token']
     :param kwargs: Arguments for :class:`BaseVisionHead`.
 
     :ivar pooling: Global pooling layer, built only when
@@ -1318,7 +1318,7 @@ class ClassificationHead(BaseVisionHead):
             self,
             num_classes: int,
             use_global_pooling: bool = True,
-            pooling_type: Literal['avg', 'max'] = 'avg',
+            pooling_type: Literal['avg', 'max', 'cls_token'] = 'avg',
             **kwargs: Any
     ) -> None:
         """
@@ -1329,10 +1329,10 @@ class ClassificationHead(BaseVisionHead):
         :param use_global_pooling: Collapse spatial dimensions by pooling.
         :type use_global_pooling: bool
         :param pooling_type: Which pooling to build, ``'avg'`` or ``'max'``.
-        :type pooling_type: Literal['avg', 'max']
+    :type pooling_type: Literal['avg', 'max', 'cls_token']
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
-        :rtype: None
+        :param pooling_type: Which pooling to build. ``avg`` or ``max`` for 4D feature maps; ``cls_token`` for 3D sequence inputs (extracts position 0).
         """
         super().__init__(**kwargs)
 
@@ -1349,16 +1349,21 @@ class ClassificationHead(BaseVisionHead):
         Pooling is built only when ``use_global_pooling`` is set. The two
         dense blocks are ``hidden_dim`` and ``hidden_dim // 2`` wide.
 
+        For ``pooling_type='cls_token'`` (used with 3D sequence inputs like
+        Vision Transformer outputs), no pooling layer is built; instead the
+        first token (position 0) is extracted directly in ``call``.
+
         :return: None.
         :rtype: None
         """
 
         # Global pooling
-        if self.use_global_pooling:
+        if self.use_global_pooling and self.pooling_type in ('avg', 'max'):
             if self.pooling_type == 'avg':
                 self.pooling = layers.GlobalAveragePooling2D()
             else:
                 self.pooling = layers.GlobalMaxPooling2D()
+        # For 'cls_token', no pooling layer is built; extraction happens in call()
 
         # Dense layers for classification
         self.dense_blocks = [
@@ -1392,7 +1397,7 @@ class ClassificationHead(BaseVisionHead):
         flat width here rather than building a layer, since ``call`` makes
         its own ``Flatten``.
 
-        :param input_shape: Input feature-map shape.
+        :param input_shape: Input feature-map shape (4D) or sequence shape (3D).
         :type input_shape: Tuple[Optional[int], ...]
         :return: None.
         :rtype: None
@@ -1402,9 +1407,12 @@ class ClassificationHead(BaseVisionHead):
         if self.use_attention:
             shape = tuple(self.attention.compute_output_shape(shape))
 
-        if self.use_global_pooling:
+        if self.use_global_pooling and self.pooling_type in ('avg', 'max'):
             self.pooling.build(shape)
             shape = tuple(self.pooling.compute_output_shape(shape))
+        elif self.use_global_pooling and self.pooling_type == 'cls_token':
+            # cls_token extracts position 0: (B, seq_len, D) -> (B, D)
+            shape = (shape[0], shape[-1])
         else:
             # call() flattens via an inline (stateless) Flatten layer.
             flat = 1
@@ -1431,7 +1439,7 @@ class ClassificationHead(BaseVisionHead):
         The FFN never runs here, whatever ``use_ffn`` says.
 
         :param inputs: Feature map of shape ``(batch, height, width,
-            channels)``.
+            channels)`` for 4D, or ``(batch, seq_len, dim)`` for 3D sequences.
         :type inputs: keras.KerasTensor
         :param training: Keras training flag, forwarded to the dense blocks
             and to attention.
@@ -1449,7 +1457,11 @@ class ClassificationHead(BaseVisionHead):
 
         # Global pooling
         if self.use_global_pooling:
-            x = self.pooling(x)
+            if self.pooling_type == 'cls_token':
+                # Extract CLS token at position 0 for sequence inputs (B, seq_len, D) -> (B, D)
+                x = x[:, 0, :]
+            else:
+                x = self.pooling(x)
         else:
             x = layers.Flatten()(x)
 

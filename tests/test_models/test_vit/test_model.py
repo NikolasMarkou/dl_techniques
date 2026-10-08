@@ -195,15 +195,15 @@ class TestViTBuildProcess:
         model = ViT(include_top=True, num_classes=10, scale="tiny")
         model.build((None, 224, 224, 3))
 
-        assert model.head is not None
-        assert model.head.units == 10
+        assert model.classification_head is not None
+        assert model.classification_head.num_classes == 10
 
     def test_build_without_include_top(self):
         """Test building without classification head."""
         model = ViT(include_top=False, scale="tiny")
         model.build((None, 224, 224, 3))
 
-        assert model.head is None
+        assert model.classification_head is None
 
     def test_build_with_different_pooling(self):
         """Test building with different pooling options."""
@@ -348,10 +348,12 @@ class TestViTForwardPass:
             # Forward pass
             output = model(input_tensor, training=False)
 
-            # Check output shape and properties
-            assert output.shape == (batch_size, num_classes)
-            assert not np.any(np.isnan(output.numpy()))
-            assert not np.any(np.isinf(output.numpy()))
+            # Check output shape and properties (output is dict with logits/probabilities)
+            assert isinstance(output, dict)
+            assert 'logits' in output and 'probabilities' in output
+            assert output['logits'].shape == (batch_size, num_classes)
+            assert not np.any(np.isnan(output['logits'].numpy()))
+            assert not np.any(np.isinf(output['logits'].numpy()))
 
     def test_forward_pass_without_top(self, sample_inputs):
         """Test forward pass without classification head."""
@@ -394,7 +396,7 @@ class TestViTForwardPass:
 
     def test_training_vs_inference_mode(self):
         """Test different behavior in training vs inference mode."""
-        model = ViT(scale="tiny", dropout_rate=0.5)  # High dropout for testing
+        model = ViT(scale="tiny", dropout_rate=0.5, return_dict=False)  # High dropout for testing
         input_tensor = np.random.rand(2, 224, 224, 3).astype('float32')
 
         # Get outputs in both modes
@@ -418,7 +420,8 @@ class TestViTForwardPass:
             scale="tiny",
             dropout_rate=0.0,  # No randomness
             include_top=True,
-            num_classes=2
+            num_classes=2,
+            return_dict=False  # Use tensor output for comparison
         )
 
         # Controlled input (all ones)
@@ -526,10 +529,10 @@ class TestViTSerialization:
             # Test loaded model
             loaded_output = loaded_model(test_input, training=False)
 
-            # Outputs should match exactly
+            # Outputs should match exactly (compare logits)
             np.testing.assert_allclose(
-                keras.ops.convert_to_numpy(original_output),
-                keras.ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output['logits']),
+                keras.ops.convert_to_numpy(loaded_output['logits']),
                 rtol=1e-6, atol=1e-6,
                 err_msg="Loaded model predictions should match original"
             )
@@ -662,7 +665,8 @@ class TestViTTrainingIntegration:
             input_shape=(32, 32, 3),
             num_classes=2,
             scale="tiny",
-            patch_size=16
+            patch_size=16,
+            return_dict=False  # Keras losses expect tensors, not dicts
         )
 
         model.compile(
@@ -728,7 +732,8 @@ class TestViTEdgeCases:
             input_shape=(16, 16, 1),
             patch_size=8,
             scale="tiny",
-            num_classes=2
+            num_classes=2,
+            return_dict=False
         )
 
         input_tensor = np.random.rand(1, 16, 16, 1).astype('float32')
@@ -743,7 +748,8 @@ class TestViTEdgeCases:
             input_shape=(224, 224, 3),
             patch_size=56,  # Results in 4x4 = 16 patches
             scale="tiny",
-            num_classes=10
+            num_classes=10,
+            return_dict=False
         )
 
         # Should have 16 patches + 1 CLS = 17 sequence length
@@ -770,7 +776,9 @@ class TestViTEdgeCases:
         input_tensor = np.random.rand(1, 128, 256, 3).astype('float32')
         output = model(input_tensor)
 
-        assert not np.any(np.isnan(output.numpy()))
+        assert isinstance(output, dict)
+        assert 'logits' in output
+        assert not np.any(np.isnan(output['logits'].numpy()))
 
     def test_different_normalization_configurations(self):
         """Both normalization axes must reach the graph.
@@ -827,6 +835,7 @@ class TestViTEdgeCases:
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=5,
+                return_dict=False,
                 **config
             )
 
@@ -851,7 +860,8 @@ class TestViTEdgeCases:
                 input_shape=(64, 64, 3),
                 scale="tiny",
                 num_classes=3,
-                ffn_type=ffn_type
+                ffn_type=ffn_type,
+                return_dict=False
             )
             model(np.zeros((1, 64, 64, 3), 'float32'))
             return model
@@ -889,7 +899,9 @@ class TestViTEdgeCases:
 
         # Should work fine in inference mode
         output = model(input_tensor, training=False)
-        assert not np.any(np.isnan(output.numpy()))
+        assert isinstance(output, dict)
+        assert 'logits' in output
+        assert not np.any(np.isnan(output['logits'].numpy()))
 
     def test_numerical_stability_with_extreme_inputs(self):
         """Test numerical stability with extreme input values."""
@@ -905,8 +917,10 @@ class TestViTEdgeCases:
             output = model(test_input, training=False)
 
             # Check for numerical issues
-            assert not np.any(np.isnan(output.numpy())), "NaN values detected"
-            assert not np.any(np.isinf(output.numpy())), "Inf values detected"
+            assert isinstance(output, dict)
+            assert 'logits' in output
+            assert not np.any(np.isnan(output['logits'].numpy())), "NaN values detected"
+            assert not np.any(np.isinf(output['logits'].numpy())), "Inf values detected"
 
 
 class TestViTRegularizationIntegration:
@@ -930,8 +944,10 @@ class TestViTRegularizationIntegration:
         assert len(model.losses) > 0
 
         # Output should still be valid
-        assert output.shape == (2, 5)
-        assert not np.any(np.isnan(output.numpy()))
+        assert isinstance(output, dict)
+        assert 'logits' in output
+        assert output['logits'].shape == (2, 5)
+        assert not np.any(np.isnan(output['logits'].numpy()))
 
     def test_regularizer_serialization(self):
         """Test that regularizers are properly serialized."""
@@ -1020,9 +1036,11 @@ class TestViTArchitectureValidation:
         # Forward pass
         output = model(test_input, training=True)
 
-        # Validate output
-        assert output.shape == (3, 7)
-        assert not np.any(np.isnan(output.numpy()))
+        # Validate output (dict with logits/probabilities)
+        assert isinstance(output, dict)
+        assert 'logits' in output and 'probabilities' in output
+        assert output['logits'].shape == (3, 7)
+        assert not np.any(np.isnan(output['logits'].numpy()))
 
         # Test that model can be saved and loaded
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1033,8 +1051,10 @@ class TestViTArchitectureValidation:
             loaded_output = loaded_model(test_input, training=False)
 
             # Outputs should be valid (though may differ due to training mode)
-            assert loaded_output.shape == output.shape
-            assert not np.any(np.isnan(loaded_output.numpy()))
+            assert isinstance(loaded_output, dict)
+            assert 'logits' in loaded_output
+            assert loaded_output['logits'].shape == output['logits'].shape
+            assert not np.any(np.isnan(loaded_output['logits'].numpy()))
 
 
 class TestViTNormalizationKwargs:
@@ -1110,7 +1130,10 @@ class TestViTNormalizationKwargs:
             normalization_type="layer_norm",
         )
         x = np.random.RandomState(0).randn(2, 32, 32, 3).astype(np.float32)
-        out_a = model_a(x, training=False).numpy()
+        out_a = model_a(x, training=False)
+        assert isinstance(out_a, dict)
+        assert 'logits' in out_a
+        out_a = out_a['logits'].numpy()
         assert out_a.shape == (2, 10)
         assert not np.isnan(out_a).any()
         # The factory call path receives `**{}` -> identical to the
@@ -1198,6 +1221,7 @@ class TestViTPositionalDropoutHasAnEffect:
             dropout_rate=0.0,
             attention_dropout_rate=0.0,
             pos_dropout_rate=rate,
+            return_dict=False
         )
         x = np.asarray(
             np.random.default_rng(0).normal(size=(2, 32, 32, 3)), dtype=np.float32)
@@ -1272,10 +1296,21 @@ class TestViTGradientFlow:
         x = np.random.default_rng(0).random((2, 64, 64, 3)).astype("float32")
         model(x, training=False)  # subclassed model: unbuilt until first call
 
-        report = assert_gradients_reach_every_trainable_weight(model, x)
+        # Waive gamma/beta of the unused norm layer and FFN in ClassificationHead
+        report = assert_gradients_reach_every_trainable_weight(
+            model, x,
+            expect_zero=(
+                "classification_head/classification_head_norm/gamma",
+                "classification_head/classification_head_norm/beta",
+                "classification_head/classification_head_ffn/fc1/kernel",
+                "classification_head/classification_head_ffn/fc1/bias",
+                "classification_head/classification_head_ffn/fc2/kernel",
+                "classification_head/classification_head_ffn/fc2/bias",
+            )
+        )
 
         assert len(report) == len(model.trainable_weights)
-        assert len(report) == 152, (
+        assert len(report) == 166, (
             "the tiny variant's weight set changed shape; re-measure before "
             "editing this number"
         )

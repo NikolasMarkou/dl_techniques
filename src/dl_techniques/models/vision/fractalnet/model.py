@@ -27,7 +27,7 @@ References:
 """
 
 import keras
-from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
+from typing import List, Optional, Union, Tuple, Dict, Any, Sequence, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -36,6 +36,11 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Sequence
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.fractal_block import FractalBlock
 from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -160,6 +165,12 @@ class FractalNet(keras.Model):
         Default is True.
     :param input_shape: Tuple, input shape of `(height, width, channels)`.
         Default and `None` both give (32, 32, 3) for CIFAR.
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration
+        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Model base class.
 
     :raises ValueError: If `depths`, `filters` and `strides` do not all have
@@ -212,6 +223,8 @@ class FractalNet(keras.Model):
         classifier_dropout_rate: float = 0.2,
         include_top: bool = True,
         input_shape: Tuple[int, ...] = (32, 32, 3),
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         """Validate the configuration and build the functional graph."""
@@ -247,6 +260,10 @@ class FractalNet(keras.Model):
         self.classifier_dropout_rate = classifier_dropout_rate
         self.include_top = include_top
         self._input_shape = input_shape
+
+        # Head configuration
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
@@ -340,35 +357,35 @@ class FractalNet(keras.Model):
         return x
 
     def _build_classification_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the classification head.
+        """Build the classification head using the vision heads factory.
+
+        Uses :class:`ClassificationHead` from the vision heads factory with
+        global average pooling and optional dropout.
 
         :param x: Input feature tensor
-
-        :return: Classification logits
-
-        :raises ValueError: If `global_pool` is neither "avg" nor "max"
+        :return: Classification logits or dict with logits/probabilities
         """
-        if self.global_pool == "avg":
-            x = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")(x)
-        elif self.global_pool == "max":
-            x = keras.layers.GlobalMaxPooling2D(name="global_max_pool")(x)
-        else:
-            raise ValueError(f"Unsupported global_pool: {self.global_pool}")
+        if self.include_top:
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+            head_config.update({
+                'num_classes': self.num_classes,
+                'dropout_rate': self.classifier_dropout_rate,
+                'normalization_type': 'layer_norm',
+                'activation_type': 'gelu',
+                'use_global_pooling': True,
+                'pooling_type': 'avg',
+                'use_attention': False,
+                'use_ffn': True,
+                'ffn_type': 'mlp',
+                'ffn_expansion_factor': 4,
+            })
+            if self._head_config_overrides:
+                head_config.update(self._head_config_overrides)
 
-        if self.classifier_dropout_rate > 0:
-            x = keras.layers.Dropout(
-                self.classifier_dropout_rate,
-                name="classifier_dropout"
-            )(x)
-
-        if self.num_classes > 0:
-            x = keras.layers.Dense(
-                self.num_classes,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name="classifier"
-            )(x)
-
+            self.head = create_vision_head(
+                VisionTaskType.CLASSIFICATION, **head_config
+            )
+            x = self.head(x)
         return x
 
     @classmethod
@@ -446,6 +463,8 @@ class FractalNet(keras.Model):
             "classifier_dropout_rate": self.classifier_dropout_rate,
             "include_top": self.include_top,
             "input_shape": self._input_shape,
+            "head_config_preset": self._head_config_preset,
+            "head_config_overrides": self._head_config_overrides,
         })
         return config
 
@@ -465,8 +484,13 @@ class FractalNet(keras.Model):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
             )
-
-        return cls(**config)
+        head_config_preset = config.pop("head_config_preset", "default")
+        head_config_overrides = config.pop("head_config_overrides", None)
+        return cls(
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
 
     def summary(self, **kwargs):
         """Print the Keras summary, then log the fractal configuration.

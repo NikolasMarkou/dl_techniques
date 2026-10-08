@@ -1,0 +1,23 @@
+Continue Phase 3 of migrating vision models to use the standardized `ClassificationHead` from `dl_techniques.layers.heads.vision.factory`.
+
+**Completed so far (9 models):** ViT, ViTHMLP, ConvNeXt V1/V2, SwinTransformer, ResNet (with deep supervision → MultiTaskHead), SqueezeNet (API consistency only), FastVLM, CliffordNet, FractalNet.
+
+**All migrated models now:**
+- Use `create_vision_head(VisionTaskType.CLASSIFICATION, ...)` via `HeadConfiguration` presets
+- Accept `head_config_preset` ('default'|'efficient'|'high_performance') + `head_config_overrides` params
+- Return dict `{'logits': (B,C), 'probabilities': (B,C)}` instead of raw logits
+- Full serialization support (`get_config`/`from_config` + save/load)
+- ResNet deep supervision uses `MultiTaskHead` with multiple `ClassificationHead` instances
+
+**Output format changed:** Raw tensor `(B,C)` → Dict `{'logits': (B,C), 'probabilities': (B,C)}`
+
+**Next up (remaining vision models to migrate):**
+1. **MobileNet variants** (`vision/mobilenet/`) - `mobilenet_v1.py`, `v2.py`, `v3.py`, `v4.py`
+2. **Enhancement models** → `EnhancementHead`: THERA, Bias-free denoisers, PFT-SR
+3. **VLM models** → VLM heads: CLIP, MobileCLIP, FastVLM (already done), NanoVLM, BitDiffusion, etc. → `VQAHead`, `ImageCaptioningHead`, `VisualGroundingHead`, `ImageTextMatchingHead`
+
+**SqueezeNet note:** Kept custom head (Conv2D 1×1 → GAP → Softmax) for architectural reasons; head config params accepted for API consistency only.
+
+**Start with MobileNet variants** (`vision/mobilenet/*.py`) — they use GAP + Dense heads similar to ConvNeXt.
+
+**Key files to modify:** `vision/mobilenet/mobilenet_v1.py`, `mobilenet_v2.py`, `mobilenet_v3.py`, `mobilenet_v4.py` — each has a custom `GAP → Dense` head to replace with `ClassificationHead`.

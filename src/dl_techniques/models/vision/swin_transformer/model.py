@@ -29,7 +29,7 @@ References:
 
 import keras
 from keras import layers, initializers, regularizers
-from typing import Optional, Union, Tuple, Dict, Any, Sequence
+from typing import Optional, Union, Tuple, Dict, Any, Sequence, Literal
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -41,6 +41,11 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.pooling.patch_merging import PatchMerging
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.transformers.swin_transformer_block import SwinTransformerBlock
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -193,6 +198,12 @@ class SwinTransformer(keras.Model):
     :param input_shape: Input tensor shape ``(H, W, C)``. Defaults to ``(224, 224, 3)``.
         The patch grid is computed from it, so it fixes the resolution.
     :type input_shape: tuple or None
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration
+        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param **kwargs: Additional arguments for the Keras ``Model`` base class.
 
     :raises ValueError: If a size or rate is out of range, if ``depths`` or
@@ -304,6 +315,8 @@ class SwinTransformer(keras.Model):
             bias_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         if num_classes <= 0:
@@ -359,6 +372,25 @@ class SwinTransformer(keras.Model):
 
         self.num_classes = num_classes
         self.embed_dim = embed_dim
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: store as a list; get_config
+        # has always emitted lists and a tuple changes that shape. See decisions.md.
+        self.depths = list(depths)
+        self.num_heads = list(num_heads)
+        self.window_size = window_size
+        self.mlp_ratio = mlp_ratio
+        self.qkv_bias = qkv_bias
+        self.dropout_rate = dropout_rate
+        self.attn_dropout_rate = attn_dropout_rate
+        self.drop_path_rate = drop_path_rate
+        self.patch_size = patch_size
+        self.use_bias = use_bias
+        self.include_top = include_top
+        self._input_shape = input_shape
+
+        # Head configuration
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
+
         # DECISION plan-2026-08-19T163559-499b6f0e/D-085: store as a list; get_config
         # has always emitted lists and a tuple changes that shape. See decisions.md.
         self.depths = list(depths)
@@ -551,38 +583,40 @@ class SwinTransformer(keras.Model):
         return x
 
     def _create_classification_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Normalize, pool over the grid, and project to class logits.
+        """Create classification head using the vision heads factory.
+
+        Uses :class:`ClassificationHead` from the vision heads factory with
+        global average pooling.
 
         :param x: Final feature grid.
         :type x: keras.KerasTensor
-        :return: Logits ``(B, num_classes)``.
-        :rtype: keras.KerasTensor
+        :return: Logits ``(B, num_classes)`` or dict with logits/probabilities.
+        :rtype: keras.KerasTensor or Dict[str, keras.KerasTensor]
         """
-        head_norm = layers.LayerNormalization(
-            epsilon=self.LAYERNORM_EPSILON,
-            center=self.use_bias,
-            scale=True,
-            name="head_norm"
-        )
-        x = head_norm(x)
+        if self.include_top:
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+            head_config.update({
+                'num_classes': self.num_classes,
+                'dropout_rate': self.dropout_rate,
+                'normalization_type': 'layer_norm',
+                'activation_type': 'gelu',
+                'use_global_pooling': True,
+                'pooling_type': 'avg',  # GAP for SwinTransformer
+                'use_attention': False,
+                'use_ffn': True,
+                'ffn_type': 'mlp',
+                'ffn_expansion_factor': 4,
+            })
+            if self._head_config_overrides:
+                head_config.update(self._head_config_overrides)
 
-        gap = layers.GlobalAveragePooling2D(name="global_avg_pool")
-        x = gap(x)
-
-        if self.num_classes > 0:
-            classifier = layers.Dense(
-                units=self.num_classes,
-                use_bias=self.use_bias,
-                kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=clone_initializer(self.bias_initializer),
-                kernel_regularizer=self.kernel_regularizer,
-                bias_regularizer=self.bias_regularizer,
-                name="classifier"
+            classification_head = create_vision_head(
+                VisionTaskType.CLASSIFICATION, **head_config
             )
-            x = classifier(x)
-            self.head_layers = [head_norm, gap, classifier]
+            x = classification_head(x)
+            self.head_layers = [classification_head]
         else:
-            self.head_layers = [head_norm, gap]
+            self.head_layers = []
 
         return x
 
@@ -653,6 +687,8 @@ class SwinTransformer(keras.Model):
             "bias_regularizer": regularizers.serialize(self.bias_regularizer),
             "include_top": self.include_top,
             "input_shape": self._input_shape,
+            "head_config_preset": self._head_config_preset,
+            "head_config_overrides": self._head_config_overrides,
         })
         return config
 
@@ -681,8 +717,13 @@ class SwinTransformer(keras.Model):
             config["bias_regularizer"] = regularizers.deserialize(
                 config["bias_regularizer"]
             )
-
-        return cls(**config)
+        head_config_preset = config.pop("head_config_preset", "default")
+        head_config_overrides = config.pop("head_config_overrides", None)
+        return cls(
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
 
     def summary(self, **kwargs: Any) -> None:
         """Print the Keras summary, then log the architecture settings.
@@ -723,6 +764,8 @@ def create_swin_transformer(
         num_classes: int = 1000,
         input_shape: Optional[Tuple[int, ...]] = None,
         pretrained: bool = False,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
 ) -> SwinTransformer:
     """Build a Swin Transformer from a named variant, with input validation.
@@ -736,6 +779,11 @@ def create_swin_transformer(
     :param pretrained: Must be ``False``; ``True`` raises ``NotImplementedError``
         since no Swin checkpoints ship with this package.
     :type pretrained: bool
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param **kwargs: Additional arguments passed to the model constructor.
     :return: Configured :class:`SwinTransformer` instance.
     :rtype: SwinTransformer
@@ -776,6 +824,8 @@ def create_swin_transformer(
         variant,
         num_classes=num_classes,
         input_shape=input_shape,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs
     )
 

@@ -31,7 +31,7 @@ References:
 
 import keras
 from keras import layers, initializers, regularizers
-from typing import Optional, Tuple, Dict, Any, Union
+from typing import Optional, Tuple, Dict, Any, Union, Literal
 
 
 # ---------------------------------------------------------------------
@@ -43,6 +43,10 @@ from .spatial_guard import validate_spatial_extent
 from .caffe_reference_init import (
     CAFFE_HEAD_INITIALIZER,
     CAFFE_XAVIER_INITIALIZER,
+)
+from dl_techniques.layers.heads.vision import (
+    VisionTaskType,
+    HeadConfiguration,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -336,6 +340,16 @@ class SqueezeNetV1(keras.Model):
     :type include_top: bool
     :param input_shape: Input shape `(height, width, channels)`.
     :type input_shape: tuple of 3 ints
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+        Note: SqueezeNet uses a custom head (Conv2D 1x1 -> GAP -> Softmax) which
+        differs from the standard ClassificationHead. This parameter is accepted
+        for API consistency but does not change the head architecture.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+        Note: SqueezeNet uses a custom head. This parameter is accepted
+        for API consistency but does not change the head architecture.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passthrough to `keras.Model`.
     :raises ValueError: If `num_classes` is not positive, `dropout_rate` is
         outside `[0, 1)`, or the input's spatial extent is below the variant's
@@ -420,6 +434,8 @@ class SqueezeNetV1(keras.Model):
             kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             include_top: bool = True,
             input_shape: Tuple[int, int, int] = (224, 224, 3),
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         if variant_config is None:
@@ -452,6 +468,10 @@ class SqueezeNetV1(keras.Model):
         self.conv1_kernel = variant_config["conv1_kernel"]
         self.conv1_stride = variant_config["conv1_stride"]
         self.pool_indices = variant_config["pool_indices"]
+
+        # Head configuration (for API consistency; SqueezeNet uses custom head)
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self.stem_layers = []
         self.fire_modules = []
@@ -699,7 +719,9 @@ class SqueezeNetV1(keras.Model):
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'include_top': self.include_top,
-            'input_shape': self._input_shape
+            'input_shape': self._input_shape,
+            'head_config_preset': self._head_config_preset,
+            'head_config_overrides': self._head_config_overrides,
         })
         return config
 
@@ -727,7 +749,13 @@ class SqueezeNetV1(keras.Model):
         for key in ('layers', 'input_layers', 'output_layers'):
             config.pop(key, None)
 
-        return cls(**config)
+        head_config_preset = config.pop("head_config_preset", "default")
+        head_config_overrides = config.pop("head_config_overrides", None)
+        return cls(
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
 
     def summary_with_details(self) -> None:
         """Print the Keras summary, then log the resolved configuration.
@@ -767,6 +795,8 @@ def create_squeezenet_v1(
         num_classes: int = 1000,
         input_shape: Tuple[int, int, int] = (224, 224, 3),
         weights: Optional[str] = None,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
 ) -> SqueezeNetV1:
     """Create a SqueezeNet V1 model from a variant name.
@@ -779,6 +809,11 @@ def create_squeezenet_v1(
     :type input_shape: tuple of 3 ints
     :param weights: Unsupported; any non-`None` value raises `NotImplementedError`.
     :type weights: str or None
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passthrough to the model constructor.
     :return: A configured `SqueezeNetV1` instance.
     :rtype: SqueezeNetV1
@@ -798,6 +833,8 @@ def create_squeezenet_v1(
         num_classes=num_classes,
         input_shape=input_shape,
         weights=weights,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs
     )
 

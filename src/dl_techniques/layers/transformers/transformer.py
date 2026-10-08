@@ -81,6 +81,8 @@ def build_transformer_ffn_config(
         bias_initializer: Any,
         use_bias: bool,
         output_kernel_initializer: Any = None,
+        kernel_regularizer: Optional[regularizers.Regularizer] = None,
+        bias_regularizer: Optional[regularizers.Regularizer] = None,
         ffn_args: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the FFN factory config for a transformer encoder/decoder block.
@@ -165,6 +167,11 @@ def build_transformer_ffn_config(
         'activation': activation,
         'use_bias': use_bias,
     }
+
+    if kernel_regularizer is not None:
+        config['kernel_regularizer'] = kernel_regularizer
+    if bias_regularizer is not None:
+        config['bias_regularizer'] = bias_regularizer
 
     if output_kernel_initializer is not None:
         config['output_kernel_initializer'] = output_kernel_initializer
@@ -862,6 +869,8 @@ class TransformerLayer(keras.layers.Layer):
             bias_initializer=self.bias_initializer,
             use_bias=self.use_bias,
             output_kernel_initializer=self.residual_output_kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
             ffn_args=self.ffn_args,
         )
 

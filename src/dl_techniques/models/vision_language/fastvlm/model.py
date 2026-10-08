@@ -27,11 +27,16 @@ References:
 """
 
 import keras
-from typing import Optional, Union, List, Dict, Any, Tuple
+from typing import Optional, Union, List, Dict, Any, Tuple, Literal
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.factory import AttentionType
 from dl_techniques.layers.conv_blocks.repmixer_block import RepMixerBlock, ConvolutionalStem
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 
 from .components import AttentionBlockVLM
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -144,6 +149,12 @@ class FastVLM(keras.Model):
     :type include_top: bool
     :param input_shape: Input shape. ``None`` defaults to ``(224, 224, 3)``.
     :type input_shape: Optional[Tuple[int, ...]]
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration
+        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Model`` base
         class.
 
@@ -248,6 +259,8 @@ class FastVLM(keras.Model):
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = None,
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         # None sentinels, not shared mutable list defaults.
@@ -311,6 +324,10 @@ class FastVLM(keras.Model):
         self.kernel_initializer = kernel_initializer
         self.include_top = include_top
         self._input_shape = input_shape
+
+        # Head configuration
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         inputs = keras.Input(shape=input_shape)
 
@@ -429,19 +446,25 @@ class FastVLM(keras.Model):
         x = stage3(x, training=None)
 
         if self.include_top and self.num_classes > 0:
-            head_layers = [
-                keras.layers.GlobalAveragePooling2D(name='gap'),
-                keras.layers.Dense(
-                    self.num_classes,
-                    kernel_initializer=self.kernel_initializer,
-                    name='classifier'
-                )
-            ]
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+            head_config.update({
+                'num_classes': self.num_classes,
+                'dropout_rate': self.dropout_rate,
+                'normalization_type': 'layer_norm',
+                'activation_type': 'gelu',
+                'use_global_pooling': True,
+                'pooling_type': 'avg',
+                'use_attention': False,
+                'use_ffn': True,
+                'ffn_type': 'mlp',
+                'ffn_expansion_factor': 4,
+            })
+            if self._head_config_overrides:
+                head_config.update(self._head_config_overrides)
 
-            if self.dropout_rate > 0.0:
-                head_layers.insert(-1, keras.layers.Dropout(self.dropout_rate, name='head_dropout'))
-
-            self.head = keras.Sequential(head_layers, name='classification_head')
+            self.head = create_vision_head(
+                VisionTaskType.CLASSIFICATION, **head_config
+            )
             x = self.head(x, training=None)
         else:
             self.head = None
@@ -573,6 +596,8 @@ class FastVLM(keras.Model):
             ),
             'include_top': self.include_top,
             'input_shape': self._input_shape,
+            'head_config_preset': self._head_config_preset,
+            'head_config_overrides': self._head_config_overrides,
         })
         return config
 
@@ -589,8 +614,13 @@ class FastVLM(keras.Model):
             config['kernel_initializer'] = keras.initializers.deserialize(
                 config['kernel_initializer']
             )
-
-        return cls(**config)
+        head_config_preset = config.pop('head_config_preset', 'default')
+        head_config_overrides = config.pop('head_config_overrides', None)
+        return cls(
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
 
     def summary(self, **kwargs: Any) -> None:
         """Print model summary with additional information."""
@@ -618,6 +648,8 @@ def create_fastvlm(
         variant: str = "base",
         num_classes: int = 1000,
         input_shape: Optional[Tuple[int, ...]] = None,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
 ) -> FastVLM:
     """
@@ -631,6 +663,11 @@ def create_fastvlm(
     :param input_shape: Input shape. ``None`` defaults to
         ``(224, 224, 3)``.
     :type input_shape: Optional[Tuple[int, ...]]
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional arguments passed to the model constructor,
         overriding the variant's entries.
     :return: A configured ``FastVLM`` instance.
@@ -648,6 +685,8 @@ def create_fastvlm(
         variant=variant,
         num_classes=num_classes,
         input_shape=input_shape,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs
     )
 

@@ -57,6 +57,11 @@ from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.sequence_pooling import SequencePooling
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -283,6 +288,14 @@ class ViT(keras.Model):
     :param name: Model name; auto-generated as ``vision_transformer_<scale>``
         when None.
     :type name: Optional[str]
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration
+            :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
+            If False, return only the logits tensor for backward compatibility.
+        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
     :raises ValueError: If ``input_shape`` is not a positive 3-tuple, if
@@ -403,6 +416,9 @@ class ViT(keras.Model):
             use_layer_scale: bool = False,
             layer_scale_init_value: float = 1e-5,
             name: Optional[str] = None,
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
+            return_dict: bool = True,
             **kwargs: Any
     ) -> None:
         """Initialize the Vision Transformer and create every sub-layer.
@@ -450,6 +466,14 @@ class ViT(keras.Model):
         :type layer_scale_init_value: float
         :param name: Model name; auto-generated when None.
         :type name: Optional[str]
+        :param head_config_preset: Classification head preset: ``'default'``,
+            ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+        :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+        :param head_config_overrides: Optional dict to override head configuration
+            :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
+            If False, return only the logits tensor for backward compatibility.
+            (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+        :type head_config_overrides: Optional[Dict[str, Any]]
         :param kwargs: Additional keyword arguments for ``keras.Model``.
         :raises ValueError: If any configuration value is invalid.
         """
@@ -535,6 +559,11 @@ class ViT(keras.Model):
         self.use_layer_scale = bool(use_layer_scale)
         self.layer_scale_init_value = float(layer_scale_init_value)
 
+        # Head configuration
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
+        self._return_dict = return_dict
+
         # Get model configuration from scale
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
 
@@ -611,20 +640,24 @@ class ViT(keras.Model):
             **self.normalization_kwargs,
         )
 
-        # Classification components (if include_top)
-        self.head_dropout = None
-        self.head = None
+        # Classification head (if include_top) - uses ClassificationHead from vision heads factory
+        self.classification_head = None
         if self.include_top:
-            if self.dropout_rate > 0.0:
-                self.head_dropout = keras.layers.Dropout(self.dropout_rate, name="head_dropout")
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+            head_config.update({
+                'num_classes': self.num_classes,
+                'dropout_rate': self.dropout_rate,
+                'normalization_type': self.normalization_type,
+                'activation_type': 'gelu',  # ViT uses gelu
+                'use_global_pooling': True,
+                'pooling_type': 'cls_token',  # Extract CLS token from sequence
+                'use_attention': False,  # ViT transformer already applies attention
+            })
+            if self._head_config_overrides:
+                head_config.update(self._head_config_overrides)
 
-            self.head = keras.layers.Dense(
-                self.num_classes,
-                kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=clone_initializer(self.bias_initializer),
-                kernel_regularizer=self.kernel_regularizer,
-                bias_regularizer=self.bias_regularizer,
-                name="head"
+            self.classification_head = create_vision_head(
+                VisionTaskType.CLASSIFICATION, **head_config
             )
 
         # Feature-extraction pooling via the shared SequencePooling layer.
@@ -686,12 +719,10 @@ class ViT(keras.Model):
         # Final normalization
         self.norm.build(pos_input_shape)
 
-        # Classification head components
+        # Classification head
         if self.include_top:
             head_input_shape = (None, self.embed_dim)
-            if self.head_dropout is not None:
-                self.head_dropout.build(head_input_shape)
-            self.head.build(head_input_shape)
+            self.classification_head.build(head_input_shape)
 
         # Feature-extraction pooling
         if self.pool is not None:
@@ -739,14 +770,13 @@ class ViT(keras.Model):
         # 6. Handle the output based on the model's configuration
         if self.include_top:
             # --- Classification Head Logic ---
-            # Extract the CLS token from the *normalized* sequence.
-            cls_token = x_norm[:, 0, :]
-
-            # Pass through the final classification head
-            if self.head_dropout is not None:
-                cls_token = self.head_dropout(cls_token, training=training)
-
-            return self.head(cls_token)
+            # The ClassificationHead expects the full sequence and handles CLS token internally
+            # when use_global_pooling=False (default for classification), or pools globally
+            head_output = self.classification_head(x_norm, training=training)
+            if self._return_dict:
+                return head_output
+            else:
+                return head_output['logits']
         else:
             # --- Feature Extraction Logic ---
             # cls / mean / max all route through SequencePooling. For mean/max the
@@ -813,6 +843,9 @@ class ViT(keras.Model):
             "activation": serialize_activation(self.activation),
             "use_layer_scale": self.use_layer_scale,
             "layer_scale_init_value": self.layer_scale_init_value,
+            "head_config_preset": self._head_config_preset,
+            "head_config_overrides": self._head_config_overrides,
+            "return_dict": self._return_dict,
         })
         return config
 
@@ -846,7 +879,16 @@ class ViT(keras.Model):
             config["activation"] = deserialize_activation(
                 activation, custom_objects=custom_objects
             )
-        return cls(**config)
+        # Extract head config parameters (new)
+        head_config_preset = config.pop("head_config_preset", "default")
+        head_config_overrides = config.pop("head_config_overrides", None)
+        return_dict = config.pop("return_dict", True)
+        return cls(
+            return_dict=return_dict,
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
 
     def get_feature_extractor(self) -> "ViT":
         """Return a feature-extractor twin of this model.
@@ -883,6 +925,8 @@ class ViT(keras.Model):
             activation=self.activation,
             use_layer_scale=self.use_layer_scale,
             layer_scale_init_value=self.layer_scale_init_value,
+            head_config_preset=self._head_config_preset,
+            head_config_overrides=self._head_config_overrides,
             name=f"{self.name}_feature_extractor"
         )
 
@@ -1138,6 +1182,9 @@ def create_vit(
         normalization_position: Literal['pre', 'post'] = "post",
         ffn_type: FFNType = "mlp",
         activation: Union[str, callable] = "gelu",
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
+            return_dict: bool = True,
         **kwargs: Any
 ) -> ViT:
     """Create a Vision Transformer with the specified configuration.
@@ -1200,6 +1247,13 @@ def create_vit(
     :type ffn_type: FFNType
     :param activation: FFN activation.
     :type activation: Union[str, callable]
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+            :param return_dict: If True (default), return dict with 'logits' and 'probabilities'.
+            If False, return only the logits tensor for backward compatibility.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional arguments forwarded to the :class:`ViT`
         constructor.
     :type kwargs: Any
@@ -1254,6 +1308,8 @@ def create_vit(
         normalization_position=normalization_position,
         ffn_type=ffn_type,
         activation=activation,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs,
     )
 

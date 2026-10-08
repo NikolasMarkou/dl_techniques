@@ -158,6 +158,9 @@ def as_array(value: Any) -> np.ndarray:
 
 def _forward(model: Any, x: Any, extract: Optional[Callable[[Any], Any]]) -> np.ndarray:
     out = model(x, training=False)
+    # Handle dict output from ClassificationHead
+    if isinstance(out, dict) and 'logits' in out:
+        out = out['logits']
     if extract is not None:
         out = extract(out)
     return as_array(out)

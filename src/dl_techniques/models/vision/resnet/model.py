@@ -50,6 +50,12 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations import create_activation_layer
 from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
 from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    create_multi_task_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -188,6 +194,12 @@ class ResNet(keras.Model):
         last two stages stride an already-collapsed map. Both stems take their
         width from ``filters_per_stage[0]``.
     :type stem_type: Literal['imagenet', 'cifar']
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration
+        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
 
     :raises ValueError: If ``blocks_per_stage`` and ``filters_per_stage`` differ
@@ -265,6 +277,8 @@ class ResNet(keras.Model):
             enable_deep_supervision: bool = False,
             input_shape: Tuple[int, ...] = (224, 224, 3),
             stem_type: Literal["imagenet", "cifar"] = "imagenet",
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs
     ):
         super().__init__(**kwargs)
@@ -314,6 +328,10 @@ class ResNet(keras.Model):
         self.enable_deep_supervision = enable_deep_supervision
         self.input_shape_config = input_shape
         self.input_height, self.input_width, self.input_channels = input_shape
+
+        # Head configuration
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self._build_stem()
 
@@ -408,21 +426,29 @@ class ResNet(keras.Model):
         self.stages.append(stage_blocks)
 
     def _build_head(self) -> None:
-        """Build classification head."""
-        self.gap = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")
+        """Build classification head using the vision heads factory."""
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        head_config.update({
+            'num_classes': self.num_classes,
+            'dropout_rate': 0.0,  # ResNet doesn't use dropout in head by default
+            'normalization_type': self.normalization_type,
+            'activation_type': self.activation_type,
+            'use_global_pooling': True,
+            'pooling_type': 'avg',  # GAP for ResNet
+            'use_attention': False,
+            'use_ffn': True,
+            'ffn_type': 'mlp',
+            'ffn_expansion_factor': 4,
+        })
+        if self._head_config_overrides:
+            head_config.update(self._head_config_overrides)
 
-        if self.num_classes > 0:
-            self.classifier = keras.layers.Dense(
-                units=self.num_classes,
-                kernel_initializer="he_normal",
-                kernel_regularizer=self.kernel_regularizer,
-                name="classifier"
-            )
-        else:
-            self.classifier = None
+        self.classification_head = create_vision_head(
+            VisionTaskType.CLASSIFICATION, **head_config
+        )
 
     def _build_supervision_heads(self) -> None:
-        """Build one GAP + Dense head per stage except the last.
+        """Build one ClassificationHead per stage except the last.
 
         The final stage is already served by the main head; stage 0 is
         supervised since it is the one stage where deep supervision
@@ -431,23 +457,27 @@ class ResNet(keras.Model):
         # DECISION plan-2026-08-17T183311-79c63e38/D-019: range(0, N-1), not range(1, N) or range(1, N-1).
         # Supervising the final stage duplicates the main head; skipping stage 0 loses the one stage the technique helps most. See decisions.md.
         for stage_idx in range(0, len(self.blocks_per_stage) - 1):
-            gap_layer = keras.layers.GlobalAveragePooling2D(
-                name=f"supervision_gap_stage{stage_idx+1}"
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+            head_config.update({
+                'num_classes': self.num_classes,
+                'dropout_rate': 0.0,
+                'normalization_type': self.normalization_type,
+                'activation_type': self.activation_type,
+                'use_global_pooling': True,
+                'pooling_type': 'avg',
+                'use_attention': False,
+                'use_ffn': True,
+                'ffn_type': 'mlp',
+                'ffn_expansion_factor': 4,
+            })
+            if self._head_config_overrides:
+                head_config.update(self._head_config_overrides)
+
+            sup_head = create_vision_head(
+                VisionTaskType.CLASSIFICATION, **head_config
             )
-
-            if self.num_classes > 0:
-                classifier_layer = keras.layers.Dense(
-                    units=self.num_classes,
-                    kernel_initializer="he_normal",
-                    kernel_regularizer=self.kernel_regularizer,
-                    name=f"supervision_classifier_stage{stage_idx+1}"
-                )
-            else:
-                classifier_layer = None
-
             self.supervision_heads.append({
-                "gap": gap_layer,
-                "classifier": classifier_layer,
+                "head": sup_head,
                 "stage_idx": stage_idx
             })
 
@@ -494,10 +524,7 @@ class ResNet(keras.Model):
                 stage_features.append(x)
 
         if self.include_top:
-            final_features = self.gap(x)
-            final_output = (
-                self.classifier(final_features) if self.classifier else final_features
-            )
+            final_output = self.classification_head(x, training=training)
         else:
             final_output = x
 
@@ -505,10 +532,9 @@ class ResNet(keras.Model):
             # Reversed (stage 3, 2, 1) to match the BFUNet output convention.
             supervision_outputs = []
             for sup_head in reversed(self.supervision_heads):
-                feat = sup_head["gap"](stage_features[sup_head["stage_idx"]])
-                supervision_outputs.append(
-                    sup_head["classifier"](feat) if sup_head["classifier"] else feat
-                )
+                feat = stage_features[sup_head["stage_idx"]]
+                sup_output = sup_head["head"](feat, training=training)
+                supervision_outputs.append(sup_output)
             return [final_output] + supervision_outputs
 
         return final_output
@@ -694,6 +720,8 @@ class ResNet(keras.Model):
             "include_top": self.include_top,
             "enable_deep_supervision": self.enable_deep_supervision,
             "input_shape": self.input_shape_config,
+            "head_config_preset": self._head_config_preset,
+            "head_config_overrides": self._head_config_overrides,
         }
         base_config = super().get_config()
         return {**base_config, **config}
@@ -705,7 +733,13 @@ class ResNet(keras.Model):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
             )
-        return cls(**config)
+        head_config_preset = config.pop("head_config_preset", "default")
+        head_config_overrides = config.pop("head_config_overrides", None)
+        return cls(
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
 
 
 # ---------------------------------------------------------------------
@@ -719,6 +753,8 @@ def create_resnet(
         weights_dataset: str = "imagenet",
         weights_input_shape: Optional[Tuple[int, ...]] = None,
         cache_dir: Optional[str] = None,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
 ) -> ResNet:
     """Create a ResNet model.
@@ -732,6 +768,11 @@ def create_resnet(
     :param weights_dataset: Dataset the pretrained weights were trained on.
     :param weights_input_shape: Input shape used during pretraining.
     :param cache_dir: Directory to cache downloaded weights.
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passthrough to the constructor.
     :return: A configured `ResNet` instance.
     :raises NotImplementedError: If `pretrained` is `True`.
@@ -749,6 +790,8 @@ def create_resnet(
         weights_dataset=weights_dataset,
         weights_input_shape=weights_input_shape,
         cache_dir=cache_dir,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs
     )
 

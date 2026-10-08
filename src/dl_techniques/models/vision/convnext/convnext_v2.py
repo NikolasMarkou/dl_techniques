@@ -25,7 +25,7 @@ References:
 
 import os
 import keras
-from typing import List, Optional, Union, Tuple, Dict, Any
+from typing import List, Optional, Union, Tuple, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -40,6 +40,11 @@ from dl_techniques.layers.regularization.stochastic_gradient import StochasticGr
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
+)
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -202,6 +207,12 @@ class ConvNeXtV2(keras.Model):
         consumer needs static spatial dims; a checkpoint load with unspecified
         spatial dims materializes weights at ``PRETRAINED_BUILD_SPATIAL`` (224).
     :type input_shape: Tuple[int, ...]
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration
+        (e.g., ``{'hidden_dim': 512, 'dropout_rate': 0.2}``). Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
@@ -273,6 +284,8 @@ class ConvNeXtV2(keras.Model):
             use_softorthonormal_regularizer: bool = False,
             include_top: bool = True,
             input_shape: Tuple[int, ...] = (None, None, 3),
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs
     ):
         super().__init__(**kwargs)
@@ -329,6 +342,10 @@ class ConvNeXtV2(keras.Model):
         self.include_top = include_top
         self.strides = strides
         self.input_shape = input_shape
+
+        # Head configuration
+        self._head_config_preset = str(head_config_preset)
+        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self.input_height, self.input_width, self.input_channels = input_shape
         if self.input_channels not in [1, 3]:
@@ -455,28 +472,34 @@ class ConvNeXtV2(keras.Model):
         self.stages_list.append(stage_blocks)
 
     def _build_head(self) -> None:
-        """Build and assign the GAP + LayerNorm + classifier head.
+        """Build and assign the classification head using the vision heads factory.
 
-        ``self.classifier`` is ``None`` when ``num_classes == 0``, in which case
-        the head returns pooled, normalized features.
+        Uses :class:`ClassificationHead` from the vision heads factory with
+        global average pooling. ``self.classification_head`` is ``None`` when
+        ``include_top=False``.
         """
-        self.gap = keras.layers.GlobalAveragePooling2D(name="global_avg_pool")
-        self.head_norm = keras.layers.LayerNormalization(
-            epsilon=self.LAYERNORM_EPSILON,
-            center=self.use_bias,
-            scale=True,
-            name="head_norm"
-        )
-        if self.num_classes > 0:
-            self.classifier = keras.layers.Dense(
-                units=self.num_classes,
-                use_bias=self.use_bias,
-                kernel_initializer=self.HEAD_INITIALIZER,
-                kernel_regularizer=self.kernel_regularizer,
-                name="classifier"
+        if self.include_top:
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+            head_config.update({
+                'num_classes': self.num_classes,
+                'dropout_rate': self.dropout_rate,
+                'normalization_type': 'layer_norm',
+                'activation_type': 'gelu',
+                'use_global_pooling': True,
+                'pooling_type': 'avg',  # GAP for ConvNeXt
+                'use_attention': False,
+                'use_ffn': True,
+                'ffn_type': 'mlp',
+                'ffn_expansion_factor': 4,
+            })
+            if self._head_config_overrides:
+                head_config.update(self._head_config_overrides)
+
+            self.classification_head = create_vision_head(
+                VisionTaskType.CLASSIFICATION, **head_config
             )
         else:
-            self.classifier = None
+            self.classification_head = None
 
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer by tracing ``call`` on a symbolic input.
@@ -513,11 +536,11 @@ class ConvNeXtV2(keras.Model):
         :type inputs: keras.KerasTensor
         :param training: Whether the model is in training mode.
         :type training: Optional[bool]
-        :return: Output tensor. ``(batch_size, num_classes)`` with
+        :return: Output tensor. Dict ``{'logits': ..., 'probabilities': ...}`` with
             ``include_top=True``, ``(batch_size, dims[-1])`` when additionally
             ``num_classes == 0``, otherwise the final stage's feature maps
             ``(batch_size, H', W', dims[-1])``.
-        :rtype: keras.KerasTensor
+        :rtype: keras.KerasTensor or Dict[str, keras.KerasTensor]
         """
         x = self.stem_conv(inputs)
         x = self.stem_norm(x)
@@ -536,10 +559,7 @@ class ConvNeXtV2(keras.Model):
                 x = keras.layers.add([residual, x])
 
         if self.include_top:
-            x = self.gap(x)
-            x = self.head_norm(x)
-            if self.classifier:
-                x = self.classifier(x)
+            return self.classification_head(x, training=training)
 
         return x
 
@@ -827,10 +847,10 @@ class ConvNeXtV2(keras.Model):
 
         # 3. Head
         if self.include_top:
-            current_shape = self.gap.compute_output_shape(current_shape)
-            current_shape = self.head_norm.compute_output_shape(current_shape)
-            if self.classifier:
-                current_shape = self.classifier.compute_output_shape(current_shape)
+            current_shape = self.classification_head.compute_output_shape(current_shape)
+            # classification_head returns dict, we want the logits shape
+            if isinstance(current_shape, dict):
+                current_shape = current_shape['logits']
 
         return current_shape
 
@@ -856,7 +876,9 @@ class ConvNeXtV2(keras.Model):
             "use_softorthonormal_regularizer": self.use_softorthonormal_regularizer,
             "include_top": self.include_top,
             "input_shape": self.input_shape,
-            "strides": self.strides
+            "strides": self.strides,
+            "head_config_preset": self._head_config_preset,
+            "head_config_overrides": self._head_config_overrides,
         }
         base_config = super().get_config()
         return {**base_config, **config}
@@ -874,8 +896,13 @@ class ConvNeXtV2(keras.Model):
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
             )
-
-        return cls(**config)
+        head_config_preset = config.pop("head_config_preset", "default")
+        head_config_overrides = config.pop("head_config_overrides", None)
+        return cls(
+            head_config_preset=head_config_preset,
+            head_config_overrides=head_config_overrides,
+            **config
+        )
 
     def summary(self, **kwargs) -> None:
         """Print the model summary with additional ConvNeXt-specific information.
@@ -915,6 +942,8 @@ def create_convnext_v2(
         weights_dataset: str = "imagenet",
         weights_input_shape: Optional[Tuple[int, ...]] = None,
         cache_dir: Optional[str] = None,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
 ) -> ConvNeXtV2:
     """Convenience function to create ConvNeXt V2 models.
@@ -943,6 +972,11 @@ def create_convnext_v2(
     :type weights_input_shape: Optional[Tuple[int, ...]]
     :param cache_dir: Directory to cache downloaded weights.
     :type cache_dir: Optional[str]
+    :param head_config_preset: Classification head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional arguments passed to the model constructor.
     :return: ConvNeXtV2 model instance.
     :rtype: ConvNeXtV2
@@ -975,6 +1009,8 @@ def create_convnext_v2(
         weights_dataset=weights_dataset,
         weights_input_shape=weights_input_shape,
         cache_dir=cache_dir,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs
     )
 
