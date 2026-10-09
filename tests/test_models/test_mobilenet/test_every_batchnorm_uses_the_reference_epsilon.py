@@ -61,7 +61,7 @@ _MODELS = {
 
 def _build(cls) -> keras.Model:
     keras.utils.set_random_seed(7)
-    model = cls(num_classes=10, input_shape=_INPUT_SHAPE)
+    model = cls(num_classes=10, input_shape=_INPUT_SHAPE, return_dict=False)
     model(keras.ops.zeros((1, *_INPUT_SHAPE)))
     return model
 

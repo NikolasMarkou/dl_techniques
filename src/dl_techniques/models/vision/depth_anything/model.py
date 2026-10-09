@@ -64,8 +64,10 @@ from dl_techniques.layers.signal_processing.strong_augmentation import StrongAug
 from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
 from dl_techniques.models.vision.vit.model import ViT
+from dl_techniques.layers.heads.vision import create_vision_head
+from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 
-from .components import DPTDecoder, REFERENCE_BN_EPSILON
+from .components import REFERENCE_BN_EPSILON
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Map depth_anything encoder_type slugs to ViT scale names.
@@ -206,6 +208,7 @@ class DepthAnything(keras.Model):
         encoder: Optional[keras.Model] = None,
         input_value_range: Optional[Tuple[float, float]] = (0.0, 1.0),
         input_shape: Optional[Tuple[int, int, int]] = None,
+        include_top: bool = True,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -250,6 +253,7 @@ class DepthAnything(keras.Model):
         self.use_feature_alignment = use_feature_alignment
         self.encoder_kind = encoder_kind
         self.enable_semi_supervised = bool(enable_semi_supervised)
+        self.include_top = include_top
 
         if self.use_feature_alignment and not self.enable_semi_supervised:
             logger.warning(
@@ -290,7 +294,7 @@ class DepthAnything(keras.Model):
         logger.info(
             f"Initialized DepthAnything (encoder_type={encoder_type}, "
             f"encoder_kind={encoder_kind}, image_shape={self.image_shape}, "
-            f"semi_supervised={self.enable_semi_supervised})"
+            f"semi_supervised={self.enable_semi_supervised}, include_top={self.include_top})"
         )
 
     def build(self, input_shape: Union[Tuple[int, ...], List[Tuple[int, ...]]]) -> None:
@@ -321,17 +325,24 @@ class DepthAnything(keras.Model):
             else:
                 self.encoder = self._create_placeholder_encoder(trainable=True)
 
-        # Decoder: pass upsample_factor so the spatial output matches image_shape.
+        # Decoder: use DepthEstimationHead with DPT-style decoder
         # For real ViT (stride=16) with len(decoder_dims)>=4, upsample_factor=16 is
         # representable as 4 stages of 2x. For placeholder (stride=16 here) ditto.
         upsample_factor = self.encoder_stride
-        self.decoder = DPTDecoder(
-            dims=self.decoder_dims,
+        self.decoder = create_vision_head(
+            VisionTaskType.DEPTH_ESTIMATION,
             output_channels=self.output_channels,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            upsample_factor=upsample_factor,
-            name='dpt_decoder',
+            min_depth=0.1,
+            max_depth=100.0,
+            use_log_depth=True,
+            decoder_style="dpt",
+            dpt_dims=self.decoder_dims,
+            dpt_use_bias=False,
+            dpt_activation="relu",
+            dpt_output_activation="linear",
+            dpt_upsample_factor=upsample_factor,
+            hidden_dim=self.decoder_dims[0],
+            name='depth_estimation_head'
         )
 
         # Build order: ensure the student encoder is built, clone its topology and
@@ -558,7 +569,7 @@ class DepthAnything(keras.Model):
         self,
         inputs: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]],
         training: Optional[bool] = None
-    ) -> keras.KerasTensor:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass through the model.
 
         This is the plain encoder-decoder path. It does not augment: strong
@@ -570,8 +581,9 @@ class DepthAnything(keras.Model):
         :type inputs: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         :param training: Whether the model runs in training or inference mode.
         :type training: Optional[bool]
-        :return: Predicted depth maps, shape ``(batch_size, height, width, output_channels)``.
-        :rtype: keras.KerasTensor
+        :return: Predicted depth maps, shape ``(batch_size, height, width, output_channels)``,
+            or encoder features dict when ``include_top=False``.
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         """
         # Handle both single input and tuple input for training
         if isinstance(inputs, tuple):
@@ -585,13 +597,24 @@ class DepthAnything(keras.Model):
         # Extract features. ViT returns (B, N+1, D); placeholder returns 4-D.
         features = self.encoder(x, training=training)
 
+        if not self.include_top:
+            # Return encoder features for custom heads
+            spatial_features = self._features_to_spatial(features)
+            return {
+                "encoder_features": features,
+                "spatial_features": spatial_features
+            }
+
         # Reshape sequence features to spatial 4-D before the decoder.
         features = self._features_to_spatial(features)
 
         # Decode features to depth.
-        depth = self.decoder(features, training=training)
+        depth_output = self.decoder(features, training=training)
 
-        return depth
+        # DepthEstimationHead returns dict with 'depth' and 'confidence'
+        if isinstance(depth_output, dict):
+            return depth_output['depth']
+        return depth_output
 
     def compile(
         self,
@@ -866,6 +889,7 @@ class DepthAnything(keras.Model):
             "use_feature_alignment": self.use_feature_alignment,
             "encoder_kind": self.encoder_kind,
             "enable_semi_supervised": self.enable_semi_supervised,
+            "include_top": self.include_top,
             # Serialize the encoder sub-Model so save/load round-trips both
             # topology and weights through `.keras` archives. Mirrors the
             # MaskedLanguageModel pattern in mlm.py.
@@ -949,6 +973,7 @@ def create_depth_anything(
     enable_semi_supervised: bool = False,
     input_value_range: Optional[Tuple[float, float]] = (0.0, 1.0),
     input_shape: Optional[Tuple[int, int, int]] = None,
+    include_top: bool = True,
 ) -> DepthAnything:
     """Create and build Depth Anything model instance.
 
@@ -999,6 +1024,9 @@ def create_depth_anything(
     :type input_value_range: Optional[Tuple[float, float]]
     :param input_shape: Deprecated alias for `image_shape`.
     :type input_shape: Optional[Tuple[int, int, int]]
+    :param include_top: Whether to include the depth estimation head.
+        When False, returns encoder features for custom heads. Defaults to True.
+    :type include_top: bool
     :return: Configured and built DepthAnything model instance.
     :rtype: DepthAnything
     :raises ValueError: If `encoder_type` is not recognized.
@@ -1037,6 +1065,7 @@ def create_depth_anything(
         use_feature_alignment=use_feature_alignment,
         encoder_kind=encoder_kind,
         enable_semi_supervised=enable_semi_supervised,
+        include_top=include_top,
     )
 
     # Build model with dummy input to initialize all components

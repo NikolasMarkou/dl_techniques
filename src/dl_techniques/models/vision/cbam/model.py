@@ -39,6 +39,11 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.attention.convolutional_block_attention import CBAM
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -225,20 +230,25 @@ class CBAMNet(keras.Model):
 
         self.head: List[keras.layers.Layer] = []
         if self.include_top:
-            self.head.append(
-                keras.layers.GlobalAveragePooling2D(name="global_avg_pool")
+            # Use factory ClassificationHead instead of custom head
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+            head_config.update({
+                'num_classes': self.num_classes,
+                'dropout_rate': 0.0,  # CBAMNet doesn't use dropout in head
+                'normalization_type': 'batch_norm',
+                'activation_type': 'relu',
+                'use_global_pooling': True,
+                'pooling_type': 'avg',
+                'use_attention': False,
+                'use_ffn': False,
+            })
+
+            self.classification_head = create_vision_head(
+                VisionTaskType.CLASSIFICATION, **head_config
             )
-            # Always true here, since include_top requires a positive count.
-            if self.num_classes > 0:
-                self.head.append(
-                    keras.layers.Dense(
-                        units=self.num_classes,
-                        activation='softmax',
-                        kernel_initializer=self.kernel_initializer,
-                        kernel_regularizer=self.kernel_regularizer,
-                        name="classifier"
-                    )
-                )
+            self.head = [self.classification_head]
+        else:
+            self.head = []
 
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer from `input_shape`.
@@ -279,8 +289,9 @@ class CBAMNet(keras.Model):
                 x = layer(x, training=training)
 
         if self.include_top:
-            for layer in self.head:
-                x = layer(x, training=training)
+            # Factory head returns {'logits': ..., 'probabilities': ...}
+            head_output = self.head[0](x, training=training)
+            x = head_output['probabilities']
 
         return x
 

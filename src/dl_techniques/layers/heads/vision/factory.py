@@ -414,7 +414,7 @@ class DetectionHead(BaseVisionHead):
 
     .. code-block:: text
 
-        inputs (B, H, W, C)
+        inputs (B, H, W, C)  or  (B, N, D) with input_format="sequence"
                          │
                          ▼
         ┌─────────────────────────────────┐
@@ -446,7 +446,8 @@ class DetectionHead(BaseVisionHead):
     detection, unchanged.
 
     Input shape:
-        ``(batch, height, width, channels)``.
+        ``(batch, height, width, channels)`` for spatial format, or
+        ``(batch, seq_len, dim)`` for sequence format (ViT patch tokens).
 
     Output shape:
         ``{'classifications': (batch, height, width, num_anchors *
@@ -459,6 +460,12 @@ class DetectionHead(BaseVisionHead):
     :type num_anchors: int
     :param bbox_dims: Values per box. 4 for the usual corner or centre form.
     :type bbox_dims: int
+    :param input_format: Input format, ``"spatial"`` for (B,H,W,C) or
+        ``"sequence"`` for (B,N,D) ViT patch tokens. Defaults to ``"spatial"``.
+    :type input_format: Literal["spatial", "sequence"]
+    :param patch_grid_size: Tuple ``(H, W)`` of patch grid dimensions for
+        ``input_format="sequence"``. Required when using sequence format.
+    :type patch_grid_size: Optional[Tuple[int, int]]
     :param kwargs: Arguments for :class:`BaseVisionHead`.
 
     :ivar cls_conv: Classification-branch ``ConvBlock``.
@@ -476,6 +483,8 @@ class DetectionHead(BaseVisionHead):
             num_classes: int,
             num_anchors: int = 9,
             bbox_dims: int = 4,
+            input_format: Literal["spatial", "sequence"] = "spatial",
+            patch_grid_size: Optional[Tuple[int, int]] = None,
             **kwargs: Any
     ) -> None:
         """
@@ -487,6 +496,10 @@ class DetectionHead(BaseVisionHead):
         :type num_anchors: int
         :param bbox_dims: Values per box.
         :type bbox_dims: int
+        :param input_format: Input format, ``"spatial"`` or ``"sequence"``.
+        :type input_format: Literal["spatial", "sequence"]
+        :param patch_grid_size: Patch grid (H, W) for sequence input format.
+        :type patch_grid_size: Optional[Tuple[int, int]]
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
@@ -496,6 +509,11 @@ class DetectionHead(BaseVisionHead):
         self.num_classes = num_classes
         self.num_anchors = num_anchors
         self.bbox_dims = bbox_dims
+        self.input_format = input_format
+        self.patch_grid_size = patch_grid_size
+
+        if self.input_format == "sequence" and self.patch_grid_size is None:
+            raise ValueError("patch_grid_size is required when input_format='sequence'")
 
         # Create detection-specific layers
         self._create_detection_layers()
@@ -549,12 +567,39 @@ class DetectionHead(BaseVisionHead):
 
         The common layers are built last, by the base class.
 
-        :param input_shape: Input feature-map shape.
+        For sequence input, attention and ffn are applied on the sequence
+        (before reshaping), so they are built on the sequence shape.
+        The conv branches are built on the spatial shape after reshaping.
+
+        :param input_shape: Input feature-map shape (spatial) or sequence shape.
         :type input_shape: Tuple[Optional[int], ...]
         :return: None.
         :rtype: None
         """
-        feature_shape = self._common_processed_shape(input_shape)
+        # For sequence input, build attention/ffn on sequence shape,
+        # and conv branches on spatial shape
+        if self.input_format == "sequence":
+            if self.patch_grid_size is None:
+                raise ValueError("patch_grid_size must be set for sequence input format")
+            batch, seq_len, dim = input_shape
+            h, w = self.patch_grid_size
+            spatial_shape = (batch, h, w, dim)
+            
+            # Build common layers (attention, ffn) on sequence shape
+            if self.use_attention:
+                self.attention.build(input_shape)
+            if self.use_ffn:
+                self.ffn.build(input_shape)
+            
+            # Build conv branches on spatial shape
+            feature_shape = self._common_processed_shape(spatial_shape)
+        else:
+            # Build common layers on spatial shape
+            if self.use_attention:
+                self.attention.build(input_shape)
+            if self.use_ffn:
+                self.ffn.build(input_shape)
+            feature_shape = self._common_processed_shape(input_shape)
 
         self.cls_conv.build(feature_shape)
         self.cls_head.build(self.cls_conv.compute_output_shape(feature_shape))
@@ -573,7 +618,8 @@ class DetectionHead(BaseVisionHead):
         Run the common stages, then both branches.
 
         :param inputs: Feature map of shape ``(batch, height, width,
-            channels)``.
+            channels)`` for spatial format, or ``(batch, seq_len, dim)``
+            for sequence format (ViT patch tokens).
         :type inputs: keras.KerasTensor
         :param training: Keras training flag, forwarded to every sub-layer.
         :type training: Optional[bool]
@@ -581,12 +627,30 @@ class DetectionHead(BaseVisionHead):
         :rtype: Dict[str, keras.KerasTensor]
         """
 
-        # Apply common processing if enabled
         x = inputs
-        if self.use_attention:
-            x = self.attention(x, training=training)
-        if self.use_ffn:
-            x = self.ffn(x, training=training)
+
+        # For sequence input, apply common processing (attention, ffn) on the
+        # sequence BEFORE reshaping to spatial, since attention layers expect
+        # 3D input (batch, seq_len, dim).
+        if self.input_format == "sequence":
+            # Apply common processing on sequence
+            if self.use_attention:
+                x = self.attention(x, training=training)
+            if self.use_ffn:
+                x = self.ffn(x, training=training)
+
+            # Now reshape to spatial for conv branches
+            if self.patch_grid_size is None:
+                raise ValueError("patch_grid_size must be set for sequence input format")
+            batch_size = ops.shape(x)[0]
+            h, w = self.patch_grid_size
+            x = ops.reshape(x, (batch_size, h, w, -1))
+        else:
+            # Spatial input: apply common processing on spatial features
+            if self.use_attention:
+                x = self.attention(x, training=training)
+            if self.use_ffn:
+                x = self.ffn(x, training=training)
 
         # Classification branch
         cls_features = self.cls_conv(x, training=training)
@@ -610,31 +674,40 @@ class DetectionHead(BaseVisionHead):
 
         Spatial dimensions are preserved. Only the channel count changes.
 
-        :param input_shape: Shape ``(batch, height, width, channels)``.
+        :param input_shape: Shape ``(batch, height, width, channels)`` for spatial,
+            or ``(batch, seq_len, dim)`` for sequence format.
         :type input_shape: Tuple[Optional[int], ...]
         :return: Dict with ``'classifications'`` and ``'regressions'``
             shapes.
         :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
-        batch, height, width = input_shape[0], input_shape[1], input_shape[2]
+        if self.input_format == "sequence":
+            batch = input_shape[0]
+            h, w = self.patch_grid_size
+        else:
+            batch, height, width = input_shape[0], input_shape[1], input_shape[2]
+            h, w = height, width
         return {
-            'classifications': (batch, height, width, self.num_anchors * self.num_classes),
-            'regressions': (batch, height, width, self.num_anchors * self.bbox_dims)
+            'classifications': (batch, h, w, self.num_anchors * self.num_classes),
+            'regressions': (batch, h, w, self.num_anchors * self.bbox_dims)
         }
 
     def get_config(self) -> Dict[str, Any]:
         """
         Return the constructor arguments for serialization.
 
-        :return: Config dict carrying ``num_classes``, ``num_anchors`` and
-            ``bbox_dims``, on top of the base configuration.
+        :return: Config dict carrying ``num_classes``, ``num_anchors``,
+            ``bbox_dims``, ``input_format`` and ``patch_grid_size``, on top of
+            the base configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
             'num_classes': self.num_classes,
             'num_anchors': self.num_anchors,
-            'bbox_dims': self.bbox_dims
+            'bbox_dims': self.bbox_dims,
+            'input_format': self.input_format,
+            'patch_grid_size': self.patch_grid_size
         })
         return config
 
@@ -657,10 +730,19 @@ class SegmentationHead(BaseVisionHead):
     become skips in reverse order. One skip is concatenated after each
     refine block, while skips remain.
 
+    Two skip channel modes are supported:
+    - ``"auto"`` (default): refine blocks halve channels each step
+      (``hidden_dim``, ``hidden_dim//2``, ``hidden_dim//4``), skip
+      concatenation dynamically widens the tensor.
+    - ``"explicit"``: caller provides ``explicit_skip_channels`` list
+      matching the encoder feature channels (e.g., ``[32, 64, 128, 256]``
+      for AccUNet). Refine block output channels are derived from the
+      corresponding skip channels.
+
     This is the only head in the module that returns a bare tensor. Every
     other one returns a dict.
 
-    **Architecture Overview:**
+    **Architecture Overview (auto mode):**
 
     .. code-block:: text
 
@@ -721,6 +803,13 @@ class SegmentationHead(BaseVisionHead):
     :param use_skip_connections: Concatenate list inputs as skips. Ignored
         when the input is a single tensor.
     :type use_skip_connections: bool
+    :param skip_channel_mode: ``"auto"`` (default) or ``"explicit"``. In
+        explicit mode, ``explicit_skip_channels`` must be provided.
+    :type skip_channel_mode: Literal["auto", "explicit"]
+    :param explicit_skip_channels: List of channel counts for each skip
+        connection, ordered from deepest to shallowest (matching the reversed
+        encoder features). Required when ``skip_channel_mode="explicit"``.
+    :type explicit_skip_channels: Optional[List[int]]
     :param kwargs: Arguments for :class:`BaseVisionHead`.
 
     :ivar refine_blocks: The three refinement ``ConvBlock`` layers.
@@ -736,6 +825,10 @@ class SegmentationHead(BaseVisionHead):
             num_classes: int,
             upsampling_factor: int = 4,
             use_skip_connections: bool = True,
+            skip_channel_mode: Literal["auto", "explicit"] = "auto",
+            explicit_skip_channels: Optional[List[int]] = None,
+            input_format: Literal["spatial", "sequence"] = "spatial",
+            patch_grid_size: Optional[Tuple[int, int]] = None,
             **kwargs: Any
     ) -> None:
         """
@@ -748,6 +841,16 @@ class SegmentationHead(BaseVisionHead):
         :type upsampling_factor: int
         :param use_skip_connections: Concatenate list inputs as skips.
         :type use_skip_connections: bool
+        :param skip_channel_mode: ``"auto"`` or ``"explicit"``.
+        :type skip_channel_mode: Literal["auto", "explicit"]
+        :param explicit_skip_channels: Channel counts for explicit skip mode.
+        :type explicit_skip_channels: Optional[List[int]]
+        :param input_format: Input format, ``"spatial"`` for (B,H,W,C) or
+            ``"sequence"`` for (B,N,D) ViT patch tokens. Defaults to ``"spatial"``.
+        :type input_format: Literal["spatial", "sequence"]
+        :param patch_grid_size: Tuple ``(H, W)`` of patch grid dimensions for
+            ``input_format="sequence"``. Required when using sequence format.
+        :type patch_grid_size: Optional[Tuple[int, int]]
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
@@ -757,6 +860,16 @@ class SegmentationHead(BaseVisionHead):
         self.num_classes = num_classes
         self.upsampling_factor = upsampling_factor
         self.use_skip_connections = use_skip_connections
+        self.skip_channel_mode = skip_channel_mode
+        self.explicit_skip_channels = explicit_skip_channels
+        self.input_format = input_format
+        self.patch_grid_size = patch_grid_size
+
+        if self.input_format == "sequence" and self.patch_grid_size is None:
+            raise ValueError("patch_grid_size is required when input_format='sequence'")
+
+        if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is None:
+            raise ValueError("explicit_skip_channels is required when skip_channel_mode='explicit'")
 
         self._create_segmentation_layers()
 
@@ -764,8 +877,9 @@ class SegmentationHead(BaseVisionHead):
         """
         Build the refine stack, the upsample stack and the output conv.
 
-        Refine channel counts halve each step. The upsample layers all take
-        the count left after the third halving.
+        In "auto" mode, refine channel counts halve each step.
+        In "explicit" mode, refine block output channels match the
+        corresponding skip channels (from explicit_skip_channels).
 
         :return: None.
         :rtype: None
@@ -773,27 +887,60 @@ class SegmentationHead(BaseVisionHead):
 
         # Feature refinement blocks
         self.refine_blocks = []
-        channels = self.hidden_dim
 
-        for i in range(3):
-            self.refine_blocks.append(
-                ConvBlock(
-                    filters=channels,
-                    kernel_size=3,
-                    normalization_type=self.normalization_type,
-                    activation_type=self.activation_type,
-                    dropout_rate=self.dropout_rate,
-                    name=f'refine_block_{i}'
+        if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is not None:
+            # Explicit mode: refine blocks output channels to match skip channels
+            # We have 3 refine blocks, explicit_skip_channels has 4 entries (L0-L3)
+            # Refine block i output should match skip_channels[-(i+2)] for concatenation
+            skip_ch = self.explicit_skip_channels
+            for i in range(3):
+                # Output channels = skip_channels[-(i+2)] // 2 (half before concat)
+                out_channels = skip_ch[-(i+2)] // 2
+                self.refine_blocks.append(
+                    ConvBlock(
+                        filters=out_channels,
+                        kernel_size=3,
+                        normalization_type=self.normalization_type,
+                        activation_type=self.activation_type,
+                        dropout_rate=self.dropout_rate,
+                        name=f'refine_block_{i}'
+                    )
                 )
-            )
-            channels = channels // 2
+        else:
+            # Auto mode: halve channels each step
+            channels = self.hidden_dim
+            for i in range(3):
+                self.refine_blocks.append(
+                    ConvBlock(
+                        filters=channels,
+                        kernel_size=3,
+                        normalization_type=self.normalization_type,
+                        activation_type=self.activation_type,
+                        dropout_rate=self.dropout_rate,
+                        name=f'refine_block_{i}'
+                    )
+                )
+                channels = channels // 2
 
         # Upsampling layers
         self.upsample_layers = []
         for i in range(int(self.upsampling_factor ** 0.5)):
+            # Determine filter count for upsample layer
+            if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is not None:
+                # After 3 refine blocks, channels = skip_ch[-3] // 2 = skip_ch[0] // 2
+                # Actually let's compute it properly: after 3 refinements in explicit mode
+                # refine_0 out = skip_ch[1]//2, after concat with skip_ch[0] -> skip_ch[1]//2 + skip_ch[0]
+                # refine_1 out = skip_ch[2]//2, after concat with skip_ch[1] -> skip_ch[2]//2 + skip_ch[1]
+                # refine_2 out = skip_ch[3]//2, after concat with skip_ch[2] -> skip_ch[3]//2 + skip_ch[2]
+                # This is complex, so we'll let build() handle the shapes
+                filters = None  # Will be determined in build
+            else:
+                # Auto mode: after 3 halvings from hidden_dim
+                filters = self.hidden_dim // 8
+            
             self.upsample_layers.append(
                 layers.Conv2DTranspose(
-                    filters=channels,
+                    filters=filters if filters else self.hidden_dim // 8,
                     kernel_size=3,
                     strides=2,
                     padding='same',
@@ -822,18 +969,52 @@ class SegmentationHead(BaseVisionHead):
         multi-scale input builds the same widths it will run with. The common
         layers are built on the single highest-level map.
 
+        In explicit mode, validates that skip shapes match explicit_skip_channels.
+
+        For sequence input format, the input is reshaped to spatial in call(),
+        so we build the layers for the spatial shape.
+
         :param input_shape: One feature-map shape, or a list of shapes for a
             multi-scale input.
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         :return: None.
         :rtype: None
         """
+        # For sequence input, compute the spatial shape after reshaping
+        if self.input_format == "sequence":
+            if self.patch_grid_size is None:
+                raise ValueError("patch_grid_size must be set for sequence input format")
+            if isinstance(input_shape, list):
+                spatial_shapes = []
+                for shape in input_shape:
+                    batch, seq_len, dim = shape
+                    h, w = self.patch_grid_size
+                    spatial_shapes.append((batch, h, w, dim))
+                input_shape = spatial_shapes
+            else:
+                batch, seq_len, dim = input_shape
+                h, w = self.patch_grid_size
+                input_shape = (batch, h, w, dim)
+
         if isinstance(input_shape, list) and self.use_skip_connections:
             base_shape = input_shape[-1]
             skip_shapes = input_shape[:-1][::-1]
         else:
             base_shape = input_shape[-1] if isinstance(input_shape, list) else input_shape
             skip_shapes = []
+
+        # In explicit mode, validate skip channels
+        if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is not None:
+            if len(skip_shapes) != len(self.explicit_skip_channels):
+                raise ValueError(
+                    f"explicit_skip_channels has {len(self.explicit_skip_channels)} entries "
+                    f"but {len(skip_shapes)} skip inputs provided"
+                )
+            for i, (skip_shape, exp_ch) in enumerate(zip(skip_shapes, self.explicit_skip_channels)):
+                if skip_shape[-1] != exp_ch:
+                    raise ValueError(
+                        f"Skip {i} channels {skip_shape[-1]} != explicit_skip_channels[{i}]={exp_ch}"
+                    )
 
         shape = self._common_processed_shape(base_shape)
 
@@ -849,9 +1030,18 @@ class SegmentationHead(BaseVisionHead):
                 )
                 shape = shape[:-1] + (merged,)
 
-        for upsample_layer in self.upsample_layers:
-            upsample_layer.build(shape)
-            shape = tuple(upsample_layer.compute_output_shape(shape))
+        # Rebuild upsample layers with correct filters if needed
+        if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is not None:
+            # After all refine blocks, shape[-1] is the channel count
+            final_channels = shape[-1]
+            for i, upsample_layer in enumerate(self.upsample_layers):
+                upsample_layer.filters = final_channels
+                upsample_layer.build(shape)
+                shape = tuple(upsample_layer.compute_output_shape(shape))
+        else:
+            for upsample_layer in self.upsample_layers:
+                upsample_layer.build(shape)
+                shape = tuple(upsample_layer.compute_output_shape(shape))
 
         self.seg_head.build(shape)
 
@@ -867,7 +1057,7 @@ class SegmentationHead(BaseVisionHead):
         Refine, concatenate skips, upsample, then classify each pixel.
 
         :param inputs: One feature map, or a list of them with the
-            highest-level map last.
+            highest-level map last. For sequence format, input is (B, N, D).
         :type inputs: Union[keras.KerasTensor, List[keras.KerasTensor]]
         :param training: Keras training flag, forwarded to every sub-layer.
         :type training: Optional[bool]
@@ -875,38 +1065,55 @@ class SegmentationHead(BaseVisionHead):
         :rtype: keras.KerasTensor
         """
 
+        # Handle sequence input format (ViT patch tokens)
+        x = inputs
+        if self.input_format == "sequence":
+            if self.patch_grid_size is None:
+                raise ValueError("patch_grid_size must be set for sequence input format")
+            if isinstance(x, list):
+                # Convert each element in the list
+                x = [self._reshape_sequence_to_spatial(xi) for xi in x]
+            else:
+                x = self._reshape_sequence_to_spatial(x)
+
         # Handle multi-scale inputs if skip connections are used
-        if isinstance(inputs, list) and self.use_skip_connections:
+        if isinstance(x, list) and self.use_skip_connections:
             # The last entry is the highest-level map. The rest are skips,
             # reversed so the deepest one is consumed first.
-            x = inputs[-1]
-            skip_features = inputs[:-1][::-1]
+            x_main = x[-1]
+            skip_features = x[:-1][::-1]
         else:
-            x = inputs if not isinstance(inputs, list) else inputs[-1]
+            x_main = x if not isinstance(x, list) else x[-1]
             skip_features = []
 
         # Apply common processing
         if self.use_attention:
-            x = self.attention(x, training=training)
+            x_main = self.attention(x_main, training=training)
         if self.use_ffn:
-            x = self.ffn(x, training=training)
+            x_main = self.ffn(x_main, training=training)
 
         # Refinement and upsampling
         for i, refine_block in enumerate(self.refine_blocks):
-            x = refine_block(x, training=training)
+            x_main = refine_block(x_main, training=training)
 
             # Add skip connections if available
             if self.use_skip_connections and i < len(skip_features):
-                x = ops.concatenate([x, skip_features[i]], axis=-1)
+                x_main = ops.concatenate([x_main, skip_features[i]], axis=-1)
 
         # Upsample to original resolution
         for upsample_layer in self.upsample_layers:
-            x = upsample_layer(x)
+            x_main = upsample_layer(x_main)
 
         # Final segmentation output
-        seg_output = self.seg_head(x)
+        seg_output = self.seg_head(x_main)
 
         return seg_output
+
+    def _reshape_sequence_to_spatial(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Reshape sequence (B, N, D) to spatial (B, H, W, D)."""
+        batch_size = ops.shape(x)[0]
+        h, w = self.patch_grid_size
+        return ops.reshape(x, (batch_size, h, w, -1))
 
     def compute_output_shape(
             self,
@@ -919,13 +1126,26 @@ class SegmentationHead(BaseVisionHead):
         doubles height and width. The output conv emits ``num_classes``
         channels. A list input is measured by its last entry.
 
+        For sequence input format, the input shape (B, N, D) is reshaped
+        to spatial (B, H, W, D) using patch_grid_size before computing.
+
         :param input_shape: One feature-map shape, or a list of shapes.
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         :return: Shape ``(batch, out_height, out_width, num_classes)``.
         :rtype: Tuple[Optional[int], ...]
         """
         base_shape = input_shape[-1] if isinstance(input_shape, list) else input_shape
-        batch, height, width = base_shape[0], base_shape[1], base_shape[2]
+        batch = base_shape[0]
+
+        # Handle sequence input format
+        if self.input_format == "sequence":
+            if self.patch_grid_size is None:
+                raise ValueError("patch_grid_size must be set for sequence input format")
+            # base_shape is (B, N, D) -> reshape to (B, H, W, D)
+            height, width = self.patch_grid_size
+        else:
+            height, width = base_shape[1], base_shape[2]
+
         scale = 2 ** int(self.upsampling_factor ** 0.5)
         out_height = height * scale if height is not None else None
         out_width = width * scale if width is not None else None
@@ -935,15 +1155,21 @@ class SegmentationHead(BaseVisionHead):
         """
         Return the constructor arguments for serialization.
 
-        :return: Config dict carrying ``num_classes``, ``upsampling_factor``
-            and ``use_skip_connections``, on top of the base configuration.
+        :return: Config dict carrying ``num_classes``, ``upsampling_factor``,
+            ``use_skip_connections``, ``skip_channel_mode``,
+            ``explicit_skip_channels``, ``input_format``, and ``patch_grid_size``,
+            on top of the base configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
             'num_classes': self.num_classes,
             'upsampling_factor': self.upsampling_factor,
-            'use_skip_connections': self.use_skip_connections
+            'use_skip_connections': self.use_skip_connections,
+            'skip_channel_mode': self.skip_channel_mode,
+            'explicit_skip_channels': self.explicit_skip_channels,
+            'input_format': self.input_format,
+            'patch_grid_size': self.patch_grid_size
         })
         return config
 
@@ -1041,6 +1267,12 @@ class DepthEstimationHead(BaseVisionHead):
             min_depth: float = 0.1,
             max_depth: float = 100.0,
             use_log_depth: bool = True,
+            decoder_style: Literal["progressive", "dpt"] = "progressive",
+            dpt_dims: Optional[List[int]] = None,
+            dpt_use_bias: bool = False,
+            dpt_activation: Union[str, callable] = "relu",
+            dpt_output_activation: Union[str, callable] = "linear",
+            dpt_upsample_factor: int = 16,
             **kwargs: Any
     ) -> None:
         """
@@ -1054,6 +1286,20 @@ class DepthEstimationHead(BaseVisionHead):
         :type max_depth: float
         :param use_log_depth: Scale in log space instead of linearly.
         :type use_log_depth: bool
+        :param decoder_style: ``"progressive"`` (default, 3x ConvBlock+Conv2DTranspose)
+            or ``"dpt"`` (DPTDecoder-compatible: Conv2D+BN+UpSampling2D).
+        :type decoder_style: Literal["progressive", "dpt"]
+        :param dpt_dims: Channel dimensions per DPT decoder stage.
+            Defaults to ``[256, 128, 64, 32]``.
+        :type dpt_dims: Optional[List[int]]
+        :param dpt_use_bias: Whether Conv2D layers use bias in DPT mode.
+        :type dpt_use_bias: bool
+        :param dpt_activation: Activation for DPT decoder stages.
+        :type dpt_activation: Union[str, callable]
+        :param dpt_output_activation: Activation for final DPT output conv.
+        :type dpt_output_activation: Union[str, callable]
+        :param dpt_upsample_factor: Total upsampling factor for DPT mode (power of 2).
+        :type dpt_upsample_factor: int
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
@@ -1064,6 +1310,15 @@ class DepthEstimationHead(BaseVisionHead):
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.use_log_depth = use_log_depth
+        self.decoder_style = decoder_style
+        self.dpt_dims = dpt_dims
+        self.dpt_use_bias = dpt_use_bias
+        self.dpt_activation = dpt_activation
+        self.dpt_output_activation = dpt_output_activation
+        self.dpt_upsample_factor = dpt_upsample_factor
+
+        if self.decoder_style not in ("progressive", "dpt"):
+            raise ValueError(f"decoder_style must be 'progressive' or 'dpt', got {decoder_style}")
 
         self._create_depth_layers()
 
@@ -1071,46 +1326,128 @@ class DepthEstimationHead(BaseVisionHead):
         """
         Build the refinement stack and the depth conv.
 
-        Three ``[ConvBlock, Conv2DTranspose]`` pairs. Each transposed conv
-        has stride 2 and halves the channel count.
+        Two architectures based on decoder_style:
+        - "progressive": Three ``[ConvBlock, Conv2DTranspose]`` pairs.
+        - "dpt": DPTDecoder-compatible conv+bn+upsample stages.
 
         :return: None.
         :rtype: None
         """
 
-        # Progressive upsampling with refinement
-        self.depth_blocks = []
-        channels = self.hidden_dim
+        if self.decoder_style == "progressive":
+            # Progressive upsampling with refinement (original behavior)
+            self.depth_blocks = []
+            channels = self.hidden_dim
 
-        for i in range(3):
-            self.depth_blocks.append([
-                ConvBlock(
-                    filters=channels,
-                    kernel_size=3,
-                    normalization_type=self.normalization_type,
-                    activation_type=self.activation_type,
-                    name=f'depth_conv_{i}'
-                ),
-                layers.Conv2DTranspose(
-                    filters=channels // 2,
-                    kernel_size=3,
-                    strides=2,
-                    padding='same',
-                    name=f'depth_upsample_{i}'
+            for i in range(3):
+                self.depth_blocks.append([
+                    ConvBlock(
+                        filters=channels,
+                        kernel_size=3,
+                        normalization_type=self.normalization_type,
+                        activation_type=self.activation_type,
+                        name=f'depth_conv_{i}'
+                    ),
+                    layers.Conv2DTranspose(
+                        filters=channels // 2,
+                        kernel_size=3,
+                        strides=2,
+                        padding='same',
+                        name=f'depth_upsample_{i}'
+                    )
+                ])
+                channels = channels // 2
+
+            # Depth prediction layer
+            self.depth_head = layers.Conv2D(
+                filters=self.output_channels,
+                kernel_size=3,
+                padding='same',
+                # Sigmoid keeps the output in [0, 1]. call() then scales it into
+                # the [min_depth, max_depth] range.
+                activation='sigmoid',
+                name='depth_head'
+            )
+        else:
+            # DPTDecoder-compatible architecture
+            from dl_techniques.utils.activation_serialization import deserialize_activation
+
+            self.dpt_dims = self.dpt_dims if self.dpt_dims is not None else [256, 128, 64, 32]
+            self.dpt_activation = deserialize_activation(self.dpt_activation)
+            self.dpt_output_activation = deserialize_activation(self.dpt_output_activation)
+
+            # Validate upsample_factor: must be a power of 2 and <= 2**len(dims).
+            if self.dpt_upsample_factor < 1 or (self.dpt_upsample_factor & (self.dpt_upsample_factor - 1)) != 0:
+                raise ValueError(
+                    f"dpt_upsample_factor must be a positive power of 2, got {self.dpt_upsample_factor}"
                 )
-            ])
-            channels = channels // 2
+            # Number of 2x upsamples to insert.
+            self._num_dpt_upsamples = 0
+            uf = self.dpt_upsample_factor
+            while uf > 1:
+                uf //= 2
+                self._num_dpt_upsamples += 1
+            if self._num_dpt_upsamples > len(self.dpt_dims):
+                raise ValueError(
+                    f"dpt_upsample_factor=2**{self._num_dpt_upsamples} requires at least "
+                    f"{self._num_dpt_upsamples} decoder stages, but len(dpt_dims)={len(self.dpt_dims)}"
+                )
 
-        # Depth prediction layer
-        self.depth_head = layers.Conv2D(
-            filters=self.output_channels,
-            kernel_size=3,
-            padding='same',
-            # Sigmoid keeps the output in [0, 1]. call() then scales it into
-            # the [min_depth, max_depth] range.
-            activation='sigmoid',
-            name='depth_head'
-        )
+            # All sublayer dims are shape-independent, so create them here in
+            # __init__ for stable layer tracking across (de)serialization.
+            self.dpt_conv_layers: List[keras.layers.Conv2D] = []
+            self.dpt_bn_layers: List[keras.layers.BatchNormalization] = []
+            self.dpt_act_layers: List[keras.layers.Layer] = []
+            self.dpt_up_layers: List[Optional[keras.layers.Layer]] = []
+
+            # Create convolutional layers for each dimension
+            for i, dim in enumerate(self.dpt_dims):
+                # Convolutional layer
+                conv = keras.layers.Conv2D(
+                    filters=dim,
+                    kernel_size=3,
+                    padding='same',
+                    kernel_initializer=self.kernel_initializer if hasattr(self, 'kernel_initializer') else 'he_normal',
+                    kernel_regularizer=self.kernel_regularizer if hasattr(self, 'kernel_regularizer') else None,
+                    use_bias=self.dpt_use_bias,
+                    name=f'dpt_conv_{i}'
+                )
+                self.dpt_conv_layers.append(conv)
+
+                # Batch normalization layer
+                # Use epsilon=1e-5 to match torch reference (DPTDecoder default)
+                bn = keras.layers.BatchNormalization(
+                    epsilon=1e-5, name=f'dpt_bn_{i}'
+                )
+                self.dpt_bn_layers.append(bn)
+
+                # Activation layer
+                activation_layer = keras.layers.Activation(
+                    self.dpt_activation,
+                    name=f'dpt_act_{i}'
+                )
+                self.dpt_act_layers.append(activation_layer)
+
+                # Upsample after the first _num_dpt_upsamples stages (one 2x per stage).
+                if i < self._num_dpt_upsamples:
+                    up = keras.layers.UpSampling2D(
+                        size=(2, 2), interpolation='bilinear', name=f'dpt_upsample_{i}'
+                    )
+                else:
+                    up = None
+                self.dpt_up_layers.append(up)
+
+            # Final output layer
+            self.dpt_output_conv = keras.layers.Conv2D(
+                filters=self.output_channels,
+                kernel_size=3,
+                padding='same',
+                kernel_initializer=self.kernel_initializer if hasattr(self, 'kernel_initializer') else 'he_normal',
+                kernel_regularizer=self.kernel_regularizer if hasattr(self, 'kernel_regularizer') else None,
+                activation=self.dpt_output_activation,
+                use_bias=True,
+                name='dpt_output_conv'
+            )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -1121,15 +1458,32 @@ class DepthEstimationHead(BaseVisionHead):
         :return: None.
         :rtype: None
         """
-        shape = self._common_processed_shape(input_shape)
+        if self.decoder_style == "progressive":
+            shape = self._common_processed_shape(input_shape)
 
-        for conv_block, upsample in self.depth_blocks:
-            conv_block.build(shape)
-            shape = tuple(conv_block.compute_output_shape(shape))
-            upsample.build(shape)
-            shape = tuple(upsample.compute_output_shape(shape))
+            for conv_block, upsample in self.depth_blocks:
+                conv_block.build(shape)
+                shape = tuple(conv_block.compute_output_shape(shape))
+                upsample.build(shape)
+                shape = tuple(upsample.compute_output_shape(shape))
 
-        self.depth_head.build(shape)
+            self.depth_head.build(shape)
+        else:
+            # DPT style: build all dpt layers
+            shape = self._common_processed_shape(input_shape)
+            for conv, bn, act, up in zip(
+                    self.dpt_conv_layers,
+                    self.dpt_bn_layers,
+                    self.dpt_act_layers,
+                    self.dpt_up_layers,
+            ):
+                conv.build(shape)
+                shape = conv.compute_output_shape(shape)
+                bn.build(shape)
+                act.build(shape)
+                if up is not None:
+                    shape = up.compute_output_shape(shape)
+            self.dpt_output_conv.build(shape)
 
         super().build(input_shape)
 
@@ -1147,7 +1501,8 @@ class DepthEstimationHead(BaseVisionHead):
         :param training: Keras training flag, forwarded to every sub-layer.
         :type training: Optional[bool]
         :return: Dict with ``'depth'`` and ``'confidence'``, where
-            ``'confidence'`` is the unscaled sigmoid output.
+            ``'confidence'`` is the unscaled sigmoid output (progressive)
+            or the pre-activation output (dpt).
         :rtype: Dict[str, keras.KerasTensor]
         """
 
@@ -1159,30 +1514,52 @@ class DepthEstimationHead(BaseVisionHead):
         if self.use_ffn:
             x = self.ffn(x, training=training)
 
-        # Progressive refinement and upsampling
-        for conv_block, upsample in self.depth_blocks:
-            x = conv_block(x, training=training)
-            x = upsample(x)
+        if self.decoder_style == "progressive":
+            # Progressive refinement and upsampling
+            for conv_block, upsample in self.depth_blocks:
+                x = conv_block(x, training=training)
+                x = upsample(x)
 
-        # Predict normalized depth
-        depth_normalized = self.depth_head(x)
+            # Predict normalized depth
+            depth_normalized = self.depth_head(x)
 
-        # Scale to actual depth range
-        if self.use_log_depth:
-            # Convert from log space
-            log_min = ops.log(self.min_depth)
-            log_max = ops.log(self.max_depth)
-            depth = ops.exp(depth_normalized * (log_max - log_min) + log_min)
+            # Scale to actual depth range
+            if self.use_log_depth:
+                # Convert from log space
+                log_min = ops.log(self.min_depth)
+                log_max = ops.log(self.max_depth)
+                depth = ops.exp(depth_normalized * (log_max - log_min) + log_min)
+            else:
+                # Linear scaling
+                depth = depth_normalized * (self.max_depth - self.min_depth) + self.min_depth
+
+            return {
+                'depth': depth,
+                # This is the sigmoid output the depth was scaled from, not a
+                # separate estimate. Read the class docstring before using it.
+                'confidence': depth_normalized
+            }
         else:
-            # Linear scaling
-            depth = depth_normalized * (self.max_depth - self.min_depth) + self.min_depth
+            # DPT style: conv -> bn -> act -> upsample
+            for conv, bn, act, up in zip(
+                    self.dpt_conv_layers,
+                    self.dpt_bn_layers,
+                    self.dpt_act_layers,
+                    self.dpt_up_layers,
+            ):
+                x = conv(x)
+                x = bn(x, training=training)
+                x = act(x)
+                if up is not None:
+                    x = up(x)
 
-        return {
-            'depth': depth,
-            # This is the sigmoid output the depth was scaled from, not a
-            # separate estimate. Read the class docstring before using it.
-            'confidence': depth_normalized
-        }
+            # Final output conv (no sigmoid, activation handled by dpt_output_activation)
+            depth = self.dpt_output_conv(x)
+
+            return {
+                'depth': depth,
+                'confidence': x  # Pre-output features as confidence proxy
+            }
 
     def compute_output_shape(
             self,
@@ -1191,17 +1568,20 @@ class DepthEstimationHead(BaseVisionHead):
         """
         Report the two output shapes.
 
-        Three transposed convs of stride 2 give eight times the input height
-        and width. ``'depth'`` and ``'confidence'`` share one shape.
-
         :param input_shape: Shape ``(batch, height, width, channels)``.
         :type input_shape: Tuple[Optional[int], ...]
         :return: Dict with ``'depth'`` and ``'confidence'`` shapes.
         :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         batch, height, width = input_shape[0], input_shape[1], input_shape[2]
-        # Three transposed-conv upsamples, stride 2 each.
-        scale = 8
+
+        if self.decoder_style == "progressive":
+            # Three transposed-conv upsamples, stride 2 each.
+            scale = 8
+        else:
+            # DPT style: upsample_factor determines scale
+            scale = self.dpt_upsample_factor
+
         out_height = height * scale if height is not None else None
         out_width = width * scale if width is not None else None
         shape = (batch, out_height, out_width, self.output_channels)
@@ -1212,8 +1592,10 @@ class DepthEstimationHead(BaseVisionHead):
         Return the constructor arguments for serialization.
 
         :return: Config dict carrying ``output_channels``, ``min_depth``,
-            ``max_depth`` and ``use_log_depth``, on top of the base
-            configuration.
+            ``max_depth``, ``use_log_depth``, ``decoder_style``,
+            ``dpt_dims``, ``dpt_use_bias``, ``dpt_activation``,
+            ``dpt_output_activation``, and ``dpt_upsample_factor``,
+            on top of the base configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -1221,7 +1603,13 @@ class DepthEstimationHead(BaseVisionHead):
             'output_channels': self.output_channels,
             'min_depth': self.min_depth,
             'max_depth': self.max_depth,
-            'use_log_depth': self.use_log_depth
+            'use_log_depth': self.use_log_depth,
+            'decoder_style': self.decoder_style,
+            'dpt_dims': self.dpt_dims,
+            'dpt_use_bias': self.dpt_use_bias,
+            'dpt_activation': self.dpt_activation,
+            'dpt_output_activation': self.dpt_output_activation,
+            'dpt_upsample_factor': self.dpt_upsample_factor
         })
         return config
 

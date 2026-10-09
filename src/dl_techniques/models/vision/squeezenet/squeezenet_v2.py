@@ -43,6 +43,11 @@ from .caffe_reference_init import (
     CAFFE_HEAD_INITIALIZER,
     CAFFE_XAVIER_INITIALIZER,
 )
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -606,10 +611,15 @@ class SqueezeNoduleNetV2(keras.Model):
         ], name=name)
 
     def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the classification head.
+        """Build the classification head using the vision heads factory.
 
-        The 1x1 convolution carries a ReLU before the pooling and softmax, as the
-        reference prototxts do.
+        Uses :class:`ClassificationHead` from the vision heads factory with
+        global average pooling. The head returns a dict with 'logits' and
+        'probabilities' (softmax applied). This method extracts probabilities
+        to maintain backward compatibility with the original SqueezeNet output.
+
+        For 3D inputs, falls back to the original custom head since the factory
+        head only supports 2D pooling.
 
         :param x: Tensor coming out of the Fire stack.
         :type x: keras.KerasTensor
@@ -617,34 +627,59 @@ class SqueezeNoduleNetV2(keras.Model):
         :rtype: keras.KerasTensor
         """
         if self.use_3d:
-            Conv = layers.Conv3D
-            GlobalPool = layers.GlobalAveragePooling3D
-        else:
-            Conv = layers.Conv2D
-            GlobalPool = layers.GlobalAveragePooling2D
+            # Factory head only supports 2D pooling; use original custom head for 3D
+            if self.use_3d:
+                Conv = layers.Conv3D
+                GlobalPool = layers.GlobalAveragePooling3D
+            else:
+                Conv = layers.Conv2D
+                GlobalPool = layers.GlobalAveragePooling2D
 
-        conv10 = Conv(
-            filters=self.num_classes,
-            kernel_size=1,
-            activation='relu',
-            kernel_regularizer=self.kernel_regularizer,
-            kernel_initializer=dict(self.HEAD_INITIALIZER),
-            name='conv10'
+            conv10 = Conv(
+                filters=self.num_classes,
+                kernel_size=1,
+                activation='relu',
+                kernel_regularizer=self.kernel_regularizer,
+                kernel_initializer=dict(self.HEAD_INITIALIZER),
+                name='conv10'
+            )
+            x = conv10(x)
+            self.head_layers.append(conv10)
+
+            globalpool = GlobalPool(name='globalpool')
+            x = globalpool(x)
+            self.head_layers.append(globalpool)
+
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-063: softmax at every
+            # num_classes; a 2-way sigmoid head would not sum to 1. See decisions.md.
+            activation = 'softmax'
+
+            final_activation = layers.Activation(activation, name='predictions')
+            x = final_activation(x)
+            self.head_layers.append(final_activation)
+
+            return x
+
+        # 2D path: use factory ClassificationHead
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        head_config.update({
+            'num_classes': self.num_classes,
+            'dropout_rate': self.dropout_rate,
+            'normalization_type': 'batch_norm',
+            'activation_type': 'relu',
+            'use_global_pooling': True,
+            'pooling_type': 'avg',
+            'use_attention': False,
+            'use_ffn': False,
+        })
+
+        self.classification_head = create_vision_head(
+            VisionTaskType.CLASSIFICATION, **head_config
         )
-        x = conv10(x)
-        self.head_layers.append(conv10)
-
-        globalpool = GlobalPool(name='globalpool')
-        x = globalpool(x)
-        self.head_layers.append(globalpool)
-
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-063: softmax at every
-        # num_classes; a 2-way sigmoid head would not sum to 1. See decisions.md.
-        activation = 'softmax'
-
-        final_activation = layers.Activation(activation, name='predictions')
-        x = final_activation(x)
-        self.head_layers.append(final_activation)
+        head_output = self.classification_head(x)
+        # Extract probabilities for backward compatibility (original SqueezeNet returns probabilities)
+        x = head_output['probabilities']
+        self.head_layers = [self.classification_head]
 
         return x
 

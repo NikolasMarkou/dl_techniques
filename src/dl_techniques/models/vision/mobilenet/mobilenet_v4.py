@@ -346,7 +346,15 @@ class MobileNetV4(keras.Model):
 
     def _build_head(self) -> None:
         """Build classification head using standardized vision head factory."""
-        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        # Select preset based on head_config_preset
+        if self._head_config_preset == 'efficient':
+            head_config = HeadConfiguration.get_efficient_config(VisionTaskType.CLASSIFICATION)
+        elif self._head_config_preset == 'high_performance':
+            head_config = HeadConfiguration.get_high_performance_config(VisionTaskType.CLASSIFICATION)
+        else:
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+
+        # Apply MobileNet-specific overrides
         head_config.update({
             'num_classes': self.num_classes,
             'dropout_rate': self.dropout_rate,

@@ -45,6 +45,7 @@ from .caffe_reference_init import (
     CAFFE_XAVIER_INITIALIZER,
 )
 from dl_techniques.layers.heads.vision import (
+    create_vision_head,
     VisionTaskType,
     HeadConfiguration,
 )
@@ -615,34 +616,39 @@ class SqueezeNetV1(keras.Model):
         return x
 
     def _build_head(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the classification head.
+        """Build the classification head using the vision heads factory.
 
-        The 1x1 convolution carries a ReLU before the pooling and softmax, as the
-        reference prototxts do.
+        Uses :class:`ClassificationHead` from the vision heads factory with
+        global average pooling. The head returns a dict with 'logits' and
+        'probabilities' (softmax applied). This method extracts probabilities
+        to maintain backward compatibility with the original SqueezeNet output.
 
         :param x: Tensor coming out of the Fire stack.
         :type x: keras.KerasTensor
         :return: Class probabilities ``(batch, num_classes)``.
         :rtype: keras.KerasTensor
         """
-        conv10 = layers.Conv2D(
-            filters=self.num_classes,
-            kernel_size=1,
-            activation='relu',
-            kernel_regularizer=self.kernel_regularizer,
-            kernel_initializer=dict(self.HEAD_INITIALIZER),
-            name='conv10'
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        head_config.update({
+            'num_classes': self.num_classes,
+            'dropout_rate': self.dropout_rate,
+            'normalization_type': 'batch_norm',
+            'activation_type': 'relu',
+            'use_global_pooling': True,
+            'pooling_type': 'avg',
+            'use_attention': False,
+            'use_ffn': False,
+        })
+        if self._head_config_overrides:
+            head_config.update(self._head_config_overrides)
+
+        self.classification_head = create_vision_head(
+            VisionTaskType.CLASSIFICATION, **head_config
         )
-        x = conv10(x)
-        self.head_layers.append(conv10)
-
-        avgpool = layers.GlobalAveragePooling2D(name='avgpool')
-        x = avgpool(x)
-        self.head_layers.append(avgpool)
-
-        softmax = layers.Activation('softmax', name='predictions')
-        x = softmax(x)
-        self.head_layers.append(softmax)
+        head_output = self.classification_head(x)
+        # Extract probabilities for backward compatibility (original SqueezeNet returns probabilities)
+        x = head_output['probabilities']
+        self.head_layers = [self.classification_head]
 
         return x
 

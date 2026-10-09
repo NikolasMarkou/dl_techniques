@@ -64,6 +64,11 @@ from typing import Any, Dict, Optional, Tuple, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 from .spatial_guard import (
     STAGES,
     final_feature_extent,
@@ -378,39 +383,28 @@ class AlexNet(keras.Model):
         ))
 
     def _build_classifier(self) -> None:
-        """Create the flatten and the three fully connected layers."""
-        # The extent entering the flatten is the result of the WHOLE chain, not of
-        # the last stage alone: conv_out(227, 3, 2, 0) is 113, because that is one
-        # 3x3/2 over a 227 input, not the 227 -> 56 -> 28 -> ... -> 6 the model
-        # actually performs.
+        """Create classification head using the vision heads factory."""
         feature_extent = self._feature_extent
         flat_features = 256 * feature_extent * feature_extent
-
-        self.flatten = layers.Flatten(name="flatten")
-        self.fc6 = layers.Dense(
-            4096,
-            activation="relu",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name="fc6",
-        )
-        self.dropout1 = layers.Dropout(self.dropout_rate, name="dropout1")
-        self.fc7 = layers.Dense(
-            4096,
-            activation="relu",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name="fc7",
-        )
-        self.dropout2 = layers.Dropout(self.dropout_rate, name="dropout2")
-        self.fc8 = layers.Dense(
-            self.num_classes,
-            activation="softmax",
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name="fc8",
-        )
         self._flat_features = flat_features
+
+        head_config = HeadConfiguration.get_default_config(VisionTaskType.CLASSIFICATION)
+        head_config.update({
+            'num_classes': self.num_classes,
+            'dropout_rate': self.dropout_rate,
+            'normalization_type': 'batch_norm',
+            'activation_type': 'relu',
+            'use_global_pooling': False,  # AlexNet uses flatten, not pooling
+            'use_attention': False,
+            'use_ffn': True,
+            'ffn_type': 'mlp',
+            'ffn_expansion_factor': 1,  # 4096 -> 4096 (no expansion)
+            'hidden_dim': 4096,  # fc6/fc7 width
+        })
+
+        self.classification_head = create_vision_head(
+            VisionTaskType.CLASSIFICATION, **head_config
+        )
 
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer, then mark the model built.
@@ -464,10 +458,9 @@ class AlexNet(keras.Model):
         if not self.include_top:
             return x
 
-        x = self.flatten(x)
-        x = self.dropout1(self.fc6(x), training=training)
-        x = self.dropout2(self.fc7(x), training=training)
-        return self.fc8(x)
+        # Factory head returns {'logits': ..., 'probabilities': ...}
+        head_output = self.classification_head(x, training=training)
+        return head_output['probabilities']
 
     def get_feature_extent(self) -> int:
         """Per-axis extent of the feature map entering the flatten.

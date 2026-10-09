@@ -272,6 +272,7 @@ class AccUNet(keras.Model):
         mlfc_iterations: int = 3,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        include_top: bool = True,
         **kwargs: Any
     ) -> None:
         """Initialize the AccUNet model instance.
@@ -288,6 +289,9 @@ class AccUNet(keras.Model):
         :type kernel_initializer: Union[str, keras.initializers.Initializer]
         :param kernel_regularizer: Optional regularizer for convolution kernels.
         :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+        :param include_top: Whether to include the segmentation head.
+            When False, returns encoder features for custom heads. Defaults to True.
+        :type include_top: bool
         :param kwargs: Additional keyword arguments for ``keras.Model``.
         :raises ValueError: If any of the four scalar arguments is not positive.
         """
@@ -310,6 +314,7 @@ class AccUNet(keras.Model):
         self.mlfc_iterations = mlfc_iterations
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.include_top = include_top
 
         # Calculate filter sizes for each level
         self.filter_sizes = [
@@ -497,7 +502,7 @@ class AccUNet(keras.Model):
         self,
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
-    ) -> keras.KerasTensor:
+    ) -> Union[keras.KerasTensor, Dict[str, Any]]:
         """Forward pass of the model.
 
         :param inputs: Input tensor of shape
@@ -508,7 +513,9 @@ class AccUNet(keras.Model):
         :return: Segmentation map of shape
             ``(batch_size, height, width, num_classes)``, already activated
             (sigmoid or softmax), i.e. probabilities rather than logits.
-        :rtype: keras.KerasTensor
+            When ``include_top=False``, returns a dict with encoder features,
+            bottleneck features, and processed skip connections for custom heads.
+        :rtype: Union[keras.KerasTensor, Dict[str, Any]]
         :raises ValueError: If a statically-known spatial dimension is not
             divisible by 16.
         """
@@ -539,6 +546,14 @@ class AccUNet(keras.Model):
 
         for mlfc_layer in self.mlfc_layers:
             processed_features = mlfc_layer(processed_features, training=training)
+
+        if not self.include_top:
+            # Return encoder features for custom heads
+            return {
+                "encoder_features": encoder_features,      # List of 4 feature maps [L0, L1, L2, L3]
+                "bottleneck_features": bottleneck_features,
+                "processed_skips": processed_features      # After ResPath + MLFC
+            }
 
         x = bottleneck_features
 
@@ -571,6 +586,7 @@ class AccUNet(keras.Model):
             'mlfc_iterations': self.mlfc_iterations,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'include_top': self.include_top,
         })
         return config
 
@@ -669,8 +685,9 @@ def create_acc_unet(
     base_filters: int = 32,
     mlfc_iterations: int = 3,
     input_shape: Optional[Tuple[int, int]] = None,
+    include_top: bool = True,
     **kwargs: Any
-) -> AccUNetFunctional:
+) -> Union[AccUNetFunctional, AccUNet]:
     """Create an ACC-UNet wrapped in the Keras Functional API.
 
     :param input_channels: Number of input channels.
@@ -686,11 +703,14 @@ def create_acc_unet(
         in which case the divisibility contract still holds at run time but
         cannot be checked at trace time.
     :type input_shape: Optional[Tuple[int, int]]
+    :param include_top: Whether to include the segmentation head.
+        When False, returns encoder features for custom heads. Defaults to True.
+    :type include_top: bool
     :param kwargs: Additional arguments forwarded to :class:`AccUNet`.
     :return: Functional model named ``ACC_UNet``. Its type is
         :class:`AccUNetFunctional`, a ``keras.Model`` subclass that additionally
         forces ``jit_compile=False`` on every compile path.
-    :rtype: AccUNetFunctional
+    :rtype: Union[AccUNetFunctional, AccUNet]
 
     Example:
         .. code-block:: python
@@ -708,6 +728,13 @@ def create_acc_unet(
                 num_classes=5,
                 base_filters=64
             )
+
+            # Feature extractor for custom heads
+            model = create_acc_unet(
+                input_channels=3,
+                num_classes=1,
+                include_top=False
+            )
     """
     if input_shape is not None:
         input_spec = keras.Input(shape=input_shape + (input_channels,))
@@ -720,11 +747,16 @@ def create_acc_unet(
         num_classes=num_classes,
         base_filters=base_filters,
         mlfc_iterations=mlfc_iterations,
+        include_top=include_top,
         **kwargs
     )
 
     # Build the model by calling it
     outputs = acc_unet(input_spec)
+
+    if not include_top:
+        # Return the base model for feature extraction
+        return acc_unet
 
     # Create functional model. AccUNetFunctional is a keras.Model that forces
     # jit_compile=False on every compile path (D-002, above).
@@ -738,8 +770,9 @@ def create_acc_unet_binary(
     input_shape: Optional[Tuple[int, int]] = None,
     base_filters: int = 32,
     mlfc_iterations: int = 3,
+    include_top: bool = True,
     **kwargs: Any
-) -> AccUNetFunctional:
+) -> Union[AccUNetFunctional, AccUNet]:
     """Create an ACC-UNet for binary segmentation.
 
     :param input_channels: Number of input channels.
@@ -751,11 +784,14 @@ def create_acc_unet_binary(
     :type base_filters: int
     :param mlfc_iterations: Number of stacked MLFC layers. Defaults to 3.
     :type mlfc_iterations: int
+    :param include_top: Whether to include the segmentation head.
+        When False, returns encoder features for custom heads. Defaults to True.
+    :type include_top: bool
     :param kwargs: Additional arguments forwarded to :class:`AccUNet`.
     :return: Functional model with a single sigmoid-activated output channel.
         Its type is :class:`AccUNetFunctional`, a ``keras.Model`` subclass that
         additionally forces ``jit_compile=False`` on every compile path.
-    :rtype: AccUNetFunctional
+    :rtype: Union[AccUNetFunctional, AccUNet]
 
     Example:
         .. code-block:: python
@@ -779,6 +815,7 @@ def create_acc_unet_binary(
         base_filters=base_filters,
         mlfc_iterations=mlfc_iterations,
         input_shape=input_shape,
+        include_top=include_top,
         **kwargs
     )
 
@@ -789,8 +826,9 @@ def create_acc_unet_multiclass(
     input_shape: Optional[Tuple[int, int]] = None,
     base_filters: int = 32,
     mlfc_iterations: int = 3,
+    include_top: bool = True,
     **kwargs: Any
-) -> AccUNetFunctional:
+) -> Union[AccUNetFunctional, AccUNet]:
     """Create an ACC-UNet for multi-class segmentation.
 
     :param input_channels: Number of input channels.
@@ -804,11 +842,14 @@ def create_acc_unet_multiclass(
     :type base_filters: int
     :param mlfc_iterations: Number of stacked MLFC layers. Defaults to 3.
     :type mlfc_iterations: int
+    :param include_top: Whether to include the segmentation head.
+        When False, returns encoder features for custom heads. Defaults to True.
+    :type include_top: bool
     :param kwargs: Additional arguments forwarded to :class:`AccUNet`.
     :return: Functional model with a softmax-activated output. Its type is
         :class:`AccUNetFunctional`, a ``keras.Model`` subclass that additionally
         forces ``jit_compile=False`` on every compile path.
-    :rtype: AccUNetFunctional
+    :rtype: Union[AccUNetFunctional, AccUNet]
     :raises ValueError: If ``num_classes`` is not greater than 1.
 
     Example:
@@ -837,6 +878,7 @@ def create_acc_unet_multiclass(
         base_filters=base_filters,
         mlfc_iterations=mlfc_iterations,
         input_shape=input_shape,
+        include_top=include_top,
         **kwargs
     )
 
