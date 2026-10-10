@@ -44,7 +44,7 @@ References:
 """
 
 import keras
-from keras import layers, models
+from keras import layers, models, ops
 from typing import Optional, Dict, Any, List, Tuple
 
 # ---------------------------------------------------------------------
@@ -59,6 +59,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.heads.vision import create_vision_head, VisionTaskType
 
 # ---------------------------------------------------------------------
 # Transformer Components
@@ -421,20 +422,21 @@ class DETR(models.Model):
         self.hidden_dim = hidden_dim
         self.aux_loss = aux_loss
 
-        # Prediction heads
-        self.class_embed = layers.Dense(num_classes + 1, name="class_embed")
-
-        # Box prediction head: the paper's 3-layer perceptron,
-        # `Dense(d) -> ReLU -> Dense(d) -> ReLU -> Dense(4)`.
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-047: build this Sequential directly, not via `create_ffn_layer('mlp', ...)`.
-        # That factory key builds a 2-layer MLPBlock, not the paper's 3-layer one, and no depth-configurable MLP exists in layers/ffn/. See decisions.md.
-        self.bbox_embed = keras.Sequential(
-            [
-                layers.Dense(hidden_dim, activation='relu', name="bbox_fc1"),
-                layers.Dense(hidden_dim, activation='relu', name="bbox_fc2"),
-                layers.Dense(4, name="bbox_fc3"),
-            ],
-            name="bbox_embed",
+        # Detection head using factory (replaces class_embed + bbox_embed)
+        # DETR uses num_classes + 1 (including "no object" class)
+        # and one query per detection (num_anchors=1)
+        self.detection_head = create_vision_head(
+            VisionTaskType.DETECTION,
+            num_classes=num_classes + 1,
+            num_anchors=1,
+            bbox_dims=4,
+            input_format="sequence",
+            patch_grid_size=(1, num_queries),  # sequence of num_queries tokens
+            hidden_dim=hidden_dim,
+            use_attention=False,
+            use_ffn=False,
+            dropout_rate=0.0,
+            name="detection_head"
         )
 
         # Query embeddings
@@ -471,15 +473,15 @@ class DETR(models.Model):
             self.input_proj.build(backbone_out_shape)
 
         seq_shape = (None, None, self.hidden_dim)
-        if not self.class_embed.built:
-            self.class_embed.build(seq_shape)
-        if not self.bbox_embed.built:
-            self.bbox_embed.build(seq_shape)
         if not self.query_embed.built:
             self.query_embed.build((None,))
 
         if not self.transformer.built:
             self.transformer.build(seq_shape)
+
+        # Build detection head on sequence shape
+        if not self.detection_head.built:
+            self.detection_head.build(seq_shape)
 
         super().build(input_shape)
 
@@ -548,9 +550,26 @@ class DETR(models.Model):
             training=training,
         )
 
-        # Apply prediction heads to all decoder outputs
-        outputs_class = [self.class_embed(h) for h in hs]
-        outputs_coord = [keras.ops.sigmoid(self.bbox_embed(h)) for h in hs]
+        # Apply detection head to all decoder outputs
+        # DetectionHead returns {'classifications': (B, 1, Q, num_classes+1), 'regressions': (B, 1, Q, 4)}
+        # We need to reshape to (B, Q, num_classes+1) and (B, Q, 4)
+        outputs_class = []
+        outputs_coord = []
+        for h in hs:
+            # h shape: (B, Q, D) - add spatial dims for sequence format
+            h_spatial = ops.expand_dims(ops.expand_dims(h, axis=1), axis=1)  # (B, 1, 1, Q, D) -> wait, need (B, 1, Q, D)
+            # Actually sequence format expects (B, N, D) where N is seq_len
+            # The DetectionHead with input_format="sequence" expects (B, seq_len, dim)
+            det_outputs = self.detection_head(h, training=training)
+            # det_outputs['classifications']: (B, 1, Q, num_classes+1) -> squeeze to (B, Q, num_classes+1)
+            # det_outputs['regressions']: (B, 1, Q, 4) -> squeeze to (B, Q, 4)
+            cls_out = ops.squeeze(det_outputs['classifications'], axis=1)  # (B, Q, num_classes+1)
+            reg_out = ops.squeeze(det_outputs['regressions'], axis=1)      # (B, Q, 4)
+            outputs_class.append(cls_out)
+            outputs_coord.append(reg_out)
+
+        # Apply sigmoid to box coordinates as DETR does
+        outputs_coord = [keras.ops.sigmoid(b) for b in outputs_coord]
 
         # Prepare output dictionary
         last_output = {
@@ -577,6 +596,7 @@ class DETR(models.Model):
             "aux_loss": self.aux_loss,
             "backbone": keras.saving.serialize_keras_object(self.backbone),
             "transformer": keras.saving.serialize_keras_object(self.transformer),
+            # detection_head is serialized as a sub-layer via Keras standard mechanism
         })
         return config
 

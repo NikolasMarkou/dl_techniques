@@ -665,6 +665,11 @@ class DepthAnything(keras.Model):
         feat = self.frozen_encoder(x_unlab, training=False)
         feat = self._features_to_spatial(feat)
         pseudo = self.decoder(feat, training=False)
+
+        # DepthEstimationHead returns dict with 'depth' and 'confidence'
+        if isinstance(pseudo, dict):
+            pseudo = pseudo['depth']
+
         return ops.stop_gradient(pseudo)
 
     # DECISION plan-2026-08-14T233721-d4f9beb2/D-014: augmentation stays in the training path, never in `call()`.

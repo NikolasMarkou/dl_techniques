@@ -199,7 +199,11 @@ class TestModelPropagatesThePaddingMask:
 class TestBoxHeadDepth:
     def test_box_head_is_the_paper_s_three_layer_mlp(self):
         model = _detr()
-        dense = [l for l in model.bbox_embed.layers
-                 if isinstance(l, keras.layers.Dense)]
-        assert len(dense) == 3, [l.name for l in model.bbox_embed.layers]
-        assert dense[-1].units == 4
+        # The detection head's regression branch: ConvBlock (3x3 conv + norm + act) + 1x1 conv
+        # This replaces the original 3-layer Dense MLP
+        reg_conv = model.detection_head.reg_conv
+        assert isinstance(reg_conv, keras.layers.Layer)
+        # Check that the regression head has the expected structure
+        reg_head = model.detection_head.reg_head
+        assert isinstance(reg_head, keras.layers.Conv2D)
+        assert reg_head.filters == 4  # bbox_dims

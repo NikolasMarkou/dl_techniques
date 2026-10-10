@@ -45,6 +45,8 @@ from ..smoke_contract_oracle import (
 IMAGE_SHAPE = (64, 64, 3)
 
 #: Measured 2026-08-21 at encoder_kind='real', encoder_type='vit_s', 64x64.
+#: Updated 2026-10-10 after fixing DepthEstimationHead to not create unused norm layer:
+#: **164** trainable weights, **0** dead, **0** non-finite.
 GF_N_WEIGHTS = 164
 
 

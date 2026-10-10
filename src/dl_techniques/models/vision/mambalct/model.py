@@ -40,6 +40,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.attention.factory import create_attention_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.ssm.context_mamba import ContextMambaLayer
+from dl_techniques.layers.heads.vision import create_vision_head, VisionTaskType
 from .uca_encoder import UcaEncoder
 
 # ---------------------------------------------------------------------
@@ -171,6 +172,21 @@ class MambaLCT(keras.Model):
         self.dropout_rate = dropout_rate
         self.embed_dim = EMBED_DIM
 
+        # Detection head using factory (replaces custom score/box MLPs)
+        # Created FIRST to ensure its internal layers get deterministic names
+        self.detection_head = create_vision_head(
+            VisionTaskType.DETECTION,
+            num_classes=1,  # binary: object / no object
+            num_anchors=1,  # one prediction per frame
+            bbox_dims=4,
+            input_format="spatial",
+            hidden_dim=self.head_hidden_dim,
+            use_attention=False,
+            use_ffn=False,
+            dropout_rate=self.dropout_rate,
+            name="detection_head"
+        )
+
         self.encoder = UcaEncoder(
             stage_dims=self.stage_dims,
             stage_depths=self.stage_depths,
@@ -197,16 +213,6 @@ class MambaLCT(keras.Model):
         self.fusion_norm = create_normalization_layer(
             "layer_norm", epsilon=1e-5, name="fusion_norm"
         )
-        self.score_hidden = keras.layers.Dense(
-            self.head_hidden_dim, activation="relu", name="score_hidden"
-        )
-        self.score_out = keras.layers.Dense(1, name="score_out")
-        self.box_hidden = keras.layers.Dense(
-            self.head_hidden_dim, activation="relu", name="box_hidden"
-        )
-        self.box_out = keras.layers.Dense(
-            4, activation="sigmoid", name="box_out"
-        )
 
         logger.info(
             f"Created MambaLCT (template={template_size}, "
@@ -220,7 +226,46 @@ class MambaLCT(keras.Model):
         """
         if self.built:
             return
-        materialize_sublayers(self, input_shape)
+        
+        # Parse input shapes for proper sub-layer building
+        if isinstance(input_shape, (tuple, list)) and len(input_shape) >= 2:
+            template_shape = input_shape[0]
+            search_shape = input_shape[1]
+        else:
+            template_shape = (None, self.template_size, self.template_size, 3)
+            search_shape = (None, None, self.search_size, self.search_size, 3)
+        
+        # Build encoder first
+        if not self.encoder.built:
+            self.encoder.build(template_shape)
+        
+        # Build search encoder
+        encoder_out_shape = self.encoder.compute_output_shape(template_shape)
+        flat_search_shape = (None, search_shape[2], search_shape[3], 3)
+        if not self.encoder.built:
+            self.encoder.build(flat_search_shape)
+        
+        search_tokens_shape = self.encoder.compute_output_shape(flat_search_shape)
+        tokens_per_frame = search_tokens_shape[1]
+        search_flow_shape = (None, search_shape[1], tokens_per_frame, self.embed_dim)
+        
+        # Build context_mamba
+        if not self.context_mamba.built:
+            context_shape = (None, self.context_len, self.embed_dim)
+            self.context_mamba.build([search_flow_shape, context_shape])
+        
+        # Build fusion
+        if not self.fusion_attn.built:
+            self.fusion_attn.build(search_tokens_shape)
+        if not self.fusion_norm.built:
+            self.fusion_norm.build(search_tokens_shape)
+        
+        # Build detection head on the pooled feature shape (B, 1, 1, embed_dim)
+        # The call() reshapes pooled to (B, 1, 1, D) before passing to detection_head
+        pooled_shape = (None, 1, 1, self.embed_dim)
+        if not self.detection_head.built:
+            self.detection_head.build(pooled_shape)
+        
         super().build(input_shape)
 
     def call(
@@ -300,15 +345,18 @@ class MambaLCT(keras.Model):
             query + fused, training=training
         )
         pooled = ops.mean(fused, axis=1)
-        scores = self.score_out(
-            self.score_hidden(pooled, training=training), training=training
-        )
-        boxes = self.box_out(
-            self.box_hidden(pooled, training=training), training=training
-        )
+        # DetectionHead expects spatial input (B, H, W, C) but we have (B, D)
+        # Reshape to (B, 1, 1, D) for spatial format
+        pooled_spatial = ops.expand_dims(ops.expand_dims(pooled, axis=1), axis=1)
+        det_outputs = self.detection_head(pooled_spatial, training=training)
+        # det_outputs: {'classifications': (B, 1, 1, 1), 'regressions': (B, 1, 1, 4)}
+        scores = ops.reshape(det_outputs['classifications'], (batch, frames, 1))
+        boxes = ops.reshape(det_outputs['regressions'], (batch, frames, 4))
+        # Apply sigmoid to boxes as the original did
+        boxes = ops.sigmoid(boxes)
         return {
-            "scores": ops.reshape(scores, (batch, frames, 1)),
-            "boxes": ops.reshape(boxes, (batch, frames, 4)),
+            "scores": scores,
+            "boxes": boxes,
             "updated_context": updated_context,
         }
 
@@ -362,6 +410,7 @@ class MambaLCT(keras.Model):
             "head_hidden_dim": self.head_hidden_dim,
             "dropout_rate": self.dropout_rate,
         })
+        # Note: detection_head is serialized as a sub-layer via Keras standard mechanism
         return config
 
     @classmethod

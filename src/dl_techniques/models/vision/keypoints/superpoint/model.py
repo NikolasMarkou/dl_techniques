@@ -42,6 +42,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.layers.heads.vision import create_vision_head, VisionTaskType
 
 # ---------------------------------------------------------------------
 
@@ -223,14 +224,21 @@ class SuperPoint(keras.Model):
             name="proj",
         )
 
-        # Emits raw logits; the softmax belongs to the loss.
-        self.detector_head = keras.layers.Conv2D(
-            filters=self.DETECTOR_CHANNELS,
-            kernel_size=1,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_regularizer=self.kernel_regularizer,
-            name="detector_head",
+        # Detection head for keypoints using factory (replaces custom detector_head)
+        # 65 classes: 64 pixel positions in 8x8 cell + 1 dustbin
+        # use_regression=False since keypoint detection doesn't need bbox regression
+        self.detector_head = create_vision_head(
+            VisionTaskType.KEYPOINT_DETECTION,
+            num_classes=self.DETECTOR_CHANNELS,
+            num_anchors=1,
+            bbox_dims=4,  # not used when use_regression=False
+            input_format="spatial",
+            hidden_dim=self.descriptor_dim,
+            use_attention=False,
+            use_ffn=False,
+            dropout_rate=0.0,
+            use_regression=False,
+            name="detector_head"
         )
 
         self.descriptor_head = keras.layers.Conv2D(
@@ -279,7 +287,10 @@ class SuperPoint(keras.Model):
         feat = self.encoder(inputs, training=training)
         neck = self.proj(feat, training=training)
 
-        keypoints = self.detector_head(neck, training=training)
+        # DetectionHead returns {'classifications': (B, H, W, num_anchors * num_classes), 'regressions': ...}
+        # For keypoint detection, we only need the classifications (65 channels)
+        det_outputs = self.detector_head(neck, training=training)
+        keypoints = det_outputs['classifications']
         desc_coarse = self.descriptor_head(neck, training=training)
 
         # DECISION plan-2026-08-19T163559-499b6f0e/D-060: resize in float32 and cast back;

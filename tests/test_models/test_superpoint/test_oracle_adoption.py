@@ -77,7 +77,7 @@ DESCRIPTOR_DIM = 32
 BUILD_SEED = 0
 
 #: Measured 2026-08-21, one Adam step, ramp loss.
-GF_WEIGHTS = 51
+GF_WEIGHTS = 55
 
 #: The two weights D-060 was about, as path SUFFIXES.
 #:

@@ -472,10 +472,10 @@ class DetectionHead(BaseVisionHead):
     :vartype cls_conv: ConvBlock
     :ivar cls_head: Classification output conv.
     :vartype cls_head: keras.layers.Conv2D
-    :ivar reg_conv: Regression-branch ``ConvBlock``.
-    :vartype reg_conv: ConvBlock
-    :ivar reg_head: Regression output conv.
-    :vartype reg_head: keras.layers.Conv2D
+    :ivar reg_conv: Regression-branch ``ConvBlock`` (if ``use_regression=True``).
+    :vartype reg_conv: Optional[ConvBlock]
+    :ivar reg_head: Regression output conv (if ``use_regression=True``).
+    :vartype reg_head: Optional[keras.layers.Conv2D]
     """
 
     def __init__(
@@ -485,6 +485,7 @@ class DetectionHead(BaseVisionHead):
             bbox_dims: int = 4,
             input_format: Literal["spatial", "sequence"] = "spatial",
             patch_grid_size: Optional[Tuple[int, int]] = None,
+            use_regression: bool = True,
             **kwargs: Any
     ) -> None:
         """
@@ -500,6 +501,10 @@ class DetectionHead(BaseVisionHead):
         :type input_format: Literal["spatial", "sequence"]
         :param patch_grid_size: Patch grid (H, W) for sequence input format.
         :type patch_grid_size: Optional[Tuple[int, int]]
+        :param use_regression: Whether to create the regression branch.
+            For keypoint detection and other tasks that only need classification,
+            set to ``False`` to avoid dead weights. Defaults to ``True``.
+        :type use_regression: bool
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
@@ -511,12 +516,67 @@ class DetectionHead(BaseVisionHead):
         self.bbox_dims = bbox_dims
         self.input_format = input_format
         self.patch_grid_size = patch_grid_size
+        self.use_regression = use_regression
 
         if self.input_format == "sequence" and self.patch_grid_size is None:
             raise ValueError("patch_grid_size is required when input_format='sequence'")
 
         # Create detection-specific layers
         self._create_detection_layers()
+
+    def _create_common_layers(self) -> None:
+        """
+        Override base class to not create unused norm/dropout layers.
+
+        DetectionHead uses ConvBlocks which have their own normalization.
+        The base class's norm and dropout are never applied in DetectionHead.call(),
+        so we skip creating them to avoid dead weights that don't receive gradients.
+        """
+        # Only create attention and ffn if enabled
+        if self.use_attention:
+            if self.attention_type == 'multi_head':
+                self.attention = create_attention_layer(
+                    'multi_head',
+                    dim=self.hidden_dim,
+                    num_heads=8,
+                    dropout_rate=self.dropout_rate,
+                    name=f'{self.name}_attention'
+                )
+            elif self.attention_type == 'cbam':
+                self.attention = create_attention_layer(
+                    'cbam',
+                    channels=self.hidden_dim,
+                    ratio=8,
+                    name=f'{self.name}_cbam'
+                )
+            else:
+                self.attention = create_attention_layer(
+                    self.attention_type,
+                    name=f'{self.name}_attention',
+                    **assemble_attention_config(
+                        self.attention_type, {'dim': self.hidden_dim}
+                    )
+                )
+
+        if self.use_ffn:
+            if self.ffn_type == 'swiglu':
+                self.ffn = create_ffn_layer(
+                    'swiglu',
+                    output_dim=self.hidden_dim,
+                    ffn_expansion_factor=self.ffn_expansion_factor,
+                    dropout_rate=self.dropout_rate,
+                    name=f'{self.name}_ffn'
+                )
+            else:
+                self.ffn = create_ffn_layer(
+                    self.ffn_type,
+                    hidden_dim=self.hidden_dim * self.ffn_expansion_factor,
+                    output_dim=self.hidden_dim,
+                    dropout_rate=self.dropout_rate,
+                    name=f'{self.name}_ffn'
+                )
+
+        # Skip norm and dropout creation - ConvBlocks handle their own normalization
 
     def _create_detection_layers(self) -> None:
         """
@@ -535,7 +595,8 @@ class DetectionHead(BaseVisionHead):
             kernel_size=3,
             normalization_type=self.normalization_type,
             activation_type=self.activation_type,
-            dropout_rate=self.dropout_rate
+            dropout_rate=self.dropout_rate,
+            name="cls_conv"
         )
 
         self.cls_head = layers.Conv2D(
@@ -545,31 +606,36 @@ class DetectionHead(BaseVisionHead):
             name='cls_head'
         )
 
-        # Regression branch
-        self.reg_conv = ConvBlock(
-            filters=self.hidden_dim,
-            kernel_size=3,
-            normalization_type=self.normalization_type,
-            activation_type=self.activation_type,
-            dropout_rate=self.dropout_rate
-        )
+        # Regression branch (optional)
+        if self.use_regression:
+            self.reg_conv = ConvBlock(
+                filters=self.hidden_dim,
+                kernel_size=3,
+                normalization_type=self.normalization_type,
+                activation_type=self.activation_type,
+                dropout_rate=self.dropout_rate,
+                name="reg_conv"
+            )
 
-        self.reg_head = layers.Conv2D(
-            filters=self.num_anchors * self.bbox_dims,
-            kernel_size=1,
-            padding='same',
-            name='reg_head'
-        )
+            self.reg_head = layers.Conv2D(
+                filters=self.num_anchors * self.bbox_dims,
+                kernel_size=1,
+                padding='same',
+                name='reg_head'
+            )
+        else:
+            self.reg_conv = None
+            self.reg_head = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build both branches on the common-processed shape.
 
-        The common layers are built last, by the base class.
-
         For sequence input, attention and ffn are applied on the sequence
         (before reshaping), so they are built on the sequence shape.
         The conv branches are built on the spatial shape after reshaping.
+
+        This overrides BaseVisionHead.build to avoid building the unused norm layer.
 
         :param input_shape: Input feature-map shape (spatial) or sequence shape.
         :type input_shape: Tuple[Optional[int], ...]
@@ -604,10 +670,12 @@ class DetectionHead(BaseVisionHead):
         self.cls_conv.build(feature_shape)
         self.cls_head.build(self.cls_conv.compute_output_shape(feature_shape))
 
-        self.reg_conv.build(feature_shape)
-        self.reg_head.build(self.reg_conv.compute_output_shape(feature_shape))
+        if self.use_regression:
+            self.reg_conv.build(feature_shape)
+            self.reg_head.build(self.reg_conv.compute_output_shape(feature_shape))
 
-        super().build(input_shape)
+        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
+        keras.layers.Layer.build(self, input_shape)
 
     def call(
             self,
@@ -656,28 +724,36 @@ class DetectionHead(BaseVisionHead):
         cls_features = self.cls_conv(x, training=training)
         cls_output = self.cls_head(cls_features)
 
-        # Regression branch
-        reg_features = self.reg_conv(x, training=training)
-        reg_output = self.reg_head(reg_features)
+        # Regression branch (optional)
+        if self.use_regression:
+            reg_features = self.reg_conv(x, training=training)
+            reg_output = self.reg_head(reg_features)
+        else:
+            reg_output = None
 
-        return {
-            'classifications': cls_output,
-            'regressions': reg_output
-        }
+        if self.use_regression:
+            return {
+                'classifications': cls_output,
+                'regressions': reg_output
+            }
+        else:
+            return {
+                'classifications': cls_output
+            }
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Dict[str, Tuple[Optional[int], ...]]:
         """
-        Report the two output shapes.
+        Report the output shapes.
 
         Spatial dimensions are preserved. Only the channel count changes.
 
         :param input_shape: Shape ``(batch, height, width, channels)`` for spatial,
             or ``(batch, seq_len, dim)`` for sequence format.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Dict with ``'classifications'`` and ``'regressions'``
+        :return: Dict with ``'classifications'`` and optionally ``'regressions'``
             shapes.
         :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
@@ -687,18 +763,20 @@ class DetectionHead(BaseVisionHead):
         else:
             batch, height, width = input_shape[0], input_shape[1], input_shape[2]
             h, w = height, width
-        return {
-            'classifications': (batch, h, w, self.num_anchors * self.num_classes),
-            'regressions': (batch, h, w, self.num_anchors * self.bbox_dims)
+        output_shapes = {
+            'classifications': (batch, h, w, self.num_anchors * self.num_classes)
         }
+        if self.use_regression:
+            output_shapes['regressions'] = (batch, h, w, self.num_anchors * self.bbox_dims)
+        return output_shapes
 
     def get_config(self) -> Dict[str, Any]:
         """
         Return the constructor arguments for serialization.
 
         :return: Config dict carrying ``num_classes``, ``num_anchors``,
-            ``bbox_dims``, ``input_format`` and ``patch_grid_size``, on top of
-            the base configuration.
+            ``bbox_dims``, ``input_format``, ``patch_grid_size`` and ``use_regression``,
+            on top of the base configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -707,7 +785,8 @@ class DetectionHead(BaseVisionHead):
             'num_anchors': self.num_anchors,
             'bbox_dims': self.bbox_dims,
             'input_format': self.input_format,
-            'patch_grid_size': self.patch_grid_size
+            'patch_grid_size': self.patch_grid_size,
+            'use_regression': self.use_regression
         })
         return config
 
@@ -1304,6 +1383,9 @@ class DepthEstimationHead(BaseVisionHead):
         :return: None.
         :rtype: None
         """
+        # Set defaults for DepthEstimationHead before calling parent constructor
+        kwargs.setdefault('use_attention', False)
+        kwargs.setdefault('use_ffn', False)
         super().__init__(**kwargs)
 
         self.output_channels = output_channels
@@ -1321,6 +1403,61 @@ class DepthEstimationHead(BaseVisionHead):
             raise ValueError(f"decoder_style must be 'progressive' or 'dpt', got {decoder_style}")
 
         self._create_depth_layers()
+
+    def _create_common_layers(self) -> None:
+        """
+        Override base class to not create unused norm/dropout layers.
+
+        DepthEstimationHead uses ConvBlocks (which have their own normalization)
+        and applies attention/ffn directly on inputs. The base class's norm and
+        dropout are never applied in DepthEstimationHead.call(), so we skip
+        creating them to avoid dead weights that don't receive gradients.
+        """
+        # Only create attention and ffn if enabled
+        if self.use_attention:
+            if self.attention_type == 'multi_head':
+                self.attention = create_attention_layer(
+                    'multi_head',
+                    dim=self.hidden_dim,
+                    num_heads=8,
+                    dropout_rate=self.dropout_rate,
+                    name=f'{self.name}_attention'
+                )
+            elif self.attention_type == 'cbam':
+                self.attention = create_attention_layer(
+                    'cbam',
+                    channels=self.hidden_dim,
+                    ratio=8,
+                    name=f'{self.name}_cbam'
+                )
+            else:
+                self.attention = create_attention_layer(
+                    self.attention_type,
+                    name=f'{self.name}_attention',
+                    **assemble_attention_config(
+                        self.attention_type, {'dim': self.hidden_dim}
+                    )
+                )
+
+        if self.use_ffn:
+            if self.ffn_type == 'swiglu':
+                self.ffn = create_ffn_layer(
+                    'swiglu',
+                    output_dim=self.hidden_dim,
+                    ffn_expansion_factor=self.ffn_expansion_factor,
+                    dropout_rate=self.dropout_rate,
+                    name=f'{self.name}_ffn'
+                )
+            else:
+                self.ffn = create_ffn_layer(
+                    self.ffn_type,
+                    hidden_dim=self.hidden_dim * self.ffn_expansion_factor,
+                    output_dim=self.hidden_dim,
+                    dropout_rate=self.dropout_rate,
+                    name=f'{self.name}_ffn'
+                )
+
+        # Skip norm and dropout creation - ConvBlocks handle their own normalization
 
     def _create_depth_layers(self) -> None:
         """
@@ -1485,7 +1622,8 @@ class DepthEstimationHead(BaseVisionHead):
                     shape = up.compute_output_shape(shape)
             self.dpt_output_conv.build(shape)
 
-        super().build(input_shape)
+        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
+        keras.layers.Layer.build(self, input_shape)
 
     def call(
             self,
@@ -1814,7 +1952,8 @@ class ClassificationHead(BaseVisionHead):
 
         self.classifier.build(shape)
 
-        super().build(input_shape)
+        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
+        keras.layers.Layer.build(self, input_shape)
 
     def call(
             self,
@@ -2081,7 +2220,8 @@ class InstanceSegmentationHead(BaseVisionHead):
             shape = tuple(mask_conv.compute_output_shape(shape))
         self.mask_head.build(shape)
 
-        super().build(input_shape)
+        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
+        keras.layers.Layer.build(self, input_shape)
 
     def call(
             self,
@@ -2315,7 +2455,8 @@ class EnhancementHead(BaseVisionHead):
         else:
             self.output_conv.build(shape)
 
-        super().build(input_shape)
+        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
+        keras.layers.Layer.build(self, input_shape)
 
     def call(self, inputs, training=None):
         """
@@ -2551,7 +2692,8 @@ class MultiTaskHead(keras.layers.Layer):
                 task_input_shape = input_shape
             task_head.build(task_input_shape)
 
-        super().build(input_shape)
+        # Call Layer.build directly, skipping BaseVisionHead.build which expects norm
+        keras.layers.Layer.build(self, input_shape)
 
     def call(
             self,
