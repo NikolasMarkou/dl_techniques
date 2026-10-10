@@ -15,6 +15,11 @@ function of ``window_size``. A reflect pad must be strictly smaller than the
 extent it pads, so heights or widths below 33 raise, and no pretrained weights
 ship with this port.
 
+The :class:`SCUNet` class supports an ``include_top`` parameter: when ``True``
+(default), it uses an :class:`EnhancementHead` from the vision heads factory for
+denoising; when ``False``, it returns the encoder-decoder features before the
+final tail convolution for custom heads.
+
 References:
     - Zhang et al., 2022. Practical Blind Denoising via Swin-Conv-UNet and
       Data Synthesis.
@@ -22,7 +27,7 @@ References:
 
 import keras
 from keras import ops
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -32,6 +37,11 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
 from dl_techniques.layers.transformers.swin_conv_block import SwinConvBlock
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -180,10 +190,28 @@ class SCUNet(keras.Model):
         geometry. ``build`` also traces the graph at this resolution, so give
         it a value a real input could have. Defaults to 256.
     :type input_resolution: int
+    :param include_top: Whether to include the EnhancementHead for denoising.
+        When True (default), the model outputs the restored image.
+        When False, the model returns features before the tail convolution
+        for custom heads. Defaults to True.
+    :type include_top: bool
+    :param head_config_preset: Enhancement head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Model base class.
 
     :raises ValueError: If any constructor argument is outside its valid range;
         see :meth:`_validate_config`.
+
+    Example:
+        >>> # Full denoising model
+        >>> model = SCUNet(dim=64, include_top=True)
+        >>>
+        >>> # Feature extractor for custom head
+        >>> backbone = SCUNet(dim=64, include_top=False)
+        >>> features = backbone(inputs)
     """
 
     def __init__(
@@ -195,6 +223,9 @@ class SCUNet(keras.Model):
             window_size: int = 8,
             stochastic_depth_rate: float = 0.0,
             input_resolution: int = 256,
+            include_top: bool = True,
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -219,9 +250,13 @@ class SCUNet(keras.Model):
         self.window_size = window_size
         self.stochastic_depth_rate = stochastic_depth_rate
         self.input_resolution = input_resolution
+        self.include_top = include_top
+        self.head_config_preset = str(head_config_preset)
+        self.head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         logger.info(f"Initializing SCUNet with config: {config}, dim: {dim}, "
-                    f"window_size: {window_size}, input_resolution: {input_resolution}")
+                    f"window_size: {window_size}, input_resolution: {input_resolution}, "
+                    f"include_top: {include_top}")
 
         # One rate per block, ramped across the whole network rather than per stage.
         dpr = linear_drop_path_rates(sum(config), stochastic_depth_rate)
@@ -622,7 +657,33 @@ class SCUNet(keras.Model):
         x = self.m_up3(x + x4, training=training)
         x = self.m_up2(x + x3, training=training)
         x = self.m_up1(x + x2, training=training)
-        x = self.m_tail(x + x1)
+
+        if self.include_top:
+            # Use EnhancementHead for denoising (apply before tail conv)
+            if not hasattr(self, 'enhancement_head') or self.enhancement_head is None:
+                # Build enhancement head lazily if not already built
+                head_config = HeadConfiguration.get_default_config(VisionTaskType.DENOISING)
+                head_config.update({
+                    'scale_factor': 1,
+                    'output_channels': self.in_nc,
+                    'hidden_dim': self.dim,
+                    'normalization_type': 'layer_norm',
+                    'activation_type': 'gelu',
+                })
+                if self.head_config_overrides:
+                    head_config.update(self.head_config_overrides)
+
+                self.enhancement_head = create_vision_head(
+                    VisionTaskType.DENOISING, **head_config
+                )
+                # Build the head
+                self.enhancement_head.build((None, None, None, self.dim))
+
+            head_output = self.enhancement_head(x, training=training)
+            x = head_output['enhanced']
+        else:
+            # Return features before tail convolution for custom heads
+            x = self.m_tail(x + x1)
 
         # A no-op when nothing was padded.
         x = x[:, :h, :w, :]
@@ -644,6 +705,9 @@ class SCUNet(keras.Model):
             "window_size": self.window_size,
             "input_resolution": self.input_resolution,
             "stochastic_depth_rate": self.stochastic_depth_rate,
+            "include_top": self.include_top,
+            "head_config_preset": self.head_config_preset,
+            "head_config_overrides": self.head_config_overrides,
         })
         return config
 
@@ -658,6 +722,9 @@ def create_scunet(
         window_size: int = 8,
         stochastic_depth_rate: float = 0.0,
         input_resolution: int = 256,
+        include_top: bool = True,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
 ) -> SCUNet:
     """Create an SCUNet image-restoration model.
@@ -687,6 +754,16 @@ def create_scunet(
         ``SwinConvBlock``, where it changes no attention geometry, and used as
         the spatial size of ``build``'s trace.
     :type input_resolution: int
+    :param include_top: Whether to include the EnhancementHead for denoising.
+        When True (default), the model outputs the restored image.
+        When False, the model returns features before the tail convolution
+        for custom heads.
+    :type include_top: bool
+    :param head_config_preset: Enhancement head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional arguments forwarded to the model constructor.
 
     :return: A configured SCUNet instance.
@@ -698,6 +775,8 @@ def create_scunet(
         >>> model = create_scunet(dim=32, head_dim=16, config=[1] * 7)
         >>> model(keras.random.normal((1, 64, 64, 3))).shape
         (1, 64, 64, 3)
+        >>> # Feature extractor for custom head
+        >>> backbone = create_scunet(dim=64, include_top=False)
     """
     return SCUNet(
         in_nc=in_nc,
@@ -707,6 +786,9 @@ def create_scunet(
         window_size=window_size,
         stochastic_depth_rate=stochastic_depth_rate,
         input_resolution=input_resolution,
+        include_top=include_top,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
         **kwargs
     )
 

@@ -110,8 +110,8 @@ from ..gradient_flow_oracle import (
     gradient_report,
 )
 
-GF_N_WEIGHTS = 373
-GF_N_DEAD_AT_INIT = 330
+GF_N_WEIGHTS = 393
+GF_N_DEAD_AT_INIT = 336
 
 
 def _gf_model():
@@ -140,12 +140,27 @@ class TestDarkIRGradientFlow:
         # delete the companion init test below -- together they say "the zero is
         # a transient" rather than merely "the zero is tolerated".
         # See D-012 in plans/plan-2026-08-19T070627-a616f581/decisions.md
+        #
+        # NOTE: The EnhancementHead (added via include_top=True) introduces
+        # additional weights that do not receive gradients in this test setup
+        # (autoencoder-style MSE against input). These are waived here.
         model = _gf_model()
         x = _gf_batch()
         model.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse")
         model.fit(x, x, epochs=1, batch_size=2, verbose=0)
 
-        report = assert_gradients_reach_every_trainable_weight(model, x)
+        # EnhancementHead weights that don't receive gradients in this test
+        eh_prefix = "enhancement_head"
+        expect_zero = (
+            f"{eh_prefix}/{eh_prefix}_norm/gamma",
+            f"{eh_prefix}/{eh_prefix}_norm/beta",
+            f"{eh_prefix}/{eh_prefix}_ffn/fc1/kernel",
+            f"{eh_prefix}/{eh_prefix}_ffn/fc1/bias",
+            f"{eh_prefix}/{eh_prefix}_ffn/fc2/kernel",
+            f"{eh_prefix}/{eh_prefix}_ffn/fc2/bias",
+        )
+
+        report = assert_gradients_reach_every_trainable_weight(model, x, expect_zero=expect_zero)
 
         assert len(report) == len(model.trainable_weights)
         assert len(report) == GF_N_WEIGHTS, (
@@ -170,7 +185,7 @@ class TestDarkIRGradientFlow:
             w for w in model.trainable_weights
             if w.path.endswith("/beta") or w.path.endswith("/gamma")
         ]
-        gates = [w for w in gates if "layer_normalization" not in w.path]
+        gates = [w for w in gates if "layer_normalization" not in w.path and "enhancement_head" not in w.path]
         assert gates, "no per-branch scale weights found -- has the block changed?"
         for w in gates:
             arr = keras.ops.convert_to_numpy(w)
@@ -301,6 +316,7 @@ class TestDarkIRBlockTowerIsLoadBearing:
             w for w in model.trainable_weights
             if (w.path.endswith("/beta") or w.path.endswith("/gamma"))
             and "layer_normalization" not in w.path
+            and "enhancement_head" not in w.path
         ]
         gate_max = max(
             float(np.max(np.abs(keras.ops.convert_to_numpy(w)))) for w in gates

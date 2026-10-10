@@ -28,7 +28,8 @@ References:
 """
 
 import keras
-from typing import Any, Dict, Optional, List, Literal
+from keras import layers
+from typing import Any, Dict, Optional, List, Literal, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -37,6 +38,12 @@ from typing import Any, Dict, Optional, List, Literal
 from dl_techniques.layers.pooling.pixel_unshuffle import PixelShuffle2D
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
+from dl_techniques.layers.heads.vision import (
+    create_vision_head,
+    VisionTaskType,
+    HeadConfiguration,
+)
+from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -168,6 +175,16 @@ class PFTSR(keras.Model):
     :param upsampler: Upsampling method: ``'pixelshuffle'``,
         ``'pixelshuffledirect'``, or ``'nearest+conv'``.
     :type upsampler: str
+    :param include_top: Whether to include the EnhancementHead for super-resolution.
+        When ``True`` (default), the model outputs the super-resolved image.
+        When ``False``, the model returns the features before upsampling for
+        custom heads. Defaults to True.
+    :type include_top: bool
+    :param head_config_preset: Enhancement head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Keras ``Model`` base class.
     :raises ValueError: At build time, if ``scale`` is not 2, 3 or 4 under
         ``'pixelshuffle'``, or not a power of two under ``'nearest+conv'``.
@@ -177,7 +194,10 @@ class PFTSR(keras.Model):
         Height and width must be divisible by window_size.
 
     Output shape:
-        4D tensor with shape: `(batch_size, height * scale, width * scale, in_channels)`.
+        - ``include_top=True``: 4D tensor with shape
+          `(batch_size, height * scale, width * scale, in_channels)`.
+        - ``include_top=False``: 4D tensor with shape
+          `(batch_size, height, width, embed_dim)` (features before upsampling).
 
     Example:
         >>> import keras
@@ -239,6 +259,9 @@ class PFTSR(keras.Model):
             norm_type: Literal['layer_norm', 'rms_norm'] = 'layer_norm',
             use_lepe: bool = True,
             upsampler: Literal['pixelshuffle', 'pixelshuffledirect', 'nearest+conv'] = 'pixelshuffle',
+            include_top: bool = True,
+            head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs
     ):
         """Store the configuration and the per-block drop-path schedule."""
@@ -261,6 +284,9 @@ class PFTSR(keras.Model):
         self.norm_type = norm_type
         self.use_lepe = use_lepe
         self.upsampler = upsampler
+        self.include_top = include_top
+        self.head_config_preset = str(head_config_preset)
+        self.head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
 
         self.total_blocks = sum(num_blocks)
 
@@ -320,6 +346,7 @@ class PFTSR(keras.Model):
             name="conv_after_body"
         )
 
+        # Build the upsampler (kept for backward compatibility and include_top=False)
         if self.upsampler == 'pixelshuffle':
             self.upsample = self._build_pixelshuffle_upsampler()
         elif self.upsampler == 'pixelshuffledirect':
@@ -334,6 +361,24 @@ class PFTSR(keras.Model):
             padding='same',
             name="conv_last"
         )
+
+        # Enhancement head for super-resolution (when include_top=True)
+        self.enhancement_head = None
+        if self.include_top:
+            head_config = HeadConfiguration.get_default_config(VisionTaskType.SUPER_RESOLUTION)
+            head_config.update({
+                'scale_factor': self.scale,
+                'output_channels': self.in_channels,
+                'hidden_dim': self.embed_dim,
+                'normalization_type': 'layer_norm',
+                'activation_type': 'gelu',
+            })
+            if self.head_config_overrides:
+                head_config.update(self.head_config_overrides)
+
+            self.enhancement_head = create_vision_head(
+                VisionTaskType.SUPER_RESOLUTION, **head_config
+            )
 
         # Force sublayers to build now: build_from_config reloads them unbuilt,
         # and weight loading fails on layers "never built".
@@ -468,7 +513,7 @@ class PFTSR(keras.Model):
             self,
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
-    ) -> keras.KerasTensor:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """
         Forward pass of PFT-SR.
 
@@ -477,8 +522,9 @@ class PFTSR(keras.Model):
         :type inputs: keras.KerasTensor
         :param training: Whether the call runs in training mode.
         :type training: bool or None
-        :return: Super-resolved high-resolution images.
-        :rtype: keras.KerasTensor
+        :return: Super-resolved high-resolution images (include_top=True) or
+            features before upsampling (include_top=False).
+        :rtype: keras.KerasTensor or Dict[str, keras.KerasTensor]
         """
         x = self.conv_first(inputs)
         residual = x
@@ -499,11 +545,13 @@ class PFTSR(keras.Model):
         x = self.conv_after_body(x)
         x = x + residual
 
-        x = self.upsample(x)
-
-        output = self.conv_last(x)
-
-        return output
+        if self.include_top:
+            # Use EnhancementHead for super-resolution
+            head_output = self.enhancement_head(x, training=training)
+            return head_output['enhanced']
+        else:
+            # Return features before upsampling for custom heads
+            return x
 
     def get_config(self):
         """Return model configuration.
@@ -526,6 +574,9 @@ class PFTSR(keras.Model):
             "norm_type": self.norm_type,
             "use_lepe": self.use_lepe,
             "upsampler": self.upsampler,
+            "include_top": self.include_top,
+            "head_config_preset": self.head_config_preset,
+            "head_config_overrides": self.head_config_overrides,
         })
         return config
 
@@ -533,6 +584,9 @@ class PFTSR(keras.Model):
 def create_pft_sr(
         scale: int = 4,
         variant: Literal['base', 'light', 'repo_medium'] = 'base',
+        include_top: bool = True,
+        head_config_preset: Literal['default', 'efficient', 'high_performance'] = 'default',
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
 ) -> PFTSR:
     """
@@ -545,6 +599,15 @@ def create_pft_sr(
         ``'repo_medium'`` is a repo-original mid-size tier with no
         published counterpart.
     :type variant: str
+    :param include_top: Whether to include the EnhancementHead for super-resolution.
+        When True (default), the model outputs the super-resolved image.
+        When False, the model returns features before upsampling for custom heads.
+    :type include_top: bool
+    :param head_config_preset: Enhancement head preset: ``'default'``,
+        ``'efficient'``, or ``'high_performance'``. Defaults to ``'default'``.
+    :type head_config_preset: Literal['default', 'efficient', 'high_performance']
+    :param head_config_overrides: Optional dict to override head configuration.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Any :class:`PFTSR` constructor argument, overriding the
         variant table. This is the only route to ``window_size``,
         ``drop_path_rate``, ``upsampler``, ``norm_type``, ``use_lepe`` and
@@ -557,6 +620,8 @@ def create_pft_sr(
         >>> model = create_pft_sr(scale=4, variant='base')
         >>> model_light = create_pft_sr(scale=2, variant='light')
         >>> model_medium = create_pft_sr(scale=4, variant='repo_medium')
+        >>> # Feature extractor for custom head
+        >>> backbone = create_pft_sr(scale=4, variant='base', include_top=False)
     """
     if variant not in PFTSR.MODEL_VARIANTS:
         raise ValueError(
@@ -570,6 +635,12 @@ def create_pft_sr(
     config['num_blocks'] = list(config['num_blocks'])
     config.update(kwargs)
 
-    return PFTSR(scale=scale, **config)
+    return PFTSR(
+        scale=scale,
+        include_top=include_top,
+        head_config_preset=head_config_preset,
+        head_config_overrides=head_config_overrides,
+        **config
+    )
 
 # ---------------------------------------------------------------------

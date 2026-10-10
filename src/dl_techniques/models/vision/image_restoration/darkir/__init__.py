@@ -1,11 +1,12 @@
 """DarkIR low-light image restoration — public API re-exports.
 
-A functional builder, not a `keras.Model` subclass: `create_darkir_model`
-returns `keras.Model(inputs, outputs)`. It stays functional because every
-existing DarkIR checkpoint was saved from that graph.
+Provides both a ``keras.Model`` subclass (:class:`DarkIR`) with ``include_top``
+support and a functional factory (:func:`create_darkir_model`) for backward
+compatibility.
 """
-from .model import create_darkir_model
+from .model import DarkIR, create_darkir_model
 
 __all__ = [
+    "DarkIR",
     "create_darkir_model",
 ]
