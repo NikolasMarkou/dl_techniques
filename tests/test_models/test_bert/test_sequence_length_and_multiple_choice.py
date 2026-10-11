@@ -183,7 +183,9 @@ def _resolve_jit(monkeypatch, config):
 
     ``jit_compile_true`` leaves the resolver alone: the caller sets it.
     """
-    from keras.src.trainers import trainer as keras_trainer
+    # Keras exposes no public switch for how ``jit_compile="auto"`` resolves,
+    # so the private resolver is the only seam; reached through ``keras``.
+    keras_trainer = keras.src.trainers.trainer
 
     if config == "jit_compile_true":
         return True
@@ -238,7 +240,10 @@ def test_a_relaxed_retrace_still_refuses_an_over_long_batch(monkeypatch, config)
 def test_a_relaxed_fit_step_refuses_an_over_long_batch(monkeypatch, config):
     """The training step, D-030: the reviewer's XLA probe TRAINED on a
     40-token batch at ``max_position_embeddings=32`` (loss 1.07, no error).
-    No update may happen for an over-long batch, under any configuration.
+    No model weight may change for an over-long batch, under any
+    configuration. The optimizer's iteration counter is not covered: on the
+    non-XLA graph path a refused step still advances it by one (measured in
+    review pass 3 of plan-2026-10-11T004932-b83935e1); under XLA it does not.
     """
     import tensorflow as tf
 

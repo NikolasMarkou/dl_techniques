@@ -662,7 +662,7 @@ class TreeTransformer(keras.Model):
         model randomly initialized; a missing local file or a failed transfer raises.
 
         :param variant: One of ``cls.MODEL_VARIANTS`` (e.g. ``"tiny"``, ``"small"``, ``"base"``, ``"large"``).
-        :param pretrained: ``False`` (default) for random init. ``True`` to attempt downloading hosted weights — this currently raises :class:`NotImplementedError` because no public Tree Transformer weights are hosted. A string path is treated as a local ``.keras`` / ``.weights.h5`` file to load.
+        :param pretrained: ``False`` (default) for random init. ``True`` to attempt downloading hosted weights — this currently raises :class:`NotImplementedError` because no public Tree Transformer weights are hosted. A string path is treated as a local ``.keras`` archive to load (the by-name backbone route reads the archive's layer structure, so a bare ``.weights.h5`` file is not accepted).
         :param weights_dataset: Dataset key for hosted weights (kept for API parity with BERT / DistilBERT / ResNet — currently unused since no public weights are hosted).
         :param cache_dir: Optional cache directory for downloaded weights.
         :param **kwargs: Forwarded to ``TreeTransformer.__init__``, including
@@ -794,7 +794,7 @@ def create_tree_transformer(
 
     :param variant: String, model variant ("tiny", "small", "base", "large").
     :param vocab_size: Optional integer; override the variant default vocabulary size. With ``pretrained=<path>``, a value different from the CHECKPOINT's ``vocab_size`` skips the vocab-dependent layers (embedding, LM head); an equal one restores them.
-    :param pretrained: Boolean or string. If ``True``, attempts to load pretrained weights for the chosen ``weights_dataset`` (currently raises :class:`NotImplementedError` — no public Tree Transformer weights are hosted). If a string, treated as a path to a local ``.keras`` / ``.weights.h5`` file.
+    :param pretrained: Boolean or string. If ``True``, attempts to load pretrained weights for the chosen ``weights_dataset`` (currently raises :class:`NotImplementedError` — no public Tree Transformer weights are hosted). If a string, treated as a path to a local ``.keras`` archive (a bare ``.weights.h5`` file is not accepted).
     :param weights_dataset: String, dataset key for pretrained weights (kept for API parity with other foundation models).
     :param cache_dir: Optional string, directory to cache downloaded weights.
     :param **kwargs: Additional arguments forwarded to ``TreeTransformer.__init__`` (e.g. ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``, or ``include_top=True`` with a ``task_config`` for a model with a task head). A local ``pretrained`` path never restores a checkpoint's task head.
