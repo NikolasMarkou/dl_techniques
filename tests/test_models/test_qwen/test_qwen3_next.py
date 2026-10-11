@@ -25,10 +25,12 @@ from dl_techniques.models.language.qwen.qwen3_next import (
     Qwen3Next,
     Qwen3NextBlock,
     create_qwen3_next,
+    create_qwen3_next_classification,
 )
 from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
+from .test_qwen3 import QwenIncludeTopCases
 
 class TestQwen3NextModelBasic:
     """Test basic Qwen3 Next model functionality with hybrid block structure."""
@@ -643,10 +645,10 @@ class TestQwen3NextModelFactories:
             num_labels=num_labels,
             classifier_dropout_rate=0.5
         )
-        # Check that the dropout layer was created with the correct rate
-        classifier_dropout_layer = dropout_model.get_layer("classifier_dropout")
-        assert classifier_dropout_layer is not None
-        assert classifier_dropout_layer.rate == 0.5
+        # The rate reaches the model's own task head (the hand-rolled
+        # `classifier_dropout` layer no longer exists).
+        head = dropout_model.get_layer("qwen3_next_backbone").task_head
+        assert head.dropout.rate == 0.5
 
     def test_model_variant_configurations(self):
         """Test that MODEL_VARIANTS have correct configurations."""
@@ -1157,6 +1159,27 @@ class TestQwen3NextCausalMasking:
             f"= {leak:.6e}); the masked run's agreement would then not be "
             f"attributable to the causal mask"
         )
+
+
+
+class TestQwen3NextIncludeTop(QwenIncludeTopCases):
+    """``Qwen3Next`` with ``include_top`` (1 block: 64 backbone weights, measured).
+
+    The cases are shared with ``Qwen3`` (``test_qwen3.IncludeTopCases``).
+    ``num_experts=1``: with 2 experts a padded token moves the real
+    positions' states by about 1e-7 (the MoE layer; measured, and the reason
+    ``test_causal_classification_pooling.py``'s exact padding arm is RED for
+    ``qwen3_next``), which would blur the padding cases here.
+    """
+
+    CLS = Qwen3Next
+    KW = dict(hidden_size=32, num_layers=1, num_attention_heads=4,
+              num_key_value_heads=2, max_seq_len=16, num_experts=1,
+              num_experts_per_tok=1, moe_intermediate_size=64,
+              dropout_rate=0.0)
+    CLASSIFICATION_FACTORY = staticmethod(create_qwen3_next_classification)
+    WRAPPED_NAME = "qwen3_next_backbone"
+    N_BACKBONE = 64
 
 
 if __name__ == "__main__":

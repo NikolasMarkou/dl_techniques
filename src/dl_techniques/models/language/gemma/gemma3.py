@@ -28,11 +28,16 @@ embedding matrix. This package is text-only; the multimodal vision tower is
 not included. `from_variant` takes no `pretrained` argument, so there is no
 path to a silently random-initialized "pretrained" model.
 
-`create_gemma3_classification` re-traces the backbone into a functional graph
-to reach hidden states before the LM head, then pools with the shared
-`SequencePooling` layer. It defaults to `last` pooling, the last position kept
-by `attention_mask`, because the causally masked blocks make `cls` pool a
-position that attended only to itself.
+With `include_top=True` and a `task_config` the model owns ONE task head from
+`layers/heads/nlp`, named `task_head`, in place of the LM head (no `lm_head`
+is created and no vocabulary logits are computed), fed the final-normed
+hidden states, as `models/language/gpt2` does. The head pools `last` by
+default, the last position kept by the mask, because the causally masked
+blocks make `cls` pool a position that attended only to itself.
+`create_gemma3_classification` is that model behind a two-input functional
+wrapper; it used to re-trace the backbone into a functional graph and pool
+with a hand-rolled `SequencePooling` + `Dense`, so no classifier checkpoint
+written earlier is portable.
 
 References:
     - Gemma Team, 2025. Gemma 3 Technical Report.
@@ -64,7 +69,15 @@ from typing import Any, Dict, List, Optional, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.sequence_pooling import SequencePooling
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    NLPTaskType,
+    build_model_task_head,
+    finalize_head_outputs,
+    head_attention_mask,
+    task_config_to_dict,
+    validate_task_head_knobs,
+)
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.layers.transformers.gemma3_transformer import Gemma3TransformerBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -78,7 +91,13 @@ class Gemma3(keras.Model):
 
     Token embeddings, scaled by sqrt(hidden_size), feed a stack of transformer
     blocks that alternate sliding-window and full attention per `layer_types`,
-    then a final RMSNorm and a Dense projection to vocabulary logits.
+    then a final RMSNorm and a Dense projection to vocabulary logits. With
+    ``include_top=True`` the projection is replaced by one NLP task head, fed
+    ``{"hidden_states": <final-normed states>, "attention_mask": <mask>}``,
+    where the mask is the input's ``attention_mask`` or, without one,
+    ``input_ids != pad_token_id``, cast to the hidden-state dtype; ``call``
+    returns what the head returns, reduced by
+    :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`.
 
     Architecture:
 
@@ -103,6 +122,9 @@ class Gemma3(keras.Model):
                  │
                  ▼
             logits [B, S, vocab_size]
+
+            include_top=True: lm_head is replaced by
+            task_head (pools 'last') ──► finalized head output (only output)
 
     :param vocab_size: Vocabulary size. Must be positive.
     :type vocab_size: int
@@ -132,19 +154,42 @@ class Gemma3(keras.Model):
     :type use_bias: bool
     :param initializer_range: Stddev for TruncatedNormal weight initialization.
     :type initializer_range: float
+    :param pad_token_id: Id treated as padding by the task head when the input
+        carries no ``attention_mask``. Read only with ``include_top=True``; the
+        blocks never derive a mask from it. Default: 0.
+    :type pad_token_id: int
+    :param include_top: Whether the model owns a task head (and no LM head).
+        Default: False: no head layer and no head weight exist.
+    :type include_top: bool
+    :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of its
+        fields. Required when ``include_top`` is True, refused otherwise; stored
+        as a plain dict. ``MULTIPLE_CHOICE`` is refused.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (e.g. ``{"pooling_type": "mean"}``, which replaces the
+        ``'last'`` default). Only valid with ``include_top=True``.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for ``keras.Model``.
 
     :ivar embeddings: Token embedding layer.
     :ivar blocks: List of ``Gemma3TransformerBlock`` layers.
     :ivar final_norm: Final RMSNorm layer before output projection.
-    :ivar lm_head: Language modeling head (Dense layer).
+    :ivar lm_head: Language modeling head (Dense layer), or None when
+        ``include_top`` is True.
+    :ivar task_head: The task head named ``"task_head"``, or None when
+        ``include_top`` is False.
+
+    :raises ValueError: On an invalid configuration value, if
+        ``include_top=True`` comes without a ``task_config``, or if a
+        ``task_config`` or ``head_config_overrides`` comes with
+        ``include_top=False``.
 
     Input shape:
         2D tensor of shape ``(batch_size, sequence_length)`` of token IDs.
 
     Output shape:
         3D tensor of shape ``(batch_size, sequence_length, vocab_size)`` of
-        logits.
+        logits; with ``include_top=True`` the finalized head output.
     """
 
     # Model variant configurations following Gemma 3 specifications
@@ -221,6 +266,10 @@ class Gemma3(keras.Model):
         dropout_rate: float = 0.0,
         use_bias: bool = False,
         initializer_range: float = 0.02,
+        pad_token_id: int = 0,
+        include_top: bool = False,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -241,6 +290,7 @@ class Gemma3(keras.Model):
             dropout_rate,
             initializer_range,
         )
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -255,8 +305,30 @@ class Gemma3(keras.Model):
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.initializer_range = initializer_range
+        self.pad_token_id = pad_token_id
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         self._build_architecture()
+
+        # Created after the backbone and under its own fixed name, so the
+        # backbone's layer names, weight paths and RNG draws are the same with
+        # or without a head.
+        self.task_head = None
+        if self.include_top:
+            # DECISION plan-2026-10-11T004932-b83935e1/D-012: pool 'last' by default; do NOT keep the head's
+            # 'cls' default -- position 0 of a causal decoder has seen only itself. See decisions.md.
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.hidden_size,
+                head_config_overrides=self.head_config_overrides,
+                default_pooling="last",
+            )
         self.emb_scale = ops.sqrt(
             ops.cast(self.hidden_size, dtype=self.compute_dtype)
         )
@@ -365,12 +437,16 @@ class Gemma3(keras.Model):
         self.final_norm = create_normalization_layer(
             "rms_norm", epsilon=self.norm_eps, name="final_norm"
         )
-        self.lm_head = layers.Dense(
-            units=self.vocab_size,
-            use_bias=self.use_bias,
-            kernel_initializer=initializer,
-            name="lm_head",
-        )
+        # A task head replaces the LM head: call() never runs lm_head then,
+        # and build() must not create what call() does not run.
+        self.lm_head = None
+        if not self.include_top:
+            self.lm_head = layers.Dense(
+                units=self.vocab_size,
+                use_bias=self.use_bias,
+                kernel_initializer=initializer,
+                name="lm_head",
+            )
 
     def _log_model_creation(self) -> None:
         """Log comprehensive model creation information."""
@@ -418,8 +494,14 @@ class Gemma3(keras.Model):
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
-        """Forward pass of the Gemma3 model."""
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
+        """Forward pass of the Gemma3 model.
+
+        :return: The LM logits ``(batch, seq_len, vocab_size)``; with
+            ``include_top=True``, only the head's output reduced by
+            ``finalize_head_outputs``: a bare tensor, or a dict of two or more
+            tensors (``start_logits`` / ``end_logits`` for QA).
+        """
         if isinstance(inputs, dict):
             input_ids = inputs.get("input_ids")
             if input_ids is None:
@@ -438,6 +520,20 @@ class Gemma3(keras.Model):
             )
 
         hidden_states = self.final_norm(hidden_states)
+
+        if self.include_top:
+            # The blocks saw only the caller's mask; the head pools under it,
+            # else under input_ids != pad_token_id.
+            return finalize_head_outputs(self.task_head(
+                {
+                    "hidden_states": hidden_states,
+                    "attention_mask": head_attention_mask(
+                        input_ids, attention_mask, self.pad_token_id,
+                        hidden_states.dtype,
+                    ),
+                },
+                training=training,
+            ))
         return self.lm_head(hidden_states)
 
     @classmethod
@@ -475,6 +571,16 @@ class Gemma3(keras.Model):
                 "dropout_rate": self.dropout_rate,
                 "use_bias": self.use_bias,
                 "initializer_range": self.initializer_range,
+                "pad_token_id": self.pad_token_id,
+                "include_top": self.include_top,
+                "task_config": (
+                    dict(self.task_config) if self.task_config is not None
+                    else None
+                ),
+                "head_config_overrides": (
+                    dict(self.head_config_overrides)
+                    if self.head_config_overrides is not None else None
+                ),
             }
         )
         return config
@@ -515,7 +621,10 @@ def create_gemma3_classification(
     by ``attention_mask``, the only one that has attended to the whole sequence
     under this backbone's causal mask), ``"mean"`` (mask-aware mean) or
     ``"cls"`` (first position; a function of the first token id alone here, kept
-    only for bidirectional-era checkpoints).
+    only for bidirectional-era checkpoints). The classifier is the model's own
+    task head (``Gemma3(include_top=True)`` with a ``TEXT_CLASSIFICATION``
+    task); this function only puts the two-input functional interface around
+    it.
     """
     if num_labels <= 0:
         raise ValueError(f"num_labels must be positive, got {num_labels}")
@@ -531,41 +640,28 @@ def create_gemma3_classification(
         f"Creating Gemma3 classification model "
         f"(Labels: {num_labels}, Pooling: {pooling_strategy})."
     )
-    gemma3_backbone = Gemma3(**config, name="gemma3_backbone")
+    classifier = Gemma3(
+        **config,
+        include_top=True,
+        task_config=NLPTaskConfig(
+            name="classification",
+            task_type=NLPTaskType.TEXT_CLASSIFICATION,
+            num_classes=num_labels,
+            dropout_rate=(
+                classifier_dropout_rate if classifier_dropout_rate is not None
+                else config.get("dropout_rate", 0.0)
+            ),
+        ),
+        head_config_overrides={"pooling_type": pooling_strategy},
+        name="gemma3_backbone",
+    )
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
     attention_mask = keras.Input(
         shape=(None,), dtype="int32", name="attention_mask"
     )
-
-    hidden_states = gemma3_backbone.embeddings(input_ids) * gemma3_backbone.emb_scale
-    for block in gemma3_backbone.blocks:
-        hidden_states = block(hidden_states, attention_mask=attention_mask)
-    base_output = gemma3_backbone.final_norm(hidden_states)
-
-    # Apply the selected pooling strategy via the shared SequencePooling layer
-    # (byte-identical cls/mean; see qwen3.py DECISION D-001).
-    pooled_output = SequencePooling(strategy=pooling_strategy, name="pooler")(
-        base_output, mask=attention_mask
+    logits = classifier(
+        inputs={"input_ids": input_ids, "attention_mask": attention_mask}
     )
-
-    dropout_rate = (
-        classifier_dropout_rate
-        if classifier_dropout_rate is not None
-        else config.get("dropout_rate", 0.0)
-    )
-    if dropout_rate > 0.0:
-        pooled_output = layers.Dropout(
-            dropout_rate, name="classifier_dropout"
-        )(pooled_output)
-
-    initializer = initializers.TruncatedNormal(
-        stddev=config.get("initializer_range", 0.02)
-    )
-    logits = layers.Dense(
-        units=num_labels,
-        kernel_initializer=initializer,
-        name="classifier_head",
-    )(pooled_output)
 
     model = keras.Model(
         inputs=[input_ids, attention_mask],

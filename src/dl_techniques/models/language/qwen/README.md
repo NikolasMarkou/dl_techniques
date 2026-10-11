@@ -75,14 +75,14 @@ direct `compile()` / `fit()` use.
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`Qwen3`** | `models.qwen.qwen3.Qwen3` | The dense/MoE decoder-only backbone. |
+| **`Qwen3`** | `models.qwen.qwen3.Qwen3` | The dense/MoE decoder-only backbone. With `include_top=True` and a `task_config` it owns one task head in place of `lm_head` (section 5). |
 | **`create_qwen3`** | `models.qwen.qwen3.create_qwen3` | Single entry point: `create_qwen3(config_or_variant, task_type=...)`. |
 | **`create_qwen3_generation`** | `models.qwen.qwen3.create_qwen3_generation` | Autoregressive LM head over the backbone. |
-| **`create_qwen3_classification`** | `models.qwen.qwen3.create_qwen3_classification` | Sequence classifier: pooling via the shared `SequencePooling` layer, then a dense head. |
-| **`Qwen3Next`** | `models.qwen.qwen3_next.Qwen3Next` | The hybrid Gated-DeltaNet + Gated-Attention MoE backbone. |
+| **`create_qwen3_classification`** | `models.qwen.qwen3.create_qwen3_classification` | Sequence classifier: a `Qwen3(include_top=True)` with a `TEXT_CLASSIFICATION` head behind a two-input functional wrapper. |
+| **`Qwen3Next`** | `models.qwen.qwen3_next.Qwen3Next` | The hybrid Gated-DeltaNet + Gated-Attention MoE backbone. Takes the same `include_top` knobs as `Qwen3`. |
 | **`create_qwen3_next`** | `models.qwen.qwen3_next.create_qwen3_next` | Same entry-point shape as `create_qwen3`. |
 | **`create_qwen3_next_generation`** | `models.qwen.qwen3_next.create_qwen3_next_generation` | Autoregressive LM head. |
-| **`create_qwen3_next_classification`** | `models.qwen.qwen3_next.create_qwen3_next_classification` | Sequence classifier. |
+| **`create_qwen3_next_classification`** | `models.qwen.qwen3_next.create_qwen3_next_classification` | Sequence classifier: a `Qwen3Next(include_top=True)`, as for `Qwen3`. |
 | **`Qwen3NextBlock`** | `models.qwen.components.Qwen3NextBlock` | One `3x GDN + 1x GA` block with per-layer norm, MoE and residual. |
 | **`Qwen3EmbeddingLayer`** | `models.qwen.qwen3_embeddings.Qwen3EmbeddingLayer` | Bidirectional, last-token-pooled, L2-normalized embedding layer. Takes `input_ids`/`attention_mask`; any instruction prefix is the caller's. |
 | **`Qwen3RerankerLayer`** | `models.qwen.qwen3_embeddings.Qwen3RerankerLayer` | Yes/no generative relevance scorer. |
@@ -150,10 +150,48 @@ model.save("qwen3.keras")
 restored = keras.models.load_model("qwen3.keras")
 ```
 
-The classification head pools with the shipped `SequencePooling` layer rather than a
-hand-rolled masked mean. That layer is parameter-free, so the choice does not change any
-checkpoint — but do not re-inline a bespoke pooling branch here; see the `DECISION` comment in
-`qwen3.py` at `create_qwen3_classification`.
+### The task head inside the model (`include_top`)
+
+`Qwen3` and `Qwen3Next` take `include_top=False`, `task_config=None`,
+`head_config_overrides=None` and `pad_token_id=0`. With `include_top=True` and a
+`task_config` (an `NLPTaskConfig` or a dict of its fields) the model replaces `lm_head` with
+ONE task head from `dl_techniques.layers.heads.nlp`, named `task_head`: no `lm_head` is
+created and no vocabulary logits are computed. The head is fed the final-normed hidden
+states and pools `"last"` by default, under the input's `attention_mask` or, without one,
+`input_ids != pad_token_id`. `call` returns the head's logits (a dict only for multi-output
+heads such as QA); with `return_dict=True` a bare output comes back as `{"logits": ...}`.
+The classification factories are this model behind a functional wrapper taking
+`[input_ids, attention_mask]`; `pooling_strategy` and `classifier_dropout_rate` reach the
+head as its `pooling_type` and dropout. A classifier checkpoint written before this change
+pooled the vocabulary logits (`Qwen3`, unbuildable since c6f5a13f2) or used a hand-rolled
+`SequencePooling` + `Dense` (`Qwen3Next`), and does not load into the new layout.
+
+The backbone's weight paths are the same with or without a head, so a backbone saved under
+one head moves to another, weights unchanged, by layer name (neither class has a
+`pretrained` argument):
+
+```python
+import numpy as np
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
+from dl_techniques.models.language.qwen import Qwen3
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+
+cfg = dict(vocab_size=1000, hidden_size=64, num_layers=2, num_attention_heads=4,
+           num_key_value_heads=2, max_seq_len=64, moe_layers=[], num_experts=1,
+           num_experts_per_tok=1)
+clf = Qwen3(**cfg, include_top=True, task_config=NLPTaskConfig(
+    name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2))
+ids = np.random.randint(1, 1000, (2, 16)).astype("int32")
+logits = clf({"input_ids": ids, "attention_mask": np.ones_like(ids)})  # (2, 2)
+clf.save("qwen3_sst2.keras")
+
+ner = Qwen3(**cfg, include_top=True, task_config=NLPTaskConfig(
+    name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9))
+ner(ids)
+load_weights_from_checkpoint(ner, "qwen3_sst2.keras",
+                             skip_prefixes=(TASK_HEAD_NAME,), strict=True)
+```
 
 Both classification factories default to `pooling_strategy="last"`: the last position kept by
 `attention_mask`. These backbones are strictly causally masked, so position 0 attends only to

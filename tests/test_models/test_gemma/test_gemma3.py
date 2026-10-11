@@ -27,6 +27,8 @@ from dl_techniques.models.language.gemma.gemma3 import (
     Gemma3TransformerBlock
 )
 
+from ..test_qwen.test_qwen3 import IncludeTopCases
+
 
 # It's good practice to have a base config fixture
 @pytest.fixture
@@ -435,3 +437,23 @@ class TestGemma3GradientFlow:
         assert len(report) == len(model.trainable_weights)
         assert len(report) > 0
         assert max(v for v in report.values() if v is not None) > 0.0
+
+
+class TestGemma3IncludeTop(IncludeTopCases):
+    """``Gemma3`` with ``include_top`` (2 blocks: 26 backbone weights, measured).
+
+    The cases are shared with ``Qwen3`` / ``Qwen3Next``
+    (``test_qwen/test_qwen3.IncludeTopCases``): the three are causal decoders
+    ending in ``final_norm`` then ``lm_head``. ``Gemma3.call`` takes no
+    ``return_dict``, so its case is not inherited.
+    """
+
+    CLS = Gemma3
+    KW = dict(hidden_size=32, num_layers=2, num_attention_heads=4,
+              num_key_value_heads=2, ffn_hidden_size=64, max_seq_len=16,
+              sliding_window_size=4,
+              layer_types=["sliding_window", "full_attention"],
+              dropout_rate=0.0)
+    CLASSIFICATION_FACTORY = staticmethod(create_gemma3_classification)
+    WRAPPED_NAME = "gemma3_backbone"
+    N_BACKBONE = 26

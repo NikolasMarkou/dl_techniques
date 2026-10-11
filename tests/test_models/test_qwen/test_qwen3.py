@@ -17,7 +17,7 @@ import pytest
 import numpy as np
 import tempfile
 import os
-from typing import Dict, Any
+from typing import Any, Callable, Dict, Optional
 
 import keras
 
@@ -28,6 +28,9 @@ from dl_techniques.models.language.qwen.qwen3 import (
     create_qwen3_classification,
 )
 from dl_techniques.layers.transformers import TransformerLayer
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
 
@@ -675,10 +678,10 @@ class TestQwen3ModelFactories:
             num_labels=num_labels,
             classifier_dropout_rate=0.5
         )
-        # Check that the dropout layer was created with the correct rate
-        classifier_dropout_layer = dropout_model.get_layer("classifier_dropout")
-        assert classifier_dropout_layer is not None
-        assert classifier_dropout_layer.rate == 0.5
+        # The rate reaches the model's own task head (the hand-rolled
+        # `classifier_dropout` layer no longer exists).
+        head = dropout_model.get_layer("qwen3_backbone").task_head
+        assert head.dropout.rate == 0.5
 
     def test_model_variant_configurations(self):
         """Test that MODEL_VARIANTS have correct configurations."""
@@ -1274,3 +1277,395 @@ class TestQwen3CausalMasking:
             f"even with an all-attend mask the prefix did not move "
             f"(max |delta| = {leak:.4e}); the masked run's agreement would then "
             f"not be attributable to the causal mask")
+
+
+# ---------------------------------------------------------------------
+# include_top: the model's own task head
+# ---------------------------------------------------------------------
+
+_SEQ = 8
+_CLF = NLPTaskConfig(
+    name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3
+)
+_NER = NLPTaskConfig(
+    name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9
+)
+#: Same head class and weight shapes as ``_CLF``, a different task.
+_SPAM = NLPTaskConfig(
+    name="spam", task_type=NLPTaskType.SPAM_DETECTION, num_classes=3
+)
+
+
+def _np(tensor) -> np.ndarray:
+    return np.asarray(keras.ops.convert_to_numpy(tensor))
+
+
+def _head_batch() -> Dict[str, np.ndarray]:
+    """Row 1 is right-padded: 5 real tokens, then 3 pad ids under a 0 mask."""
+    ids = np.random.default_rng(0).integers(1, 64, (2, _SEQ)).astype("int32")
+    mask = np.ones_like(ids)
+    ids[1, 5:] = 0
+    mask[1, 5:] = 0
+    return {"input_ids": ids, "attention_mask": mask}
+
+
+def _relative_paths(model: keras.Model) -> list:
+    """Weight paths without the model-root segment (guide 8.3)."""
+    return sorted(w.path.split("/", 1)[-1] for w in model.weights)
+
+
+def _randomized(model: keras.Model, seed: int) -> keras.Model:
+    """Overwrite every weight, so a restored value cannot match by init luck."""
+    assert model.weights, "build the model before randomizing it"
+    rng = np.random.default_rng(seed)
+    for w in model.weights:
+        w.assign(rng.normal(0.0, 0.1, size=tuple(w.shape)).astype(w.dtype))
+    return model
+
+
+def _backbone(model: keras.Model) -> Dict[str, list]:
+    """Weights of every layer but the two tops (``lm_head``, ``task_head``)."""
+    return {
+        layer.name: [_np(w) for w in layer.weights]
+        for layer in model.layers
+        if layer.name not in ("lm_head", TASK_HEAD_NAME) and layer.weights
+    }
+
+
+class IncludeTopCases:
+    """The ``include_top`` knobs of a causal decoder that ends in ``lm_head``.
+
+    Not collected itself (no ``Test`` prefix). ``TestQwen3IncludeTop`` below,
+    ``TestQwen3NextIncludeTop`` in ``test_qwen3_next.py`` and
+    ``TestGemma3IncludeTop`` in ``test_gemma/test_gemma3.py`` bind ``CLS``,
+    ``KW``, the classification factory and the measured backbone weight count.
+    None of the three classes has a ``pretrained`` path, so a backbone moves
+    between tops through ``load_weights_from_checkpoint`` (D-007 route R2 of
+    plan-2026-10-11T004932-b83935e1).
+    """
+
+    CLS: Any = None
+    KW: Dict[str, Any] = {}
+    #: ``create_<model>_classification(config, num_labels, ...)``.
+    CLASSIFICATION_FACTORY: Optional[Callable[..., keras.Model]] = None
+    #: Name of the headed model inside that factory's functional wrapper.
+    WRAPPED_NAME: str = ""
+    #: Backbone weights at ``KW``; ``lm_head`` adds 1, a TEXT_CLASSIFICATION
+    #: head 8.
+    N_BACKBONE: int = 0
+
+    def model(self, **kw: Any) -> keras.Model:
+        return self.CLS(vocab_size=64, **self.KW, **kw)
+
+    def test_head_output_shapes(self):
+        """Bare logits for single-output heads, a dict for QA; nothing else."""
+        batch = _head_batch()
+        out = self.model(include_top=True, task_config=_CLF)(batch, training=False)
+        assert not isinstance(out, dict) and tuple(out.shape) == (2, 3)
+
+        out = self.model(include_top=True, task_config=_NER)(batch, training=False)
+        assert not isinstance(out, dict) and tuple(out.shape) == (2, _SEQ, 9)
+
+        qa = self.model(include_top=True, task_config=NLPTaskConfig(
+            name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=2))
+        out = qa(batch, training=False)
+        assert set(out) == {"start_logits", "end_logits"}
+        assert tuple(out["start_logits"].shape) == (2, _SEQ)
+
+    def test_a_task_head_replaces_the_lm_head(self):
+        """``build()`` must not create the LM head ``call()`` no longer runs."""
+        headed = self.model(include_top=True, task_config=_CLF)
+        headed(_head_batch(), training=False)
+        assert headed.lm_head is None
+        assert not [w.path for w in headed.weights if "lm_head" in w.path]
+
+        headless = self.model()
+        headless(_head_batch(), training=False)
+        assert [w.path.split("/", 1)[-1] for w in headless.weights
+                if "lm_head" in w.path] == ["lm_head/kernel"]
+
+    def test_symbolic_output_matches_the_eager_one(self):
+        """A symbolic call reports what ``call`` returns, headless or headed."""
+        headed = self.model(include_top=True, task_config=_NER)
+        symbolic = headed(keras.Input(shape=(None,), dtype="int32"))
+        assert not isinstance(symbolic, dict)
+        assert tuple(symbolic.shape) == (None, None, 9)
+        symbolic = self.model()(keras.Input(shape=(None,), dtype="int32"))
+        assert tuple(symbolic.shape) == (None, None, 64)
+
+    def test_the_default_pooling_is_last_and_an_override_wins(self):
+        """Causal decoder: pool the last real token, not position 0 (D-012)."""
+        assert self.model(include_top=True, task_config=_CLF
+                          ).task_head.pooling_type == "last"
+        assert self.model(include_top=True, task_config=_CLF,
+                          head_config_overrides={"pooling_type": "mean"}
+                          ).task_head.pooling_type == "mean"
+
+    def test_the_head_reads_the_last_real_token(self):
+        """Changing the last real token changes the head output.
+
+        Under ``'cls'`` pooling the head reads position 0, which in a causal
+        decoder has seen only itself, so this change would be invisible.
+        """
+        model = self.model(include_top=True, task_config=_CLF)
+        batch = _head_batch()
+        base = _np(model(batch, training=False))
+        edited = {k: v.copy() for k, v in batch.items()}
+        edited["input_ids"][1, 4] = (edited["input_ids"][1, 4] % 63) + 1
+        moved = _np(model(edited, training=False))
+        np.testing.assert_array_equal(moved[0], base[0])
+        assert not np.allclose(moved[1], base[1], atol=1e-6, rtol=0)
+
+    @pytest.mark.parametrize("with_mask", [True, False],
+                             ids=["attention_mask", "pad_derived"])
+    def test_appended_padding_does_not_change_the_head_output(self, with_mask):
+        """Padding after the last real token is invisible to the head.
+
+        The decoder is causal, so the real positions' states do not depend on
+        what follows them; the head must not pool the padding either. Without
+        an ``attention_mask`` the head's mask is ``input_ids != pad_token_id``
+        (here 0, the default).
+        """
+        model = self.model(include_top=True, task_config=_CLF)
+        ids = np.random.default_rng(3).integers(1, 64, (2, 5)).astype("int32")
+        padded = np.concatenate([ids, np.zeros((2, 4), "int32")], axis=1)
+
+        def run(x):
+            if with_mask:
+                return _np(model({"input_ids": x,
+                                  "attention_mask": (x != 0).astype("int32")},
+                                 training=False))
+            return _np(model(x, training=False))
+
+        np.testing.assert_allclose(run(padded), run(ids), atol=1e-5, rtol=0)
+
+    def test_a_custom_pad_token_id_drives_the_derived_mask(self):
+        """``pad_token_id`` is the padding id when no mask is given."""
+        model = self.model(pad_token_id=7, include_top=True, task_config=_CLF)
+        ids = np.random.default_rng(4).integers(8, 64, (2, 5)).astype("int32")
+        padded = np.concatenate([ids, np.full((2, 3), 7, "int32")], axis=1)
+        np.testing.assert_allclose(_np(model(padded, training=False)),
+                                   _np(model(ids, training=False)),
+                                   atol=1e-5, rtol=0)
+
+    def test_config_round_trip_with_a_head(self):
+        """Every knob is serialized; ``task_config`` as a plain JSON dict."""
+        import json
+
+        overrides = {"pooling_type": "mean"}
+        model = self.model(pad_token_id=5, include_top=True, task_config=_CLF,
+                           head_config_overrides=overrides)
+        config = model.get_config()
+        assert config["include_top"] is True
+        assert config["pad_token_id"] == 5
+        assert config["head_config_overrides"] == overrides
+        assert isinstance(config["task_config"], dict)
+        assert config["task_config"]["task_type"] == "text_classification"
+        json.dumps(config)  # plain data, no enum or dataclass inside
+
+        from_dict = self.model(include_top=True,
+                               task_config=dict(config["task_config"]),
+                               head_config_overrides=overrides)
+        assert from_dict.get_config()["task_config"] == config["task_config"]
+
+        rebuilt = self.CLS.from_config(config)
+        assert rebuilt.get_config() == config
+        assert rebuilt.task_head.pooling_type == "mean"
+
+        batch = _head_batch()
+        model(batch, training=False)
+        rebuilt(batch, training=False)
+        assert _relative_paths(rebuilt) == _relative_paths(model)
+        rebuilt.set_weights(model.get_weights())
+        np.testing.assert_array_equal(
+            _np(rebuilt(batch, training=False)), _np(model(batch, training=False)))
+
+    def test_a_config_without_the_new_keys_still_loads(self):
+        """A config written before the knobs existed rebuilds the headless model."""
+        config = self.model().get_config()
+        for key in ("include_top", "task_config", "head_config_overrides",
+                    "pad_token_id"):
+            config.pop(key)
+        model = self.CLS.from_config(config)
+        assert model.include_top is False and model.task_head is None
+        assert model.pad_token_id == 0 and model.lm_head is not None
+
+    def test_keras_round_trip_restores_the_head_by_value(self, tmp_path):
+        """Weights compared BEFORE the first call on the loaded model (guide 8.4)."""
+        model = self.model(include_top=True, task_config=_CLF)
+        batch = _head_batch()
+        model(batch, training=False)
+        _randomized(model, 5)
+        before = _np(model(batch, training=False))
+        saved = [_np(w).copy() for w in model.weights]
+        head_saved = [_np(w).copy() for w in model.task_head.weights]
+        assert head_saved, "the head has no weights to compare"
+
+        path = str(tmp_path / "headed.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert len(loaded.weights) == len(saved)
+        for s, w in zip(saved, loaded.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0,
+                                       err_msg=f"{w.path} not restored")
+        for s, w in zip(head_saved, loaded.task_head.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0)
+        np.testing.assert_array_equal(_np(loaded(batch, training=False)), before)
+
+    @pytest.mark.parametrize("include_top", [False, True])
+    def test_explicit_build_matches_lazy_build(self, include_top):
+        """``build()`` materializes exactly the tree ``call()`` runs (guide 8.1)."""
+        kw = dict(include_top=include_top,
+                  task_config=_CLF if include_top else None)
+        explicit = self.model(**kw)
+        explicit.build((None, _SEQ))
+        lazy = self.model(**kw)
+        lazy(_head_batch(), training=False)
+        assert _relative_paths(explicit) == _relative_paths(lazy)
+        assert explicit.count_params() == lazy.count_params() > 0
+
+    def test_a_disabled_head_builds_no_head_weights(self):
+        """Anti-vacuity sibling of the parity arm (guide 8.3)."""
+        headless = self.model()
+        headless(_head_batch(), training=False)
+        assert headless.task_head is None
+        assert not [w.path for w in headless.weights if "task_head" in w.path]
+
+        headed = self.model(include_top=True, task_config=_CLF)
+        headed(_head_batch(), training=False)
+        assert [w.path for w in headed.weights if "/task_head/" in w.path]
+
+    def test_the_backbone_weight_paths_do_not_depend_on_the_head(self):
+        """The backbone's paths are identical across tops (D-005 of the plan).
+
+        The backbone is every weight but ``lm_head/`` and ``task_head/``; the
+        headless model adds ``lm_head/kernel``, a head 8 weights after it.
+        """
+        def paths(**kw):
+            m = self.model(name="m", **kw)
+            m(_head_batch(), training=False)
+            return [w.path for w in m.weights]
+
+        headless = paths()
+        backbone = [p for p in headless if not p.startswith("m/lm_head/")]
+        assert (len(backbone), len(headless)) == (
+            self.N_BACKBONE, self.N_BACKBONE + 1)
+        for task in (_CLF, _NER):
+            headed = paths(include_top=True, task_config=task)
+            assert headed[:len(backbone)] == backbone, task.name
+            assert all(p.startswith("m/task_head/")
+                       for p in headed[len(backbone):]), task.name
+            assert len(headed) > len(backbone)
+
+    def test_backbone_weights_transfer_across_heads(self, tmp_path):
+        """A backbone trained under one head is reused, same weights, under another.
+
+        ``load_weights_from_checkpoint(..., skip_prefixes=(TASK_HEAD_NAME,))``
+        copies the backbone by layer name into a TOKEN_CLASSIFICATION model
+        and into a headless one, and never the checkpoint's ``task_head``: a
+        SPAM head of the same shapes keeps its own initialization.
+        """
+        batch = _head_batch()
+        source = self.model(include_top=True, task_config=_CLF)
+        source(batch, training=False)
+        _randomized(source, 1)
+        path = str(tmp_path / "trained_under_clf.keras")
+        source.save(path)
+        reference = _backbone(source)
+
+        for target in (self.model(include_top=True, task_config=_NER),
+                       self.model(include_top=True, task_config=_SPAM),
+                       self.model()):
+            target(batch, training=False)
+            fresh_head = [_np(w).copy() for w in target.task_head.weights] \
+                if target.task_head is not None else []
+            load_weights_from_checkpoint(
+                target, path, skip_prefixes=(TASK_HEAD_NAME,), strict=True)
+            got = _backbone(target)
+            assert set(got) == set(reference)
+            for name, values in reference.items():
+                for a, b in zip(values, got[name]):
+                    np.testing.assert_array_equal(a, b, err_msg=name)
+            if target.task_head is not None:
+                for a, w in zip(fresh_head, target.task_head.weights):
+                    np.testing.assert_array_equal(a, _np(w))
+
+        # Anti-vacuity: a fresh backbone does NOT hold the reference values.
+        fresh = self.model()
+        fresh(batch, training=False)
+        assert not all(np.array_equal(a[0], b[0]) for a, b in
+                       zip(reference.values(), _backbone(fresh).values()))
+
+    def test_the_classification_factory_is_the_headed_model(self):
+        """``create_*_classification`` wraps the class and adds no layer of its own.
+
+        Its knobs reach the in-model head: ``pooling_strategy`` as the head's
+        ``pooling_type`` and ``classifier_dropout_rate`` as the head's dropout.
+        """
+        config = dict(self.KW, vocab_size=64)
+        wrapper = self.CLASSIFICATION_FACTORY(
+            config, num_labels=4, pooling_strategy="mean",
+            classifier_dropout_rate=0.25)
+        inner = wrapper.get_layer(self.WRAPPED_NAME)
+        assert isinstance(inner, self.CLS)
+        assert inner.include_top is True and inner.lm_head is None
+        assert inner.task_config["num_classes"] == 4
+        assert inner.task_head.pooling_type == "mean"
+        assert inner.task_head.dropout.rate == 0.25
+        assert sorted(layer.name for layer in wrapper.layers) == sorted([
+            "input_ids", "attention_mask", self.WRAPPED_NAME])
+
+        batch = _head_batch()
+        np.testing.assert_array_equal(
+            _np(wrapper([batch["input_ids"], batch["attention_mask"]])),
+            _np(inner(batch, training=False)))
+
+    def test_include_top_without_task_config_raises(self):
+        with pytest.raises(ValueError, match="include_top=True needs a task_config"):
+            self.model(include_top=True)
+
+    @pytest.mark.parametrize("dead", [
+        {"task_config": _CLF},
+        {"head_config_overrides": {"pooling_type": "mean"}},
+    ], ids=["task_config", "head_config_overrides"])
+    def test_head_knobs_without_include_top_raise(self, dead):
+        with pytest.raises(ValueError, match="only take effect with include_top=True"):
+            self.model(**dead)
+
+
+class QwenIncludeTopCases(IncludeTopCases):
+    """``IncludeTopCases`` plus the Qwen-only ``return_dict`` call argument."""
+
+    def test_return_dict_wraps_a_bare_head_output(self):
+        """``return_dict=True`` keeps its meaning under a head.
+
+        A bare head output comes back under ``logits``; a multi-output head's
+        dict comes back as is.
+        """
+        batch = _head_batch()
+        model = self.model(include_top=True, task_config=_CLF)
+        out = model(batch, training=False, return_dict=True)
+        assert set(out) == {"logits"}
+        np.testing.assert_array_equal(_np(out["logits"]),
+                                      _np(model(batch, training=False)))
+        qa = self.model(include_top=True, task_config=NLPTaskConfig(
+            name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=2))
+        assert set(qa(batch, training=False, return_dict=True)) == {
+            "start_logits", "end_logits"}
+
+
+class TestQwen3IncludeTop(QwenIncludeTopCases):
+    """``Qwen3`` with ``include_top`` (2 blocks: 24 backbone weights, measured).
+
+    ``test_explicit_build_matches_lazy_build[False]`` also guards the new
+    ``Qwen3.build``: before it, an explicit build created no weight at all.
+    """
+
+    CLS = Qwen3
+    KW = dict(hidden_size=32, num_layers=2, num_attention_heads=4,
+              num_key_value_heads=2, max_seq_len=16, moe_layers=[],
+              num_experts=1, num_experts_per_tok=1, dropout_rate=0.0)
+    CLASSIFICATION_FACTORY = staticmethod(create_qwen3_classification)
+    WRAPPED_NAME = "qwen3_backbone"
+    N_BACKBONE = 24

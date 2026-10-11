@@ -234,11 +234,11 @@ print(f"\n✅ Training step complete! Loss: {loss:.4f}, Accuracy: {acc:.4f}")
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`Gemma3`** | `...gemma3.gemma3.Gemma3` | The main Keras `Model` class that assembles the architecture. |
+| **`Gemma3`** | `...gemma3.gemma3.Gemma3` | The main Keras `Model` class that assembles the architecture. With `include_top=True` and a `task_config` it owns one `layers/heads/nlp` task head in place of `lm_head` (Example 3). |
 | **`Gemma3TransformerBlock`** | `...gemma3.components.Gemma3TransformerBlock` | The core dual-norm transformer block. |
 | **`create_gemma3`** | `...gemma3.gemma3.create_gemma3` | High-level factory to create models for different tasks. |
 | **`..._generation`** | `...gemma3.gemma3.create_gemma3_generation` | Factory specifically for text generation. |
-| **`..._classification`** | `...gemma3.gemma3.create_gemma3_classification`| Factory specifically for sequence classification. |
+| **`..._classification`** | `...gemma3.gemma3.create_gemma3_classification`| Factory specifically for sequence classification: a `Gemma3(include_top=True)` with a `TEXT_CLASSIFICATION` head behind a two-input functional wrapper. |
 
 ---
 
@@ -259,6 +259,8 @@ This implementation provides several pre-configured variants based on the offici
 ### Example 1: Sequence Classification
 
 Use the dedicated factory function to add a classification head on top of the Gemma 3 backbone.
+The head is the model's own task head (`Gemma3(include_top=True)`, Example 3); the factory only
+wraps it in a model that takes `[input_ids, attention_mask]`.
 
 ```python
 # Create a model for a 3-class classification problem
@@ -306,6 +308,42 @@ model = create_gemma3(custom_config, task_type="generation")
 ```
 
 ---
+
+### Example 3: A Task Head Inside the Model (`include_top`)
+
+`Gemma3(include_top=True, task_config=...)` replaces `lm_head` with ONE task head from
+`dl_techniques.layers.heads.nlp`, named `task_head` (no `lm_head` is created and no
+vocabulary logits are computed). It is fed the final-normed hidden states and pools `"last"`
+by default under the input's `attention_mask`, or `input_ids != pad_token_id` without one;
+`head_config_overrides={"pooling_type": ...}` overrides that. `call` returns the head's
+logits (a dict only for multi-output heads such as QA). The backbone's weight paths are the
+same with or without a head, so a backbone trained under one head moves to another, weights
+unchanged, by layer name:
+
+```python
+import numpy as np
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
+from dl_techniques.models.language.gemma import Gemma3
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+
+cfg = dict(vocab_size=1000, hidden_size=64, num_layers=2, num_attention_heads=4,
+           num_key_value_heads=2, ffn_hidden_size=128, max_seq_len=64,
+           sliding_window_size=16, layer_types=["sliding_window", "full_attention"])
+clf = Gemma3(**cfg, include_top=True, task_config=NLPTaskConfig(
+    name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2))
+ids = np.random.randint(1, 1000, (2, 16)).astype("int32")
+logits = clf({"input_ids": ids, "attention_mask": np.ones_like(ids)})  # (2, 2)
+clf.save("gemma_sst2.keras")
+
+# Same backbone weights under a token-classification head; the checkpoint's
+# task_head is never copied.
+ner = Gemma3(**cfg, include_top=True, task_config=NLPTaskConfig(
+    name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9))
+ner(ids)
+load_weights_from_checkpoint(ner, "gemma_sst2.keras",
+                             skip_prefixes=(TASK_HEAD_NAME,), strict=True)
+```
 
 ## 9. Advanced Usage Patterns
 
@@ -408,7 +446,7 @@ A: The key differentiators are the **dual normalization** pattern within the tra
 
 **Q: Can I use this for fine-tuning?**
 
-A: Yes. The provided factory functions are ideal for fine-tuning. You can load pre-trained weights into the `gemma3_backbone` and train a new classification head, or continue training the entire model on a specific downstream task.
+A: Yes. `Gemma3` has no `pretrained` argument; a backbone saved as `.keras` moves into a model with a fresh task head through `load_weights_from_checkpoint(..., skip_prefixes=(TASK_HEAD_NAME,))` (Example 3). You can then train the new head, or the entire model, on a downstream task.
 
 ---
 

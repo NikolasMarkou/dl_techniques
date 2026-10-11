@@ -31,9 +31,16 @@ There is no model-level positional embedding; position enters through RoPE
 inside the gated-attention sublayer and through the causal convolutions and
 ordered recurrence of the linear-attention sublayers. `from_variant`
 exposes no `pretrained` argument. With `return_dict=False` (the default)
-the model returns logits, and `create_qwen3_next_classification` pools that
-vocab_size-wide tensor rather than hidden states, so a classifier trained
-one way does not transfer to the other.
+the model returns logits.
+
+With `include_top=True` and a `task_config` the model owns ONE task head from
+`layers/heads/nlp`, named `task_head`, in place of the LM head (no `lm_head`
+is created and no vocabulary logits are computed), fed the final-normed
+hidden states and pooling `'last'` by default, as `qwen3.py` does.
+`create_qwen3_next_classification` is that model behind a two-input
+functional wrapper. Its classifier used to pool the vocab_size-wide logits
+through a hand-rolled `SequencePooling` + `Dense`, so no classifier
+checkpoint written earlier is portable.
 
 References:
     - Qwen Team, 2025. Qwen3 Technical Report.
@@ -67,7 +74,15 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.sequence_pooling import SequencePooling
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    NLPTaskType,
+    build_model_task_head,
+    finalize_head_outputs,
+    head_attention_mask,
+    task_config_to_dict,
+    validate_task_head_knobs,
+)
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 from dl_techniques.layers.ffn import assemble_ffn_config
 
@@ -103,6 +118,9 @@ class Qwen3Next(keras.Model):
                ▼
         Linear Projection → Logits [vocab_size]
 
+        include_top=True: the projection is replaced by
+        task_head (pools 'last') → finalized head output (only output)
+
     :param vocab_size: Size of the vocabulary. Defaults to 151936.
     :param hidden_size: Dimensionality of encoder layers. Defaults to 2048.
     :param num_layers: Number of transformer blocks. Defaults to 12.
@@ -122,7 +140,21 @@ class Qwen3Next(keras.Model):
     :param ffn_type: Type of feed-forward network in experts. Defaults to "swiglu".
     :param use_stochastic_depth: Whether to enable stochastic depth. Defaults to False.
     :param stochastic_depth_rate: Drop path rate for stochastic depth. Defaults to 0.1.
+    :param pad_token_id: Id treated as padding by the task head when the input
+        carries no `attention_mask`. Read only with `include_top=True`; the
+        blocks never derive a mask from it. Defaults to 0.
+    :param include_top: Whether the model owns a task head (and no LM head).
+        Defaults to False: no head layer and no head weight exist.
+    :param task_config: The head's task, as an `NLPTaskConfig` or a dict of its
+        fields. Required when `include_top` is True, refused otherwise; stored
+        as a plain dict. `MULTIPLE_CHOICE` is refused.
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (e.g. `{"pooling_type": "mean"}`, which replaces the
+        `'last'` default). Only valid with `include_top=True`.
     :param kwargs: Additional keyword arguments for the `keras.Model` base class.
+    :raises ValueError: On an invalid size, if `include_top=True` comes without
+        a `task_config`, or if a `task_config` or `head_config_overrides` comes
+        with `include_top=False`.
     """
 
     # Model variant configurations following Qwen3 Next specifications
@@ -201,6 +233,10 @@ class Qwen3Next(keras.Model):
             ffn_type: str = "swiglu",
             use_stochastic_depth: bool = False,
             stochastic_depth_rate: float = 0.1,
+            pad_token_id: int = 0,
+            include_top: bool = False,
+            task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         # CRITICAL FIX: Call super() FIRST. This is mandatory for Keras models.
@@ -211,6 +247,7 @@ class Qwen3Next(keras.Model):
             vocab_size, hidden_size, num_layers, num_attention_heads,
             num_key_value_heads, num_experts, num_experts_per_tok
         )
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         # Store all configuration parameters
         self.vocab_size = vocab_size
@@ -229,6 +266,14 @@ class Qwen3Next(keras.Model):
         self.ffn_type = ffn_type
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
+        self.pad_token_id = pad_token_id
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         # DECISION plan-2026-08-22T035419-a11304c8/D-204: head_dim is decoupled
         # upstream (released 256 vs quotient 128) and must stay an explicit
@@ -243,6 +288,20 @@ class Qwen3Next(keras.Model):
 
         # Build the model architecture
         self._build_architecture()
+
+        # Created after the backbone and under its own fixed name, so the
+        # backbone's layer names, weight paths and RNG draws are the same with
+        # or without a head.
+        self.task_head = None
+        if self.include_top:
+            # DECISION plan-2026-10-11T004932-b83935e1/D-012: pool 'last' by default; do NOT keep the head's
+            # 'cls' default -- position 0 of a causal decoder has seen only itself. See decisions.md.
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.hidden_size,
+                head_config_overrides=self.head_config_overrides,
+                default_pooling="last",
+            )
 
         # Log model creation
         total_effective_layers = num_layers * 4  # Each block has 3 delta + 1 attn
@@ -364,15 +423,18 @@ class Qwen3Next(keras.Model):
             name='final_norm'
         )
 
-        # Language modeling head
-        self.lm_head = keras.layers.Dense(
-            units=self.vocab_size,
-            use_bias=False,
-            kernel_initializer=keras.initializers.TruncatedNormal(
-                stddev=self.initializer_range
-            ),
-            name='lm_head'
-        )
+        # Language modeling head. A task head replaces it: call() never runs
+        # lm_head then, and build() must not create what call() does not run.
+        self.lm_head = None
+        if not self.include_top:
+            self.lm_head = keras.layers.Dense(
+                units=self.vocab_size,
+                use_bias=False,
+                kernel_initializer=keras.initializers.TruncatedNormal(
+                    stddev=self.initializer_range
+                ),
+                name='lm_head'
+            )
 
     # DECISION plan-2026-08-23T091307-9a110062/D-421: coerce the sequence axis
     # to a concrete 1 before tracing — materialize_sublayers calls `call` on
@@ -405,7 +467,11 @@ class Qwen3Next(keras.Model):
         :param return_dict: Whether to return outputs as a dictionary.
         :return: With `return_dict=False`, the logits tensor, shape
             (batch, seq_len, vocab_size). With `return_dict=True`, a
-            dictionary with key `logits` and optionally others.
+            dictionary with key `logits` and optionally others. With
+            `include_top=True`, the head's output reduced by
+            `finalize_head_outputs` in place of the LM logits: a bare tensor
+            (under `logits` when `return_dict=True`), or a dict of two or more
+            tensors (`start_logits` / `end_logits` for QA), returned as is.
         """
         # Parse inputs
         if isinstance(inputs, dict):
@@ -435,6 +501,23 @@ class Qwen3Next(keras.Model):
         # Final normalization
         hidden_states = self.final_norm(hidden_states)
 
+        if self.include_top:
+            # The blocks saw only the caller's mask; the head pools under it,
+            # else under input_ids != pad_token_id.
+            outputs = finalize_head_outputs(self.task_head(
+                {
+                    "hidden_states": hidden_states,
+                    "attention_mask": head_attention_mask(
+                        input_ids, attention_mask, self.pad_token_id,
+                        hidden_states.dtype,
+                    ),
+                },
+                training=training,
+            ))
+            if return_dict and not isinstance(outputs, dict):
+                return {"logits": outputs}
+            return outputs
+
         # Language modeling head
         logits = self.lm_head(hidden_states)
 
@@ -454,7 +537,9 @@ class Qwen3Next(keras.Model):
         Create a Qwen3 Next model from a predefined variant.
 
         :param variant: One of "80b_a3b", "80b", "small", "tiny".
-        :param kwargs: Additional arguments passed to the constructor.
+        :param kwargs: Additional arguments passed to the constructor,
+            including `include_top`, `task_config`, `head_config_overrides`
+            and `pad_token_id`.
         :return: Qwen3Next model instance.
         """
         if variant not in cls.MODEL_VARIANTS:
@@ -495,6 +580,15 @@ class Qwen3Next(keras.Model):
             "ffn_type": self.ffn_type,
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
+            "pad_token_id": self.pad_token_id,
+            "include_top": self.include_top,
+            "task_config": (
+                dict(self.task_config) if self.task_config is not None else None
+            ),
+            "head_config_overrides": (
+                dict(self.head_config_overrides)
+                if self.head_config_overrides is not None else None
+            ),
         })
         return config
 
@@ -586,9 +680,10 @@ def create_qwen3_next_classification(
     """
     Create a Qwen3 Next model for sequence classification tasks.
 
-    This factory adds a classification head on top of the Qwen3 Next model.
-    It supports different pooling strategies for aggregating sequence
-    information.
+    The classifier is the model's own task head
+    (`Qwen3Next(include_top=True)` with a `TEXT_CLASSIFICATION` task), fed the
+    final-normed hidden states; this function only puts the two-input
+    functional interface around it.
 
     :param config: Complete configuration for the `Qwen3Next` base model.
     :param num_labels: Number of output labels for the classification task.
@@ -620,35 +715,27 @@ def create_qwen3_next_classification(
     logger.info(f"Using pooling strategy: '{pooling_strategy}'")
     logger.debug(f"Classification model config: {config}")
 
-    qwen3_next_backbone = Qwen3Next(**config, name="qwen3_next_backbone")
+    classifier = Qwen3Next(
+        **config,
+        include_top=True,
+        task_config=NLPTaskConfig(
+            name="classification",
+            task_type=NLPTaskType.TEXT_CLASSIFICATION,
+            num_classes=num_labels,
+            dropout_rate=(
+                classifier_dropout_rate if classifier_dropout_rate is not None
+                else config.get("dropout_rate", 0.1)
+            ),
+        ),
+        head_config_overrides={"pooling_type": pooling_strategy},
+        name="qwen3_next_backbone",
+    )
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
     attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
 
-    sequence_output = qwen3_next_backbone(
+    logits = classifier(
         inputs={"input_ids": input_ids, "attention_mask": attention_mask}
     )
-
-    # Apply the selected pooling strategy via the shared SequencePooling layer
-    # (byte-identical cls/mean; see qwen3.py DECISION D-001).
-    pooled_output = SequencePooling(strategy=pooling_strategy, name="pooler")(
-        sequence_output, mask=attention_mask
-    )
-
-    # Determine classifier dropout
-    dropout_rate = classifier_dropout_rate if classifier_dropout_rate is not None else config.get("dropout_rate", 0.1)
-    if dropout_rate > 0.0:
-        logger.info(f"Applying classifier dropout with rate: {dropout_rate}")
-        pooled_output = keras.layers.Dropout(
-            dropout_rate, name="classifier_dropout"
-        )(pooled_output)
-
-    # Final classification layer
-    initializer_range = config.get("initializer_range", 0.02)
-    logits = keras.layers.Dense(
-        units=num_labels,
-        kernel_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range),
-        name="classifier_head",
-    )(pooled_output)
 
     model = keras.Model(
         inputs=[input_ids, attention_mask],
