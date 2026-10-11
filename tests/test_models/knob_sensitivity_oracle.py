@@ -158,11 +158,13 @@ def as_array(value: Any) -> np.ndarray:
 
 def _forward(model: Any, x: Any, extract: Optional[Callable[[Any], Any]]) -> np.ndarray:
     out = model(x, training=False)
-    # Handle dict output from ClassificationHead
-    if isinstance(out, dict) and 'logits' in out:
-        out = out['logits']
+    # DECISION plan-2026-10-11T004932-b83935e1/D-014: an explicit `extract` gets the RAW output; do NOT
+    # unwrap 'logits' before it -- that pre-empts every selector on a {"logits", ...} dict. See decisions.md.
     if extract is not None:
         out = extract(out)
+    elif isinstance(out, dict) and 'logits' in out:
+        # Handle dict output from ClassificationHead
+        out = out['logits']
     return as_array(out)
 
 

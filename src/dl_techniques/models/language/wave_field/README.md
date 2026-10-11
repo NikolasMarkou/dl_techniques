@@ -221,7 +221,7 @@ Note the printed `field_size`: `2 * max_seq_len`, the configuration that measure
 
 | Name | Kind | Notes |
 |:---|:---|:---|
-| `WaveFieldLLM` | `keras.Model` | Accepts a tensor of IDs or a dict (`input_ids` required, `attention_mask` optional); returns `{"logits", "last_hidden_state"}`. Methods: `from_variant`, `call`, `compute_output_shape`, `get_config`, and the static `_download_weights` (always raises). |
+| `WaveFieldLLM` | `keras.Model` | Accepts a tensor of IDs or a dict (`input_ids` required, `attention_mask` optional); returns `{"logits", "last_hidden_state"}`, or with `include_top=True` only its task head's output (Example 3). Methods: `from_variant`, `call`, `compute_output_shape`, `get_config`, and the static `_download_weights` (always raises). |
 | `WaveFieldDecoderBlock` | `keras.layers.Layer` | A single block, reusable outside the model on `(B, N, D)` activations, with the same `attention_mask` keyword. |
 | `create_wave_field_llm` | factory | Thin wrapper over `WaveFieldLLM.from_variant`, mirroring `create_bert` / `create_gpt2`. `vocab_size` is injected only when not `None`. |
 
@@ -254,6 +254,10 @@ the stride and therefore the causality behaviour** (§3). Other constructor argu
 | `initializer_range` | `0.02` | `TruncatedNormal` stddev. |
 | `layer_norm_eps` | `1e-5` | |
 | `tie_word_embeddings` | `True` | Untied builds a `Dense(vocab, use_bias=False)`. |
+| `pad_token_id` | `0` | Padding id for the task head's mask when the input has no `attention_mask`. Read only with `include_top=True`. `0` is a real `gpt2` token: pass your tokenizer's pad id or a mask. |
+| `include_top` | `False` | Own one task head instead of the LM head (Example 3). |
+| `task_config` | `None` | `NLPTaskConfig` or dict; required with `include_top=True`, refused without it. |
+| `head_config_overrides` | `None` | Head constructor kwargs, e.g. `{"pooling_type": "mean"}`; only with `include_top=True`. |
 
 Re-derive the table with
 `for name, cfg in WaveFieldLLM.MODEL_VARIANTS.items(): print(name, cfg)` rather than trusting it.
@@ -303,13 +307,56 @@ except NotImplementedError as e:
     print(f"NotImplementedError: {e}")
 ```
 
-A string path is loaded with `skip_mismatch=True`; a nonexistent one raises `FileNotFoundError`.
+A string path is loaded with `skip_mismatch=True` after `build((1, min(32, max_seq_len)))` (a
+32-token dummy forward used to raise for every `max_seq_len < 32`); a nonexistent one raises
+`FileNotFoundError`.
 The load goes through `utils.weight_transfer.load_weights_or_raise`, which counts variables whose
 value actually changed and raises when that count is **zero**, so a checkpoint whose names or
 shapes do not match cannot restore nothing and return normally. Its limit: that guard fires only
 on a *completely* empty load. A **partial** restore (say 9 of 30 variables) logs a warning and
 returns normally, which under `skip_mismatch=True` is possible. Check the logged
-restored-variable count.
+restored-variable count. A model with a task head loads differently; see Example 3.
+
+### Example 3: a task head in the model (`include_top`)
+
+```python
+import numpy as np
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.wave_field import create_wave_field_llm
+
+sst2 = NLPTaskConfig(name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2)
+clf = create_wave_field_llm("tiny", vocab_size=512, include_top=True, task_config=sst2)
+
+ids = np.random.randint(1, 512, size=(2, 16)).astype("int32")
+ids[1, 10:] = 0                                    # right padding, pad_token_id=0
+print(clf.task_head.pooling_type)                  # 'last'
+print(clf(ids).shape)                              # (2, 2) -- bare logits, no LM logits
+
+# Warm-start another head from this one: the backbone is copied by layer name, the
+# checkpoint's task_head never is.
+clf.save("wave_field_sst2.keras")
+ner = create_wave_field_llm(
+    "tiny", vocab_size=512, include_top=True, pretrained="wave_field_sst2.keras",
+    task_config=NLPTaskConfig(name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION,
+                              num_classes=9),
+)
+print(ner(ids).shape)                              # (2, 16, 9)
+ner.compile(optimizer="adam",
+            loss="sparse_categorical_crossentropy")  # a bare tensor compiles as is
+```
+
+The head is built in the constructor with the rest of the model, after the backbone, so the
+backbone's weight paths (§15) are the same with or without one; its own weights sit under
+`task_head/`. The model is causal only as measured (§3), and the head pools the **last real token**
+(`pooling_type='last'`) under the input's `attention_mask`, else `input_ids != pad_token_id`; the
+blocks see only the caller's mask either way. `head_config_overrides={"pooling_type": ...}`
+replaces the default. With a head, no LM logits are computed and an untied `lm_head` is not created.
+
+A headed model's `pretrained=<path>` must be a `.keras` file. It copies the backbone by layer name
+and skips the checkpoint's `task_head` (and a headless checkpoint's `lm_head`, which has no target);
+the model's own head keeps its fresh initialization, and a backbone that does not fit (another
+`vocab_size` or width) raises `ValueError: Shape mismatch on layer ...` instead of loading nothing.
+To restore a whole model, head included, use `keras.models.load_model`.
 
 ---
 
@@ -412,8 +459,9 @@ after = restored(ids, training=False)["logits"]
 print(float(np.max(np.abs(np.array(before) - np.array(after)))))  # 0.0
 ```
 
-`get_config()` stores all eleven constructor arguments, including `field_size` resolved to its
-concrete value, never left as `None`.
+`get_config()` stores every constructor argument (`task_config` as a plain dict), including
+`field_size` resolved to its concrete value, never left as `None`. A config saved before
+`pad_token_id` and the head knobs existed still loads, as a headless model.
 
 ---
 
@@ -427,8 +475,9 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest \
 The model suite covers construction validation, forward shapes, the **causality ratio sweep**
 (the pin for the §3 table: clean ratios must stay below a bound and leaky ratios *above* one, so a
 silent change in either direction fails), weight tying, `get_config` / `.keras` round trips, every
-named variant, gradient flow, CLM loss finiteness, the `pretrained=True` contract, and the public
-API surface. Report *passed with collected*: a suite that collects nothing also reports green.
+named variant, gradient flow, CLM loss finiteness, the `pretrained=True` contract, the public
+API surface, and the in-model task head (`TestWaveFieldIncludeTop`: last-token pooling, padding
+invariance, head swap by `pretrained` path). Report *passed with collected*: a suite that collects nothing also reports green.
 
 ---
 
@@ -471,7 +520,9 @@ The repo's layer-reuse policy prefers a factory. Three candidate adoptions here 
 
 Block: `attn_norm`, `attention`, `ffn_norm`, `ffn_dense_1`, `ffn_dense_2`, `ffn_dropout`. Model:
 `token_embeddings`, `position_embeddings`, `embed_norm`, `embed_dropout`, `block_{i}`,
-`final_norm`, and `lm_head` when untied.
+`final_norm`, `lm_head` when untied and headless, and `task_head` with `include_top=True`. All of
+them are built in the constructor, outside the model's name scope, so no path carries a model-name
+prefix.
 
 ### Relationship to `WaveFieldAttention`
 

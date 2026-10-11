@@ -66,7 +66,7 @@ from .config import (
     grid_shape_of,
     validate_variant,
 )
-from .model import TopoLM, create_topolm, create_topolm_with_head
+from .model import TopoLM, create_topolm
 
 __all__ = [
     "DEFAULT_ALPHA",
@@ -77,7 +77,6 @@ __all__ = [
     "TopoLM",
     "TopoLMBlock",
     "create_topolm",
-    "create_topolm_with_head",
     "grid_shape_of",
     "validate_variant",
 ]

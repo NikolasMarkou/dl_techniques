@@ -219,6 +219,51 @@ are worth knowing before reading its code, both of which would otherwise look li
 mistakes: the validation cadence *is* the virtual epoch length, and the head must
 be told to aggregate the backbone's losses.
 
+### A task head in the model (`include_top`)
+
+```python
+import numpy as np
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.topolm import create_topolm
+
+sst2 = NLPTaskConfig(name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2)
+clf = create_topolm("tiny", vocab_size=512, include_top=True, task_config=sst2)
+
+ids = np.random.randint(1, 512, size=(2, 16)).astype("int32")
+ids[1, 10:] = 0                                    # right padding, pad_token_id=0
+print(clf.task_head.pooling_type)                  # 'last'
+print(clf(ids).shape)                              # (2, 2) -- bare logits, no LM logits
+clf(ids, training=True)
+print(len(clf.losses))                             # 8 -- the taps still fire
+
+# Warm-start another head from this one: the backbone is copied by layer name, the
+# checkpoint's task_head never is.
+clf.save("topolm_sst2.keras")
+ner = create_topolm(
+    "tiny", vocab_size=512, include_top=True, pretrained="topolm_sst2.keras",
+    task_config=NLPTaskConfig(name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION,
+                              num_classes=9),
+)
+print(ner(ids).shape)                              # (2, 16, 9)
+```
+
+With `include_top=True` and a `task_config` the model owns one head from
+`layers/heads/nlp`, named `task_head`, and returns only its output (a bare tensor, or a dict for
+question answering); no LM logits are computed and an untied `lm_head` is not created. TopoLM is
+causal, so the head pools the **last real token** (`pooling_type='last'`) under the input's
+`attention_mask`, else `input_ids != pad_token_id` (`pad_token_id=0` by default, a real
+`cl100k_base` token: pass your pad id or a mask); `head_config_overrides={"pooling_type": ...}`
+replaces the default. The blocks never see that derived mask, run unchanged, and keep adding the
+smoothness terms through `add_loss`, so a fine-tune under `fit` still pays the spatial penalty
+unless `alpha=0.0`. The backbone's weight paths are the same with or without a head.
+
+A headed model's `pretrained=<path>` must be a `.keras` file. It copies the backbone by layer name
+and skips the checkpoint's `task_head` (and a headless checkpoint's `lm_head`, which has no target);
+the model's own head keeps its fresh initialization, and a backbone that does not fit (another
+`vocab_size` or width) raises `ValueError: Shape mismatch on layer ...`. A headless model restores
+the whole file. Both build the model first: before that, every `pretrained=<path>` raised
+"model must be built". To restore a whole model, head included, use `keras.models.load_model`.
+
 ---
 
 ## 7. Post-hoc analysis
@@ -280,7 +325,7 @@ Two things the metrics do *not* do, deliberately:
 
 | symbol | location | role |
 |---|---|---|
-| `TopoLM` | `model.py` | the model; `{"logits", "last_hidden_state"}` |
+| `TopoLM` | `model.py` | the model; `{"logits", "last_hidden_state"}`, or one task head's output with `include_top=True` |
 | `TopoLMBlock` | `components.py` | decoder block carrying the taps |
 | `create_topolm` | `model.py` | module-level factory |
 | `MODEL_VARIANTS` | `config.py` | the variant table |

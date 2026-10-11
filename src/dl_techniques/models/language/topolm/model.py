@@ -45,6 +45,15 @@ still created, still built, and still derive their layouts from the same seeds, 
 the non-topographic control has a byte-identical weight set and differs from the
 trained arm in its objective alone.
 
+By default (``include_top=False``) the model returns ``logits`` and
+``last_hidden_state``. With ``include_top=True`` and a ``task_config`` it owns ONE
+task head from ``layers/heads/nlp``, named ``task_head``, in place of the LM head
+(no logits are computed and no untied ``lm_head`` is created), and returns only
+that head's output, as ``models/language/gpt2`` does. The head pools ``'last'`` by
+default, the only position of a causal decoder that has seen the whole sequence.
+The blocks, and so their taps and ``add_loss`` terms, run unchanged under a head,
+and the backbone's weight paths are the same either way.
+
 References:
     - Rathi, Mehrer, AlKhamissi, Binhuraib, Blauch & Schrimpf, 2025. TopoLM:
       Brain-like spatio-functional organization in a topographic language model.
@@ -73,7 +82,10 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import load_weights_or_raise
+from dl_techniques.utils.weight_transfer import (
+    load_weights_from_checkpoint,
+    load_weights_or_raise,
+)
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.activation_serialization import (
@@ -81,7 +93,15 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
 )
 from dl_techniques.layers.activations import gelu_tanh
-from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    head_attention_mask,
+    task_config_to_dict,
+    validate_task_head_knobs,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from .components import TAP_SITES, TopoLMBlock
 from .config import (
     DEFAULT_ALPHA,
@@ -130,6 +150,11 @@ class TopoLM(keras.Model):
             tied matmul(token emb.T)  |  lm_head Dense
                  │
                  ▼  logits [B, S, vocab_size]
+
+            include_top=True: both leaves are replaced by
+            ┌─────────────────────────┐
+            │ task_head (pools 'last')│──► finalized head output (only output)
+            └─────────────────────────┘
 
     Both leaves come back together, so
     :class:`~dl_techniques.models.common.masked_language_model.CausalLanguageModel`
@@ -199,10 +224,36 @@ class TopoLM(keras.Model):
     :param seed: Base seed for the taps. Every tap's layout seed is derived from
         it, so the whole model's topography is reproducible from this one integer.
     :type seed: Optional[int]
+    :param pad_token_id: Id treated as padding by the task head when the input
+        carries no ``attention_mask``. Read only with ``include_top=True``; the
+        blocks never derive a mask from it. Default 0, which is a real token in
+        ``cl100k_base``: with right-padded batches pass the tokenizer's pad id or
+        an ``attention_mask``.
+    :type pad_token_id: int
+    :param include_top: Whether the model owns a task head (and no LM head).
+        Default False: no head layer and no head weight exist. With a head the
+        blocks and their taps run unchanged, so ``add_loss`` still fires.
+    :type include_top: bool
+    :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of its
+        fields. Required when ``include_top`` is True, refused otherwise; stored
+        as a plain dict. ``MULTIPLE_CHOICE`` is refused.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (e.g. ``{"pooling_type": "mean"}``, which replaces the
+        ``'last'`` default). Only valid with ``include_top=True``. Default None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Forwarded to ``keras.Model``.
+    :ivar lm_head: The untied LM projection, or None when the embeddings are tied
+        or ``include_top`` is True.
+    :vartype lm_head: Optional[keras.layers.Dense]
+    :ivar task_head: The task head named ``"task_head"``, or None when
+        ``include_top`` is False.
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
     :raises ValueError: If the width cannot host the tapped grid, does not divide
         among the heads, or if any argument is out of range -- naming the offending
-        value in each case.
+        value in each case; also if ``include_top=True`` comes without a
+        ``task_config``, or a ``task_config`` or ``head_config_overrides`` comes
+        with ``include_top=False``.
     """
 
     MODEL_VARIANTS = MODEL_VARIANTS
@@ -230,6 +281,10 @@ class TopoLM(keras.Model):
         activation: Union[str, Any] = gelu_tanh,
         tie_word_embeddings: bool = True,
         seed: Optional[int] = None,
+        pad_token_id: int = 0,
+        include_top: bool = False,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -239,6 +294,7 @@ class TopoLM(keras.Model):
             attention_dropout_rate, radius, alpha, num_neighborhoods, distance,
             tap_sites, grid_shape, normalization_position,
         )
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         self.vocab_size = int(vocab_size)
         self.embed_dim = int(embed_dim)
@@ -273,8 +329,30 @@ class TopoLM(keras.Model):
         self.activation = activation
         self.tie_word_embeddings = bool(tie_word_embeddings)
         self.seed = seed
+        self.pad_token_id = int(pad_token_id)
+        self.include_top = bool(include_top)
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         self._build_architecture()
+
+        # Created after the backbone and under its own fixed name, so the
+        # backbone's layer names, weight paths and RNG draws are the same with
+        # or without a head.
+        self.task_head = None
+        if self.include_top:
+            # DECISION plan-2026-10-11T004932-b83935e1/D-012: pool 'last' by default; do NOT keep the head's
+            # 'cls' default -- position 0 of a causal decoder has seen only itself. See decisions.md.
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.embed_dim,
+                head_config_overrides=self.head_config_overrides,
+                default_pooling="last",
+            )
 
         logger.info(
             f"Created TopoLM: depth={self.depth}, embed_dim={self.embed_dim}, "
@@ -282,6 +360,7 @@ class TopoLM(keras.Model):
             f"alpha={self.alpha}, radius={self.radius}, "
             f"taps={len(self.blocks) * len(self.tap_sites)}, "
             f"tie_word_embeddings={self.tie_word_embeddings}"
+            + (f", task head '{self.task_config['name']}'" if self.include_top else "")
         )
 
     @staticmethod
@@ -431,7 +510,9 @@ class TopoLM(keras.Model):
             epsilon=self.layer_norm_eps, name="final_norm"
         )
 
-        if not self.tie_word_embeddings:
+        # A task head replaces the LM head: call() never runs lm_head then,
+        # and build() must not create what call() does not run.
+        if not self.tie_word_embeddings and not self.include_top:
             self.lm_head = keras.layers.Dense(
                 self.vocab_size,
                 use_bias=False,
@@ -543,6 +624,10 @@ class TopoLM(keras.Model):
         self.final_norm.build(hidden_shape)
         if self.lm_head is not None:
             self.lm_head.build(hidden_shape)
+        if self.task_head is not None:
+            self.task_head.build(
+                {"hidden_states": hidden_shape, "attention_mask": token_shape}
+            )
 
         super().build(input_shape)
 
@@ -578,7 +663,7 @@ class TopoLM(keras.Model):
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
         taps: Optional[Tuple[Any, ...]] = None,
-    ) -> Dict[str, keras.KerasTensor]:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass.
 
         :param inputs: Token IDs ``(batch, seq_len)``, or a dict carrying
@@ -599,9 +684,12 @@ class TopoLM(keras.Model):
             does not alter the residual arithmetic -- asserted in
             ``tests/test_models/test_topolm/``.
         :type taps: Optional[Tuple[Any, ...]]
-        :return: ``{"logits": (batch, seq_len, vocab_size),
-            "last_hidden_state": (batch, seq_len, embed_dim)}``.
-        :rtype: Dict[str, keras.KerasTensor]
+        :return: With ``include_top=False``, ``{"logits": (batch, seq_len,
+            vocab_size), "last_hidden_state": (batch, seq_len, embed_dim)}``.
+            With ``include_top=True``, only the head's output reduced by
+            ``finalize_head_outputs``: a bare tensor, or a dict of two or more
+            tensors (``start_logits`` / ``end_logits`` for QA).
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :raises ValueError: If a dict input has no ``'input_ids'``, or if
             ``taps`` is given the wrong number of entries for
             :attr:`tap_layers`.
@@ -651,6 +739,19 @@ class TopoLM(keras.Model):
 
         hidden = self.final_norm(hidden, training=training)
 
+        if self.include_top:
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": hidden,
+                    "attention_mask": head_attention_mask(
+                        input_ids, attention_mask, self.pad_token_id,
+                        hidden.dtype,
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
+
         if self.tie_word_embeddings:
             logits = tied_embedding_logits(
                 hidden, self.word_embeddings.embeddings
@@ -661,12 +762,31 @@ class TopoLM(keras.Model):
         return {"logits": logits, "last_hidden_state": hidden}
 
     def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...]
-    ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Return both output shapes from STORED CONFIG, on an unbuilt model."""
+        self, input_shape: Union[Tuple[Optional[int], ...], Dict[str, Any]]
+    ) -> Any:
+        """Return what ``call`` returns, from STORED CONFIG, on an unbuilt model.
+
+        :param input_shape: ``(batch, seq_len)``, or a dict holding one under
+            ``'input_ids'``.
+        :return: Headless, both output shapes in a dict. With a head, the head's
+            output shapes after the reduction ``call`` applies: one shape, or a
+            mapping of two or more.
+        """
+        token_shape = self._token_shape(input_shape)
+
+        if self.include_top:
+            # finalize_head_outputs only drops and unwraps dict entries, so it
+            # applies to a dict of shapes exactly as to a dict of tensors.
+            return finalize_head_outputs(
+                self.task_head.compute_output_shape({
+                    "hidden_states": (*token_shape, self.embed_dim),
+                    "attention_mask": token_shape,
+                })
+            )
+
         return {
-            "logits": (*tuple(input_shape), self.vocab_size),
-            "last_hidden_state": (*tuple(input_shape), self.embed_dim),
+            "logits": (*token_shape, self.vocab_size),
+            "last_hidden_state": (*token_shape, self.embed_dim),
         }
 
     def get_config(self) -> Dict[str, Any]:
@@ -694,6 +814,15 @@ class TopoLM(keras.Model):
             "activation": serialize_activation(self.activation),
             "tie_word_embeddings": self.tie_word_embeddings,
             "seed": self.seed,
+            "pad_token_id": self.pad_token_id,
+            "include_top": self.include_top,
+            "task_config": (
+                dict(self.task_config) if self.task_config is not None else None
+            ),
+            "head_config_overrides": (
+                dict(self.head_config_overrides)
+                if self.head_config_overrides is not None else None
+            ),
         })
         return config
 
@@ -744,10 +873,19 @@ class TopoLM(keras.Model):
         :type variant: str
         :param pretrained: ``True`` raises :class:`NotImplementedError`; a string
             path loads weights from that local ``.keras`` file; ``False``
-            (default) random-initializes.
+            (default) random-initializes. A model WITH a head
+            (``include_top=True``) receives the backbone only: a ``task_head`` in
+            the checkpoint is never copied and the model's own head keeps its
+            fresh initialization, so a checkpoint of any TopoLM, headless or
+            trained under any head, warm-starts a model with any other head. That
+            transfer copies by layer name, needs a ``.keras`` file and raises if a
+            backbone layer does not fit (e.g. another ``vocab_size``). To restore
+            a whole model, head included, use ``keras.models.load_model``.
         :type pretrained: Union[bool, str]
         :param kwargs: Override any variant parameter, e.g. ``alpha=0.0`` for the
-            non-topographic control or ``tap_sites=("attention",)``.
+            non-topographic control or ``tap_sites=("attention",)``, including
+            ``include_top``, ``task_config``, ``head_config_overrides`` and
+            ``pad_token_id``.
         :type kwargs: Any
         :return: The configured model.
         :rtype: TopoLM
@@ -787,10 +925,27 @@ class TopoLM(keras.Model):
                 raise FileNotFoundError(
                     f"Weights file not found: {weights_path}"
                 )
-            # Built above, so the restore has somewhere to land. By-name transfer
-            # does not exist in Keras 3 and its absence used to be swallowed into
-            # a warning, turning a partial restore into a silent success.
-            load_weights_or_raise(model, weights_path, skip_mismatch=True)
+            # Built here, so the restore has somewhere to land: a build, not a
+            # dummy forward, so no RNG is drawn. Without it every local path
+            # raised "model must be built" (measured).
+            model.build((1, min(32, model.max_seq_len)))
+            if model.include_top:
+                # DECISION plan-2026-10-11T004932-b83935e1/D-012: by-name and strict; do NOT send a headed
+                # model through load_weights_or_raise (copies an equal-shape head) nor pass strict=False
+                # (a backbone that does not fit records only shape mismatches and loads nothing). See decisions.md.
+                # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+                # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
+                load_weights_from_checkpoint(
+                    target=model,
+                    ckpt_path=weights_path,
+                    skip_prefixes=(TASK_HEAD_NAME,),
+                    strict=True,
+                )
+            else:
+                # Whole-file restore. By-name transfer does not exist in Keras 3
+                # and its absence used to be swallowed into a warning, turning a
+                # partial restore into a silent success.
+                load_weights_or_raise(model, weights_path, skip_mismatch=True)
 
         return model
 
@@ -820,161 +975,29 @@ def create_topolm(
     :type pretrained: Union[bool, str]
     :param kwargs: Forwarded to :meth:`TopoLM.from_variant`, e.g.
         ``vocab_size=50257``, ``alpha=0.0``, ``radius=3``, ``permute=False``,
-        ``tap_sites=()``.
+        ``tap_sites=()``, or ``include_top=True`` with a ``task_config`` for a
+        model with a task head. A local ``pretrained`` path never restores a
+        checkpoint's task head.
     :type kwargs: Any
     :return: A configured :class:`TopoLM`.
     :rtype: TopoLM
-    :raises ValueError: If ``variant`` is unrecognized.
+    :raises ValueError: If ``variant`` is unrecognized, or a forwarded argument
+        is invalid (including inconsistent head knobs, see :class:`TopoLM`).
     :raises NotImplementedError: If ``pretrained=True``.
 
     Example:
         >>> topographic = create_topolm("paper")
         >>> control = create_topolm("paper", alpha=0.0)
         >>> no_permutation = create_topolm("paper", permute=False)
+        >>>
+        >>> # The same backbone with a sentence-classification head (pools 'last')
+        >>> clf = create_topolm(
+        ...     "tiny", include_top=True,
+        ...     task_config=NLPTaskConfig(
+        ...         name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+        ...         num_classes=2))
     """
     return TopoLM.from_variant(variant, pretrained=pretrained, **kwargs)
-
-
-# ---------------------------------------------------------------------
-# Integration with NLP Task Heads
-# ---------------------------------------------------------------------
-
-
-def create_topolm_with_head(
-    topolm_variant: str,
-    task_config: NLPTaskConfig,
-    pretrained: Union[bool, str] = False,
-    topolm_config_overrides: Optional[Dict[str, Any]] = None,
-    head_config_overrides: Optional[Dict[str, Any]] = None,
-) -> keras.Model:
-    """Build an end-to-end model: a TopoLM encoder plus an NLP task head.
-
-    Takes a variant name, instantiates the encoder, builds a head from the
-    ``dl_techniques.layers.heads.nlp`` factory, and joins them into one functional
-    ``keras.Model``. The head pools the last position by default (causal model),
-    which ``head_config_overrides`` can change.
-
-    .. code-block:: text
-
-        {"input_ids": [B, L] int32}
-                 │
-                 ├─────────────────────┐
-                 ▼                     ▼
-        ┌───────────────────┐     input_ids != pad_token_id
-        │ TopoLM encoder    │          │
-        └───────────────────┘          │
-                 │ last_hidden_state   │
-                 ▼                     ▼
-        ┌─────────────────────────────────┐
-        │ nlp head  pooling_type 'last'   │
-        └─────────────────────────────────┘
-                 │
-                 ▼
-            task outputs
-
-    :param topolm_variant: The TopoLM variant to use (e.g., "paper", "small").
-    :type topolm_variant: str
-    :param task_config: An ``NLPTaskConfig`` object defining the task, which must set
-        ``vocabulary_size``.
-    :type task_config: NLPTaskConfig
-    :param pretrained: If a string, path to a local weights file. If True, raises
-        ``NotImplementedError``. Defaults to False.
-    :type pretrained: Union[bool, str]
-    :param topolm_config_overrides: Optional dictionary to override default TopoLM
-        configuration for the chosen variant. Defaults to None.
-    :type topolm_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Optional dictionary to override default head
-        configuration, including ``pooling_type``. Defaults to None.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete ``keras.Model`` ready for the specified task.
-    :rtype: keras.Model
-    :raises ValueError: If ``task_config`` has no ``vocabulary_size``, or the variant
-        is unknown.
-    :raises NotImplementedError: If ``pretrained is True``.
-
-    Example:
-        .. code-block:: python
-
-            from dl_techniques.layers.heads.nlp import NLPTaskType
-
-            # Define a task for sequence classification
-            seq_cls_task = NLPTaskConfig(
-                name="sentiment_analysis",
-                task_type=NLPTaskType.TEXT_CLASSIFICATION,
-                num_classes=3,
-                vocabulary_size=100277
-            )
-
-            # Create the full model with a TopoLM Paper encoder
-            model = create_topolm_with_head(
-                topolm_variant="paper",
-                task_config=seq_cls_task,
-                pretrained=False,
-                head_config_overrides={"dropout_rate": 0.15}
-            )
-            model.summary()
-    """
-    topolm_config_overrides = topolm_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-
-    logger.info(
-        f"Creating TopoLM-{topolm_variant} with a '{task_config.name}' head."
-    )
-
-    if not getattr(task_config, 'vocabulary_size', None):
-        raise ValueError(
-            "The `task_config` must set 'vocabulary_size' "
-            "to create a TopoLM model."
-        )
-
-    topolm_encoder = TopoLM.from_variant(
-        topolm_variant,
-        vocab_size=task_config.vocabulary_size,
-        pretrained=pretrained,
-        **topolm_config_overrides,
-    )
-
-    # TopoLM is causal, so use 'last' pooling
-    head_kwargs = {'pooling_type': 'last'}
-    head_kwargs.update(head_config_overrides)
-    task_head = create_nlp_head(
-        task_config=task_config,
-        input_dim=topolm_encoder.embed_dim,
-        **head_kwargs,
-    )
-
-    inputs = {
-        "input_ids": keras.Input(
-            shape=(None,), dtype="int32", name="input_ids"
-        ),
-    }
-
-    # TopoLM call expects input_ids as first positional arg
-    encoder_outputs = topolm_encoder(
-        inputs["input_ids"],
-    )
-
-    attention_mask = keras.ops.not_equal(
-        inputs["input_ids"], 0
-    )
-
-    head_inputs = {
-        "hidden_states": encoder_outputs["last_hidden_state"],
-        "attention_mask": attention_mask,
-    }
-    task_outputs = task_head(head_inputs)
-
-    model_name = f"topolm_{topolm_variant}_with_{task_config.name}_head"
-    model = keras.Model(
-        inputs=inputs,
-        outputs=task_outputs,
-        name=model_name
-    )
-
-    logger.info(
-        f"Successfully created model with {model.count_params():,} parameters."
-    )
-    return model
 
 
 # ---------------------------------------------------------------------

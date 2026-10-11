@@ -16,7 +16,11 @@ rather than ``O(N^2 * D)``. Two gates restore content dependence: a sigmoid on
 the query scales the gathered field per token, and a projection of the block
 input gates the block output. Around that sits a standard GPT-2-style pre-norm
 stack with learned token and position embeddings and a weight-tied LM head by
-default. ``call`` returns ``{"logits", "last_hidden_state"}``. No causal mask
+default. ``call`` returns ``{"logits", "last_hidden_state"}``; with
+``include_top=True`` and a ``task_config`` the model instead owns ONE task head
+from ``layers/heads/nlp``, named ``task_head``, in place of the LM head, pools
+``'last'`` by default and returns only that head's output, as
+``models/language/gpt2`` does. No causal mask
 is built anywhere in this module, so causality is a measured property of the
 ``(field_size, max_seq_len)`` pair rather than a guarantee; see
 ``WaveFieldLLM`` for the numbers. No pretrained weights ship with this
@@ -47,13 +51,24 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import load_weights_or_raise
+from dl_techniques.utils.weight_transfer import (
+    load_weights_from_checkpoint,
+    load_weights_or_raise,
+)
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.attention.wave_field_attention import (
     WaveFieldAttention,
 )
-from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    head_attention_mask,
+    task_config_to_dict,
+    validate_task_head_knobs,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -352,6 +367,11 @@ class WaveFieldLLM(keras.Model):
               ▼
         logits [B, N, V]
 
+        include_top=True: the LM head is replaced by
+        ┌──────────────────────────────┐
+        │ task_head (pools 'last')     │──► finalized head output (only output)
+        └──────────────────────────────┘
+
     Both leaves are returned together as
     ``{"logits", "last_hidden_state"}``, so :class:`MaskedCausalLMLoss` and
     the standard CLM data-wrapper that keys on ``"logits"`` work unchanged.
@@ -417,12 +437,33 @@ class WaveFieldLLM(keras.Model):
     :param layer_norm_eps: LayerNorm epsilon. Default 1e-5.
     :param tie_word_embeddings: Reuse transposed token embedding as LM head
         (DECISION ``D-003``). Default True, which builds no ``lm_head``.
+    :param pad_token_id: Id treated as padding by the task head when the input
+        carries no ``attention_mask``. Read only with ``include_top=True``; the
+        blocks never derive a mask from it. Default 0, which is a real token in
+        the ``gpt2`` encoding: with right-padded batches pass the tokenizer's
+        pad id or an ``attention_mask``.
+    :param include_top: Whether the model owns a task head (and no LM head).
+        Default False: no head layer and no head weight exist.
+    :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of
+        its fields. Required when ``include_top`` is True, refused otherwise;
+        stored as a plain dict. ``MULTIPLE_CHOICE`` is refused.
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (e.g. ``{"pooling_type": "mean"}``, which replaces the
+        ``'last'`` default). Only valid with ``include_top=True``.
+        Default None.
     :param kwargs: Forwarded to ``keras.Model``.
+
+    :ivar lm_head: The untied LM projection, or None when the embeddings are
+        tied or ``include_top`` is True.
+    :ivar task_head: The task head named ``"task_head"``, or None when
+        ``include_top`` is False.
 
     :raises ValueError: If ``vocab_size``, ``embed_dim``, ``depth``,
         ``num_heads`` or ``max_seq_len`` is not positive, if ``embed_dim`` is
-        not divisible by ``num_heads``, if ``field_size`` is not above 1, or if
-        either dropout rate falls outside ``[0, 1]``.
+        not divisible by ``num_heads``, if ``field_size`` is not above 1, if
+        either dropout rate falls outside ``[0, 1]``, if ``include_top=True``
+        comes without a ``task_config``, or if a ``task_config`` or
+        ``head_config_overrides`` comes with ``include_top=False``.
     """
 
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
@@ -488,6 +529,10 @@ class WaveFieldLLM(keras.Model):
         initializer_range: float = DEFAULT_INITIALIZER_RANGE,
         layer_norm_eps: float = DEFAULT_LAYER_NORM_EPS,
         tie_word_embeddings: bool = True,
+        pad_token_id: int = 0,
+        include_top: bool = False,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -502,6 +547,7 @@ class WaveFieldLLM(keras.Model):
             field_size, max_seq_len,
             dropout_rate, attention_dropout_rate,
         )
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -514,14 +560,41 @@ class WaveFieldLLM(keras.Model):
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
         self.tie_word_embeddings = tie_word_embeddings
+        self.pad_token_id = pad_token_id
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         self._build_architecture()
+
+        # Created and built after the backbone and under its own fixed name, so
+        # the backbone's layer names, weight paths and RNG draws are the same
+        # with or without a head. Built here like every other sub-layer.
+        self.task_head = None
+        if self.include_top:
+            # DECISION plan-2026-10-11T004932-b83935e1/D-012: pool 'last' by default; do NOT keep the head's
+            # 'cls' default -- position 0 of a causal decoder has seen only itself. See decisions.md.
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.embed_dim,
+                head_config_overrides=self.head_config_overrides,
+                default_pooling="last",
+            )
+            self.task_head.build({
+                "hidden_states": (None, self.max_seq_len, self.embed_dim),
+                "attention_mask": (None, self.max_seq_len),
+            })
 
         logger.info(
             f"Created WaveFieldLLM: depth={self.depth}, "
             f"embed_dim={self.embed_dim}, heads={self.num_heads}, "
             f"max_seq_len={self.max_seq_len}, field_size={self.field_size}, "
             f"tie_word_embeddings={self.tie_word_embeddings}"
+            + (f", task head '{self.task_config['name']}'" if self.include_top else "")
         )
 
     @staticmethod
@@ -578,7 +651,8 @@ class WaveFieldLLM(keras.Model):
     def _build_architecture(self) -> None:
         """Create every sub-layer and build it at ``max_seq_len``.
 
-        The LM head exists only when ``tie_word_embeddings`` is False.
+        The LM head exists only when ``tie_word_embeddings`` and
+        ``include_top`` are both False. The task head is built by ``__init__``.
 
         :return: Nothing.
         :rtype: None
@@ -630,7 +704,9 @@ class WaveFieldLLM(keras.Model):
             epsilon=self.layer_norm_eps, name="final_norm",
         )
 
-        if not self.tie_word_embeddings:
+        # A task head replaces the LM head: call() never runs lm_head then,
+        # and the model must not create what call() does not run.
+        if not self.tie_word_embeddings and not self.include_top:
             self.lm_head = keras.layers.Dense(
                 self.vocab_size,
                 use_bias=False,
@@ -659,7 +735,7 @@ class WaveFieldLLM(keras.Model):
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Run the forward pass and return both heads in one dict.
 
         :param inputs: Token ids ``(B, N)``, or a dict holding ``"input_ids"``
@@ -671,9 +747,14 @@ class WaveFieldLLM(keras.Model):
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Whether the call is in training mode.
         :type training: Optional[bool]
-        :return: ``{"logits": (B, N, vocab_size), "last_hidden_state":
-            (B, N, embed_dim)}``, the logits with no softmax applied.
-        :rtype: Dict[str, keras.KerasTensor]
+        :return: With ``include_top=False``, ``{"logits": (B, N, vocab_size),
+            "last_hidden_state": (B, N, embed_dim)}``, the logits with no
+            softmax applied. With ``include_top=True``, only the head's output
+            reduced by ``finalize_head_outputs``: a bare tensor, or a dict of
+            two or more tensors (``start_logits`` / ``end_logits`` for QA). The
+            head pools under the caller's mask, else ``input_ids !=
+            pad_token_id``; the blocks see only the caller's mask either way.
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :raises ValueError: If ``inputs`` is a dict without ``"input_ids"``.
         """
         if isinstance(inputs, dict):
@@ -702,6 +783,18 @@ class WaveFieldLLM(keras.Model):
 
         x = self.final_norm(x)
 
+        if self.include_top:
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": x,
+                    "attention_mask": head_attention_mask(
+                        input_ids, attention_mask, self.pad_token_id, x.dtype,
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
+
         if self.tie_word_embeddings:
             embedding_weights = self.token_embeddings.embeddings
             logits = tied_embedding_logits(x, embedding_weights)
@@ -714,14 +807,29 @@ class WaveFieldLLM(keras.Model):
         }
 
     def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...],
-    ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Compute both output shapes from the token-id shape.
+        self, input_shape: Union[Tuple[Optional[int], ...], Dict[str, Any]],
+    ) -> Any:
+        """Compute the shapes of what ``call`` returns from the token-id shape.
 
-        :param input_shape: Token id shape ``(B, N)``.
-        :return: A dict mirroring ``call``'s keys.
-        :rtype: Dict[str, Tuple[Optional[int], ...]]
+        :param input_shape: Token id shape ``(B, N)``, or a dict holding one
+            under ``'input_ids'``.
+        :return: Headless, a dict mirroring ``call``'s keys. With a head, the
+            head's output shapes after the reduction ``call`` applies: one
+            shape, or a mapping of two or more.
         """
+        if isinstance(input_shape, dict):
+            input_shape = input_shape["input_ids"]
+
+        if self.include_top:
+            # finalize_head_outputs only drops and unwraps dict entries, so it
+            # applies to a dict of shapes exactly as to a dict of tensors.
+            return finalize_head_outputs(
+                self.task_head.compute_output_shape({
+                    "hidden_states": (*input_shape, self.embed_dim),
+                    "attention_mask": tuple(input_shape),
+                })
+            )
+
         return {
             "logits": (*input_shape, self.vocab_size),
             "last_hidden_state": (*input_shape, self.embed_dim),
@@ -747,6 +855,15 @@ class WaveFieldLLM(keras.Model):
             "initializer_range": self.initializer_range,
             "layer_norm_eps": self.layer_norm_eps,
             "tie_word_embeddings": self.tie_word_embeddings,
+            "pad_token_id": self.pad_token_id,
+            "include_top": self.include_top,
+            "task_config": (
+                dict(self.task_config) if self.task_config is not None else None
+            ),
+            "head_config_overrides": (
+                dict(self.head_config_overrides)
+                if self.head_config_overrides is not None else None
+            ),
         })
         return config
 
@@ -790,11 +907,21 @@ class WaveFieldLLM(keras.Model):
             ``'large'``, ``'xl'``.
         :param pretrained: If ``True``, raises ``NotImplementedError`` (no
             public WaveFieldLLM weights are distributed by this library). If a
-            string path is supplied, the model is built by a dummy forward pass
-            of 32 random token ids and weights are loaded with
+            string path is supplied, the model is built by
+            ``build((1, min(32, max_seq_len)))`` and weights are loaded with
             ``skip_mismatch=True``. If ``False`` (default), returns a
-            random-initialized model.
-        :param kwargs: Override any variant parameter.
+            random-initialized model. A model WITH a head
+            (``include_top=True``) receives the backbone only: a ``task_head``
+            in the checkpoint is never copied and the model's own head keeps its
+            fresh initialization, so a checkpoint of any WaveFieldLLM, headless
+            or trained under any head, warm-starts a model with any other head.
+            That transfer copies by layer name, needs a ``.keras`` file and
+            raises if a backbone layer does not fit (e.g. another
+            ``vocab_size``). To restore a whole model, head included, use
+            ``keras.models.load_model``.
+        :param kwargs: Override any variant parameter, including
+            ``include_top``, ``task_config``, ``head_config_overrides`` and
+            ``pad_token_id``.
         :return: Configured ``WaveFieldLLM`` instance.
         :rtype: WaveFieldLLM
         :raises ValueError: If the variant name is not recognized.
@@ -823,16 +950,27 @@ class WaveFieldLLM(keras.Model):
                     raise FileNotFoundError(
                         f"Weights file not found: {weights_path}"
                     )
+                # A build, not a dummy forward: no RNG is drawn, and the length
+                # never exceeds max_seq_len (a fixed 32 raised below 32).
                 if not model.built:
-                    import numpy as np
-                    dummy = np.random.randint(
-                        0, model.vocab_size, (1, 32),
-                    ).astype("int32")
-                    model(dummy, training=False)
-                # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: load_weights_or_raise,
-                # since load_weights no-ops on a non-matching checkpoint.
-                # See decisions.md.
-                load_weights_or_raise(model, weights_path, skip_mismatch=True)
+                    model.build((1, min(32, model.max_seq_len)))
+                if model.include_top:
+                    # DECISION plan-2026-10-11T004932-b83935e1/D-012: by-name and strict; do NOT send a headed
+                    # model through load_weights_or_raise (copies an equal-shape head) nor pass strict=False
+                    # (a backbone that does not fit records only shape mismatches and loads nothing). See decisions.md.
+                    # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+                    # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
+                    load_weights_from_checkpoint(
+                        target=model,
+                        ckpt_path=weights_path,
+                        skip_prefixes=(TASK_HEAD_NAME,),
+                        strict=True,
+                    )
+                else:
+                    # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: load_weights_or_raise,
+                    # since load_weights no-ops on a non-matching checkpoint.
+                    # See decisions.md.
+                    load_weights_or_raise(model, weights_path, skip_mismatch=True)
             else:
                 # DECISION plan-2026-08-13T091555-230c101d/D-005: catch I/O errors
                 # only; Exception would swallow the NotImplementedError below.
@@ -889,7 +1027,9 @@ def create_wave_field_llm(
     :type pretrained: Union[bool, str]
     :param kwargs: Additional keyword arguments forwarded to
         :meth:`WaveFieldLLM.from_variant` (e.g. ``dropout_rate``,
-        ``tie_word_embeddings``).
+        ``tie_word_embeddings``, or ``include_top=True`` with a
+        ``task_config`` for a model with a task head). A local ``pretrained``
+        path never restores a checkpoint's task head.
     :type kwargs: Any
 
     :returns: Configured ``WaveFieldLLM`` instance.
@@ -898,11 +1038,20 @@ def create_wave_field_llm(
     :raises NotImplementedError: If ``pretrained=True`` (no public weights).
     :raises FileNotFoundError: If ``pretrained`` is a string path that does
         not exist.
-    :raises ValueError: If ``variant`` is not a recognized variant.
+    :raises ValueError: If ``variant`` is not a recognized variant, or a
+        forwarded argument is invalid (including inconsistent head knobs, see
+        :class:`WaveFieldLLM`).
 
     Example:
         >>> model = create_wave_field_llm("small")
         >>> model = create_wave_field_llm("tiny", vocab_size=200)
+        >>>
+        >>> # The same backbone with a sentence-classification head (pools 'last')
+        >>> clf = create_wave_field_llm(
+        ...     "tiny", include_top=True,
+        ...     task_config=NLPTaskConfig(
+        ...         name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+        ...         num_classes=2))
     """
     if vocab_size is not None:
         kwargs["vocab_size"] = vocab_size
@@ -912,151 +1061,5 @@ def create_wave_field_llm(
         **kwargs,
     )
 
-
-# ---------------------------------------------------------------------
-# Integration with NLP Task Heads
-# ---------------------------------------------------------------------
-
-
-def create_wave_field_llm_with_head(
-    wave_field_variant: str,
-    task_config: NLPTaskConfig,
-    pretrained: Union[bool, str] = False,
-    wave_field_config_overrides: Optional[Dict[str, Any]] = None,
-    head_config_overrides: Optional[Dict[str, Any]] = None,
-) -> keras.Model:
-    """Build an end-to-end model: a WaveFieldLLM encoder plus an NLP task head.
-
-    Takes a variant name, instantiates the encoder, builds a head from the
-    ``dl_techniques.layers.heads.nlp`` factory, and joins them into one functional
-    ``keras.Model``. The only input is ``input_ids``; the padding mask is derived
-    here from ``input_ids != pad_token_id`` (using 0 as default pad token).
-    The head pools the last position by default, which ``head_config_overrides``
-    can change.
-
-    .. code-block:: text
-
-        {"input_ids": [B, L] int32}
-                 │
-                 ├─────────────────────┐
-                 ▼                     ▼
-        ┌───────────────────┐     input_ids != 0
-        │ WaveFieldLLM      │          │
-        └───────────────────┘          │
-                 │ last_hidden_state   │
-                 ▼                     ▼
-        ┌─────────────────────────────────┐
-        │ nlp head  pooling_type 'last'   │
-        └─────────────────────────────────┘
-                 │
-                 ▼
-            task outputs
-
-    :param wave_field_variant: The WaveFieldLLM variant to use (e.g., "small", "medium").
-    :type wave_field_variant: str
-    :param task_config: An ``NLPTaskConfig`` object defining the task, which must set
-        ``vocabulary_size``.
-    :type task_config: NLPTaskConfig
-    :param pretrained: If a string, path to a local weights file. If True, raises
-        ``NotImplementedError``. Defaults to False.
-    :type pretrained: Union[bool, str]
-    :param wave_field_config_overrides: Optional dictionary to override default
-        WaveFieldLLM configuration for the chosen variant. Defaults to None.
-    :type wave_field_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Optional dictionary to override default head
-        configuration, including ``pooling_type``. Defaults to None.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete ``keras.Model`` ready for the specified task.
-    :rtype: keras.Model
-    :raises ValueError: If ``task_config`` has no ``vocabulary_size``, or the variant
-        is unknown.
-    :raises NotImplementedError: If ``pretrained is True``.
-
-    Example:
-        .. code-block:: python
-
-            from dl_techniques.layers.heads.nlp import NLPTaskType
-
-            # Define a task for sequence classification
-            seq_cls_task = NLPTaskConfig(
-                name="sentiment_analysis",
-                task_type=NLPTaskType.TEXT_CLASSIFICATION,
-                num_classes=3,
-                vocabulary_size=50261
-            )
-
-            # Create the full model with a WaveFieldLLM Small encoder
-            model = create_wave_field_llm_with_head(
-                wave_field_variant="small",
-                task_config=seq_cls_task,
-                pretrained=False,
-                head_config_overrides={"dropout_rate": 0.15}
-            )
-            model.summary()
-    """
-    wave_field_config_overrides = wave_field_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-
-    logger.info(
-        f"Creating WaveFieldLLM-{wave_field_variant} with a '{task_config.name}' head."
-    )
-
-    # WaveFieldLLM uses vocabulary_size field
-    if not getattr(task_config, 'vocabulary_size', None):
-        raise ValueError(
-            "The `task_config` must set 'vocabulary_size' "
-            "to create a WaveFieldLLM model."
-        )
-
-    wave_field_encoder = WaveFieldLLM.from_variant(
-        wave_field_variant,
-        vocab_size=task_config.vocabulary_size,
-        pretrained=pretrained,
-        **wave_field_config_overrides,
-    )
-
-    # WaveFieldLLM is causal, so use 'last' pooling
-    head_kwargs = {'pooling_type': 'last'}
-    head_kwargs.update(head_config_overrides)
-    task_head = create_nlp_head(
-        task_config=task_config,
-        input_dim=wave_field_encoder.embed_dim,
-        **head_kwargs,
-    )
-
-    inputs = {
-        "input_ids": keras.Input(
-            shape=(None,), dtype="int32", name="input_ids"
-        ),
-    }
-
-    # WaveFieldLLM call expects input_ids as first positional arg
-    encoder_outputs = wave_field_encoder(
-        inputs["input_ids"],
-    )
-
-    # Use 0 as pad_token_id (common default)
-    pad_token_id = 0
-    attention_mask = keras.ops.not_equal(
-        inputs["input_ids"], pad_token_id
-    )
-
-    head_inputs = {
-        "hidden_states": encoder_outputs["last_hidden_state"],
-        "attention_mask": attention_mask,
-    }
-    task_outputs = task_head(head_inputs)
-
-    model_name = f"wave_field_{wave_field_variant}_with_{task_config.name}_head"
-    model = keras.Model(
-        inputs=inputs,
-        outputs=task_outputs,
-        name=model_name
-    )
-
-    logger.info(
-        f"Successfully created model with {model.count_params():,} parameters."
-    )
-    return model
 
 # ---------------------------------------------------------------------
