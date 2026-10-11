@@ -29,6 +29,14 @@ linear cost, while the periodic global layers stitch the windows together so
 information still crosses the whole sequence -- a token pair `L` apart is
 connected after one global layer, not after `L / window` local ones.
 
+By default (`include_top=False`) the class is a pure encoder returning
+`{"last_hidden_state", "attention_mask"}`. With `include_top=True` and a
+`task_config` it owns ONE task head from `layers/heads/nlp`, named `task_head`,
+and returns that head's output instead, exactly as `models/language/bert` does;
+every head weight lives under `task_head/`, so an encoder trained under one head
+is reused, weights unchanged, under another. `create_modern_bert` is the
+module-level factory.
+
 References:
     - Warner et al., 2024. Smarter, Better, Faster, Longer: A Modern
       Bidirectional Encoder. (https://arxiv.org/abs/2412.13663)
@@ -56,7 +64,13 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.transformers import TransformerLayer
-from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    task_config_to_dict,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -73,9 +87,17 @@ class ModernBERT(keras.Model):
     periodic global attention. It is designed for high performance and
     configurability.
 
-    The model expects inputs as a dictionary containing 'input_ids', and
-    optionally 'attention_mask' and 'token_type_ids'. It outputs a dictionary
+    The model expects a tensor of 'input_ids', or a dictionary containing
+    'input_ids' and optionally 'attention_mask' and 'token_type_ids'.
+    Headless (``include_top=False``, the default) it outputs a dictionary
     containing the 'last_hidden_state' and the forwarded 'attention_mask'.
+    With ``include_top=True`` it also owns one NLP task head, fed
+    ``{"hidden_states": last_hidden_state, "attention_mask": <mask cast to the
+    hidden-state dtype>}``, and outputs what the head returns, reduced by
+    :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`: a bare
+    tensor, or a dict for question answering. The knobs, their validation and
+    the head-swap route are those of
+    :class:`~dl_techniques.models.language.bert.model.BERT`.
 
     Positional signal: the embedding stage carries none — it sums word and
     token-type embeddings only. Global layers get theirs from RoPE, applied
@@ -249,6 +271,17 @@ class ModernBERT(keras.Model):
     :param global_rope_theta: RoPE base frequency for the global layers.
         Defaults to 160000.0.
     :type global_rope_theta: float
+    :param include_top: Whether the model owns a task head. Defaults to False:
+        no head layer and no head weight exist.
+    :type include_top: bool
+    :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of
+        its fields. Required when ``include_top`` is True, refused otherwise;
+        stored as a plain dict. ``MULTIPLE_CHOICE`` is refused.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (e.g. ``{"pooling_type": "mean"}``). Only valid with
+        ``include_top=True``. Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the `keras.Model`.
 
     :ivar embeddings: The embedding layer instance.
@@ -257,17 +290,23 @@ class ModernBERT(keras.Model):
     :vartype encoder_layers: List[TransformerLayer]
     :ivar final_norm: LayerNormalization applied after the stack.
     :vartype final_norm: keras.layers.LayerNormalization
+    :ivar task_head: The task head named ``"task_head"``, or None when
+        ``include_top`` is False.
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
 
-    :raises ValueError: If invalid configuration parameters are provided.
+    :raises ValueError: If invalid configuration parameters are provided,
+        including ``include_top=True`` without a ``task_config``, and a
+        ``task_config`` or ``head_config_overrides`` given with
+        ``include_top=False``.
 
     Input shape:
         Mapping with ``input_ids`` of shape ``(batch_size, seq_len)``, plus the
         optional ``attention_mask`` and ``token_type_ids`` at the same shape.
 
     Output shape:
-        Mapping with ``last_hidden_state`` at
+        Headless, a mapping with ``last_hidden_state`` at
         ``(batch_size, seq_len, hidden_size)`` and ``attention_mask`` at
-        ``(batch_size, seq_len)``.
+        ``(batch_size, seq_len)``. With a head, the head's finalized output.
 
     Example:
         .. code-block:: python
@@ -281,8 +320,21 @@ class ModernBERT(keras.Model):
                 "attention_mask": keras.ops.ones((2, 256), dtype="int32")
             }
             outputs = model(inputs)
-            print(outputs["last_hidden_state"].shape)
+            outputs["last_hidden_state"].shape
             # (2, 256, 768)
+
+            # Same encoder, plus a sentiment head: returns bare logits (2, 3)
+            from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+            clf = ModernBERT.from_variant(
+                "base",
+                include_top=True,
+                task_config=NLPTaskConfig(
+                    name="sentiment",
+                    task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+                    num_classes=3,
+                ),
+            )
+            logits = clf(inputs, training=False)
     """
 
     MODEL_VARIANTS = {
@@ -355,6 +407,9 @@ class ModernBERT(keras.Model):
             local_attention_window_size: int = 128,
             max_position_embeddings: int = DEFAULT_MAX_POSITION_EMBEDDINGS,
             global_rope_theta: float = DEFAULT_GLOBAL_ROPE_THETA,
+            include_top: bool = False,
+            task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any,
     ) -> None:
         """Initialize the ModernBERT model instance.
@@ -394,6 +449,13 @@ class ModernBERT(keras.Model):
         :type max_position_embeddings: int
         :param global_rope_theta: RoPE base frequency for global layers.
         :type global_rope_theta: float
+        :param include_top: Whether to build the task head.
+        :type include_top: bool
+        :param task_config: Task of the head; required iff ``include_top``.
+        :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+        :param head_config_overrides: Head constructor overrides; only valid
+            with ``include_top``.
+        :type head_config_overrides: Optional[Dict[str, Any]]
         :param kwargs: Additional keyword arguments for ``keras.Model``.
         :raises ValueError: If any configuration value is invalid.
         """
@@ -406,6 +468,19 @@ class ModernBERT(keras.Model):
             global_attention_interval, max_position_embeddings,
             global_rope_theta
         )
+        if include_top and task_config is None:
+            raise ValueError(
+                "include_top=True needs a task_config (an NLPTaskConfig or a "
+                "dict of its fields) to know which head to build."
+            )
+        if not include_top and (
+            task_config is not None or head_config_overrides is not None
+        ):
+            raise ValueError(
+                "task_config and head_config_overrides only take effect with "
+                "include_top=True; with include_top=False no head is built, so "
+                "they would be silently ignored."
+            )
 
         # Store all configuration parameters
         self.vocab_size = vocab_size
@@ -424,13 +499,32 @@ class ModernBERT(keras.Model):
         self.local_attention_window_size = local_attention_window_size
         self.max_position_embeddings = max_position_embeddings
         self.global_rope_theta = global_rope_theta
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         # Build the model architecture
         self._build_architecture()
 
+        # Created after every encoder layer and under its own fixed name, so
+        # the encoder's layer names, weight paths and RNG draws are the same
+        # with or without a head.
+        self.task_head = None
+        if self.include_top:
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.hidden_size,
+                head_config_overrides=self.head_config_overrides,
+            )
+
         logger.info(
             f"Created ModernBERT foundation model: {self.num_layers} layers, "
             f"hidden_size={self.hidden_size}, heads={self.num_heads}"
+            + (f", task head '{self.task_config['name']}'" if self.include_top else "")
         )
 
     def _validate_config(
@@ -562,7 +656,8 @@ class ModernBERT(keras.Model):
         model built while every sub-layer is still unbuilt -- Keras warns about
         exactly that at ``layers/layer.py:393``. The shared helper traces
         ``call()`` on symbolic inputs, so what gets built cannot drift from what
-        gets called.
+        gets called: the task head is built exactly when ``include_top`` makes
+        ``call()`` run it.
 
         :param input_shape: Shape (or nest of shapes) of the input to ``call``.
         :type input_shape: Any
@@ -578,7 +673,7 @@ class ModernBERT(keras.Model):
             attention_mask: Optional[keras.KerasTensor] = None,
             token_type_ids: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass of the ModernBERT foundation model.
 
         :param inputs: Input token IDs or a dictionary containing 'input_ids'
@@ -590,7 +685,7 @@ class ModernBERT(keras.Model):
         :type token_type_ids: Optional[keras.KerasTensor]
         :param training: Indicates if the model is in training mode.
         :type training: Optional[bool]
-        :return: A dictionary with the following keys:
+        :return: With ``include_top=False``, a dictionary with the keys:
                  - ``last_hidden_state``: The sequence of hidden states at the
                    output of the final layer. Shape:
                    `(batch, seq_len, hidden_size)`.
@@ -600,7 +695,11 @@ class ModernBERT(keras.Model):
                    returned rather than ``None``, so the output structure is
                    independent of the input and ``predict()`` works on a
                    single-key input dict.
-        :rtype: Dict[str, keras.KerasTensor]
+                 With ``include_top=True``, the head's output reduced by
+                 ``finalize_head_outputs``: a bare tensor, or a dict of two or
+                 more tensors (``start_logits``/``end_logits`` for QA). The
+                 head's pooling sees the same resolved mask.
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :raises ValueError: If dictionary input does not contain 'input_ids'.
         """
         if isinstance(inputs, dict):
@@ -627,13 +726,28 @@ class ModernBERT(keras.Model):
             )
 
         sequence_output = self.final_norm(hidden_states, training=training)
+        resolved_mask = (
+            attention_mask if attention_mask is not None
+            else keras.ops.ones_like(input_ids)
+        )
+
+        if self.include_top:
+            # Cast so a float16 hidden state never meets an int mask inside
+            # the head's pooling (mixed precision; QA needs a float mask).
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": sequence_output,
+                    "attention_mask": keras.ops.cast(
+                        resolved_mask, sequence_output.dtype
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
 
         return {
             "last_hidden_state": sequence_output,
-            "attention_mask": (
-                attention_mask if attention_mask is not None
-                else keras.ops.ones_like(input_ids)
-            ),
+            "attention_mask": resolved_mask,
         }
 
     def load_pretrained_weights(
@@ -641,7 +755,14 @@ class ModernBERT(keras.Model):
             weights_path: str,
             skip_mismatch: bool = True
     ) -> None:
-        """Load pretrained weights into the model from a local checkpoint.
+        """Load pretrained ENCODER weights into the model from a local checkpoint.
+
+        Only the encoder is transferred, by layer name: a ``task_head`` in the
+        checkpoint is never copied, and this model's own head (if any) keeps
+        its fresh initialization. So a checkpoint of any ModernBERT, headless
+        or trained under any head, warm-starts a model with any other head or
+        none. To restore a whole model, head included, use
+        ``keras.models.load_model``.
 
         :param weights_path: Path to the weights file (.keras format).
         :type weights_path: str
@@ -653,19 +774,19 @@ class ModernBERT(keras.Model):
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
         try:
+            # build() materializes the tree call() runs, as in BERT. The dummy
+            # forward this replaced was fixed at length 128, which the global
+            # layers' RoPE refuses when max_position_embeddings < 128.
             if not self.built:
-                dummy_input = {
-                    "input_ids": keras.random.randint(
-                        (1, 128), 0, self.vocab_size, dtype="int32"
-                    )
-                }
-                self(dummy_input, training=False)
+                self.build((1, min(128, self.max_position_embeddings)))
             logger.info(f"Loading pretrained weights from {weights_path}")
 
+            # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+            # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
             report = load_weights_from_checkpoint(
                 target=self,
                 ckpt_path=weights_path,
-                skip_prefixes=(),
+                skip_prefixes=(TASK_HEAD_NAME,),
                 strict=not skip_mismatch,
             )
             logger.info(f"Weight transfer complete: {report}")
@@ -725,7 +846,10 @@ class ModernBERT(keras.Model):
         :type weights_dataset: str
         :param cache_dir: Directory to cache downloaded weights.
         :type cache_dir: Optional[str]
-        :param kwargs: Additional arguments overriding the variant's defaults.
+        :param kwargs: Additional arguments overriding the variant's defaults,
+            including ``include_top``, ``task_config`` and
+            ``head_config_overrides``. A local ``pretrained`` path restores
+            the encoder only; a head keeps its fresh initialization.
         :type kwargs: Any
         :return: A configured ModernBERT instance.
         :rtype: ModernBERT
@@ -792,6 +916,14 @@ class ModernBERT(keras.Model):
             "local_attention_window_size": self.local_attention_window_size,
             "max_position_embeddings": self.max_position_embeddings,
             "global_rope_theta": self.global_rope_theta,
+            "include_top": self.include_top,
+            "task_config": (
+                dict(self.task_config) if self.task_config is not None else None
+            ),
+            "head_config_overrides": (
+                dict(self.head_config_overrides)
+                if self.head_config_overrides is not None else None
+            ),
         })
         return config
 
@@ -828,115 +960,60 @@ class ModernBERT(keras.Model):
 
 # ---------------------------------------------------------------------
 
-def create_modern_bert_with_head(
-        bert_variant: str,
-        task_config: NLPTaskConfig,
+def create_modern_bert(
+        variant: str = "base",
+        vocab_size: Optional[int] = None,
         pretrained: Union[bool, str] = False,
         weights_dataset: str = "uncased",
         cache_dir: Optional[str] = None,
-        bert_config_overrides: Optional[Dict[str, Any]] = None,
-        head_config_overrides: Optional[Dict[str, Any]] = None,
-) -> keras.Model:
-    """Factory function to create a ModernBERT model with a task-specific head.
+        **kwargs: Any,
+) -> "ModernBERT":
+    """Convenience factory that mirrors ``create_bert`` / ``create_resnet``.
 
-    Head integration:
+    Thin wrapper around :meth:`ModernBERT.from_variant`; behaves identically
+    to calling it directly.
 
-    .. code-block:: text
-
-        ┌──────────────────────────────────────┐
-        │  keras.Input x 3 (all required)      │
-        │    input_ids / attention_mask /      │
-        │    token_type_ids                    │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  ModernBERT encoder (from_variant)   │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  cast attention_mask → float         │
-        │  (some heads, e.g. QA, need it)      │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  NLP task head (create_nlp_head)     │
-        │    {hidden_states, attention_mask}   │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  head output returned AS IS          │
-        │  (no logits/derived-key collapse     │
-        │   here, unlike create_bert_with_head)│
-        └──────────────────────────────────────┘
-
-    :param bert_variant: The ModernBERT variant to use (e.g., "base", "large").
-    :type bert_variant: str
-    :param task_config: An `NLPTaskConfig` object defining the task.
-    :type task_config: NLPTaskConfig
-    :param pretrained: If a string, a path to a local ``.keras`` weights file.
-        If True, raises ``NotImplementedError`` -- no public ModernBERT weights
-        ship with ``dl_techniques``. If False (default), random init.
+    :param variant: ModernBERT variant name (``"tiny"``, ``"base"``,
+        ``"large"``). Defaults to ``"base"``.
+    :type variant: str
+    :param vocab_size: Optional vocabulary size override, forwarded as
+        ``vocab_size=...`` when given.
+    :type vocab_size: Optional[int]
+    :param pretrained: ``True`` raises ``NotImplementedError`` (no public
+        weights); a string path loads a local ``.keras`` checkpoint (the
+        encoder only); ``False`` (default) gives random init.
     :type pretrained: Union[bool, str]
-    :param weights_dataset: Dataset for pretrained weights ("uncased", etc.).
+    :param weights_dataset: unreachable: only ``pretrained=True`` reads it,
+        and that raises first. Kept for signature stability.
     :type weights_dataset: str
-    :param cache_dir: Directory to cache downloaded weights.
+    :param cache_dir: unreachable for the same reason.
     :type cache_dir: Optional[str]
-    :param bert_config_overrides: Optional dictionary to override default BERT
-        configuration for the chosen variant.
-    :type bert_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Optional dictionary to override default head
-        configuration.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete `keras.Model` ready for the specified task. All three
-        inputs are required by name; the Functional wrapper declares one
-        ``keras.Input`` per key and Keras matches a data dict against that
-        declaration exactly. For a single-segment task pass
-        ``np.zeros_like(input_ids)`` as ``token_type_ids``.
-    :rtype: keras.Model
+    :param kwargs: Forwarded to :meth:`ModernBERT.from_variant` (e.g.
+        ``local_attention_window_size``, or ``include_top=True`` with a
+        ``task_config`` for a model with a head).
+    :type kwargs: Any
+    :return: Configured ``ModernBERT`` instance.
+    :rtype: ModernBERT
+    :raises NotImplementedError: If ``pretrained=True``.
+    :raises ValueError: If ``variant`` is unknown, or the head knobs are
+        inconsistent (see :class:`ModernBERT`).
+
+    Example:
+        >>> encoder = create_modern_bert("tiny")
+        >>> ner = create_modern_bert(
+        ...     "tiny", include_top=True,
+        ...     task_config=NLPTaskConfig(
+        ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+        ...         num_classes=9))
     """
-    bert_config_overrides = bert_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-
-    logger.info(f"Creating ModernBERT-{bert_variant} with a '{task_config.name}' head.")
-
-    bert_encoder = ModernBERT.from_variant(
-        bert_variant,
+    if vocab_size is not None:
+        kwargs["vocab_size"] = vocab_size
+    return ModernBERT.from_variant(
+        variant,
         pretrained=pretrained,
         weights_dataset=weights_dataset,
         cache_dir=cache_dir,
-        **bert_config_overrides
+        **kwargs,
     )
-    task_head = create_nlp_head(
-        task_config=task_config,
-        input_dim=bert_encoder.hidden_size,
-        **head_config_overrides,
-    )
-
-    inputs = {
-        "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
-        "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
-        "token_type_ids": keras.Input(shape=(None,), dtype="int32", name="token_type_ids"),
-    }
-
-    encoder_outputs = bert_encoder(inputs)
-
-    # Some heads (like QuestionAnsweringHead) may internally use ops that
-    # require the attention mask to be a float. This cast ensures compatibility.
-    attention_mask_float = keras.ops.cast(
-        encoder_outputs["attention_mask"],
-        dtype=encoder_outputs["last_hidden_state"].dtype
-    )
-
-    head_inputs = {
-        "hidden_states": encoder_outputs["last_hidden_state"],
-        "attention_mask": attention_mask_float,
-    }
-    task_outputs = task_head(head_inputs)
-
-    model_name = f"modern_bert_{bert_variant}_with_{task_config.name}_head"
-    model = keras.Model(inputs=inputs, outputs=task_outputs, name=model_name)
-
-    logger.info(f"Successfully created model with {model.count_params():,} parameters.")
-    return model
 
 # ---------------------------------------------------------------------

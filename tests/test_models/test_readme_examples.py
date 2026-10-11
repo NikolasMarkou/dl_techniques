@@ -83,10 +83,13 @@ class TestPretrainedContractAsDocumented:
         (b) an encoder saved before ever being CALLED writes zero weights (lazy
             subclassed build), and the transfer then finds no overlapping layer.
         The control arm is what distinguishes a real transfer from a no-op.
+        The head is in-model since plan-2026-10-11T004932-b83935e1, so the
+        restored encoder is read through a headless twin carrying the headed
+        model's own encoder weights.
         """
         from dl_techniques.models.language.modern_bert.model import (
             ModernBERT,
-            create_modern_bert_with_head,
+            create_modern_bert,
         )
         from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
@@ -99,8 +102,8 @@ class TestPretrainedContractAsDocumented:
         ner_task = NLPTaskConfig(
             name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9
         )
-        ner_model = create_modern_bert_with_head(
-            bert_variant="tiny", task_config=ner_task, pretrained=path
+        ner_model = create_modern_bert(
+            "tiny", include_top=True, task_config=ner_task, pretrained=path
         )
         ner_model.compile(
             optimizer=keras.optimizers.AdamW(learning_rate=2e-5),
@@ -108,8 +111,11 @@ class TestPretrainedContractAsDocumented:
             metrics=["accuracy"],
         )
 
-        inner = [l for l in ner_model.layers if isinstance(l, ModernBERT)][0]
+        inner = ModernBERT.from_variant("tiny")
         probe = np.random.default_rng(0).integers(0, 50368, (1, 128)).astype("int32")
+        inner({"input_ids": probe}, training=False)
+        for layer in inner.layers:
+            layer.set_weights(ner_model.get_layer(layer.name).get_weights())
         source = keras.models.load_model(path)
         a = keras.ops.convert_to_numpy(
             source({"input_ids": probe}, training=False)["last_hidden_state"]
@@ -118,6 +124,7 @@ class TestPretrainedContractAsDocumented:
             inner({"input_ids": probe}, training=False)["last_hidden_state"]
         )
         np.testing.assert_allclose(a, b, atol=1e-6)
+        assert ner_model({"input_ids": probe}, training=False).shape == (1, 128, 9)
 
         # CONTROL: a fresh encoder must NOT match, or the assertion above is vacuous.
         fresh = ModernBERT.from_variant("tiny")

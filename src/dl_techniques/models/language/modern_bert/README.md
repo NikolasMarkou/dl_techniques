@@ -27,6 +27,8 @@ A Keras 3 implementation of **ModernBERT**, based on "[Smarter, Better, Faster, 
 
 ModernBERT suits long-document classification and retrieval, semantic search and RAG, code analysis, and standard NER/GLUE-style tasks where a BERT-class encoder is the backbone.
 
+The `ModernBERT` class is a pure encoder by default (`include_top=False`). Pass `include_top=True` with a `task_config` and the same class also owns one task head from `dl_techniques.layers.heads.nlp`, named `task_head`; every head weight lives under `task_head/`, so an encoder trained under one head is reused, unchanged, under another (§9). The knobs and contracts are those of `models/language/bert`.
+
 ---
 
 ## 2. The Problem ModernBERT Solves
@@ -65,6 +67,10 @@ Input IDs ────► ┌─────────────────
                 └──────────┬───────────┘
                            ▼
                   Output Hidden States
+                           ▼ (only with include_top=True)
+                ┌──────────────────────┐
+                │      task_head       │  (e.g. a classifier)
+                └──────────────────────┘
 ```
 
 ### The Pre-LN block
@@ -163,11 +169,11 @@ print(outputs["last_hidden_state"].shape)
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`ModernBERT`** | `...models.language.modern_bert.model` | The foundation encoder. Outputs `{"last_hidden_state", "attention_mask"}`. |
-| **`create_modern_bert_with_head`** | `...models.language.modern_bert.model` | Factory combining a `ModernBERT` with a task head. |
+| **`ModernBERT`** | `...models.language.modern_bert.model` | The foundation encoder. Outputs `{"last_hidden_state", "attention_mask"}`; with `include_top=True`, the task head's output. |
+| **`create_modern_bert`** | `...models.language.modern_bert.model` | Module-level wrapper around `ModernBERT.from_variant`, with or without a head. |
 | **`ModernBertEmbeddings`** | `...layers.embedding.modern_bert_embeddings` | Token and token-type embedding, normalization, dropout. |
 | **`TransformerLayer`** | `...layers.transformers` | The configurable block powering the encoder. |
-| **`create_nlp_head`** | `...layers.heads.nlp.factory` | Factory for downstream task heads. |
+| **`build_model_task_head`** | `...layers.heads.nlp.model_head` | Builds the in-model `task_head` (via `create_nlp_head`). |
 
 ---
 
@@ -192,8 +198,9 @@ Counts are measured with `count_params()` after `from_variant(v)` plus one forwa
 ### Example 1: Text Classification
 
 ```python
+import keras
 import numpy as np
-from dl_techniques.models.language.modern_bert.model import create_modern_bert_with_head
+from dl_techniques.models.language.modern_bert.model import create_modern_bert
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 classification_task = NLPTaskConfig(
@@ -202,23 +209,28 @@ classification_task = NLPTaskConfig(
     num_classes=3
 )
 
-classifier_model = create_modern_bert_with_head(
-    bert_variant="tiny",
-    task_config=classification_task
+classifier_model = create_modern_bert(
+    "tiny",
+    include_top=True,
+    task_config=classification_task,
+)
+classifier_model.compile(
+    optimizer="adamw",
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
 )
 
 dummy_inputs = {
     "input_ids": np.random.randint(0, 50368, (4, 128)),
     "attention_mask": np.ones((4, 128), dtype="int32"),
-    "token_type_ids": np.zeros((4, 128), dtype="int32"),
 }
-predictions = classifier_model.predict(dummy_inputs, verbose=0)
-
-# Measured: a DICT, not one tensor -- {'logits': (4, 3), 'probabilities': (4, 3)}.
-# `predictions.shape` would raise AttributeError. Select the key you want, and
-# select one output before compiling on a single loss.
-print({k: v.shape for k, v in predictions.items()})
+logits = classifier_model.predict(dummy_inputs, verbose=0)
+logits.shape  # (4, 3) -- measured
 ```
+
+Two contracts worth reading before you debug anything:
+
+- **Output.** With `include_top=True` the model returns a **bare tensor** whenever the head produces one informative tensor: `probabilities` and `predictions` are pure functions of `logits` and are dropped, so the model compiles with a plain loss. `QuestionAnsweringHead` keeps its dict, `{"start_logits", "end_logits"}`. The rule is `layers/heads/nlp/model_head.py::finalize_head_outputs`.
+- **Construction.** `include_top=True` without a `task_config` raises `ValueError`, and so does a `task_config` or `head_config_overrides` passed with `include_top=False`. `MULTIPLE_CHOICE` is refused. Only `input_ids` is required at call time; the head's pooling sees the attention mask, cast to the hidden-state dtype (all ones when omitted).
 
 ### Example 2: Long-Context Feature Extraction
 
@@ -251,13 +263,13 @@ print(features["last_hidden_state"].shape)
 Two things the mechanism requires:
 
 1.  **Call the encoder once before you save it.** `pretrained=` transfers weights *layer by layer* out of the saved model. `ModernBERT` is a subclassed model whose sublayers are built lazily, so saving an un-called encoder writes a file whose layers hold **zero** weights; the transfer then finds no overlap and raises *"No overlapping layers between target and source checkpoint"*.
-2.  **Save the bare encoder, not a model that already carries a head.** The transfer matches on layer name against the `ModernBERT` you are restoring into.
+2.  **Only the encoder is transferred.** The transfer matches on layer name and skips the checkpoint's `task_head`, so the file may hold a bare encoder or a `ModernBERT` trained under any head; the new model's head keeps its fresh initialization. A whole model, head included, comes back with `keras.models.load_model`.
 
 ```python
 import keras
 from dl_techniques.models.language.modern_bert.model import (
     ModernBERT,
-    create_modern_bert_with_head,
+    create_modern_bert,
 )
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
@@ -275,9 +287,10 @@ ner_task = NLPTaskConfig(
     num_classes=9,
 )
 
-# 1. Attach a fresh task head on top of the restored encoder.
-ner_model = create_modern_bert_with_head(
-    bert_variant="tiny",
+# 1. Restore the encoder into a model with a fresh task head.
+ner_model = create_modern_bert(
+    "tiny",
+    include_top=True,
     task_config=ner_task,
     pretrained="/tmp/modern_bert_tiny.keras",
 )
@@ -290,9 +303,11 @@ ner_model.compile(
 )
 ```
 
-Measured for this snippet: the restored encoder reproduces the saved encoder's `last_hidden_state` to **exactly 0.0**, against **5.50** for a freshly initialized control, so the transfer is real and not a silent no-op. `tests/test_models/test_readme_examples.py` executes this pattern verbatim, control arm included.
+Measured for this snippet: the restored encoder reproduces the saved encoder's `last_hidden_state` to **exactly 0.0** (max abs diff), against **5.50** and **5.22** in two unseeded runs for a freshly initialized control, so the transfer is real and not a silent no-op. `tests/test_models/test_readme_examples.py` executes this pattern verbatim, control arm included.
 
 Note `keras.random.randint` rather than `keras.random.uniform`: Keras rejects an integer `dtype` on `uniform`, so the `uniform` spelling of a token batch always raises.
+
+The same route swaps heads: save a model trained under one head, then pass its path as `pretrained` with another `task_config` (or none). For a model that is already built, the transfer is `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(model, path, skip_prefixes=("task_head",))`. Pinned by `tests/test_models/test_modern_bert/test_modern_bert.py::TestModernBERTIncludeTop::test_backbone_weights_transfer_across_heads`.
 
 ---
 
@@ -328,7 +343,7 @@ model.compile(optimizer="adamw")
 Fully serializable in the `.keras` format; no `custom_objects` needed on load.
 
 ```python
-model = create_modern_bert_with_head(...)
+model = create_modern_bert("tiny", include_top=True, task_config=classification_task)
 model.save('my_modern_bert_classifier.keras')
 
 loaded_model = keras.models.load_model('my_modern_bert_classifier.keras')
@@ -366,7 +381,7 @@ All three variants (`tiny`, `base`, `large`) construct and forward comfortably; 
 
 -   **`NotImplementedError` from `pretrained=True`.** No checkpoint ships here. Save your own encoder and pass its path (§9).
 -   **"No overlapping layers between target and source checkpoint".** You saved an encoder that had never been called, so its lazily-built sublayers held no weights. Call it once before saving (§9).
--   **`AttributeError: 'dict' object has no attribute 'shape'`.** `create_modern_bert_with_head` returns the head's dict. Select a key (§8).
+-   **`ValueError: include_top=True needs a task_config`**, or **`... only take effect with include_top=True`.** The head knobs travel together: `include_top=True` with a `task_config`, or none of them (§8).
 -   **A raise above 8192 tokens.** The RoPE tables are sized to `max_position_embeddings`; the ceiling is hard (§4.4).
 -   **`ValueError` naming an attention key.** `create_attention_layer` is strict, so an undeclared key such as `use_rope` on a `multi_head` layer fails at construction instead of being silently dropped (§4.3).
 -   **Unstable training.** Unlikely with Pre-LN, but lower the learning rate and add warmup.
