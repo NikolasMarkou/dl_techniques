@@ -26,6 +26,7 @@ from dl_techniques.models.language.qwen.qwen3_next import (
     Qwen3NextBlock,
     create_qwen3_next,
     create_qwen3_next_classification,
+    create_qwen3_next_generation,
 )
 from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 
@@ -1178,6 +1179,8 @@ class TestQwen3NextIncludeTop(QwenIncludeTopCases):
               num_experts_per_tok=1, moe_intermediate_size=64,
               dropout_rate=0.0)
     CLASSIFICATION_FACTORY = staticmethod(create_qwen3_next_classification)
+    GENERATION_FACTORY = staticmethod(create_qwen3_next_generation)
+    DISPATCH_FACTORY = staticmethod(create_qwen3_next)
     WRAPPED_NAME = "qwen3_next_backbone"
     N_BACKBONE = 64
 

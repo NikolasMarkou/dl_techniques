@@ -382,6 +382,94 @@ class TestAllowUnloaded:
         assert report.skipped_by_prefix == ["head_cls"]
 
 
+def _wrapped(inner, extra_layer: bool = False):
+    """A functional I/O wrapper whose only non-input layer is *inner*.
+
+    The shape of ``create_qwen3_classification`` and its siblings. With
+    ``extra_layer`` it gains a second weighted layer and is no longer a
+    single-model wrapper.
+    """
+    inp = keras.Input(shape=(_INPUT_DIM,), name="input")
+    out = inner(inp)
+    if extra_layer:
+        out = keras.layers.Dense(3, name="post_dense")(out)
+    return keras.Model(inp, out, name=f"wrapper_{inner.name}")
+
+
+class TestSingleModelWrapper:
+    """D-027 of plan-2026-10-11T004932-b83935e1: a wrapper is compared by its inner model."""
+
+    def test_a_wrapped_checkpoint_loads_into_a_bare_model(self, tmp_path):
+        src = _wrapped(_build_classifier())
+        ckpt = _save(src, tmp_path)
+        tgt = _build_segmenter()
+
+        report = load_weights_from_checkpoint(tgt, ckpt, allow_unloaded=())
+
+        inner = src.get_layer("tiny_cls")
+        assert sorted(report.loaded) == sorted(
+            l.name for l in tgt.layers
+            if l.get_weights() and not l.name.startswith("head_"))
+        for name in report.loaded:
+            assert _weights_equal(tgt.get_layer(name).get_weights(),
+                                  inner.get_layer(name).get_weights()), name
+        assert report.skipped_by_prefix == ["head_cls"]
+
+    def test_a_bare_checkpoint_loads_into_a_wrapped_model(self, tmp_path):
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+        tgt = _wrapped(_build_segmenter())
+
+        report = load_weights_from_checkpoint(tgt, ckpt, allow_unloaded=())
+
+        inner = tgt.get_layer("tiny_seg")
+        assert report.loaded
+        for name in report.loaded:
+            assert _weights_equal(inner.get_layer(name).get_weights(),
+                                  src.get_layer(name).get_weights()), name
+
+    def test_two_wrappers_with_different_heads_transfer_the_backbone(self, tmp_path):
+        """Compared whole, the two wrapped models would be one shape mismatch."""
+        src = _wrapped(_build_classifier())
+        ckpt = _save(src, tmp_path)
+        tgt = _wrapped(_build_segmenter())
+        seg_head = [w.copy() for w in
+                    tgt.get_layer("tiny_seg").get_layer("head_seg").get_weights()]
+
+        report = load_weights_from_checkpoint(
+            tgt, ckpt, strict=True, allow_unloaded=())
+
+        assert report.skipped_by_prefix == ["head_cls"]
+        assert _weights_equal(
+            tgt.get_layer("tiny_seg").get_layer("head_seg").get_weights(), seg_head)
+
+    def test_a_functional_model_of_one_plain_layer_is_compared_as_is(self, tmp_path):
+        """Anti-vacuity: only a nested MODEL is unwrapped, never a plain layer."""
+        def one_dense():
+            inp = keras.Input(shape=(_INPUT_DIM,), name="input")
+            out = keras.layers.Dense(4, name="stem_dense")(inp)
+            return keras.Model(inp, out, name="one_dense")
+
+        src = one_dense()
+        ckpt = _save(src, tmp_path)
+        tgt = one_dense()
+
+        report = load_weights_from_checkpoint(tgt, ckpt, allow_unloaded=())
+
+        assert report.loaded == ["stem_dense"]
+        assert _weights_equal(tgt.get_layer("stem_dense").get_weights(),
+                              src.get_layer("stem_dense").get_weights())
+
+    def test_a_wrapper_with_a_second_weighted_layer_is_compared_as_is(self, tmp_path):
+        """Anti-vacuity: only a wrapper around ONE model is unwrapped."""
+        src = _wrapped(_build_classifier(), extra_layer=True)
+        ckpt = _save(src, tmp_path)
+        tgt = _build_segmenter()
+
+        with pytest.raises(ValueError, match="No overlapping layers"):
+            load_weights_from_checkpoint(tgt, ckpt)
+
+
 class TestCheckpointConfig:
     def test_reads_the_archives_own_config(self, tmp_path):
         ckpt = _save(_build_classifier(), tmp_path)

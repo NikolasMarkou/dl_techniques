@@ -189,9 +189,19 @@ clf.save("qwen3_sst2.keras")
 ner = Qwen3(**cfg, include_top=True, task_config=NLPTaskConfig(
     name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9))
 ner(ids)
-load_weights_from_checkpoint(ner, "qwen3_sst2.keras",
-                             skip_prefixes=(TASK_HEAD_NAME,), strict=True)
+load_weights_from_checkpoint(ner, "qwen3_sst2.keras", skip_prefixes=(TASK_HEAD_NAME,),
+                             strict=True, allow_unloaded=())
 ```
+
+The same call works on the factory models, either side: a checkpoint of
+`create_qwen3_classification` (or `create_qwen3_next_classification`) fills a bare model
+with any head, a headless one (`allow_unloaded=("lm_head",)`, since the classifier holds no
+`lm_head`) or a `create_qwen3_generation` model with the same backbone weights.
+`load_weights_from_checkpoint` compares the layers of the one model a functional wrapper
+holds. `create_qwen3(..., include_top=True, task_config=...)` (and `create_qwen3_next`)
+returns that task's two-input model, named for its task type
+(`qwen3_for_token_classification`, ...); combined with `task_type="classification"` or
+`num_labels` it raises `ValueError`.
 
 Both classification factories default to `pooling_strategy="last"`: the last position kept by
 `attention_mask`. These backbones are strictly causally masked, so position 0 attends only to

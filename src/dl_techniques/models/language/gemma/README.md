@@ -341,9 +341,18 @@ clf.save("gemma_sst2.keras")
 ner = Gemma3(**cfg, include_top=True, task_config=NLPTaskConfig(
     name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9))
 ner(ids)
-load_weights_from_checkpoint(ner, "gemma_sst2.keras",
-                             skip_prefixes=(TASK_HEAD_NAME,), strict=True)
+load_weights_from_checkpoint(ner, "gemma_sst2.keras", skip_prefixes=(TASK_HEAD_NAME,),
+                             strict=True, allow_unloaded=())
 ```
+
+The same call works on the factory models, either side: a `create_gemma3_classification`
+checkpoint fills a bare `Gemma3` with any head, a headless one
+(`allow_unloaded=("lm_head",)`, since the classifier holds no `lm_head`) or a
+`create_gemma3_generation` model with the same backbone weights, because
+`load_weights_from_checkpoint` compares the layers of the one model a functional wrapper
+holds. `create_gemma3(..., include_top=True, task_config=...)` returns that task's two-input
+model, named for its task type (`gemma3_for_token_classification`, ...); combined with
+`task_type="classification"` or `num_labels` it raises `ValueError`.
 
 ## 9. Advanced Usage Patterns
 

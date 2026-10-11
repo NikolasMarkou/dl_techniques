@@ -1348,6 +1348,10 @@ class IncludeTopCases:
     KW: Dict[str, Any] = {}
     #: ``create_<model>_classification(config, num_labels, ...)``.
     CLASSIFICATION_FACTORY: Optional[Callable[..., keras.Model]] = None
+    #: ``create_<model>_generation(config)``.
+    GENERATION_FACTORY: Optional[Callable[..., keras.Model]] = None
+    #: ``create_<model>(config_or_variant, task_type=..., **kwargs)``.
+    DISPATCH_FACTORY: Optional[Callable[..., keras.Model]] = None
     #: Name of the headed model inside that factory's functional wrapper.
     WRAPPED_NAME: str = ""
     #: Backbone weights at ``KW``; ``lm_head`` adds 1, a TEXT_CLASSIFICATION
@@ -1621,6 +1625,102 @@ class IncludeTopCases:
             _np(wrapper([batch["input_ids"], batch["attention_mask"]])),
             _np(inner(batch, training=False)))
 
+    def test_a_classification_factory_backbone_is_reused_with_the_same_weights(
+            self, tmp_path):
+        """A backbone trained through ``create_*_classification`` moves anywhere.
+
+        D-027 of plan-2026-10-11T004932-b83935e1: the factory's functional
+        wrapper nests the headed class as ONE layer, so the documented route
+        (``load_weights_from_checkpoint(..., skip_prefixes=(TASK_HEAD_NAME,),
+        strict=True, allow_unloaded=...)``) compares that inner model's layers.
+        From the classifier checkpoint: a bare TOKEN_CLASSIFICATION model, a
+        bare headless model and the generation wrapper get the exact backbone
+        (the headless ``lm_head`` stays fresh, allowed by the load rule); the
+        generation wrapper's checkpoint then fills a fresh classification
+        wrapper exactly, so the route works into a wrapper too. Before D-027
+        the first two raised "No overlapping layers" and the third a shape
+        mismatch on the wrapped layer.
+        """
+        batch = _head_batch()
+        pair = [batch["input_ids"], batch["attention_mask"]]
+        config = dict(self.KW, vocab_size=64)
+        source = self.CLASSIFICATION_FACTORY(dict(config), num_labels=3)
+        source(pair)
+        _randomized(source, 1)
+        path = str(tmp_path / "factory_classifier.keras")
+        source.save(path)
+        reference = _backbone(source.get_layer(self.WRAPPED_NAME))
+
+        def check(target, inner, allow):
+            fresh = {name: [_np(w).copy() for w in layer.weights]
+                     for name in ("lm_head", TASK_HEAD_NAME)
+                     for layer in [getattr(inner, name)] if layer is not None}
+            load_weights_from_checkpoint(
+                target, path, skip_prefixes=(TASK_HEAD_NAME,), strict=True,
+                allow_unloaded=allow)
+            got = _backbone(inner)
+            assert set(got) == set(reference)
+            for name, values in reference.items():
+                for a, b in zip(values, got[name]):
+                    np.testing.assert_array_equal(a, b, err_msg=name)
+            for name, values in fresh.items():  # tops keep their own init
+                for a, w in zip(values, getattr(inner, name).weights):
+                    np.testing.assert_array_equal(a, _np(w), err_msg=name)
+
+        ner = self.model(include_top=True, task_config=_NER)
+        ner(batch, training=False)
+        check(ner, ner, ())
+        headless = self.model()
+        headless(batch, training=False)
+        check(headless, headless, ("lm_head",))
+        generation = self.GENERATION_FACTORY(dict(config))
+        generation(pair)
+        check(generation, generation.get_layer(self.WRAPPED_NAME), ("lm_head",))
+
+        path = str(tmp_path / "factory_generation.keras")
+        generation.save(path)
+        target = self.CLASSIFICATION_FACTORY(dict(config), num_labels=5)
+        target(pair)
+        check(target, target.get_layer(self.WRAPPED_NAME), ())
+
+        # Anti-vacuity: a fresh backbone does NOT hold the reference values.
+        fresh = self.model()
+        fresh(batch, training=False)
+        assert not all(np.array_equal(a[0], b[0]) for a, b in
+                       zip(reference.values(), _backbone(fresh).values()))
+
+    def test_include_top_through_the_dispatcher_is_named_for_its_task(self):
+        """``create_<model>(..., include_top=True, task_config=...)`` is that task's model.
+
+        It used to fall through to the generation wrapper and come back named
+        ``*_for_generation`` while emitting the head's logits.
+        """
+        config = dict(self.KW, vocab_size=64)
+        batch = _head_batch()
+        pair = [batch["input_ids"], batch["attention_mask"]]
+        model = self.DISPATCH_FACTORY(
+            dict(config), include_top=True, task_config=_NER)
+        prefix = self.WRAPPED_NAME[:-len("_backbone")]
+        assert model.name == f"{prefix}_for_token_classification"
+        inner = model.get_layer(self.WRAPPED_NAME)
+        assert isinstance(inner, self.CLS)
+        assert inner.include_top is True and inner.lm_head is None
+        assert tuple(model(pair).shape) == (2, _SEQ, _NER.num_classes)
+        np.testing.assert_array_equal(
+            _np(model(pair)), _np(inner(batch, training=False)))
+
+        # The default is still the generation model.
+        generation = self.DISPATCH_FACTORY(dict(config))
+        assert generation.name == f"{prefix}_for_generation"
+        assert tuple(generation(pair).shape) == (2, _SEQ, 64)
+
+        for conflict in ({"task_type": "classification", "num_labels": 3},
+                         {"num_labels": 3},
+                         {"pooling_strategy": "mean"}):
+            with pytest.raises(ValueError, match="include_top=True builds"):
+                self.DISPATCH_FACTORY(dict(config), include_top=True,
+                                      task_config=_NER, **conflict)
+
     def test_include_top_without_task_config_raises(self):
         with pytest.raises(ValueError, match="include_top=True needs a task_config"):
             self.model(include_top=True)
@@ -1667,5 +1767,7 @@ class TestQwen3IncludeTop(QwenIncludeTopCases):
               num_key_value_heads=2, max_seq_len=16, moe_layers=[],
               num_experts=1, num_experts_per_tok=1, dropout_rate=0.0)
     CLASSIFICATION_FACTORY = staticmethod(create_qwen3_classification)
+    GENERATION_FACTORY = staticmethod(create_qwen3_generation)
+    DISPATCH_FACTORY = staticmethod(create_qwen3)
     WRAPPED_NAME = "qwen3_backbone"
     N_BACKBONE = 24

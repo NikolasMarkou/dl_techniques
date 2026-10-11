@@ -68,10 +68,36 @@ WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
   padding mask. `call()` returns bare logits for a one-output head, a dict for
   a multi-output one (QA). Causal backbones pool `"last"` by default;
   `head_config_overrides={"pooling_type": ...}` changes that.
-- Build through `create_<model>(variant, include_top=True, task_config=...)`,
-  which only forwards to `from_variant`; the old functional head wrappers are
-  gone. `create_qwen3_classification`, `create_qwen3_next_classification` and
-  `create_gemma3_classification` remain, as wrappers over the in-model head.
+- Ten factories only forward to `from_variant` and return the class itself:
+  `create_bert`, `create_distilbert`, `create_modern_bert`, `create_fnet`,
+  `create_tree_transformer`, `create_gpt2`, `create_mamba`, `create_mamba2`,
+  `create_topolm`, `create_wave_field_llm`. Build a headed model with
+  `create_<model>(variant, include_top=True, task_config=...)`; the old
+  functional head wrappers are gone.
+- `create_qwen3`, `create_qwen3_next` and `create_gemma3` dispatch instead. Each
+  returns a two-input (`[input_ids, attention_mask]`) functional model whose
+  only layer besides the inputs is the class, named `<model>_backbone`:
+  `<model>_for_generation` by default, `<model>_for_classification` for
+  `task_type="classification"` with `num_labels` (the same model as
+  `create_<model>_classification`), and, for `include_top=True,
+  task_config=...`, a model named for the task type
+  (`<model>_for_token_classification`, ...). `include_top=True` together with
+  `task_type="classification"` or `num_labels` / `pooling_strategy` /
+  `classifier_dropout_rate` raises `ValueError`.
+
+Which mask the head pools under, when the caller passes none (the backbone's
+own attention is unchanged):
+
+| Classes | Head mask without a caller mask | Default pooling |
+|---|---|---|
+| BERT, DistilBERT, ModernBERT, FNet (bidirectional encoders) | all ones, the same mask the encoder returns: padding is pooled under `mean` / `max` / `attention` | `cls` |
+| TreeTransformer | `input_ids != pad_token_id` | `cls` |
+| GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3 (causal decoders) | `input_ids != pad_token_id` | `last` |
+
+A caller's `attention_mask` always wins. `pad_token_id` defaults to 0, and id 0
+is a real token in the GPT2 and Qwen vocabularies (cl100k and Qwen BPE): pass
+your tokenizer's pad id or an explicit mask, or a sequence whose last real
+token is id 0 pools the token before it under `last`.
 
 Reusing a backbone under a new head:
 
@@ -112,7 +138,12 @@ Reusing a backbone under a new head:
   to `allow_unloaded` for a vocabulary change). Without `strict=True` and
   `allow_unloaded`, a backbone that does not fit loads nothing and returns
   normally. Never pass `skip_prefixes=()` across tasks: a head of equal shape
-  is copied silently.
+  is copied silently. The same call works on the Qwen3, Qwen3Next and Gemma3
+  factory models, either side: a functional model whose only layer besides
+  its inputs is a model is compared through that inner model's layers, so a
+  `create_qwen3_classification` checkpoint fills a bare `Qwen3` of any head,
+  a headless one (`allow_unloaded=("lm_head",)`) or a `create_qwen3_generation`
+  model with the same backbone weights.
 
 ## Trainer wiring (Pattern 3)
 

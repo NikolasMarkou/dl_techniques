@@ -586,27 +586,38 @@ class Gemma3(keras.Model):
         return config
 
 
-def create_gemma3_generation(config: Dict[str, Any]) -> keras.Model:
-    """Creates a Gemma3 model for text generation tasks."""
-    logger.info("Creating Gemma3 model for text generation.")
-    gemma3_backbone = Gemma3(**config, name="gemma3_backbone")
+def _two_input_model(core: Gemma3, name: str) -> keras.Model:
+    """Put the ``[input_ids, attention_mask]`` functional interface around ``core``.
+
+    Interface contract (shared by the ``create_gemma3*`` factories):
+
+    :param core: An unbuilt ``Gemma3``, named ``gemma3_backbone`` by every
+        caller.
+    :param name: Name of the returned model.
+    :return: A functional ``keras.Model`` with two int32 inputs whose only
+        non-input layer is ``core``. ``load_weights_from_checkpoint``
+        therefore compares ``core``'s layers, so a backbone moves between such
+        a model and a bare ``Gemma3`` either way.
+    """
     input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
     attention_mask = keras.Input(
         shape=(None,), dtype="int32", name="attention_mask"
     )
-    logits = gemma3_backbone(
+    outputs = core(
         inputs={"input_ids": input_ids, "attention_mask": attention_mask}
     )
     model = keras.Model(
-        inputs=[input_ids, attention_mask],
-        outputs=logits,
-        name="gemma3_for_generation",
+        inputs=[input_ids, attention_mask], outputs=outputs, name=name
     )
-    logger.info(
-        f"Created Gemma3 generation model with {model.count_params():,} "
-        "parameters."
-    )
+    logger.info(f"Created {name} with {model.count_params():,} parameters.")
     return model
+
+
+def create_gemma3_generation(config: Dict[str, Any]) -> keras.Model:
+    """Creates a Gemma3 model for text generation tasks."""
+    logger.info("Creating Gemma3 model for text generation.")
+    return _two_input_model(
+        Gemma3(**config, name="gemma3_backbone"), "gemma3_for_generation")
 
 
 def create_gemma3_classification(
@@ -655,24 +666,7 @@ def create_gemma3_classification(
         head_config_overrides={"pooling_type": pooling_strategy},
         name="gemma3_backbone",
     )
-    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
-    attention_mask = keras.Input(
-        shape=(None,), dtype="int32", name="attention_mask"
-    )
-    logits = classifier(
-        inputs={"input_ids": input_ids, "attention_mask": attention_mask}
-    )
-
-    model = keras.Model(
-        inputs=[input_ids, attention_mask],
-        outputs=logits,
-        name="gemma3_for_classification",
-    )
-    logger.info(
-        f"Created Gemma3 classification model with {model.count_params():,} "
-        "parameters."
-    )
-    return model
+    return _two_input_model(classifier, "gemma3_for_classification")
 
 
 def create_gemma3(
@@ -680,7 +674,19 @@ def create_gemma3(
     task_type: str = "generation",
     **kwargs: Any,
 ) -> keras.Model:
-    """High-level factory to create Gemma3 models for common tasks."""
+    """High-level factory to create Gemma3 models for common tasks.
+
+    ``task_type="generation"`` (default) gives ``gemma3_for_generation`` and
+    ``"classification"`` (with ``num_labels``, optionally ``pooling_strategy``
+    and ``classifier_dropout_rate``) gives ``gemma3_for_classification``. Any
+    other keyword overrides the config. ``include_top=True`` with a
+    ``task_config`` (and optional ``head_config_overrides``) replaces the LM
+    top with that task head: the result is named
+    ``gemma3_for_<task_type value>`` (e.g. ``gemma3_for_token_classification``),
+    and combining it with ``task_type="classification"`` or the classification
+    settings raises ``ValueError``. Every result takes
+    ``[input_ids, attention_mask]``.
+    """
     if isinstance(config_or_variant, str):
         if config_or_variant not in Gemma3.MODEL_VARIANTS:
             available = list(Gemma3.MODEL_VARIANTS.keys())
@@ -701,6 +707,21 @@ def create_gemma3(
     task_kwargs = {k: kwargs.pop(k) for k in task_keys if k in kwargs}
     # The rest of kwargs are model overrides.
     config.update(kwargs)
+
+    # include_top=True replaces the LM top with the task_config's head, so the
+    # model is that task's, named for it, and never "generation".
+    if config.get("include_top"):
+        if task_type != "generation" or task_kwargs:
+            raise ValueError(
+                "include_top=True builds the head named by task_config; it "
+                "cannot be combined with task_type='classification' or with "
+                "num_labels / pooling_strategy / classifier_dropout_rate, "
+                f"which build their own head. Got task_type={task_type!r} "
+                f"and {sorted(task_kwargs)}."
+            )
+        core = Gemma3(**config, name="gemma3_backbone")
+        return _two_input_model(
+            core, f"gemma3_for_{core.task_config['task_type']}")
 
     if task_type == "generation":
         return create_gemma3_generation(config)

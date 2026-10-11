@@ -219,6 +219,27 @@ def _layer_weight_shapes(layer: keras.layers.Layer) -> List[Tuple[int, ...]]:
     return [tuple(w.shape) for w in layer.get_weights()]
 
 
+def _unwrap_single_model(model: keras.Model) -> keras.Model:
+    """The model whose layers a by-name transfer compares.
+
+    A functional model whose only non-input layer is itself a
+    ``keras.Model`` (an input/output wrapper such as
+    ``create_qwen3_classification``'s) holds every weight in that one layer,
+    so its layers are the ones compared. Any other model is returned as is.
+    """
+    inner = [
+        layer for layer in model.layers
+        if not isinstance(layer, keras.layers.InputLayer)
+    ]
+    if (
+        len(inner) == 1
+        and len(inner) < len(model.layers)
+        and isinstance(inner[0], keras.Model)
+    ):
+        return inner[0]
+    return model
+
+
 def load_weights_from_checkpoint(
     target: keras.Model,
     ckpt_path: str,
@@ -236,6 +257,9 @@ def load_weights_from_checkpoint(
     :param target: A *built* Keras model receiving weights.  Must already have
         been called once or had ``build(input_shape)`` invoked so its layers
         exist and are weight-shaped.
+        A functional model whose only non-input layer is a ``keras.Model``
+        (an input/output wrapper) is compared through that inner model's
+        layers; the same holds for the checkpoint's model.
     :param ckpt_path: Path to a ``.keras`` model file (produced by
         ``keras.Model.save(path)``).  Non-``.keras`` paths raise ``ValueError``
         — use ``keras.models.load_model`` manually for legacy formats.
@@ -280,8 +304,17 @@ def load_weights_from_checkpoint(
     logger.info(f"Loading source model from {ckpt_path}")
     source = keras.models.load_model(ckpt_path, custom_objects=custom_objects)
 
-    target_layers = {layer.name: layer for layer in target.layers}
-    source_layers = {layer.name: layer for layer in source.layers}
+    # DECISION plan-2026-10-11T004932-b83935e1/D-027: compare the layers of
+    # the one model a functional I/O wrapper holds, on either side. Do not
+    # compare the wrapper's own layers: its only weighted layer is the whole
+    # nested model, so a wrapped classifier's backbone could never move under
+    # another head (no overlap, or one all-or-nothing shape mismatch).
+    target_layers = {
+        layer.name: layer for layer in _unwrap_single_model(target).layers
+    }
+    source_layers = {
+        layer.name: layer for layer in _unwrap_single_model(source).layers
+    }
 
     report = TransferReport()
     allowed = tuple(allow_unloaded or ())

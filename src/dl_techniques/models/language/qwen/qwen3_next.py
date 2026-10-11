@@ -635,6 +635,32 @@ class Qwen3Next(keras.Model):
 # Factory Functions
 # ---------------------------------------------------------------------
 
+def _two_input_model(core: Qwen3Next, name: str) -> keras.Model:
+    """
+    Put the `[input_ids, attention_mask]` functional interface around `core`.
+
+    Interface contract (shared by the `create_qwen3_next*` factories):
+
+    :param core: An unbuilt `Qwen3Next`, named `qwen3_next_backbone` by every
+        caller.
+    :param name: Name of the returned model.
+    :return: A functional `keras.Model` with two int32 inputs whose only
+        non-input layer is `core`. `load_weights_from_checkpoint` therefore
+        compares `core`'s layers, so a backbone moves between such a model
+        and a bare `Qwen3Next` either way.
+    """
+    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
+    attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
+    outputs = core(
+        inputs={"input_ids": input_ids, "attention_mask": attention_mask}
+    )
+    model = keras.Model(
+        inputs=[input_ids, attention_mask], outputs=outputs, name=name
+    )
+    logger.info(f"Created {name} with {model.count_params():,} parameters.")
+    return model
+
+
 def create_qwen3_next_generation(config: Dict[str, Any]) -> keras.Model:
     """
     Create a Qwen3 Next model optimized for text generation tasks.
@@ -648,26 +674,9 @@ def create_qwen3_next_generation(config: Dict[str, Any]) -> keras.Model:
     """
     logger.info("Creating Qwen3 Next model for text generation.")
     logger.debug(f"Generation model config: {config}")
-
-    qwen3_next_backbone = Qwen3Next(**config, name="qwen3_next_backbone")
-    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
-    attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
-
-    logits = qwen3_next_backbone(
-        inputs={"input_ids": input_ids, "attention_mask": attention_mask}
-    )
-
-    model = keras.Model(
-        inputs=[input_ids, attention_mask],
-        outputs=logits,
-        name="qwen3_next_for_generation"
-    )
-
-    param_count = model.count_params()
-    logger.info(
-        f"Created Qwen3 Next generation model with {param_count:,} parameters."
-    )
-    return model
+    return _two_input_model(
+        Qwen3Next(**config, name="qwen3_next_backbone"),
+        "qwen3_next_for_generation")
 
 # ---------------------------------------------------------------------
 
@@ -730,24 +739,7 @@ def create_qwen3_next_classification(
         head_config_overrides={"pooling_type": pooling_strategy},
         name="qwen3_next_backbone",
     )
-    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
-    attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
-
-    logits = classifier(
-        inputs={"input_ids": input_ids, "attention_mask": attention_mask}
-    )
-
-    model = keras.Model(
-        inputs=[input_ids, attention_mask],
-        outputs=logits,
-        name="qwen3_next_for_classification"
-    )
-
-    param_count = model.count_params()
-    logger.info(
-        f"Created Qwen3 Next classification model with {param_count:,} parameters."
-    )
-    return model
+    return _two_input_model(classifier, "qwen3_next_for_classification")
 
 # ---------------------------------------------------------------------
 
@@ -777,8 +769,15 @@ def create_qwen3_next(
     :param kwargs: Additional keyword arguments to override configuration
         parameters (e.g. `hidden_size`, `num_layers`) or provide
         task-specific settings for classification (`num_labels`,
-        `pooling_strategy`, `classifier_dropout_rate`).
-    :return: A Keras `Model` configured for the specified task.
+        `pooling_strategy`, `classifier_dropout_rate`). `include_top=True`
+        with a `task_config` (and optional `head_config_overrides`) replaces
+        the LM top with that task head: the result is named
+        `qwen3_next_for_<task_type value>` (e.g.
+        `qwen3_next_for_token_classification`), and combining it with
+        `task_type="classification"` or the classification settings raises
+        `ValueError`.
+    :return: A two-input (`[input_ids, attention_mask]`) Keras `Model`
+        configured for the specified task.
 
     Example:
         .. code-block:: python
@@ -831,7 +830,22 @@ def create_qwen3_next(
     # 3. Apply overrides to the base model config
     config.update(model_kwargs)
 
-    # 4. Build the requested model based on task_type
+    # 4. include_top=True replaces the LM top with the task_config's head, so
+    # the model is that task's, named for it, and never "generation".
+    if config.get("include_top"):
+        if task_type != "generation" or task_kwargs:
+            raise ValueError(
+                "include_top=True builds the head named by task_config; it "
+                "cannot be combined with task_type='classification' or with "
+                "num_labels / pooling_strategy / classifier_dropout_rate, "
+                f"which build their own head. Got task_type={task_type!r} "
+                f"and {sorted(task_kwargs)}."
+            )
+        core = Qwen3Next(**config, name="qwen3_next_backbone")
+        return _two_input_model(
+            core, f"qwen3_next_for_{core.task_config['task_type']}")
+
+    # 5. Build the requested model based on task_type
     if task_type == "generation":
         if "num_labels" in task_kwargs:
             logger.warning("`num_labels` is ignored for 'generation' task type.")

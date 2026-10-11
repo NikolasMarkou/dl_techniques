@@ -455,5 +455,7 @@ class TestGemma3IncludeTop(IncludeTopCases):
               layer_types=["sliding_window", "full_attention"],
               dropout_rate=0.0)
     CLASSIFICATION_FACTORY = staticmethod(create_gemma3_classification)
+    GENERATION_FACTORY = staticmethod(create_gemma3_generation)
+    DISPATCH_FACTORY = staticmethod(create_gemma3)
     WRAPPED_NAME = "gemma3_backbone"
     N_BACKBONE = 26
