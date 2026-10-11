@@ -84,7 +84,7 @@ import keras
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
     load_weights_from_checkpoint,
-    load_weights_or_raise,
+    vocab_layers_if_changed,
 )
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -873,14 +873,18 @@ class TopoLM(keras.Model):
         :type variant: str
         :param pretrained: ``True`` raises :class:`NotImplementedError`; a string
             path loads weights from that local ``.keras`` file; ``False``
-            (default) random-initializes. A model WITH a head
-            (``include_top=True``) receives the backbone only: a ``task_head`` in
-            the checkpoint is never copied and the model's own head keeps its
-            fresh initialization, so a checkpoint of any TopoLM, headless or
-            trained under any head, warm-starts a model with any other head. That
-            transfer copies by layer name, needs a ``.keras`` file and raises if a
-            backbone layer does not fit (e.g. another ``vocab_size``). To restore
-            a whole model, head included, use ``keras.models.load_model``.
+            (default) random-initializes. Headed or headless, the model receives
+            the backbone (and an untied ``lm_head``) by layer name: a
+            ``task_head`` in the checkpoint is never copied and the model's own
+            head keeps its fresh initialization, so a checkpoint of any TopoLM,
+            headless or trained under any head, warm-starts a model with any
+            other head or none. Every backbone layer loads or the call raises
+            (another depth or width is refused); ``word_embeddings`` and
+            ``lm_head`` stay fresh only when the checkpoint's own
+            ``vocab_size`` differs, and an untied ``lm_head`` the checkpoint
+            does not hold (a headed checkpoint) keeps its initialization. Needs
+            a ``.keras`` file. To restore a whole model, head included, use
+            ``keras.models.load_model``.
         :type pretrained: Union[bool, str]
         :param kwargs: Override any variant parameter, e.g. ``alpha=0.0`` for the
             non-topographic control or ``tap_sites=("attention",)``, including
@@ -929,23 +933,26 @@ class TopoLM(keras.Model):
             # dummy forward, so no RNG is drawn. Without it every local path
             # raised "model must be built" (measured).
             model.build((1, min(32, model.max_seq_len)))
-            if model.include_top:
-                # DECISION plan-2026-10-11T004932-b83935e1/D-012: by-name and strict; do NOT send a headed
-                # model through load_weights_or_raise (copies an equal-shape head) nor pass strict=False
-                # (a backbone that does not fit records only shape mismatches and loads nothing). See decisions.md.
-                # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
-                # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
-                load_weights_from_checkpoint(
-                    target=model,
-                    ckpt_path=weights_path,
-                    skip_prefixes=(TASK_HEAD_NAME,),
-                    strict=True,
-                )
-            else:
-                # Whole-file restore. By-name transfer does not exist in Keras 3
-                # and its absence used to be swallowed into a warning, turning a
-                # partial restore into a silent success.
-                load_weights_or_raise(model, weights_path, skip_mismatch=True)
+            # DECISION plan-2026-10-11T004932-b83935e1/D-012: by-name and strict; do NOT send a headed
+            # model through load_weights_or_raise (copies an equal-shape head) nor pass strict=False
+            # (a backbone that does not fit records only shape mismatches and loads nothing). See decisions.md.
+            # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+            # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
+            # DECISION plan-2026-10-11T004932-b83935e1/D-026: complete-or-raise headed AND headless; do NOT
+            # restore a headless model by whole file with skip_mismatch=True (a deeper or wider model keeps fresh
+            # layers and returns normally), and key the vocabulary layers on the CHECKPOINT's vocab_size. See decisions.md.
+            load_weights_from_checkpoint(
+                target=model,
+                ckpt_path=weights_path,
+                skip_prefixes=(TASK_HEAD_NAME,),
+                strict=True,
+                allow_unloaded=(
+                    *vocab_layers_if_changed(
+                        weights_path, model.vocab_size,
+                        ("word_embeddings", "lm_head")),
+                    "lm_head",
+                ),
+            )
 
         return model
 

@@ -257,12 +257,15 @@ replaces the default. The blocks never see that derived mask, run unchanged, and
 smoothness terms through `add_loss`, so a fine-tune under `fit` still pays the spatial penalty
 unless `alpha=0.0`. The backbone's weight paths are the same with or without a head.
 
-A headed model's `pretrained=<path>` must be a `.keras` file. It copies the backbone by layer name
-and skips the checkpoint's `task_head` (and a headless checkpoint's `lm_head`, which has no target);
-the model's own head keeps its fresh initialization, and a backbone that does not fit (another
-`vocab_size` or width) raises `ValueError: Shape mismatch on layer ...`. A headless model restores
-the whole file. Both build the model first: before that, every `pretrained=<path>` raised
-"model must be built". To restore a whole model, head included, use `keras.models.load_model`.
+`pretrained=<path>` must be a `.keras` file, headed or headless. It copies the backbone (and an
+untied `lm_head`) by layer name and never the checkpoint's `task_head`; the model's own head keeps
+its fresh initialization. Every backbone layer loads or the call raises `ValueError`, so a
+checkpoint of another depth or width is refused, never half-restored. The vocabulary layers
+(`word_embeddings` and `lm_head`) stay fresh only when the checkpoint's own `vocab_size` differs from the
+model's, and an untied `lm_head` the checkpoint does not hold (one saved with a head) keeps its
+initialization. The model is built first: before that, every
+`pretrained=<path>` raised "model must be built". To restore a whole model, head included, use
+`keras.models.load_model`.
 
 ---
 

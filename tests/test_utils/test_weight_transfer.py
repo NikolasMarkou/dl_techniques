@@ -462,7 +462,9 @@ class TestLoadWeightsOrRaise:
     nothing is reported. Three sites did exactly that with an unconditional
     ``skip_mismatch=True`` and then logged "Loaded weights from ..." -- the
     whole-file restores in ``GPT2.from_variant`` and ``WaveFieldLLM.from_variant``
-    (twice), now ``gpt2/gpt2.py:698``, ``wave_field/model.py:973`` and ``:994``.
+    (twice). Two of them have since moved to the complete-or-raise by-name
+    transfer (plan-2026-10-11T004932-b83935e1 D-024, D-026); the third is
+    ``WaveFieldLLM``'s download branch, unreachable while no weights are hosted.
     ``distilbert/model.py`` was the repo's only implementation of the check;
     ``load_weights_or_raise`` is that check, shared.
 

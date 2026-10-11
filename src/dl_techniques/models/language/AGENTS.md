@@ -79,30 +79,37 @@ Reusing a backbone under a new head:
   the backbone only; the checkpoint's `task_head` is never copied and a new
   head keeps its fresh init. Available on the first ten models above (not
   Qwen3, Qwen3Next, Gemma3).
-- The load rule: every backbone layer loads, or the call raises. The only
-  layer allowed to stay at its fresh init is the vocabulary-dependent
-  `embeddings`, and only when the checkpoint's own `vocab_size` (read from the
-  archive, not a class default) differs from the model's. BERT, DistilBERT,
-  ModernBERT and FNet follow it, headed and headless
-  (`tests/test_models/test_a_language_checkpoint_loads_completely_or_raises.py`).
-  TreeTransformer follows it too, with `embedding` and `lm_head` as its
-  vocabulary layers, and its `lm_head` (a top, absent from a headed
-  checkpoint) also allowed to stay fresh. GPT2 follows it, headed and
-  headless, with an untied `lm_head` allowed to stay fresh the same way, but
-  refuses a vocabulary change: its `decoder` is ONE layer holding the token
-  embedding, so the embedding cannot stay fresh on its own. Mamba and Mamba2
-  follow it with `embedding` as their vocabulary layer (a headless load with
-  the checkpoint's vocabulary restores the whole file strictly, which already
-  is the rule there; a headed one or a vocabulary change copies by name).
-- Not yet on that rule (measured): TopoLM and WaveFieldLLM refuse a
-  vocabulary change when headed and, headed, load a checkpoint with fewer
-  blocks without raising; headless, they restore the whole file with
-  `skip_mismatch=True`, so a layer that does not fit stays fresh and only a
-  zero-variable restore raises.
+- The load rule, one for all ten classes, headed and headless: every
+  backbone layer loads, or the call raises (a checkpoint of another depth or
+  width is refused, never half-restored). The checkpoint's `task_head` is
+  never copied. The vocabulary layers may stay at their fresh init only when
+  the checkpoint's own `vocab_size` (read from the archive by
+  `vocab_layers_if_changed`, never a class default) differs from the model's.
+  An untied `lm_head` is a top, so it may also stay fresh when the checkpoint
+  holds none (one saved with a task head). Pinned for every class except
+  TreeTransformer by
+  `tests/test_models/test_a_language_checkpoint_loads_completely_or_raises.py`
+  (TreeTransformer: its own suite).
+
+  | Class | Vocabulary layers | Route |
+  |---|---|---|
+  | BERT, ModernBERT, FNet | `embeddings` | by name |
+  | DistilBERT | `embeddings` | whole file, strict, when headless with the checkpoint's vocabulary; else by name |
+  | TreeTransformer | `embedding`, `lm_head` | by name |
+  | GPT2 | none: a vocabulary change raises | by name |
+  | Mamba, Mamba2 | `embedding` | whole file, strict, when headless with the checkpoint's vocabulary; else by name |
+  | TopoLM | `word_embeddings`, `lm_head` | by name |
+  | WaveFieldLLM | `token_embeddings`, `lm_head` | by name |
+
+  GPT2 refuses a vocabulary change because its `decoder` is ONE layer holding
+  the token embedding, so the embedding cannot stay fresh on its own. The
+  whole-file routes are strict, measured to raise on a deeper or wider model
+  and to ignore a checkpoint's `task_head`. The by-name routes need a `.keras`
+  file.
 - On a built model: `load_weights_from_checkpoint(model, path,
   skip_prefixes=(TASK_HEAD_NAME,), strict=True, allow_unloaded=())` from
-  `dl_techniques.utils.weight_transfer` (add `"embeddings"` to
-  `allow_unloaded` for a vocabulary change). Without `strict=True` and
+  `dl_techniques.utils.weight_transfer` (add the class's vocabulary layers
+  to `allow_unloaded` for a vocabulary change). Without `strict=True` and
   `allow_unloaded`, a backbone that does not fit loads nothing and returns
   normally. Never pass `skip_prefixes=()` across tasks: a head of equal shape
   is copied silently.

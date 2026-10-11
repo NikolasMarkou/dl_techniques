@@ -34,6 +34,8 @@ from dl_techniques.models.language.fnet import create_fnet
 from dl_techniques.models.language.gpt2 import create_gpt2
 from dl_techniques.models.language.mamba import create_mamba, create_mamba2
 from dl_techniques.models.language.modern_bert import create_modern_bert
+from dl_techniques.models.language.topolm import create_topolm
+from dl_techniques.models.language.wave_field import create_wave_field_llm
 
 # Keras warns "A total of N objects could not be loaded" when a whole-file
 # restore skips variables, and this repo's pytest config escalates UserWarning
@@ -100,6 +102,19 @@ _MODELS = {
                          headdim=16),
                     {"deeper": dict(num_layers=3), "wider": dict(d_model=64)},
                     ("embedding",)),
+    "topolm": _Spec(lambda **k: create_topolm("tiny", **k),
+                    dict(vocab_size=_VOCAB, embed_dim=64, depth=1, num_heads=2,
+                         radius=2, ffn_intermediate_size=128, max_seq_len=16,
+                         tie_word_embeddings=False),
+                    {"deeper": dict(depth=2),
+                     "wider": dict(ffn_intermediate_size=256)},
+                    ("word_embeddings", "lm_head")),
+    "wave_field": _Spec(lambda **k: create_wave_field_llm("tiny", **k),
+                        dict(vocab_size=_VOCAB, embed_dim=32, depth=1,
+                             num_heads=2, max_seq_len=16,
+                             tie_word_embeddings=False),
+                        {"deeper": dict(depth=2), "wider": dict(embed_dim=64)},
+                        ("token_embeddings", "lm_head")),
 }
 _HEADS = {"headless": {}, "headed": dict(include_top=True, task_config=_CLF)}
 _MISFIT_CASES = [(name, misfit) for name in sorted(_MODELS)
@@ -133,7 +148,9 @@ def _checkpoint(model, head, tmp_path):
     source(_batch(), training=False)
     rng = np.random.default_rng(1)
     for w in source.weights:
-        w.assign(rng.normal(0.0, 0.1, size=tuple(w.shape)).astype(w.dtype))
+        # Integer weights (TopoLM's tap layouts) are indices, left alone.
+        if "float" in str(w.dtype):
+            w.assign(rng.normal(0.0, 0.1, size=tuple(w.shape)).astype(w.dtype))
     path = str(tmp_path / f"{model}_{head}.keras")
     source.save(path)
     return source, path

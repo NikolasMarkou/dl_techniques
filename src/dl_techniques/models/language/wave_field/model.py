@@ -54,6 +54,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
     load_weights_from_checkpoint,
     load_weights_or_raise,
+    vocab_layers_if_changed,
 )
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.layers.embedding import create_embedding_layer
@@ -907,17 +908,19 @@ class WaveFieldLLM(keras.Model):
             ``'large'``, ``'xl'``.
         :param pretrained: If ``True``, raises ``NotImplementedError`` (no
             public WaveFieldLLM weights are distributed by this library). If a
-            string path is supplied, the model is built by
-            ``build((1, min(32, max_seq_len)))`` and weights are loaded with
-            ``skip_mismatch=True``. If ``False`` (default), returns a
-            random-initialized model. A model WITH a head
-            (``include_top=True``) receives the backbone only: a ``task_head``
-            in the checkpoint is never copied and the model's own head keeps its
-            fresh initialization, so a checkpoint of any WaveFieldLLM, headless
-            or trained under any head, warm-starts a model with any other head.
-            That transfer copies by layer name, needs a ``.keras`` file and
-            raises if a backbone layer does not fit (e.g. another
-            ``vocab_size``). To restore a whole model, head included, use
+            string path to a ``.keras`` file is supplied, the model is built by
+            ``build((1, min(32, max_seq_len)))`` and, headed or headless,
+            receives the backbone (and an untied ``lm_head``) by layer name. If
+            ``False`` (default), returns a random-initialized model. A
+            ``task_head`` in the checkpoint is never copied and the model's own
+            head keeps its fresh initialization, so a checkpoint of any
+            WaveFieldLLM, headless or trained under any head, warm-starts a
+            model with any other head or none. Every backbone layer loads or
+            the call raises (another depth or width is refused);
+            ``token_embeddings`` and ``lm_head`` stay fresh only when the
+            checkpoint's own ``vocab_size`` differs, and an untied ``lm_head``
+            the checkpoint does not hold (a headed checkpoint) keeps its
+            initialization. To restore a whole model, head included, use
             ``keras.models.load_model``.
         :param kwargs: Override any variant parameter, including
             ``include_top``, ``task_config``, ``head_config_overrides`` and
@@ -954,23 +957,29 @@ class WaveFieldLLM(keras.Model):
                 # never exceeds max_seq_len (a fixed 32 raised below 32).
                 if not model.built:
                     model.build((1, min(32, model.max_seq_len)))
-                if model.include_top:
-                    # DECISION plan-2026-10-11T004932-b83935e1/D-012: by-name and strict; do NOT send a headed
-                    # model through load_weights_or_raise (copies an equal-shape head) nor pass strict=False
-                    # (a backbone that does not fit records only shape mismatches and loads nothing). See decisions.md.
-                    # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
-                    # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
-                    load_weights_from_checkpoint(
-                        target=model,
-                        ckpt_path=weights_path,
-                        skip_prefixes=(TASK_HEAD_NAME,),
-                        strict=True,
-                    )
-                else:
-                    # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: load_weights_or_raise,
-                    # since load_weights no-ops on a non-matching checkpoint.
-                    # See decisions.md.
-                    load_weights_or_raise(model, weights_path, skip_mismatch=True)
+                # DECISION plan-2026-10-11T004932-b83935e1/D-012: by-name and strict; do NOT send a headed
+                # model through load_weights_or_raise (copies an equal-shape head) nor pass strict=False
+                # (a backbone that does not fit records only shape mismatches and loads nothing). See decisions.md.
+                # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+                # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
+                # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: never a bare load_weights call,
+                # since load_weights no-ops on a non-matching checkpoint.
+                # See decisions.md.
+                # DECISION plan-2026-10-11T004932-b83935e1/D-026: complete-or-raise headed AND headless; do NOT
+                # restore a headless model by whole file with skip_mismatch=True (a deeper or wider model keeps fresh
+                # layers and returns normally), and key the vocabulary layers on the CHECKPOINT's vocab_size. See decisions.md.
+                load_weights_from_checkpoint(
+                    target=model,
+                    ckpt_path=weights_path,
+                    skip_prefixes=(TASK_HEAD_NAME,),
+                    strict=True,
+                    allow_unloaded=(
+                        *vocab_layers_if_changed(
+                            weights_path, model.vocab_size,
+                            ("token_embeddings", "lm_head")),
+                        "lm_head",
+                    ),
+                )
             else:
                 # DECISION plan-2026-08-13T091555-230c101d/D-005: catch I/O errors
                 # only; Exception would swallow the NotImplementedError below.

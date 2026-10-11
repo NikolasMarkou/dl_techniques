@@ -151,13 +151,14 @@ def load_weights_or_raise(
     .. warning::
        **This guard is all-or-nothing, and it is blind to a PARTIAL restore.**
        It raises only when *zero* variables changed. A 9-of-30 restore returns
-       normally with a ``logger.warning`` and the caller sees a success. That
-       matters because three of the four production call sites
-       (``gpt2::GPT2.from_variant`` and ``wave_field::WaveFieldLLM.from_variant``,
-       twice) hardcode ``skip_mismatch=True`` — precisely the configuration in
-       which a partial restore is possible. Compare the RETURNED count against
-       ``len(model.weights)`` if a total restore is what you require; a
-       non-zero return is not a claim of completeness.
+       normally with a ``logger.warning`` and the caller sees a success, which
+       under ``skip_mismatch=True`` is possible. That is why the language
+       models' ``pretrained=<path>`` routes no longer use it with
+       ``skip_mismatch=True`` (plan-2026-10-11T004932-b83935e1 D-024, D-026):
+       they copy by name through :func:`load_weights_from_checkpoint` with
+       ``allow_unloaded``, which is complete-or-raise. Compare the RETURNED
+       count against ``len(model.weights)`` if a total restore is what you
+       require; a non-zero return is not a claim of completeness.
     """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights file not found: {weights_path}")

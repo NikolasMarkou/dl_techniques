@@ -1646,14 +1646,19 @@ class TestTopoLMIncludeTop:
         np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
 
     def test_a_backbone_that_does_not_fit_raises_for_a_headed_model(self, tmp_path):
+        """A checkpoint with fewer blocks is refused (D-026).
+
+        Before D-026 the strict by-name transfer raised only on a shape
+        mismatch, so the deeper model's extra block kept its fresh init and
+        the call returned normally.
+        """
         lm = create_topolm("tiny", **_HEAD_KW)
         lm(_head_batch(), training=False)
-        path = str(tmp_path / "lm_v64.keras")
+        path = str(tmp_path / "one_block.keras")
         lm.save(path)
-        with pytest.raises(ValueError,
-                           match="Shape mismatch on layer 'word_embeddings'"):
+        with pytest.raises(ValueError, match=r"unloaded: \['block_1'\]"):
             create_topolm("tiny", include_top=True, task_config=_CLF,
-                          pretrained=path, **dict(_HEAD_KW, vocab_size=80))
+                          pretrained=path, **dict(_HEAD_KW, depth=2))
 
     def test_include_top_without_task_config_raises(self):
         with pytest.raises(ValueError, match="include_top=True needs a task_config"):

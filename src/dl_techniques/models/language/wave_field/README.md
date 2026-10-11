@@ -307,15 +307,9 @@ except NotImplementedError as e:
     print(f"NotImplementedError: {e}")
 ```
 
-A string path is loaded with `skip_mismatch=True` after `build((1, min(32, max_seq_len)))` (a
-32-token dummy forward used to raise for every `max_seq_len < 32`); a nonexistent one raises
-`FileNotFoundError`.
-The load goes through `utils.weight_transfer.load_weights_or_raise`, which counts variables whose
-value actually changed and raises when that count is **zero**, so a checkpoint whose names or
-shapes do not match cannot restore nothing and return normally. Its limit: that guard fires only
-on a *completely* empty load. A **partial** restore (say 9 of 30 variables) logs a warning and
-returns normally, which under `skip_mismatch=True` is possible. Check the logged
-restored-variable count. A model with a task head loads differently; see Example 3.
+A string path is loaded after `build((1, min(32, max_seq_len)))` (a 32-token dummy forward used
+to raise for every `max_seq_len < 32`); a nonexistent one raises `FileNotFoundError`. The load is
+by layer name and complete-or-raise, headed or headless; see Example 3.
 
 ### Example 3: a task head in the model (`include_top`)
 
@@ -352,11 +346,14 @@ backbone's weight paths (§15) are the same with or without one; its own weights
 blocks see only the caller's mask either way. `head_config_overrides={"pooling_type": ...}`
 replaces the default. With a head, no LM logits are computed and an untied `lm_head` is not created.
 
-A headed model's `pretrained=<path>` must be a `.keras` file. It copies the backbone by layer name
-and skips the checkpoint's `task_head` (and a headless checkpoint's `lm_head`, which has no target);
-the model's own head keeps its fresh initialization, and a backbone that does not fit (another
-`vocab_size` or width) raises `ValueError: Shape mismatch on layer ...` instead of loading nothing.
-To restore a whole model, head included, use `keras.models.load_model`.
+`pretrained=<path>` must be a `.keras` file, headed or headless. It copies the backbone (and an
+untied `lm_head`) by layer name and never the checkpoint's `task_head`; the model's own head keeps
+its fresh initialization. Every backbone layer loads or the call raises `ValueError`, so a
+checkpoint of another depth or width is refused, never half-restored. The vocabulary layers
+(`token_embeddings` and `lm_head`) stay fresh only when the checkpoint's own `vocab_size` differs from the
+model's, and an untied `lm_head` the checkpoint does not hold (one saved with a head) keeps its
+initialization. To restore a whole model, head included,
+use `keras.models.load_model`.
 
 ---
 

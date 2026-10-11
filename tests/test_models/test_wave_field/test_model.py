@@ -785,10 +785,12 @@ class TestWaveFieldDecoderBlockIsolation:
 
 
 class TestWaveFieldPretrainedLocalPathIsVerified:
-    """``from_variant`` loads a local path with an unconditional
-    ``skip_mismatch=True``. A checkpoint whose variables do not line up restores
-    NOTHING and returns normally; before D-070 the next line logged a successful
-    load, so the caller got an untrained model and no error.
+    """Before D-070 a local path was restored with ``skip_mismatch=True`` and a
+    checkpoint whose variables did not line up restored NOTHING while the next
+    line logged a successful load, so the caller got an untrained model and no
+    error. Since D-026 (plan-2026-10-11T004932-b83935e1) the load is by layer
+    name and complete-or-raise, so such a checkpoint is refused before anything
+    loads.
     """
 
     def test_mismatched_checkpoint_raises_naming_the_cause(self, tmp_path):
@@ -798,12 +800,8 @@ class TestWaveFieldPretrainedLocalPathIsVerified:
         ckpt = str(tmp_path / "not_a_wave_field.keras")
         other.save(ckpt)
 
-        # R-038 / D-054: see the GPT-2 twin of this test. The
-        # `A total of N objects could not be loaded` warning is the deliberately
-        # provoked mismatch being reported, so it is asserted, not suppressed.
-        with pytest.warns(UserWarning, match="could not be loaded"):
-            with pytest.raises(ValueError, match="changed none of this model"):
-                WaveFieldLLM.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+        with pytest.raises(ValueError, match="No overlapping layers"):
+            WaveFieldLLM.from_variant("tiny", vocab_size=64, pretrained=ckpt)
 
     def test_matching_checkpoint_still_loads(self, tmp_path):
         """Anti-vacuity: the real warm-start path must still work."""
@@ -1154,14 +1152,20 @@ class TestWaveFieldIncludeTop:
         np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
 
     def test_a_backbone_that_does_not_fit_raises_for_a_headed_model(self, tmp_path):
+        """A checkpoint with fewer blocks is refused (D-026).
+
+        Before D-026 the strict by-name transfer raised only on a shape
+        mismatch, so the deeper model's extra block kept its fresh init and
+        the call returned normally.
+        """
         lm = create_wave_field_llm("tiny", **_HEAD_KW)
         lm(_head_batch(), training=False)
-        path = str(tmp_path / "lm_v64.keras")
+        path = str(tmp_path / "shallow.keras")
         lm.save(path)
-        with pytest.raises(ValueError,
-                           match="Shape mismatch on layer 'token_embeddings'"):
+        deeper = dict(_HEAD_KW, depth=_HEAD_KW["depth"] + 1)
+        with pytest.raises(ValueError, match="unloaded"):
             create_wave_field_llm("tiny", include_top=True, task_config=_CLF,
-                                  pretrained=path, **dict(_HEAD_KW, vocab_size=80))
+                                  pretrained=path, **deeper)
 
     def test_include_top_without_task_config_raises(self):
         with pytest.raises(ValueError, match="include_top=True needs a task_config"):
