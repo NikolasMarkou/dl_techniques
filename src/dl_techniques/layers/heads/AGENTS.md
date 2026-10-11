@@ -65,6 +65,13 @@ still load.
   keeps its native calling convention, forwarded verbatim (D-004).
 - `nlp/factory.py` — `create_nlp_head(task_config, input_dim, ...)`,
   `create_multi_task_nlp_head(...)`, `NLPHeadConfiguration`.
+- `nlp/model_head.py` — helpers for a language model that owns its task head
+  (`include_top=True`): `build_model_task_head(task_config, input_dim, ...)`
+  (dict or `NLPTaskConfig`; refuses `MULTIPLE_CHOICE`; `default_pooling` only
+  when the overrides set no `pooling_type`; head named `task_head`),
+  `task_config_to_dict(...)` for the model's `get_config`, and
+  `finalize_head_outputs(...)` (drop `probabilities`/`predictions` beside
+  `logits`, unwrap a single-key dict to a bare tensor).
 - `vision/factory.py` — `create_vision_head(task_type, ...)`,
   `create_enhancement_head(...)`, `create_multi_task_head(...)`,
   `HeadConfiguration`.
