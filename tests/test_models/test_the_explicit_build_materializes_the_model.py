@@ -72,7 +72,7 @@ import numpy as np
 import pytest
 import keras
 
-from .precision_arm_subjects import roundtrip_subject
+from .precision_arm_subjects import SUBJECTS, roundtrip_subject
 from .roundtrip_instrument_oracle import _call, relative_path
 from tests.optimizer_state import build_optimizer_state
 
@@ -80,16 +80,24 @@ from tests.optimizer_state import build_optimizer_state
 #: weight count ``.build(shape)`` alone MUST now materialize. Pinned exactly: a
 #: package that loses its ``build()`` fires, and one whose weight population
 #: changes fires too.
+#:
+#: RE-MEASURED 2026-10-11 (plan-2026-10-11T004932-b83935e1, D-016): the eight
+#: language entries now pin the HEADED build ``roundtrip_subject`` returns --
+#: the headless count plus the 8 ``task_head/`` weights, minus the untied
+#: ``lm_head`` that is not created under a head (``gemma``, ``qwen``: +7;
+#: ``tree_transformer``, kernel and bias: +6). Headless they were distilbert
+#: 16, fnet 15, gemma 15, gpt2 18, mamba 14, modern_bert 12, qwen 97 and
+#: tree_transformer 28.
 FIXED = {
     "cbam": 22,
-    "distilbert": 16,
-    "fnet": 15,
-    "gemma": 15,
-    "gpt2": 18,
+    "distilbert": 24,
+    "fnet": 23,
+    "gemma": 22,
+    "gpt2": 26,
     "ideogram4": 45,
     "latent_gmm_registration": 26,
     "lewm": 188,
-    "mamba": 14,
+    "mamba": 22,
     "masked_language_model": 23,
     "mobilenet": 267,
     # RE-MEASURED 2026-09-04: 12, not 13. ModernBERT's `use_bias` defaults to
@@ -98,17 +106,18 @@ FIXED = {
     # subject's default config no `beta` weight exists anywhere in the model,
     # consistent architecture top to bottom. Re-derived directly from
     # `model.weights` after `build()`; the prior 13 does not correspond to
-    # any weight this build path has ever produced in git history.
-    "modern_bert": 12,
+    # any weight this build path has ever produced in git history. 20 since
+    # 2026-10-11: the same 12 plus the 8 head weights.
+    "modern_bert": 20,
     "power_mlp": 5,
     "pw_fnet": 100,
-    "qwen": 97,
+    "qwen": 104,
     "relgt": 49,
     "resnet": 32,
     "scunet": 148,
     "sd3_mmdit": 124,
     "tabm": 5,
-    "tree_transformer": 28,
+    "tree_transformer": 34,
     "video_jepa": 161,
     "vq_vae": 9,
     "vq_vae_rotation": 9,
@@ -360,7 +369,10 @@ def test_a_coerced_build_probe_does_not_pin_the_call_shape(
     shapes: the forward must run, produce the shape the input asked for, and
     move the weight population not at all.
     """
-    build, make_inputs, kwargs = roundtrip_subject(name)
+    # The subject's own builder, not ``roundtrip_subject``'s: for ``qwen`` that
+    # is the HEADED build (D-016), whose pooled ``(batch, classes)`` logits
+    # carry no sequence axis for this arm to read the call shape off.
+    build, _make_inputs, _kwargs = SUBJECTS[name]
     keras.utils.set_random_seed(0)
     model = build()
 

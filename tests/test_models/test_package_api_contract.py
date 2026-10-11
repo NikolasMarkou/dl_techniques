@@ -100,8 +100,10 @@ def _variant_table_for(fn):
        a size.
     2. otherwise the *defining module*'s first class (``dir()`` order, so
        deterministic) carrying a ``MODEL_VARIANTS``. This is what reaches the
-       ``create_<x>_with_head(<x>_variant, task_config)`` factories, which are
-       plain functions sitting beside their model class.
+       plain ``create_<x>(variant, ...)`` factories sitting beside their model
+       class (until 2026-10-11 also the language
+       ``create_<x>_with_head(<x>_variant, task_config)`` factories, deleted
+       when the head moved into the model as ``include_top``).
 
     If (2) ever picks the wrong class in a two-model module, the probe fails LOUDLY
     with the package's own ``ValueError: Unknown variant`` rather than silently
@@ -146,19 +148,20 @@ def _resolve_required_arg(param_name: str, fn) -> Tuple[Any, str]:
             NLPTaskType,
         )
 
-        # `vocabulary_size` is a size like any other here, and it is REQUIRED by
-        # `mamba.create_mamba_with_head`, which reads the encoder's vocabulary
-        # off the task config and raises `ValueError` before it ever reaches its
-        # `pretrained` branch without it. Leaving it unset made this probe report
-        # "raised ValueError instead of NotImplementedError" for that site on the
-        # day it became reachable (2026-08-22) -- a harness gap wearing the
-        # costume of a contract violation.
+        # MEASURED 2026-10-11: no reached site takes a REQUIRED `task_config`
+        # any more -- the language `create_<x>_with_head(variant, task_config)`
+        # factories it served were deleted, and `create_<x>(...,
+        # task_config=None)` defaults it. The branch stays because the table is
+        # keyed by argument kind, not by call site. It carried
+        # `vocabulary_size=32` for `mamba.create_mamba_with_head`, which read
+        # the encoder's vocabulary off the task config and raised `ValueError`
+        # before its `pretrained` branch without it (2026-08-22); that consumer
+        # is gone, so the field is too.
         return (
             NLPTaskConfig(
                 name="pretrained-contract-probe",
                 task_type=NLPTaskType.TEXT_CLASSIFICATION,
                 num_classes=2,
-                vocabulary_size=32,
             ),
             "",
         )
@@ -226,7 +229,10 @@ def _pretrained_factories() -> Tuple[List[Tuple[str, Any, dict]], List[Tuple[str
     every ``create_<x>_with_head`` in the tree was outside it, i.e. exactly the
     entry points a user reaches for a *named* model. The resolver above lifts that
     to 42; the three it still cannot reach are named, with reasons, in
-    ``_PRETRAINED_UNREACHABLE_EVIDENCE`` below.
+    ``_PRETRAINED_UNREACHABLE_EVIDENCE`` below. (Re-measured 2026-10-11, after
+    the ``_with_head`` factories were deleted and ``create_distilbert``,
+    ``create_modern_bert``, ``create_fnet``, ``create_mamba`` and
+    ``create_mamba2`` added: population 84, reached 83, unreached 1.)
     """
     reached: List[Tuple[str, Any, dict]] = []
     unreached: List[Tuple[str, str]] = []
@@ -284,9 +290,11 @@ _PRETRAINED_UNREACHABLE_EVIDENCE = {
     # original comment predicted: `models/language/fnet/model.py::create_fnet_with_head`
     # on 2026-08-21 (step 27, D-133) and
     # `models/language/mamba/mamba_v1.py::create_mamba_with_head` on 2026-08-22
-    # (plan-2026-08-22-a11304c8 step 14). Do not re-add an export-gap waiver
-    # here: an unexported factory is a package defect, and this file is the
-    # wrong place to absorb it.
+    # (plan-2026-08-22-a11304c8 step 14). Every language `_with_head` factory
+    # was deleted on 2026-10-11 (plan-2026-10-11T004932-b83935e1); the
+    # `create_<x>` factories that replace them are exported and reached. Do not
+    # re-add an export-gap waiver here: an unexported factory is a package
+    # defect, and this file is the wrong place to absorb it.
 }
 
 

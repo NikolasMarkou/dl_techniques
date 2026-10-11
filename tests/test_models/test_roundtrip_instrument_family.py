@@ -174,6 +174,19 @@ NO_HEAD_MARKERS = {
     "vit": "head/",
     "vit_hmlp": "head/",
     "vit_siglip": "head/",
+    # The language classes' in-model task head (``layers/heads/nlp``
+    # ``TASK_HEAD_NAME``). MEASURED 2026-10-11: 8 weights under ``task_head/``
+    # in every enabled build, 0 in every headless one.
+    "bert": "task_head/",
+    "distilbert": "task_head/",
+    "fnet": "task_head/",
+    "gemma": "task_head/",
+    "gpt2": "task_head/",
+    "mamba": "task_head/",
+    "modern_bert": "task_head/",
+    "qwen": "task_head/",
+    "tree_transformer": "task_head/",
+    "wave_field": "task_head/",
 }
 
 

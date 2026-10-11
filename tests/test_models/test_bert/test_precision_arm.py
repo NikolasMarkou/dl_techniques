@@ -6,7 +6,7 @@ Why this file exists at all, re-derived rather than carried
 The plan's F-13 recorded "zero adoption of ``precision_arm_oracle`` in either
 package". That premise is FALSE at the family level and true only at the
 package level: ``bert`` IS a registered subject in
-``precision_arm_subjects.py`` (``_sub("bert", ...)``, line 314) and its arm --
+``precision_arm_subjects.py`` (``_sub("bert", ...)``, line 313) and its arm --
 the bare ``create_bert`` ENCODER -- runs green from
 ``test_precision_arm_family.py``. Re-registering that subject here would be a
 second copy of an assertion the repo deliberately centralises.
@@ -16,7 +16,12 @@ What the family subject does not reach is a BERT WITH A HEAD -- today
 (plan-2026-10-11T004932-b83935e1) the functional head factory it replaced, the
 package's flagship factory at the time. Pointing the arm at it found a real
 defect. The finding below was measured on that factory; the arms now build the
-in-model head, which runs the same encoder and the same head layer.
+in-model head, which runs the same encoder and the same head layer. Since
+2026-10-11 the family also runs the four-part arm on a headed ``bert`` build
+(``test_the_in_model_task_head_runs_under_mixed_float16``,
+plan-2026-10-11T004932-b83935e1/D-016) at the family's own geometry; this file
+keeps its arm for the localisation contrast and the
+plan-2026-08-23T203721-009b7ccf D-016/D-017 history below.
 
 THE FINDING (MEASURED, GPU 1 / RTX 4070, TF32 on by default) -- NOW FIXED
 --------------------------------------------------------------------------

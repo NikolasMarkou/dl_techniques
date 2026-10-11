@@ -35,7 +35,9 @@ import keras
 import pytest
 
 from .precision_arm_oracle import assert_precision_arm, default_call
-from .precision_arm_subjects import CHARGED_PACKAGES, SUBJECTS, subject_names
+from .precision_arm_subjects import (
+    CHARGED_PACKAGES, HEADED_SUBJECTS, SUBJECTS, subject_names,
+)
 
 
 def test_every_charged_package_has_a_subject():
@@ -62,6 +64,26 @@ def test_the_package_runs_under_mixed_float16(name):
     # edit that loosens the oracle cannot make this file silently trivial.
     assert reports["mixed_float16"]["model_policy"] == "mixed_float16"
     assert reports["float32"]["model_policy"] == "float32"
+
+
+# DECISION plan-2026-10-11T004932-b83935e1/D-016
+@pytest.mark.parametrize("name", sorted(set(HEADED_SUBJECTS) & set(SUBJECTS)))
+def test_the_in_model_task_head_runs_under_mixed_float16(name):
+    """All four parts of the arm on the package's HEADED build.
+
+    The arm above keeps the headless build, because a head output cannot see a
+    backbone that leaves mixed precision (the head re-casts its input); this
+    one charges the head path the arm above never runs -- the head mask cast
+    to the hidden dtype, the pooling, the classifier. No subject kwarg is
+    forwarded: the head's float16 logits are the single output, so the
+    ``gpt2``/``wave_field`` exemption of the LM logits would leave part 2 no
+    float tensor to judge. See decisions.md D-016.
+    """
+    _build, make_inputs, _kwargs = SUBJECTS[name]
+    reports = assert_precision_arm(build=HEADED_SUBJECTS[name],
+                                   make_inputs=make_inputs)
+    assert reports["mixed_float16"]["model_policy"] == "mixed_float16"
+    assert reports["mixed_float16"]["n_tensors"] == 1
 
 
 # DECISION plan-2026-09-12T123331-28fd855f/D-006

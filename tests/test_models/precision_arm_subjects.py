@@ -46,7 +46,7 @@ __all__ = ["CHARGED_PACKAGES", "SUBJECTS", "subject_names",
            "XLA_OVERRIDES", "xla_subject",
            "FLOAT64_CHARGED", "FLOAT64_OVERRIDES", "float64_subject",
            "EXTRA_SUBJECTS", "ROUNDTRIP_NA", "roundtrip_charged",
-           "roundtrip_subject", "NO_HEAD_SIBLINGS"]
+           "roundtrip_subject", "NO_HEAD_SIBLINGS", "HEADED_SUBJECTS"]
 
 
 #: Every package the audit charged with R-088 / R-141 and that step 18 left
@@ -303,39 +303,39 @@ _sub("depth_anything", _b_depth_anything, lambda: _f32(1, 64, 64, 3))
 # Language / sequence
 # ---------------------------------------------------------------------------
 
-def _b_bert():
+def _b_bert(**head):
     from dl_techniques.models.language.bert import create_bert
     return create_bert("tiny", vocab_size=64, max_position_embeddings=32,
                        hidden_size=32, num_layers=1, num_heads=2,
-                       intermediate_size=64)
+                       intermediate_size=64, **head)
 
 
 _sub("bert", _b_bert, lambda: _ids(64, 2, 16))
 
 
-def _b_fnet():
+def _b_fnet(**head):
     from dl_techniques.models.language.fnet import FNet
     return FNet(vocab_size=64, hidden_size=32, num_layers=1,
-                intermediate_size=64, max_position_embeddings=32)
+                intermediate_size=64, max_position_embeddings=32, **head)
 
 
 _sub("fnet", _b_fnet, lambda: _ids(64, 2, 16))
 
 
-def _b_modern_bert():
+def _b_modern_bert(**head):
     from dl_techniques.models.language.modern_bert import ModernBERT
     return ModernBERT(vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
                       intermediate_size=64, max_position_embeddings=32,
-                      local_attention_window_size=8)
+                      local_attention_window_size=8, **head)
 
 
 _sub("modern_bert", _b_modern_bert, lambda: _ids(64, 2, 16))
 
 
-def _b_gpt2():
+def _b_gpt2(**head):
     from dl_techniques.models.language.gpt2 import GPT2
     return GPT2(vocab_size=64, embed_dim=32, depth=1, num_heads=2,
-                max_seq_len=32)
+                max_seq_len=32, **head)
 
 
 # DECISION plan-2026-09-12T123331-28fd855f/D-006
@@ -360,13 +360,14 @@ def _b_gpt2():
 _sub("gpt2", _b_gpt2, lambda: _ids(64, 2, 16), dtype_exempt_outputs=(0,))
 
 
-def _b_gemma():
+def _b_gemma(**head):
     # ``create_gemma3`` returns a FUNCTIONAL wrapper that expects two input
     # tensors; the subject here is the ``Gemma3`` backbone itself.
     from dl_techniques.models.language.gemma import Gemma3
     return Gemma3(vocab_size=64, hidden_size=32, num_layers=1,
                   num_attention_heads=2, num_key_value_heads=1,
-                  ffn_hidden_size=64, max_seq_len=32, sliding_window_size=8)
+                  ffn_hidden_size=64, max_seq_len=32, sliding_window_size=8,
+                  **head)
 
 
 # ``_ids(64, ...)``, not ``_ids(256, ...)``: this subject's ``vocab_size`` is 64.
@@ -383,12 +384,12 @@ def _b_gemma():
 _sub("gemma", _b_gemma, lambda: _ids(64, 2, 16))
 
 
-def _b_qwen():
+def _b_qwen(**head):
     from dl_techniques.models.language.qwen import Qwen3Next
     return Qwen3Next(vocab_size=64, hidden_size=32, num_layers=1,
                      num_attention_heads=2, num_key_value_heads=1,
                      max_seq_len=32, num_experts=2, num_experts_per_tok=1,
-                     moe_intermediate_size=32)
+                     moe_intermediate_size=32, **head)
 
 
 # DECISION plan-2026-08-19T163559-499b6f0e/D-076
@@ -410,9 +411,9 @@ _sub("blt", _b_blt, lambda: _ids(256, 2, 32),
      allowed_none_grads=54)
 
 
-def _b_wave_field():
+def _b_wave_field(**head):
     from dl_techniques.models.language.wave_field import create_wave_field_llm
-    return create_wave_field_llm("small", vocab_size=64)
+    return create_wave_field_llm("small", vocab_size=64, **head)
 
 
 # DECISION plan-2026-09-12T123331-28fd855f/D-006
@@ -1135,10 +1136,10 @@ _extra("dino", _b_dino,
        lambda: [_f32(1, 28, 28, 3), np.zeros((1, 4), dtype="bool")])
 
 
-def _b_distilbert():
+def _b_distilbert(**head):
     from dl_techniques.models.language.distilbert.model import DistilBERT
     return DistilBERT(vocab_size=64, hidden_size=32, num_layers=1, num_heads=2,
-                      intermediate_size=64, max_position_embeddings=16)
+                      intermediate_size=64, max_position_embeddings=16, **head)
 
 
 _extra("distilbert", _b_distilbert, lambda: {"input_ids": _ids(64, 1, 8)})
@@ -1215,10 +1216,10 @@ _extra("latent_gmm_registration", _b_latent_gmm,
        lambda: (_f32(1, 16, 3), _f32(1, 16, 3, seed=1)))
 
 
-def _b_mamba():
+def _b_mamba(**head):
     from dl_techniques.models.language.mamba.mamba_v1 import Mamba
     return Mamba(vocab_size=64, d_model=32, num_layers=1, d_state=8, d_conv=4,
-                 expand=2)
+                 expand=2, **head)
 
 
 _extra("mamba", _b_mamba, lambda: _ids(64, 1, 8))
@@ -1287,12 +1288,13 @@ def _thera_inputs():
 _extra("thera", _b_thera, _thera_inputs)
 
 
-def _b_tree_transformer():
+def _b_tree_transformer(**head):
     from dl_techniques.models.language.tree_transformer.model import TreeTransformer
     # ``max_len``, not ``max_position_embeddings``: the constructor rejects the
     # BERT spelling outright rather than ignoring it.
     return TreeTransformer(vocab_size=64, hidden_size=32, num_layers=1,
-                           num_heads=2, intermediate_size=64, max_len=16)
+                           num_heads=2, intermediate_size=64, max_len=16,
+                           **head)
 
 
 _extra("tree_transformer", _b_tree_transformer,
@@ -1453,12 +1455,15 @@ def roundtrip_charged() -> Tuple[str, ...]:
 def roundtrip_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], Dict[str, Any]]:
     """Resolve one subject for the round-trip instrument family.
 
-    Interface contract (3 call sites, all in
-    ``test_roundtrip_instrument_family.py``): returns
+    Interface contract (9 call sites: 4 in
+    ``test_roundtrip_instrument_family.py``, 5 in
+    ``test_the_explicit_build_materializes_the_model.py``): returns
     ``(build, make_inputs, kwargs)`` where ``kwargs`` carries only the two keys
     the round-trip oracle understands -- ``call_fn`` and ``training`` -- so a
-    precision-arm-only kwarg (``rtol_against_float32``, ``check_backward``)
-    cannot leak into a round-trip assertion and silently do nothing.
+    precision-arm-only kwarg (``rtol_against_float32``, ``check_backward``,
+    ``dtype_exempt_outputs``) cannot leak into a round-trip assertion and
+    silently do nothing. ``build`` is the :data:`HEADED_SUBJECTS` builder when
+    the package has one (its in-model task head ON), else the subject's own.
 
     :raises KeyError: if ``name`` has no subject (including the
         :data:`ROUNDTRIP_NA` packages, which have none by ruling).
@@ -1466,6 +1471,7 @@ def roundtrip_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], 
     build, make_inputs, kwargs = (
         SUBJECTS[name] if name in SUBJECTS else EXTRA_SUBJECTS[name]
     )
+    build = HEADED_SUBJECTS.get(name, build)
     resolved: Dict[str, Any] = {}
     if kwargs.get("call_fn") is not None:
         resolved["call_fn"] = kwargs["call_fn"]
@@ -1484,11 +1490,53 @@ def roundtrip_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], 
 #
 # The subject set is not chosen by taste. It is every package whose model class
 # accepts ``include_top``, derived mechanically by
-# ``inspect.signature(type(model).__init__)`` -- 13 of the 72 -- and
+# ``inspect.signature(type(model).__init__)`` -- 29 of the 81 subjects,
+# re-derived 2026-10-11 (the comment read "13 of the 72" when written) -- and
 # ``test_the_no_head_sibling_set_is_the_include_top_set`` re-derives it, so a
-# package that GAINS the knob cannot stay out of the arm.
+# package that GAINS the knob cannot stay out of the arm. 23 of the 29 have a
+# sibling; that test names the 6 that do not (beit, darkir, depth_anything,
+# fftnet, pft_sr, scunet).
 
 NO_HEAD_SIBLINGS: Dict[str, Callable[[], Any]] = {}
+
+#: name -> the SAME subject built with its in-model task head ON. Read by
+#: :func:`roundtrip_subject` only, so the round-trip, build-parity and sibling
+#: arms see the head while :data:`SUBJECTS` -- the precision and XLA arms --
+#: keeps the headless build.
+HEADED_SUBJECTS: Dict[str, Callable[[], Any]] = {}
+
+#: The task every headed language subject is built with. A dict, not an
+#: ``NLPTaskConfig``, so importing this module imports no model code.
+_HEAD_TASK = {"name": "clf", "task_type": "text_classification",
+              "num_classes": 3}
+
+
+def _headed(build: Callable[..., Any]) -> Callable[[], Any]:
+    """``build`` with ``include_top=True`` and :data:`_HEAD_TASK`."""
+    def build_headed():
+        return build(include_top=True, task_config=dict(_HEAD_TASK))
+    return build_headed
+
+
+# DECISION plan-2026-10-11T004932-b83935e1/D-016
+# The language classes default to ``include_top=False`` (a language model has
+# no task to default to), so for them the HEADED build is the enabled instance
+# and the precision subject's own headless builder IS the sibling -- one
+# builder, two roles, nothing to keep in lockstep. Do NOT switch the
+# ``SUBJECTS`` entries themselves to the headed build: MEASURED 2026-10-11, a
+# headed precision arm stayed GREEN on all 9 of 9 checkable subjects when the
+# hidden states reaching the head were cast to float32 (the head's Dense
+# re-casts them to float16), so it cannot see a backbone that leaves mixed
+# precision, and it would break the ``last_hidden_state`` guard of
+# ``gpt2``/``wave_field`` (plan-2026-09-12T123331-28fd855f/D-006). The headed
+# build gets its own fp16 arm instead (``test_precision_arm_family.py``). See
+# decisions.md D-016.
+for _name in ("bert", "distilbert", "fnet", "gemma", "gpt2", "mamba",
+              "modern_bert", "qwen", "tree_transformer", "wave_field"):
+    _build = (SUBJECTS[_name] if _name in SUBJECTS else EXTRA_SUBJECTS[_name])[0]
+    HEADED_SUBJECTS[_name] = _headed(_build)
+    NO_HEAD_SIBLINGS[_name] = _build
+del _name, _build
 
 
 def _no_head(name: str):
