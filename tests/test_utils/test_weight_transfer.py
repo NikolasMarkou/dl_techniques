@@ -35,6 +35,8 @@ from dl_techniques.utils.weight_transfer import (
     TransferReport,
     load_weights_from_checkpoint,
     load_weights_or_raise,
+    read_checkpoint_config,
+    vocab_layers_if_changed,
 )
 
 
@@ -101,6 +103,8 @@ def _build_multihead(
     head_name: str,
     head_units: int,
     widths=(8, 16),
+    input_dim: int = _INPUT_DIM,
+    extra_layer: bool = False,
 ):
     """A tiny encoder/decoder-shaped functional model with pinned layer names.
 
@@ -110,9 +114,11 @@ def _build_multihead(
     Layer names are IDENTICAL across head configurations and across ``widths``,
     which is what makes name-matched transfer (and shape mismatch) observable.
     """
-    inp = keras.Input(shape=(_INPUT_DIM,), name="input")
+    inp = keras.Input(shape=(input_dim,), name="input")
     x = keras.layers.Dense(widths[0], activation="relu", name="stem_dense")(inp)
     x = keras.layers.Dense(widths[1], activation="relu", name="enc_dense")(x)
+    if extra_layer:
+        x = keras.layers.Dense(widths[1], activation="relu", name="enc_extra_dense")(x)
     # ONE composite layer with two weight-bearing sub-layers, so the whole-layer
     # set_weights() ORDERING contract stays exercised (see module docstring).
     # Its two subs are deliberately SHAPE-IDENTICAL (widths[1] -> widths[1] ->
@@ -124,8 +130,8 @@ def _build_multihead(
     return keras.Model(inp, out, name=f"tiny_{head_name}")
 
 
-def _build_classifier(widths=(8, 16)):
-    return _build_multihead("cls", 7, widths=widths)
+def _build_classifier(widths=(8, 16), **kwargs):
+    return _build_multihead("cls", 7, widths=widths, **kwargs)
 
 
 def _build_segmenter(widths=(8, 16)):
@@ -305,6 +311,108 @@ class TestStrictMode:
         assert report.num_shape_mismatch > 0
         # Loaded may be empty (all backbone mismatched).
         # But total target backbone layers should equal loaded + mismatch + missing.
+
+
+# ---------------------------------------------------------------------------
+# allow_unloaded: complete-or-raise (plan-2026-10-11T004932-b83935e1 D-020)
+# ---------------------------------------------------------------------------
+
+
+class TestAllowUnloaded:
+    """Every target layer loads, except the named ones, or nothing is copied.
+
+    ``stem_dense`` stands in for a vocabulary-dependent embedding: an
+    ``input_dim`` change mismatches it and nothing else.
+    """
+
+    def test_an_allowed_mismatch_is_tolerated_even_when_strict(self, tmp_path):
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+        tgt = _build_classifier(input_dim=12)
+        stem_before = tgt.get_layer("stem_dense").get_weights()
+
+        report = load_weights_from_checkpoint(
+            tgt, ckpt, strict=True, allow_unloaded=("stem_",))
+
+        assert [m[0] for m in report.shape_mismatch] == ["stem_dense"]
+        assert _weights_equal(tgt.get_layer("stem_dense").get_weights(), stem_before)
+        for name in ("enc_dense", "bottleneck_dense", "dec_dense"):
+            assert _weights_equal(
+                tgt.get_layer(name).get_weights(),
+                src.get_layer(name).get_weights()), name
+
+    def test_a_mismatch_outside_the_allowed_layers_raises_and_copies_nothing(
+        self, tmp_path
+    ):
+        src = _build_classifier(widths=(8, 16))
+        ckpt = _save(src, tmp_path)
+        tgt = _build_classifier(widths=(8, 32))   # stem fits, the rest does not
+        before = _dup_initial_weights(tgt)
+
+        with pytest.raises(ValueError, match="enc_dense"):
+            load_weights_from_checkpoint(tgt, ckpt, allow_unloaded=("stem_",))
+
+        # Nothing was copied, not even the layer that fits.
+        for layer in tgt.layers:
+            assert _weights_equal(layer.get_weights(), before[layer.name]), layer.name
+
+    def test_a_target_layer_absent_from_the_source_raises(self, tmp_path):
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+        tgt = _build_classifier(extra_layer=True)
+
+        with pytest.raises(ValueError, match="enc_extra_dense"):
+            load_weights_from_checkpoint(tgt, ckpt, allow_unloaded=())
+
+        # Anti-vacuity: the default (None) still reports instead of raising.
+        report = load_weights_from_checkpoint(tgt, ckpt)
+        assert report.missing_in_source == ["enc_extra_dense"]
+
+    def test_skipped_prefixes_and_extra_source_layers_are_not_unloaded(
+        self, tmp_path
+    ):
+        """A skipped head and a source layer with no target home never raise."""
+        src = _build_classifier(extra_layer=True)
+        ckpt = _save(src, tmp_path)
+        tgt = _build_segmenter()
+
+        report = load_weights_from_checkpoint(tgt, ckpt, allow_unloaded=())
+
+        assert report.unused_in_source == ["enc_extra_dense"]
+        assert report.skipped_by_prefix == ["head_cls"]
+
+
+class TestCheckpointConfig:
+    def test_reads_the_archives_own_config(self, tmp_path):
+        ckpt = _save(_build_classifier(), tmp_path)
+        config = read_checkpoint_config(ckpt)
+        assert config["config"]["name"] == "tiny_cls"
+        assert "build_config" in config
+
+    def test_an_unreadable_file_gives_an_empty_dict(self, tmp_path):
+        bogus = os.path.join(str(tmp_path), "bogus.keras")
+        with open(bogus, "w") as f:
+            f.write("not a zip")
+        assert read_checkpoint_config(bogus) == {}
+        assert read_checkpoint_config(os.path.join(str(tmp_path), "nope.keras")) == {}
+
+    def test_vocab_layers_are_named_only_on_a_recorded_change(self, tmp_path):
+        model = keras.Sequential(
+            [keras.Input(shape=(4,), dtype="int32"),
+             keras.layers.Embedding(64, 8, name="embedding")],
+            name="vocab_holder",
+        )
+        ckpt = _save(model, tmp_path)
+        # A Sequential config records no vocab_size: an unknown vocabulary is
+        # not a change, so nothing is exempted.
+        assert vocab_layers_if_changed(ckpt, 64, ("embedding",)) == ()
+
+    def test_vocab_layers_follow_the_recorded_vocab_size(self, tmp_path, monkeypatch):
+        import dl_techniques.utils.weight_transfer as wt
+        monkeypatch.setattr(
+            wt, "read_checkpoint_config", lambda p: {"config": {"vocab_size": 64}})
+        assert wt.vocab_layers_if_changed("x.keras", 64, ("embedding",)) == ()
+        assert wt.vocab_layers_if_changed("x.keras", 96, ("embedding",)) == ("embedding",)
 
 
 # ---------------------------------------------------------------------------

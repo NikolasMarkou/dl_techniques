@@ -29,7 +29,6 @@ returns a dict with `last_hidden_state` + `attention_mask`.
 import os
 import keras
 import pytest
-import logging
 import importlib
 import traceback
 import numpy as np
@@ -630,34 +629,52 @@ class TestPretrainedWeightLoading:
             for b, a in zip(before, target.weights)
         ), "no variable changed -- the comparison above proves nothing"
 
-    def test_partial_load_reports_how_many_variables_it_actually_restored(
-        self, tmp_path, caplog
+    def test_a_vocabulary_change_restores_every_layer_but_the_embeddings(
+        self, tmp_path
     ):
-        """`skip_mismatch=True` succeeds partially — say so, with a count.
+        """A checkpoint of another vocabulary: ``embeddings`` stays fresh, all else loads.
 
-        Measured: only the two embedding tables mismatch when the vocab and
-        position sizes change; the encoder stack restores fine. The point of
-        the count is that "8 of 28" is visible instead of the load looking
-        total.
+        Before plan-2026-10-11T004932-b83935e1 D-020 this was a whole-file
+        ``skip_mismatch=True`` load that logged "8 of 28 variables changed" and
+        returned normally whatever else failed to fit. Now the vocabulary is
+        read from the checkpoint and only the ``embeddings`` layer may stay
+        unloaded; the next test shows any other mismatch raising.
         """
-        _, path = self._saved_tiny(tmp_path)
+        model, path = self._saved_tiny(tmp_path)
 
         mismatched = DistilBERT.from_variant(
             "tiny", vocab_size=512, max_position_embeddings=128
         )
-        # R-038 / D-054: the embedding tables really cannot be restored here,
-        # and Keras says so with `A total of N objects could not be loaded`.
-        # That warning is the subject of this test, so it is asserted.
-        with pytest.warns(UserWarning, match="could not be loaded"):
-            with caplog.at_level(logging.WARNING, logger="dl"):
-                mismatched.load_pretrained_weights(path, skip_mismatch=True)
+        mismatched.load_pretrained_weights(path)
 
-        text = caplog.text
-        assert "skip_mismatch=True" in text
-        assert "of 28 variables changed value" in text, text
-        # The embedding tables are the ones that cannot be restored here.
-        emb = mismatched.embeddings.word_embeddings.embeddings
-        assert emb.shape[0] == 512
+        assert mismatched.embeddings.word_embeddings.embeddings.shape[0] == 512
+        for layer in model.layers:
+            if layer.name == "embeddings":
+                continue
+            for a, b in zip(layer.weights, mismatched.get_layer(layer.name).weights):
+                np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
+
+    def test_any_other_mismatch_raises_even_with_a_vocabulary_change(
+        self, tmp_path
+    ):
+        """The vocabulary exception covers ``embeddings`` only, never the encoder."""
+        _, path = self._saved_tiny(tmp_path)
+        wider = DistilBERT.from_variant(
+            "tiny", vocab_size=512, max_position_embeddings=64,
+            intermediate_size=2048,
+        )
+        with pytest.raises(ValueError, match="transformer_layer_0"):
+            wider.load_pretrained_weights(path)
+
+    def test_a_vocabulary_change_raises_when_the_exception_is_refused(
+        self, tmp_path
+    ):
+        _, path = self._saved_tiny(tmp_path)
+        mismatched = DistilBERT.from_variant(
+            "tiny", vocab_size=512, max_position_embeddings=64
+        )
+        with pytest.raises(ValueError):
+            mismatched.load_pretrained_weights(path, skip_mismatch=False)
 
     def test_a_load_that_restores_nothing_raises_rather_than_passing_silently(
         self, tmp_path, monkeypatch

@@ -45,6 +45,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
     load_weights_from_checkpoint,
     load_weights_or_raise,
+    vocab_layers_if_changed,
 )
 from dl_techniques.layers.transformers import (
     FFNType,
@@ -668,14 +669,14 @@ class DistilBERT(keras.Model):
     def load_pretrained_weights(
         self,
         weights_path: str,
-        skip_mismatch: bool = False,
+        skip_mismatch: bool = True,
     ) -> None:
         """Load weights from a ``.keras`` file into this model, in place.
 
         Use this when you already have a `DistilBERT` instance configured the
         way you want it — typically because you are transplanting weights into
-        a *differently sized* model, e.g. loading a 30522-vocab checkpoint into
-        a 50000-vocab model with ``skip_mismatch=True``. If you just want the
+        a model with another vocabulary, e.g. loading a 30522-vocab checkpoint
+        into a 50000-vocab model. If you just want the
         saved model back exactly as it was, prefer
         ``keras.models.load_model(path)``, which restores architecture and
         weights together and needs no configuration to match.
@@ -694,33 +695,30 @@ class DistilBERT(keras.Model):
         as below, and a head in the checkpoint is ignored. To restore a whole
         model, head included, use ``keras.models.load_model``.
 
-        .. note::
-           ``skip_mismatch=True`` makes a *partial* load succeed silently — any
-           variable whose shape does not line up is left at its initialized
-           value. To keep that from being indistinguishable from a real load,
-           the shared loader
-           (:func:`dl_techniques.utils.weight_transfer.load_weights_or_raise`)
-           counts the variables whose values actually changed and logs the
-           count, and it raises if *nothing* changed.
+        Every encoder layer must load, or this raises: a checkpoint of another
+        hidden size, depth or width is refused, never half-loaded. The one
+        exception is ``embeddings`` when the checkpoint's ``vocab_size``
+        differs from this model's; it then keeps its fresh initialization, and
+        the load copies by layer name as for a headed model. A headless load
+        of a same-vocabulary checkpoint restores the whole file strictly
+        (:func:`dl_techniques.utils.weight_transfer.load_weights_or_raise`,
+        which also raises if nothing changed value).
 
         :param weights_path: Path to the weights file (``.keras`` format).
         :type weights_path: str
-        :param skip_mismatch: Skip variables whose shape does not match instead
-            of raising. Defaults to ``False`` (strict) — a mismatch is far more
-            often a bug than an intent.
+        :param skip_mismatch: Allow the vocabulary exception above. ``False``
+            refuses a vocabulary change too.
         :type skip_mismatch: bool
         :raises FileNotFoundError: If ``weights_path`` does not exist.
-        :raises ValueError: If the weights cannot be loaded, or if the load
+        :raises ValueError: If the weights cannot be loaded, if any encoder
+            layer outside the exception is left unloaded, or if the load
             completed without changing a single variable.
 
         Example:
             .. code-block:: python
 
                 model = DistilBERT.from_variant("base", vocab_size=50000)
-                model.load_pretrained_weights(
-                    "distilbert_base_uncased.keras",
-                    skip_mismatch=True,
-                )
+                model.load_pretrained_weights("distilbert_base_uncased.keras")
         """
         # DECISION plan-2026-08-10T183739-b007f435/D-024: dummy input uses randint, not
         # uniform(dtype="int32") -- Keras rejects an integer dtype on uniform. See decisions.md.
@@ -746,21 +744,27 @@ class DistilBERT(keras.Model):
             }
             self(dummy_input, training=False)
 
+        vocab_exempt = (
+            vocab_layers_if_changed(weights_path, self.vocab_size, ("embeddings",))
+            if skip_mismatch else ()
+        )
         # DECISION plan-2026-10-11T004932-b83935e1/D-008: a headed model takes the by-name transfer; do NOT
         # send it through load_weights_or_raise -- whole-file loading raises on a headless or other-task checkpoint and copies an equal-shape head silently. See decisions.md.
-        if self.include_top:
+        # DECISION plan-2026-10-11T004932-b83935e1/D-020: a vocabulary change takes it too; do NOT
+        # use whole-file skip_mismatch=True there -- it also skips any other mismatched layer and returns normally. See decisions.md.
+        if self.include_top or vocab_exempt:
             # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
             # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
-            # The transfer logs its own report and raises when no layer overlaps.
             load_weights_from_checkpoint(
                 target=self,
                 ckpt_path=weights_path,
                 skip_prefixes=(TASK_HEAD_NAME,),
-                strict=not skip_mismatch,
+                strict=True,
+                allow_unloaded=vocab_exempt,
             )
             return
 
-        load_weights_or_raise(self, weights_path, skip_mismatch=skip_mismatch)
+        load_weights_or_raise(self, weights_path, skip_mismatch=False)
 
     # No public DistilBERT weights are distributed with dl_techniques; this raises rather
     # than falling back to a random-init model. Pass a local path via `pretrained="/path/to/file.keras"`.
@@ -833,9 +837,10 @@ class DistilBERT(keras.Model):
         :type cache_dir: Optional[str]
         :param kwargs: Additional arguments to override the variant's defaults,
             including ``include_top``, ``task_config`` and
-            ``head_config_overrides``. With ``include_top=True`` a local
-            ``pretrained`` path restores the encoder by layer name; the
-            model's head keeps its fresh initialization.
+            ``head_config_overrides``. A local ``pretrained`` path restores
+            the encoder, every layer or raise (see
+            :meth:`load_pretrained_weights`); a head keeps its fresh
+            initialization.
         :type kwargs: Any
         :return: A DistilBERT model instance configured for the specified variant.
         :rtype: DistilBERT
@@ -875,7 +880,6 @@ class DistilBERT(keras.Model):
         logger.info(f"Configuration: {description}")
 
         load_weights_path = None
-        skip_mismatch = False
 
         if pretrained:
             if isinstance(pretrained, str):
@@ -888,33 +892,13 @@ class DistilBERT(keras.Model):
                     cache_dir=cache_dir
                 )
 
-            pretrained_vocab_size = cls.DEFAULT_VOCAB_SIZE
-            custom_vocab_size = kwargs.get("vocab_size", config.get("vocab_size"))
-
-            if custom_vocab_size and custom_vocab_size != pretrained_vocab_size:
-                skip_mismatch = True
-                logger.info(
-                    f"vocab_size ({custom_vocab_size}) differs from pretrained "
-                    f"({pretrained_vocab_size}). Will skip embedding layer weights."
-                )
-
-            pretrained_config_keys = ["hidden_size", "num_layers", "num_heads", "intermediate_size"]
-            for key in pretrained_config_keys:
-                if key in kwargs and kwargs[key] != config.get(key):
-                    skip_mismatch = True
-                    logger.info(
-                        f"{key} differs from pretrained configuration. "
-                        f"Will skip layers with shape mismatches."
-                    )
-
         config.update(kwargs)
         model = cls(**config)
 
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
-                    weights_path=load_weights_path,
-                    skip_mismatch=skip_mismatch,
+                    weights_path=load_weights_path, skip_mismatch=True
                 )
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {str(e)}")

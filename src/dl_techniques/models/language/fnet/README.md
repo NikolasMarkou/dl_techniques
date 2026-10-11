@@ -236,6 +236,8 @@ Parameter counts are measured with `count_params()` on a built model at the defa
 
 A `pretrained=<path>` load transfers **the encoder only**, layer by layer and by name, and never the checkpoint's `task_head`. So the file may hold a bare encoder or an `FNet` trained under any head, and the new model's head (if any) keeps its fresh initialization; a whole model, head included, comes back with `keras.models.load_model`. Call the source model once before saving it, and the new model is built at the sequence length the checkpoint was built at: each block carries DFT matrices sized by that length, so a block can only be copied at the same length.
 
+Every encoder layer must load or the call raises: a checkpoint of another hidden size, depth, width or sequence length is refused, never half-loaded. The one exception is `embeddings`, which keeps its fresh initialization when the checkpoint's own `vocab_size` differs from the model's.
+
 ```python
 import numpy as np
 from dl_techniques.models.language.fnet.model import create_fnet

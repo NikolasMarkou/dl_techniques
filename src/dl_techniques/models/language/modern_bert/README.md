@@ -260,10 +260,11 @@ print(features["last_hidden_state"].shape)
 
 **Nothing is downloaded.** The supported route is a local `.keras` encoder file you produced yourself, passed as `pretrained="<path>"`.
 
-Two things the mechanism requires:
+Three things the mechanism requires:
 
 1.  **Call the encoder once before you save it.** `pretrained=` transfers weights *layer by layer* out of the saved model. `ModernBERT` is a subclassed model whose sublayers are built lazily, so saving an un-called encoder writes a file whose layers hold **zero** weights; the transfer then finds no overlap and raises *"No overlapping layers between target and source checkpoint"*.
 2.  **Only the encoder is transferred.** The transfer matches on layer name and skips the checkpoint's `task_head`, so the file may hold a bare encoder or a `ModernBERT` trained under any head; the new model's head keeps its fresh initialization. A whole model, head included, comes back with `keras.models.load_model`.
+3.  **Every encoder layer must load, or the call raises.** A checkpoint of another hidden size, depth or width is refused, never half-loaded. The one exception is `embeddings`, which keeps its fresh initialization when the checkpoint's own `vocab_size` differs from the model's.
 
 ```python
 import keras
@@ -307,7 +308,7 @@ Measured for this snippet: the restored encoder reproduces the saved encoder's `
 
 Note `keras.random.randint` rather than `keras.random.uniform`: Keras rejects an integer `dtype` on `uniform`, so the `uniform` spelling of a token batch always raises.
 
-The same route swaps heads: save a model trained under one head, then pass its path as `pretrained` with another `task_config` (or none). For a model that is already built, the transfer is `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(model, path, skip_prefixes=("task_head",))`. Pinned by `tests/test_models/test_modern_bert/test_modern_bert.py::TestModernBERTIncludeTop::test_backbone_weights_transfer_across_heads`.
+The same route swaps heads: save a model trained under one head, then pass its path as `pretrained` with another `task_config` (or none). For a model that is already built, the transfer is `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(model, path, skip_prefixes=("task_head",), strict=True, allow_unloaded=())`. Pinned by `tests/test_models/test_modern_bert/test_modern_bert.py::TestModernBERTIncludeTop::test_backbone_weights_transfer_across_heads`.
 
 ---
 

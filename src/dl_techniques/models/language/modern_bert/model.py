@@ -62,7 +62,10 @@ from typing import Optional, Union, Any, Dict, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_build import materialize_sublayers
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.weight_transfer import (
+    load_weights_from_checkpoint,
+    vocab_layers_if_changed,
+)
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
@@ -753,12 +756,19 @@ class ModernBERT(keras.Model):
         none. To restore a whole model, head included, use
         ``keras.models.load_model``.
 
+        Every encoder layer must load, or this raises: a checkpoint of another
+        hidden size, depth or width is refused, never half-loaded. The one
+        exception is ``embeddings`` when the checkpoint's ``vocab_size``
+        differs from this model's; it then keeps its fresh initialization.
+
         :param weights_path: Path to the weights file (.keras format).
         :type weights_path: str
-        :param skip_mismatch: Whether to skip layers with mismatched shapes.
+        :param skip_mismatch: Allow the vocabulary exception above. ``False``
+            refuses a vocabulary change too.
         :type skip_mismatch: bool
         :raises FileNotFoundError: If weights_path doesn't exist.
-        :raises ValueError: If weights cannot be loaded.
+        :raises ValueError: If weights cannot be loaded, or any encoder layer
+            outside the exception is left unloaded.
         """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
@@ -772,22 +782,23 @@ class ModernBERT(keras.Model):
 
             # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
             # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
-            report = load_weights_from_checkpoint(
+            # DECISION plan-2026-10-11T004932-b83935e1/D-020: complete-or-raise; do NOT go back to
+            # strict=not skip_mismatch -- a backbone that does not fit then loads nothing and returns normally. See decisions.md.
+            load_weights_from_checkpoint(
                 target=self,
                 ckpt_path=weights_path,
                 skip_prefixes=(TASK_HEAD_NAME,),
-                strict=not skip_mismatch,
+                strict=True,
+                allow_unloaded=(
+                    vocab_layers_if_changed(
+                        weights_path, self.vocab_size, ("embeddings",))
+                    if skip_mismatch else ()
+                ),
             )
-            logger.info(f"Weight transfer complete: {report}")
-            if skip_mismatch:
-                logger.info(
-                    "Weights loaded with skip_mismatch=True. Layers with shape "
-                    "mismatches were skipped (e.g., embedding layer)."
-                )
-            else:
-                logger.info("All weights loaded successfully.")
         except Exception as e:
-            raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
+            raise ValueError(
+                f"Failed to load weights from {weights_path}: {str(e)}"
+            ) from e
 
     @staticmethod
     def _download_weights(
@@ -838,7 +849,9 @@ class ModernBERT(keras.Model):
         :param kwargs: Additional arguments overriding the variant's defaults,
             including ``include_top``, ``task_config`` and
             ``head_config_overrides``. A local ``pretrained`` path restores
-            the encoder only; a head keeps its fresh initialization.
+            the encoder only, every layer or raise (see
+            :meth:`load_pretrained_weights`); a head keeps its fresh
+            initialization.
         :type kwargs: Any
         :return: A configured ModernBERT instance.
         :rtype: ModernBERT
@@ -856,7 +869,6 @@ class ModernBERT(keras.Model):
         logger.info(f"Configuration: {description}")
 
         load_weights_path = None
-        skip_mismatch = False
         if pretrained:
             if isinstance(pretrained, str):
                 load_weights_path = pretrained
@@ -866,16 +878,12 @@ class ModernBERT(keras.Model):
                     variant, weights_dataset, cache_dir
                 )
 
-            if kwargs.get("vocab_size", config.get("vocab_size")) != cls.DEFAULT_VOCAB_SIZE:
-                skip_mismatch = True
-                logger.info("Custom vocab_size differs from pretrained. Will skip embedding layer.")
-
         config.update(kwargs)
         model = cls(**config)
 
         if load_weights_path:
             try:
-                model.load_pretrained_weights(load_weights_path, skip_mismatch=skip_mismatch)
+                model.load_pretrained_weights(load_weights_path, skip_mismatch=True)
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {e}")
                 raise

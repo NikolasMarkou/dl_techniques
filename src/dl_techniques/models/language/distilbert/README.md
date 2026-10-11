@@ -223,8 +223,9 @@ Parameter counts are measured with `count_params()` on a built model at the defa
 |---|---|
 | `from_variant(pretrained="<file>.keras")` on a fresh model | Works. The model is built with a dummy pass first, then every variable is restored; verified by value against the saved model (max abs diff `0.0`, against `5.2` for a fresh control). |
 | `model(...)` first, then `load_pretrained_weights("<file>.keras")` | Works. Same result on an already-built model. |
-| `load_pretrained_weights(..., skip_mismatch=True)` with a different `vocab_size`/`max_position_embeddings` | Partial by design: the two embedding tables are skipped, the encoder stack is restored. The call logs how many variables actually changed value so a partial load cannot look total. |
-| A load that restores **nothing** | Raises `ValueError`. Otherwise `skip_mismatch=True` would make a total non-load indistinguishable from success. |
+| A checkpoint with another `vocab_size` | The `embeddings` layer keeps its fresh initialization; every other layer is restored, by layer name. The vocabulary is read from the checkpoint, not from a class default. `skip_mismatch=False` refuses this case too. |
+| A checkpoint whose encoder does not fit (another `hidden_size`, `num_layers`, `intermediate_size`, ...) | Raises `ValueError`, with or without a vocabulary change. Nothing is half-loaded. |
+| A load that restores **nothing** | Raises `ValueError`. |
 | Any route into a model **with a head** (`include_top=True`) | Restores the **encoder only**, by layer name. A `task_head` in the checkpoint is never copied and the model's own head keeps its fresh initialization, so the checkpoint may come from a headless DistilBERT or one trained under any head. A whole-file load would raise on a headless or other-task checkpoint, and silently copy the head of another task whose weights have the same shapes. |
 | `keras.models.load_model("<file>.keras")` | Works, and is simpler: architecture and weights together, no config to match. All weights restored identically (`len(model.weights)` is 28 `tiny` / 52 `small` / 76 `base`). |
 

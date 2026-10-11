@@ -75,16 +75,31 @@ WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
 
 Reusing a backbone under a new head:
 
-- At construction: `pretrained="<path>.keras"` with `include_top=True` restores
-  the backbone only; the checkpoint's `task_head` is skipped and the new head
-  keeps its fresh init. Available on the first ten models above (not Qwen3,
-  Qwen3Next, Gemma3). The decoders (GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM)
-  raise on a backbone that does not fit; the encoders copy by layer name and,
-  by default, skip and log mismatched layers.
+- At construction: `pretrained="<path>.keras"`, headed or headless, restores
+  the backbone only; the checkpoint's `task_head` is never copied and a new
+  head keeps its fresh init. Available on the first ten models above (not
+  Qwen3, Qwen3Next, Gemma3).
+- The load rule: every backbone layer loads, or the call raises. The only
+  layer allowed to stay at its fresh init is the vocabulary-dependent
+  `embeddings`, and only when the checkpoint's own `vocab_size` (read from the
+  archive, not a class default) differs from the model's. BERT, DistilBERT,
+  ModernBERT and FNet follow it, headed and headless
+  (`tests/test_models/test_an_encoder_checkpoint_loads_completely_or_raises.py`).
+- Not yet on that rule (measured): TreeTransformer copies by name non-strictly
+  and skips `embedding`/`lm_head` for any non-default `vocab_size`. The
+  decoders refuse a vocabulary change when headed (GPT2's `decoder` is one
+  layer holding the embedding); a headed Mamba, Mamba2, TopoLM or WaveFieldLLM
+  loads a checkpoint with fewer blocks without raising; a headless GPT2,
+  TopoLM or WaveFieldLLM restores the whole file with `skip_mismatch=True`, so
+  a layer that does not fit stays fresh and only a zero-variable restore
+  raises; headless Mamba and Mamba2 restore the whole file strictly.
 - On a built model: `load_weights_from_checkpoint(model, path,
-  skip_prefixes=(TASK_HEAD_NAME,))` from `dl_techniques.utils.weight_transfer`.
-  Never pass `skip_prefixes=()` across tasks: a head of equal shape is copied
-  silently.
+  skip_prefixes=(TASK_HEAD_NAME,), strict=True, allow_unloaded=())` from
+  `dl_techniques.utils.weight_transfer` (add `"embeddings"` to
+  `allow_unloaded` for a vocabulary change). Without `strict=True` and
+  `allow_unloaded`, a backbone that does not fit loads nothing and returns
+  normally. Never pass `skip_prefixes=()` across tasks: a head of equal shape
+  is copied silently.
 
 ## Trainer wiring (Pattern 3)
 

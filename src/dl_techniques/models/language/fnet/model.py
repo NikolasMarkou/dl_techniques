@@ -68,7 +68,10 @@ from typing import Any, Dict, List, Optional, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.weight_transfer import (
+    load_weights_from_checkpoint,
+    vocab_layers_if_changed,
+)
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
@@ -706,13 +709,20 @@ class FNet(keras.Model):
         built at, so it then runs at that length. An already-built model keeps
         its own length, and must match the checkpoint's.
 
+        Every encoder layer must load, or this raises: a checkpoint of another
+        hidden size, depth, width or sequence length is refused, never
+        half-loaded. The one exception is ``embeddings`` when the checkpoint's
+        ``vocab_size`` differs from this model's; it then keeps its fresh
+        initialization.
+
         :param weights_path: Path to the weights file (.keras format).
         :type weights_path: str
-        :param skip_mismatch: Whether to skip layers with mismatched shapes.
-            Useful when loading weights with different vocab_size or config.
+        :param skip_mismatch: Allow the vocabulary exception above. ``False``
+            refuses a vocabulary change too.
         :type skip_mismatch: bool
         :raises FileNotFoundError: If weights_path doesn't exist.
-        :raises ValueError: If weights cannot be loaded.
+        :raises ValueError: If weights cannot be loaded, or any encoder layer
+            outside the exception is left unloaded.
 
         Example:
             .. code-block:: python
@@ -740,24 +750,23 @@ class FNet(keras.Model):
             # Keras 3 dropped `by_name` from `Model.load_weights`; this helper does not pass it.
             # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
             # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
-            report = load_weights_from_checkpoint(
+            # DECISION plan-2026-10-11T004932-b83935e1/D-020: complete-or-raise; do NOT go back to
+            # strict=not skip_mismatch -- a backbone that does not fit then loads nothing and returns normally. See decisions.md.
+            load_weights_from_checkpoint(
                 target=self,
                 ckpt_path=weights_path,
                 skip_prefixes=(TASK_HEAD_NAME,),
-                strict=not skip_mismatch,
+                strict=True,
+                allow_unloaded=(
+                    vocab_layers_if_changed(
+                        weights_path, self.vocab_size, ("embeddings",))
+                    if skip_mismatch else ()
+                ),
             )
-            logger.info(f"Weight transfer complete: {report}")
-
-            if skip_mismatch:
-                logger.info(
-                    "Weights loaded with skip_mismatch=True. "
-                    "Layers with shape mismatches were skipped (e.g., embedding layer)."
-                )
-            else:
-                logger.info("All weights loaded successfully.")
-
         except Exception as e:
-            raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
+            raise ValueError(
+                f"Failed to load weights from {weights_path}: {str(e)}"
+            ) from e
 
     @staticmethod
     def _checkpoint_sequence_length(weights_path: str) -> Optional[int]:
@@ -837,7 +846,9 @@ class FNet(keras.Model):
         :param kwargs: Additional arguments overriding the variant's defaults,
             including ``include_top``, ``task_config`` and
             ``head_config_overrides``. A local ``pretrained`` path restores
-            the encoder only; a head keeps its fresh initialization.
+            the encoder only, every layer or raise (see
+            :meth:`load_pretrained_weights`); a head keeps its fresh
+            initialization.
         :type kwargs: Any
         :return: An FNet model instance configured for the specified variant.
         :rtype: FNet
@@ -853,7 +864,7 @@ class FNet(keras.Model):
                 # Load from local file
                 model = FNet.from_variant("base", pretrained="path/to/weights.keras")
 
-                # Create with custom vocab size (will skip embedding weights)
+                # A checkpoint of another vocab size: embeddings stay fresh
                 model = FNet.from_variant(
                     "base", pretrained="path/to/weights.keras", vocab_size=50000
                 )
@@ -871,7 +882,6 @@ class FNet(keras.Model):
         logger.info(f"Configuration: {description}")
 
         load_weights_path = None
-        skip_mismatch = False
 
         if pretrained:
             if isinstance(pretrained, str):
@@ -882,37 +892,13 @@ class FNet(keras.Model):
                     variant=variant, dataset=weights_dataset, cache_dir=cache_dir
                 )
 
-            pretrained_vocab_size = cls.DEFAULT_VOCAB_SIZE
-            custom_vocab_size = kwargs.get("vocab_size", config.get("vocab_size"))
-
-            if custom_vocab_size and custom_vocab_size != pretrained_vocab_size:
-                skip_mismatch = True
-                logger.info(
-                    f"vocab_size ({custom_vocab_size}) differs from pretrained "
-                    f"({pretrained_vocab_size}). Will skip embedding layer weights."
-                )
-
-            pretrained_config_keys = [
-                "hidden_size",
-                "num_layers",
-                "intermediate_size",
-            ]
-            for key in pretrained_config_keys:
-                if key in kwargs and kwargs[key] != config.get(key):
-                    skip_mismatch = True
-                    logger.info(
-                        f"{key} differs from pretrained configuration. "
-                        f"Will skip layers with shape mismatches."
-                    )
-
         config.update(kwargs)
         model = cls(**config)
 
         if load_weights_path:
             try:
                 model.load_pretrained_weights(
-                    weights_path=load_weights_path,
-                    skip_mismatch=skip_mismatch
+                    weights_path=load_weights_path, skip_mismatch=True
                 )
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {str(e)}")

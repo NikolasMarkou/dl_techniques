@@ -32,13 +32,21 @@ Two functions live here, and they are not interchangeable:
 * :func:`load_weights_or_raise` — whole-file ``.keras`` restore into the *same*
   architecture. A load that restores nothing is always a defect there, so it
   raises.
+
+:func:`load_weights_from_checkpoint` reports by default; pass ``allow_unloaded``
+to make it complete-or-raise instead (every target layer loads, except the ones
+named there). :func:`read_checkpoint_config` and :func:`vocab_layers_if_changed`
+read a ``.keras`` archive's own config, so a caller can name those layers from
+what the checkpoint actually holds rather than from a class default.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import zipfile
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
@@ -216,6 +224,7 @@ def load_weights_from_checkpoint(
     skip_prefixes: Sequence[str] = ("head_",),
     strict: bool = False,
     custom_objects: Optional[dict] = None,
+    allow_unloaded: Optional[Sequence[str]] = None,
 ) -> TransferReport:
     """Copy weights layer-by-layer from a saved ``.keras`` checkpoint into *target*.
 
@@ -237,10 +246,22 @@ def load_weights_from_checkpoint(
         :class:`ValueError`.  When ``False`` (default), mismatches are recorded
         in the report and skipped so other layers can still load.
     :param custom_objects: Forwarded to :func:`keras.models.load_model`.
+    :param allow_unloaded: ``None`` (default) keeps the reporting behavior
+        above. A sequence of layer-name prefixes makes the transfer
+        complete-or-raise: every target layer that holds weights must be
+        loaded, except layers matched by ``skip_prefixes`` and layers whose
+        name starts with one of these prefixes. A shape mismatch on an allowed
+        layer is recorded and never raises, even with ``strict=True``. ``()``
+        allows none. Any other target layer left at its initialization (shape
+        mismatch, or absent from the source) raises, naming the layers.
     :returns: :class:`TransferReport` describing what happened.
     :raises FileNotFoundError: *ckpt_path* does not exist.
-    :raises ValueError: *ckpt_path* does not end in ``.keras``; or all source
-        layers were filtered / missing in target (no overlap).
+    :raises ValueError: *ckpt_path* does not end in ``.keras``; all source
+        layers were filtered / missing in target (no overlap); or, with
+        ``allow_unloaded``, a target layer outside it was not loaded.
+
+    Every check runs before the first weight is copied, so a raise leaves
+    *target* untouched.
     """
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
@@ -262,6 +283,8 @@ def load_weights_from_checkpoint(
     source_layers = {layer.name: layer for layer in source.layers}
 
     report = TransferReport()
+    allowed = tuple(allow_unloaded or ())
+    pending: List[Tuple[keras.layers.Layer, list]] = []
 
     # Walk source layers — decide for each whether to transfer, skip, or record.
     for name, src_layer in source_layers.items():
@@ -282,14 +305,14 @@ def load_weights_from_checkpoint(
         src_shapes = [tuple(w.shape) for w in src_weights]
         if tgt_shapes != src_shapes:
             report.shape_mismatch.append((name, tgt_shapes, src_shapes))
-            if strict:
+            if strict and not _matches_any_prefix(name, allowed):
                 raise ValueError(
                     f"Shape mismatch on layer {name!r}: target={tgt_shapes} "
                     f"source={src_shapes}"
                 )
             continue
 
-        tgt_layer.set_weights(src_weights)
+        pending.append((tgt_layer, src_weights))
         report.loaded.append(name)
 
     # Pass 2: detect target layers that have weights but were never loaded.
@@ -318,5 +341,66 @@ def load_weights_from_checkpoint(
             f"{len(source_layers)}."
         )
 
+    if allow_unloaded is not None:
+        # missing_in_source holds every weight-bearing target layer neither
+        # loaded nor skipped by prefix: absent from the source OR mismatched.
+        unloaded = [
+            n for n in report.missing_in_source
+            if not _matches_any_prefix(n, allowed)
+        ]
+        if unloaded:
+            raise ValueError(
+                f"Checkpoint {ckpt_path!r} leaves {len(unloaded)} target "
+                f"layer(s) unloaded: {unloaded}. Only layers starting with "
+                f"{list(allowed)} may stay at their initialization.\n"
+                f"{report.summary_string()}"
+            )
+
+    for tgt_layer, src_weights in pending:
+        tgt_layer.set_weights(src_weights)
+
     logger.info(report.summary_string())
     return report
+
+
+def read_checkpoint_config(ckpt_path: str) -> Dict[str, Any]:
+    """Return the top-level ``config.json`` of a ``.keras`` archive.
+
+    Interface contract (shared by several model loaders):
+
+    :param ckpt_path: Path to a ``.keras`` archive.
+    :returns: The parsed dict (``class_name``, ``config``, ``build_config``,
+        ...), or ``{}`` when the file is missing, not a zip archive, holds no
+        ``config.json``, or that file is not a JSON object. Never raises for
+        an unreadable file: the caller's transfer then reports the real error.
+    """
+    try:
+        with zipfile.ZipFile(ckpt_path) as archive:
+            config = json.loads(archive.read("config.json"))
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def vocab_layers_if_changed(
+    ckpt_path: str, vocab_size: int, vocab_layers: Sequence[str]
+) -> Tuple[str, ...]:
+    """Name the vocabulary-dependent layers only if the checkpoint's vocab differs.
+
+    Interface contract (shared by the language-model ``pretrained=<path>``
+    loaders, which pass the result as ``allow_unloaded`` or ``skip_prefixes``
+    of :func:`load_weights_from_checkpoint`):
+
+    :param ckpt_path: Path to a ``.keras`` archive of a model whose top-level
+        config carries ``vocab_size``.
+    :param vocab_size: The receiving model's vocabulary size.
+    :param vocab_layers: Layer-name prefixes that depend on the vocabulary.
+    :returns: ``tuple(vocab_layers)`` when the checkpoint records a
+        ``vocab_size`` other than *vocab_size*; ``()`` when it records the same
+        one or none (an unknown vocabulary is not a change, so nothing is
+        exempted).
+    """
+    recorded = (read_checkpoint_config(ckpt_path).get("config") or {}).get("vocab_size")
+    if recorded is None or recorded == vocab_size:
+        return ()
+    return tuple(vocab_layers)
