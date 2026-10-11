@@ -287,13 +287,14 @@ except FileNotFoundError as e:
     print(f"FileNotFoundError: {e}")
 ```
 
-An existing path is loaded with `skip_mismatch=True` after `build((1, min(32, max_seq_len)))`
-builds the model, through `utils.weight_transfer.load_weights_or_raise`. That helper counts variables whose value
-actually changed and raises when the count is **zero**, so a checkpoint whose names or shapes do
-not match cannot restore nothing and return normally. Its limit: the guard fires only on a
-*completely* empty load. A **partial** restore (say 9 of 30 variables) logs a warning and returns
-normally, which under `skip_mismatch=True` is possible. Check the logged restored-variable
-count. A model with a task head loads differently; see Example 4.
+An existing path must be a `.keras` file. The model is built by `build((1, min(32, max_seq_len)))`,
+then the `decoder` layer (and an untied `lm_head`) is copied by layer name, headed or headless, and
+the load is complete or it raises: a checkpoint of another depth, width or `vocab_size` is refused
+with a `ValueError`, never half-restored. The checkpoint's `task_head` is never copied, and an
+untied `lm_head` the checkpoint does not hold (a checkpoint saved with a head) keeps its
+initialization. Unlike the encoders, GPT2 refuses a vocabulary change rather than leaving only the
+token embedding fresh: the decoder, embedding included, is one layer to the by-name transfer.
+See Example 4 for a model with a task head.
 
 ### Example 4: a task head in the model (`include_top`)
 
@@ -330,12 +331,11 @@ so its hidden states are the same with or without a head. `head_config_overrides
 ...}` replaces the default. With a head, no LM logits are computed and an untied `lm_head` is not
 created; the weights under `decoder/` have the same paths either way.
 
-A headed model's `pretrained=<path>` must be a `.keras` file. It copies the `decoder` layer and
-skips the checkpoint's `task_head` (and a headless checkpoint's `lm_head`, which has no target);
-the model's own head keeps its fresh initialization. The decoder is a single layer to that
-transfer, so a checkpoint whose decoder does not fit (another `vocab_size` or width) raises
-`ValueError: Shape mismatch on layer 'decoder'` instead of loading nothing. To restore a whole
-model, head included, use `keras.models.load_model`.
+A headed model's `pretrained=<path>` takes the same route as a headless one: it copies the
+`decoder` layer and skips the checkpoint's `task_head` (and a headless checkpoint's `lm_head`,
+which has no target); the model's own head keeps its fresh initialization. A checkpoint whose
+decoder does not fit (another depth, width or `vocab_size`) raises `ValueError` instead of loading
+nothing. To restore a whole model, head included, use `keras.models.load_model`.
 
 ---
 

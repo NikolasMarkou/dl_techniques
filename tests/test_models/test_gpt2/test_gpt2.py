@@ -687,11 +687,12 @@ class TestGPT2AttentionMask:
 class TestPretrainedLocalPathIsVerified:
     """The route the `pretrained=True` error message points callers at.
 
-    ``from_variant`` loads a local path with an unconditional
-    ``skip_mismatch=True``. A checkpoint whose variables do not line up restores
-    NOTHING, ``load_weights`` returns normally, and before D-070 the next line
-    logged "Loaded weights from ..." -- the same "silently untrained model" the
-    `pretrained=True` contract exists to prevent, one door over.
+    Before D-070 a local path was restored with ``skip_mismatch=True`` and a
+    checkpoint whose variables did not line up restored NOTHING while the next
+    line logged "Loaded weights from ..." -- the same "silently untrained
+    model" the `pretrained=True` contract exists to prevent, one door over.
+    Since D-024 (plan-2026-10-11T004932-b83935e1) the load is by layer name and
+    complete-or-raise, so such a checkpoint is refused before anything loads.
     """
 
     def test_mismatched_checkpoint_raises_naming_the_cause(self, tmp_path):
@@ -701,13 +702,27 @@ class TestPretrainedLocalPathIsVerified:
         ckpt = str(tmp_path / "not_a_gpt2.keras")
         other.save(ckpt)
 
-        # R-038 / D-054: the mismatched load Keras is asked to perform here
-        # emits `A total of N objects could not be loaded` -- that warning IS the
-        # instrument working, so it is asserted rather than suppressed. Without
-        # this context the test aborts under `-W error::UserWarning`.
-        with pytest.warns(UserWarning, match="could not be loaded"):
-            with pytest.raises(ValueError, match="changed none of this model"):
-                GPT2.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+        with pytest.raises(ValueError, match="No overlapping layers"):
+            GPT2.from_variant("tiny", vocab_size=64, pretrained=ckpt)
+
+    def test_a_checkpoint_that_fills_only_the_lm_head_raises(self, tmp_path):
+        """An ``lm_head`` that fits does not excuse a missing decoder (D-024).
+
+        ``lm_head`` is the one layer allowed to stay fresh; the decoder is not,
+        so a checkpoint whose only overlap is an equal-shape ``lm_head`` is
+        refused rather than returning a model with a fresh backbone.
+        """
+        other = keras.Sequential([
+            keras.layers.Input(shape=(32,)),
+            keras.layers.Dense(64, use_bias=False, name="lm_head"),
+        ])
+        ckpt = str(tmp_path / "only_an_lm_head.keras")
+        other.save(ckpt)
+
+        with pytest.raises(ValueError, match=r"unloaded: \['decoder'\]"):
+            GPT2.from_variant("tiny", vocab_size=64, embed_dim=32, depth=2,
+                              num_heads=2, max_seq_len=16,
+                              tie_word_embeddings=False, pretrained=ckpt)
 
     def test_matching_checkpoint_still_loads(self, tmp_path):
         """Anti-vacuity: the real warm-start path must still work."""
@@ -1097,16 +1112,17 @@ class TestGPT2IncludeTop:
         np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
 
     def test_a_decoder_that_does_not_fit_raises_for_a_headed_model(self, tmp_path):
-        """A vocab mismatch fails loudly instead of loading nothing (D-012).
+        """A vocab mismatch fails loudly instead of loading nothing (D-012, D-024).
 
         The decoder is ONE layer to the by-name transfer, so a non-strict
-        transfer would skip the whole backbone and return normally.
+        transfer would skip the whole backbone and return normally; leaving
+        just the embedding fresh is not possible, so the change is refused.
         """
         lm = create_gpt2("tiny", **_HEAD_KW)
         lm(_head_batch(), training=False)
         path = str(tmp_path / "lm_v64.keras")
         lm.save(path)
-        with pytest.raises(ValueError, match="Shape mismatch on layer 'decoder'"):
+        with pytest.raises(ValueError, match="another vocab_size"):
             create_gpt2("tiny", include_top=True, task_config=_CLF,
                         pretrained=path, **dict(_HEAD_KW, vocab_size=80))
 
