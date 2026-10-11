@@ -814,9 +814,12 @@ class BERT(keras.Model):
         later over-long batch through. In such a graph the check runs at run
         time instead and raises ``InvalidArgumentError`` (a Python
         ``ValueError`` cannot cross a graph boundary) with the same message.
-        Under XLA (``jit_compile=True``) TensorFlow drops that assertion, so a
-        relaxed XLA step is not covered. A symbolic ``keras.Input`` with a
-        dynamic axis has nothing to check and returns unchanged.
+        XLA drops that assertion, and Keras's default ``jit_compile="auto"``
+        selects XLA whenever a GPU is visible; there the XLA compile of the
+        over-long length fails instead, with ``InvalidArgumentError`` naming
+        the node ``seq_len_exceeds_max_position_embeddings_<max>``. A symbolic
+        ``keras.Input`` with a dynamic axis has nothing to check and returns
+        unchanged.
         """
         # DECISION plan-2026-08-23T203721-009b7ccf/D-023: without this check an
         # over-length sequence fails differently per device (finite garbage on
@@ -873,7 +876,12 @@ class BERT(keras.Model):
 
         :param input_ids: Token ids whose sequence axis is not statically known.
         :type input_ids: keras.KerasTensor
-        :return: ``input_ids``, unchanged outside a TensorFlow graph.
+        :return: ``input_ids``, unchanged outside a TensorFlow graph; inside
+            one, ``input_ids`` plus an all-zero term sized
+            ``max_position_embeddings - seq_len``, both gated on the run-time
+            assertion. The term is what refuses an over-long batch under XLA,
+            which ignores the assertion but must give every size at compile
+            time.
         :rtype: keras.KerasTensor
         """
         # DECISION plan-2026-10-11T004932-b83935e1/D-021: raw TF on purpose; do NOT replace with a
@@ -885,13 +893,26 @@ class BERT(keras.Model):
             return input_ids
         import tensorflow as tf
 
+        seq_len = tf.shape(input_ids)[-1]
         check = tf.debugging.assert_less_equal(
-            tf.shape(input_ids)[-1],
+            seq_len,
             self.max_position_embeddings,
             message=self._sequence_length_message("<run-time length>"),
         )
         with tf.control_dependencies([check]):
-            return tf.identity(input_ids)
+            # DECISION plan-2026-10-11T004932-b83935e1/D-030: XLA drops `check`, which Keras enables
+            # by default when a GPU is visible; do NOT remove this zero-sum term or opt BERT out of
+            # XLA instead. XLA compiles each length with static shapes, so a negative size here
+            # fails that compile, naming this node. See decisions.md.
+            xla_guard = tf.zeros(
+                tf.reshape(self.max_position_embeddings - seq_len, [1]),
+                dtype=input_ids.dtype,
+                name=(
+                    "seq_len_exceeds_max_position_embeddings_"
+                    f"{self.max_position_embeddings}"
+                ),
+            )
+            return input_ids + tf.reduce_sum(xla_guard)
 
     def load_pretrained_weights(
         self,

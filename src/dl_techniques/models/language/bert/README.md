@@ -438,7 +438,9 @@ keras.mixed_precision.set_global_policy("mixed_float16")  # BEFORE constructing
 model = BERT.from_variant("base")
 ```
 
-Pass `jit_compile=True` to `compile()` for XLA: a compilation warmup that pays back on long runs.
+Keras's default `jit_compile="auto"` already compiles with XLA whenever a GPU is visible (outside
+a `tf.distribute` strategy); pass `jit_compile=True` to `compile()` to force it, `False` to opt
+out. The compilation warmup pays back on long runs.
 
 ---
 
@@ -511,8 +513,11 @@ The package's own suite is `tests/test_models/test_bert/`.
 - **`seq_len=... exceeds max_position_embeddings=...`.** The batch is longer than the learned
   position table. Eagerly, and on a step function's first trace, it is a `ValueError`; inside a
   `predict`/`fit`/`evaluate` step already retraced for several lengths it is TensorFlow's
-  `InvalidArgumentError` with the same text. Under `jit_compile=True` that run-time check is
-  dropped by XLA, so truncate the input yourself there. The model stays usable after either.
+  `InvalidArgumentError` with the same text. Under XLA, which Keras selects by default whenever a
+  GPU is visible, TensorFlow drops that assertion, so the XLA compile of the over-long length
+  fails instead: an `InvalidArgumentError` ("Broadcast with negative dimension size -N", N the
+  overshoot) naming the node `seq_len_exceeds_max_position_embeddings_<max>`. No path returns
+  output for an over-long batch. The model stays usable after any of them.
 
 **What is `[CLS]` for?** A special token prepended to every sequence. Because self-attention lets
 it read the whole input, its final hidden state acts as an aggregate sequence representation, and

@@ -46,9 +46,12 @@ Why each arm is not satisfied by construction:
     An actionable message is the point. A bare ``ValueError`` would satisfy the
     two raise arms.
 ``test_a_relaxed_retrace_still_refuses_an_over_long_batch``
+``test_a_relaxed_fit_step_refuses_an_over_long_batch``
     A step function retraced with a ``None`` sequence axis skips the static
     check; a run-time check (D-021 of plan-2026-10-11T004932-b83935e1) must
-    fire there, with the same message.
+    fire there, with the same message. Each runs three ways: Keras's default
+    on a CPU-only box, Keras's default with a GPU visible (XLA, D-030), and
+    ``jit_compile=True``.
 ``test_a_refused_first_predict_leaves_the_model_usable``
     The refusal must not poison Keras's cached step functions or the
     variables; later legal ``predict``/``fit`` calls must work.
@@ -157,8 +160,46 @@ def test_the_message_names_both_numbers():
     assert f"max_position_embeddings={MAX_POS}" in message, message
 
 
-def test_a_relaxed_retrace_still_refuses_an_over_long_batch():
-    """Reviewer W6 of plan-2026-10-11T004932-b83935e1, D-021.
+# How Keras resolves ``jit_compile`` for a model that never set it. On a
+# CPU-only machine ``"auto"`` resolves to False; with any GPU visible Keras 3.8
+# resolves it to ``model_supports_jit(model)`` (``Trainer._resolve_auto_jit_compile``),
+# i.e. True for BERT, so XLA is the DEFAULT on this repo's GPU box. Both are
+# pinned here by replacing the resolver, so every arm runs the same
+# configuration on any machine; ``monkeypatch.setattr`` raises if Keras renames
+# the resolver, and each arm asserts the resolved value, so neither can go
+# vacuous. ``jit_compile_true`` is the explicit, public opt-in.
+_JIT_CONFIGS = ("cpu_default", "gpu_default", "jit_compile_true")
+# What each configuration must raise. Graph path: the assertion's D-023
+# message. XLA path: TensorFlow drops the assertion, and the XLA compile fails
+# on the guard node instead (D-030), so the error names that node.
+_OVER_LONG = {
+    False: rf"exceeds max_position_embeddings={MAX_POS}(?![0-9])",
+    True: rf"seq_len_exceeds_max_position_embeddings_{MAX_POS}(?![0-9])",
+}
+
+
+def _resolve_jit(monkeypatch, config):
+    """Pin how ``"auto"`` resolves; return the ``jit_compile`` the model must end with.
+
+    ``jit_compile_true`` leaves the resolver alone: the caller sets it.
+    """
+    from keras.src.trainers import trainer as keras_trainer
+
+    if config == "jit_compile_true":
+        return True
+    expected = config == "gpu_default"
+    monkeypatch.setattr(
+        keras_trainer.Trainer,
+        "_resolve_auto_jit_compile",
+        (lambda self: keras_trainer.model_supports_jit(self))
+        if expected else (lambda self: False),
+    )
+    return expected
+
+
+@pytest.mark.parametrize("config", _JIT_CONFIGS)
+def test_a_relaxed_retrace_still_refuses_an_over_long_batch(monkeypatch, config):
+    """Reviewer W6 of plan-2026-10-11T004932-b83935e1, D-021, and D-030.
 
     After ``predict`` has seen two lengths, TensorFlow retraces the step
     function with the sequence axis relaxed to ``None`` and never re-enters
@@ -168,20 +209,60 @@ def test_a_relaxed_retrace_still_refuses_an_over_long_batch():
     zeros-backed garbage. Now a run-time check fails first, with the D-023
     message. A Python ``ValueError`` cannot cross a graph boundary, so in that
     graph the type is TensorFlow's ``InvalidArgumentError``.
+
+    D-030: XLA ignores that assertion, and XLA is Keras's default whenever a
+    GPU is visible. Before D-030 the ``gpu_default`` and ``jit_compile_true``
+    arms RETURNED finite output for the over-long batch (measured on CPU with
+    the resolver replaced, and on GPU 1 with the real resolver).
     """
     import tensorflow as tf
 
     model = _head_model()
+    expected_jit = _resolve_jit(monkeypatch, config)
+    if config == "jit_compile_true":
+        model.jit_compile = True
     for seq_len in (5, MAX_POS - 4):
         model.predict(_feed(seq_len), verbose=0)
+    assert model.jit_compile is expected_jit, (config, model.jit_compile)
     with pytest.raises(
         (ValueError, tf.errors.InvalidArgumentError),
-        match=f"exceeds max_position_embeddings={MAX_POS}",
+        match=_OVER_LONG[expected_jit],
     ):
         model.predict(_feed(MAX_POS + 1), verbose=0)
     # And the model still serves a legal length afterwards.
     predictions = model.predict(_feed(MAX_POS), verbose=0)
     assert np.isfinite(predictions).all()
+
+
+@pytest.mark.parametrize("config", _JIT_CONFIGS)
+def test_a_relaxed_fit_step_refuses_an_over_long_batch(monkeypatch, config):
+    """The training step, D-030: the reviewer's XLA probe TRAINED on a
+    40-token batch at ``max_position_embeddings=32`` (loss 1.07, no error).
+    No update may happen for an over-long batch, under any configuration.
+    """
+    import tensorflow as tf
+
+    expected_jit = _resolve_jit(monkeypatch, config)
+    model = _head_model()
+    model.compile(
+        optimizer="adam",
+        loss="sparse_categorical_crossentropy",
+        jit_compile=True if config == "jit_compile_true" else "auto",
+    )
+    labels = np.zeros((BATCH,), "int32")
+    for seq_len in (5, MAX_POS - 4):
+        model.fit(_feed(seq_len), labels, verbose=0)
+    assert model.jit_compile is expected_jit, (config, model.jit_compile)
+    before = [keras.ops.convert_to_numpy(w).copy() for w in model.weights]
+    with pytest.raises(
+        (ValueError, tf.errors.InvalidArgumentError),
+        match=_OVER_LONG[expected_jit],
+    ):
+        model.fit(_feed(MAX_POS + 1), labels, verbose=0)
+    after = [keras.ops.convert_to_numpy(w) for w in model.weights]
+    assert all(np.array_equal(b, a) for b, a in zip(before, after))
+    history = model.fit(_feed(MAX_POS), labels, verbose=0)
+    assert np.isfinite(history.history["loss"]).all()
 
 
 @pytest.mark.parametrize("headed", [True, False], ids=["headed", "headless"])
