@@ -495,6 +495,20 @@ def _backbone_hidden(model: FNet, batch: Dict[str, np.ndarray]) -> np.ndarray:
     return _np(twin(batch, training=False)["last_hidden_state"])
 
 
+@keras.saving.register_keras_serializable(package="test_fnet_list_input")
+class _ListInputFNetWrapper(keras.Model):
+    """A model called with a LIST of inputs, so its ``build_config`` is a list."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.fnet = create_fnet("tiny", **_HEAD_KW)
+
+    def call(self, inputs):
+        return self.fnet(
+            {"input_ids": inputs[0], "attention_mask": inputs[1]}
+        )["last_hidden_state"]
+
+
 def _randomized(model: FNet, seed: int) -> FNet:
     """Overwrite every weight, so a restored value cannot match by init luck."""
     assert model.weights, "build the model before randomizing it"
@@ -722,9 +736,9 @@ class TestFNetIncludeTop:
     def test_a_pretrained_load_builds_at_the_checkpoint_length(self, tmp_path):
         """The loaded model runs at the length its checkpoint was built at.
 
-        ``vocab_size`` 64 differs from the variant default, so ``from_variant``
-        loads with ``skip_mismatch=True``: a length-mismatched block would be
-        skipped, not raised, and only this by-value check would see it.
+        Since D-020 a length-mismatched block raises instead of being skipped;
+        this by-value check pins that the right length was chosen, not merely
+        that nothing raised.
         """
         encoder = create_fnet("tiny", **_HEAD_KW)
         batch = _head_batch()
@@ -740,6 +754,48 @@ class TestFNetIncludeTop:
         for i, block in enumerate(loaded.encoder_layers):
             for a, b in zip(block.weights, encoder.encoder_layers[i].weights):
                 np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
+
+    @pytest.mark.parametrize("form", ["tensor", "dict", "built", "list"])
+    def test_the_checkpoint_length_reader_reads_every_build_config_form(
+        self, tmp_path, form
+    ):
+        """``build_config`` records a shape, a mapping, or a LIST of shapes.
+
+        The list form (a model called with a list of inputs) made the reader
+        return a whole shape, and ``build((1, [2, 8]))`` then failed with
+        "'int' object is not subscriptable" inside the load (step 6.1 of
+        plan-2026-10-11T004932-b83935e1, reviewer NOTE 14).
+        """
+        batch = _head_batch()
+        if form == "list":
+            model = _ListInputFNetWrapper()
+            model([batch["input_ids"], batch["attention_mask"]])
+        else:
+            model = create_fnet("tiny", **_HEAD_KW)
+            if form == "tensor":
+                model(batch["input_ids"])
+            elif form == "dict":
+                model(batch)
+            else:
+                model.build((None, _SEQ))
+        path = str(tmp_path / f"{form}.keras")
+        model.save(path)
+        assert FNet._checkpoint_sequence_length(path) == _SEQ
+
+    def test_an_unreadable_archive_has_no_checkpoint_length(self, tmp_path):
+        bogus = tmp_path / "bogus.keras"
+        bogus.write_text("not a zip")
+        assert FNet._checkpoint_sequence_length(str(bogus)) is None
+
+    def test_a_list_input_archive_is_refused_with_a_clear_reason(self, tmp_path):
+        """A wrapper is not an FNet checkpoint: the transfer says so plainly."""
+        batch = _head_batch()
+        wrapper = _ListInputFNetWrapper()
+        wrapper([batch["input_ids"], batch["attention_mask"]])
+        path = str(tmp_path / "wrapper.keras")
+        wrapper.save(path)
+        with pytest.raises(ValueError, match="No overlapping layers"):
+            create_fnet("tiny", pretrained=path, **_HEAD_KW)
 
     def test_include_top_without_task_config_raises(self):
         with pytest.raises(ValueError, match="include_top=True needs a task_config"):

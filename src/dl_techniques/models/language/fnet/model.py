@@ -58,8 +58,6 @@ References:
 
 
 import os
-import json
-import zipfile
 import keras
 from typing import Any, Dict, List, Optional, Union
 
@@ -70,6 +68,7 @@ from typing import Any, Dict, List, Optional, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
     load_weights_from_checkpoint,
+    read_checkpoint_config,
     vocab_layers_if_changed,
 )
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -773,23 +772,28 @@ class FNet(keras.Model):
         """Return the sequence length a ``.keras`` checkpoint was built at.
 
         Read from the archive's top-level ``build_config``, whose input shape
-        is ``(batch, seq_len)`` or a mapping holding ``input_ids`` at it.
+        is ``(batch, seq_len)``, a mapping holding ``input_ids`` at it, or a
+        list of input shapes whose first entry is the ids' (a model called
+        with a list).
 
         :param weights_path: Path to a ``.keras`` archive.
         :type weights_path: str
-        :return: The length, or None when the archive records none or is not
-            a readable ``.keras`` archive (the transfer then reports why).
+        :return: The length, or None when the archive records no static one
+            or is not a readable ``.keras`` archive (the transfer then
+            reports why).
         :rtype: Optional[int]
         """
-        try:
-            with zipfile.ZipFile(weights_path) as archive:
-                config = json.loads(archive.read("config.json"))
-        except (OSError, KeyError, ValueError, zipfile.BadZipFile):
-            return None
-        shape = (config.get("build_config") or {}).get("input_shape")
+        shape = (
+            read_checkpoint_config(weights_path).get("build_config") or {}
+        ).get("input_shape")
         if isinstance(shape, dict):
             shape = shape.get("input_ids")
-        return shape[-1] if shape else None
+        if isinstance(shape, (list, tuple)) and shape and isinstance(
+            shape[0], (list, tuple)
+        ):
+            shape = shape[0]
+        seq_len = shape[-1] if isinstance(shape, (list, tuple)) and shape else None
+        return seq_len if isinstance(seq_len, int) else None
 
     # Raises instead of falling back to random init, so a missing download is never
     # indistinguishable from a real load.
