@@ -61,6 +61,10 @@ from dl_techniques.layers.heads.nlp import (
 )
 from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.weight_transfer import (
+    load_weights_from_checkpoint,
+    vocab_layers_if_changed,
+)
 
 from .components import (  # noqa: F401
     PositionalEncoding,
@@ -556,7 +560,7 @@ class TreeTransformer(keras.Model):
         self,
         weights_path: str,
         skip_prefixes: Sequence[str] = (),
-        strict: bool = False,
+        strict: bool = True,
     ) -> None:
         """Load weights from a ``.keras`` checkpoint by layer name.
 
@@ -572,15 +576,22 @@ class TreeTransformer(keras.Model):
         trained under any head, warm-starts a model with any other head or none. To
         restore a whole model, head included, use ``keras.models.load_model``.
 
+        ``embedding`` and ``lm_head`` are skipped only when the checkpoint's own
+        ``vocab_size`` differs from this model's; with the same vocabulary they
+        load like every other layer, whatever the value.
+
         :param weights_path: Path to a ``.keras`` checkpoint.
         :param skip_prefixes: Further layer-name prefixes to skip during transfer,
             on top of ``task_head``.
-        :param strict: If True, raise on any shape mismatch.
+        :param strict: If True (default), every backbone layer must load or this
+            raises; only ``lm_head`` (a top, absent from a headed checkpoint) and
+            the skipped layers may stay at their initialization. If False, a
+            layer that does not fit is recorded in the logged report and skipped.
         :raises FileNotFoundError: If ``weights_path`` does not exist.
+        :raises ValueError: If ``strict`` and a backbone layer is left unloaded.
         """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
-        from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
         if not self.built:
             seq_len = min(64, self.max_len)
             dummy_input = {
@@ -593,15 +604,20 @@ class TreeTransformer(keras.Model):
             }
             self(dummy_input, training=False)
         logger.info(f"Loading pretrained weights from {weights_path}")
+        # DECISION plan-2026-10-11T004932-b83935e1/D-022: the vocabulary layers are skipped only when the
+        # CHECKPOINT's vocab_size differs; do NOT compare against DEFAULT_VOCAB_SIZE -- any custom
+        # vocabulary then drops a same-vocabulary embedding. See decisions.md.
+        vocab_layers = vocab_layers_if_changed(
+            weights_path, self.vocab_size, ("embedding", "lm_head"))
         # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
         # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
-        report = load_weights_from_checkpoint(
+        load_weights_from_checkpoint(
             target=self,
             ckpt_path=weights_path,
-            skip_prefixes=(TASK_HEAD_NAME, *skip_prefixes),
+            skip_prefixes=(TASK_HEAD_NAME, *vocab_layers, *skip_prefixes),
             strict=strict,
+            allow_unloaded=("lm_head",) if strict else None,
         )
-        logger.info(report.summary_string())
 
     @staticmethod
     def _download_weights(
@@ -641,9 +657,9 @@ class TreeTransformer(keras.Model):
         :param cache_dir: Optional cache directory for downloaded weights.
         :param **kwargs: Forwarded to ``TreeTransformer.__init__``, including
             ``include_top``, ``task_config`` and ``head_config_overrides``. A
-            ``vocab_size`` other than :attr:`DEFAULT_VOCAB_SIZE` skips the embedding
-            and LM head during a pretrained transfer; a checkpoint's task head is
-            always skipped.
+            pretrained transfer restores every backbone layer or raises; it skips
+            the embedding and LM head only when the checkpoint's ``vocab_size``
+            differs from the model's, and a checkpoint's task head always.
 
         :return: The model, with weights loaded if a path was given.
         :rtype: TreeTransformer
@@ -659,7 +675,7 @@ class TreeTransformer(keras.Model):
         logger.info(
             f"Creating TreeTransformer-{variant.upper()} model: {description}"
         )
-        load_weights_path, skip_mismatch = None, False
+        load_weights_path = None
         if pretrained:
             if isinstance(pretrained, str):
                 load_weights_path = pretrained
@@ -676,29 +692,11 @@ class TreeTransformer(keras.Model):
                         f"Failed to download pretrained weights: {e}. "
                         "Continuing with random initialization."
                     )
-            if (
-                "vocab_size" in kwargs
-                and kwargs["vocab_size"] != cls.DEFAULT_VOCAB_SIZE
-            ):
-                skip_mismatch = True
-                logger.info(
-                    "Custom vocab_size differs from pretrained, will skip "
-                    "embedding and LM head weights."
-                )
         config.update(kwargs)
         model = cls(**config)
         if load_weights_path:
             try:
-                # The vocab-dependent layers are the ones a changed vocab_size
-                # invalidates, so they become the loader's skip prefixes.
-                skip_prefixes = (
-                    ("embedding", "lm_head") if skip_mismatch else ()
-                )
-                model.load_pretrained_weights(
-                    load_weights_path,
-                    skip_prefixes=skip_prefixes,
-                    strict=False,
-                )
+                model.load_pretrained_weights(load_weights_path, strict=True)
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {e}")
                 raise
@@ -785,7 +783,7 @@ def create_tree_transformer(
     :func:`dl_techniques.models.vision.resnet.model.create_resnet`.
 
     :param variant: String, model variant ("tiny", "small", "base", "large").
-    :param vocab_size: Optional integer; override the variant default vocabulary size. Passing a value different from :attr:`TreeTransformer.DEFAULT_VOCAB_SIZE` while ``pretrained=True`` will skip loading vocab-dependent layers (embeddings, LM head).
+    :param vocab_size: Optional integer; override the variant default vocabulary size. With ``pretrained=<path>``, a value different from the CHECKPOINT's ``vocab_size`` skips the vocab-dependent layers (embedding, LM head); an equal one restores them.
     :param pretrained: Boolean or string. If ``True``, attempts to load pretrained weights for the chosen ``weights_dataset`` (currently raises :class:`NotImplementedError` — no public Tree Transformer weights are hosted). If a string, treated as a path to a local ``.keras`` / ``.weights.h5`` file.
     :param weights_dataset: String, dataset key for pretrained weights (kept for API parity with other foundation models).
     :param cache_dir: Optional string, directory to cache downloaded weights.

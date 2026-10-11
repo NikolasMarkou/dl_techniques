@@ -1056,12 +1056,12 @@ _HEAD_KW: Dict[str, Any] = {
     "intermediate_size": 64,
     "max_len": 16,
 }
-#: The factory-route transfer arms keep the DEFAULT vocabulary: any other
-#: ``vocab_size`` makes ``from_variant`` skip ``embedding`` and ``lm_head``,
-#: and the embedding is part of the backbone those arms compare by value.
-_XFER_KW: Dict[str, Any] = {
-    k: v for k, v in _HEAD_KW.items() if k != "vocab_size"
-}
+#: The factory-route transfer arms use the CUSTOM vocabulary of ``_HEAD_KW``
+#: (64, not the class default): a same-vocabulary checkpoint must restore the
+#: embedding by value (D-022 of plan-2026-10-11T004932-b83935e1; before it,
+#: any non-default ``vocab_size`` dropped the embedding and these arms had to
+#: keep the default to pass).
+_XFER_KW: Dict[str, Any] = dict(_HEAD_KW)
 _SEQ = 8
 _CLF = NLPTaskConfig(
     name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3
@@ -1386,28 +1386,63 @@ class TestTreeTransformerIncludeTop:
         assert headed.lm_head is None
         np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
 
-    def test_a_vocab_mismatch_load_into_a_headed_model(self, tmp_path):
-        """The vocab-mismatch skip list still works when ``lm_head`` is absent.
+    @pytest.mark.parametrize("headed", [True, False], ids=["headed", "headless"])
+    def test_a_same_custom_vocabulary_restores_the_embedding(self, tmp_path, headed):
+        """Reviewer W2: a non-default but EQUAL vocabulary is not a vocab change.
 
-        ``vocab_size`` 64 differs from the default, so ``from_variant`` skips
-        ``embedding`` and ``lm_head``: the blocks and the final norm still load
-        by value, and the embedding keeps its fresh initialization.
+        Before D-022 ``from_variant`` compared ``vocab_size`` with
+        ``DEFAULT_VOCAB_SIZE`` and skipped ``embedding`` (and ``lm_head``) for
+        any custom vocabulary, so this checkpoint's embedding was dropped.
         """
+        encoder = create_tree_transformer("tiny", **_HEAD_KW)
+        encoder(_head_batch(), training=False)
+        _randomized(encoder, 5)
+        path = str(tmp_path / "encoder_v64.keras")
+        encoder.save(path)
+
+        head = {"include_top": True, "task_config": _CLF} if headed else {}
+        target = create_tree_transformer("tiny", pretrained=path, **_HEAD_KW, **head)
+        names = ["embedding", "pos_encoding", "block_0", "block_1", "final_norm"]
+        if not headed:
+            names.append("lm_head_projection")
+        for name in names:
+            for a, b in zip(target.get_layer(name).weights,
+                            encoder.get_layer(name).weights):
+                np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
+
+    @pytest.mark.parametrize("headed", [True, False], ids=["headed", "headless"])
+    def test_a_different_vocabulary_skips_only_the_vocab_layers(self, tmp_path, headed):
+        """A checkpoint of another vocabulary: everything but embedding/LM head loads."""
         encoder = create_tree_transformer("tiny", **_HEAD_KW)
         encoder(_head_batch(), training=False)
         _randomized(encoder, 4)
         path = str(tmp_path / "encoder_v64.keras")
         encoder.save(path)
 
-        headed = create_tree_transformer("tiny", include_top=True, task_config=_CLF,
-                                         pretrained=path, **_HEAD_KW)
-        for name in ["block_0", "block_1", "final_norm"]:
-            for a, b in zip(headed.get_layer(name).weights,
+        head = {"include_top": True, "task_config": _CLF} if headed else {}
+        target = create_tree_transformer(
+            "tiny", pretrained=path, **dict(_HEAD_KW, vocab_size=80), **head)
+        for name in ["pos_encoding", "block_0", "block_1", "final_norm"]:
+            for a, b in zip(target.get_layer(name).weights,
                             encoder.get_layer(name).weights):
                 np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
-        assert not np.array_equal(
-            _np(headed.get_layer("embedding").weights[0]),
-            _np(encoder.get_layer("embedding").weights[0]))
+        assert tuple(target.get_layer("embedding").weights[0].shape) == (80, 32)
+
+    @pytest.mark.parametrize("headed", [True, False], ids=["headed", "headless"])
+    @pytest.mark.parametrize("override", [
+        {"hidden_size": 64}, {"num_layers": 3},
+    ], ids=["hidden_size", "deeper"])
+    def test_a_backbone_that_does_not_fit_raises(self, tmp_path, headed, override):
+        """The D-020 rule: a backbone that does not fit is refused, never half-loaded."""
+        encoder = create_tree_transformer("tiny", **_HEAD_KW)
+        encoder(_head_batch(), training=False)
+        path = str(tmp_path / "encoder.keras")
+        encoder.save(path)
+
+        head = {"include_top": True, "task_config": _CLF} if headed else {}
+        with pytest.raises(ValueError, match="unloaded|[Ss]hape mismatch"):
+            create_tree_transformer(
+                "tiny", pretrained=path, **dict(_HEAD_KW, **override), **head)
 
     def test_include_top_without_task_config_raises(self):
         with pytest.raises(ValueError, match="include_top=True needs a task_config"):

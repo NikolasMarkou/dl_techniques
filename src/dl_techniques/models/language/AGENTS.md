@@ -85,10 +85,12 @@ Reusing a backbone under a new head:
   archive, not a class default) differs from the model's. BERT, DistilBERT,
   ModernBERT and FNet follow it, headed and headless
   (`tests/test_models/test_an_encoder_checkpoint_loads_completely_or_raises.py`).
-- Not yet on that rule (measured): TreeTransformer copies by name non-strictly
-  and skips `embedding`/`lm_head` for any non-default `vocab_size`. The
-  decoders refuse a vocabulary change when headed (GPT2's `decoder` is one
-  layer holding the embedding); a headed Mamba, Mamba2, TopoLM or WaveFieldLLM
+  TreeTransformer follows it too, with `embedding` and `lm_head` as its
+  vocabulary layers, and its `lm_head` (a top, absent from a headed
+  checkpoint) also allowed to stay fresh.
+- Not yet on that rule (measured): the decoders refuse a vocabulary change
+  when headed (GPT2's `decoder` is one layer holding the embedding); a headed
+  Mamba, Mamba2, TopoLM or WaveFieldLLM
   loads a checkpoint with fewer blocks without raising; a headless GPT2,
   TopoLM or WaveFieldLLM restores the whole file with `skip_mismatch=True`, so
   a layer that does not fit stays fresh and only a zero-variable restore
