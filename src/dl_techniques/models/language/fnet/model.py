@@ -1002,7 +1002,6 @@ class FNet(keras.Model):
 
 def create_fnet(
     variant: str = "base",
-    vocab_size: Optional[int] = None,
     pretrained: Union[bool, str] = False,
     weights_dataset: str = "uncased",
     cache_dir: Optional[str] = None,
@@ -1018,9 +1017,6 @@ def create_fnet(
     :param variant: FNet variant name (``"tiny"``, ``"small"``, ``"base"``,
         ``"large"``). Defaults to ``"base"``.
     :type variant: str
-    :param vocab_size: Optional vocabulary size override, forwarded as
-        ``vocab_size=...`` when given.
-    :type vocab_size: Optional[int]
     :param pretrained: ``True`` raises ``NotImplementedError`` (no public
         weights); a string path loads a local ``.keras`` checkpoint (the
         encoder only, at the checkpoint's sequence length); ``False``
@@ -1032,7 +1028,7 @@ def create_fnet(
     :param cache_dir: unreachable for the same reason.
     :type cache_dir: Optional[str]
     :param kwargs: Forwarded to :meth:`FNet.from_variant` (e.g.
-        ``max_position_embeddings``, or ``include_top=True`` with a
+        ``vocab_size``, ``max_position_embeddings``, or ``include_top=True`` with a
         ``task_config`` for a model with a head).
     :type kwargs: Any
     :return: Configured ``FNet`` instance.
@@ -1049,8 +1045,6 @@ def create_fnet(
         ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
         ...         num_classes=9))
     """
-    if vocab_size is not None:
-        kwargs["vocab_size"] = vocab_size
     return FNet.from_variant(
         variant,
         pretrained=pretrained,

@@ -951,7 +951,6 @@ class ModernBERT(keras.Model):
 
 def create_modern_bert(
         variant: str = "base",
-        vocab_size: Optional[int] = None,
         pretrained: Union[bool, str] = False,
         weights_dataset: str = "uncased",
         cache_dir: Optional[str] = None,
@@ -965,9 +964,6 @@ def create_modern_bert(
     :param variant: ModernBERT variant name (``"tiny"``, ``"base"``,
         ``"large"``). Defaults to ``"base"``.
     :type variant: str
-    :param vocab_size: Optional vocabulary size override, forwarded as
-        ``vocab_size=...`` when given.
-    :type vocab_size: Optional[int]
     :param pretrained: ``True`` raises ``NotImplementedError`` (no public
         weights); a string path loads a local ``.keras`` checkpoint (the
         encoder only); ``False`` (default) gives random init.
@@ -978,7 +974,7 @@ def create_modern_bert(
     :param cache_dir: unreachable for the same reason.
     :type cache_dir: Optional[str]
     :param kwargs: Forwarded to :meth:`ModernBERT.from_variant` (e.g.
-        ``local_attention_window_size``, or ``include_top=True`` with a
+        ``vocab_size``, ``local_attention_window_size``, or ``include_top=True`` with a
         ``task_config`` for a model with a head).
     :type kwargs: Any
     :return: Configured ``ModernBERT`` instance.
@@ -995,8 +991,6 @@ def create_modern_bert(
         ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
         ...         num_classes=9))
     """
-    if vocab_size is not None:
-        kwargs["vocab_size"] = vocab_size
     return ModernBERT.from_variant(
         variant,
         pretrained=pretrained,

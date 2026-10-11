@@ -1015,7 +1015,6 @@ class DistilBERT(keras.Model):
 
 def create_distilbert(
     variant: str = "base",
-    vocab_size: Optional[int] = None,
     pretrained: Union[bool, str] = False,
     weights_dataset: str = "uncased",
     cache_dir: Optional[str] = None,
@@ -1030,10 +1029,6 @@ def create_distilbert(
     :param variant: DistilBERT variant name (``"tiny"``, ``"small"``,
         ``"base"``). Defaults to ``"base"``.
     :type variant: str
-    :param vocab_size: Optional vocabulary size override. If ``None`` (default),
-        the variant's default vocab size is used. If provided, forwarded as
-        ``vocab_size=...`` in ``kwargs``.
-    :type vocab_size: Optional[int]
     :param pretrained: If ``True``, raises ``NotImplementedError`` -- no public
         DistilBERT weights are distributed by this library. If a string path,
         loads local weights from that path. If ``False`` (default), random
@@ -1049,8 +1044,9 @@ def create_distilbert(
     :param cache_dir: unreachable for the same reason. Defaults to ``None``.
     :type cache_dir: Optional[str]
     :param kwargs: Additional keyword arguments forwarded to
-        :meth:`DistilBERT.from_variant` (e.g. ``max_position_embeddings``, or
-        ``include_top=True`` with a ``task_config`` for a model with a head).
+        :meth:`DistilBERT.from_variant` (e.g. ``vocab_size``,
+        ``max_position_embeddings``, or ``include_top=True`` with a
+        ``task_config`` for a model with a head).
     :type kwargs: Any
 
     :returns: Configured ``DistilBERT`` instance.
@@ -1071,8 +1067,6 @@ def create_distilbert(
         ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
         ...         num_classes=9))
     """
-    if vocab_size is not None:
-        kwargs["vocab_size"] = vocab_size
     return DistilBERT.from_variant(
         variant,
         pretrained=pretrained,

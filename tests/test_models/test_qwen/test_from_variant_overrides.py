@@ -10,7 +10,7 @@ already carries the overridable keys, so ANY override of one collides:
 
 That is the exact call `create_qwen3`'s own docstring advertises
 (``create_qwen3("tiny", num_layers=2)``), so the documented use was dead. Six
-siblings already do it correctly; `models/language/gpt2/gpt2.py:464-468` is the one copied
+siblings already do it correctly; `models/language/gpt2/gpt2.py:665-669` is the one copied
 here:
 
     config = cls.MODEL_VARIANTS[variant].copy()

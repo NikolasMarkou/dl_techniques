@@ -352,8 +352,9 @@ class TestLoadWeightsOrRaise:
     It returns normally when the checkpoint's variable names or shapes do not
     line up with the target: every variable is left at its initialized value and
     nothing is reported. Three sites did exactly that with an unconditional
-    ``skip_mismatch=True`` and then logged "Loaded weights from ..." --
-    ``gpt2/gpt2.py:480``, ``wave_field/model.py:745`` and ``:769``.
+    ``skip_mismatch=True`` and then logged "Loaded weights from ..." -- the
+    whole-file restores in ``GPT2.from_variant`` and ``WaveFieldLLM.from_variant``
+    (twice), now ``gpt2/gpt2.py:698``, ``wave_field/model.py:973`` and ``:994``.
     ``distilbert/model.py`` was the repo's only implementation of the check;
     ``load_weights_or_raise`` is that check, shared.
 

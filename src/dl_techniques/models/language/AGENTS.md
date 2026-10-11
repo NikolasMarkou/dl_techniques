@@ -53,6 +53,39 @@ so it doubles as the generation path. Flags that change the contract:
 | `aggregate_backbone_losses=True` | backbone uses `add_loss` in `call()` (HNet boundary term; **TopoLM**'s spatial-smoothness taps, where it is the difference between training the objective and computing it every step and discarding it — measured 15.31 aggregated against 5.36 not on identical weights) |
 | `causality_probe_plain_tensor=True` | backbone `call()` takes a plain tensor, not the `{input_ids, attention_mask}` dict — without it the probe silently degrades to a warning and nothing was checked |
 
+## Task heads: `include_top` (fine-tuning, not pretraining)
+
+BERT, DistilBERT, ModernBERT, FNet, TreeTransformer, GPT2, Mamba, Mamba2, TopoLM,
+WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
+
+- `include_top=False` (default): no head; `call()` returns what it always did,
+  which is what the CLM/MLM wrappers above consume.
+- `include_top=True` needs a `task_config` (`NLPTaskConfig` or its dict);
+  `head_config_overrides` go to the head. A `task_config` or overrides without
+  `include_top=True` raise `ValueError`, as does `MULTIPLE_CHOICE`.
+- The head is one `layers/heads/nlp` head named `task_head` (`TASK_HEAD_NAME`
+  in `layers/heads/nlp/model_head.py`), fed the final hidden states and the
+  padding mask. `call()` returns bare logits for a one-output head, a dict for
+  a multi-output one (QA). Causal backbones pool `"last"` by default;
+  `head_config_overrides={"pooling_type": ...}` changes that.
+- Build through `create_<model>(variant, include_top=True, task_config=...)`,
+  which only forwards to `from_variant`; the old functional head wrappers are
+  gone. `create_qwen3_classification`, `create_qwen3_next_classification` and
+  `create_gemma3_classification` remain, as wrappers over the in-model head.
+
+Reusing a backbone under a new head:
+
+- At construction: `pretrained="<path>.keras"` with `include_top=True` restores
+  the backbone only; the checkpoint's `task_head` is skipped and the new head
+  keeps its fresh init. Available on the first ten models above (not Qwen3,
+  Qwen3Next, Gemma3). The decoders (GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM)
+  raise on a backbone that does not fit; the encoders copy by layer name and,
+  by default, skip and log mismatched layers.
+- On a built model: `load_weights_from_checkpoint(model, path,
+  skip_prefixes=(TASK_HEAD_NAME,))` from `dl_techniques.utils.weight_transfer`.
+  Never pass `skip_prefixes=()` across tasks: a head of equal shape is copied
+  silently.
+
 ## Trainer wiring (Pattern 3)
 
 `src/train/*/{pretrain,finetune}.py` + `train.common.nlp`: `create_tokenizer`,
