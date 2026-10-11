@@ -508,6 +508,11 @@ The package's own suite is `tests/test_models/test_bert/`.
   absorbed, by leaving `embeddings` at its fresh initialization.
 - **A `UserWarning` about input names, then a broken `fit`.** Your `keras.Input`s inside a dict
   are missing `name=`. See §9 Pattern 1.
+- **`seq_len=... exceeds max_position_embeddings=...`.** The batch is longer than the learned
+  position table. Eagerly, and on a step function's first trace, it is a `ValueError`; inside a
+  `predict`/`fit`/`evaluate` step already retraced for several lengths it is TensorFlow's
+  `InvalidArgumentError` with the same text. Under `jit_compile=True` that run-time check is
+  dropped by XLA, so truncate the input yourself there. The model stays usable after either.
 
 **What is `[CLS]` for?** A special token prepended to every sequence. Because self-attention lets
 it read the whole input, its final hidden state acts as an aggregate sequence representation, and

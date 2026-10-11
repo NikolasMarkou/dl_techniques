@@ -45,6 +45,13 @@ Why each arm is not satisfied by construction:
 ``test_the_message_names_both_numbers``
     An actionable message is the point. A bare ``ValueError`` would satisfy the
     two raise arms.
+``test_a_relaxed_retrace_still_refuses_an_over_long_batch``
+    A step function retraced with a ``None`` sequence axis skips the static
+    check; a run-time check (D-021 of plan-2026-10-11T004932-b83935e1) must
+    fire there, with the same message.
+``test_a_refused_first_predict_leaves_the_model_usable``
+    The refusal must not poison Keras's cached step functions or the
+    variables; later legal ``predict``/``fit`` calls must work.
 ``test_a_dynamic_sequence_axis_returns_silently``
     The check must return silently when the length is not statically known.
     This arm calls the validator DIRECTLY, because the obvious version ("the
@@ -150,6 +157,60 @@ def test_the_message_names_both_numbers():
     assert f"max_position_embeddings={MAX_POS}" in message, message
 
 
+def test_a_relaxed_retrace_still_refuses_an_over_long_batch():
+    """Reviewer W6 of plan-2026-10-11T004932-b83935e1, D-021.
+
+    After ``predict`` has seen two lengths, TensorFlow retraces the step
+    function with the sequence axis relaxed to ``None`` and never re-enters
+    Python for a new length, so the static check is skipped. Before D-021 the
+    over-long batch then failed in the position-embedding gather on CPU
+    (``InvalidArgumentError`` naming ``GatherV2``) and, on GPU, returned
+    zeros-backed garbage. Now a run-time check fails first, with the D-023
+    message. A Python ``ValueError`` cannot cross a graph boundary, so in that
+    graph the type is TensorFlow's ``InvalidArgumentError``.
+    """
+    import tensorflow as tf
+
+    model = _head_model()
+    for seq_len in (5, MAX_POS - 4):
+        model.predict(_feed(seq_len), verbose=0)
+    with pytest.raises(
+        (ValueError, tf.errors.InvalidArgumentError),
+        match=f"exceeds max_position_embeddings={MAX_POS}",
+    ):
+        model.predict(_feed(MAX_POS + 1), verbose=0)
+    # And the model still serves a legal length afterwards.
+    predictions = model.predict(_feed(MAX_POS), verbose=0)
+    assert np.isfinite(predictions).all()
+
+
+@pytest.mark.parametrize("headed", [True, False], ids=["headed", "headless"])
+def test_a_refused_first_predict_leaves_the_model_usable(headed):
+    """An over-long FIRST ``predict`` on a fresh model must not break the model.
+
+    Measured before D-021: the refusal fired inside the first trace of
+    Keras's cached step function, after ``build`` had created the variables
+    in that trace, and every later ``predict`` or ``fit`` failed ("Structures
+    don't have the same nested structure", then reshape errors on empty
+    variables). Now ``build`` refuses before any variable exists and the
+    cached step functions are dropped.
+    """
+    model = _head_model() if headed else _encoder()
+    with pytest.raises(ValueError, match="max_position_embeddings"):
+        model.predict(_feed(MAX_POS + 1), verbose=0)
+
+    for seq_len in (5, MAX_POS - 4):
+        out = model.predict(_feed(seq_len), verbose=0)
+        hidden = out if headed else out["last_hidden_state"]
+        assert hidden.shape[:2] == ((BATCH, NUM_CLASSES) if headed else (BATCH, seq_len))
+        assert np.isfinite(hidden).all()
+
+    if headed:
+        model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
+        history = model.fit(_feed(8), np.zeros((BATCH,), "int32"), verbose=0)
+        assert np.isfinite(history.history["loss"]).all()
+
+
 def test_a_dynamic_sequence_axis_returns_silently(monkeypatch):
     """A length that is not statically known has nothing to check.
 
@@ -175,8 +236,8 @@ def test_a_dynamic_sequence_axis_returns_silently(monkeypatch):
     symbolic = keras.Input(shape=(None,), dtype="int32")
     assert symbolic.shape[-1] is None, symbolic.shape
 
-    # Must return None, not raise. `int(None)` would be a TypeError.
-    assert encoder._validate_sequence_length(symbolic) is None
+    # Must return the input unchanged, not raise. `int(None)` would be a TypeError.
+    assert encoder._validate_sequence_length(symbolic) is symbolic
 
     model = _head_model()
     calls = []

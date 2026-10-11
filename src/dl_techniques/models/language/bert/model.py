@@ -640,6 +640,9 @@ class BERT(keras.Model):
                 "BERT.build expects the shape of `input_ids`, i.e. "
                 f"(batch_size, seq_length); got {ids_shape}"
             )
+        # Before any variable exists: variables created inside a step-function
+        # trace that then fails are left unusable (measured).
+        self._refuse_over_long_sequence(ids_shape[1])
 
         self.embeddings.build(ids_shape)
 
@@ -746,7 +749,7 @@ class BERT(keras.Model):
         else:
             input_ids = inputs
 
-        self._validate_sequence_length(input_ids)
+        input_ids = self._validate_sequence_length(input_ids)
 
         embedding_output = self.embeddings(
             input_ids=input_ids,
@@ -792,41 +795,103 @@ class BERT(keras.Model):
 
     def _validate_sequence_length(
         self, input_ids: keras.KerasTensor
-    ) -> None:
+    ) -> keras.KerasTensor:
         """Reject a sequence longer than the learned position table.
 
         :param input_ids: The resolved token-id tensor, rank >= 2, whose LAST
             axis is the sequence.
         :type input_ids: keras.KerasTensor
+        :return: ``input_ids`` itself, or, inside a TensorFlow graph traced
+            with a dynamic sequence axis, ``input_ids`` gated on a runtime
+            check of its length.
+        :rtype: keras.KerasTensor
         :raises ValueError: if the sequence length is statically known and
             exceeds ``max_position_embeddings``.
 
-        Returns silently when the length is not statically known (a symbolic
-        trace over ``keras.Input(shape=(None,))``); there is nothing to check
-        at that point and the concrete-shape call that follows will do it.
+        A ``predict``/``fit``/``evaluate`` that has seen two lengths retraces
+        its step function with the sequence axis relaxed to ``None`` and then
+        never re-enters Python for a new length, so a static check alone let a
+        later over-long batch through. In such a graph the check runs at run
+        time instead and raises ``InvalidArgumentError`` (a Python
+        ``ValueError`` cannot cross a graph boundary) with the same message.
+        Under XLA (``jit_compile=True``) TensorFlow drops that assertion, so a
+        relaxed XLA step is not covered. A symbolic ``keras.Input`` with a
+        dynamic axis has nothing to check and returns unchanged.
         """
         # DECISION plan-2026-08-23T203721-009b7ccf/D-023: without this check an
         # over-length sequence fails differently per device (finite garbage on
         # GPU, InvalidArgumentError on CPU). See decisions.md.
         shape = getattr(input_ids, "shape", None)
         if shape is None or len(shape) < 2:
-            return
-        try:
-            seq_len = int(shape[-1])
-        except TypeError:
-            # Dynamic sequence axis (symbolic build). Nothing to check.
-            return
+            return input_ids
+        if shape[-1] is None:
+            return self._check_dynamic_sequence_length(input_ids)
+        self._refuse_over_long_sequence(int(shape[-1]))
+        return input_ids
 
-        if seq_len > self.max_position_embeddings:
-            raise ValueError(
-                f"seq_len={seq_len} exceeds max_position_embeddings="
-                f"{self.max_position_embeddings}. BERT's position embeddings "
-                f"are a learned table of {self.max_position_embeddings} rows, "
-                "so there is no embedding for position "
-                f"{self.max_position_embeddings}. Truncate the input to "
-                f"{self.max_position_embeddings} tokens, or build the model "
-                f"with max_position_embeddings>={seq_len}."
-            )
+    def _refuse_over_long_sequence(self, seq_len: Optional[int]) -> None:
+        """Raise for a static ``seq_len`` above ``max_position_embeddings``.
+
+        :param seq_len: The static sequence length, or None when unknown.
+        :type seq_len: Optional[int]
+        :raises ValueError: if ``seq_len`` exceeds ``max_position_embeddings``.
+        """
+        if seq_len is None or seq_len <= self.max_position_embeddings:
+            return
+        # A refusal during the FIRST trace of a cached Keras step function
+        # leaves that function unusable for every later call ("Structures
+        # don't have the same nested structure", or "Creating variables on a
+        # non-first call"); drop them so the next call builds fresh ones.
+        self.predict_function = None
+        self.train_function = None
+        self.test_function = None
+        raise ValueError(self._sequence_length_message(seq_len))
+
+    def _sequence_length_message(self, seq_len: Union[int, str]) -> str:
+        """The over-length message, shared by the static and runtime checks.
+
+        :param seq_len: The offending length, or a placeholder when it is only
+            known at run time.
+        :type seq_len: Union[int, str]
+        :return: The message.
+        :rtype: str
+        """
+        return (
+            f"seq_len={seq_len} exceeds max_position_embeddings="
+            f"{self.max_position_embeddings}. BERT's position embeddings "
+            f"are a learned table of {self.max_position_embeddings} rows, "
+            "so there is no embedding for position "
+            f"{self.max_position_embeddings}. Truncate the input to "
+            f"{self.max_position_embeddings} tokens, or build the model "
+            f"with max_position_embeddings>={seq_len}."
+        )
+
+    def _check_dynamic_sequence_length(
+        self, input_ids: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Gate ``input_ids`` on a run-time length check inside a TF graph.
+
+        :param input_ids: Token ids whose sequence axis is not statically known.
+        :type input_ids: keras.KerasTensor
+        :return: ``input_ids``, unchanged outside a TensorFlow graph.
+        :rtype: keras.KerasTensor
+        """
+        # DECISION plan-2026-10-11T004932-b83935e1/D-021: raw TF on purpose; do NOT replace with a
+        # keras.ops expression -- keras.ops has no assertion, and without the control dependency the
+        # out-of-range gather can fail first with an opaque message (or, on GPU, return zeros). See decisions.md.
+        if keras.backend.backend() != "tensorflow" or isinstance(
+            input_ids, keras.KerasTensor
+        ):
+            return input_ids
+        import tensorflow as tf
+
+        check = tf.debugging.assert_less_equal(
+            tf.shape(input_ids)[-1],
+            self.max_position_embeddings,
+            message=self._sequence_length_message("<run-time length>"),
+        )
+        with tf.control_dependencies([check]):
+            return tf.identity(input_ids)
 
     def load_pretrained_weights(
         self,
