@@ -379,6 +379,20 @@ class TestCrystalMultiHeadProjectionComputeOutputShape:
 
         assert layer.compute_output_shape(inputs.shape) == tuple(layer(inputs).shape)
 
+    def test_a_shape_arriving_as_a_list_keeps_its_batch_axis(self):
+        """A one-shape LIST is a legal Keras shape form.
+
+        ``list(input_shape)`` over ``[[None, 32]]`` iterates the OUTER list, so
+        rewriting its last element replaces the batch axis.
+        """
+        for output_dim, expected in ((16, (None, 16)), (None, (None, 32))):
+            layer = CrystalMultiHeadProjection(num_heads=4, output_dim=output_dim)
+
+            for listed in ([[None, 32]], [(None, 32)], [None, 32]):
+                assert layer.compute_output_shape(listed) == expected, (
+                    f"output_dim={output_dim}, input_shape={listed}"
+                )
+
 
 class TestCrystalMultiHeadProjectionKnobSensitivity:
     """Constructor knobs pinned by a measured difference, with twins."""

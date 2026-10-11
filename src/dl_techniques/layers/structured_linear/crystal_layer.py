@@ -19,6 +19,12 @@ receiving an identical logit -- the frame is packed from several *rotated*
 simplexes by a greedy minimax-angular-separation search. See
 :mod:`dl_techniques.layers.structured_linear.crystal_frames`.
 
+The packing gives `num_classes` distinct columns up to the sphere's own ceiling
+of `2 * input_dim` points; beyond that, and only beyond that, a repeat is
+unavoidable rather than a defect -- at `input_dim=1` the sphere is
+`S^0 = {-1, +1}`, so a 3-class head over a 1-D feature has only two distinct
+directions available. Every realistic width sits well inside the limit.
+
 Setting ``trainable_crystal=True`` releases the frame so the network may leave
 the collapsed configuration it was handed. Weights are re-normalized inside
 ``call()`` in that mode, because a trained frame drifts off the unit sphere and
@@ -45,6 +51,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.layers.structured_linear.crystal_frames import crystal_frame
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -242,13 +249,16 @@ class CrystalLayer(keras.layers.Layer):
         """
         Compute output shape from stored config, on an unbuilt layer.
 
-        :param input_shape: Shape tuple of the input.
+        :param input_shape: Shape of the input. A shape arriving as a list is
+            canonicalized first; ``list(input_shape)`` over ``[[None, 8]]``
+            iterates the outer list and would rewrite the batch axis, returning
+            ``(num_classes,)`` instead of ``(None, num_classes)``.
         :type input_shape: Tuple[Optional[int], ...]
         :return: Output shape with last dimension replaced by ``num_classes``.
         :rtype: Tuple[Optional[int], ...]
         """
 
-        output_shape = list(input_shape)
+        output_shape = list(canonical_binary_input_shape(input_shape))
         output_shape[-1] = self.num_classes
 
         return tuple(output_shape)

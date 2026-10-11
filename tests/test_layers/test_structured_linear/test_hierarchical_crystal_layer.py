@@ -450,10 +450,55 @@ class TestClusterSpread:
             f"cluster_spread did not monotonically open the bundles: {cosines}"
         )
 
+    def test_zero_spread_leaves_the_micro_tier_unable_to_discriminate(self):
+        """The degeneracy `cluster_spread=0` causes, pinned as a measured fact.
+
+        At zero every leaf of a group IS its centroid, so the frame holds
+        `num_macro_classes` distinct columns out of the full width, and the
+        within-group logits are identical. Measured: 3 distinct of 15, and a
+        within-group logit spread of exactly 0.0.
+
+        The configuration is LEGAL and deliberate -- it is what a
+        one-leaf-per-group model asks for -- so this asserts the degeneracy
+        rather than forbidding it. The point is that it can never be mistaken
+        for a working leaf discriminator.
+        """
+        layer = _layer(3, 5, cluster_spread=0.0, return_hierarchy=True, seed=0)
+        outputs = layer(_sample_input(input_dim=4))
+
+        micro = ops.convert_to_numpy(layer.micro_weights)
+        distinct = len({tuple(np.round(column, 6)) for column in micro.T})
+        assert distinct == 3, (
+            f"expected 3 distinct leaves at cluster_spread=0, got {distinct}"
+        )
+
+        logits = ops.convert_to_numpy(outputs['micro_logits'])
+        grouped = logits.reshape(*logits.shape[:-1], 3, 5)
+        within_group = np.abs(grouped[:, :, 0] - grouped[:, :, 1]).max()
+        assert within_group == 0.0, (
+            f"at cluster_spread=0 every leaf of a group must score identically, "
+            f"measured a within-group spread of {within_group}"
+        )
+
+    def test_a_positive_spread_restores_leaf_discrimination(self):
+        """The other half of the pair: the collapse is not unconditional.
+
+        Without this arm the zero-spread test would also be satisfied by a layer
+        that never discriminates leaves at any aperture.
+        """
+        layer = _layer(3, 5, cluster_spread=0.25, return_hierarchy=True, seed=0)
+        outputs = layer(_sample_input(input_dim=4))
+
+        logits = ops.convert_to_numpy(outputs['micro_logits'])
+        grouped = logits.reshape(*logits.shape[:-1], 3, 5)
+
+        assert np.abs(grouped[:, :, 0] - grouped[:, :, 1]).max() > 1e-3, \
+            "a positive cluster_spread must separate the leaves of a group"
+
     def test_no_group_reproduces_the_macro_frame(self):
-        """The defect this package found: a group whose seed coincides with the
-        macro seed reproduces the macro simplex exactly, and its first leaf then
-        sits at cosine 1.0 with its own centroid at EVERY spread.
+        """A group whose seed coincides with the macro seed reproduces the macro
+        simplex exactly, and its first leaf then sits at cosine 1.0 with its own
+        centroid at EVERY spread.
 
         Pinned at the largest aperture, where a genuine bundle is furthest from
         its centroid and a coincident one is still exactly on it.
@@ -505,6 +550,25 @@ class TestHierarchicalCrystalLayerComputeOutputShape:
         computed = nested.compute_output_shape(inputs.shape)
         for key, shape in computed.items():
             assert shape == tuple(nested(inputs)[key].shape)
+
+    def test_a_shape_arriving_as_a_list_keeps_its_batch_axis(self):
+        """A one-shape LIST is a legal Keras shape form.
+
+        ``input_shape[:-1]`` over ``[[None, 4]]`` slices the OUTER list, so the
+        batch axis is dropped and the layer reports ``(15,)`` for a ``(None, 4)``
+        input. Checked on BOTH branches, because the dict branch would pass
+        while the flat one failed.
+        """
+        flat = _layer(3, 5)
+        nested = _layer(3, 5, return_hierarchy=True)
+
+        for listed in ([[None, 4]], [(None, 4)], [None, 4]):
+            assert flat.compute_output_shape(listed) == (None, 15)
+
+            computed = nested.compute_output_shape(listed)
+            assert computed['macro_logits'] == (None, 3)
+            assert computed['micro_logits'] == (None, 15)
+            assert computed['joint_probabilities'] == (None, 15)
 
 
 class TestHierarchicalCrystalLayerKnobSensitivity:

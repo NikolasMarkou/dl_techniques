@@ -14,8 +14,28 @@ away. This layer keeps it, in two tiers of the same geometric construction:
       V_{m,k} = normalize(C_m + cluster_spread * S_{m,k})
 
   where ``S_{m,k}`` is itself a packed frame. ``cluster_spread`` is the angular
-  aperture: at 0 every leaf of a cluster collapses onto its centroid, and as it
-  grows the leaves fan out toward the sphere.
+  aperture: as it grows the leaves fan out around their centroid, and as it
+  shrinks toward 0 they collapse onto it.
+
+**``cluster_spread=0`` is degenerate, and is allowed deliberately.** At exactly
+zero the bundle collapses: all ``num_micro_per_macro`` leaves of a group become
+the same vector as their centroid, so the frame holds ``num_macro_classes``
+distinct columns out of ``num_macro_classes * num_micro_per_macro`` -- the same
+duplication ``tiled_simplex_frame`` produces, arriving through a different door
+(measured at 3 distinct of 15 at ``num_macro_classes=3``). Every leaf of a group
+then receives an identical logit, and the conditional softmax within that group
+is **uniform by construction** (measured within-group logit spread: exactly
+``0.0`` at ``spread=0``, against ``1.19e-05`` at ``1e-06`` and ``2.71`` at
+``0.25``). The macro tier still discriminates; the micro tier does not.
+
+This is a real limit rather than a rounding artifact, so the constructor does
+not reject it -- a caller may legitimately want a single-leaf-per-group model,
+and that is exactly the configuration ``spread=0`` describes. It is documented
+here and pinned by tests so that it cannot be mistaken for a working leaf
+discriminator. **Any caller wanting per-leaf discrimination must use a
+strictly positive ``cluster_spread``**; there is no value below which the
+collapse is avoided, because the collapse is exact at zero rather than
+approximate near it.
 
 **Joint probabilities.** With ``return_hierarchy=True`` the layer also emits the
 Bayesian decomposition of a leaf probability, and the identity it is built to
@@ -46,6 +66,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.layers.structured_linear.crystal_frames import crystal_frame
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -140,8 +161,13 @@ class HierarchicalCrystalLayer(keras.layers.Layer):
         packed from several simplexes rather than being capped at one.
     :type num_micro_per_macro: int
     :param cluster_spread: Angular aperture of each leaf bundle around its macro
-        centroid. ``0.0`` collapses every leaf onto its centroid. Must be
-        non-negative. Defaults to 0.25.
+        centroid. Must be non-negative. Defaults to 0.25.
+
+        .. warning::
+           ``0.0`` is degenerate, though legal. Every leaf of a group collapses
+           onto its centroid, giving that group identical logits and a uniform
+           conditional softmax. Use a strictly positive value whenever the leaf
+           tier must discriminate. See the module docstring for measurements.
     :type cluster_spread: float
     :param scale: Inverse-temperature multiplier on the cosine logits.
         Defaults to 10.0.
@@ -466,14 +492,16 @@ class HierarchicalCrystalLayer(keras.layers.Layer):
         Both branches are derived from ``self.return_hierarchy`` alone, so the
         flag cannot leave one of them unstated.
 
-        :param input_shape: Shape tuple of the input.
+        :param input_shape: Shape of the input. A shape arriving as a list is
+            canonicalized first; ``input_shape[:-1]`` over ``[[None, 8]]``
+            slices the outer list and would drop the batch axis entirely.
         :type input_shape: Tuple[Optional[int], ...]
         :return: Output shape, or the per-key dict of output shapes when
             ``return_hierarchy`` is set.
         :rtype: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]
         """
 
-        base = tuple(input_shape[:-1])
+        base = tuple(canonical_binary_input_shape(input_shape)[:-1])
 
         if not self.return_hierarchy:
             return base + (self.total_classes,)

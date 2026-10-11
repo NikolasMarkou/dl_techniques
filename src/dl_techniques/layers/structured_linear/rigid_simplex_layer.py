@@ -58,6 +58,7 @@ from dl_techniques.layers.structured_linear.crystal_frames import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -331,13 +332,16 @@ class RigidSimplexLayer(keras.layers.Layer):
         """
         Compute output shape from input shape.
 
-        :param input_shape: Shape tuple of the input.
+        :param input_shape: Shape of the input. A shape that arrives as a list
+            is canonicalized first: ``list(input_shape)`` over ``[[None, 8]]``
+            iterates the OUTER list, so the last-element rewrite would replace
+            the batch axis and return ``(units,)`` instead of ``(None, units)``.
         :type input_shape: Tuple[Optional[int], ...]
         :return: Output shape with last dimension replaced by ``units``.
         :rtype: Tuple[Optional[int], ...]
         """
 
-        output_shape = list(input_shape)
+        output_shape = list(canonical_binary_input_shape(input_shape))
         output_shape[-1] = self.units
         return tuple(output_shape)
 

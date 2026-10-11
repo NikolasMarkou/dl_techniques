@@ -85,3 +85,63 @@ Two behaviours worth knowing before composing them:
   `0.31` at `seed=None` before the fix, `0.98+` after, at every seed including
   `None`. An explicit `seed` masked the defect for most settings, which is why
   the regression guard is parametrized over `seed=None`.
+
+## `compute_output_shape` accepts a shape that arrives as a list (2026-10-12)
+
+All five layers in this package. A single shape is a legal Keras argument form
+and can arrive wrapped in a list — `[[None, 8]]`, `[(None, 8)]` or
+`[None, 8]` — notably after deserialization.
+
+`list(input_shape)` over `[[None, 8]]` iterates the **outer** list, so
+rewriting its last element replaces the *batch* axis:
+
+| `input_shape` | before | after |
+|---|---|---|
+| `[[None, 8]]` | `(units,)` | `(None, units)` |
+| `[(None, 8)]` | `(units,)` | `(None, units)` |
+| `[None, 8]` | `(units,)` | `(None, units)` |
+
+This affected the tuple return of every layer and the per-key dict of
+`HierarchicalCrystalLayer`. Fixed by routing the argument through the shared
+`dl_techniques.utils.tensors.canonical_binary_input_shape`, which already
+exists for exactly this and whose docstring names `compute_output_shape` as a
+caller. No shipped behaviour changes for the tuple form, which was already
+correct.
+
+## `cluster_spread=0` is degenerate, and is now documented as such (2026-10-12)
+
+No behaviour change — the configuration stays legal — but it is now stated in
+the module docstring, carries a `.. warning::` on the constructor argument, and
+is pinned by a test, because it previously read as a working leaf discriminator.
+
+At exactly zero, every leaf of a group IS its centroid: the frame holds
+`num_macro_classes` distinct columns out of `num_macro_classes *
+num_micro_per_macro`, every leaf of a group receives an identical logit, and
+the conditional softmax within that group is uniform **by construction**
+(measured within-group logit spread: exactly `0.0` at `spread=0`, `1.19e-05` at
+`1e-06`, `2.71` at `0.25`). This is the same duplication `tiled_simplex_frame`
+produces, reached through a different door.
+
+The collapse is exact at zero rather than approximate near it, so no value below
+which it is avoided exists; a caller wanting leaf discrimination must use a
+strictly positive `cluster_spread`.
+
+## Packing's distinctness ceiling is now stated (2026-10-12)
+
+`crystal_frame`'s docstring, and `CrystalLayer`'s, claimed `width` distinct
+columns without qualification. That holds up to the sphere's own ceiling of
+`2 * dimensions` points, and below that the simplex count binds first at
+`dimensions + 1`. Past the ceiling a repeat is unavoidable rather than a
+defect: at `dimensions=1` the sphere is `S^0 = {-1, +1}`, so a 3-column frame
+has 2 distinct columns and one repeat no matter how it is built. The claim is
+now bounded in the docstring and pinned by a parametrized test that checks
+both sides of the ceiling.
+
+## Removed: a guard that could not fire
+
+`CrystalMultiHeadProjection.call()` re-checked `input_dim % num_heads == 0`.
+`_input_dim` is fixed by `build()`, which already validated it, so the check
+was structurally unreachable. Reinstatement was verified to leave the line
+**uncovered with all 63 module tests passing** — no input can reach it. Removed
+rather than left as decoration; the width check beside it, which *is* reachable,
+stays.

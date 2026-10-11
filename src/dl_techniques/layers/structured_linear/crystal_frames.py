@@ -21,8 +21,17 @@ whose columns are exact duplicates of each other. Measured on the tiled
 construction at ``dimensions=16, width=100``: **17** distinct columns out of
 100, and **490** column pairs at inner product exactly ``1.0``. An 83%-duplicated
 matrix is not a codebook; every duplicated column receives an identical logit.
-:func:`crystal_frame` fills the same width with rotated simplexes instead, so
-every column is a distinct direction.
+:func:`crystal_frame` fills the same width with rotated simplexes instead.
+
+**The ceiling, stated honestly.** Packing yields ``width`` distinct columns
+*up to a limit set by the sphere itself*: ``S^(N-1)`` contains only ``2N``
+points, so no frame can have more than ``2 * dimensions`` distinct columns, and
+below that the simplex count binds first at ``dimensions + 1``. Past the
+ceiling the duplicates are unavoidable rather than a defect -- at
+``dimensions=1`` the sphere is ``S^0 = {-1, +1}``, so a width-3 frame of 3
+distinct directions does not exist and the caller gets 2 distinct plus one
+repeat. Every configuration the layers actually use sits well inside the limit;
+the degenerate corner is documented rather than silently produced.
 
 Pure NumPy by design. These run once per layer, inside a weight initializer,
 where a ``keras.ops`` call would be tracing-time work for no benefit. The

@@ -46,6 +46,7 @@ from dl_techniques.layers.structured_linear.crystal_frames import (
     hyperspherical_simplex
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -256,22 +257,21 @@ class CrystalMultiHeadProjection(keras.layers.Layer):
         :return: Tensor of shape ``(..., output_dim)``.
         :rtype: keras.KerasTensor
         :raises ValueError: If the last dimension of ``inputs`` disagrees with
-            the width this layer was built for, or is not divisible by
-            ``num_heads``.
+            the width this layer was built for.
         """
 
-        # Re-asserted here as well as in build(): build() only ever sees the
-        # shape that arrived first, so a contract checked only there is checked
-        # exactly once.
+        # The width contract is re-asserted here, not only in build(): build()
+        # only ever sees the shape that arrived first, so a contract checked
+        # there alone is checked exactly once.
+        #
+        # Divisibility by num_heads is deliberately NOT re-checked. It is a
+        # property of `self._input_dim`, which build() has already validated and
+        # which never changes afterwards -- so a second check on it can never
+        # fire, and a guard that cannot fail is worse than no guard.
         if inputs.shape[-1] != self._input_dim:
             raise ValueError(
                 f"CrystalMultiHeadProjection was built for input_dim={self._input_dim} "
                 f"but received input_dim={inputs.shape[-1]}"
-            )
-        if self._input_dim % self.num_heads != 0:
-            raise ValueError(
-                f"input_dim ({self._input_dim}) must be divisible by num_heads "
-                f"({self.num_heads})"
             )
 
         # ops.shape returns a tuple whose elements are Python ints eagerly but
@@ -317,16 +317,20 @@ class CrystalMultiHeadProjection(keras.layers.Layer):
         Reads ``self.output_dim`` rather than the resolved value, so it works
         before ``build()`` has seen an input width.
 
-        :param input_shape: Shape tuple of the input.
+        :param input_shape: Shape of the input. A shape arriving as a list is
+            canonicalized first; ``list(input_shape)`` over ``[[None, 8]]``
+            iterates the outer list and would rewrite the batch axis.
         :type input_shape: Tuple[Optional[int], ...]
         :return: Output shape with last dimension set to ``output_dim``, or to
             the input's own width when ``output_dim`` is ``None``.
         :rtype: Tuple[Optional[int], ...]
         """
 
-        output_shape = list(input_shape)
+        shape = canonical_binary_input_shape(input_shape)
+
+        output_shape = list(shape)
         output_shape[-1] = self.output_dim if self.output_dim is not None \
-            else input_shape[-1]
+            else shape[-1]
 
         return tuple(output_shape)
 

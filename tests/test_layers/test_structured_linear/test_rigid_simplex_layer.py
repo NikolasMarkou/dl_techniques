@@ -146,6 +146,19 @@ class TestRigidSimplexLayerBuild:
         with pytest.raises(ValueError, match="Last dimension of input must be defined"):
             layer.build((None, None))
 
+    def test_call_rejects_a_width_the_layer_was_not_built_for(self):
+        """The build-time contract is re-asserted on every forward.
+
+        A contract checked only in build() is checked exactly once, against
+        whatever shape arrived first -- so a later call at a different width
+        would otherwise be silently accepted.
+        """
+        layer = RigidSimplexLayer(units=64, frame_seed=0)
+        layer(np.random.default_rng(0).standard_normal((4, 128)).astype(np.float32))
+
+        with pytest.raises(ValueError, match="was built for input_dim=128"):
+            layer(np.random.default_rng(0).standard_normal((4, 64)).astype(np.float32))
+
 
 class TestRigidSimplexLayerForwardPass:
     """Tests for forward pass computation."""
@@ -508,6 +521,21 @@ class TestRigidSimplexLayerComputeOutputShape:
         actual_output = layer(inputs)
 
         assert computed_shape == actual_output.shape
+
+    def test_a_shape_arriving_as_a_list_keeps_its_batch_axis(self):
+        """A one-shape LIST is a legal Keras shape form and must not be read as
+        a shape tuple.
+
+        ``list(input_shape)`` over ``[[None, 128]]`` iterates the OUTER list, so
+        rewriting the last element replaces the batch axis and the layer reports
+        ``(64,)`` for a ``(None, 128)`` input.
+        """
+        layer = RigidSimplexLayer(units=64)
+
+        for listed in ([[None, 128]], [(None, 128)], [None, 128]):
+            assert layer.compute_output_shape(listed) == (None, 64), (
+                f"input_shape={listed} produced the wrong output shape"
+            )
 
 
 class TestRigidSimplexLayerConfiguration:

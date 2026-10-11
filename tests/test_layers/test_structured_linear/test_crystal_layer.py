@@ -151,6 +151,45 @@ class TestCrystalLayerFrame:
             f"expected 30 distinct frame columns, got {len(distinct)}"
         )
 
+    @pytest.mark.parametrize('num_classes,expected', [(9, 9), (16, 16), (30, 30)])
+    def test_the_distinct_column_claim_holds_across_the_sphere_ceiling(
+            self, num_classes, expected
+    ):
+        """`num_classes` distinct columns is a claim with a stated limit.
+
+        ``S^(N-1)`` holds ``2N`` points, so a frame can never exceed that many
+        distinct columns. At ``input_dim=8`` the ceiling is 16, so the claim is
+        checked on both sides of it rather than only comfortably inside.
+        """
+        layer = CrystalLayer(num_classes=num_classes, seed=0)
+        layer(_sample_input(input_dim=8))
+
+        frame = ops.convert_to_numpy(layer.crystal_weights)
+        distinct = len({tuple(np.round(column, 6)) for column in frame.T})
+
+        assert distinct == expected, (
+            f"input_dim=8, num_classes={num_classes}: expected {expected} "
+            f"distinct columns, got {distinct}"
+        )
+
+    def test_beyond_the_sphere_ceiling_a_repeat_is_mathematical_not_a_defect(self):
+        """Documents the one place the distinctness claim cannot hold.
+
+        At ``input_dim=1`` the sphere is ``S^0 = {-1, +1}``: exactly two points,
+        so a 3-column frame has one repeat no matter how it is built. Pinned so
+        the ceiling is a measured fact rather than an assumption, and so a future
+        change cannot silently claim otherwise.
+        """
+        layer = CrystalLayer(num_classes=3, seed=0)
+        layer(_sample_input(input_dim=1))
+
+        frame = ops.convert_to_numpy(layer.crystal_weights)
+        distinct = len({tuple(np.round(column, 6)) for column in frame.T})
+
+        assert distinct == 2, (
+            f"S^0 has 2 points, so 2 distinct columns is the maximum; got {distinct}"
+        )
+
     def test_trainable_crystal_changes_the_weight_signature_is_not_the_instrument(self):
         """A frozen frame still produces a weight; only its flag differs."""
         frozen = CrystalLayer(num_classes=8, seed=0)
@@ -240,6 +279,11 @@ class TestCrystalLayerForwardPass:
         )
 
     def test_call_rejects_a_width_the_layer_was_not_built_for(self):
+        """The build-time contract is re-asserted on every forward.
+
+        A contract checked only in build() is checked once, against whatever
+        shape happened to arrive first.
+        """
         layer = CrystalLayer(num_classes=5, seed=0)
         layer(_sample_input(input_dim=8))
 
@@ -313,6 +357,21 @@ class TestCrystalLayerComputeOutputShape:
         inputs = _sample_input(rank=3)
 
         assert layer.compute_output_shape(inputs.shape) == tuple(layer(inputs).shape)
+
+    def test_a_shape_arriving_as_a_list_keeps_its_batch_axis(self):
+        """A one-shape LIST is a legal Keras shape form and must not be read as
+        a shape tuple.
+
+        ``list(input_shape)`` over ``[[None, 8]]`` iterates the OUTER list, so
+        rewriting the last element replaces the batch axis and the layer
+        reports ``(6,)`` for a ``(None, 8)`` input.
+        """
+        layer = CrystalLayer(num_classes=6)
+
+        for listed in ([[None, 8]], [(None, 8)], [None, 8]):
+            assert layer.compute_output_shape(listed) == (None, 6), (
+                f"input_shape={listed} produced the wrong output shape"
+            )
 
 
 class TestCrystalLayerKnobSensitivity:
