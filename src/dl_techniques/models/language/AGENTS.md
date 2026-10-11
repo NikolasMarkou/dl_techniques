@@ -90,13 +90,15 @@ Reusing a backbone under a new head:
   checkpoint) also allowed to stay fresh. GPT2 follows it, headed and
   headless, with an untied `lm_head` allowed to stay fresh the same way, but
   refuses a vocabulary change: its `decoder` is ONE layer holding the token
-  embedding, so the embedding cannot stay fresh on its own.
-- Not yet on that rule (measured): the other decoders refuse a vocabulary
-  change when headed; a headed Mamba, Mamba2, TopoLM or WaveFieldLLM loads a
-  checkpoint with fewer blocks without raising; a headless TopoLM or
-  WaveFieldLLM restores the whole file with `skip_mismatch=True`, so a layer
-  that does not fit stays fresh and only a zero-variable restore raises;
-  headless Mamba and Mamba2 restore the whole file strictly.
+  embedding, so the embedding cannot stay fresh on its own. Mamba and Mamba2
+  follow it with `embedding` as their vocabulary layer (a headless load with
+  the checkpoint's vocabulary restores the whole file strictly, which already
+  is the rule there; a headed one or a vocabulary change copies by name).
+- Not yet on that rule (measured): TopoLM and WaveFieldLLM refuse a
+  vocabulary change when headed and, headed, load a checkpoint with fewer
+  blocks without raising; headless, they restore the whole file with
+  `skip_mismatch=True`, so a layer that does not fit stays fresh and only a
+  zero-variable restore raises.
 - On a built model: `load_weights_from_checkpoint(model, path,
   skip_prefixes=(TASK_HEAD_NAME,), strict=True, allow_unloaded=())` from
   `dl_techniques.utils.weight_transfer` (add `"embeddings"` to

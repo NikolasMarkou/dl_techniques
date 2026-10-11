@@ -1939,14 +1939,21 @@ class IncludeTopCases:
         np.testing.assert_array_equal(self.backbone_hidden(headed, batch), expected)
 
     def test_a_backbone_that_does_not_fit_raises_for_a_headed_model(self, tmp_path):
-        """A vocab mismatch fails loudly instead of loading part of the backbone."""
+        """A checkpoint with fewer blocks fails loudly instead of loading part
+        of the backbone (plan-2026-10-11T004932-b83935e1 D-025).
+
+        Before D-025 the strict by-name transfer raised only on a shape
+        mismatch, so the deeper model's extra block kept its fresh init and
+        the call returned normally.
+        """
         source = self.factory()
         source(_head_batch(), training=False)
-        path = str(tmp_path / "v64.keras")
+        path = str(tmp_path / "two_blocks.keras")
         source.save(path)
-        with pytest.raises(ValueError, match="Shape mismatch on layer 'embedding'"):
-            self.factory(vocab_size=80, include_top=True, task_config=_CLF,
-                         pretrained=path)
+        deeper = dict(self.KW, num_layers=self.KW["num_layers"] + 1)
+        with pytest.raises(ValueError, match="unloaded"):
+            self.FACTORY("base", vocab_size=64, include_top=True,
+                         task_config=_CLF, pretrained=path, **deeper)
 
     def test_include_top_without_task_config_raises(self):
         with pytest.raises(ValueError, match="include_top=True needs a task_config"):

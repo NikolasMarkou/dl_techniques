@@ -32,6 +32,7 @@ from dl_techniques.models.language.bert import create_bert
 from dl_techniques.models.language.distilbert import create_distilbert
 from dl_techniques.models.language.fnet import create_fnet
 from dl_techniques.models.language.gpt2 import create_gpt2
+from dl_techniques.models.language.mamba import create_mamba, create_mamba2
 from dl_techniques.models.language.modern_bert import create_modern_bert
 
 # Keras warns "A total of N objects could not be loaded" when a whole-file
@@ -88,6 +89,17 @@ _MODELS = {
                        max_seq_len=16, tie_word_embeddings=False),
                   {"deeper": dict(depth=3), "wider": dict(embed_dim=64)},
                   ()),
+    # Headless with the checkpoint's vocabulary: whole-file strict restore;
+    # headed or a vocabulary change: by name (D-025).
+    "mamba": _Spec(lambda **k: create_mamba("base", **k),
+                   dict(vocab_size=_VOCAB, d_model=32, num_layers=2, d_state=8),
+                   {"deeper": dict(num_layers=3), "wider": dict(d_model=64)},
+                   ("embedding",)),
+    "mamba2": _Spec(lambda **k: create_mamba2("base", **k),
+                    dict(vocab_size=_VOCAB, d_model=32, num_layers=2, d_state=8,
+                         headdim=16),
+                    {"deeper": dict(num_layers=3), "wider": dict(d_model=64)},
+                    ("embedding",)),
 }
 _HEADS = {"headless": {}, "headed": dict(include_top=True, task_config=_CLF)}
 _MISFIT_CASES = [(name, misfit) for name in sorted(_MODELS)
@@ -149,8 +161,23 @@ def _assert_layers_equal(source, target, names):
     ids=[f"{name}-{misfit}" for name, misfit in _MISFIT_CASES])
 def test_a_backbone_that_does_not_fit_raises(model, misfit, head, tmp_path):
     _, path = _checkpoint(model, head, tmp_path)
-    with pytest.raises(ValueError, match="Failed to load weights|unloaded|mismatch"):
+    with pytest.raises(ValueError, match="Failed to load weights|unloaded|mismatch|could not be loaded"):
         _build(model, head, pretrained=path, **_MODELS[model].misfits[misfit])
+
+
+@pytest.mark.parametrize(
+    "model, misfit", _MISFIT_CASES,
+    ids=[f"{name}-{misfit}" for name, misfit in _MISFIT_CASES])
+def test_a_vocabulary_change_does_not_excuse_a_misfit(model, misfit, head, tmp_path):
+    """The vocabulary exemption covers the vocabulary layers, nothing else."""
+    _, path = _checkpoint(model, head, tmp_path)
+    with pytest.raises(
+        ValueError,
+        match="Failed to load weights|unloaded|mismatch|could not be loaded"
+              "|another vocab_size",
+    ):
+        _build(model, head, pretrained=path, vocab_size=_OTHER_VOCAB,
+               **_MODELS[model].misfits[misfit])
 
 
 def test_the_same_checkpoint_restores_every_layer(model, head, tmp_path):
