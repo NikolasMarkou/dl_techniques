@@ -13,9 +13,17 @@ so a pair the model reads as straddling a boundary is attenuated instead of
 hard-masked. Each block hands its group probabilities to the next as a prior, so
 boundaries persist and constituents grow with depth, and every block's break
 probabilities come back stacked as the induced grammar. Blocks are Pre-LN, ordered
-GroupAttention, TreeMHA, then FFN. ``lm_head`` is always built, and no pretrained
-weights ship with this package: ``pretrained=True`` raises ``NotImplementedError``,
-so pass a local ``.keras`` path instead.
+GroupAttention, TreeMHA, then FFN.
+
+By default (``include_top=False``) the model also owns its masked-LM projection
+``lm_head`` and returns ``last_hidden_state``, ``logits`` and ``break_probs``. With
+``include_top=True`` and a ``task_config`` it owns ONE task head from
+``layers/heads/nlp``, named ``task_head``, in place of ``lm_head`` (which is then not
+created), and returns only that head's output, exactly as ``models/language/bert``
+does. The backbone (every weight but ``lm_head`` and ``task_head``) has the same weight
+paths either way, so an encoder trained under one head is reused, weights unchanged,
+under another. No pretrained weights ship with this package: ``pretrained=True``
+raises ``NotImplementedError``, so pass a local ``.keras`` path instead.
 
 References:
     - Wang et al., 2019. Tree Transformer: Integrating Tree Structures into
@@ -44,7 +52,14 @@ from dl_techniques.layers.norms import (
     create_normalization_layer,
     NormalizationType,
 )
-from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    task_config_to_dict,
+    validate_task_head_knobs,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.model_build import materialize_sublayers
 
 from .components import (  # noqa: F401
@@ -62,10 +77,17 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 class TreeTransformer(keras.Model):
     """Encode tokens and induce break probabilities in the same forward pass.
 
-    A pure encoder with no task-specific layers beyond the language-modelling head.
-    ``call`` accepts either a tensor of token ids or a dictionary with ``input_ids``
-    and an optional ``attention_mask``, and returns a dictionary with
-    ``last_hidden_state``, ``logits`` and the per-layer ``break_probs``.
+    Headless (``include_top=False``, the default) it is an encoder with no
+    task-specific layers beyond the language-modelling head. ``call`` accepts either
+    a tensor of token ids or a dictionary with ``input_ids`` and an optional
+    ``attention_mask``, and returns a dictionary with ``last_hidden_state``,
+    ``logits`` and the per-layer ``break_probs``. With ``include_top=True`` the
+    ``lm_head`` is not created; one NLP task head is fed ``{"hidden_states":
+    last_hidden_state, "attention_mask": <the mask below, cast to the hidden-state
+    dtype>}`` and ``call`` returns what the head returns, reduced by
+    :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`: a bare tensor, or
+    a dict for question answering. The knobs, their validation and the head-swap
+    route are those of :class:`~dl_techniques.models.language.bert.model.BERT`.
 
     Architecture:
 
@@ -107,6 +129,11 @@ class TreeTransformer(keras.Model):
         └───────────────────┘
 
         every break_prob stacked ──► "break_probs"  [B, N, L, L]
+
+        include_top=True: lm_head is replaced by
+        ┌───────────────────┐
+        │ task_head         │──► finalized head output (only output)
+        └───────────────────┘
 
     Each block takes the previous block's group_prob as its prior; the first gets 0.
 
@@ -165,11 +192,31 @@ class TreeTransformer(keras.Model):
     :type normalization_type: str
     :param ffn_type: Type of feed-forward network. Defaults to "mlp".
     :type ffn_type: str
+    :param include_top: Whether the model owns a task head (and no ``lm_head``).
+        Defaults to False: no head layer and no head weight exist.
+    :type include_top: bool
+    :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of its
+        fields. Required when ``include_top`` is True, refused otherwise; stored as
+        a plain dict. ``MULTIPLE_CHOICE`` is refused.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Extra keyword arguments for the head constructor
+        (e.g. ``{"pooling_type": "mean"}``). Only valid with ``include_top=True``.
+        Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param **kwargs: Additional keyword arguments for the `keras.Model`.
+
+    :ivar lm_head: The masked-LM projection, or None when ``include_top`` is True.
+    :vartype lm_head: Optional[keras.layers.Dense]
+    :ivar task_head: The task head named ``"task_head"``, or None when
+        ``include_top`` is False.
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
 
     :raises ValueError: If ``vocab_size``, ``hidden_size``, ``num_layers`` or
         ``num_heads`` is not positive, if ``hidden_size`` is not divisible by
-        ``num_heads``, or if either dropout rate falls outside [0, 1].
+        ``num_heads``, if either dropout rate falls outside [0, 1], if
+        ``include_top=True`` comes without a ``task_config``, or if a
+        ``task_config`` or ``head_config_overrides`` comes with
+        ``include_top=False``.
     """
 
     MODEL_VARIANTS = {
@@ -224,6 +271,9 @@ class TreeTransformer(keras.Model):
         pad_token_id: int = DEFAULT_PAD_TOKEN_ID,
         normalization_type: NormalizationType = "layer_norm",
         ffn_type: FFNType = "mlp",
+        include_top: bool = False,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         """Validate the configuration and create every sub-layer.
@@ -240,6 +290,7 @@ class TreeTransformer(keras.Model):
             hidden_dropout_rate,
             attention_dropout_rate,
         )
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -254,11 +305,30 @@ class TreeTransformer(keras.Model):
         self.pad_token_id = pad_token_id
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         self._build_architecture()
+
+        # Created after every encoder layer and under its own fixed name, so
+        # the backbone's layer names, weight paths and RNG draws are the same
+        # with or without a head.
+        self.task_head = None
+        if self.include_top:
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.hidden_size,
+                head_config_overrides=self.head_config_overrides,
+            )
         logger.info(
             f"Created Tree Transformer foundation model: {self.num_layers} layers, "
             f"hidden_size={self.hidden_size}, heads={self.num_heads}"
+            + (f", task head '{self.task_config['name']}'" if self.include_top else "")
         )
 
     def _validate_config(
@@ -304,7 +374,11 @@ class TreeTransformer(keras.Model):
             )
 
     def _build_architecture(self) -> None:
-        """Create the embedding, positional encoding, blocks, final norm and LM head."""
+        """Create the embedding, positional encoding, blocks, final norm and LM head.
+
+        The LM head is created only without a task head: ``call`` never runs it
+        then, and ``build`` must not create what ``call`` does not run.
+        """
         self.embedding = keras.layers.Embedding(
             self.vocab_size, self.hidden_size, name="embedding"
         )
@@ -334,25 +408,43 @@ class TreeTransformer(keras.Model):
             epsilon=self.layer_norm_eps,
             name="final_norm",
         )
-        self.lm_head = keras.layers.Dense(
-            self.vocab_size, name="lm_head_projection"
+        # DECISION plan-2026-10-11T004932-b83935e1/D-011: no lm_head under a task head; do NOT build it
+        # always -- call() never runs it then, and it is not backbone, so no transfer may depend on it. See decisions.md.
+        self.lm_head = (
+            None if self.include_top
+            else keras.layers.Dense(self.vocab_size, name="lm_head_projection")
         )
 
     def compute_output_shape(
         self, input_shape: Any
-    ) -> Dict[str, Any]:
-        """Compute the shapes of all three outputs.
+    ) -> Any:
+        """Compute the shapes of what ``call`` returns.
+
+        Keras builds a symbolic call of this model from this method, never from
+        ``call``, so it must report what ``call`` returns in both modes.
 
         :param input_shape: A ``(batch, seq_len)`` shape, or a dict holding one under
             ``'input_ids'``.
         :type input_shape: Any
-        :return: Shapes for ``last_hidden_state``, ``logits`` and ``break_probs``.
-        :rtype: Dict[str, Any]
+        :return: Headless, shapes for ``last_hidden_state``, ``logits`` and
+            ``break_probs``. With a head, the head's output shapes after the same
+            reduction ``call`` applies: one shape, or a mapping of two or more.
+        :rtype: Any
         """
         if isinstance(input_shape, dict):
             input_shape = input_shape["input_ids"]
 
         batch_size, seq_len = input_shape
+
+        if self.include_top:
+            # finalize_head_outputs only drops and unwraps dict entries, so it
+            # applies to a dict of shapes exactly as to a dict of tensors.
+            return finalize_head_outputs(
+                self.task_head.compute_output_shape({
+                    "hidden_states": (batch_size, seq_len, self.hidden_size),
+                    "attention_mask": (batch_size, seq_len),
+                })
+            )
 
         return {
             "last_hidden_state": (batch_size, seq_len, self.hidden_size),
@@ -379,7 +471,7 @@ class TreeTransformer(keras.Model):
         self,
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
         training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Embed the ids, run every block, and return hidden states, logits and breaks.
 
         :param inputs: Token ids ``(B, L)``, or a dictionary with ``'input_ids'`` and
@@ -388,10 +480,14 @@ class TreeTransformer(keras.Model):
         :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :param training: Whether the call runs in training mode.
         :type training: Optional[bool]
-        :return: ``last_hidden_state`` ``(B, L, hidden_size)``, ``logits``
-            ``(B, L, vocab_size)`` and ``break_probs``
-            ``(B, num_layers, L, L)``.
-        :rtype: Dict[str, keras.KerasTensor]
+        :return: With ``include_top=False``, ``last_hidden_state``
+            ``(B, L, hidden_size)``, ``logits`` ``(B, L, vocab_size)`` and
+            ``break_probs`` ``(B, num_layers, L, L)``. With ``include_top=True``,
+            only the head's output reduced by ``finalize_head_outputs``: a bare
+            tensor, or a dict of two or more tensors (``start_logits`` /
+            ``end_logits`` for QA). The head's pooling sees the same resolved mask
+            the blocks do.
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :raises ValueError: If a dictionary input has no ``'input_ids'`` key.
         """
         explicit_attention_mask = None
@@ -408,12 +504,12 @@ class TreeTransformer(keras.Model):
             input_ids = inputs
 
         if explicit_attention_mask is not None:
-            mask = ops.cast(explicit_attention_mask, "int32")
+            token_mask = ops.cast(explicit_attention_mask, "int32")
         else:
-            mask = ops.cast(
+            token_mask = ops.cast(
                 ops.not_equal(input_ids, self.pad_token_id), "int32"
             )
-        mask = ops.expand_dims(mask, axis=1)
+        mask = ops.expand_dims(token_mask, axis=1)
 
         x = self.embedding(input_ids)
         x *= ops.cast(self.hidden_size, x.dtype) ** 0.5
@@ -432,6 +528,21 @@ class TreeTransformer(keras.Model):
             all_break_probs.append(break_prob)
 
         last_hidden_state = self.final_norm(x)
+
+        if self.include_top:
+            # Cast so a float16 hidden state never meets an int mask inside
+            # the head's pooling (mixed precision; QA needs a float mask).
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": last_hidden_state,
+                    "attention_mask": ops.cast(
+                        token_mask, last_hidden_state.dtype
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
+
         logits = self.lm_head(last_hidden_state)
         stacked_break_probs = ops.stack(all_break_probs, axis=1)
 
@@ -454,8 +565,16 @@ class TreeTransformer(keras.Model):
         unbuilt model is first called on a dummy batch, since name matching needs the
         layers to exist.
 
+        A ``task_head`` in the checkpoint is never copied, and this model's own head
+        (if any) keeps its fresh initialization. A checkpoint's ``lm_head`` has no
+        target in a headed model and is left out; a headless model takes it when
+        the checkpoint has one. So a checkpoint of any TreeTransformer, headless or
+        trained under any head, warm-starts a model with any other head or none. To
+        restore a whole model, head included, use ``keras.models.load_model``.
+
         :param weights_path: Path to a ``.keras`` checkpoint.
-        :param skip_prefixes: Layer-name prefixes to skip during transfer.
+        :param skip_prefixes: Further layer-name prefixes to skip during transfer,
+            on top of ``task_head``.
         :param strict: If True, raise on any shape mismatch.
         :raises FileNotFoundError: If ``weights_path`` does not exist.
         """
@@ -474,10 +593,12 @@ class TreeTransformer(keras.Model):
             }
             self(dummy_input, training=False)
         logger.info(f"Loading pretrained weights from {weights_path}")
+        # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+        # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
         report = load_weights_from_checkpoint(
             target=self,
             ckpt_path=weights_path,
-            skip_prefixes=skip_prefixes,
+            skip_prefixes=(TASK_HEAD_NAME, *skip_prefixes),
             strict=strict,
         )
         logger.info(report.summary_string())
@@ -518,9 +639,11 @@ class TreeTransformer(keras.Model):
         :param pretrained: ``False`` (default) for random init. ``True`` to attempt downloading hosted weights — this currently raises :class:`NotImplementedError` because no public Tree Transformer weights are hosted. A string path is treated as a local ``.keras`` / ``.weights.h5`` file to load.
         :param weights_dataset: Dataset key for hosted weights (kept for API parity with BERT / DistilBERT / ResNet — currently unused since no public weights are hosted).
         :param cache_dir: Optional cache directory for downloaded weights.
-        :param **kwargs: Forwarded to ``TreeTransformer.__init__``. A ``vocab_size``
-            other than :attr:`DEFAULT_VOCAB_SIZE` skips the embedding and LM head
-            during a pretrained transfer.
+        :param **kwargs: Forwarded to ``TreeTransformer.__init__``, including
+            ``include_top``, ``task_config`` and ``head_config_overrides``. A
+            ``vocab_size`` other than :attr:`DEFAULT_VOCAB_SIZE` skips the embedding
+            and LM head during a pretrained transfer; a checkpoint's task head is
+            always skipped.
 
         :return: The model, with weights loaded if a path was given.
         :rtype: TreeTransformer
@@ -603,6 +726,14 @@ class TreeTransformer(keras.Model):
                 "pad_token_id": self.pad_token_id,
                 "normalization_type": self.normalization_type,
                 "ffn_type": self.ffn_type,
+                "include_top": self.include_top,
+                "task_config": (
+                    dict(self.task_config) if self.task_config is not None else None
+                ),
+                "head_config_overrides": (
+                    dict(self.head_config_overrides)
+                    if self.head_config_overrides is not None else None
+                ),
             }
         )
         return config
@@ -658,10 +789,10 @@ def create_tree_transformer(
     :param pretrained: Boolean or string. If ``True``, attempts to load pretrained weights for the chosen ``weights_dataset`` (currently raises :class:`NotImplementedError` — no public Tree Transformer weights are hosted). If a string, treated as a path to a local ``.keras`` / ``.weights.h5`` file.
     :param weights_dataset: String, dataset key for pretrained weights (kept for API parity with other foundation models).
     :param cache_dir: Optional string, directory to cache downloaded weights.
-    :param **kwargs: Additional arguments forwarded to ``TreeTransformer.__init__`` (e.g. ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``).
+    :param **kwargs: Additional arguments forwarded to ``TreeTransformer.__init__`` (e.g. ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``, or ``include_top=True`` with a ``task_config`` for a model with a task head). A local ``pretrained`` path never restores a checkpoint's task head.
 
-    :return: TreeTransformer encoder instance.
-    :raises ValueError: If ``variant`` is unknown, or a forwarded argument is invalid.
+    :return: TreeTransformer instance.
+    :raises ValueError: If ``variant`` is unknown, or a forwarded argument is invalid (including inconsistent head knobs, see :class:`TreeTransformer`).
     :raises NotImplementedError: If ``pretrained=True``.
 
     Example:
@@ -673,6 +804,13 @@ def create_tree_transformer(
         >>>
         >>> # Load from local weights file
         >>> model = create_tree_transformer("base", pretrained="path/to/weights.keras")
+        >>>
+        >>> # Same encoder with a NER head instead of the LM head
+        >>> ner = create_tree_transformer(
+        ...     "tiny", include_top=True,
+        ...     task_config=NLPTaskConfig(
+        ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+        ...         num_classes=9))
     """
     if vocab_size is not None:
         kwargs["vocab_size"] = vocab_size
@@ -683,105 +821,3 @@ def create_tree_transformer(
         cache_dir=cache_dir,
         **kwargs,
     )
-
-
-# ---------------------------------------------------------------------
-# Integration with NLP Task Heads
-# ---------------------------------------------------------------------
-
-
-def create_tree_transformer_with_head(
-    tree_transformer_variant: str,
-    task_config: NLPTaskConfig,
-    pretrained: Union[bool, str] = False,
-    weights_dataset: str = "uncased",
-    cache_dir: Optional[str] = None,
-    encoder_config_overrides: Optional[Dict[str, Any]] = None,
-    head_config_overrides: Optional[Dict[str, Any]] = None,
-) -> keras.Model:
-    """Build an end-to-end model: a Tree Transformer encoder plus a task head.
-
-    The functional model takes ``input_ids`` only, and the head receives only
-    ``hidden_states``; the encoder's ``logits`` and ``break_probs`` are not wired
-    through, and the head gets no attention mask.
-
-    .. code-block:: text
-
-        {"input_ids": [B, L]}
-                 │
-                 ▼
-        ┌───────────────────────┐
-        │ TreeTransformer       │
-        └───────────────────────┘
-                 │  last_hidden_state
-                 ▼
-        ┌───────────────────────┐
-        │ nlp task head         │
-        └───────────────────────┘
-                 │
-                 ▼
-            task outputs
-
-    :param tree_transformer_variant: The Tree Transformer variant (e.g., "base").
-    :type tree_transformer_variant: str
-    :param task_config: An `NLPTaskConfig` object defining the task.
-    :type task_config: NLPTaskConfig
-    :param pretrained: If ``True``, attempts to load hosted weights — this
-        currently raises ``NotImplementedError`` (no public Tree Transformer
-        weights are hosted). Pass a string path to a local
-        ``.keras`` / ``.weights.h5`` file to load weights instead.
-    :type pretrained: Union[bool, str]
-    :param weights_dataset: Dataset key for hosted weights ("uncased"). Kept
-        for API parity; currently unused since no public weights are hosted.
-    :type weights_dataset: str
-    :param cache_dir: Directory to cache downloaded weights.
-    :type cache_dir: Optional[str]
-    :param encoder_config_overrides: Dict to override default encoder config.
-    :type encoder_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Dict to override default head config.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete `keras.Model` ready for the specified task.
-    :rtype: keras.Model
-    :raises ValueError: If the variant is unknown, or an override is invalid.
-    :raises NotImplementedError: If ``pretrained=True``.
-    """
-    encoder_config_overrides = encoder_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-    logger.info(
-        f"Creating TreeTransformer-{tree_transformer_variant} with a '{task_config.name}' head."
-    )
-
-    tree_encoder = TreeTransformer.from_variant(
-        tree_transformer_variant,
-        pretrained=pretrained,
-        weights_dataset=weights_dataset,
-        cache_dir=cache_dir,
-        **encoder_config_overrides,
-    )
-
-    task_head = create_nlp_head(
-        task_config=task_config,
-        input_dim=tree_encoder.hidden_size,
-        **head_config_overrides,
-    )
-
-    inputs = {
-        "input_ids": keras.Input(
-            shape=(None,), dtype="int32", name="input_ids"
-        )
-    }
-    encoder_outputs = tree_encoder(inputs)
-
-    head_inputs = {"hidden_states": encoder_outputs["last_hidden_state"]}
-    task_outputs = task_head(head_inputs)
-
-    model_name = (
-        f"tree_transformer_{tree_transformer_variant}_with_{task_config.name}_head"
-    )
-    model = keras.Model(inputs=inputs, outputs=task_outputs, name=model_name)
-    logger.info(
-        f"Successfully created model with {model.count_params():,} parameters."
-    )
-    return model
-
-# ---------------------------------------------------------------------

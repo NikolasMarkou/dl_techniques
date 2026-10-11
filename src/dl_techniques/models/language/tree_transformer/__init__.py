@@ -1,11 +1,9 @@
 from dl_techniques.models.language.tree_transformer.model import (
     TreeTransformer,
     create_tree_transformer,
-    create_tree_transformer_with_head,
 )
 
 __all__ = [
     "TreeTransformer",
     "create_tree_transformer",
-    "create_tree_transformer_with_head",
 ]

@@ -9,11 +9,11 @@ An implementation of the **Tree Transformer** in **Keras 3**. This implementatio
 The architecture's key innovation is its **Hierarchical Group Attention** mechanism, which enables the model to infer syntactic structure as a byproduct of standard language modeling.
 
 ### Key Features
--   **Pure Foundation Model:** The `TreeTransformer` class is a pure encoder, separate from any task-specific heads.
+-   **Pure Foundation Model:** By default (`include_top=False`) the `TreeTransformer` class is an encoder plus its masked-LM projection, separate from any task-specific heads.
 -   **Keras 3 Native:** Built with `keras.ops` for backend-agnostic performance.
 -   **Fully Serializable:** All five custom classes register through `register_dl_technique` (`dl_techniques.utils.keras_registration`) for easy saving and loading with `.keras` files — `TreeTransformer` under `dl_techniques.models.tree_transformer.model`, and `PositionalEncoding`, `GroupAttention`, `TreeMHA`, `TreeTransformerBlock` under `dl_techniques.models.tree_transformer.components`.
 -   **Pre-built Variants:** Includes `tiny`, `small`, `base`, and `large` configurations via the `from_variant` factory method.
--   **Task Integration:** Comes with a `create_tree_transformer_with_head` factory to easily combine the encoder with heads for downstream tasks like classification or NER.
+-   **Task Integration:** `include_top=True` with a `task_config` gives the model ONE task head from `layers/heads/nlp` (classification, NER, QA, ...) in place of the LM projection, so a downstream model is the same class, saved and loaded like the encoder.
 
 ---
 
@@ -177,7 +177,7 @@ print(f"Break probabilities shape: {outputs['break_probs'].shape}")
 | `GroupAttention` | `keras.layers.Layer` | The core layer that computes unsupervised constituency probabilities. |
 | `TreeMHA` | `keras.layers.Layer` | A multi-head attention layer whose scores are modulated by the output of `GroupAttention`. |
 | `PositionalEncoding` | `keras.layers.Layer` | Sinusoidal positional encoding applied to the token embeddings before the encoder stack. |
-| `create_tree_transformer_with_head()` | Function | A factory to build a complete end-to-end model by combining a `TreeTransformer` with a task-specific head (e.g., for NER). |
+| `create_tree_transformer()` | Function | Module-level factory delegating to `from_variant`; pass `include_top=True` and a `task_config` for a model with a task head. |
 
 ---
 
@@ -246,12 +246,16 @@ mlm.compile(optimizer=keras.optimizers.AdamW(learning_rate=5e-5, clipnorm=1.0))
 
 ### Example 2: Fine-tuning for a Downstream Task (NER)
 
-Use the `create_tree_transformer_with_head` factory to easily build a model for any NLP task.
+Pass `include_top=True` and a `task_config`. The model then owns one task head, named
+`task_head`, in place of the masked-LM projection `lm_head` (which is not created), and
+returns only the head's output: a bare logits tensor for every task but question
+answering (a `start_logits`/`end_logits` dict). The head pools under the same mask the
+blocks use: the input's `attention_mask`, else `input_ids != pad_token_id`.
 
 ```python
 import keras
-from dl_techniques.models.language.tree_transformer import create_tree_transformer_with_head
-from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.tree_transformer import create_tree_transformer
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the task configuration
 ner_config = NLPTaskConfig(
@@ -260,16 +264,20 @@ ner_config = NLPTaskConfig(
     num_classes=9  # e.g., B-PER, I-PER, B-LOC, etc. + O
 )
 
-# 2. Create the complete model
-# This function handles creating the TreeTransformer base and adding the NER head.
-ner_model = create_tree_transformer_with_head(
-    tree_transformer_variant="base",
+# 2. Create the complete model: the same class, with a task head.
+#    Add pretrained="path/to/encoder.keras" to warm-start the backbone from a
+#    local checkpoint (headless/MLM, or trained under any other head): the
+#    checkpoint's task_head is never copied, and its lm_head has no target here.
+ner_model = create_tree_transformer(
+    "base",
+    vocab_size=30000,
+    include_top=True,
     task_config=ner_config,
-    encoder_config_overrides={"vocab_size": 30000}
 )
+ner_model.build((None, 128))  # materialize the weights, so summary() counts them
 ner_model.summary()
 
-# 3. Compile and fine-tune
+# 3. Compile and fine-tune: the output is bare logits (batch, seq_len, 9)
 ner_model.compile(
     optimizer=keras.optimizers.Adam(3e-5),
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
@@ -277,6 +285,11 @@ ner_model.compile(
 )
 # ner_model.fit(ner_dataset, epochs=3)
 ```
+
+The backbone (every weight but `lm_head_projection/` and `task_head/`) has the same weight
+paths with or without a head and with any task, so a backbone trained under one head is
+reused, weights unchanged, under another through `pretrained=<path>`. To restore a whole
+model, head included, use `keras.models.load_model`.
 
 ### Example 3: Interpreting the Learned Tree
 
@@ -348,6 +361,8 @@ This implementation includes a `pytest` suite at `tests/test_models/test_tree_tr
 -   Correctness of output shapes for all model variants.
 -   Serialization / deserialization round-trip (max-abs-diff 0.0 on logits).
 -   End-to-end integration with task heads, including gradient flow checks.
+-   The in-model task head (`include_top`): output contract, no `lm_head` under a head,
+    config and `.keras` round trips, build parity, backbone transfer across heads.
 -   Edge cases: padding behavior, `seq_len == 1`, `seq_len == max_len`.
 -   Mixed-precision (`mixed_float16`) NaN regression test.
 -   Explicit `attention_mask` honoring in dict input.
@@ -361,11 +376,11 @@ This implementation includes a `pytest` suite at `tests/test_models/test_tree_tr
     `TreeTransformer.from_variant(..., pretrained=True)` raises a clear
     `NotImplementedError`. Pass `pretrained=path/to/checkpoint.keras` to load
     locally-trained weights, or omit the argument for random init.
--   **`lm_head` is part of the foundation model**: The output `logits` head is
-    always built. For pure-encoder use (downstream fine-tuning) this is wasted
-    weight. Strip it by saving only the encoder via the training script
-    (`src/train/tree_transformer/pretrain.py` saves a separate
-    `pretrained_tree_transformer_encoder_*.keras` artifact).
+-   **`lm_head` is part of the headless model**: with `include_top=False` the output
+    `logits` projection is always built, which is wasted weight for pure-encoder use.
+    A model with a task head (`include_top=True`) does not create it. A headed model
+    therefore has no LM head to save: warm-starting a headless model from a headed
+    checkpoint leaves `lm_head` at its initialization.
 
 ---
 

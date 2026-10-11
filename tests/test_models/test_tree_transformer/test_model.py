@@ -8,7 +8,8 @@ This module provides extensive testing for the Tree Transformer implementation i
 - Model variant creation and configuration.
 - Serialization and deserialization of the pure encoder.
 - Error handling and edge cases.
-- Factory function testing for integrating the encoder with task heads.
+- The in-model task head (``include_top=True``) that replaced the functional
+  ``create_tree_transformer_with_head`` wrapper.
 - End-to-end integration testing for gradient flow and training.
 """
 
@@ -18,12 +19,12 @@ import keras
 import tensorflow as tf
 import tempfile
 import os
+import re
 from typing import Dict, Any
 
 from dl_techniques.models.language.tree_transformer.model import (
     TreeTransformer,
     create_tree_transformer,
-    create_tree_transformer_with_head,
 )
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
@@ -378,17 +379,24 @@ class TestTreeTransformerEdgeCases:
 
 
 class TestTreeTransformerIntegrationFactory:
-    """Test the integration factory `create_tree_transformer_with_head`."""
+    """``create_tree_transformer(..., include_top=True)``: the in-model task head.
+
+    The functional ``create_tree_transformer_with_head`` this replaced returned
+    the head's raw dict and gave the head no attention mask; the in-model head
+    returns the finalized output (bare logits here) and pools under the mask
+    the blocks use.
+    """
 
     def test_create_with_classification_head(self):
-        """Test creating a TreeTransformer model for sequence classification."""
+        """Sequence classification: bare logits, ``probabilities`` dropped."""
         task_config = NLPTaskConfig(
             name="sentiment",
             task_type=NLPTaskType.SENTIMENT_ANALYSIS,
             num_classes=3,
         )
-        model = create_tree_transformer_with_head("tiny", task_config)
-        assert isinstance(model, keras.Model)
+        model = create_tree_transformer(
+            "tiny", include_top=True, task_config=task_config)
+        assert isinstance(model, TreeTransformer)
 
         inputs = {
             "input_ids": keras.ops.cast(
@@ -396,20 +404,19 @@ class TestTreeTransformerIntegrationFactory:
             ),
         }
         outputs = model(inputs, training=False)
-        assert isinstance(outputs, dict)
-        assert "logits" in outputs
-        assert "probabilities" in outputs
-        assert outputs["logits"].shape == (2, 3)
+        assert not isinstance(outputs, dict)
+        assert outputs.shape == (2, 3)
 
     def test_create_with_token_classification_head(self):
-        """Test creating a TreeTransformer model for token classification."""
+        """Token classification: bare logits, ``predictions`` dropped."""
         task_config = NLPTaskConfig(
             name="ner",
             task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
             num_classes=9,
         )
-        model = create_tree_transformer_with_head("tiny", task_config)
-        assert isinstance(model, keras.Model)
+        model = create_tree_transformer(
+            "tiny", include_top=True, task_config=task_config)
+        assert isinstance(model, TreeTransformer)
 
         inputs = {
             "input_ids": keras.ops.cast(
@@ -417,9 +424,8 @@ class TestTreeTransformerIntegrationFactory:
             ),
         }
         outputs = model(inputs, training=False)
-        assert isinstance(outputs, dict)
-        assert "logits" in outputs
-        assert outputs["logits"].shape == (2, 32, 9)
+        assert not isinstance(outputs, dict)
+        assert outputs.shape == (2, 32, 9)
 
 
 class TestTreeTransformerIntegration:
@@ -434,13 +440,12 @@ class TestTreeTransformerIntegration:
             num_classes=9,
         )
         # Ensure configuration is small and testable
-        return create_tree_transformer_with_head(
+        return create_tree_transformer(
             "tiny",
-            task_config,
-            encoder_config_overrides={
-                "hidden_size": 64,
-                "intermediate_size": 256,
-            },
+            include_top=True,
+            task_config=task_config,
+            hidden_size=64,
+            intermediate_size=256,
         )
 
     def test_gradient_flow_integration(self, token_classification_model):
@@ -454,8 +459,7 @@ class TestTreeTransformerIntegration:
         }
 
         with tf.GradientTape() as tape:
-            outputs = token_classification_model(inputs, training=True)
-            logits = outputs["logits"]
+            logits = token_classification_model(inputs, training=True)
             targets = keras.ops.one_hot(
                 keras.ops.cast(
                     keras.random.uniform((batch_size, seq_length), maxval=9),
@@ -477,13 +481,12 @@ class TestTreeTransformerIntegration:
         )
         non_none_grads = [g for g in gradients if g is not None]
 
-        # The base model's lm_head is not used, so it won't have gradients.
-        # This is expected behavior.
-        num_expected_trainable_weights = len(token_classification_model.trainable_weights)
-        num_lm_head_weights = 2 # kernel and bias
-
+        # With a task head the model creates no lm_head, so EVERY trainable
+        # weight is on the loss path. The wrapper this replaced carried an
+        # unused lm_head and excused its 2 weights (kernel, bias) from here.
         assert len(non_none_grads) > 0
-        assert len(non_none_grads) == (num_expected_trainable_weights - num_lm_head_weights)
+        assert len(non_none_grads) == len(
+            token_classification_model.trainable_weights)
         # A Euclidean norm is never negative: the previous
         # `all(norm >= 0.0)` was true of an all-zero gradient, i.e. of a model
         # in which nothing trains. Per-weight positive floor instead, so one
@@ -499,8 +502,6 @@ class TestTreeTransformerIntegration:
         for weight, grad in zip(
             token_classification_model.trainable_weights, gradients
         ):
-            if grad is None:  # the unused lm_head, asserted for above
-                continue
             g = keras.ops.convert_to_numpy(grad)
             assert np.isfinite(g).all(), f"non-finite gradient at {weight.path}"
             assert float(np.max(np.abs(g))) > 0.0, (
@@ -527,7 +528,7 @@ class TestTreeTransformerIntegration:
                 outputs = token_classification_model(inputs, training=True)
                 loss = keras.ops.mean(
                     keras.losses.sparse_categorical_crossentropy(
-                        labels, outputs["logits"], from_logits=True
+                        labels, outputs, from_logits=True
                     )
                 )
             if initial_loss is None:
@@ -797,7 +798,9 @@ class TestTreeTransformerIter1Refactor:
     - ``create_tree_transformer`` module-level factory exists and works.
     - ``from_variant(pretrained=True)`` raises ``NotImplementedError``
       instead of silently falling back to random init.
-    - Package-level public API is exactly the trimmed 3-name surface.
+    - Package-level public API is exactly the trimmed 2-name surface (the
+      third, ``create_tree_transformer_with_head``, was replaced by
+      ``include_top`` in plan-2026-10-11T004932-b83935e1).
     """
 
     def test_create_tree_transformer_factory(self):
@@ -832,15 +835,15 @@ class TestTreeTransformerIter1Refactor:
             TreeTransformer.from_variant("tiny", pretrained=True)
 
     def test_public_api_surface(self):
-        """Package `__init__` exposes only the 3 public symbols."""
+        """Package `__init__` exposes only the 2 public symbols."""
         import dl_techniques.models.language.tree_transformer as pkg
 
         expected = {
             "TreeTransformer",
             "create_tree_transformer",
-            "create_tree_transformer_with_head",
         }
         assert set(pkg.__all__) == expected
+        assert not hasattr(pkg, "create_tree_transformer_with_head")
         for name in expected:
             assert hasattr(pkg, name), f"missing public symbol: {name}"
 
@@ -902,7 +905,8 @@ class TestTreeTransformerComponentsSplitLockIn:
         # Top-level + factories live here.
         assert hasattr(m, "TreeTransformer")
         assert callable(getattr(m, "create_tree_transformer", None))
-        assert callable(getattr(m, "create_tree_transformer_with_head", None))
+        # Replaced by `include_top` on the class (plan-2026-10-11T004932-b83935e1).
+        assert not hasattr(m, "create_tree_transformer_with_head")
         # Sub-layers are re-exports — verify they live in components, not model.
         assert m.GroupAttention.__module__ == "dl_techniques.models.language.tree_transformer.components"
         assert m.TreeTransformer.__module__ == "dl_techniques.models.language.tree_transformer.model"
@@ -1037,3 +1041,387 @@ class TestGroupProbIsAppliedOnTheKeyAxis:
             "group_prob is constant, so multiplying the attention weights by it "
             "is a global rescale and carries no constituency structure"
         )
+
+
+# ---------------------------------------------------------------------
+# include_top: the in-model task head (plan-2026-10-11T004932-b83935e1)
+# ---------------------------------------------------------------------
+
+#: Small enough that every arm below runs in about a second.
+_HEAD_KW: Dict[str, Any] = {
+    "vocab_size": 64,
+    "hidden_size": 32,
+    "num_layers": 2,
+    "num_heads": 2,
+    "intermediate_size": 64,
+    "max_len": 16,
+}
+#: The factory-route transfer arms keep the DEFAULT vocabulary: any other
+#: ``vocab_size`` makes ``from_variant`` skip ``embedding`` and ``lm_head``,
+#: and the embedding is part of the backbone those arms compare by value.
+_XFER_KW: Dict[str, Any] = {
+    k: v for k, v in _HEAD_KW.items() if k != "vocab_size"
+}
+_SEQ = 8
+_CLF = NLPTaskConfig(
+    name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3
+)
+_NER = NLPTaskConfig(
+    name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9
+)
+#: Same head class and weight shapes as ``_CLF``, a different task.
+_SPAM = NLPTaskConfig(
+    name="spam", task_type=NLPTaskType.SPAM_DETECTION, num_classes=3
+)
+#: The masked-LM projection: NOT backbone. It exists only headless, and a
+#: task head replaces it (D-011 of plan-2026-10-11T004932-b83935e1).
+_LM_HEAD = "lm_head_projection"
+#: ``GroupAttention``, its norm and ``TreeMHA`` carry no explicit ``name=``,
+#: so their path segment embeds the process-global Keras auto-name counter
+#: (``group_attention_16``) and differs between two models built in one
+#: process, head or no head. Measured; the same three stems are the package's
+#: ``AUTONAME_STEMS`` entry in ``test_roundtrip_instrument_family.py``. The
+#: counter is stripped from exactly these segments before paths are compared.
+_AUTONAMED = re.compile(r"^(group_attention|layer_normalization|tree_mha)_\d+$")
+
+
+def _canonical(path: str) -> str:
+    return "/".join(_AUTONAMED.sub(r"\1", part) for part in path.split("/"))
+
+
+def _np(tensor) -> np.ndarray:
+    return np.asarray(keras.ops.convert_to_numpy(tensor))
+
+
+def _head_batch() -> Dict[str, np.ndarray]:
+    ids = np.random.default_rng(0).integers(1, 64, (2, _SEQ)).astype("int32")
+    mask = np.ones_like(ids)
+    mask[1, 5:] = 0
+    return {"input_ids": ids, "attention_mask": mask}
+
+
+def _relative_paths(model: keras.Model) -> list:
+    """Weight paths without the model-root segment (guide 8.3), canonical."""
+    return sorted(_canonical(w.path.split("/", 1)[-1]) for w in model.weights)
+
+
+def _backbone_hidden(model: TreeTransformer, batch: Dict[str, np.ndarray]) -> np.ndarray:
+    """``last_hidden_state`` of ``model``'s backbone, whatever its top.
+
+    Read through a headless twin rebuilt from the model's own config and given
+    the model's own backbone weights, layer by layer; the twin's ``lm_head``
+    has no counterpart in a headed model and does not feed
+    ``last_hidden_state``.
+    """
+    config = model.get_config()
+    config.update(include_top=False, task_config=None, head_config_overrides=None)
+    config.pop("name", None)
+    twin = TreeTransformer.from_config(config)
+    twin(batch, training=False)
+    for layer in twin.layers:
+        if layer.name != _LM_HEAD:
+            layer.set_weights(model.get_layer(layer.name).get_weights())
+    return _np(twin(batch, training=False)["last_hidden_state"])
+
+
+def _randomized(model: TreeTransformer, seed: int) -> TreeTransformer:
+    """Overwrite every weight, so a restored value cannot match by init luck."""
+    assert model.weights, "build the model before randomizing it"
+    rng = np.random.default_rng(seed)
+    for w in model.weights:
+        w.assign(rng.normal(0.0, 0.1, size=tuple(w.shape)).astype(w.dtype))
+    return model
+
+
+class TestTreeTransformerIncludeTop:
+    """The ``include_top`` / ``task_config`` / ``head_config_overrides`` knobs."""
+
+    def test_head_output_shapes(self):
+        """Bare logits for single-output heads, a dict for QA; nothing else."""
+        batch = _head_batch()
+        out = TreeTransformer(**_HEAD_KW, include_top=True, task_config=_CLF)(
+            batch, training=False)
+        assert not isinstance(out, dict) and tuple(out.shape) == (2, 3)
+
+        out = TreeTransformer(**_HEAD_KW, include_top=True, task_config=_NER)(
+            batch, training=False)
+        assert not isinstance(out, dict) and tuple(out.shape) == (2, _SEQ, 9)
+
+        qa = TreeTransformer(**_HEAD_KW, include_top=True, task_config=NLPTaskConfig(
+            name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=2))
+        out = qa(batch, training=False)
+        # No `logits` / `break_probs` / `last_hidden_state` beside the head's keys.
+        assert set(out) == {"start_logits", "end_logits"}
+        assert tuple(out["start_logits"].shape) == (2, _SEQ)
+
+    def test_a_task_head_replaces_the_lm_head(self):
+        """``build()`` must not create the LM head ``call()`` no longer runs."""
+        headed = TreeTransformer(**_HEAD_KW, include_top=True, task_config=_CLF)
+        headed(_head_batch(), training=False)
+        assert headed.lm_head is None
+        assert not [w.path for w in headed.weights if _LM_HEAD in w.path]
+
+        headless = TreeTransformer(**_HEAD_KW)
+        headless(_head_batch(), training=False)
+        assert headless.lm_head is not None
+        assert sorted(w.path.split("/", 1)[-1] for w in headless.weights
+                      if _LM_HEAD in w.path) == [
+            f"{_LM_HEAD}/bias", f"{_LM_HEAD}/kernel"]
+
+    def test_symbolic_output_matches_the_eager_one(self):
+        """A symbolic call reports what ``call`` returns, headless or headed."""
+        model = TreeTransformer(**_HEAD_KW, include_top=True, task_config=_NER)
+        symbolic = model(keras.Input(shape=(None,), dtype="int32"))
+        assert not isinstance(symbolic, dict)
+        assert tuple(symbolic.shape) == (None, None, 9)
+        headless = TreeTransformer(**_HEAD_KW)
+        symbolic = headless(keras.Input(shape=(None,), dtype="int32"))
+        assert set(symbolic) == {"last_hidden_state", "logits", "break_probs"}
+
+    def test_the_head_pools_under_the_pad_derived_mask(self):
+        """Without an ``attention_mask`` the head sees ``input_ids != pad_token_id``.
+
+        The wrapper this replaced gave the head no mask at all. Mean pooling
+        makes the head's output depend on its mask, so the model's output is
+        compared against its own head applied by hand to the backbone's hidden
+        states, once under the pad-derived mask and once under none.
+        """
+        model = TreeTransformer(**_HEAD_KW, include_top=True, task_config=_CLF,
+                                head_config_overrides={"pooling_type": "mean"})
+        ids = np.random.default_rng(1).integers(1, 64, (2, _SEQ)).astype("int32")
+        ids[1, 5:] = 0
+        out = _np(model(ids, training=False))
+
+        hidden = _backbone_hidden(model, {"input_ids": ids})
+        masked = _np(model.task_head(
+            {"hidden_states": hidden,
+             "attention_mask": (ids != 0).astype("float32")}, training=False
+        )["logits"])
+        unmasked = _np(model.task_head(
+            {"hidden_states": hidden}, training=False)["logits"])
+        np.testing.assert_allclose(out, masked, atol=1e-6, rtol=0)
+        assert not np.allclose(masked[1], unmasked[1], atol=1e-6, rtol=0), (
+            "fixture invalid: the head's mask makes no difference")
+
+    def test_config_round_trip_with_a_head(self):
+        """Every knob is serialized; ``task_config`` as a plain JSON dict."""
+        import json
+
+        overrides = {"pooling_type": "mean"}
+        model = TreeTransformer(**_HEAD_KW, include_top=True, task_config=_CLF,
+                                head_config_overrides=overrides)
+        config = model.get_config()
+        assert config["include_top"] is True
+        assert config["head_config_overrides"] == overrides
+        assert isinstance(config["task_config"], dict)
+        assert config["task_config"]["task_type"] == "text_classification"
+        json.dumps(config)  # plain data, no enum or dataclass inside
+
+        from_dict = TreeTransformer(**_HEAD_KW, include_top=True,
+                                    task_config=dict(config["task_config"]),
+                                    head_config_overrides=overrides)
+        assert from_dict.get_config()["task_config"] == config["task_config"]
+
+        rebuilt = TreeTransformer.from_config(config)
+        assert rebuilt.get_config() == config
+        assert rebuilt.task_head.pooling_type == "mean"
+
+        batch = _head_batch()
+        model(batch, training=False)
+        rebuilt(batch, training=False)
+        assert _relative_paths(rebuilt) == _relative_paths(model)
+        rebuilt.set_weights(model.get_weights())
+        np.testing.assert_array_equal(
+            _np(rebuilt(batch, training=False)), _np(model(batch, training=False)))
+
+    def test_a_config_without_the_head_keys_still_loads(self):
+        """A config written before the knobs existed rebuilds the headless model."""
+        config = TreeTransformer(**_HEAD_KW).get_config()
+        for key in ("include_top", "task_config", "head_config_overrides"):
+            config.pop(key)
+        model = TreeTransformer.from_config(config)
+        assert model.include_top is False and model.task_head is None
+        assert model.lm_head is not None
+
+    def test_keras_round_trip_restores_the_head_by_value(self, tmp_path):
+        """Weights compared BEFORE the first call on the loaded model (guide 8.4)."""
+        model = TreeTransformer(**_HEAD_KW, include_top=True, task_config=_CLF)
+        batch = _head_batch()
+        before = _np(model(batch, training=False))
+        saved = [_np(w).copy() for w in model.weights]
+        head_saved = [_np(w).copy() for w in model.task_head.weights]
+        assert head_saved, "the head has no weights to compare"
+
+        path = str(tmp_path / "tree_head.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert len(loaded.weights) == len(saved)
+        for s, w in zip(saved, loaded.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0,
+                                       err_msg=f"{w.path} not restored")
+        for s, w in zip(head_saved, loaded.task_head.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0)
+        np.testing.assert_array_equal(_np(loaded(batch, training=False)), before)
+
+    @pytest.mark.parametrize("include_top", [False, True])
+    def test_explicit_build_matches_lazy_build(self, include_top):
+        """``build()`` materializes exactly the tree ``call()`` runs (guide 8.1)."""
+        kw = dict(_HEAD_KW, include_top=include_top,
+                  task_config=_CLF if include_top else None)
+        explicit = TreeTransformer(**kw)
+        explicit.build((None, _SEQ))
+        lazy = TreeTransformer(**kw)
+        lazy(_head_batch(), training=False)
+        assert _relative_paths(explicit) == _relative_paths(lazy)
+        assert explicit.count_params() == lazy.count_params() > 0
+
+    def test_a_disabled_head_builds_no_head_weights(self):
+        """Anti-vacuity sibling of the parity arm (guide 8.3)."""
+        headless = TreeTransformer(**_HEAD_KW)
+        headless(_head_batch(), training=False)
+        assert headless.task_head is None
+        assert not [w.path for w in headless.weights if "task_head" in w.path]
+
+        headed = TreeTransformer(**_HEAD_KW, include_top=True, task_config=_CLF)
+        headed(_head_batch(), training=False)
+        assert [w.path for w in headed.weights if "/task_head/" in w.path]
+
+    def test_the_encoder_weight_paths_do_not_depend_on_the_head(self):
+        """The backbone's paths are identical across tops (D-005 of the plan).
+
+        The backbone is every weight except the two tops: ``lm_head_projection/``
+        (headless only, the masked-LM projection) and ``task_head/`` (headed
+        only). Measured on this config: 48 backbone paths, plus 2 for the LM
+        head headless (50), plus 8 for a TEXT_CLASSIFICATION head headed (56).
+        """
+        def weights(**kw):
+            m = TreeTransformer(**_HEAD_KW, name="tree", **kw)
+            m(_head_batch(), training=False)
+            return [_canonical(w.path) for w in m.weights]
+
+        headless = weights()
+        backbone = [p for p in headless if not p.startswith(f"tree/{_LM_HEAD}/")]
+        assert (len(backbone), len(headless)) == (48, 50)
+        for task in (_CLF, _NER):
+            headed = weights(include_top=True, task_config=task)
+            assert [p for p in headed if not p.startswith("tree/task_head/")] == (
+                backbone), task.name
+            assert all(p.startswith("tree/task_head/")
+                       for p in headed[len(backbone):]), task.name
+            assert len(headed) > len(backbone)
+
+    def test_backbone_weights_transfer_across_heads(self, tmp_path):
+        """A backbone trained under one head is reused, same weights, under another.
+
+        The supported route is a local ``pretrained`` path, which copies the
+        backbone by layer name and never the checkpoint's ``task_head``
+        (D-007 of plan-2026-10-11T004932-b83935e1). Exercised into a
+        TOKEN_CLASSIFICATION model and into a headless one, whose ``lm_head``
+        has no source in a headed checkpoint and keeps its initialization.
+        """
+        source = create_tree_transformer("tiny", include_top=True,
+                                         task_config=_CLF, **_XFER_KW)
+        batch = _head_batch()
+        source(batch, training=False)
+        _randomized(source, 1)
+        path = str(tmp_path / "trained_under_clf.keras")
+        source.save(path)
+        reference = _backbone_hidden(source, batch)
+
+        token = create_tree_transformer("tiny", include_top=True, task_config=_NER,
+                                        pretrained=path, **_XFER_KW)
+        headless = create_tree_transformer("tiny", pretrained=path, **_XFER_KW)
+
+        np.testing.assert_array_equal(_backbone_hidden(token, batch), reference)
+        np.testing.assert_array_equal(
+            _np(headless(batch, training=False)["last_hidden_state"]), reference)
+        assert tuple(token(batch, training=False).shape) == (2, _SEQ, 9)
+
+        # Anti-vacuity: a fresh backbone does NOT reproduce the reference.
+        fresh = create_tree_transformer("tiny", **_XFER_KW)
+        assert not np.array_equal(
+            _np(fresh(batch, training=False)["last_hidden_state"]), reference)
+
+    def test_an_equal_shape_head_of_another_task_is_not_copied(self, tmp_path):
+        """A SPAM head is not filled from a CLF checkpoint's head of equal shape.
+
+        With the old ``skip_prefixes=()`` default the transfer matched the head
+        by layer name and copied it silently, because the shapes agree
+        (plan-2026-10-11T004932-b83935e1 D-007).
+        """
+        source = create_tree_transformer("tiny", include_top=True,
+                                         task_config=_CLF, **_XFER_KW)
+        batch = _head_batch()
+        source(batch, training=False)
+        _randomized(source, 2)
+        path = str(tmp_path / "clf.keras")
+        source.save(path)
+
+        spam = create_tree_transformer("tiny", include_top=True, task_config=_SPAM,
+                                       pretrained=path, **_XFER_KW)
+        src_head = [_np(w) for w in source.task_head.weights]
+        dst_head = [_np(w) for w in spam.task_head.weights]
+        assert [a.shape for a in src_head] == [b.shape for b in dst_head], (
+            "fixture invalid: the two heads must have equal weight shapes")
+        assert not any(np.array_equal(a, b) for a, b in zip(src_head, dst_head))
+        np.testing.assert_array_equal(
+            _backbone_hidden(spam, batch), _backbone_hidden(source, batch))
+
+    def test_pretrained_headless_checkpoint_into_a_headed_model(self, tmp_path):
+        """A headless (MLM) checkpoint restores the backbone of a headed model.
+
+        The checkpoint's ``lm_head`` has no target there and is left out.
+        """
+        encoder = create_tree_transformer("tiny", **_XFER_KW)
+        batch = _head_batch()
+        encoder(batch, training=False)
+        _randomized(encoder, 3)
+        expected = _np(encoder(batch, training=False)["last_hidden_state"])
+        path = str(tmp_path / "encoder.keras")
+        encoder.save(path)
+
+        headed = create_tree_transformer("tiny", include_top=True, task_config=_CLF,
+                                         pretrained=path, **_XFER_KW)
+        assert headed.lm_head is None
+        np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
+
+    def test_a_vocab_mismatch_load_into_a_headed_model(self, tmp_path):
+        """The vocab-mismatch skip list still works when ``lm_head`` is absent.
+
+        ``vocab_size`` 64 differs from the default, so ``from_variant`` skips
+        ``embedding`` and ``lm_head``: the blocks and the final norm still load
+        by value, and the embedding keeps its fresh initialization.
+        """
+        encoder = create_tree_transformer("tiny", **_HEAD_KW)
+        encoder(_head_batch(), training=False)
+        _randomized(encoder, 4)
+        path = str(tmp_path / "encoder_v64.keras")
+        encoder.save(path)
+
+        headed = create_tree_transformer("tiny", include_top=True, task_config=_CLF,
+                                         pretrained=path, **_HEAD_KW)
+        for name in ["block_0", "block_1", "final_norm"]:
+            for a, b in zip(headed.get_layer(name).weights,
+                            encoder.get_layer(name).weights):
+                np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
+        assert not np.array_equal(
+            _np(headed.get_layer("embedding").weights[0]),
+            _np(encoder.get_layer("embedding").weights[0]))
+
+    def test_include_top_without_task_config_raises(self):
+        with pytest.raises(ValueError, match="include_top=True needs a task_config"):
+            TreeTransformer(**_HEAD_KW, include_top=True)
+
+    @pytest.mark.parametrize("dead", [
+        {"task_config": _CLF},
+        {"head_config_overrides": {"pooling_type": "mean"}},
+    ], ids=["task_config", "head_config_overrides"])
+    def test_head_knobs_without_include_top_raise(self, dead):
+        with pytest.raises(ValueError, match="only take effect with include_top=True"):
+            TreeTransformer(**_HEAD_KW, **dead)
+
+    def test_pretrained_true_still_raises_with_a_head(self):
+        with pytest.raises(NotImplementedError):
+            create_tree_transformer("tiny", pretrained=True, include_top=True,
+                                    task_config=_CLF)
