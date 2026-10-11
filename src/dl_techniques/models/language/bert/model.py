@@ -54,6 +54,7 @@ from dl_techniques.layers.heads.nlp import (
     build_model_task_head,
     finalize_head_outputs,
     task_config_to_dict,
+    validate_task_head_knobs,
 )
 from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -455,19 +456,7 @@ class BERT(keras.Model):
             vocab_size, hidden_size, num_layers, num_heads,
             hidden_dropout_rate, attention_probs_dropout_rate
         )
-        if include_top and task_config is None:
-            raise ValueError(
-                "include_top=True needs a task_config (an NLPTaskConfig or a "
-                "dict of its fields) to know which head to build."
-            )
-        if not include_top and (
-            task_config is not None or head_config_overrides is not None
-        ):
-            raise ValueError(
-                "task_config and head_config_overrides only take effect with "
-                "include_top=True; with include_top=False no head is built, so "
-                "they would be silently ignored."
-            )
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         # Store all configuration parameters
         self.vocab_size = vocab_size

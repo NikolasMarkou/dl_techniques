@@ -8,6 +8,8 @@ An implementation of the **FNet** architecture in **Keras 3**, based on ["FNet: 
 
 This architecture is a **pure encoder**, separating token mixing from task-specific heads, which suits pre-training, fine-tuning and multi-task workflows.
 
+The `FNet` class is a pure encoder by default (`include_top=False`). Pass `include_top=True` with a `task_config` and the same class also owns one task head from `dl_techniques.layers.heads.nlp`, named `task_head`; every head weight lives under `task_head/`, so an encoder trained under one head is reused, unchanged, under another (§7). The knobs and contracts are those of `models/language/bert`.
+
 > **No trained weights ship with this package.** `pretrained=True` raises `NotImplementedError`; pass a local `.keras` path instead. Everything below describes an architecture you train yourself.
 
 ---
@@ -125,7 +127,9 @@ The Fourier mixer needs a known sequence length at build time. A `keras.Input(sh
 ValueError: Sequence length and hidden dimension must be known at build time.
 ```
 
-Always give an explicit length: `sequence_length=` on the factory, or a concrete `shape=(L,)` on your `keras.Input`. This is the single most common way to get an FNet model to refuse to build.
+Always give an explicit length: call the model on a concrete batch, call `model.build((None, L))`, or give your `keras.Input` a concrete `shape=(L,)`. This is the single most common way to get an FNet model to refuse to build.
+
+The length is fixed by the first build, with or without a task head: every block's DFT matrices are sized by it, so a model built at `L` raises `InvalidArgumentError` on a batch of any other length. Build one model per length bucket. A `pretrained=<path>` load builds an unbuilt model at the length its checkpoint was built at (§7).
 
 ---
 
@@ -145,7 +149,7 @@ A sentiment classifier on the `tiny` configuration.
 import keras
 import numpy as np
 
-from dl_techniques.models.language.fnet.model import create_fnet_with_head, FNet
+from dl_techniques.models.language.fnet.model import create_fnet, FNet
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the task configuration
@@ -156,39 +160,37 @@ task_config = NLPTaskConfig(
 )
 
 # 2. Instantiate via the factory. Use 'base' for real work.
-#    sequence_length is required in practice -- see section 4.3.
-model = create_fnet_with_head(
-    fnet_variant="tiny",
+model = create_fnet(
+    "tiny",
+    include_top=True,
     task_config=task_config,
     pretrained=False,     # True raises NotImplementedError -- section 7
-    sequence_length=128
 )
 
-# 3. This factory returns the head's output AS IS: a dict
-#    {'logits', 'probabilities'}, unlike create_bert_with_head, which
-#    collapses it. A dict output cannot be compiled with a single loss,
-#    so select the tensor you train on.
-trainable = keras.Model(model.inputs, model.outputs[0])  # logits
-trainable.compile(
+# 3. The model returns bare logits (probabilities are derived from them and
+#    dropped), so it compiles with a plain loss.
+model.compile(
     optimizer='adamw',
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=['accuracy']
 )
 
-# 4. Mock training step
+# 4. Mock training step. The first batch fixes the sequence length (section 4.3).
 dummy_inputs = {
     "input_ids": np.random.randint(0, FNet.DEFAULT_VOCAB_SIZE, (4, 128)),
     "attention_mask": np.ones((4, 128), dtype="int32"),
-    "token_type_ids": np.zeros((4, 128), dtype="int32"),
 }
 dummy_labels = np.array([0, 1, 0, 1])
 
-loss, acc = trainable.train_on_batch(dummy_inputs, dummy_labels)
-print(f"Loss: {loss:.4f}, Accuracy: {acc:.4f}")
-
-# The full model still gives you both keys at inference time:
-print(sorted(model.predict(dummy_inputs, verbose=0).keys()))  # ['logits', 'probabilities']
+loss, acc = model.train_on_batch(dummy_inputs, dummy_labels)
+logits = model.predict(dummy_inputs, verbose=0)
+logits.shape  # (4, 2) -- measured
 ```
+
+Two contracts worth reading before you debug anything:
+
+- **Output.** With `include_top=True` the model returns a **bare tensor** whenever the head produces one informative tensor: `probabilities` and `predictions` are pure functions of `logits` and are dropped, so the model compiles with a plain loss. `QuestionAnsweringHead` keeps its dict, `{"start_logits", "end_logits"}`. The rule is `layers/heads/nlp/model_head.py::finalize_head_outputs`.
+- **Construction.** `include_top=True` without a `task_config` raises `ValueError`, and so does a `task_config` or `head_config_overrides` passed with `include_top=False`. `MULTIPLE_CHOICE` is refused. Only `input_ids` is required at call time; the head's pooling sees the attention mask, cast to the hidden-state dtype (all ones when omitted).
 
 ---
 
@@ -196,9 +198,10 @@ print(sorted(model.predict(dummy_inputs, verbose=0).keys()))  # ['logits', 'prob
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`FNet`** | `...models.language.fnet.model.FNet` | The foundation encoder. Outputs `{"last_hidden_state", "attention_mask"}`. |
+| **`FNet`** | `...models.language.fnet.model.FNet` | The foundation encoder. Outputs `{"last_hidden_state", "attention_mask"}`; with `include_top=True`, the task head's output. |
 | **`FNetEncoderBlock`** | `dl_techniques.layers.fnet_encoder_block` | The encoder block, usable outside the standard FNet topology. |
-| **`create_fnet_with_head`** | `...models.language.fnet.model` | Attaches an NLP head (classification, NER, ...) to the encoder. |
+| **`create_fnet`** | `...models.language.fnet.model` | Module-level wrapper around `FNet.from_variant`, with or without a head. |
+| **`build_model_task_head`** | `...layers.heads.nlp.model_head` | Builds the in-model `task_head` (via `create_nlp_head`). |
 
 ```python
 from dl_techniques.models.language.fnet.model import FNet
@@ -214,7 +217,7 @@ block = FNetEncoderBlock(
 )
 ```
 
-`create_fnet_with_head` builds three inputs, all required: `input_ids`, `attention_mask` and `token_type_ids`.
+`FNet` takes a tensor of `input_ids`, or a dict whose only required key is `input_ids`; `attention_mask`, `token_type_ids` and `position_ids` are optional.
 
 ---
 
@@ -230,6 +233,26 @@ block = FNetEncoderBlock(
 Parameter counts are measured with `count_params()` on a built model at the default `vocab_size=30522` and `max_position_embeddings=512`; they move with either of those. Start with `base`; move to `small` if inference latency is critical.
 
 **Pretrained weights.** `pretrained=True` raises `NotImplementedError`: no FNet checkpoint is distributed with `dl_techniques`. Pass `pretrained="<path>.keras"` to load a file you saved yourself, or use `keras.models.load_model(path)`.
+
+A `pretrained=<path>` load transfers **the encoder only**, layer by layer and by name, and never the checkpoint's `task_head`. So the file may hold a bare encoder or an `FNet` trained under any head, and the new model's head (if any) keeps its fresh initialization; a whole model, head included, comes back with `keras.models.load_model`. Call the source model once before saving it, and the new model is built at the sequence length the checkpoint was built at: each block carries DFT matrices sized by that length, so a block can only be copied at the same length.
+
+```python
+import numpy as np
+from dl_techniques.models.language.fnet.model import create_fnet
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+
+batch = {"input_ids": np.random.randint(1, 1000, (2, 64))}
+clf = create_fnet("tiny", include_top=True, task_config=NLPTaskConfig(
+    name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3))
+clf(batch)                      # builds at length 64
+clf.save("fnet_clf.keras")      # ... after training under the classifier
+
+ner = create_fnet("tiny", include_top=True, pretrained="fnet_clf.keras",
+                  task_config=NLPTaskConfig(
+                      name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+                      num_classes=9))
+ner(batch).shape                # (2, 64, 9): same encoder weights, fresh NER head
+```
 
 ---
 
@@ -259,7 +282,7 @@ extractor = keras.Model(inputs, cls_embedding)
 ### Example 2: Named Entity Recognition
 
 ```python
-from dl_techniques.models.language.fnet.model import create_fnet_with_head
+from dl_techniques.models.language.fnet.model import create_fnet
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 ner_config = NLPTaskConfig(
@@ -268,15 +291,15 @@ ner_config = NLPTaskConfig(
     num_classes=9
 )
 
-ner_model = create_fnet_with_head(
-    fnet_variant="tiny",
+ner_model = create_fnet(
+    "tiny",
+    include_top=True,
     task_config=ner_config,
     pretrained=False,
-    sequence_length=256
 )
-# Measured output: a dict {'logits': (batch, 256, 9), 'predictions': (batch, 256)}.
-# A token head returns different keys from the sentiment head in section 5.
-# Always inspect the dict, and select one tensor before compiling.
+ner_model.build((None, 256))   # fixes the sequence length (section 4.3)
+# Measured output: bare logits (batch, 256, 9). The token head's `predictions`
+# is argmax(logits) and is dropped, as `probabilities` is for the sentiment head.
 ```
 
 ---
@@ -300,12 +323,12 @@ modern_fnet = FNet.from_variant(
 
 ### Pattern 2: Multi-Task Learning
 
-FNet is a pure encoder, so one instance can feed several heads. The heads read a `"hidden_states"` key; the encoder emits `"last_hidden_state"`, so the rename is required, not cosmetic.
+For one head, `include_top=True` is enough (§5). For several heads at once, use the headless encoder: one instance can feed several heads. The heads read a `"hidden_states"` key; the encoder emits `"last_hidden_state"`, so the rename is required, not cosmetic.
 
 ```python
 import keras
-from dl_techniques.models.language.fnet.model import FNet, create_nlp_head
-from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.fnet.model import FNet
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, create_nlp_head
 
 shared_encoder = FNet.from_variant("tiny")
 
@@ -399,8 +422,9 @@ The suite covers shape inference, serialization round trips and numerical stabil
 
 ## 14. Troubleshooting & FAQs
 
--   **`ValueError: Sequence length and hidden dimension must be known at build time.`** The Fourier mixer needs a static length. Pass `sequence_length=` to the factory or a concrete `shape=(L,)` to `keras.Input` (§4.3).
--   **`KeyError` on `'logits'` when compiling.** `create_fnet_with_head` returns the head's dict as-is. Select one output tensor before compiling (§5).
+-   **`ValueError: Sequence length and hidden dimension must be known at build time.`** The Fourier mixer needs a static length. Call the model on a concrete batch, call `model.build((None, L))`, or give `keras.Input` a concrete `shape=(L,)` (§4.3).
+-   **`InvalidArgumentError` from `FNetFourierTransform.call()`.** The batch's length differs from the one the model was built at (§4.3).
+-   **`ValueError: include_top=True needs a task_config`**, or **`... only take effect with include_top=True`.** The head knobs travel together: `include_top=True` with a `task_config`, or none of them (§5).
 -   **`KeyError: 'hidden_states'`.** Heads read `hidden_states`; the encoder emits `last_hidden_state`. Rename it (§9, Pattern 2).
 -   **`NotImplementedError` from `pretrained=True`.** No checkpoint ships here. Pass a local `.keras` path instead (§7).
 -   **Accuracy 2-3% below an attention model.** Expected: FNet trades adaptivity for speed. It often wins in wall-clock time while needing more steps to settle.

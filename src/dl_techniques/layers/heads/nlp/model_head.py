@@ -1,14 +1,16 @@
 """Glue between a language backbone and one in-model NLP task head.
 
 A language model that owns its task head (``include_top=True``) needs the
-same three things whatever its architecture: a head built from a task config
-that may arrive as a dict out of ``get_config``, that config written back as
-plain JSON data, and the head's output dict reduced to something
-``model.compile`` accepts. This module holds those three pieces so the models
-do not each carry a copy.
+same four things whatever its architecture: its head knobs checked for
+consistency, a head built from a task config that may arrive as a dict out of
+``get_config``, that config written back as plain JSON data, and the head's
+output dict reduced to something ``model.compile`` accepts. This module holds
+those pieces so the models do not each carry a copy.
 
 Functions
 ---------
+* :func:`validate_task_head_knobs` -- refuse ``include_top=True`` without a
+  task config, and a task config or head overrides without ``include_top``.
 * :func:`build_model_task_head` -- build one head, named ``name``, from a task
   config plus optional head keyword overrides.
 * :func:`task_config_to_dict` -- turn a task config into a JSON-serializable
@@ -84,6 +86,45 @@ def _as_task_config(
     if isinstance(fields.get("task_type"), str):
         fields["task_type"] = NLPTaskType.from_string(fields["task_type"])
     return NLPTaskConfig(**fields)
+
+
+def validate_task_head_knobs(
+        include_top: bool,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]],
+        head_config_overrides: Optional[Dict[str, Any]],
+) -> None:
+    """
+    Refuse an inconsistent set of a model's three task-head knobs.
+
+    Shared by every language model that takes ``include_top``,
+    ``task_config`` and ``head_config_overrides``, so the rule and its
+    messages exist once. Call it before building anything. Valid sets are
+    ``include_top=True`` with a ``task_config`` (overrides optional), or
+    neither of the other two.
+
+    :param include_top: Whether the model is to own a task head.
+    :type include_top: bool
+    :param task_config: The head's task, or None.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Head constructor overrides, or None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
+    :raises ValueError: If ``include_top`` is True without a
+        ``task_config``, or if ``task_config`` or ``head_config_overrides``
+        is given with ``include_top`` False (a dead knob).
+    """
+    if include_top and task_config is None:
+        raise ValueError(
+            "include_top=True needs a task_config (an NLPTaskConfig or a "
+            "dict of its fields) to know which head to build."
+        )
+    if not include_top and (
+        task_config is not None or head_config_overrides is not None
+    ):
+        raise ValueError(
+            "task_config and head_config_overrides only take effect with "
+            "include_top=True; with include_top=False no head is built, so "
+            "they would be silently ignored."
+        )
 
 
 def task_config_to_dict(

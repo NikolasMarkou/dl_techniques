@@ -1,9 +1,9 @@
 """
 Comprehensive test suite for the FNet model implementation.
 
-This test suite validates the FNet foundation model and its integration
-with task-specific heads, using small memory footprint configurations
-suitable for CPU testing.
+This test suite validates the FNet foundation model, its in-model task head
+(``include_top=True``) and the ``create_fnet`` factory, using small memory
+footprint configurations suitable for CPU testing.
 """
 
 import pytest
@@ -18,7 +18,7 @@ import tensorflow as tf
 # Imports from the project structure, assuming it's available in the path
 from dl_techniques.models.language.fnet.model import (
     FNet,
-    create_fnet_with_head,
+    create_fnet,
 )
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
@@ -334,7 +334,13 @@ class TestFNetStochasticDepth:
 
 
 class TestFNetWithHeadFactory:
-    """Test suite for the `create_fnet_with_head` factory function."""
+    """``create_fnet(..., include_top=True)``: the in-model task head.
+
+    The functional ``create_fnet_with_head`` this replaced returned the head's
+    raw dict and took a ``sequence_length`` for its ``keras.Input``; the
+    in-model head returns the finalized output and takes its length from the
+    first call, as the headless encoder always has.
+    """
 
     @pytest.fixture
     def sample_inputs(self) -> Dict[str, keras.KerasTensor]:
@@ -348,47 +354,38 @@ class TestFNetWithHeadFactory:
         }
 
     def test_create_with_sentiment_head(self, sample_inputs):
-        """Test creating a model for sequence classification."""
+        """Sequence classification: bare logits, ``probabilities`` dropped."""
         task_config = NLPTaskConfig(
             name="sentiment",
             task_type=NLPTaskType.SENTIMENT_ANALYSIS,
             num_classes=3
         )
-        model = create_fnet_with_head(
-            fnet_variant="tiny",
-            task_config=task_config,
-            fnet_config_overrides={"max_position_embeddings": 16, "vocab_size": 100},
-            sequence_length=16
+        model = create_fnet(
+            "tiny", include_top=True, task_config=task_config,
+            max_position_embeddings=16, vocab_size=100,
         )
-        assert isinstance(model, keras.Model)
+        assert isinstance(model, FNet)
 
         output = model(sample_inputs)
-        # For sentiment analysis, output should be (batch_size, num_classes)
-        assert isinstance(output, dict)
-        assert "logits" in output
-        assert output["logits"].shape == (2, 3)
+        assert not isinstance(output, dict)
+        assert output.shape == (2, 3)
 
     def test_create_with_ner_head(self, sample_inputs):
-        """Test creating a model for token classification."""
+        """Token classification: bare logits, ``predictions`` dropped."""
         task_config = NLPTaskConfig(
             name="ner",
             task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
             num_classes=9
         )
-        model = create_fnet_with_head(
-            fnet_variant="tiny",
-            task_config=task_config,
-            fnet_config_overrides={"max_position_embeddings": 16, "vocab_size": 100},
-            sequence_length=16
+        model = create_fnet(
+            "tiny", include_top=True, task_config=task_config,
+            max_position_embeddings=16, vocab_size=100,
         )
-        assert isinstance(model, keras.Model)
+        assert isinstance(model, FNet)
 
         output = model(sample_inputs)
-        # For NER (token classification), output should be (batch_size, seq_len, num_classes)
-        assert isinstance(output, dict)
-        assert "logits" in output
-        assert output["logits"].shape == (2, 16, 9)
-
+        assert not isinstance(output, dict)
+        assert output.shape == (2, 16, 9)
 
 
 class TestPretrainedContract:
@@ -410,6 +407,355 @@ class TestPretrainedContract:
 
     def test_no_placeholder_weight_table(self):
         assert not hasattr(FNet, "PRETRAINED_WEIGHTS")
+
+
+
+class TestCreateFNet:
+    """``create_fnet`` is the package's factory; the head wrapper is gone."""
+
+    def test_public_api(self):
+        import dl_techniques.models.language.fnet as pkg
+
+        assert sorted(pkg.__all__) == ["FNet", "create_fnet"]
+        assert pkg.create_fnet is create_fnet
+        # Replaced by `include_top` on the class (plan-2026-10-11T004932-b83935e1).
+        assert not hasattr(pkg, "create_fnet_with_head")
+
+    def test_pretrained_true_raises(self):
+        with pytest.raises(NotImplementedError, match="No pretrained FNet weights"):
+            create_fnet("tiny", pretrained=True)
+
+    def test_delegates_to_from_variant(self):
+        model = create_fnet("tiny", vocab_size=128, max_position_embeddings=32)
+        assert isinstance(model, FNet)
+        tiny = FNet.MODEL_VARIANTS["tiny"]
+        assert (model.hidden_size, model.num_layers) == (
+            tiny["hidden_size"], tiny["num_layers"])
+        assert model.vocab_size == 128 and model.max_position_embeddings == 32
+
+
+# ---------------------------------------------------------------------
+# include_top: the in-model task head
+# ---------------------------------------------------------------------
+
+#: Small enough that every arm below runs in about a second. ``_SEQ`` is
+#: deliberately NOT ``min(128, max_position_embeddings)``: a pretrained load
+#: must build at the checkpoint's own length (D-010 of
+#: plan-2026-10-11T004932-b83935e1), and a fixed-length build would drop every
+#: encoder block of these checkpoints.
+_HEAD_KW: Dict[str, Any] = {
+    "vocab_size": 64,
+    "hidden_size": 32,
+    "num_layers": 2,
+    "intermediate_size": 64,
+    "max_position_embeddings": 32,
+}
+_SEQ = 8
+_CLF = NLPTaskConfig(
+    name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3
+)
+_NER = NLPTaskConfig(
+    name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9
+)
+#: Same head class and weight shapes as ``_CLF``, a different task.
+_SPAM = NLPTaskConfig(
+    name="spam", task_type=NLPTaskType.SPAM_DETECTION, num_classes=3
+)
+
+
+def _np(tensor) -> np.ndarray:
+    return np.asarray(keras.ops.convert_to_numpy(tensor))
+
+
+def _head_batch() -> Dict[str, np.ndarray]:
+    ids = np.random.default_rng(0).integers(1, 64, (2, _SEQ)).astype("int32")
+    mask = np.ones_like(ids)
+    mask[1, 5:] = 0
+    return {"input_ids": ids, "attention_mask": mask}
+
+
+def _relative_paths(model: keras.Model) -> list:
+    """Weight paths without the model-root segment (guide 8.3)."""
+    return sorted(w.path.split("/", 1)[-1] for w in model.weights)
+
+
+def _backbone_hidden(model: FNet, batch: Dict[str, np.ndarray]) -> np.ndarray:
+    """``last_hidden_state`` of ``model``'s encoder, whatever its head.
+
+    Read through a headless twin rebuilt from the model's own config and given
+    the model's own encoder weights, layer by layer.
+    """
+    config = model.get_config()
+    config.update(include_top=False, task_config=None, head_config_overrides=None)
+    config.pop("name", None)
+    twin = FNet.from_config(config)
+    twin(batch, training=False)
+    for layer in twin.layers:
+        layer.set_weights(model.get_layer(layer.name).get_weights())
+    return _np(twin(batch, training=False)["last_hidden_state"])
+
+
+def _randomized(model: FNet, seed: int) -> FNet:
+    """Overwrite every weight, so a restored value cannot match by init luck."""
+    assert model.weights, "build the model before randomizing it"
+    rng = np.random.default_rng(seed)
+    for w in model.weights:
+        w.assign(rng.normal(0.0, 0.1, size=tuple(w.shape)).astype(w.dtype))
+    return model
+
+
+class TestFNetIncludeTop:
+    """The ``include_top`` / ``task_config`` / ``head_config_overrides`` knobs."""
+
+    def test_head_output_shapes(self):
+        """Bare logits for single-output heads, a dict for QA."""
+        batch = _head_batch()
+        out = FNet(**_HEAD_KW, include_top=True, task_config=_CLF)(
+            batch, training=False)
+        assert not isinstance(out, dict) and tuple(out.shape) == (2, 3)
+
+        out = FNet(**_HEAD_KW, include_top=True, task_config=_NER)(
+            batch, training=False)
+        assert not isinstance(out, dict) and tuple(out.shape) == (2, _SEQ, 9)
+
+        qa = FNet(**_HEAD_KW, include_top=True, task_config=NLPTaskConfig(
+            name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=2))
+        out = qa(batch, training=False)
+        assert set(out) == {"start_logits", "end_logits"}
+        assert tuple(out["start_logits"].shape) == (2, _SEQ)
+
+    def test_symbolic_output_matches_the_eager_one(self):
+        """A symbolic call at a static length reports what ``call`` returns."""
+        model = FNet(**_HEAD_KW, include_top=True, task_config=_NER)
+        symbolic = model(keras.Input(shape=(_SEQ,), dtype="int32"))
+        assert tuple(symbolic.shape) == (None, _SEQ, 9)
+        headless = FNet(**_HEAD_KW)
+        symbolic = headless(keras.Input(shape=(_SEQ,), dtype="int32"))
+        assert set(symbolic) == {"last_hidden_state", "attention_mask"}
+
+    @pytest.mark.parametrize("include_top", [False, True], ids=["headless", "headed"])
+    def test_the_sequence_length_is_static_with_or_without_a_head(self, include_top):
+        """The DFT fixes the length at the first build; a head changes nothing.
+
+        Why the old wrapper's ``sequence_length`` argument has no successor
+        (D-010 of plan-2026-10-11T004932-b83935e1): the length comes from the
+        first call or ``build((None, seq_len))``, as it always did headless.
+        """
+        kw = dict(_HEAD_KW, include_top=include_top,
+                  task_config=_CLF if include_top else None)
+        with pytest.raises(ValueError, match="must be known at build time"):
+            FNet(**kw).build((None, None))
+        model = FNet(**kw)
+        model.build((None, 16))
+        ids = np.ones((2, 16), dtype="int32")
+        out = model(ids, training=False)
+        out = out if include_top else out["last_hidden_state"]
+        assert tuple(out.shape) == ((2, 3) if include_top else (2, 16, 32))
+        with pytest.raises(tf.errors.InvalidArgumentError):
+            model(np.ones((2, 12), dtype="int32"), training=False)
+
+    def test_config_round_trip_with_a_head(self):
+        """Every knob is serialized; ``task_config`` as a plain JSON dict."""
+        import json
+
+        overrides = {"pooling_type": "mean"}
+        model = FNet(**_HEAD_KW, include_top=True, task_config=_CLF,
+                     head_config_overrides=overrides)
+        config = model.get_config()
+        assert config["include_top"] is True
+        assert config["head_config_overrides"] == overrides
+        assert isinstance(config["task_config"], dict)
+        assert config["task_config"]["task_type"] == "text_classification"
+        json.dumps(config)  # plain data, no enum or dataclass inside
+
+        from_dict = FNet(**_HEAD_KW, include_top=True,
+                         task_config=dict(config["task_config"]),
+                         head_config_overrides=overrides)
+        assert from_dict.get_config()["task_config"] == config["task_config"]
+
+        rebuilt = FNet.from_config(config)
+        assert rebuilt.get_config() == config
+        assert rebuilt.task_head.pooling_type == "mean"
+
+        batch = _head_batch()
+        model(batch, training=False)
+        rebuilt(batch, training=False)
+        assert _relative_paths(rebuilt) == _relative_paths(model)
+        rebuilt.set_weights(model.get_weights())
+        np.testing.assert_array_equal(
+            _np(rebuilt(batch, training=False)), _np(model(batch, training=False)))
+
+    def test_a_config_without_the_head_keys_still_loads(self):
+        """A config written before the knobs existed rebuilds the encoder."""
+        config = FNet(**_HEAD_KW).get_config()
+        for key in ("include_top", "task_config", "head_config_overrides"):
+            config.pop(key)
+        model = FNet.from_config(config)
+        assert model.include_top is False and model.task_head is None
+
+    def test_keras_round_trip_restores_the_head_by_value(self, tmp_path):
+        """Weights compared BEFORE the first call on the loaded model (guide 8.4)."""
+        model = FNet(**_HEAD_KW, include_top=True, task_config=_CLF)
+        batch = _head_batch()
+        before = _np(model(batch, training=False))
+        saved = [_np(w).copy() for w in model.weights]
+        head_saved = [_np(w).copy() for w in model.task_head.weights]
+        assert head_saved, "the head has no weights to compare"
+
+        path = str(tmp_path / "fnet_head.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert len(loaded.weights) == len(saved)
+        for s, w in zip(saved, loaded.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0,
+                                       err_msg=f"{w.path} not restored")
+        for s, w in zip(head_saved, loaded.task_head.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0)
+        np.testing.assert_array_equal(_np(loaded(batch, training=False)), before)
+
+    @pytest.mark.parametrize("include_top", [False, True])
+    def test_explicit_build_matches_lazy_build(self, include_top):
+        """``build()`` materializes exactly the tree ``call()`` runs (guide 8.1)."""
+        kw = dict(_HEAD_KW, include_top=include_top,
+                  task_config=_CLF if include_top else None)
+        explicit = FNet(**kw)
+        explicit.build((None, _SEQ))
+        lazy = FNet(**kw)
+        lazy(_head_batch(), training=False)
+        assert _relative_paths(explicit) == _relative_paths(lazy)
+        assert explicit.count_params() == lazy.count_params() > 0
+
+    def test_a_disabled_head_builds_no_head_weights(self):
+        """Anti-vacuity sibling of the parity arm (guide 8.3)."""
+        headless = FNet(**_HEAD_KW)
+        headless(_head_batch(), training=False)
+        assert headless.task_head is None
+        assert not [w.path for w in headless.weights if "task_head" in w.path]
+
+        headed = FNet(**_HEAD_KW, include_top=True, task_config=_CLF)
+        headed(_head_batch(), training=False)
+        assert [w.path for w in headed.weights if "/task_head/" in w.path]
+
+    def test_the_encoder_weight_paths_do_not_depend_on_the_head(self):
+        """The head lives entirely under ``task_head/`` (D-005 of the plan)."""
+        def paths(**kw):
+            m = FNet(**_HEAD_KW, name="fnet", **kw)
+            m(_head_batch(), training=False)
+            return [w.path for w in m.weights]
+
+        headless = paths()
+        for task in (_CLF, _NER):
+            headed = paths(include_top=True, task_config=task)
+            encoder_part = [p for p in headed if not p.startswith("fnet/task_head/")]
+            assert encoder_part == headless, task.name
+            assert len(headed) > len(headless)
+
+    def test_backbone_weights_transfer_across_heads(self, tmp_path):
+        """An encoder trained under one head is reused, same weights, under another.
+
+        The supported route is a local ``pretrained`` path, which copies the
+        encoder by layer name and never the checkpoint's ``task_head``
+        (D-007 of plan-2026-10-11T004932-b83935e1). Exercised into a
+        TOKEN_CLASSIFICATION model and into a headless one.
+        """
+        source = create_fnet("tiny", include_top=True, task_config=_CLF, **_HEAD_KW)
+        batch = _head_batch()
+        source(batch, training=False)
+        _randomized(source, 1)
+        path = str(tmp_path / "trained_under_clf.keras")
+        source.save(path)
+        reference = _backbone_hidden(source, batch)
+
+        token = create_fnet("tiny", include_top=True, task_config=_NER,
+                            pretrained=path, **_HEAD_KW)
+        headless = create_fnet("tiny", pretrained=path, **_HEAD_KW)
+
+        np.testing.assert_array_equal(_backbone_hidden(token, batch), reference)
+        np.testing.assert_array_equal(
+            _np(headless(batch, training=False)["last_hidden_state"]), reference)
+        assert tuple(token(batch, training=False).shape) == (2, _SEQ, 9)
+
+        # Anti-vacuity: a fresh encoder does NOT reproduce the reference.
+        fresh = create_fnet("tiny", **_HEAD_KW)
+        assert not np.array_equal(
+            _np(fresh(batch, training=False)["last_hidden_state"]), reference)
+
+    def test_an_equal_shape_head_of_another_task_is_not_copied(self, tmp_path):
+        """A SPAM head is not filled from a CLF checkpoint's head of equal shape.
+
+        With the old ``skip_prefixes=()`` the transfer matched the head by
+        layer name and copied it silently, because the shapes agree
+        (plan-2026-10-11T004932-b83935e1 D-007).
+        """
+        source = create_fnet("tiny", include_top=True, task_config=_CLF, **_HEAD_KW)
+        batch = _head_batch()
+        source(batch, training=False)
+        _randomized(source, 2)
+        path = str(tmp_path / "clf.keras")
+        source.save(path)
+
+        spam = create_fnet("tiny", include_top=True, task_config=_SPAM,
+                           pretrained=path, **_HEAD_KW)
+        src_head = [_np(w) for w in source.task_head.weights]
+        dst_head = [_np(w) for w in spam.task_head.weights]
+        assert [a.shape for a in src_head] == [b.shape for b in dst_head], (
+            "fixture invalid: the two heads must have equal weight shapes")
+        assert not any(np.array_equal(a, b) for a, b in zip(src_head, dst_head))
+        np.testing.assert_array_equal(
+            _backbone_hidden(spam, batch), _backbone_hidden(source, batch))
+
+    def test_pretrained_headless_checkpoint_into_a_headed_model(self, tmp_path):
+        """A headless checkpoint restores the encoder of a headed model by value."""
+        encoder = create_fnet("tiny", **_HEAD_KW)
+        batch = _head_batch()
+        encoder(batch, training=False)
+        _randomized(encoder, 3)
+        expected = _np(encoder(batch, training=False)["last_hidden_state"])
+        path = str(tmp_path / "encoder.keras")
+        encoder.save(path)
+
+        headed = create_fnet("tiny", include_top=True, task_config=_CLF,
+                             pretrained=path, **_HEAD_KW)
+        np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
+
+    def test_a_pretrained_load_builds_at_the_checkpoint_length(self, tmp_path):
+        """The loaded model runs at the length its checkpoint was built at.
+
+        ``vocab_size`` 64 differs from the variant default, so ``from_variant``
+        loads with ``skip_mismatch=True``: a length-mismatched block would be
+        skipped, not raised, and only this by-value check would see it.
+        """
+        encoder = create_fnet("tiny", **_HEAD_KW)
+        batch = _head_batch()
+        encoder(batch, training=False)
+        _randomized(encoder, 4)
+        path = str(tmp_path / "encoder.keras")
+        encoder.save(path)
+
+        loaded = create_fnet("tiny", pretrained=path, **_HEAD_KW)
+        assert loaded.built
+        fourier = loaded.encoder_layers[0].fourier_transform
+        assert fourier.dft_matrix_seq.shape[0] == _SEQ
+        for i, block in enumerate(loaded.encoder_layers):
+            for a, b in zip(block.weights, encoder.encoder_layers[i].weights):
+                np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
+
+    def test_include_top_without_task_config_raises(self):
+        with pytest.raises(ValueError, match="include_top=True needs a task_config"):
+            FNet(**_HEAD_KW, include_top=True)
+
+    @pytest.mark.parametrize("dead", [
+        {"task_config": _CLF},
+        {"head_config_overrides": {"pooling_type": "mean"}},
+    ], ids=["task_config", "head_config_overrides"])
+    def test_head_knobs_without_include_top_raise(self, dead):
+        with pytest.raises(ValueError, match="only take effect with include_top=True"):
+            FNet(**_HEAD_KW, **dead)
+
+    def test_pretrained_true_still_raises_with_a_head(self):
+        with pytest.raises(NotImplementedError):
+            create_fnet("tiny", pretrained=True, include_top=True, task_config=_CLF)
 
 
 if __name__ == "__main__":

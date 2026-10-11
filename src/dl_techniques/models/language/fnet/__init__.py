@@ -1,3 +1,3 @@
-from .model import FNet, create_fnet_with_head
+from .model import FNet, create_fnet
 
-__all__ = ['FNet', 'create_fnet_with_head']
+__all__ = ["FNet", "create_fnet"]

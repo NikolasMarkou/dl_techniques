@@ -2,13 +2,14 @@
 
 Eleven of the names are re-exported from ``nlp/factory.py``. Two of those,
 ``NLPTaskType`` and ``NLPTaskConfig``, are defined in ``nlp/task_types.py``
-and pass through ``factory.py`` on the way out. The other three come from
+and pass through ``factory.py`` on the way out. The other four come from
 ``nlp/model_head.py``.
 
-Fourteen names are exported: the two task-description types, the two factory
+Fifteen names are exported: the two task-description types, the two factory
 functions ``create_nlp_head`` and ``create_multi_task_nlp_head``, seven head
-layers, and the three in-model head helpers ``build_model_task_head``,
-``task_config_to_dict`` and ``finalize_head_outputs``. ``BaseNLPHead``,
+layers, and the four in-model head helpers ``validate_task_head_knobs``,
+``build_model_task_head``, ``task_config_to_dict`` and
+``finalize_head_outputs``. ``BaseNLPHead``,
 ``get_head_class`` and ``NLPHeadConfiguration`` are NOT exported; import them
 from ``.factory`` when you need them.
 
@@ -26,7 +27,8 @@ from .factory import (
     TextClassificationHead, TokenClassificationHead, TextGenerationHead, TextSimilarityHead
 )
 from .model_head import (
-    build_model_task_head, task_config_to_dict, finalize_head_outputs
+    validate_task_head_knobs, build_model_task_head, task_config_to_dict,
+    finalize_head_outputs,
 )
 
 __all__ = [
@@ -41,6 +43,7 @@ __all__ = [
     "TokenClassificationHead",
     "TextGenerationHead",
     "TextSimilarityHead",
+    "validate_task_head_knobs",
     "build_model_task_head",
     "task_config_to_dict",
     "finalize_head_outputs",

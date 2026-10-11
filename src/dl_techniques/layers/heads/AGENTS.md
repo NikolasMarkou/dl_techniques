@@ -66,7 +66,9 @@ still load.
 - `nlp/factory.py` — `create_nlp_head(task_config, input_dim, ...)`,
   `create_multi_task_nlp_head(...)`, `NLPHeadConfiguration`.
 - `nlp/model_head.py` — helpers for a language model that owns its task head
-  (`include_top=True`): `build_model_task_head(task_config, input_dim, ...)`
+  (`include_top=True`): `validate_task_head_knobs(include_top, task_config,
+  head_config_overrides)` (the two knob `ValueError`s, one source),
+  `build_model_task_head(task_config, input_dim, ...)`
   (dict or `NLPTaskConfig`; refuses `MULTIPLE_CHOICE`; `default_pooling` only
   when the overrides set no `pooling_type`; head named `task_head`),
   `task_config_to_dict(...)` for the model's `get_config`, and

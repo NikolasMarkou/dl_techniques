@@ -29,6 +29,17 @@ norm` (post-normalization by default, with optional stochastic depth), emitting
 `position_embedding_type` selects a learned absolute table or a fixed
 sinusoidal one. Four preset variants span tiny through large.
 
+By default (`include_top=False`) the class is a pure encoder. With
+`include_top=True` and a `task_config` it owns ONE task head from
+`layers/heads/nlp`, named `task_head`, and returns that head's output instead,
+exactly as `models/language/bert` does; every head weight lives under
+`task_head/`, so an encoder trained under one head is reused, weights
+unchanged, under another. `create_fnet` is the module-level factory.
+
+The Fourier mixer fixes the sequence length at the first build, headless or
+not: its DFT matrices are sized by it. A model runs at one length, set by its
+first call or by `build((None, seq_len))`.
+
 No pretrained weights are distributed with this package. `pretrained=True`
 raises `NotImplementedError` instead of returning a randomly initialized model.
 Pass a local `.keras` path to `pretrained` instead.
@@ -47,6 +58,8 @@ References:
 
 
 import os
+import json
+import zipfile
 import keras
 from typing import Any, Dict, List, Optional, Union
 
@@ -60,7 +73,14 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    task_config_to_dict,
+    validate_task_head_knobs,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.layers.transformers import FFNType, NormalizationPositionType, NormalizationType
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -78,9 +98,16 @@ class FNet(keras.Model):
     capacity lives in its feed-forward network, and one layer already has global
     receptive field because every output position is a fixed linear combination
     of every input position. Cost drops from ``O(L^2)`` to ``O(L log L)`` with no
-    pairwise score matrix anywhere. The model emits
-    ``{"last_hidden_state", "attention_mask"}`` and owns no pooler and no task
-    head, so the same weights can back several heads at once.
+    pairwise score matrix anywhere. Headless (``include_top=False``, the
+    default) the model emits ``{"last_hidden_state", "attention_mask"}`` and
+    owns no pooler and no task head, so the same weights can back several
+    heads at once. With ``include_top=True`` it also owns one NLP task head,
+    fed ``{"hidden_states": last_hidden_state, "attention_mask": <mask cast to
+    the hidden-state dtype>}``, and outputs what the head returns, reduced by
+    :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`: a bare
+    tensor, or a dict for question answering. The knobs, their validation and
+    the head-swap route are those of
+    :class:`~dl_techniques.models.language.bert.model.BERT`.
 
     Architecture:
 
@@ -237,6 +264,17 @@ class FNet(keras.Model):
     :param stochastic_depth_rate: Terminal drop-path rate for stochastic depth.
         Defaults to 0.1.
     :type stochastic_depth_rate: float
+    :param include_top: Whether the model owns a task head. Defaults to False:
+        no head layer and no head weight exist.
+    :type include_top: bool
+    :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of
+        its fields. Required when ``include_top`` is True, refused otherwise;
+        stored as a plain dict. ``MULTIPLE_CHOICE`` is refused.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (e.g. ``{"pooling_type": "mean"}``). Only valid with
+        ``include_top=True``. Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the `keras.Model`.
 
     :ivar embeddings: The embedding layer instance.
@@ -246,18 +284,25 @@ class FNet(keras.Model):
     :ivar final_norm: Stack-final normalization, present only when
         ``normalization_position == 'pre'``; ``None`` otherwise.
     :vartype final_norm: Optional[keras.layers.Layer]
+    :ivar task_head: The task head named ``"task_head"``, or None when
+        ``include_top`` is False.
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
 
-    :raises ValueError: If invalid configuration parameters are provided.
+    :raises ValueError: If invalid configuration parameters are provided,
+        including ``include_top=True`` without a ``task_config``, and a
+        ``task_config`` or ``head_config_overrides`` given with
+        ``include_top=False``.
 
     Input shape:
-        Mapping with ``input_ids`` of shape ``(batch_size, seq_len)``, plus the
-        optional ``attention_mask``, ``token_type_ids`` and ``position_ids`` at
-        the same shape.
+        A tensor of ``input_ids`` of shape ``(batch_size, seq_len)``, or a
+        mapping with ``input_ids`` plus the optional ``attention_mask``,
+        ``token_type_ids`` and ``position_ids`` at the same shape. ``seq_len``
+        must be static, and every later call must use the length of the first.
 
     Output shape:
-        Mapping with ``last_hidden_state`` at
+        Headless, a mapping with ``last_hidden_state`` at
         ``(batch_size, seq_len, hidden_size)`` and ``attention_mask`` at
-        ``(batch_size, seq_len)``.
+        ``(batch_size, seq_len)``. With a head, the head's finalized output.
 
     Example:
         .. code-block:: python
@@ -274,8 +319,21 @@ class FNet(keras.Model):
                 "attention_mask": keras.ops.ones((2, 128), dtype="int32")
             }
             outputs = model(inputs)
-            print(outputs["last_hidden_state"].shape)
+            outputs["last_hidden_state"].shape
             # (2, 128, 768)
+
+            # Same encoder, plus a sentiment head: returns bare logits (2, 3)
+            from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+            clf = FNet.from_variant(
+                "base",
+                include_top=True,
+                task_config=NLPTaskConfig(
+                    name="sentiment",
+                    task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+                    num_classes=3,
+                ),
+            )
+            logits = clf(inputs, training=False)
 
     Note:
         Masking is multiplicative and post-mix, so the usual "masked tokens are
@@ -336,6 +394,9 @@ class FNet(keras.Model):
         ffn_type: FFNType = "mlp",
         use_stochastic_depth: bool = False,
         stochastic_depth_rate: float = 0.1,
+        include_top: bool = False,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         """Initializes the FNet model instance.
@@ -376,12 +437,20 @@ class FNet(keras.Model):
         :type use_stochastic_depth: bool
         :param stochastic_depth_rate: Drop rate for stochastic depth.
         :type stochastic_depth_rate: float
+        :param include_top: Whether to build the task head.
+        :type include_top: bool
+        :param task_config: Task of the head; required iff ``include_top``.
+        :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+        :param head_config_overrides: Head constructor overrides; only valid
+            with ``include_top``.
+        :type head_config_overrides: Optional[Dict[str, Any]]
         :param kwargs: Additional keyword arguments for the `keras.Model`.
         :raises ValueError: If any configuration value is invalid.
         """
         super().__init__(**kwargs)
 
         self._validate_config(vocab_size, hidden_size, num_layers, hidden_dropout_rate)
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -402,12 +471,31 @@ class FNet(keras.Model):
         self.ffn_type = ffn_type
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         self._build_architecture()
+
+        # Created after every encoder layer and under its own fixed name, so
+        # the encoder's layer names, weight paths and RNG draws are the same
+        # with or without a head.
+        self.task_head = None
+        if self.include_top:
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.hidden_size,
+                head_config_overrides=self.head_config_overrides,
+            )
 
         logger.info(
             f"Created FNet foundation model: {self.num_layers} layers, "
             f"hidden_size={self.hidden_size}"
+            + (f", task head '{self.task_config['name']}'" if self.include_top else "")
         )
 
     def _validate_config(
@@ -497,7 +585,9 @@ class FNet(keras.Model):
         model built while every sub-layer is still unbuilt -- Keras warns about
         exactly that at ``layers/layer.py:393``. The shared helper traces
         ``call()`` on symbolic inputs, so what gets built cannot drift from what
-        gets called.
+        gets called: the task head is built exactly when ``include_top`` makes
+        ``call()`` run it. The sequence length in ``input_shape`` must be
+        static; it sizes every block's DFT matrices.
 
         :param input_shape: Shape (or nest of shapes) of the input to ``call``.
         :type input_shape: Any
@@ -514,7 +604,7 @@ class FNet(keras.Model):
         token_type_ids: Optional[keras.KerasTensor] = None,
         position_ids: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass of the FNet foundation model.
 
         :param inputs: Input token IDs or a dictionary containing 'input_ids'
@@ -530,7 +620,7 @@ class FNet(keras.Model):
         :type position_ids: Optional[keras.KerasTensor]
         :param training: Indicates if the model is in training mode.
         :type training: Optional[bool]
-        :return: A dictionary with the following keys:
+        :return: With ``include_top=False``, a dictionary with the keys:
                  - ``last_hidden_state``: The sequence of hidden states at the
                    output of the final layer. Shape:
                    `(batch, seq_len, hidden_size)`.
@@ -540,7 +630,11 @@ class FNet(keras.Model):
                    returned rather than ``None``, so the output structure is
                    independent of the input and ``predict()`` works on a
                    single-key input dict.
-        :rtype: Dict[str, keras.KerasTensor]
+                 With ``include_top=True``, the head's output reduced by
+                 ``finalize_head_outputs``: a bare tensor, or a dict of two or
+                 more tensors (``start_logits``/``end_logits`` for QA). The
+                 head's pooling sees the same resolved mask.
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :raises ValueError: If dictionary input does not contain 'input_ids'.
         """
         if isinstance(inputs, dict):
@@ -572,22 +666,45 @@ class FNet(keras.Model):
         # DECISION plan-2026-08-18T140459-7991552f/D-031: resolve the mask here, at return,
         # not before the encoder loop or by omitting the key. Either alternative broke predict()
         # or changed modern_bert's numerics. See decisions.md.
+        resolved_mask = (
+            attention_mask if attention_mask is not None
+            else keras.ops.ones_like(input_ids)
+        )
+
+        if self.include_top:
+            # Cast so a float16 hidden state never meets an int mask inside
+            # the head's pooling (mixed precision; QA needs a float mask).
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": hidden_states,
+                    "attention_mask": keras.ops.cast(
+                        resolved_mask, hidden_states.dtype
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
+
         return {
             "last_hidden_state": hidden_states,
-            "attention_mask": (
-                attention_mask if attention_mask is not None
-                else keras.ops.ones_like(input_ids)
-            ),
+            "attention_mask": resolved_mask,
         }
 
     def load_pretrained_weights(
         self, weights_path: str, skip_mismatch: bool = True
     ) -> None:
-        """Load pretrained weights into the model.
+        """Load pretrained ENCODER weights into the model from a local checkpoint.
 
-        This method handles loading weights with smart mismatch handling,
-        particularly useful when the vocabulary size or architecture differs
-        slightly from the pretrained model.
+        Only the encoder is transferred, by layer name: a ``task_head`` in the
+        checkpoint is never copied, and this model's own head (if any) keeps
+        its fresh initialization. So a checkpoint of any FNet, headless or
+        trained under any head, warm-starts a model with any other head or
+        none. To restore a whole model, head included, use
+        ``keras.models.load_model``.
+
+        An unbuilt model is built at the sequence length the checkpoint was
+        built at, so it then runs at that length. An already-built model keeps
+        its own length, and must match the checkpoint's.
 
         :param weights_path: Path to the weights file (.keras format).
         :type weights_path: str
@@ -610,22 +727,23 @@ class FNet(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
         try:
+            # The dummy forward this replaced drew int32 `keras.random.uniform`,
+            # which Keras refuses, so every `pretrained=<path>` load raised.
+            # DECISION plan-2026-10-11T004932-b83935e1/D-010: build at the checkpoint's own sequence length; do NOT
+            # use a fixed length -- every block holds DFT matrices sized by it, so any other length drops every block. See decisions.md.
             if not self.built:
-                dummy_input = {
-                    "input_ids": keras.random.uniform(
-                        (1, 128), 0, self.vocab_size, dtype="int32"
-                    ),
-                    "attention_mask": keras.ops.ones((1, 128), dtype="int32"),
-                }
-                self(dummy_input, training=False)
+                seq_len = self._checkpoint_sequence_length(weights_path)
+                self.build((1, seq_len or min(128, self.max_position_embeddings)))
 
             logger.info(f"Loading pretrained weights from {weights_path}")
 
             # Keras 3 dropped `by_name` from `Model.load_weights`; this helper does not pass it.
+            # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+            # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
             report = load_weights_from_checkpoint(
                 target=self,
                 ckpt_path=weights_path,
-                skip_prefixes=(),
+                skip_prefixes=(TASK_HEAD_NAME,),
                 strict=not skip_mismatch,
             )
             logger.info(f"Weight transfer complete: {report}")
@@ -640,6 +758,29 @@ class FNet(keras.Model):
 
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
+
+    @staticmethod
+    def _checkpoint_sequence_length(weights_path: str) -> Optional[int]:
+        """Return the sequence length a ``.keras`` checkpoint was built at.
+
+        Read from the archive's top-level ``build_config``, whose input shape
+        is ``(batch, seq_len)`` or a mapping holding ``input_ids`` at it.
+
+        :param weights_path: Path to a ``.keras`` archive.
+        :type weights_path: str
+        :return: The length, or None when the archive records none or is not
+            a readable ``.keras`` archive (the transfer then reports why).
+        :rtype: Optional[int]
+        """
+        try:
+            with zipfile.ZipFile(weights_path) as archive:
+                config = json.loads(archive.read("config.json"))
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+            return None
+        shape = (config.get("build_config") or {}).get("input_shape")
+        if isinstance(shape, dict):
+            shape = shape.get("input_ids")
+        return shape[-1] if shape else None
 
     # Raises instead of falling back to random init, so a missing download is never
     # indistinguishable from a real load.
@@ -693,7 +834,10 @@ class FNet(keras.Model):
         :type weights_dataset: str
         :param cache_dir: Directory to cache downloaded weights.
         :type cache_dir: Optional[str]
-        :param kwargs: Additional arguments to override the variant's defaults.
+        :param kwargs: Additional arguments overriding the variant's defaults,
+            including ``include_top``, ``task_config`` and
+            ``head_config_overrides``. A local ``pretrained`` path restores
+            the encoder only; a head keeps its fresh initialization.
         :type kwargs: Any
         :return: An FNet model instance configured for the specified variant.
         :rtype: FNet
@@ -801,6 +945,14 @@ class FNet(keras.Model):
                 "ffn_type": self.ffn_type,
                 "use_stochastic_depth": self.use_stochastic_depth,
                 "stochastic_depth_rate": self.stochastic_depth_rate,
+                "include_top": self.include_top,
+                "task_config": (
+                    dict(self.task_config) if self.task_config is not None else None
+                ),
+                "head_config_overrides": (
+                    dict(self.head_config_overrides)
+                    if self.head_config_overrides is not None else None
+                ),
             }
         )
         return config
@@ -846,154 +998,65 @@ class FNet(keras.Model):
 
 
 # ---------------------------------------------------------------------
-# Integration with NLP Task Heads
-# ---------------------------------------------------------------------
 
 
-def create_fnet_with_head(
-    fnet_variant: str,
-    task_config: NLPTaskConfig,
+def create_fnet(
+    variant: str = "base",
+    vocab_size: Optional[int] = None,
     pretrained: Union[bool, str] = False,
     weights_dataset: str = "uncased",
     cache_dir: Optional[str] = None,
-    fnet_config_overrides: Optional[Dict[str, Any]] = None,
-    head_config_overrides: Optional[Dict[str, Any]] = None,
-    sequence_length: Optional[int] = None,
-) -> keras.Model:
-    """Factory function to create an FNet model with a task-specific head.
+    **kwargs: Any,
+) -> "FNet":
+    """Convenience factory that mirrors ``create_bert`` / ``create_resnet``.
 
-    This function demonstrates the intended integration pattern:
-    1. Instantiate a foundational `FNet` model (optionally pretrained).
-    2. Instantiate a task-specific head from the `dl_techniques.nlp.heads`
-       factory.
-    3. Combine them into a single, end-to-end `keras.Model`.
+    Thin wrapper around :meth:`FNet.from_variant`; behaves identically to
+    calling it directly. The sequence length is not an argument: the model
+    takes it from its first call or ``build((None, seq_len))``, headless or
+    not.
 
-    Head integration:
-
-    .. code-block:: text
-
-        ┌──────────────────────────────────────┐
-        │  keras.Input x 3 (all required)      │
-        │    input_ids / attention_mask /      │
-        │    token_type_ids                    │
-        │  shape = (sequence_length,) or       │
-        │          (None,) if unspecified      │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  FNet encoder (FNet.from_variant)    │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  NLP task head (create_nlp_head)     │
-        │    {hidden_states, attention_mask}   │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  head output returned AS IS          │
-        │  (no logits/derived-key collapse     │
-        │   here, unlike create_bert_with_head)│
-        └──────────────────────────────────────┘
-
-        Pass `sequence_length`: the Fourier mixer wants a known
-        length at build time, so a dynamic (None,) axis may not
-        be compatible.
-
-    :param fnet_variant: The FNet variant to use (e.g., "base", "large").
-    :type fnet_variant: str
-    :param task_config: An `NLPTaskConfig` object defining the task.
-    :type task_config: NLPTaskConfig
-    :param pretrained: If True, loads pretrained weights. If string,
-        path to local weights file.
+    :param variant: FNet variant name (``"tiny"``, ``"small"``, ``"base"``,
+        ``"large"``). Defaults to ``"base"``.
+    :type variant: str
+    :param vocab_size: Optional vocabulary size override, forwarded as
+        ``vocab_size=...`` when given.
+    :type vocab_size: Optional[int]
+    :param pretrained: ``True`` raises ``NotImplementedError`` (no public
+        weights); a string path loads a local ``.keras`` checkpoint (the
+        encoder only, at the checkpoint's sequence length); ``False``
+        (default) gives random init.
     :type pretrained: Union[bool, str]
-    :param weights_dataset: Dataset for pretrained weights ("uncased", "cased", etc.).
+    :param weights_dataset: unreachable: only ``pretrained=True`` reads it,
+        and that raises first. Kept for signature stability.
     :type weights_dataset: str
-    :param cache_dir: Directory to cache downloaded weights.
+    :param cache_dir: unreachable for the same reason.
     :type cache_dir: Optional[str]
-    :param fnet_config_overrides: Optional dictionary to override default FNet
-        configuration for the chosen variant. Defaults to None.
-    :type fnet_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Optional dictionary to override default head
-        configuration. Defaults to None.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :param sequence_length: The fixed sequence length for the model's inputs.
-        If None, the model will have dynamic sequence length, but this may
-        not be compatible with FNet's Fourier Transform layer which
-        requires a known length at build time. Defaults to None.
-    :type sequence_length: Optional[int]
-    :return: A complete `keras.Model` ready for the specified task. All three
-        inputs are required by name; the Functional wrapper declares one
-        ``keras.Input`` per key and Keras matches a data dict against that
-        declaration exactly. For a single-segment task pass
-        ``np.zeros_like(input_ids)`` as ``token_type_ids``.
-    :rtype: keras.Model
+    :param kwargs: Forwarded to :meth:`FNet.from_variant` (e.g.
+        ``max_position_embeddings``, or ``include_top=True`` with a
+        ``task_config`` for a model with a head).
+    :type kwargs: Any
+    :return: Configured ``FNet`` instance.
+    :rtype: FNet
+    :raises NotImplementedError: If ``pretrained=True``.
+    :raises ValueError: If ``variant`` is unknown, or the head knobs are
+        inconsistent (see :class:`FNet`).
 
     Example:
-        .. code-block:: python
-
-            from dl_techniques.layers.heads.nlp import NLPTaskType
-
-            # Define a task
-            ner_task = NLPTaskConfig(
-                name="ner",
-                task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
-                num_classes=9
-            )
-
-            # Create the full model (pass a local .keras path to `pretrained`
-            # to warm-start; `pretrained=True` raises NotImplementedError)
-            ner_model = create_fnet_with_head(
-                fnet_variant="base",
-                task_config=ner_task,
-                sequence_length=128, # Provide a fixed length
-                head_config_overrides={"use_task_attention": True}
-            )
-            ner_model.summary()
+        >>> encoder = create_fnet("tiny")
+        >>> ner = create_fnet(
+        ...     "tiny", include_top=True,
+        ...     task_config=NLPTaskConfig(
+        ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+        ...         num_classes=9))
     """
-    fnet_config_overrides = fnet_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-
-    logger.info(f"Creating FNet-{fnet_variant} with a '{task_config.name}' head.")
-
-    fnet_encoder = FNet.from_variant(
-        fnet_variant,
+    if vocab_size is not None:
+        kwargs["vocab_size"] = vocab_size
+    return FNet.from_variant(
+        variant,
         pretrained=pretrained,
         weights_dataset=weights_dataset,
         cache_dir=cache_dir,
-        **fnet_config_overrides,
+        **kwargs,
     )
-
-    task_head = create_nlp_head(
-        task_config=task_config,
-        input_dim=fnet_encoder.hidden_size,
-        **head_config_overrides,
-    )
-
-    input_shape = (sequence_length,) if sequence_length is not None else (None,)
-    inputs = {
-        "input_ids": keras.Input(shape=input_shape, dtype="int32", name="input_ids"),
-        "attention_mask": keras.Input(
-            shape=input_shape, dtype="int32", name="attention_mask"
-        ),
-        "token_type_ids": keras.Input(
-            shape=input_shape, dtype="int32", name="token_type_ids"
-        ),
-    }
-
-    encoder_outputs = fnet_encoder(inputs)
-
-    head_inputs = {
-        "hidden_states": encoder_outputs["last_hidden_state"],
-        "attention_mask": encoder_outputs["attention_mask"],
-    }
-    task_outputs = task_head(head_inputs)
-
-    model_name = f"fnet_{fnet_variant}_with_{task_config.name}_head"
-    model = keras.Model(inputs=inputs, outputs=task_outputs, name=model_name)
-
-    logger.info(
-        f"Successfully created model with {model.count_params():,} parameters."
-    )
-    return model
 
 # ---------------------------------------------------------------------

@@ -5,6 +5,8 @@ Covers:
 * ``task_config`` given as a dataclass, as the dict ``task_config_to_dict``
   writes, or as a dict holding the enum member, builds the same head.
 * ``MULTIPLE_CHOICE`` is refused with a ``ValueError``.
+* ``validate_task_head_knobs`` accepts the two consistent knob sets and
+  refuses the two inconsistent ones.
 * ``default_pooling`` applies only when the overrides set no ``pooling_type``.
 * The head carries the requested layer name, and every weight sits under it.
 * ``finalize_head_outputs`` gives a bare tensor for classification, token
@@ -25,6 +27,7 @@ from dl_techniques.layers.heads.nlp import (
     build_model_task_head,
     finalize_head_outputs,
     task_config_to_dict,
+    validate_task_head_knobs,
 )
 
 # ---------------------------------------------------------------------
@@ -141,6 +144,33 @@ class TestBuildRules:
         )
         assert head.pooling_type == expected
         assert overrides == snapshot
+
+    @pytest.mark.parametrize(
+        "include_top, task_config, overrides, match",
+        [
+            (True, None, None, "include_top=True needs a task_config"),
+            (True, None, {"pooling_type": "mean"},
+             "include_top=True needs a task_config"),
+            (False, "cfg", None, "only take effect with include_top=True"),
+            (False, None, {"pooling_type": "mean"},
+             "only take effect with include_top=True"),
+            (True, "cfg", None, None),
+            (True, "cfg", {"pooling_type": "mean"}, None),
+            (False, None, None, None),
+        ],
+        ids=["missing-config", "missing-config-with-overrides",
+             "dead-config", "dead-overrides",
+             "head", "head-with-overrides", "headless"],
+    )
+    def test_the_knob_set_is_validated(
+            self, include_top, task_config, overrides, match
+    ) -> None:
+        cfg = _classification_config() if task_config == "cfg" else None
+        if match is None:
+            assert validate_task_head_knobs(include_top, cfg, overrides) is None
+            return
+        with pytest.raises(ValueError, match=match):
+            validate_task_head_knobs(include_top, cfg, overrides)
 
     def test_overrides_reach_the_head(self) -> None:
         head = build_model_task_head(
