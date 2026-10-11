@@ -1167,10 +1167,11 @@ class TestQwen3NextIncludeTop(QwenIncludeTopCases):
     """``Qwen3Next`` with ``include_top`` (1 block: 64 backbone weights, measured).
 
     The cases are shared with ``Qwen3`` (``test_qwen3.IncludeTopCases``).
-    ``num_experts=1``: with 2 experts a padded token moves the real
-    positions' states by about 1e-7 (the MoE layer; measured, and the reason
-    ``test_causal_classification_pooling.py``'s exact padding arm is RED for
-    ``qwen3_next``), which would blur the padding cases here.
+    ``num_experts=1``: under sparse top-k routing (2 experts, top 1) a padded
+    token moves the real positions' states by about 1e-7, float32 rounding
+    from the experts' changed gather sizes, not a leak (measured; see
+    ``QWEN3_NEXT_CONFIG`` in ``test_causal_classification_pooling.py``), which
+    would blur the exact padding cases here. One expert routes densely.
     """
 
     CLS = Qwen3Next

@@ -18,6 +18,8 @@ import keras
 import numpy as np
 import pytest
 
+from tests.numerics import reassociation_atol
+
 from dl_techniques.models.language.qwen.qwen3 import create_qwen3_classification
 from dl_techniques.models.language.qwen.qwen3_next import (
     create_qwen3_next_classification,
@@ -37,11 +39,23 @@ QWEN3_CONFIG = dict(
     max_seq_len=16,
     dropout_rate=0.0,
 )
-QWEN3_NEXT_CONFIG = {
+QWEN3_NEXT_SPARSE_CONFIG = {
     k: v for k, v in QWEN3_CONFIG.items() if k != "moe_layers"
 }
-QWEN3_NEXT_CONFIG["num_experts"] = 2
-QWEN3_NEXT_CONFIG["num_experts_per_tok"] = 1
+QWEN3_NEXT_SPARSE_CONFIG["num_experts"] = 2
+QWEN3_NEXT_SPARSE_CONFIG["num_experts_per_tok"] = 1
+# Dense routing (every expert sees every token) for the exact-equality arms.
+# Measured on CPU, float32 (plan-2026-10-11T004932-b83935e1 step 11.2): under
+# sparse top-k routing a changed PADDED token moves the real positions'
+# headless logits by 1.19e-07 (2 experts, top 1) or 1.34e-07 (4, top 1) and the
+# pooled head logits by 2.6e-08 / 8.2e-08, while 2/2, 4/4 and 1/1 move both by
+# exactly 0. Routing stays per token, so nothing leaks from the pad: the
+# changed token changes how many tokens each expert gathers, hence the kernel
+# blocking and the float32 rounding of the real positions. Dense routing
+# removes that noise and keeps `np.array_equal` exact; the sparse model is
+# charged separately, under a derived bound, by
+# `test_sparse_routing_moves_the_pooled_logits_only_by_rounding` below.
+QWEN3_NEXT_CONFIG = dict(QWEN3_NEXT_SPARSE_CONFIG, num_experts_per_tok=2)
 
 # Eight positions, the last two of which are right padding. Index 3 is the
 # token every "non-first" assertion moves: it is strictly inside the kept
@@ -149,3 +163,33 @@ class TestCausalClassificationPooling:
             f"changing padded token {PAD_INDEX} moved the logits; the pooler "
             "is gathering a padded position instead of the last real one"
         )
+
+
+def test_sparse_routing_moves_the_pooled_logits_only_by_rounding():
+    """A REAL pad leak under sparse top-k routing is caught; rounding is not.
+
+    The exact arm above runs Qwen3Next with dense routing because sparse
+    routing moves the pooled logits by float32 rounding alone (2.6e-08
+    measured, see ``QWEN3_NEXT_CONFIG``). This arm keeps the sparse model and
+    bounds the change by ``reassociation_atol`` over the contractions a real
+    position's state passes through (``hidden_size`` and
+    ``moe_intermediate_size`` per block, ``num_layers`` blocks plus the head),
+    about 1e-5 here. Pooling a padded position instead moves the logits by
+    4e-02 to 1e-01 (measured), thousands of times the bound.
+    """
+    config = QWEN3_NEXT_SPARSE_CONFIG
+    model = _build(create_qwen3_next_classification, config, "last")
+    base = _logits(model, IDS)
+    moved = _logits(model, _mutate(PAD_INDEX))
+    bound = reassociation_atol(
+        reduction_lengths=(config["hidden_size"],
+                           config["moe_intermediate_size"]),
+        num_steps=config["num_layers"] + 1,
+        scale=float(np.max(np.abs(base))),
+    )
+    delta = float(np.max(np.abs(moved - base)))
+    assert delta <= bound, (
+        f"changing padded token {PAD_INDEX} moved the sparse-routed logits by "
+        f"{delta:.3e}, above the float32 rounding bound {bound:.3e}; the "
+        "pooler or the router is reading a padded position"
+    )
