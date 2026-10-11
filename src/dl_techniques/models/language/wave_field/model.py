@@ -53,6 +53,7 @@ from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.attention.wave_field_attention import (
     WaveFieldAttention,
 )
+from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -910,5 +911,152 @@ def create_wave_field_llm(
         pretrained=pretrained,
         **kwargs,
     )
+
+
+# ---------------------------------------------------------------------
+# Integration with NLP Task Heads
+# ---------------------------------------------------------------------
+
+
+def create_wave_field_llm_with_head(
+    wave_field_variant: str,
+    task_config: NLPTaskConfig,
+    pretrained: Union[bool, str] = False,
+    wave_field_config_overrides: Optional[Dict[str, Any]] = None,
+    head_config_overrides: Optional[Dict[str, Any]] = None,
+) -> keras.Model:
+    """Build an end-to-end model: a WaveFieldLLM encoder plus an NLP task head.
+
+    Takes a variant name, instantiates the encoder, builds a head from the
+    ``dl_techniques.layers.heads.nlp`` factory, and joins them into one functional
+    ``keras.Model``. The only input is ``input_ids``; the padding mask is derived
+    here from ``input_ids != pad_token_id`` (using 0 as default pad token).
+    The head pools the last position by default, which ``head_config_overrides``
+    can change.
+
+    .. code-block:: text
+
+        {"input_ids": [B, L] int32}
+                 │
+                 ├─────────────────────┐
+                 ▼                     ▼
+        ┌───────────────────┐     input_ids != 0
+        │ WaveFieldLLM      │          │
+        └───────────────────┘          │
+                 │ last_hidden_state   │
+                 ▼                     ▼
+        ┌─────────────────────────────────┐
+        │ nlp head  pooling_type 'last'   │
+        └─────────────────────────────────┘
+                 │
+                 ▼
+            task outputs
+
+    :param wave_field_variant: The WaveFieldLLM variant to use (e.g., "small", "medium").
+    :type wave_field_variant: str
+    :param task_config: An ``NLPTaskConfig`` object defining the task, which must set
+        ``vocabulary_size``.
+    :type task_config: NLPTaskConfig
+    :param pretrained: If a string, path to a local weights file. If True, raises
+        ``NotImplementedError``. Defaults to False.
+    :type pretrained: Union[bool, str]
+    :param wave_field_config_overrides: Optional dictionary to override default
+        WaveFieldLLM configuration for the chosen variant. Defaults to None.
+    :type wave_field_config_overrides: Optional[Dict[str, Any]]
+    :param head_config_overrides: Optional dictionary to override default head
+        configuration, including ``pooling_type``. Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
+    :return: A complete ``keras.Model`` ready for the specified task.
+    :rtype: keras.Model
+    :raises ValueError: If ``task_config`` has no ``vocabulary_size``, or the variant
+        is unknown.
+    :raises NotImplementedError: If ``pretrained is True``.
+
+    Example:
+        .. code-block:: python
+
+            from dl_techniques.layers.heads.nlp import NLPTaskType
+
+            # Define a task for sequence classification
+            seq_cls_task = NLPTaskConfig(
+                name="sentiment_analysis",
+                task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=3,
+                vocabulary_size=50261
+            )
+
+            # Create the full model with a WaveFieldLLM Small encoder
+            model = create_wave_field_llm_with_head(
+                wave_field_variant="small",
+                task_config=seq_cls_task,
+                pretrained=False,
+                head_config_overrides={"dropout_rate": 0.15}
+            )
+            model.summary()
+    """
+    wave_field_config_overrides = wave_field_config_overrides or {}
+    head_config_overrides = head_config_overrides or {}
+
+    logger.info(
+        f"Creating WaveFieldLLM-{wave_field_variant} with a '{task_config.name}' head."
+    )
+
+    # WaveFieldLLM uses vocabulary_size field
+    if not getattr(task_config, 'vocabulary_size', None):
+        raise ValueError(
+            "The `task_config` must set 'vocabulary_size' "
+            "to create a WaveFieldLLM model."
+        )
+
+    wave_field_encoder = WaveFieldLLM.from_variant(
+        wave_field_variant,
+        vocab_size=task_config.vocabulary_size,
+        pretrained=pretrained,
+        **wave_field_config_overrides,
+    )
+
+    # WaveFieldLLM is causal, so use 'last' pooling
+    head_kwargs = {'pooling_type': 'last'}
+    head_kwargs.update(head_config_overrides)
+    task_head = create_nlp_head(
+        task_config=task_config,
+        input_dim=wave_field_encoder.embed_dim,
+        **head_kwargs,
+    )
+
+    inputs = {
+        "input_ids": keras.Input(
+            shape=(None,), dtype="int32", name="input_ids"
+        ),
+    }
+
+    # WaveFieldLLM call expects input_ids as first positional arg
+    encoder_outputs = wave_field_encoder(
+        inputs["input_ids"],
+    )
+
+    # Use 0 as pad_token_id (common default)
+    pad_token_id = 0
+    attention_mask = keras.ops.not_equal(
+        inputs["input_ids"], pad_token_id
+    )
+
+    head_inputs = {
+        "hidden_states": encoder_outputs["last_hidden_state"],
+        "attention_mask": attention_mask,
+    }
+    task_outputs = task_head(head_inputs)
+
+    model_name = f"wave_field_{wave_field_variant}_with_{task_config.name}_head"
+    model = keras.Model(
+        inputs=inputs,
+        outputs=task_outputs,
+        name=model_name
+    )
+
+    logger.info(
+        f"Successfully created model with {model.count_params():,} parameters."
+    )
+    return model
 
 # ---------------------------------------------------------------------

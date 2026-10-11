@@ -61,6 +61,7 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig, NLPTaskType
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 from dl_techniques.layers.ffn import assemble_ffn_config
@@ -599,9 +600,8 @@ def create_qwen3_classification(
     """
     Create a Qwen3 model for sequence classification tasks.
 
-    This factory adds a classification head on top of the Qwen3 model.
-    It supports different pooling strategies for aggregating sequence
-    information.
+    This factory adds a classification head on top of the Qwen3 model
+    using the standardized NLP head factory.
 
     :param config: Complete configuration for the `Qwen3` base model.
     :param num_labels: Number of output labels for the classification task.
@@ -640,29 +640,29 @@ def create_qwen3_classification(
         inputs={"input_ids": input_ids, "attention_mask": attention_mask}
     )
 
-    # Apply the selected pooling strategy via the shared SequencePooling layer.
-    # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via shipped
-    # SequencePooling, not a hand-rolled cls/mean. mask=attention_mask is
-    # required for "last" (D-029) to land on the last real token. See decisions.md.
-    pooled_output = SequencePooling(strategy=pooling_strategy, name="pooler")(
-        sequence_output, mask=attention_mask
+    # Use the NLP head factory for classification
+    task_config = NLPTaskConfig(
+        name="classification",
+        task_type=NLPTaskType.TEXT_CLASSIFICATION,
+        num_classes=num_labels,
+        dropout_rate=classifier_dropout_rate if classifier_dropout_rate is not None else config.get("dropout_rate", 0.1),
     )
 
-    # Determine classifier dropout
-    dropout_rate = classifier_dropout_rate if classifier_dropout_rate is not None else config.get("dropout_rate", 0.1)
-    if dropout_rate > 0.0:
-        logger.info(f"Applying classifier dropout with rate: {dropout_rate}")
-        pooled_output = keras.layers.Dropout(
-            dropout_rate, name="classifier_dropout"
-        )(pooled_output)
+    # Use the same pooling strategy as before
+    task_head = create_nlp_head(
+        task_config=task_config,
+        input_dim=config.get("hidden_size", 768),
+        pooling_type=pooling_strategy,
+    )
 
-    # Final classification layer
-    initializer_range = config.get("initializer_range", 0.02)
-    logits = keras.layers.Dense(
-        units=num_labels,
-        kernel_initializer=keras.initializers.TruncatedNormal(stddev=initializer_range),
-        name="classifier_head",
-    )(pooled_output)
+    head_inputs = {
+        "hidden_states": sequence_output,
+        "attention_mask": attention_mask,
+    }
+    task_outputs = task_head(head_inputs)
+
+    # The head returns dict with 'logits' and 'probabilities'; extract logits
+    logits = task_outputs['logits']
 
     model = keras.Model(
         inputs=[input_ids, attention_mask],

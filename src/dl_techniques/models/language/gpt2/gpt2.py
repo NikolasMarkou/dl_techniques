@@ -51,6 +51,7 @@ from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
+from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig, NLPTaskType
 
 # ---------------------------------------------------------------------
 
@@ -596,6 +597,99 @@ def create_gpt2(
         pretrained=pretrained,
         **kwargs,
     )
+
+
+# ---------------------------------------------------------------------
+# Integration with NLP Task Heads
+# ---------------------------------------------------------------------
+
+
+def create_gpt2_with_head(
+    gpt2_variant: str,
+    task_config: NLPTaskConfig,
+    pretrained: Union[bool, str] = False,
+    gpt2_config_overrides: Optional[Dict[str, Any]] = None,
+    head_config_overrides: Optional[Dict[str, Any]] = None,
+) -> keras.Model:
+    """Factory function to create a GPT-2 model with a task-specific head.
+
+    This function demonstrates the intended integration pattern:
+    1. Instantiate a foundational ``GPT2`` model (optionally pretrained).
+    2. Instantiate a task-specific head from the ``dl_techniques.layers.heads.nlp``
+       factory.
+    3. Combine them into a single, end-to-end ``keras.Model``.
+
+    :param gpt2_variant: The GPT-2 variant to use (e.g., "small", "medium", "large").
+    :type gpt2_variant: str
+    :param task_config: An ``NLPTaskConfig`` object defining the task.
+    :type task_config: NLPTaskConfig
+    :param pretrained: If a string, a path to a local ``.keras`` weights file.
+        If True, raises ``NotImplementedError`` -- no public GPT-2 weights ship
+        with ``dl_techniques``. If False (default), random init.
+    :type pretrained: Union[bool, str]
+    :param gpt2_config_overrides: Optional dictionary to override default GPT-2
+        configuration for the chosen variant. Defaults to None.
+    :type gpt2_config_overrides: Optional[Dict[str, Any]]
+    :param head_config_overrides: Optional dictionary to override default head
+        configuration. Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
+    :return: A complete ``keras.Model`` ready for the specified task.
+    :rtype: keras.Model
+    """
+    gpt2_config_overrides = gpt2_config_overrides or {}
+    head_config_overrides = head_config_overrides or {}
+
+    logger.info(f"Creating GPT2-{gpt2_variant} with a '{task_config.name}' head.")
+
+    # GPT-2 is a causal decoder, so for sequence-level tasks we use 'last' pooling
+    # which respects the causal mask and attends to the last valid token.
+    head_kwargs = {'pooling_type': 'last'}
+    head_kwargs.update(head_config_overrides)
+
+    gpt2_backbone = GPT2.from_variant(
+        gpt2_variant,
+        pretrained=pretrained,
+        **gpt2_config_overrides,
+    )
+
+    task_head = create_nlp_head(
+        task_config=task_config,
+        input_dim=gpt2_backbone.embed_dim,
+        **head_kwargs,
+    )
+
+    inputs = {
+        "input_ids": keras.Input(
+            shape=(None,), dtype="int32", name="input_ids"
+        ),
+        "attention_mask": keras.Input(
+            shape=(None,), dtype="int32", name="attention_mask"
+        ),
+    }
+
+    # GPT2 call expects inputs (input_ids) as first positional arg, attention_mask as kwarg
+    encoder_outputs = gpt2_backbone(
+        inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
+    )
+
+    head_inputs = {
+        "hidden_states": encoder_outputs["last_hidden_state"],
+        "attention_mask": inputs["attention_mask"],
+    }
+    task_outputs = task_head(head_inputs)
+
+    model_name = f"gpt2_{gpt2_variant}_with_{task_config.name}_head"
+    model = keras.Model(
+        inputs=inputs,
+        outputs=task_outputs,
+        name=model_name
+    )
+
+    logger.info(
+        f"Successfully created model with {model.count_params():,} parameters."
+    )
+    return model
 
 
 # ---------------------------------------------------------------------
