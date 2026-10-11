@@ -1,10 +1,11 @@
 """Glue between a language backbone and one in-model NLP task head.
 
 A language model that owns its task head (``include_top=True``) needs the
-same four things whatever its architecture: its head knobs checked for
+same few things whatever its architecture: its head knobs checked for
 consistency, a head built from a task config that may arrive as a dict out of
-``get_config``, that config written back as plain JSON data, and the head's
-output dict reduced to something ``model.compile`` accepts. This module holds
+``get_config``, that config written back as plain JSON data, a padding mask
+for the head to pool under, and the head's output dict reduced to something
+``model.compile`` accepts. This module holds
 those pieces so the models do not each carry a copy.
 
 Functions
@@ -17,6 +18,8 @@ Functions
   dict that :func:`build_model_task_head` accepts back.
 * :func:`finalize_head_outputs` -- drop the outputs derived from ``logits`` and
   unwrap a single-key dict to a bare tensor.
+* :func:`head_attention_mask` -- the mask a head pools under: the caller's
+  ``attention_mask``, else ``input_ids != pad_token_id``, in a given dtype.
 
 Nothing here touches the backbone. The head is the only layer created, and all
 of its weights live under its own name.
@@ -293,5 +296,38 @@ def finalize_head_outputs(
     if len(outputs) == 1:
         return next(iter(outputs.values()))
     return outputs
+
+
+def head_attention_mask(
+        input_ids: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor],
+        pad_token_id: int,
+        dtype: str,
+) -> keras.KerasTensor:
+    """
+    Return the padding mask a model's task head pools under.
+
+    For a backbone whose own forward pass may run without a mask (a causal
+    decoder needs none), the head still must not pool padding: under
+    ``'last'`` pooling an unmasked head reads the final position, which is
+    padding for every row shorter than the batch. The caller's mask wins;
+    without one, padding is every ``pad_token_id`` position.
+
+    :param input_ids: Token ids ``(batch, seq_len)``.
+    :type input_ids: keras.KerasTensor
+    :param attention_mask: The caller's mask ``(batch, seq_len)``, 1 = keep,
+        or None.
+    :type attention_mask: Optional[keras.KerasTensor]
+    :param pad_token_id: Id treated as padding when no mask is given.
+    :type pad_token_id: int
+    :param dtype: Dtype of the result, normally the hidden states' dtype, so a
+        float16 hidden state never meets an int mask inside the head.
+    :type dtype: str
+    :return: The mask, ``(batch, seq_len)``, in ``dtype``.
+    :rtype: keras.KerasTensor
+    """
+    if attention_mask is None:
+        attention_mask = keras.ops.not_equal(input_ids, pad_token_id)
+    return keras.ops.cast(attention_mask, dtype)
 
 # ---------------------------------------------------------------------

@@ -22,6 +22,15 @@ published architecture exactly. No pretrained weights ship with this package —
 ``pretrained=True`` raises ``NotImplementedError``; a local checkpoint loads by
 path.
 
+By default (``include_top=False``) the model returns ``logits`` and
+``last_hidden_state``. With ``include_top=True`` and a ``task_config`` it owns ONE
+task head from ``layers/heads/nlp``, named ``task_head``, in place of the LM head
+(no logits are computed and no untied ``lm_head`` is created), and returns only
+that head's output, as ``models/language/bert`` does. The head pools ``'last'`` by
+default, the only position of a causal decoder that has seen the whole sequence.
+The decoder's weight paths are the same either way, so a backbone trained under
+one head is reused, weights unchanged, under another.
+
 References:
     - Radford et al., 2019. Language Models are Unsupervised Multitask Learners.
       OpenAI technical report.
@@ -45,13 +54,24 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.harmonic_loss import harmonic_logits
-from dl_techniques.utils.weight_transfer import load_weights_or_raise
+from dl_techniques.utils.weight_transfer import (
+    load_weights_from_checkpoint,
+    load_weights_or_raise,
+)
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
-from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    head_attention_mask,
+    task_config_to_dict,
+    validate_task_head_knobs,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 
 # ---------------------------------------------------------------------
 
@@ -62,7 +82,15 @@ class GPT2(keras.Model):
 
     Wraps a ``TextDecoder`` to produce contextual representations and projects
     them to vocabulary logits using the transposed token embedding matrix
-    (weight tying).
+    (weight tying). With ``include_top=True`` the LM head is replaced by one NLP
+    task head, fed ``{"hidden_states": last_hidden_state, "attention_mask":
+    <mask>}``, where the mask is the input's ``attention_mask`` or, without one,
+    ``input_ids != pad_token_id``, cast to the hidden-state dtype; ``call``
+    returns what the head returns, reduced by
+    :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`. The decoder
+    itself sees only the caller's mask either way, so its hidden states do not
+    depend on the head. The knobs, their validation and the head-swap route are
+    those of :class:`~dl_techniques.models.language.bert.model.BERT`.
 
     Architecture:
 
@@ -86,6 +114,12 @@ class GPT2(keras.Model):
           └──────┬───────┘
                  ▼
             logits [B, S, vocab_size]
+
+            include_top=True: both LM paths are replaced by
+            ┌───────────────────┐
+            │ task_head         │──► finalized head output (only output)
+            │ (pools 'last')    │
+            └───────────────────┘
 
     Variants:
 
@@ -145,7 +179,36 @@ class GPT2(keras.Model):
     :param harmonic_eps: Floor added to the squared distance in the harmonic
         head. Default: 1e-6.
     :type harmonic_eps: float
+    :param pad_token_id: Id treated as padding by the task head when the input
+        carries no ``attention_mask``. Read only with ``include_top=True``; the
+        decoder never derives a mask from it. Default: 0, which is a real token in
+        ``cl100k_base``: with right-padded batches pass the tokenizer's pad id or
+        an ``attention_mask``.
+    :type pad_token_id: int
+    :param include_top: Whether the model owns a task head (and no LM head).
+        Default: False: no head layer and no head weight exist.
+    :type include_top: bool
+    :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of its
+        fields. Required when ``include_top`` is True, refused otherwise; stored
+        as a plain dict. ``MULTIPLE_CHOICE`` is refused.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (e.g. ``{"pooling_type": "mean"}``, which replaces the
+        ``'last'`` default). Only valid with ``include_top=True``. Default: None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for ``keras.Model``.
+
+    :ivar lm_head: The untied LM projection, or None when the embeddings are tied
+        or ``include_top`` is True.
+    :vartype lm_head: Optional[keras.layers.Dense]
+    :ivar task_head: The task head named ``"task_head"``, or None when
+        ``include_top`` is False.
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
+
+    :raises ValueError: On an invalid size, dropout rate or harmonic setting, if
+        ``include_top=True`` comes without a ``task_config``, or if a
+        ``task_config`` or ``head_config_overrides`` comes with
+        ``include_top=False``.
 
     Example:
         .. code-block:: python
@@ -221,6 +284,10 @@ class GPT2(keras.Model):
         head_type: str = "linear",
         harmonic_exponent: Optional[float] = None,
         harmonic_eps: float = 1e-6,
+        pad_token_id: int = 0,
+        include_top: bool = False,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -244,6 +311,7 @@ class GPT2(keras.Model):
             )
         if harmonic_eps <= 0:
             raise ValueError(f"harmonic_eps must be positive, got {harmonic_eps}")
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -263,8 +331,30 @@ class GPT2(keras.Model):
             else float(harmonic_exponent)
         )
         self.harmonic_eps = harmonic_eps
+        self.pad_token_id = pad_token_id
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         self._build_architecture()
+
+        # Created after the decoder and under its own fixed name, so the
+        # backbone's layer names, weight paths and RNG draws are the same with
+        # or without a head.
+        self.task_head = None
+        if self.include_top:
+            # DECISION plan-2026-10-11T004932-b83935e1/D-012: pool 'last' by default; do NOT keep the head's
+            # 'cls' default -- position 0 of a causal decoder has seen only itself. See decisions.md.
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.embed_dim,
+                head_config_overrides=self.head_config_overrides,
+                default_pooling="last",
+            )
 
         logger.info(
             f"Created GPT-2: {self.depth} layers, "
@@ -272,6 +362,7 @@ class GPT2(keras.Model):
             f"max_seq_len={self.max_seq_len}, "
             f"tie_word_embeddings={self.tie_word_embeddings}, "
             f"head_type={self.head_type}"
+            + (f", task head '{self.task_config['name']}'" if self.include_top else "")
         )
 
     @staticmethod
@@ -335,7 +426,9 @@ class GPT2(keras.Model):
             name="decoder",
         )
 
-        if not self.tie_word_embeddings:
+        # A task head replaces the LM head: call() never runs lm_head then,
+        # and build() must not create what call() does not run.
+        if not self.tie_word_embeddings and not self.include_top:
             self.lm_head = keras.layers.Dense(
                 self.vocab_size,
                 use_bias=False,
@@ -368,7 +461,7 @@ class GPT2(keras.Model):
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass of GPT-2.
 
         :param inputs: Token IDs ``(B, seq_len)`` or a dictionary with
@@ -379,10 +472,13 @@ class GPT2(keras.Model):
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Training mode flag.
         :type training: Optional[bool]
-        :return: Dictionary with:
+        :return: With ``include_top=False``, a dictionary with:
             - ``logits``: LM logits ``(B, seq_len, vocab_size)``
             - ``last_hidden_state``: Final hidden states ``(B, seq_len, embed_dim)``
-        :rtype: Dict[str, keras.KerasTensor]
+            With ``include_top=True``, only the head's output reduced by
+            ``finalize_head_outputs``: a bare tensor, or a dict of two or more
+            tensors (``start_logits`` / ``end_logits`` for QA).
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         """
         if isinstance(inputs, dict):
             input_ids = inputs.get("input_ids")
@@ -400,6 +496,19 @@ class GPT2(keras.Model):
             attention_mask=attention_mask,
             training=training,
         )
+
+        if self.include_top:
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": hidden_states,
+                    "attention_mask": head_attention_mask(
+                        input_ids, attention_mask, self.pad_token_id,
+                        hidden_states.dtype,
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
 
         if self.tie_word_embeddings:
             # Weight-tied LM head: logits = hidden_states @ embedding_weights.T
@@ -420,13 +529,32 @@ class GPT2(keras.Model):
         }
 
     def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...]
-    ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Compute output shapes given input shape.
+        self, input_shape: Union[Tuple[Optional[int], ...], Dict[str, Any]]
+    ) -> Any:
+        """Compute the shapes of what ``call`` returns.
 
-        :param input_shape: Input shape ``(batch, seq_len)``.
-        :return: Dictionary of output shapes.
+        Keras builds a symbolic call of this model from this method, never from
+        ``call``, so it must report what ``call`` returns in both modes.
+
+        :param input_shape: Input shape ``(batch, seq_len)``, or a dict holding
+            one under ``'input_ids'``.
+        :return: Headless, a dictionary of output shapes. With a head, the
+            head's output shapes after the reduction ``call`` applies: one
+            shape, or a mapping of two or more.
         """
+        if isinstance(input_shape, dict):
+            input_shape = input_shape["input_ids"]
+
+        if self.include_top:
+            # finalize_head_outputs only drops and unwraps dict entries, so it
+            # applies to a dict of shapes exactly as to a dict of tensors.
+            return finalize_head_outputs(
+                self.task_head.compute_output_shape({
+                    "hidden_states": (*input_shape, self.embed_dim),
+                    "attention_mask": tuple(input_shape),
+                })
+            )
+
         return {
             "logits": (*input_shape, self.vocab_size),
             "last_hidden_state": (*input_shape, self.embed_dim),
@@ -451,6 +579,15 @@ class GPT2(keras.Model):
             "head_type": self.head_type,
             "harmonic_exponent": self.harmonic_exponent,
             "harmonic_eps": self.harmonic_eps,
+            "pad_token_id": self.pad_token_id,
+            "include_top": self.include_top,
+            "task_config": (
+                dict(self.task_config) if self.task_config is not None else None
+            ),
+            "head_config_overrides": (
+                dict(self.head_config_overrides)
+                if self.head_config_overrides is not None else None
+            ),
         })
         return config
 
@@ -496,9 +633,19 @@ class GPT2(keras.Model):
         :param pretrained: If ``True``, raises ``NotImplementedError`` (no
             public GPT-2 weights are distributed by this library). If a string
             path, loads weights from that local ``.keras`` file. If ``False``
-            (default), returns a random-initialized model.
+            (default), returns a random-initialized model. A model WITH a head
+            (``include_top=True``) receives the decoder only: a ``task_head`` in
+            the checkpoint is never copied and the model's own head keeps its
+            fresh initialization, so a checkpoint of any GPT2, headless or
+            trained under any head, warm-starts a model with any other head.
+            That transfer copies the decoder by layer name, needs a ``.keras``
+            file and raises if the decoder does not fit (e.g. another
+            ``vocab_size``). To restore a whole model, head included, use
+            ``keras.models.load_model``.
         :type pretrained: Union[bool, str]
-        :param kwargs: Override any variant parameter.
+        :param kwargs: Override any variant parameter, including
+            ``include_top``, ``task_config``, ``head_config_overrides`` and
+            ``pad_token_id``.
         :return: Configured GPT-2 model instance.
         :rtype: GPT2
         :raises ValueError: If the variant name is not recognized.
@@ -528,16 +675,27 @@ class GPT2(keras.Model):
                     raise FileNotFoundError(
                         f"Weights file not found: {weights_path}"
                     )
-                # Build model before loading weights
+                # Build model before loading weights. A build, not a dummy
+                # forward: no RNG is drawn, and the length never exceeds
+                # max_seq_len (a fixed 32 raised for max_seq_len < 32).
                 if not model.built:
-                    import numpy as np
-                    dummy = np.random.randint(
-                        0, model.vocab_size, (1, 32)
-                    ).astype(np.int32)
-                    model(dummy, training=False)
-                # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: never a bare load_weights call.
-                # A shape/name mismatch there restores nothing and reports success. See decisions.md.
-                load_weights_or_raise(model, weights_path, skip_mismatch=True)
+                    model.build((1, min(32, model.max_seq_len)))
+                if model.include_top:
+                    # DECISION plan-2026-10-11T004932-b83935e1/D-012: by-name and strict; do NOT send a headed
+                    # model through load_weights_or_raise (copies an equal-shape head) nor pass strict=False
+                    # (the decoder is ONE layer, so a mismatch skips the whole backbone silently). See decisions.md.
+                    # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+                    # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
+                    load_weights_from_checkpoint(
+                        target=model,
+                        ckpt_path=weights_path,
+                        skip_prefixes=(TASK_HEAD_NAME,),
+                        strict=True,
+                    )
+                else:
+                    # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: never a bare load_weights call.
+                    # A shape/name mismatch there restores nothing and reports success. See decisions.md.
+                    load_weights_or_raise(model, weights_path, skip_mismatch=True)
             else:
                 # DECISION plan_2026-05-11_a9e8e6f6/D-001: pretrained=True raises, never silently
                 # random-inits. See decisions.md.
@@ -575,7 +733,10 @@ def create_gpt2(
         local weights from that path. If ``False`` (default), random init.
     :type pretrained: Union[bool, str]
     :param kwargs: Additional keyword arguments forwarded to
-        :meth:`GPT2.from_variant` (e.g. ``dropout_rate``, ``tie_word_embeddings``).
+        :meth:`GPT2.from_variant` (e.g. ``dropout_rate``, ``tie_word_embeddings``,
+        or ``include_top=True`` with a ``task_config`` for a model with a task
+        head). A local ``pretrained`` path never restores a checkpoint's task
+        head.
     :type kwargs: Any
 
     :returns: Configured ``GPT2`` instance.
@@ -584,11 +745,20 @@ def create_gpt2(
     :raises NotImplementedError: If ``pretrained=True`` (no public weights).
     :raises FileNotFoundError: If ``pretrained`` is a string path that does
         not exist.
-    :raises ValueError: If ``variant`` is not a recognized GPT-2 variant.
+    :raises ValueError: If ``variant`` is not a recognized GPT-2 variant, or a
+        forwarded argument is invalid (including inconsistent head knobs, see
+        :class:`GPT2`).
 
     Example:
         >>> gpt = create_gpt2("small")
         >>> gpt = create_gpt2("tiny", vocab_size=200)
+        >>>
+        >>> # Same decoder with a sentence-classification head (pools 'last')
+        >>> clf = create_gpt2(
+        ...     "tiny", include_top=True,
+        ...     task_config=NLPTaskConfig(
+        ...         name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+        ...         num_classes=2))
     """
     if vocab_size is not None:
         kwargs["vocab_size"] = vocab_size
@@ -597,99 +767,6 @@ def create_gpt2(
         pretrained=pretrained,
         **kwargs,
     )
-
-
-# ---------------------------------------------------------------------
-# Integration with NLP Task Heads
-# ---------------------------------------------------------------------
-
-
-def create_gpt2_with_head(
-    gpt2_variant: str,
-    task_config: NLPTaskConfig,
-    pretrained: Union[bool, str] = False,
-    gpt2_config_overrides: Optional[Dict[str, Any]] = None,
-    head_config_overrides: Optional[Dict[str, Any]] = None,
-) -> keras.Model:
-    """Factory function to create a GPT-2 model with a task-specific head.
-
-    This function demonstrates the intended integration pattern:
-    1. Instantiate a foundational ``GPT2`` model (optionally pretrained).
-    2. Instantiate a task-specific head from the ``dl_techniques.layers.heads.nlp``
-       factory.
-    3. Combine them into a single, end-to-end ``keras.Model``.
-
-    :param gpt2_variant: The GPT-2 variant to use (e.g., "small", "medium", "large").
-    :type gpt2_variant: str
-    :param task_config: An ``NLPTaskConfig`` object defining the task.
-    :type task_config: NLPTaskConfig
-    :param pretrained: If a string, a path to a local ``.keras`` weights file.
-        If True, raises ``NotImplementedError`` -- no public GPT-2 weights ship
-        with ``dl_techniques``. If False (default), random init.
-    :type pretrained: Union[bool, str]
-    :param gpt2_config_overrides: Optional dictionary to override default GPT-2
-        configuration for the chosen variant. Defaults to None.
-    :type gpt2_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Optional dictionary to override default head
-        configuration. Defaults to None.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete ``keras.Model`` ready for the specified task.
-    :rtype: keras.Model
-    """
-    gpt2_config_overrides = gpt2_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-
-    logger.info(f"Creating GPT2-{gpt2_variant} with a '{task_config.name}' head.")
-
-    # GPT-2 is a causal decoder, so for sequence-level tasks we use 'last' pooling
-    # which respects the causal mask and attends to the last valid token.
-    head_kwargs = {'pooling_type': 'last'}
-    head_kwargs.update(head_config_overrides)
-
-    gpt2_backbone = GPT2.from_variant(
-        gpt2_variant,
-        pretrained=pretrained,
-        **gpt2_config_overrides,
-    )
-
-    task_head = create_nlp_head(
-        task_config=task_config,
-        input_dim=gpt2_backbone.embed_dim,
-        **head_kwargs,
-    )
-
-    inputs = {
-        "input_ids": keras.Input(
-            shape=(None,), dtype="int32", name="input_ids"
-        ),
-        "attention_mask": keras.Input(
-            shape=(None,), dtype="int32", name="attention_mask"
-        ),
-    }
-
-    # GPT2 call expects inputs (input_ids) as first positional arg, attention_mask as kwarg
-    encoder_outputs = gpt2_backbone(
-        inputs["input_ids"],
-        attention_mask=inputs["attention_mask"],
-    )
-
-    head_inputs = {
-        "hidden_states": encoder_outputs["last_hidden_state"],
-        "attention_mask": inputs["attention_mask"],
-    }
-    task_outputs = task_head(head_inputs)
-
-    model_name = f"gpt2_{gpt2_variant}_with_{task_config.name}_head"
-    model = keras.Model(
-        inputs=inputs,
-        outputs=task_outputs,
-        name=model_name
-    )
-
-    logger.info(
-        f"Successfully created model with {model.count_params():,} parameters."
-    )
-    return model
 
 
 # ---------------------------------------------------------------------

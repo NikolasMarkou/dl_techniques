@@ -1,14 +1,20 @@
 """Tests for the GPT-2 model implementation.
 
 Covers initialization, parameter validation, forward pass, weight tying,
-causal masking, serialization, variant creation, and gradient flow.
+causal masking, serialization, variant creation, gradient flow, and the
+in-model task head (``include_top``).
 """
+
+from typing import Any, Dict
 
 import pytest
 import numpy as np
 import keras
 import tensorflow as tf
 
+import dl_techniques.models.language.gpt2.gpt2 as gpt2_module
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.gpt2 import create_gpt2
 from dl_techniques.models.language.gpt2.gpt2 import GPT2
 
 
@@ -718,3 +724,405 @@ class TestPretrainedLocalPathIsVerified:
             rtol=1e-6,
             atol=1e-6,
         )
+
+
+# ---------------------------------------------------------------------
+# In-model task head: include_top / task_config / head_config_overrides
+# (plan-2026-10-11T004932-b83935e1, D-012)
+# ---------------------------------------------------------------------
+
+#: ``max_seq_len`` 16 sits below the 32-token dummy forward the pretrained
+#: path used to run, so every ``pretrained=<path>`` arm here also guards that
+#: fix (it raised "seq_len=32 exceeds max_seq_len=16" before).
+_HEAD_KW: Dict[str, Any] = {
+    "vocab_size": 64, "embed_dim": 32, "depth": 2, "num_heads": 2,
+    "max_seq_len": 16,
+}
+_SEQ = 8
+_CLF = NLPTaskConfig(
+    name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3
+)
+_NER = NLPTaskConfig(
+    name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9
+)
+#: Same head class and weight shapes as ``_CLF``, a different task.
+_SPAM = NLPTaskConfig(
+    name="spam", task_type=NLPTaskType.SPAM_DETECTION, num_classes=3
+)
+
+
+def _np(tensor) -> np.ndarray:
+    return np.asarray(keras.ops.convert_to_numpy(tensor))
+
+
+def _head_batch() -> Dict[str, np.ndarray]:
+    """Row 1 is right-padded: 5 real tokens, then 3 pad ids under a 0 mask."""
+    ids = np.random.default_rng(0).integers(1, 64, (2, _SEQ)).astype("int32")
+    mask = np.ones_like(ids)
+    ids[1, 5:] = 0
+    mask[1, 5:] = 0
+    return {"input_ids": ids, "attention_mask": mask}
+
+
+def _relative_paths(model: keras.Model) -> list:
+    """Weight paths without the model-root segment (guide 8.3)."""
+    return sorted(w.path.split("/", 1)[-1] for w in model.weights)
+
+
+def _backbone_hidden(model: GPT2, batch: Dict[str, np.ndarray]) -> np.ndarray:
+    """``last_hidden_state`` of ``model``'s decoder, whatever its top.
+
+    Read through a headless twin rebuilt from the model's own config and given
+    the model's own decoder weights; the twin's LM head does not feed
+    ``last_hidden_state``.
+    """
+    config = model.get_config()
+    config.update(include_top=False, task_config=None, head_config_overrides=None)
+    config.pop("name", None)
+    twin = GPT2.from_config(config)
+    twin(batch, training=False)
+    twin.decoder.set_weights(model.decoder.get_weights())
+    return _np(twin(batch, training=False)["last_hidden_state"])
+
+
+def _randomized(model: GPT2, seed: int) -> GPT2:
+    """Overwrite every weight, so a restored value cannot match by init luck."""
+    assert model.weights, "build the model before randomizing it"
+    rng = np.random.default_rng(seed)
+    for w in model.weights:
+        w.assign(rng.normal(0.0, 0.1, size=tuple(w.shape)).astype(w.dtype))
+    return model
+
+
+class TestGPT2IncludeTop:
+    """The ``include_top`` / ``task_config`` / ``head_config_overrides`` knobs."""
+
+    def test_head_output_shapes(self):
+        """Bare logits for single-output heads, a dict for QA; nothing else."""
+        batch = _head_batch()
+        out = GPT2(**_HEAD_KW, include_top=True, task_config=_CLF)(
+            batch, training=False)
+        assert not isinstance(out, dict) and tuple(out.shape) == (2, 3)
+
+        out = GPT2(**_HEAD_KW, include_top=True, task_config=_NER)(
+            batch, training=False)
+        assert not isinstance(out, dict) and tuple(out.shape) == (2, _SEQ, 9)
+
+        qa = GPT2(**_HEAD_KW, include_top=True, task_config=NLPTaskConfig(
+            name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=2))
+        out = qa(batch, training=False)
+        # No `logits` / `last_hidden_state` beside the head's keys.
+        assert set(out) == {"start_logits", "end_logits"}
+        assert tuple(out["start_logits"].shape) == (2, _SEQ)
+
+    def test_a_task_head_replaces_the_untied_lm_head(self):
+        """``build()`` must not create the LM head ``call()`` no longer runs."""
+        headed = GPT2(**_HEAD_KW, tie_word_embeddings=False,
+                      include_top=True, task_config=_CLF)
+        headed(_head_batch(), training=False)
+        assert headed.lm_head is None
+        assert not [w.path for w in headed.weights if "lm_head" in w.path]
+
+        headless = GPT2(**_HEAD_KW, tie_word_embeddings=False)
+        headless(_head_batch(), training=False)
+        assert [w.path.split("/", 1)[-1] for w in headless.weights
+                if "lm_head" in w.path] == ["lm_head/kernel"]
+
+    @pytest.mark.parametrize("head_type", ["linear", "harmonic"])
+    def test_no_lm_logits_are_computed_under_a_head(self, monkeypatch, head_type):
+        """Neither the tied nor the harmonic projection runs with a head.
+
+        Both are replaced by functions that raise; the headed forward pass must
+        not reach them, the headless one must (anti-vacuity).
+        """
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("LM logits computed")
+
+        monkeypatch.setattr(gpt2_module, "tied_embedding_logits", _forbidden)
+        monkeypatch.setattr(gpt2_module, "harmonic_logits", _forbidden)
+        headed = GPT2(**_HEAD_KW, head_type=head_type,
+                      include_top=True, task_config=_CLF)
+        assert tuple(headed(_head_batch(), training=False).shape) == (2, 3)
+        with pytest.raises(AssertionError, match="LM logits computed"):
+            GPT2(**_HEAD_KW, head_type=head_type)(_head_batch(), training=False)
+
+    def test_symbolic_output_matches_the_eager_one(self):
+        """A symbolic call reports what ``call`` returns, headless or headed."""
+        model = GPT2(**_HEAD_KW, include_top=True, task_config=_NER)
+        symbolic = model(keras.Input(shape=(None,), dtype="int32"))
+        assert not isinstance(symbolic, dict)
+        assert tuple(symbolic.shape) == (None, None, 9)
+        headless = GPT2(**_HEAD_KW)
+        symbolic = headless(keras.Input(shape=(None,), dtype="int32"))
+        assert set(symbolic) == {"logits", "last_hidden_state"}
+
+    def test_the_default_pooling_is_last_and_an_override_wins(self):
+        """Causal decoder: pool the last real token, not position 0 (D-012)."""
+        assert GPT2(**_HEAD_KW, include_top=True,
+                    task_config=_CLF).task_head.pooling_type == "last"
+        assert GPT2(**_HEAD_KW, include_top=True, task_config=_CLF,
+                    head_config_overrides={"pooling_type": "mean"}
+                    ).task_head.pooling_type == "mean"
+
+    def test_the_head_reads_the_last_real_token(self):
+        """Changing the last real token changes the head output.
+
+        Under ``'cls'`` pooling the head reads position 0, which in a causal
+        decoder has seen only itself, so this change would be invisible.
+        """
+        model = GPT2(**_HEAD_KW, include_top=True, task_config=_CLF)
+        batch = _head_batch()
+        base = _np(model(batch, training=False))
+        edited = {k: v.copy() for k, v in batch.items()}
+        edited["input_ids"][1, 4] = (edited["input_ids"][1, 4] % 63) + 1
+        moved = _np(model(edited, training=False))
+        np.testing.assert_array_equal(moved[0], base[0])
+        assert not np.allclose(moved[1], base[1], atol=1e-6, rtol=0)
+
+    @pytest.mark.parametrize("with_mask", [True, False],
+                             ids=["attention_mask", "pad_derived"])
+    def test_appended_padding_does_not_change_the_head_output(self, with_mask):
+        """Padding after the last real token is invisible to the head.
+
+        The decoder is causal, so the real positions' states do not depend on
+        what follows them; the head must not pool the padding either. Without
+        an ``attention_mask`` the head's mask is ``input_ids != pad_token_id``
+        (here 0, the default).
+        """
+        model = GPT2(**_HEAD_KW, include_top=True, task_config=_CLF)
+        ids = np.random.default_rng(3).integers(1, 64, (2, 5)).astype("int32")
+        padded = np.concatenate([ids, np.zeros((2, 4), "int32")], axis=1)
+
+        def run(x):
+            if with_mask:
+                return _np(model({"input_ids": x,
+                                  "attention_mask": (x != 0).astype("int32")},
+                                 training=False))
+            return _np(model(x, training=False))
+
+        np.testing.assert_allclose(run(padded), run(ids), atol=1e-5, rtol=0)
+
+    def test_a_custom_pad_token_id_drives_the_derived_mask(self):
+        """``pad_token_id`` is the padding id when no mask is given."""
+        model = GPT2(**_HEAD_KW, pad_token_id=7, include_top=True,
+                     task_config=_CLF)
+        ids = np.random.default_rng(4).integers(8, 64, (2, 5)).astype("int32")
+        padded = np.concatenate([ids, np.full((2, 3), 7, "int32")], axis=1)
+        np.testing.assert_allclose(_np(model(padded, training=False)),
+                                   _np(model(ids, training=False)),
+                                   atol=1e-5, rtol=0)
+
+    def test_config_round_trip_with_a_head(self):
+        """Every knob is serialized; ``task_config`` as a plain JSON dict."""
+        import json
+
+        overrides = {"pooling_type": "mean"}
+        model = GPT2(**_HEAD_KW, pad_token_id=5, include_top=True,
+                     task_config=_CLF, head_config_overrides=overrides)
+        config = model.get_config()
+        assert config["include_top"] is True
+        assert config["pad_token_id"] == 5
+        assert config["head_config_overrides"] == overrides
+        assert isinstance(config["task_config"], dict)
+        assert config["task_config"]["task_type"] == "text_classification"
+        json.dumps(config)  # plain data, no enum or dataclass inside
+
+        from_dict = GPT2(**_HEAD_KW, include_top=True,
+                         task_config=dict(config["task_config"]),
+                         head_config_overrides=overrides)
+        assert from_dict.get_config()["task_config"] == config["task_config"]
+
+        rebuilt = GPT2.from_config(config)
+        assert rebuilt.get_config() == config
+        assert rebuilt.task_head.pooling_type == "mean"
+
+        batch = _head_batch()
+        model(batch, training=False)
+        rebuilt(batch, training=False)
+        assert _relative_paths(rebuilt) == _relative_paths(model)
+        rebuilt.set_weights(model.get_weights())
+        np.testing.assert_array_equal(
+            _np(rebuilt(batch, training=False)), _np(model(batch, training=False)))
+
+    def test_a_config_without_the_new_keys_still_loads(self):
+        """A config written before the knobs existed rebuilds the headless model."""
+        config = GPT2(**_HEAD_KW).get_config()
+        for key in ("include_top", "task_config", "head_config_overrides",
+                    "pad_token_id"):
+            config.pop(key)
+        model = GPT2.from_config(config)
+        assert model.include_top is False and model.task_head is None
+        assert model.pad_token_id == 0
+
+    def test_keras_round_trip_restores_the_head_by_value(self, tmp_path):
+        """Weights compared BEFORE the first call on the loaded model (guide 8.4)."""
+        model = GPT2(**_HEAD_KW, include_top=True, task_config=_CLF)
+        batch = _head_batch()
+        before = _np(model(batch, training=False))
+        saved = [_np(w).copy() for w in model.weights]
+        head_saved = [_np(w).copy() for w in model.task_head.weights]
+        assert head_saved, "the head has no weights to compare"
+
+        path = str(tmp_path / "gpt2_head.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert len(loaded.weights) == len(saved)
+        for s, w in zip(saved, loaded.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0,
+                                       err_msg=f"{w.path} not restored")
+        for s, w in zip(head_saved, loaded.task_head.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0)
+        np.testing.assert_array_equal(_np(loaded(batch, training=False)), before)
+
+    @pytest.mark.parametrize("include_top", [False, True])
+    def test_explicit_build_matches_lazy_build(self, include_top):
+        """``build()`` materializes exactly the tree ``call()`` runs (guide 8.1)."""
+        kw = dict(_HEAD_KW, tie_word_embeddings=False, include_top=include_top,
+                  task_config=_CLF if include_top else None)
+        explicit = GPT2(**kw)
+        explicit.build((None, _SEQ))
+        lazy = GPT2(**kw)
+        lazy(_head_batch(), training=False)
+        assert _relative_paths(explicit) == _relative_paths(lazy)
+        assert explicit.count_params() == lazy.count_params() > 0
+
+    def test_a_disabled_head_builds_no_head_weights(self):
+        """Anti-vacuity sibling of the parity arm (guide 8.3)."""
+        headless = GPT2(**_HEAD_KW)
+        headless(_head_batch(), training=False)
+        assert headless.task_head is None
+        assert not [w.path for w in headless.weights if "task_head" in w.path]
+
+        headed = GPT2(**_HEAD_KW, include_top=True, task_config=_CLF)
+        headed(_head_batch(), training=False)
+        assert [w.path for w in headed.weights if "/task_head/" in w.path]
+
+    @pytest.mark.parametrize("tie", [True, False], ids=["tied", "untied"])
+    def test_the_encoder_weight_paths_do_not_depend_on_the_head(self, tie):
+        """The decoder's paths are identical across tops (D-005 of the plan).
+
+        The backbone is every weight under ``decoder/``. Measured on this
+        config: 30 decoder paths; untied headless adds ``lm_head/kernel`` (31);
+        a TEXT_CLASSIFICATION head adds 8 under ``task_head/`` (38).
+        """
+        def weights(**kw):
+            m = GPT2(**_HEAD_KW, tie_word_embeddings=tie, name="gpt", **kw)
+            m(_head_batch(), training=False)
+            return [w.path for w in m.weights]
+
+        headless = weights()
+        backbone = [p for p in headless if p.startswith("gpt/decoder/")]
+        assert (len(backbone), len(headless)) == (30, 30 if tie else 31)
+        assert headless[:len(backbone)] == backbone
+        for task in (_CLF, _NER):
+            headed = weights(include_top=True, task_config=task)
+            assert headed[:len(backbone)] == backbone, task.name
+            assert all(p.startswith("gpt/task_head/")
+                       for p in headed[len(backbone):]), task.name
+            assert len(headed) > len(backbone)
+
+    def test_backbone_weights_transfer_across_heads(self, tmp_path):
+        """A backbone trained under one head is reused, same weights, under another.
+
+        The supported route is a local ``pretrained`` path, which copies the
+        decoder by layer name and never the checkpoint's ``task_head``
+        (D-007, D-012 of plan-2026-10-11T004932-b83935e1). Exercised into a
+        TOKEN_CLASSIFICATION model and into a headless one.
+        """
+        source = create_gpt2("tiny", include_top=True, task_config=_CLF,
+                             **_HEAD_KW)
+        batch = _head_batch()
+        source(batch, training=False)
+        _randomized(source, 1)
+        path = str(tmp_path / "trained_under_clf.keras")
+        source.save(path)
+        reference = _backbone_hidden(source, batch)
+
+        token = create_gpt2("tiny", include_top=True, task_config=_NER,
+                            pretrained=path, **_HEAD_KW)
+        headless = create_gpt2("tiny", pretrained=path, **_HEAD_KW)
+
+        np.testing.assert_array_equal(_backbone_hidden(token, batch), reference)
+        np.testing.assert_array_equal(
+            _np(headless(batch, training=False)["last_hidden_state"]), reference)
+        assert tuple(token(batch, training=False).shape) == (2, _SEQ, 9)
+
+        # Anti-vacuity: a fresh backbone does NOT reproduce the reference.
+        fresh = create_gpt2("tiny", **_HEAD_KW)
+        assert not np.array_equal(
+            _np(fresh(batch, training=False)["last_hidden_state"]), reference)
+
+    def test_an_equal_shape_head_of_another_task_is_not_copied(self, tmp_path):
+        """A SPAM head is not filled from a CLF checkpoint's head of equal shape.
+
+        Whole-file loading (the headless route) matches the head by object
+        path and would copy it silently, because the shapes agree
+        (plan-2026-10-11T004932-b83935e1 D-007, D-012).
+        """
+        source = create_gpt2("tiny", include_top=True, task_config=_CLF,
+                             **_HEAD_KW)
+        batch = _head_batch()
+        source(batch, training=False)
+        _randomized(source, 2)
+        path = str(tmp_path / "clf.keras")
+        source.save(path)
+
+        spam = create_gpt2("tiny", include_top=True, task_config=_SPAM,
+                           pretrained=path, **_HEAD_KW)
+        src_head = [_np(w) for w in source.task_head.weights]
+        dst_head = [_np(w) for w in spam.task_head.weights]
+        assert [a.shape for a in src_head] == [b.shape for b in dst_head], (
+            "fixture invalid: the two heads must have equal weight shapes")
+        assert not any(np.array_equal(a, b) for a, b in zip(src_head, dst_head))
+        np.testing.assert_array_equal(
+            _backbone_hidden(spam, batch), _backbone_hidden(source, batch))
+
+    def test_pretrained_headless_checkpoint_into_a_headed_model(self, tmp_path):
+        """An untied headless (LM) checkpoint restores a headed model's decoder.
+
+        The checkpoint's ``lm_head`` has no target there and is left out.
+        """
+        lm = create_gpt2("tiny", tie_word_embeddings=False, **_HEAD_KW)
+        batch = _head_batch()
+        lm(batch, training=False)
+        _randomized(lm, 3)
+        expected = _np(lm(batch, training=False)["last_hidden_state"])
+        path = str(tmp_path / "lm.keras")
+        lm.save(path)
+
+        headed = create_gpt2("tiny", tie_word_embeddings=False, include_top=True,
+                             task_config=_CLF, pretrained=path, **_HEAD_KW)
+        assert headed.lm_head is None
+        np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
+
+    def test_a_decoder_that_does_not_fit_raises_for_a_headed_model(self, tmp_path):
+        """A vocab mismatch fails loudly instead of loading nothing (D-012).
+
+        The decoder is ONE layer to the by-name transfer, so a non-strict
+        transfer would skip the whole backbone and return normally.
+        """
+        lm = create_gpt2("tiny", **_HEAD_KW)
+        lm(_head_batch(), training=False)
+        path = str(tmp_path / "lm_v64.keras")
+        lm.save(path)
+        with pytest.raises(ValueError, match="Shape mismatch on layer 'decoder'"):
+            create_gpt2("tiny", include_top=True, task_config=_CLF,
+                        pretrained=path, **dict(_HEAD_KW, vocab_size=80))
+
+    def test_include_top_without_task_config_raises(self):
+        with pytest.raises(ValueError, match="include_top=True needs a task_config"):
+            GPT2(**_HEAD_KW, include_top=True)
+
+    @pytest.mark.parametrize("dead", [
+        {"task_config": _CLF},
+        {"head_config_overrides": {"pooling_type": "mean"}},
+    ], ids=["task_config", "head_config_overrides"])
+    def test_head_knobs_without_include_top_raise(self, dead):
+        with pytest.raises(ValueError, match="only take effect with include_top=True"):
+            GPT2(**_HEAD_KW, **dead)
+
+    def test_pretrained_true_still_raises_with_a_head(self):
+        with pytest.raises(NotImplementedError):
+            create_gpt2("tiny", pretrained=True, include_top=True,
+                        task_config=_CLF)

@@ -10,7 +10,8 @@ are Unsupervised Multitask Learners* (Radford et al., 2019).
 The class is a deliberately **thin wrapper**. The whole transformer stack (token and positional
 embeddings, embedding norm and dropout, causal self-attention blocks, final normalization) lives
 in the library's shared `TextDecoder` layer, which is itself built out of the library's factories.
-`GPT2` adds the language-modeling head on top and nothing else.
+`GPT2` adds the language-modeling head on top and nothing else, or, with `include_top=True`, one
+task head from `layers/heads/nlp` in its place (§8, Example 4).
 
 > **No pretrained weights are distributed by this library.**
 > `GPT2.from_variant("small", pretrained=True)` raises `NotImplementedError`, so a caller who asks
@@ -36,7 +37,7 @@ What this implementation is:
    `create_normalization_layer` and the shared causal/padding mask builders in
    `dl_techniques.utils.masking`, so improvements to them land here with no code change.
 3. **Serializable.** Registered as `dl_techniques.models.gpt2.gpt2>GPT2`; `get_config()`
-   round-trips all twelve constructor arguments, and a `.keras` save/load needs no
+   round-trips every constructor argument, and a `.keras` save/load needs no
    `custom_objects` (§12). The `gpt2_gelu` activation registers as
    `dl_techniques.models.gpt2.gpt2>gpt2_gelu`.
 4. **Configurable attention and FFN.** `attention_type` and `ffn_type` pass straight through to
@@ -84,6 +85,8 @@ Input IDs (B, N)   [+ optional attention_mask (B, N)]
   -> hidden_states (B, N, D)
   -> LM head:  tied -> hidden @ E^T  |  untied -> Dense(V, no bias)
   -> {"logits": (B, N, V), "last_hidden_state": (B, N, D)}
+
+include_top=True: hidden_states -> task_head (pools 'last') -> head output only
 ```
 
 The model accepts either a bare tensor of IDs or a dict `{"input_ids", "attention_mask"}`; a dict
@@ -160,9 +163,10 @@ print(outputs["last_hidden_state"].shape)  # (2, 64, 256)
 `dl_techniques.models.language.gpt2` exports exactly `GPT2` and `create_gpt2` via `__all__`. That
 surface is pinned by a test (§13).
 
-**`GPT2`** is the `keras.Model` subclass. It returns a **dict** with `logits` and
-`last_hidden_state`, never a bare tensor, so a dict-keyed `compile(loss={"logits": ...})` works
-unchanged. Key methods: `from_variant`, `call`, `compute_output_shape`, `get_config`, and the
+**`GPT2`** is the `keras.Model` subclass. Headless (the default) it returns a **dict** with
+`logits` and `last_hidden_state`, never a bare tensor, so a dict-keyed
+`compile(loss={"logits": ...})` works unchanged. With `include_top=True` it returns only its task
+head's output (a bare tensor, or a dict for question answering). Key methods: `from_variant`, `call`, `compute_output_shape`, `get_config`, and the
 static `_download_weights` (always raises). **`create_gpt2(...)`** wraps `GPT2.from_variant`,
 mirroring `create_bert` / `create_resnet`; `vocab_size` is injected only when not `None`.
 
@@ -209,6 +213,10 @@ Constructor arguments not covered by a variant:
 | `head_type` | `"linear"` | `"harmonic"` scores tokens by `-(n/2) log(||h-E_t||^2+eps)` (harmonic max, arXiv:2502.01628); tied embeddings only; no extra parameters. Train with `HarmonicCausalLMLoss` (`train.gpt2.pretrain_harmonic`). |
 | `harmonic_exponent` | `None` | The paper's `n` in `p ~ d^-n`; `None` resolves to `2 * embed_dim`. |
 | `harmonic_eps` | `1e-6` | Floor added to the squared distance. |
+| `pad_token_id` | `0` | Padding id for the task head's mask when the input has no `attention_mask`. Read only with `include_top=True`. `0` is a real `cl100k_base` token: pass your tokenizer's pad id or a mask. |
+| `include_top` | `False` | Own one task head instead of the LM head (Example 4). |
+| `task_config` | `None` | `NLPTaskConfig` or dict; required with `include_top=True`, refused without it. |
+| `head_config_overrides` | `None` | Head constructor kwargs, e.g. `{"pooling_type": "mean"}`; only with `include_top=True`. |
 
 ---
 
@@ -279,13 +287,55 @@ except FileNotFoundError as e:
     print(f"FileNotFoundError: {e}")
 ```
 
-An existing path is loaded with `skip_mismatch=True` after a dummy forward pass builds the model,
-through `utils.weight_transfer.load_weights_or_raise`. That helper counts variables whose value
+An existing path is loaded with `skip_mismatch=True` after `build((1, min(32, max_seq_len)))`
+builds the model, through `utils.weight_transfer.load_weights_or_raise`. That helper counts variables whose value
 actually changed and raises when the count is **zero**, so a checkpoint whose names or shapes do
 not match cannot restore nothing and return normally. Its limit: the guard fires only on a
 *completely* empty load. A **partial** restore (say 9 of 30 variables) logs a warning and returns
 normally, which under `skip_mismatch=True` is possible. Check the logged restored-variable
-count.
+count. A model with a task head loads differently; see Example 4.
+
+### Example 4: a task head in the model (`include_top`)
+
+```python
+import numpy as np
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.gpt2 import create_gpt2
+
+sst2 = NLPTaskConfig(name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2)
+clf = create_gpt2("tiny", vocab_size=512, include_top=True, task_config=sst2)
+
+ids = np.random.randint(1, 512, size=(2, 16)).astype("int32")
+ids[1, 10:] = 0                                    # right padding, pad_token_id=0
+print(clf.task_head.pooling_type)                  # 'last'
+print(clf(ids).shape)                              # (2, 2) -- bare logits, no LM logits
+
+# Warm-start another head from this one: the decoder is copied by layer name, the
+# checkpoint's task_head never is.
+clf.save("gpt2_sst2.keras")
+ner = create_gpt2(
+    "tiny", vocab_size=512, include_top=True, pretrained="gpt2_sst2.keras",
+    task_config=NLPTaskConfig(name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION,
+                              num_classes=9),
+)
+print(ner(ids).shape)                              # (2, 16, 9)
+ner.compile(optimizer="adam",
+            loss="sparse_categorical_crossentropy")  # a bare tensor compiles as is
+```
+
+GPT-2 is causal, so position 0 has seen only itself: the head pools the **last real token**
+(`pooling_type='last'`) under a mask, unlike BERT's `'cls'` default. The mask is the input's
+`attention_mask`, else `input_ids != pad_token_id`; the decoder itself sees only the caller's mask,
+so its hidden states are the same with or without a head. `head_config_overrides={"pooling_type":
+...}` replaces the default. With a head, no LM logits are computed and an untied `lm_head` is not
+created; the weights under `decoder/` have the same paths either way.
+
+A headed model's `pretrained=<path>` must be a `.keras` file. It copies the `decoder` layer and
+skips the checkpoint's `task_head` (and a headless checkpoint's `lm_head`, which has no target);
+the model's own head keeps its fresh initialization. The decoder is a single layer to that
+transfer, so a checkpoint whose decoder does not fit (another `vocab_size` or width) raises
+`ValueError: Shape mismatch on layer 'decoder'` instead of loading nothing. To restore a whole
+model, head included, use `keras.models.load_model`.
 
 ---
 
@@ -402,8 +452,9 @@ after = restored(ids)["logits"]
 print(float(np.max(np.abs(np.array(before) - np.array(after)))))  # 0.0
 ```
 
-`get_config()` stores all twelve constructor arguments; `from_config` is Keras's default, which
-resolves to `cls(**config)` for this subclassed model.
+`get_config()` stores every constructor argument (`task_config` as a plain dict); `from_config` is
+Keras's default, which resolves to `cls(**config)` for this subclassed model. A config saved before
+`pad_token_id` and the head knobs existed still loads, as a headless model.
 
 ---
 
@@ -417,8 +468,9 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest \
 The model suite covers initialization and validation
 errors, forward shapes for tensor and dict inputs, weight tying **and** the untied head, causal
 masking (a future token must not move an earlier position's logits), `get_config` / `.keras` round
-trips, every named variant, gradient flow, the `pretrained=True` contract, and the exact `__all__`
-surface. `tests/test_train/test_gpt2/` holds the trainer-side contract tests. Quote *passed with
+trips, every named variant, gradient flow, the `pretrained=True` contract, the exact `__all__`
+surface, and the in-model task head (`TestGPT2IncludeTop`: last-token pooling, padding
+invariance, head swap by `pretrained` path). `tests/test_train/test_gpt2/` holds the trainer-side contract tests. Quote *passed with
 collected*: a suite that collects almost nothing also reports green.
 
 ---
@@ -483,7 +535,7 @@ shape-illegal at any `vocab_size != embed_dim`.
 
 ### Output dict
 
-`call()` always returns `{"logits", "last_hidden_state"}`. Keeping `last_hidden_state` costs
+Headless, `call()` always returns `{"logits", "last_hidden_state"}`. Keeping `last_hidden_state` costs
 nothing (the head consumes that tensor anyway) and makes the model usable as an encoder without a
 second forward pass.
 

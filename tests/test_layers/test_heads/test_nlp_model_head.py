@@ -13,6 +13,8 @@ Covers:
   classification, generation and similarity heads, and keeps the QA dict.
 * The returned head round-trips through ``get_config`` / ``from_config`` by
   value.
+* ``head_attention_mask`` returns the caller's mask when given, else
+  ``input_ids != pad_token_id``, in the requested dtype.
 """
 
 import json
@@ -26,6 +28,7 @@ from dl_techniques.layers.heads.nlp import (
     NLPTaskType,
     build_model_task_head,
     finalize_head_outputs,
+    head_attention_mask,
     task_config_to_dict,
     validate_task_head_knobs,
 )
@@ -313,3 +316,27 @@ class TestHeadRoundTrip:
             atol=1e-6,
             rtol=0,
         )
+
+
+# ---------------------------------------------------------------------
+# the head's padding mask
+# ---------------------------------------------------------------------
+
+
+class TestHeadAttentionMask:
+
+    def test_no_mask_derives_one_from_the_pad_id(self) -> None:
+        ids = np.array([[5, 7, 3, 3], [3, 9, 1, 2]], dtype="int32")
+        mask = keras.ops.convert_to_numpy(
+            head_attention_mask(ids, None, pad_token_id=3, dtype="float32"))
+        np.testing.assert_array_equal(
+            mask, [[1, 1, 0, 0], [0, 1, 1, 1]])
+        assert mask.dtype == np.float32
+
+    def test_a_given_mask_wins_over_the_pad_id(self) -> None:
+        ids = np.zeros((2, 4), dtype="int32")  # all "padding" by id
+        given = np.array([[1, 1, 1, 0], [1, 0, 0, 0]], dtype="int32")
+        mask = keras.ops.convert_to_numpy(
+            head_attention_mask(ids, given, pad_token_id=0, dtype="float16"))
+        np.testing.assert_array_equal(mask, given)
+        assert mask.dtype == np.float16

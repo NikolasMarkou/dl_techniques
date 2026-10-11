@@ -73,7 +73,10 @@ still load.
   when the overrides set no `pooling_type`; head named `task_head`),
   `task_config_to_dict(...)` for the model's `get_config`, and
   `finalize_head_outputs(...)` (drop `probabilities`/`predictions` beside
-  `logits`, unwrap a single-key dict to a bare tensor).
+  `logits`, unwrap a single-key dict to a bare tensor), and
+  `head_attention_mask(input_ids, attention_mask, pad_token_id, dtype)` (the
+  caller's mask, else `input_ids != pad_token_id`, cast to `dtype`; for causal
+  backbones that run without a mask but pool `'last'`).
 - `vision/factory.py` — `create_vision_head(task_type, ...)`,
   `create_enhancement_head(...)`, `create_multi_task_head(...)`,
   `HeadConfiguration`.
