@@ -67,6 +67,12 @@ def test_the_package_runs_under_mixed_float16(name):
 
 
 # DECISION plan-2026-10-11T004932-b83935e1/D-016
+# A separate fp16 arm for the HEADED build. Do NOT fold it into the arm above
+# by pointing SUBJECTS at the headed build: the head's Dense re-casts its input
+# to float16, so a headed arm stayed green on 9 of 9 subjects even when the
+# backbone had left mixed precision (measured), and the backbone check would
+# be lost. Do NOT forward the subject kwargs here either: the gpt2/wave_field
+# exemption of the LM logits would leave the headed output nothing to judge.
 @pytest.mark.parametrize("name", sorted(set(HEADED_SUBJECTS) & set(SUBJECTS)))
 def test_the_in_model_task_head_runs_under_mixed_float16(name):
     """All four parts of the arm on the package's HEADED build.
