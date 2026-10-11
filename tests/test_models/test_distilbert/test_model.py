@@ -6,8 +6,8 @@ Covers the paths that were never exercised before plan
 position branch under `float32` and `mixed_float16`, `rms_norm`, the
 unknown-`normalization_type` raise (which must come from the EMBEDDING stage,
 not from the first `TransformerLayer`), the I-4 no-auto-masking guard, the
-D-003 `pad_token_id`-is-advisory guard, `create_distilbert_with_head` end to
-end, and the `get_config()` / `.keras` round trips asserted on weight VALUES
+D-003 `pad_token_id`-is-advisory guard, the in-model task head
+(`include_top=True`) end to end, and the `get_config()` / `.keras` round trips asserted on weight VALUES
 and a `training=False` forward output.
 
 Measured facts these tests encode (do not "simplify" them into shape checks):
@@ -115,20 +115,21 @@ class TestTopLevelImport:
             "dl_techniques.models.language.distilbert does not export DistilBERT; "
             "the package __init__ is empty or incomplete"
         )
-        assert hasattr(pkg, "create_distilbert_with_head"), (
+        assert hasattr(pkg, "create_distilbert"), (
             "dl_techniques.models.language.distilbert does not export "
-            "create_distilbert_with_head"
+            "create_distilbert"
         )
         # The exported names must be the real implementations, not shadows.
         from dl_techniques.models.language.distilbert.model import (
             DistilBERT as _cls,
-            create_distilbert_with_head as _fn,
+            create_distilbert as _fn,
         )
         assert pkg.DistilBERT is _cls
-        assert pkg.create_distilbert_with_head is _fn
-        assert sorted(pkg.__all__) == [
-            "DistilBERT", "create_distilbert_with_head"
-        ], pkg.__all__
+        assert pkg.create_distilbert is _fn
+        assert sorted(pkg.__all__) == ["DistilBERT", "create_distilbert"], pkg.__all__
+        # The head factory was replaced by `include_top` on the class
+        # (plan-2026-10-11T004932-b83935e1); it must not come back.
+        assert not hasattr(pkg, "create_distilbert_with_head")
         # SC-4: the deleted private class must not be resurrected as an export.
         assert not hasattr(pkg, "DistilBertEmbeddings"), (
             "DistilBertEmbeddings was deleted; the package must not export it"
@@ -420,8 +421,14 @@ class TestMaskingContract:
 
 class TestHeadIntegration:
 
-    def test_create_distilbert_with_head_end_to_end(self):
-        from dl_techniques.models.language.distilbert import create_distilbert_with_head
+    def test_create_distilbert_with_a_head_end_to_end(self):
+        """``create_distilbert(..., include_top=True)`` predicts bare logits.
+
+        The functional wrapper this replaced returned the head's raw dict
+        (``logits`` and ``probabilities``); the in-model head returns the
+        finalized output, so the model compiles with a plain loss.
+        """
+        from dl_techniques.models.language.distilbert import create_distilbert
         from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
         num_classes = 3
@@ -431,36 +438,42 @@ class TestHeadIntegration:
             num_classes=num_classes,
         )
         keras.utils.set_random_seed(SEED)
-        model = create_distilbert_with_head(
+        model = create_distilbert(
             "tiny",
-            task,
-            distilbert_config_overrides=dict(
-                vocab_size=256, max_position_embeddings=64, num_layers=1
-            ),
+            include_top=True,
+            task_config=task,
+            vocab_size=256,
+            max_position_embeddings=64,
+            num_layers=1,
         )
 
-        assert sorted(model.input.keys()) == ["attention_mask", "input_ids"], (
-            "the assembled model's input signature changed; "
-            f"got {sorted(model.input.keys())}"
-        )
-        encoders = [l for l in model.layers if isinstance(l, DistilBERT)]
-        assert len(encoders) == 1, [type(l).__name__ for l in model.layers]
-        assert encoders[0].vocab_size == 256, (
-            "distilbert_config_overrides did not reach the encoder "
-            f"(vocab_size={encoders[0].vocab_size}, expected the override 256)"
+        assert isinstance(model, DistilBERT)
+        assert model.vocab_size == 256 and model.num_layers == 1, (
+            "the create_distilbert overrides did not reach the model "
+            f"(vocab_size={model.vocab_size}, num_layers={model.num_layers})"
         )
 
         ids = _padded_tokens()
         mask = (ids != 0).astype("int32")
         out = model.predict({"input_ids": ids, "attention_mask": mask}, verbose=0)
 
-        assert isinstance(out, dict) and sorted(out) == ["logits", "probabilities"], out
-        assert out["logits"].shape == (ids.shape[0], num_classes), out["logits"].shape
-        assert np.all(np.isfinite(out["logits"]))
-        np.testing.assert_allclose(
-            out["probabilities"].sum(axis=-1), 1.0, atol=1e-5,
-            err_msg="classification head probabilities do not sum to 1",
+        assert isinstance(out, np.ndarray), type(out)
+        assert out.shape == (ids.shape[0], num_classes), out.shape
+        assert np.all(np.isfinite(out))
+
+        # Only input_ids is required, exactly as for the encoder.
+        out_ids_only = model.predict({"input_ids": ids}, verbose=0)
+        assert out_ids_only.shape == (ids.shape[0], num_classes)
+
+        model.compile(
+            optimizer="adam",
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         )
+        history = model.fit(
+            {"input_ids": ids, "attention_mask": mask},
+            np.array([0, 2], dtype="int32"), epochs=1, verbose=0,
+        )
+        assert np.isfinite(history.history["loss"][0])
 
 
 class TestSerialization:
@@ -700,6 +713,22 @@ class TestPretrainedContract:
         with pytest.raises(NotImplementedError, match="No pretrained DistilBERT weights"):
             DistilBERT.from_variant("tiny", pretrained=True)
 
+    def test_create_distilbert_pretrained_true_raises(self):
+        from dl_techniques.models.language.distilbert import create_distilbert
+
+        with pytest.raises(NotImplementedError, match="No pretrained DistilBERT weights"):
+            create_distilbert("tiny", pretrained=True)
+
+    def test_create_distilbert_delegates_to_from_variant(self):
+        from dl_techniques.models.language.distilbert import create_distilbert
+
+        model = create_distilbert("tiny", vocab_size=128, max_position_embeddings=32)
+        assert isinstance(model, DistilBERT)
+        tiny = DistilBERT.MODEL_VARIANTS["tiny"]
+        assert (model.hidden_size, model.num_layers) == (
+            tiny["hidden_size"], tiny["num_layers"])
+        assert model.vocab_size == 128 and model.max_position_embeddings == 32
+
     def test_pretrained_false_still_builds(self):
         model = DistilBERT.from_variant("tiny", vocab_size=128,
                                         max_position_embeddings=32)
@@ -742,3 +771,296 @@ class TestDistilBERTGradientFlow:
         assert len(report) == len(model.trainable_weights)
         assert len(report) > 0
         assert max(v for v in report.values() if v is not None) > 0.0
+
+
+# ---------------------------------------------------------------------
+# include_top: the in-model task head
+# ---------------------------------------------------------------------
+
+from typing import Any, Dict
+
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.distilbert import create_distilbert
+
+#: Small enough that every arm below runs in about a second.
+_HEAD_KW: Dict[str, Any] = {
+    "vocab_size": 64,
+    "hidden_size": 32,
+    "num_layers": 2,
+    "num_heads": 2,
+    "intermediate_size": 64,
+    "max_position_embeddings": 32,
+}
+_SEQ = 8
+_CLF = NLPTaskConfig(
+    name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3
+)
+_NER = NLPTaskConfig(
+    name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9
+)
+#: Same head class and weight shapes as ``_CLF``, a different task.
+_SPAM = NLPTaskConfig(
+    name="spam", task_type=NLPTaskType.SPAM_DETECTION, num_classes=3
+)
+
+
+def _head_batch() -> Dict[str, np.ndarray]:
+    ids = np.random.default_rng(0).integers(1, 64, (2, _SEQ)).astype("int32")
+    mask = np.ones_like(ids)
+    mask[1, 5:] = 0
+    return {"input_ids": ids, "attention_mask": mask}
+
+
+def _relative_paths(model: keras.Model) -> list:
+    """Weight paths without the model-root segment (guide 8.3)."""
+    return sorted(w.path.split("/", 1)[-1] for w in model.weights)
+
+
+def _backbone_hidden(model: DistilBERT, batch: Dict[str, np.ndarray]) -> np.ndarray:
+    """``last_hidden_state`` of ``model``'s encoder, whatever its head.
+
+    A headed model does not return its hidden states, so the encoder is read
+    through a headless twin rebuilt from the model's own config and given the
+    model's own encoder weights, layer by layer.
+    """
+    config = model.get_config()
+    config.update(include_top=False, task_config=None, head_config_overrides=None)
+    config.pop("name", None)
+    twin = DistilBERT.from_config(config)
+    twin(batch, training=False)
+    for layer in twin.layers:
+        layer.set_weights(model.get_layer(layer.name).get_weights())
+    return _np(twin(batch, training=False)["last_hidden_state"])
+
+
+def _randomized(model: DistilBERT, seed: int) -> DistilBERT:
+    """Overwrite every weight, so a restored value cannot match by init luck.
+
+    ``model`` must be built: an unbuilt model has no weights to overwrite.
+    """
+    assert model.weights, "build the model before randomizing it"
+    rng = np.random.default_rng(seed)
+    for w in model.weights:
+        w.assign(rng.normal(0.0, 0.1, size=tuple(w.shape)).astype(w.dtype))
+    return model
+
+
+class TestDistilBERTIncludeTop:
+    """The ``include_top`` / ``task_config`` / ``head_config_overrides`` knobs."""
+
+    def test_head_output_shapes(self):
+        """Bare logits for single-output heads, a dict for QA."""
+        batch = _head_batch()
+        clf = DistilBERT(**_HEAD_KW, include_top=True, task_config=_CLF)
+        out = clf(batch, training=False)
+        assert not isinstance(out, dict)
+        assert tuple(out.shape) == (2, 3)
+
+        ner = DistilBERT(**_HEAD_KW, include_top=True, task_config=_NER)
+        out = ner(batch, training=False)
+        assert not isinstance(out, dict)
+        assert tuple(out.shape) == (2, _SEQ, 9)
+
+        qa = DistilBERT(**_HEAD_KW, include_top=True, task_config=NLPTaskConfig(
+            name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=2))
+        out = qa(batch, training=False)
+        assert set(out) == {"start_logits", "end_logits"}
+        assert tuple(out["start_logits"].shape) == (2, _SEQ)
+
+    def test_symbolic_output_matches_the_eager_one(self):
+        """A symbolic call reports what ``call`` returns, in both modes."""
+        model = DistilBERT(**_HEAD_KW, include_top=True, task_config=_NER)
+        symbolic = model(keras.Input(shape=(None,), dtype="int32"))
+        assert tuple(symbolic.shape) == (None, None, 9)
+        headless = DistilBERT(**_HEAD_KW)
+        symbolic = headless(keras.Input(shape=(None,), dtype="int32"))
+        assert set(symbolic) == {"last_hidden_state", "attention_mask"}
+
+    def test_config_round_trip_with_a_head(self):
+        """Every knob is serialized; ``task_config`` as a plain JSON dict."""
+        import json
+
+        overrides = {"pooling_type": "mean"}
+        model = DistilBERT(**_HEAD_KW, include_top=True, task_config=_CLF,
+                           head_config_overrides=overrides)
+        config = model.get_config()
+        assert config["include_top"] is True
+        assert config["head_config_overrides"] == overrides
+        assert isinstance(config["task_config"], dict)
+        assert config["task_config"]["task_type"] == "text_classification"
+        json.dumps(config)  # plain data, no enum or dataclass inside
+
+        # A dict task_config and the dataclass serialize identically.
+        from_dict = DistilBERT(**_HEAD_KW, include_top=True,
+                               task_config=dict(config["task_config"]),
+                               head_config_overrides=overrides)
+        assert from_dict.get_config()["task_config"] == config["task_config"]
+
+        rebuilt = DistilBERT.from_config(config)
+        assert rebuilt.get_config() == config
+        assert rebuilt.task_head.pooling_type == "mean"
+
+        batch = _head_batch()
+        model(batch, training=False)
+        rebuilt(batch, training=False)
+        assert _relative_paths(rebuilt) == _relative_paths(model)
+        rebuilt.set_weights(model.get_weights())
+        np.testing.assert_array_equal(
+            _np(rebuilt(batch, training=False)), _np(model(batch, training=False)))
+
+    def test_a_config_without_the_head_keys_still_loads(self):
+        """A config written before the knobs existed rebuilds the encoder."""
+        config = DistilBERT(**_HEAD_KW).get_config()
+        for key in ("include_top", "task_config", "head_config_overrides"):
+            config.pop(key)
+        model = DistilBERT.from_config(config)
+        assert model.include_top is False and model.task_head is None
+
+    def test_keras_round_trip_restores_the_head_by_value(self, tmp_path):
+        """Weights compared BEFORE the first call on the loaded model (guide 8.4)."""
+        model = DistilBERT(**_HEAD_KW, include_top=True, task_config=_CLF)
+        batch = _head_batch()
+        before = _np(model(batch, training=False))
+        saved = [_np(w).copy() for w in model.weights]
+        head_saved = [_np(w).copy() for w in model.task_head.weights]
+        assert head_saved, "the head has no weights to compare"
+
+        path = str(tmp_path / "distilbert_head.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert len(loaded.weights) == len(saved)
+        for s, w in zip(saved, loaded.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0,
+                                       err_msg=f"{w.path} not restored")
+        for s, w in zip(head_saved, loaded.task_head.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0)
+        np.testing.assert_array_equal(_np(loaded(batch, training=False)), before)
+
+    @pytest.mark.parametrize("include_top", [False, True])
+    def test_explicit_build_matches_lazy_build(self, include_top):
+        """``build()`` materializes exactly the tree ``call()`` runs (guide 8.1)."""
+        kw = dict(_HEAD_KW, include_top=include_top,
+                  task_config=_CLF if include_top else None)
+        explicit = DistilBERT(**kw)
+        explicit.build((None, _SEQ))
+        lazy = DistilBERT(**kw)
+        lazy(_head_batch(), training=False)
+        assert _relative_paths(explicit) == _relative_paths(lazy)
+        assert explicit.count_params() == lazy.count_params() > 0
+
+    def test_a_disabled_head_builds_no_head_weights(self):
+        """Anti-vacuity sibling of the parity arm (guide 8.3)."""
+        headless = DistilBERT(**_HEAD_KW)
+        headless(_head_batch(), training=False)
+        assert headless.task_head is None
+        assert not [w.path for w in headless.weights if "task_head" in w.path]
+
+        headed = DistilBERT(**_HEAD_KW, include_top=True, task_config=_CLF)
+        headed(_head_batch(), training=False)
+        assert [w.path for w in headed.weights if "/task_head/" in w.path]
+
+    def test_the_encoder_weight_paths_do_not_depend_on_the_head(self):
+        """The head lives entirely under ``task_head/`` (D-005 of the plan)."""
+        def paths(**kw):
+            m = DistilBERT(**_HEAD_KW, name="distilbert", **kw)
+            m(_head_batch(), training=False)
+            return [w.path for w in m.weights]
+
+        headless = paths()
+        for task in (_CLF, _NER):
+            headed = paths(include_top=True, task_config=task)
+            encoder_part = [
+                p for p in headed if not p.startswith("distilbert/task_head/")]
+            assert encoder_part == headless, task.name
+            assert len(headed) > len(headless)
+
+    def test_backbone_weights_transfer_across_heads(self, tmp_path):
+        """An encoder trained under one head is reused, same weights, under another.
+
+        The supported route is a local ``pretrained`` path: a headed model
+        copies the encoder by layer name and never the checkpoint's
+        ``task_head``; a headless model restores the file and ignores the head
+        (D-007, D-008 of plan-2026-10-11T004932-b83935e1). Exercised here into
+        a TOKEN_CLASSIFICATION model and into a headless one.
+        """
+        source = create_distilbert("tiny", include_top=True, task_config=_CLF,
+                                   **_HEAD_KW)
+        batch = _head_batch()
+        source(batch, training=False)
+        _randomized(source, 1)
+        path = str(tmp_path / "trained_under_clf.keras")
+        source.save(path)
+        reference = _backbone_hidden(source, batch)
+
+        token = create_distilbert("tiny", include_top=True, task_config=_NER,
+                                  pretrained=path, **_HEAD_KW)
+        headless = create_distilbert("tiny", pretrained=path, **_HEAD_KW)
+
+        np.testing.assert_array_equal(_backbone_hidden(token, batch), reference)
+        np.testing.assert_array_equal(
+            _np(headless(batch, training=False)["last_hidden_state"]), reference)
+        # The new head is the target's own: fresh, and of the new task's shape.
+        assert tuple(token(batch, training=False).shape) == (2, _SEQ, 9)
+
+        # Anti-vacuity: a fresh encoder does NOT reproduce the reference.
+        fresh = create_distilbert("tiny", **_HEAD_KW)
+        assert not np.array_equal(
+            _np(fresh(batch, training=False)["last_hidden_state"]), reference)
+
+    def test_an_equal_shape_head_of_another_task_is_not_copied(self, tmp_path):
+        """A SPAM head is not filled from a CLF checkpoint's head of equal shape.
+
+        Measured before the transfer route existed: a whole-file load copied
+        the CLF head into the SPAM model silently, because the shapes agree
+        (plan-2026-10-11T004932-b83935e1 D-007/D-008).
+        """
+        source = create_distilbert("tiny", include_top=True, task_config=_CLF,
+                                   **_HEAD_KW)
+        batch = _head_batch()
+        source(batch, training=False)
+        _randomized(source, 2)
+        path = str(tmp_path / "clf.keras")
+        source.save(path)
+
+        keras.utils.set_random_seed(SEED)
+        spam = create_distilbert("tiny", include_top=True, task_config=_SPAM,
+                                 pretrained=path, **_HEAD_KW)
+        src_head = [_np(w) for w in source.task_head.weights]
+        dst_head = [_np(w) for w in spam.task_head.weights]
+        assert [a.shape for a in src_head] == [b.shape for b in dst_head], (
+            "fixture invalid: the two heads must have equal weight shapes")
+        assert not any(np.array_equal(a, b) for a, b in zip(src_head, dst_head))
+        np.testing.assert_array_equal(
+            _backbone_hidden(spam, batch), _backbone_hidden(source, batch))
+
+    def test_pretrained_headless_checkpoint_into_a_headed_model(self, tmp_path):
+        """A headless checkpoint restores the encoder of a headed model by value."""
+        encoder = create_distilbert("tiny", **_HEAD_KW)
+        batch = _head_batch()
+        encoder(batch, training=False)
+        _randomized(encoder, 3)
+        expected = _np(encoder(batch, training=False)["last_hidden_state"])
+        path = str(tmp_path / "encoder.keras")
+        encoder.save(path)
+
+        headed = create_distilbert("tiny", include_top=True, task_config=_CLF,
+                                   pretrained=path, **_HEAD_KW)
+        np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
+
+    def test_include_top_without_task_config_raises(self):
+        with pytest.raises(ValueError, match="include_top=True needs a task_config"):
+            DistilBERT(**_HEAD_KW, include_top=True)
+
+    @pytest.mark.parametrize("dead", [
+        {"task_config": _CLF},
+        {"head_config_overrides": {"pooling_type": "mean"}},
+    ], ids=["task_config", "head_config_overrides"])
+    def test_head_knobs_without_include_top_raise(self, dead):
+        with pytest.raises(ValueError, match="only take effect with include_top=True"):
+            DistilBERT(**_HEAD_KW, **dead)
+
+    def test_pretrained_true_still_raises_with_a_head(self):
+        with pytest.raises(NotImplementedError):
+            create_distilbert("tiny", pretrained=True, include_top=True,
+                              task_config=_CLF)

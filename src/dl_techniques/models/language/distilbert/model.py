@@ -1,20 +1,24 @@
 """
 DistilBERT compresses a BERT encoder by knowledge distillation, in the `DistilBERT` class
-and its `create_distilbert_with_head` factory. Where a small model trained from scratch on
+and its `create_distilbert` factory. Where a small model trained from scratch on
 the same corpus sees only hard targets, a distilled model fits the teacher's full soft
 output distribution, which carries near-miss structure a from-scratch model would have to
 rediscover from data. The compression is entirely in depth: layers are halved (6 instead of
 12 for base) while hidden size, head count and FFN width stay at BERT's values, so a student
 initialized from the teacher can copy every other layer verbatim. Token type embeddings and
 the pooler are removed rather than shrunk, since DistilBERT trains on single-segment input
-and drops the next-sentence-prediction objective the pooler served. The class is a pure
-foundation model, emitting `{"last_hidden_state", "attention_mask"}` with no head attached;
-`create_distilbert_with_head` wires it to a task head that returns a dict, not a single
-tensor. Three preset variants: base (the paper's configuration), small and tiny. No
-pretrained weights ship with this package -- `pretrained=True` raises
+and drops the next-sentence-prediction objective the pooler served. By default
+(`include_top=False`) the class is a pure foundation model, emitting
+`{"last_hidden_state", "attention_mask"}` with no head attached. With `include_top=True` and
+a `task_config` it owns ONE task head from `layers/heads/nlp`, named `task_head`, and returns
+that head's output instead (a bare tensor for every task but question answering). Every head
+weight lives under `task_head/`, so the encoder's weight paths are the same with or without a
+head and with any task, which is what lets an encoder trained under one head be reused,
+weights unchanged, under another. Three preset variants: base (the paper's configuration),
+small and tiny. No pretrained weights ship with this package -- `pretrained=True` raises
 `NotImplementedError`. `pretrained="<path>.keras"` loads a local checkpoint into this
-configuration; `keras.models.load_model(path)` is simpler when you just want a saved model
-back as it was.
+configuration (the encoder only, when the model has a head);
+`keras.models.load_model(path)` is simpler when you just want a saved model back as it was.
 
 References:
     - Sanh et al., 2019. DistilBERT, a distilled version of BERT: smaller,
@@ -38,7 +42,10 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import load_weights_or_raise
+from dl_techniques.utils.weight_transfer import (
+    load_weights_from_checkpoint,
+    load_weights_or_raise,
+)
 from dl_techniques.layers.transformers import (
     FFNType,
     AttentionType,
@@ -47,7 +54,13 @@ from dl_techniques.layers.transformers import (
     NormalizationPositionType,
 )
 from dl_techniques.layers.embedding import create_embedding_layer
-from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    task_config_to_dict,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -69,13 +82,20 @@ class DistilBERT(keras.Model):
         - Optional sinusoidal position embeddings
         - No pooler layer
 
-    The model expects inputs as a dictionary containing 'input_ids', and
-    optionally 'attention_mask' and 'position_ids'. It outputs a dictionary
-    containing the 'last_hidden_state' and the forwarded 'attention_mask'. That
-    second entry is never ``None``: an omitted mask is echoed back as all ones
-    so the output structure does not depend on the input (which is what makes
-    ``predict({"input_ids": ...})`` work). The encoder still sees ``None``, so
-    the echo is numerically inert — it is not a mask being applied.
+    With ``include_top=False`` (the default) it holds no task-specific layer
+    at all. With ``include_top=True`` it also owns one NLP task head, built
+    from ``task_config``.
+
+    The model expects a tensor of ``input_ids``, or a dictionary containing
+    'input_ids' and optionally 'attention_mask' and 'position_ids'. Headless,
+    it outputs a dictionary containing the 'last_hidden_state' and the
+    forwarded 'attention_mask'. That second entry is never ``None``: an
+    omitted mask is echoed back as all ones so the output structure does not
+    depend on the input (which is what makes ``predict({"input_ids": ...})``
+    work). The encoder still sees ``None``, so the echo is numerically inert —
+    it is not a mask being applied. With a head it outputs what the head
+    returns, reduced by
+    :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`.
 
     Architecture:
 
@@ -100,6 +120,32 @@ class DistilBERT(keras.Model):
             "last_hidden_state": [batch, seq_len, hidden_size],
             "attention_mask": [batch, seq_len]
         }
+
+    Head integration (``include_top=True``):
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │  same inputs as the headless model   │
+        │  (only input_ids is required)        │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  embeddings → encoder layers         │
+        │  (identical weights and paths)       │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  task_head (build_model_task_head)   │
+        │    {hidden_states: last_hidden_state,│
+        │     attention_mask: mask cast to the │
+        │     hidden-state dtype}              │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        finalize_head_outputs: a bare tensor, or a dict for QA
 
     :param vocab_size: Size of the vocabulary. Defaults to 30522.
     :type vocab_size: int
@@ -164,6 +210,19 @@ class DistilBERT(keras.Model):
     :param stochastic_depth_rate: Drop path rate for stochastic depth.
         Defaults to 0.1.
     :type stochastic_depth_rate: float
+    :param include_top: Whether the model owns a task head. Defaults to False,
+        which builds the bare encoder: no head layer and no head weight exist.
+    :type include_top: bool
+    :param task_config: The task the head serves, as an ``NLPTaskConfig`` or a
+        dict of its fields. Required when ``include_top`` is True, refused
+        otherwise. Stored, and serialized, as a plain dict.
+        ``MULTIPLE_CHOICE`` is refused: the head would be fed a token
+        sequence, not one row per choice.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (for example ``{"pooling_type": "mean"}``). Only valid
+        with ``include_top=True``. Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the `keras.Model`.
 
     :ivar embeddings: The embedding layer instance — the shared
@@ -173,8 +232,14 @@ class DistilBERT(keras.Model):
     :vartype embeddings: BertEmbeddings
     :ivar encoder_layers: A list of `TransformerLayer` instances.
     :vartype encoder_layers: list[TransformerLayer]
+    :ivar task_head: The task head named ``"task_head"``, or None when
+        ``include_top`` is False.
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
 
-    :raises ValueError: If invalid configuration parameters are provided.
+    :raises ValueError: If invalid configuration parameters are provided,
+        including ``include_top=True`` without a ``task_config``, and a
+        ``task_config`` or ``head_config_overrides`` given with
+        ``include_top=False``.
 
     Example:
         .. code-block:: python
@@ -188,8 +253,21 @@ class DistilBERT(keras.Model):
                 "attention_mask": keras.ops.ones((2, 128), dtype="int32")
             }
             outputs = model(inputs, training=False)
-            print(outputs["last_hidden_state"].shape)
+            outputs["last_hidden_state"].shape
             # (2, 128, 768)
+
+            # Same encoder, plus a sentiment head: returns bare logits (2, 3)
+            from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+            clf = DistilBERT.from_variant(
+                "base",
+                include_top=True,
+                task_config=NLPTaskConfig(
+                    name="sentiment",
+                    task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+                    num_classes=3,
+                ),
+            )
+            logits = clf(inputs, training=False)
 
         ``pretrained="path/to/weights.keras"`` loads a local checkpoint; see
         :meth:`from_variant`. ``pretrained=True`` raises
@@ -251,6 +329,9 @@ class DistilBERT(keras.Model):
         ffn_type: FFNType = "mlp",
         use_stochastic_depth: bool = False,
         stochastic_depth_rate: float = 0.1,
+        include_top: bool = False,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
         """Initialize the DistilBERT model instance.
@@ -298,6 +379,13 @@ class DistilBERT(keras.Model):
         :type use_stochastic_depth: bool
         :param stochastic_depth_rate: Drop rate for stochastic depth.
         :type stochastic_depth_rate: float
+        :param include_top: Whether to build the task head.
+        :type include_top: bool
+        :param task_config: Task of the head; required iff ``include_top``.
+        :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+        :param head_config_overrides: Head constructor overrides; only valid
+            with ``include_top``.
+        :type head_config_overrides: Optional[Dict[str, Any]]
         :param kwargs: Additional keyword arguments for the `keras.Model`.
         """
         super().__init__(**kwargs)
@@ -307,6 +395,19 @@ class DistilBERT(keras.Model):
             vocab_size, hidden_size, num_layers, num_heads,
             dropout_rate, attention_dropout_rate
         )
+        if include_top and task_config is None:
+            raise ValueError(
+                "include_top=True needs a task_config (an NLPTaskConfig or a "
+                "dict of its fields) to know which head to build."
+            )
+        if not include_top and (
+            task_config is not None or head_config_overrides is not None
+        ):
+            raise ValueError(
+                "task_config and head_config_overrides only take effect with "
+                "include_top=True; with include_top=False no head is built, so "
+                "they would be silently ignored."
+            )
 
         # Store all configuration parameters
         self.vocab_size = vocab_size
@@ -330,13 +431,32 @@ class DistilBERT(keras.Model):
         self.ffn_type = ffn_type
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         # Build the model architecture
         self._build_architecture()
 
+        # Created after every encoder layer and under its own fixed name, so
+        # the encoder's layer names, weight paths and RNG draws are the same
+        # with or without a head.
+        self.task_head = None
+        if self.include_top:
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.hidden_size,
+                head_config_overrides=self.head_config_overrides,
+            )
+
         logger.info(
             f"Created DistilBERT foundation model: {self.num_layers} layers, "
             f"hidden_size={self.hidden_size}, heads={self.num_heads}"
+            + (f", task head '{self.task_config['name']}'" if self.include_top else "")
         )
 
     def _validate_config(
@@ -451,7 +571,8 @@ class DistilBERT(keras.Model):
         model built while every sub-layer is still unbuilt -- Keras warns about
         exactly that at ``layers/layer.py:393``. The shared helper traces
         ``call()`` on symbolic inputs, so what gets built cannot drift from what
-        gets called.
+        gets called: the task head is built exactly when ``include_top`` makes
+        ``call()`` run it.
 
         :param input_shape: Shape (or nest of shapes) of the input to ``call``.
         """
@@ -466,7 +587,7 @@ class DistilBERT(keras.Model):
         attention_mask: Optional[keras.KerasTensor] = None,
         position_ids: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass of the DistilBERT foundation model.
 
         :param inputs: Input token IDs or a dictionary containing 'input_ids'
@@ -484,7 +605,7 @@ class DistilBERT(keras.Model):
         :type position_ids: Optional[keras.KerasTensor]
         :param training: Indicates if the model is in training mode.
         :type training: Optional[bool]
-        :return: A dictionary with the following keys:
+        :return: With ``include_top=False``, a dictionary with the keys:
                  - ``last_hidden_state``: The sequence of hidden states at the
                    output of the final layer. Shape:
                    `(batch, seq_len, hidden_size)`.
@@ -495,7 +616,12 @@ class DistilBERT(keras.Model):
                    independent of the input and ``predict()`` works on a
                    single-key input dict. The encoder itself still receives
                    ``None`` — the echo does not change any numerics.
-        :rtype: Dict[str, keras.KerasTensor]
+                 With ``include_top=True``, the head's output reduced by
+                 ``finalize_head_outputs``: a bare tensor (logits, or
+                 embeddings for a similarity head), or a dict of two or more
+                 tensors (``start_logits``/``end_logits`` for QA). The head's
+                 pooling sees the same resolved mask (all ones when omitted).
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :raises ValueError: If dictionary input does not contain 'input_ids'.
         """
         if isinstance(inputs, dict):
@@ -526,12 +652,28 @@ class DistilBERT(keras.Model):
 
         # DECISION plan-2026-08-18T140459-7991552f/D-062: resolve the echoed mask here, at the
         # return, never earlier or conditionally — a possibly-None key broke predict()'s batch concatenation. See decisions.md.
+        resolved_mask = (
+            attention_mask if attention_mask is not None
+            else keras.ops.ones_like(input_ids)
+        )
+
+        if self.include_top:
+            # Cast so a float16 hidden state never meets an int mask inside
+            # the head's pooling (mixed precision).
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": hidden_states,
+                    "attention_mask": keras.ops.cast(
+                        resolved_mask, hidden_states.dtype
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
+
         return {
             "last_hidden_state": hidden_states,
-            "attention_mask": (
-                attention_mask if attention_mask is not None
-                else keras.ops.ones_like(input_ids)
-            ),
+            "attention_mask": resolved_mask,
         }
 
     def load_pretrained_weights(
@@ -552,6 +694,16 @@ class DistilBERT(keras.Model):
         The model is built with a dummy forward pass first if it is not built
         already, since Keras can only restore weights into materialized
         variables.
+
+        A model WITH a head (``include_top=True``) receives the ENCODER only: a
+        ``task_head`` in the checkpoint is never copied and this model's own
+        head keeps its fresh initialization, so a checkpoint of any DistilBERT,
+        headless or trained under any head, warm-starts a model with any other
+        head. That transfer copies by layer name
+        (:func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`)
+        and needs a ``.keras`` file. A headless model restores the whole file
+        as below, and a head in the checkpoint is ignored. To restore a whole
+        model, head included, use ``keras.models.load_model``.
 
         .. note::
            ``skip_mismatch=True`` makes a *partial* load succeed silently — any
@@ -604,6 +756,20 @@ class DistilBERT(keras.Model):
                 "attention_mask": keras.ops.ones((1, seq_len), dtype="int32")
             }
             self(dummy_input, training=False)
+
+        # DECISION plan-2026-10-11T004932-b83935e1/D-008: a headed model takes the by-name transfer; do NOT
+        # send it through load_weights_or_raise -- whole-file loading raises on a headless or other-task checkpoint and copies an equal-shape head silently. See decisions.md.
+        if self.include_top:
+            # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+            # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
+            # The transfer logs its own report and raises when no layer overlaps.
+            load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=(TASK_HEAD_NAME,),
+                strict=not skip_mismatch,
+            )
+            return
 
         load_weights_or_raise(self, weights_path, skip_mismatch=skip_mismatch)
 
@@ -676,7 +842,11 @@ class DistilBERT(keras.Model):
         :type weights_dataset: str
         :param cache_dir: Directory to cache downloaded weights.
         :type cache_dir: Optional[str]
-        :param kwargs: Additional arguments to override the variant's defaults.
+        :param kwargs: Additional arguments to override the variant's defaults,
+            including ``include_top``, ``task_config`` and
+            ``head_config_overrides``. With ``include_top=True`` a local
+            ``pretrained`` path restores the encoder by layer name; the
+            model's head keeps its fresh initialization.
         :type kwargs: Any
         :return: A DistilBERT model instance configured for the specified variant.
         :rtype: DistilBERT
@@ -790,6 +960,14 @@ class DistilBERT(keras.Model):
             "ffn_type": self.ffn_type,
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
+            "include_top": self.include_top,
+            "task_config": (
+                dict(self.task_config) if self.task_config is not None else None
+            ),
+            "head_config_overrides": (
+                dict(self.head_config_overrides)
+                if self.head_config_overrides is not None else None
+            ),
         })
         return config
 
@@ -842,124 +1020,77 @@ class DistilBERT(keras.Model):
 
 
 # ---------------------------------------------------------------------
-# Integration with NLP Task Heads
+# Module-level Factory
 # ---------------------------------------------------------------------
 
 
-def create_distilbert_with_head(
-    distilbert_variant: str,
-    task_config: NLPTaskConfig,
+def create_distilbert(
+    variant: str = "base",
+    vocab_size: Optional[int] = None,
     pretrained: Union[bool, str] = False,
     weights_dataset: str = "uncased",
     cache_dir: Optional[str] = None,
-    distilbert_config_overrides: Optional[Dict[str, Any]] = None,
-    head_config_overrides: Optional[Dict[str, Any]] = None,
-) -> keras.Model:
-    """Factory function to create a DistilBERT model with a task-specific head.
+    **kwargs: Any,
+) -> "DistilBERT":
+    """Convenience factory that mirrors ``create_bert`` / ``create_resnet``.
 
-    It instantiates a foundational `DistilBERT` model, a task-specific head
-    from the `dl_techniques.layers.heads.nlp` factory, and combines them into a
-    single end-to-end `keras.Model`.
+    Thin wrapper around :meth:`DistilBERT.from_variant` exposing the most
+    common construction arguments at module level. Behaves identically to
+    calling ``DistilBERT.from_variant(...)`` directly.
 
-    The returned model's output is whatever the head returns — for a
-    classification head a DICT (e.g. ``{'logits', 'probabilities'}``), not a
-    single tensor.
-
-    :param distilbert_variant: The DistilBERT variant to use (e.g., "base", "small").
-    :type distilbert_variant: str
-    :param task_config: An `NLPTaskConfig` object defining the task.
-    :type task_config: NLPTaskConfig
-    :param pretrained: Forwarded to :meth:`DistilBERT.from_variant`. A string
-        path loads a local ``.keras`` checkpoint into this configuration;
-        ``True`` raises ``NotImplementedError``; ``False`` (default) gives
-        random initialization.
+    :param variant: DistilBERT variant name (``"tiny"``, ``"small"``,
+        ``"base"``). Defaults to ``"base"``.
+    :type variant: str
+    :param vocab_size: Optional vocabulary size override. If ``None`` (default),
+        the variant's default vocab size is used. If provided, forwarded as
+        ``vocab_size=...`` in ``kwargs``.
+    :type vocab_size: Optional[int]
+    :param pretrained: If ``True``, raises ``NotImplementedError`` -- no public
+        DistilBERT weights are distributed by this library. If a string path,
+        loads local weights from that path. If ``False`` (default), random
+        init.
     :type pretrained: Union[bool, str]
-    :param weights_dataset: Dataset for pretrained weights ("uncased", "cased", etc.).
+    :param weights_dataset: unreachable. Forwarded to
+        ``DistilBERT.from_variant``, which forwards it to
+        ``_download_weights``, which raises ``NotImplementedError`` before
+        reading it -- and ``pretrained=True`` is the only route there. No value
+        of this argument does anything. Kept for signature stability.
+        Defaults to ``"uncased"``.
     :type weights_dataset: str
-    :param cache_dir: Directory to cache downloaded weights.
+    :param cache_dir: unreachable for the same reason. Defaults to ``None``.
     :type cache_dir: Optional[str]
-    :param distilbert_config_overrides: Optional dictionary to override default
-        DistilBERT configuration for the chosen variant. Defaults to None.
-    :type distilbert_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Optional dictionary to override default head
-        configuration. Defaults to None.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete `keras.Model` ready for the specified task.
-    :rtype: keras.Model
-    :raises NotImplementedError: If ``pretrained`` is True.
+    :param kwargs: Additional keyword arguments forwarded to
+        :meth:`DistilBERT.from_variant` (e.g. ``max_position_embeddings``, or
+        ``include_top=True`` with a ``task_config`` for a model with a head).
+    :type kwargs: Any
+
+    :returns: Configured ``DistilBERT`` instance.
+    :rtype: DistilBERT
+
+    :raises NotImplementedError: If ``pretrained=True`` (no public weights).
+    :raises FileNotFoundError: If ``pretrained`` is a string path that does
+        not exist.
+    :raises ValueError: If ``variant`` is not a recognized DistilBERT variant,
+        or the head knobs are inconsistent (see :class:`DistilBERT`).
 
     Example:
-        .. code-block:: python
-
-            from dl_techniques.layers.heads.nlp import NLPTaskType
-
-            # Define a task
-            ner_task = NLPTaskConfig(
-                name="ner",
-                task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
-                num_classes=9
-            )
-
-            # Create the full model (randomly initialized DistilBERT)
-            ner_model = create_distilbert_with_head(
-                distilbert_variant="base",
-                task_config=ner_task,
-                head_config_overrides={"use_task_attention": True}
-            )
-            ner_model.summary()
+        >>> distilbert = create_distilbert("base")
+        >>> distilbert = create_distilbert("tiny", vocab_size=200)
+        >>> ner = create_distilbert(
+        ...     "tiny", include_top=True,
+        ...     task_config=NLPTaskConfig(
+        ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+        ...         num_classes=9))
     """
-    distilbert_config_overrides = distilbert_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-
-    logger.info(
-        f"Creating DistilBERT-{distilbert_variant} with a '{task_config.name}' head."
-    )
-
-    distilbert_encoder = DistilBERT.from_variant(
-        distilbert_variant,
+    if vocab_size is not None:
+        kwargs["vocab_size"] = vocab_size
+    return DistilBERT.from_variant(
+        variant,
         pretrained=pretrained,
         weights_dataset=weights_dataset,
         cache_dir=cache_dir,
-        **distilbert_config_overrides
+        **kwargs,
     )
 
-    task_head = create_nlp_head(
-        task_config=task_config,
-        input_dim=distilbert_encoder.hidden_size,
-        **head_config_overrides,
-    )
-
-    # DistilBERT has no token_type_ids input.
-    inputs = {
-        "input_ids": keras.Input(
-            shape=(None,), dtype="int32", name="input_ids"
-        ),
-        "attention_mask": keras.Input(
-            shape=(None,), dtype="int32", name="attention_mask"
-        ),
-    }
-
-    # Get hidden states from the encoder
-    encoder_outputs = distilbert_encoder(inputs)
-
-    # Pass encoder outputs to the task head
-    head_inputs = {
-        "hidden_states": encoder_outputs["last_hidden_state"],
-        "attention_mask": encoder_outputs["attention_mask"],
-    }
-    task_outputs = task_head(head_inputs)
-
-    # Create the final model
-    model_name = f"distilbert_{distilbert_variant}_with_{task_config.name}_head"
-    model = keras.Model(
-        inputs=inputs,
-        outputs=task_outputs,
-        name=model_name
-    )
-
-    logger.info(
-        f"Successfully created model with {model.count_params():,} parameters."
-    )
-    return model
 
 # ---------------------------------------------------------------------

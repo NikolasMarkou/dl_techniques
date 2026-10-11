@@ -9,16 +9,17 @@ is not an instrument. It now fails, and asserts the output key set and
 ``last_hidden_state``'s shape rather than only `isinstance(out, dict)`.
 
 We exercise the raw ``DistilBERT`` foundation class at its smallest config.
-The ``create_distilbert_with_head`` factory needs an ``NLPTaskConfig`` object
-and is out of scope here. ``DistilBERT.call`` accepts a plain ``int32 (B, T)``
+A model with a task head (``include_top=True``) needs an ``NLPTaskConfig``
+and is covered by ``test_model.py::TestDistilBERTIncludeTop``, not here.
+``DistilBERT.call`` accepts a plain ``int32 (B, T)``
 token tensor (or a dict with ``input_ids``). (Line numbers deliberately not
 quoted: the two this docstring used to cite were both stale after the embedding
 stage moved to the shared ``BertEmbeddings``.)
 
-MEASURED, and the reason this file's contract is worth having: the returned dict
-is ``{"last_hidden_state": (B, T, hidden), "attention_mask": None}`` -- the mask
-value really is ``None`` when no mask is passed in, so a contract that iterates
-``out.values()`` and calls ``.shape`` on each crashes rather than judges.
+The returned dict is ``{"last_hidden_state": (B, T, hidden), "attention_mask":
+(B, T)}``. The mask value was ``None`` when no mask was passed in, until the
+echo was resolved at the return site (decisions.md D-062); it is now all ones,
+so the contract asserts the key set rather than relying on that value.
 """
 
 import numpy as np
@@ -70,7 +71,7 @@ def test_the_smoke_contract_rejects_a_broken_forward():
     meta-test (which yolo12 shipped) proved nothing.
 
     This package is one of the three carrying the meta-test because its output
-    is a dict with a ``None`` value, the container shape most likely to make an
-    injection silently no-op.
+    was a dict with a ``None`` value (before D-062), the container shape most
+    likely to make an injection silently no-op.
     """
     assert_contract_rejects_a_broken_forward(_build(), _inputs(), _assert_contract)

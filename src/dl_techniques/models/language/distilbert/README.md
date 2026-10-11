@@ -16,11 +16,11 @@ The published DistilBERT checkpoint retains roughly **97% of BERT's GLUE score**
 
 **DistilBERT** is a Transformer encoder trained by **knowledge distillation**: a compact student is trained to reproduce the behaviour of a larger teacher. It is a general-purpose language representation model like BERT, with a smaller architectural footprint.
 
-This implementation provides the encoder as a **foundation model**. It takes token IDs and returns a sequence of contextual vectors, decoupled from task-specific heads.
+This implementation provides the encoder as a **foundation model**. It takes token IDs and returns a sequence of contextual vectors. Pass `include_top=True` with a `task_config` and the same class also owns one task head from `dl_techniques.layers.heads.nlp`, named `task_head`. The encoder's weights do not depend on the head, so an encoder trained under one head is reused, unchanged, under another (§9 Pattern 2).
 
 Four things worth knowing about this implementation:
 
-1.  **Pure encoder.** The `DistilBERT` class carries no head and no pooler. Heads are attached by `create_distilbert_with_head`.
+1.  **Pure encoder by default.** With `include_top=False` (the default) the `DistilBERT` class carries no head and no pooler. With `include_top=True` it owns one task head, and every head weight lives under `task_head/`.
 2.  **Weight loading works, downloading does not.** `keras.models.load_model(path)` restores a file you saved; `load_pretrained_weights(path)` transplants weights into a model you configured yourself. Only the `pretrained=True` download route raises (§8).
 3.  **Keras 3 native.** A `.keras` round trip with no `custom_objects` reproduces the forward output exactly (measured max abs diff `0.0`). Only the TensorFlow backend is exercised here.
 4.  **Shared embedding stage.** There is no DistilBERT-private embedding class; the model builds the same `BertEmbeddings` layer that `models/language/bert/` and `models/language/fnet/` use (§4.1).
@@ -64,7 +64,8 @@ The architecture is BERT with two pieces removed: **token type (segment) embeddi
 │                       │Output Hidden States│ (B, seq_len, D)     │
 │                       └────────┬───────────┘                     │
 │                       ┌────────▼───────────┐                     │
-│                       │ Task-Specific Head │ (e.g., Classifier)  │
+│                       │ task_head          │ (only with          │
+│                       │ (e.g., Classifier) │  include_top=True)  │
 │                       └────────────────────┘                     │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -73,7 +74,7 @@ The data flow, in three steps:
 
 1.  **Input preparation.** A WordPiece tokenizer produces `input_ids` and an `attention_mask` (`1` = keep, `0` = pad). No token type IDs are required. The mask is not optional in practice: nothing infers one for you (§11).
 2.  **Embedding + encoding.** Word and position embeddings are summed, normalized and dropped out, then passed through `num_layers` transformer blocks. `base` uses 6 blocks where BERT-base uses 12.
-3.  **Projection.** The final hidden states `(B, seq_len, D)` go to a task head. There is no pooler, so for sentence-level tasks take index `0` of `last_hidden_state` yourself.
+3.  **Projection.** With `include_top=True` the final hidden states `(B, seq_len, D)` and the mask go to the task head, which pools for sentence-level tasks. Headless, the model returns them; there is no pooler, so for sentence-level tasks pool `last_hidden_state` yourself (index `0`, for instance).
 
 ---
 
@@ -110,7 +111,7 @@ The core block is identical to BERT's, but DistilBERT uses half the depth (6 lay
 
 ### 4.3 Task-Specific Heads
 
-The output width matches BERT (`hidden_size=768` for `base`), so DistilBERT is compatible with the same task heads.
+The output width matches BERT (`hidden_size=768` for `base`), so DistilBERT is compatible with the same task heads. `include_top=True` is the integration point: `DistilBERT.__init__` builds the head with `layers/heads/nlp/model_head.py::build_model_task_head`, and `call()` feeds it `{"hidden_states": last_hidden_state, "attention_mask": mask}` (the mask cast to the hidden-state dtype, all ones when omitted).
 
 ---
 
@@ -130,7 +131,7 @@ A sentiment classifier on a randomly initialized encoder.
 import keras
 import numpy as np
 
-from dl_techniques.models.language.distilbert import create_distilbert_with_head
+from dl_techniques.models.language.distilbert import create_distilbert
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the downstream task
@@ -142,16 +143,17 @@ sentiment_config = NLPTaskConfig(
 
 # 2. Create a DistilBERT model with a sentiment head (random weights).
 #    Swap "tiny" for "base" once you have the compute.
-model = create_distilbert_with_head(
-    distilbert_variant="tiny",
+model = create_distilbert(
+    "tiny",
+    include_top=True,
     task_config=sentiment_config,
     pretrained=False  # True raises NotImplementedError -- see section 8
 )
 
-# 3. Compile
+# 3. Compile. The output is logits, so the loss takes from_logits=True.
 model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=5e-5),
-    loss="sparse_categorical_crossentropy",
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
 
@@ -161,11 +163,16 @@ dummy_inputs = {
     "input_ids": np.random.randint(0, 30522, size=(BATCH_SIZE, SEQ_LEN)),
     "attention_mask": np.ones((BATCH_SIZE, SEQ_LEN), dtype="int32")
 }
-# A classification head returns a DICT, not one tensor. Measured:
-# {'logits': (4, 3), 'probabilities': (4, 3)}
-outputs = model.predict(dummy_inputs, verbose=0)
-print({k: v.shape for k, v in outputs.items()})
+# The head's `probabilities` (softmax of the logits) is dropped and the one
+# surviving tensor is returned bare.
+logits = model.predict(dummy_inputs, verbose=0)
+logits.shape  # (4, 3) -- measured
 ```
+
+Two contracts worth reading before you debug anything:
+
+- **Output.** With `include_top=True` the model returns a **bare tensor** whenever the head produces one informative tensor. Keys that are pure functions of `logits` (`probabilities = softmax(logits)`, `predictions = argmax(logits)`) are dropped: no loss can consume them, and a dict output cannot be compiled with a string loss or any metric. `QuestionAnsweringHead` keeps its dict, `{"start_logits", "end_logits"}`. The rule is `layers/heads/nlp/model_head.py::finalize_head_outputs`.
+- **Construction.** `include_top=True` without a `task_config` raises `ValueError`, and so does a `task_config` or `head_config_overrides` passed with `include_top=False` (the head would not exist, so the knob would do nothing). `MULTIPLE_CHOICE` is refused: the head would see the token sequence, not one row per choice. `head_config_overrides` reaches the head constructor, e.g. `{"pooling_type": "mean"}`; `task_config` is stored in `get_config()` as a plain dict.
 
 ---
 
@@ -173,9 +180,9 @@ print({k: v.shape for k, v in outputs.items()})
 
 | Symbol | What it is |
 |---|---|
-| `DistilBERT` | The `keras.Model` encoder. `from_variant(name)` builds a named configuration. |
-| `DistilBERT.load_pretrained_weights(path)` | Transplants weights from a `.keras` file into an existing model. |
-| `create_distilbert_with_head(...)` | End-to-end factory: builds the inputs (no token types), the encoder and the head, and wires them together. |
+| `DistilBERT` | The `keras.Model` encoder. Returns `{"last_hidden_state", "attention_mask"}`; with `include_top=True`, the task head's output. `from_variant(name)` builds a named configuration and forwards `include_top` / `task_config` / `head_config_overrides`. |
+| `DistilBERT.load_pretrained_weights(path)` | Transplants weights from a `.keras` file into an existing model (the encoder only, when the model has a head). |
+| `create_distilbert(...)` | Module-level wrapper around `from_variant`, with or without a head. |
 
 ```python
 from dl_techniques.models.language.distilbert import DistilBERT
@@ -218,6 +225,7 @@ Parameter counts are measured with `count_params()` on a built model at the defa
 | `model(...)` first, then `load_pretrained_weights("<file>.keras")` | Works. Same result on an already-built model. |
 | `load_pretrained_weights(..., skip_mismatch=True)` with a different `vocab_size`/`max_position_embeddings` | Partial by design: the two embedding tables are skipped, the encoder stack is restored. The call logs how many variables actually changed value so a partial load cannot look total. |
 | A load that restores **nothing** | Raises `ValueError`. Otherwise `skip_mismatch=True` would make a total non-load indistinguishable from success. |
+| Any route into a model **with a head** (`include_top=True`) | Restores the **encoder only**, by layer name. A `task_head` in the checkpoint is never copied and the model's own head keeps its fresh initialization, so the checkpoint may come from a headless DistilBERT or one trained under any head. A whole-file load would raise on a headless or other-task checkpoint, and silently copy the head of another task whose weights have the same shapes. |
 | `keras.models.load_model("<file>.keras")` | Works, and is simpler: architecture and weights together, no config to match. All weights restored identically (`len(model.weights)` is 28 `tiny` / 52 `small` / 76 `base`). |
 
 Rule of thumb: `keras.models.load_model(path)` to get a saved model back as-is; `load_pretrained_weights(path)` to transplant weights into a model you configured yourself.
@@ -240,7 +248,7 @@ transplanted = DistilBERT.from_variant("tiny", pretrained="./distilbert_weights.
 ### Example 2: NER (Token Classification)
 
 ```python
-from dl_techniques.models.language.distilbert import create_distilbert_with_head
+from dl_techniques.models.language.distilbert import create_distilbert
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 ner_config = NLPTaskConfig(
@@ -249,13 +257,14 @@ ner_config = NLPTaskConfig(
     num_classes=9
 )
 
-ner_model = create_distilbert_with_head(
-    distilbert_variant="tiny",
+ner_model = create_distilbert(
+    "tiny",
+    include_top=True,
     task_config=ner_config,
 )
-# Output (measured): {'logits': (batch, seq_len, 9), 'predictions': (batch, seq_len)}
-# -- a token-classification head returns different keys from the sentiment
-# head in section 5. Always inspect the dict.
+# The head emits `logits` plus `predictions` = argmax(logits); the model drops
+# that derived duplicate, so the output is the bare logits tensor.
+# Measured: (batch, seq_len, 9)
 ```
 
 ---
@@ -283,13 +292,38 @@ outputs = keras.layers.Dense(1)(x)
 model = keras.Model(inputs, outputs)
 ```
 
+### Pattern 2: Reuse a trained encoder under a different head
+
+The encoder's weight paths are identical with or without a head and for every task: the head is the single layer `task_head`, and every one of its weights is under `task_head/`. So an encoder trained with one head is reused, same weights, with another, through a local `pretrained` path. The checkpoint's own head is skipped and the new head starts fresh.
+
+```python
+from dl_techniques.models.language.distilbert import create_distilbert
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+
+sentiment = create_distilbert("tiny", include_top=True, task_config=NLPTaskConfig(
+    name="sentiment", task_type=NLPTaskType.SENTIMENT_ANALYSIS, num_classes=3))
+# ... fit `sentiment` ...
+sentiment.save("sentiment.keras")
+
+ner = create_distilbert("tiny", include_top=True, pretrained="sentiment.keras",
+                        task_config=NLPTaskConfig(
+                            name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+                            num_classes=9))
+encoder = create_distilbert("tiny", pretrained="sentiment.keras")   # headless, same encoder
+```
+
+For a model with a head that is already built, the same transfer is
+`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(model, "sentiment.keras",
+skip_prefixes=("task_head",))`. Pinned by
+`tests/test_models/test_distilbert/test_model.py::TestDistilBERTIncludeTop::test_backbone_weights_transfer_across_heads`.
+
 ---
 
 ## 10. Performance Optimization
 
 The published DistilBERT is reported at ~60% faster than BERT-base at 6 layers instead of 12; this repo measures no latency. Two knobs are verified to *work* (not to be faster, no timing was taken):
 
-1.  **XLA compilation**: `model.compile(..., jit_compile=True)`, verified end to end through `create_distilbert_with_head` and `predict`.
+1.  **XLA compilation**: `model.compile(..., jit_compile=True)`, verified end to end through `create_distilbert(..., include_top=True)` and `predict`.
 2.  **Mixed precision**:
     ```python
     keras.mixed_precision.set_global_policy('mixed_float16')
@@ -324,7 +358,7 @@ Use a BERT-compatible WordPiece tokenizer. `token_type_ids` are **not** used: a 
 Fully serializable via Keras 3. Verified: a save/load round trip with **no** `custom_objects` reproduces the `training=False` forward output exactly (max abs diff `0.0`).
 
 ```python
-model = create_distilbert_with_head(...)
+model = create_distilbert("tiny", include_top=True, task_config=sentiment_config)
 model.save('distilbert_sentiment.keras')
 
 # Reload without custom object dictionaries
@@ -360,6 +394,7 @@ The package's own suite lives in `tests/test_models/test_distilbert/`.
 -   **`TypeError: unexpected keyword argument 'token_type_ids'`.** DistilBERT has no segment embeddings. Drop the argument; a dict key of that name is ignored rather than raising.
 -   **`ValueError` at construction from the embedding stage.** `normalization_type` must be one of the four values `BertEmbeddings` accepts (§4.1).
 -   **No pooler output.** DistilBERT dropped Next Sentence Prediction and with it the pooler. Take index `0` of `last_hidden_state` for sentence-level tasks.
+-   **`ValueError: include_top=True needs a task_config`**, or **`... only take effect with include_top=True`.** The head knobs travel together: `include_top=True` with a `task_config`, or none of them.
 -   **BERT weights do not transfer directly.** The depth differs (6 vs 12) and the matrices are not 1:1 mappable without the paper's layer-selection procedure.
 
 ---
