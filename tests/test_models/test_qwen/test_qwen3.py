@@ -1681,7 +1681,10 @@ class IncludeTopCases:
         generation.save(path)
         target = self.CLASSIFICATION_FACTORY(dict(config), num_labels=5)
         target(pair)
-        check(target, target.get_layer(self.WRAPPED_NAME), ())
+        # The generation checkpoint's lm_head has no home in a classifier;
+        # complete-or-raise checks the source side too (D-031), so the
+        # caller names it as allowed, as for a headless target above.
+        check(target, target.get_layer(self.WRAPPED_NAME), ("lm_head",))
 
         # Anti-vacuity: a fresh backbone does NOT hold the reference values.
         fresh = self.model()

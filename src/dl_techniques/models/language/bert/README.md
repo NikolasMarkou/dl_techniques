@@ -210,10 +210,12 @@ encoder = BERT.from_variant("base", pretrained="./bert.keras")  # local checkpoi
 custom  = BERT.from_variant("small", vocab_size=50000)          # override any config key
 ```
 
-Overriding `vocab_size` while loading a checkpoint is supported. Every encoder layer must load or
-the call raises: a checkpoint of another hidden size, depth or width is refused, never
-half-loaded. The one exception is `embeddings`, which keeps its fresh initialization when the
-checkpoint's own `vocab_size` differs from the model's.
+Overriding `vocab_size` while loading a checkpoint is supported. Every encoder layer must load,
+and every layer of the checkpoint must find its place, or the call raises: a checkpoint of another
+hidden size, depth (deeper or shallower) or width is refused, never half-loaded or truncated. On a
+vocabulary change (the checkpoint's own `vocab_size` differs from the model's) only the
+word-embedding table keeps its fresh initialization; the position and token-type tables and the
+embedding LayerNorm still load, or the call raises.
 
 A local `pretrained` path restores the **encoder only**, by layer name. A `task_head` in the
 checkpoint is never copied and the model's own head (if any) keeps its fresh initialization, so the
@@ -506,8 +508,9 @@ The package's own suite is `tests/test_models/test_bert/`.
 - **OOM during training.** Attention is quadratic in sequence length. Reduce batch size, truncate
   harder, accumulate gradients, drop to a smaller variant, or enable mixed precision.
 - **`ValueError` when loading a checkpoint.** The checkpoint's encoder does not fit this model
-  (another `hidden_size`, `num_layers`, `intermediate_size`, ...). Only a `vocab_size` change is
-  absorbed, by leaving `embeddings` at its fresh initialization.
+  (another `hidden_size`, `num_layers` in either direction, `intermediate_size`,
+  `max_position_embeddings`, ...). Only a `vocab_size` change is absorbed, by leaving the
+  word-embedding table at its fresh initialization.
 - **A `UserWarning` about input names, then a broken `fit`.** Your `keras.Input`s inside a dict
   are missing `name=`. See §9 Pattern 1.
 - **`seq_len=... exceeds max_position_embeddings=...`.** The batch is longer than the learned

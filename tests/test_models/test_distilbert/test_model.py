@@ -629,29 +629,33 @@ class TestPretrainedWeightLoading:
             for b, a in zip(before, target.weights)
         ), "no variable changed -- the comparison above proves nothing"
 
-    def test_a_vocabulary_change_restores_every_layer_but_the_embeddings(
+    def test_a_vocabulary_change_restores_every_variable_but_the_word_table(
         self, tmp_path
     ):
-        """A checkpoint of another vocabulary: ``embeddings`` stays fresh, all else loads.
+        """A checkpoint of another vocabulary: only the word table stays fresh.
 
         Before plan-2026-10-11T004932-b83935e1 D-020 this was a whole-file
         ``skip_mismatch=True`` load that logged "8 of 28 variables changed" and
-        returned normally whatever else failed to fit. Now the vocabulary is
-        read from the checkpoint and only the ``embeddings`` layer may stay
-        unloaded; the next test shows any other mismatch raising.
+        returned normally whatever else failed to fit. D-020 read the
+        vocabulary from the checkpoint but let the WHOLE ``embeddings`` layer
+        stay unloaded, position table and LayerNorm included, and this arm
+        then passed with ``max_position_embeddings`` changed too. Since D-031
+        only the vocabulary-shaped word table keeps its init; the shared
+        load-rule file shows a position change raising.
         """
         model, path = self._saved_tiny(tmp_path)
 
         mismatched = DistilBERT.from_variant(
-            "tiny", vocab_size=512, max_position_embeddings=128
+            "tiny", vocab_size=512, max_position_embeddings=64
         )
         mismatched.load_pretrained_weights(path)
 
-        assert mismatched.embeddings.word_embeddings.embeddings.shape[0] == 512
+        word = mismatched.embeddings.word_embeddings.embeddings
+        assert word.shape[0] == 512
         for layer in model.layers:
-            if layer.name == "embeddings":
-                continue
             for a, b in zip(layer.weights, mismatched.get_layer(layer.name).weights):
+                if b.path == word.path:
+                    continue
                 np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
 
     def test_any_other_mismatch_raises_even_with_a_vocabulary_change(
@@ -677,27 +681,32 @@ class TestPretrainedWeightLoading:
             mismatched.load_pretrained_weights(path, skip_mismatch=False)
 
     def test_a_load_that_restores_nothing_raises_rather_than_passing_silently(
-        self, tmp_path, monkeypatch
+        self, tmp_path
     ):
-        """The backstop guard, proven to fire by a no-op `load_weights`.
+        """The backstop: a checkpoint that shares no layer with the model raises.
 
-        A real file that restores literally zero variables is hard to
-        construct (a shape-mismatched file still restores the encoder stack —
-        see the test above), so the guard is exercised by neutering the load
-        itself. Without the guard this call would return successfully having
-        done nothing, which is exactly the failure it exists to catch.
+        Before plan-2026-10-11T004932-b83935e1 D-031 a headless same-vocabulary
+        load restored the whole file through ``load_weights_or_raise`` and this
+        arm neutered ``load_weights`` to reach its zero-change guard. Every
+        route now copies by layer name and is complete-or-raise in both
+        directions, so the case to pin is a checkpoint of something else.
         """
-        _, path = self._saved_tiny(tmp_path)
+        unrelated = keras.Sequential(
+            [keras.Input(shape=(4,)), keras.layers.Dense(3, name="unrelated")],
+            name="unrelated",
+        )
+        path = str(tmp_path / "unrelated.keras")
+        unrelated.save(path)
         model = DistilBERT.from_variant(
             "tiny", vocab_size=256, max_position_embeddings=64
         )
         model(_tokens(), training=False)
+        before = [_np(w).copy() for w in model.weights]
 
-        monkeypatch.setattr(
-            type(model), "load_weights", lambda self, *a, **k: None, raising=True
-        )
-        with pytest.raises(ValueError, match="changed none of this model"):
+        with pytest.raises(ValueError, match="No overlapping layers"):
             model.load_pretrained_weights(path)
+        for a, b in zip(before, model.weights):
+            np.testing.assert_array_equal(a, _np(b))
 
     def test_missing_file_raises_file_not_found(self, tmp_path):
         model = DistilBERT.from_variant(

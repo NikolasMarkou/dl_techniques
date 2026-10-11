@@ -52,9 +52,8 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
-    load_weights_from_checkpoint,
+    load_backbone_from_checkpoint,
     load_weights_or_raise,
-    vocab_layers_if_changed,
 )
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.layers.embedding import create_embedding_layer
@@ -915,12 +914,13 @@ class WaveFieldLLM(keras.Model):
             ``task_head`` in the checkpoint is never copied and the model's own
             head keeps its fresh initialization, so a checkpoint of any
             WaveFieldLLM, headless or trained under any head, warm-starts a
-            model with any other head or none. Every backbone layer loads or
-            the call raises (another depth or width is refused);
-            ``token_embeddings`` and ``lm_head`` stay fresh only when the
-            checkpoint's own ``vocab_size`` differs, and an untied ``lm_head``
-            the checkpoint does not hold (a headed checkpoint) keeps its
-            initialization. To restore a whole model, head included, use
+            model with any other head or none. Every backbone layer loads, and
+            every checkpoint layer finds its place, or the call raises
+            (another depth, deeper or shallower, or width is refused);
+            ``token_embeddings`` and an untied ``lm_head`` stay fresh only
+            when the checkpoint's own ``vocab_size`` differs, and an untied
+            ``lm_head`` may otherwise be left out only when one side is
+            headed. To restore a whole model, head included, use
             ``keras.models.load_model``.
         :param kwargs: Override any variant parameter, including
             ``include_top``, ``task_config``, ``head_config_overrides`` and
@@ -968,17 +968,12 @@ class WaveFieldLLM(keras.Model):
                 # DECISION plan-2026-10-11T004932-b83935e1/D-026: complete-or-raise headed AND headless; do NOT
                 # restore a headless model by whole file with skip_mismatch=True (a deeper or wider model keeps fresh
                 # layers and returns normally), and key the vocabulary layers on the CHECKPOINT's vocab_size. See decisions.md.
-                load_weights_from_checkpoint(
-                    target=model,
-                    ckpt_path=weights_path,
-                    skip_prefixes=(TASK_HEAD_NAME,),
-                    strict=True,
-                    allow_unloaded=(
-                        *vocab_layers_if_changed(
-                            weights_path, model.vocab_size,
-                            ("token_embeddings", "lm_head")),
-                        "lm_head",
-                    ),
+                load_backbone_from_checkpoint(
+                    model,
+                    weights_path,
+                    head_prefixes=(TASK_HEAD_NAME,),
+                    vocab_layers=("token_embeddings",),
+                    tops=("lm_head",),
                 )
             else:
                 # DECISION plan-2026-08-13T091555-230c101d/D-005: catch I/O errors

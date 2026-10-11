@@ -289,8 +289,11 @@ ner_model.compile(
 The backbone (every weight but `lm_head_projection/` and `task_head/`) has the same weight
 paths with or without a head and with any task, so a backbone trained under one head is
 reused, weights unchanged, under another through `pretrained=<path>`. That load restores every
-backbone layer or raises; `embedding` and `lm_head` are skipped only when the checkpoint's own
-`vocab_size` differs from the model's, so a custom vocabulary restores its embedding exactly.
+backbone layer, and finds a place for every checkpoint layer (a deeper checkpoint is refused), or
+raises. On a vocabulary change (the checkpoint's own `vocab_size` differs from the model's) only
+the variables shaped by the vocabulary keep their fresh initialization, so a custom vocabulary
+restores its embedding exactly. `lm_head_projection` may be left out only when one side carries a
+task head, or the vocabulary changed.
 To restore a whole model, head included, use `keras.models.load_model`.
 
 ### Example 3: Interpreting the Learned Tree

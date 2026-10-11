@@ -1112,19 +1112,44 @@ class TestGPT2IncludeTop:
         np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
 
     def test_a_decoder_that_does_not_fit_raises_for_a_headed_model(self, tmp_path):
-        """A vocab mismatch fails loudly instead of loading nothing (D-012, D-024).
+        """A wider decoder fails loudly instead of loading nothing (D-012, D-024).
 
         The decoder is ONE layer to the by-name transfer, so a non-strict
-        transfer would skip the whole backbone and return normally; leaving
-        just the embedding fresh is not possible, so the change is refused.
+        transfer would skip the whole backbone and return normally.
         """
         lm = create_gpt2("tiny", **_HEAD_KW)
         lm(_head_batch(), training=False)
+        path = str(tmp_path / "lm_e32.keras")
+        lm.save(path)
+        with pytest.raises(ValueError, match="decoder"):
+            create_gpt2("tiny", include_top=True, task_config=_CLF,
+                        pretrained=path,
+                        **dict(_HEAD_KW, embed_dim=2 * _HEAD_KW["embed_dim"]))
+
+    def test_a_vocabulary_change_keeps_only_the_token_table_fresh(self, tmp_path):
+        """D-031: the one-layer decoder is transferred variable by variable.
+
+        Before D-031 a vocabulary change was refused (D-024): the whole
+        decoder could only stay fresh or load. Now the token table keeps its
+        init and every other decoder variable holds the checkpoint's value.
+        """
+        lm = create_gpt2("tiny", **_HEAD_KW)
+        lm(_head_batch(), training=False)
+        _randomized(lm, 5)
         path = str(tmp_path / "lm_v64.keras")
         lm.save(path)
-        with pytest.raises(ValueError, match="another vocab_size"):
-            create_gpt2("tiny", include_top=True, task_config=_CLF,
-                        pretrained=path, **dict(_HEAD_KW, vocab_size=80))
+        vocab = _HEAD_KW["vocab_size"] + 16
+        headed = create_gpt2("tiny", include_top=True, task_config=_CLF,
+                             pretrained=path, **dict(_HEAD_KW, vocab_size=vocab))
+        fresh = 0
+        for a, b in zip(lm.get_layer("decoder").weights,
+                        headed.get_layer("decoder").weights):
+            if tuple(a.shape) == tuple(b.shape):
+                np.testing.assert_array_equal(_np(a), _np(b), err_msg=a.path)
+            else:
+                assert tuple(b.shape)[0] == vocab, (a.path, a.shape, b.shape)
+                fresh += 1
+        assert fresh == 1, fresh
 
     def test_include_top_without_task_config_raises(self):
         with pytest.raises(ValueError, match="include_top=True needs a task_config"):

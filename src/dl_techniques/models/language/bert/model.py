@@ -40,8 +40,7 @@ from typing import Optional, Union, Any, Dict, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
-    load_weights_from_checkpoint,
-    vocab_layers_if_changed,
+    load_backbone_from_checkpoint,
 )
 from dl_techniques.layers.transformers import (
     FFNType,
@@ -927,10 +926,13 @@ class BERT(keras.Model):
         any head, warm-starts a model with any other head or none. To restore
         a whole model, head included, use ``keras.models.load_model``.
 
-        Every encoder layer must load, or this raises: a checkpoint of another
-        hidden size, depth or width is refused, never half-loaded. The one
-        exception is ``embeddings`` when the checkpoint's ``vocab_size``
-        differs from this model's; it then keeps its fresh initialization.
+        Every encoder layer must load, and every checkpoint layer must find
+        its place, or this raises: a checkpoint of another hidden size, depth
+        (deeper or shallower) or width is refused, never half-loaded or
+        truncated. On a vocabulary change (the checkpoint's ``vocab_size``
+        differs from this model's) only the variables of ``embeddings`` shaped
+        by the vocabulary keep their fresh initialization; the position and
+        token-type tables and the LayerNorm still load, or this raises.
 
         :param weights_path: Path to the weights file (.keras format).
         :type weights_path: str
@@ -975,16 +977,12 @@ class BERT(keras.Model):
             # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
             # DECISION plan-2026-10-11T004932-b83935e1/D-020: complete-or-raise; do NOT go back to
             # strict=not skip_mismatch -- a backbone that does not fit then loads nothing and returns normally. See decisions.md.
-            load_weights_from_checkpoint(
-                target=self,
-                ckpt_path=weights_path,
-                skip_prefixes=(TASK_HEAD_NAME,),
-                strict=True,
-                allow_unloaded=(
-                    vocab_layers_if_changed(
-                        weights_path, self.vocab_size, ("embeddings",))
-                    if skip_mismatch else ()
-                ),
+            load_backbone_from_checkpoint(
+                self,
+                weights_path,
+                head_prefixes=(TASK_HEAD_NAME,),
+                vocab_layers=("embeddings",),
+                allow_vocab_change=skip_mismatch,
             )
         except Exception as e:
             raise ValueError(
@@ -1068,7 +1066,7 @@ class BERT(keras.Model):
                 # Load from local file
                 model = BERT.from_variant("base", pretrained="path/to/weights.keras")
 
-                # A checkpoint of another vocab size: embeddings stay fresh
+                # A checkpoint of another vocab size: the word table stays fresh
                 model = BERT.from_variant(
                     "base", pretrained="path/to/weights.keras", vocab_size=50000
                 )

@@ -196,7 +196,9 @@ load_weights_from_checkpoint(ner, "qwen3_sst2.keras", skip_prefixes=(TASK_HEAD_N
 The same call works on the factory models, either side: a checkpoint of
 `create_qwen3_classification` (or `create_qwen3_next_classification`) fills a bare model
 with any head, a headless one (`allow_unloaded=("lm_head",)`, since the classifier holds no
-`lm_head`) or a `create_qwen3_generation` model with the same backbone weights.
+`lm_head`) or a `create_qwen3_generation` model with the same backbone weights. The call is
+complete-or-raise on both sides, so a generation checkpoint's `lm_head`, which has no home in a
+classifier, is named the same way (`allow_unloaded=("lm_head",)`).
 `load_weights_from_checkpoint` compares the layers of the one model a functional wrapper
 holds. `create_qwen3(..., include_top=True, task_config=...)` (and `create_qwen3_next`)
 returns that task's two-input model, named for its task type

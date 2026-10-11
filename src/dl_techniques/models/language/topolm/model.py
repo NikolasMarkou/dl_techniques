@@ -83,8 +83,7 @@ import keras
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
-    load_weights_from_checkpoint,
-    vocab_layers_if_changed,
+    load_backbone_from_checkpoint,
 )
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -878,11 +877,13 @@ class TopoLM(keras.Model):
             ``task_head`` in the checkpoint is never copied and the model's own
             head keeps its fresh initialization, so a checkpoint of any TopoLM,
             headless or trained under any head, warm-starts a model with any
-            other head or none. Every backbone layer loads or the call raises
-            (another depth or width is refused); ``word_embeddings`` and
-            ``lm_head`` stay fresh only when the checkpoint's own
-            ``vocab_size`` differs, and an untied ``lm_head`` the checkpoint
-            does not hold (a headed checkpoint) keeps its initialization. Needs
+            other head or none. Every backbone layer loads, and every
+            checkpoint layer finds its place, or the call raises (another
+            depth, deeper or shallower, or width is refused);
+            ``word_embeddings`` and an untied ``lm_head`` stay fresh only when
+            the checkpoint's own ``vocab_size`` differs, and an untied
+            ``lm_head`` may otherwise be left out only when one side is
+            headed. Needs
             a ``.keras`` file. To restore a whole model, head included, use
             ``keras.models.load_model``.
         :type pretrained: Union[bool, str]
@@ -941,17 +942,12 @@ class TopoLM(keras.Model):
             # DECISION plan-2026-10-11T004932-b83935e1/D-026: complete-or-raise headed AND headless; do NOT
             # restore a headless model by whole file with skip_mismatch=True (a deeper or wider model keeps fresh
             # layers and returns normally), and key the vocabulary layers on the CHECKPOINT's vocab_size. See decisions.md.
-            load_weights_from_checkpoint(
-                target=model,
-                ckpt_path=weights_path,
-                skip_prefixes=(TASK_HEAD_NAME,),
-                strict=True,
-                allow_unloaded=(
-                    *vocab_layers_if_changed(
-                        weights_path, model.vocab_size,
-                        ("word_embeddings", "lm_head")),
-                    "lm_head",
-                ),
+            load_backbone_from_checkpoint(
+                model,
+                weights_path,
+                head_prefixes=(TASK_HEAD_NAME,),
+                vocab_layers=("word_embeddings",),
+                tops=("lm_head",),
             )
 
         return model

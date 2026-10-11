@@ -42,11 +42,7 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.weight_transfer import (
-    load_weights_from_checkpoint,
-    load_weights_or_raise,
-    vocab_layers_if_changed,
-)
+from dl_techniques.utils.weight_transfer import load_backbone_from_checkpoint
 from dl_techniques.layers.transformers import (
     FFNType,
     AttentionType,
@@ -689,20 +685,19 @@ class DistilBERT(keras.Model):
         ``task_head`` in the checkpoint is never copied and this model's own
         head keeps its fresh initialization, so a checkpoint of any DistilBERT,
         headless or trained under any head, warm-starts a model with any other
-        head. That transfer copies by layer name
-        (:func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`)
-        and needs a ``.keras`` file. A headless model restores the whole file
-        as below, and a head in the checkpoint is ignored. To restore a whole
-        model, head included, use ``keras.models.load_model``.
+        head. A headless model takes the same route. The transfer copies by
+        layer name
+        (:func:`dl_techniques.utils.weight_transfer.load_backbone_from_checkpoint`)
+        and needs a ``.keras`` file. To restore a whole model, head included,
+        use ``keras.models.load_model``.
 
-        Every encoder layer must load, or this raises: a checkpoint of another
-        hidden size, depth or width is refused, never half-loaded. The one
-        exception is ``embeddings`` when the checkpoint's ``vocab_size``
-        differs from this model's; it then keeps its fresh initialization, and
-        the load copies by layer name as for a headed model. A headless load
-        of a same-vocabulary checkpoint restores the whole file strictly
-        (:func:`dl_techniques.utils.weight_transfer.load_weights_or_raise`,
-        which also raises if nothing changed value).
+        Every encoder layer must load, and every checkpoint layer must find
+        its place, or this raises: a checkpoint of another hidden size, depth
+        (deeper or shallower) or width is refused, never half-loaded or
+        truncated. On a vocabulary change (the checkpoint's ``vocab_size``
+        differs from this model's) only the variables of ``embeddings`` shaped
+        by the vocabulary keep their fresh initialization; the position and
+        token-type tables and the LayerNorm still load, or this raises.
 
         :param weights_path: Path to the weights file (``.keras`` format).
         :type weights_path: str
@@ -722,8 +717,8 @@ class DistilBERT(keras.Model):
         """
         # DECISION plan-2026-08-10T183739-b007f435/D-024: dummy input uses randint, not
         # uniform(dtype="int32") -- Keras rejects an integer dtype on uniform. See decisions.md.
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: restored-variable count lives in
-        # load_weights_or_raise, not inline here, since gpt2/wave_field had the same unchecked load. See decisions.md.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: no inline restored-variable count here; the
+        # shared transfer below is complete-or-raise (plan-2026-10-11T004932-b83935e1 D-031). See decisions.md.
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
@@ -744,27 +739,19 @@ class DistilBERT(keras.Model):
             }
             self(dummy_input, training=False)
 
-        vocab_exempt = (
-            vocab_layers_if_changed(weights_path, self.vocab_size, ("embeddings",))
-            if skip_mismatch else ()
-        )
-        # DECISION plan-2026-10-11T004932-b83935e1/D-008: a headed model takes the by-name transfer; do NOT
+        # DECISION plan-2026-10-11T004932-b83935e1/D-008: by name for every model; do NOT
         # send it through load_weights_or_raise -- whole-file loading raises on a headless or other-task checkpoint and copies an equal-shape head silently. See decisions.md.
-        # DECISION plan-2026-10-11T004932-b83935e1/D-020: a vocabulary change takes it too; do NOT
-        # use whole-file skip_mismatch=True there -- it also skips any other mismatched layer and returns normally. See decisions.md.
-        if self.include_top or vocab_exempt:
-            # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
-            # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
-            load_weights_from_checkpoint(
-                target=self,
-                ckpt_path=weights_path,
-                skip_prefixes=(TASK_HEAD_NAME,),
-                strict=True,
-                allow_unloaded=vocab_exempt,
-            )
-            return
-
-        load_weights_or_raise(self, weights_path, skip_mismatch=False)
+        # DECISION plan-2026-10-11T004932-b83935e1/D-031: headless too; do NOT restore a headless
+        # same-vocabulary model by whole file -- Keras ignores a deeper checkpoint's extra blocks there. See decisions.md.
+        # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+        # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
+        load_backbone_from_checkpoint(
+            self,
+            weights_path,
+            head_prefixes=(TASK_HEAD_NAME,),
+            vocab_layers=("embeddings",),
+            allow_vocab_change=skip_mismatch,
+        )
 
     # No public DistilBERT weights are distributed with dl_techniques; this raises rather
     # than falling back to a random-init model. Pass a local path via `pretrained="/path/to/file.keras"`.

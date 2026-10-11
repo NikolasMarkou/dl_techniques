@@ -33,10 +33,11 @@ import pytest
 
 from dl_techniques.utils.weight_transfer import (
     TransferReport,
+    VocabChange,
     load_weights_from_checkpoint,
     load_weights_or_raise,
     read_checkpoint_config,
-    vocab_layers_if_changed,
+    vocab_change,
 )
 
 
@@ -368,18 +369,81 @@ class TestAllowUnloaded:
         report = load_weights_from_checkpoint(tgt, ckpt)
         assert report.missing_in_source == ["enc_extra_dense"]
 
-    def test_skipped_prefixes_and_extra_source_layers_are_not_unloaded(
-        self, tmp_path
-    ):
-        """A skipped head and a source layer with no target home never raise."""
+    def test_a_source_layer_absent_from_the_target_raises(self, tmp_path):
+        """D-031: complete-or-raise holds in both directions.
+
+        A deeper checkpoint used to return normally with its extra layer
+        dropped (pinned here as allowed until D-031).
+        """
+        src = _build_classifier(extra_layer=True)
+        ckpt = _save(src, tmp_path)
+        tgt = _build_segmenter()
+        before = _dup_initial_weights(tgt)
+
+        with pytest.raises(ValueError, match=r"no target layer: \['enc_extra_dense'\]"):
+            load_weights_from_checkpoint(tgt, ckpt, allow_unloaded=())
+        for layer in tgt.layers:
+            assert _weights_equal(layer.get_weights(), before[layer.name]), layer.name
+
+        # Anti-vacuity: the default (None) still reports instead of raising.
+        report = load_weights_from_checkpoint(tgt, ckpt)
+        assert report.unused_in_source == ["enc_extra_dense"]
+
+    def test_skipped_and_allowed_source_layers_never_raise(self, tmp_path):
         src = _build_classifier(extra_layer=True)
         ckpt = _save(src, tmp_path)
         tgt = _build_segmenter()
 
-        report = load_weights_from_checkpoint(tgt, ckpt, allow_unloaded=())
+        report = load_weights_from_checkpoint(
+            tgt, ckpt, allow_unloaded=("enc_extra_",))
 
         assert report.unused_in_source == ["enc_extra_dense"]
         assert report.skipped_by_prefix == ["head_cls"]
+
+
+class TestVocabChange:
+    """D-031: a vocabulary layer is transferred variable by variable.
+
+    ``stem_dense`` stands in for a layer holding a vocabulary table and
+    another variable: an ``input_dim`` change (8 -> 12) reshapes its kernel
+    along the "vocabulary" axis and leaves its bias as it was.
+    """
+
+    def test_only_the_vocabulary_shaped_variable_keeps_its_init(self, tmp_path):
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+        tgt = _build_classifier(input_dim=12)
+        kernel_before = tgt.get_layer("stem_dense").get_weights()[0].copy()
+
+        report = load_weights_from_checkpoint(
+            tgt, ckpt, strict=True, allow_unloaded=(),
+            vocab_change=VocabChange(("stem_",), _INPUT_DIM, 12))
+
+        kernel, bias = tgt.get_layer("stem_dense").get_weights()
+        np.testing.assert_array_equal(kernel, kernel_before)
+        np.testing.assert_array_equal(bias, src.get_layer("stem_dense").get_weights()[1])
+        assert report.vocab_fresh == [tgt.get_layer("stem_dense").weights[0].path]
+        assert "stem_dense" in report.loaded and not report.shape_mismatch
+
+    def test_a_difference_other_than_the_vocabulary_is_a_mismatch(self, tmp_path):
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+        tgt = _build_classifier(input_dim=12)
+
+        with pytest.raises(ValueError, match="stem_dense"):
+            load_weights_from_checkpoint(
+                tgt, ckpt, allow_unloaded=(),
+                vocab_change=VocabChange(("stem_",), _INPUT_DIM, 13))
+
+    def test_a_layer_not_named_is_never_split(self, tmp_path):
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+        tgt = _build_classifier(input_dim=12)
+
+        with pytest.raises(ValueError, match="stem_dense"):
+            load_weights_from_checkpoint(
+                tgt, ckpt, allow_unloaded=(),
+                vocab_change=VocabChange(("enc_",), _INPUT_DIM, 12))
 
 
 def _wrapped(inner, extra_layer: bool = False):
@@ -484,7 +548,7 @@ class TestCheckpointConfig:
         assert read_checkpoint_config(bogus) == {}
         assert read_checkpoint_config(os.path.join(str(tmp_path), "nope.keras")) == {}
 
-    def test_vocab_layers_are_named_only_on_a_recorded_change(self, tmp_path):
+    def test_a_vocab_change_is_reported_only_when_recorded(self, tmp_path):
         model = keras.Sequential(
             [keras.Input(shape=(4,), dtype="int32"),
              keras.layers.Embedding(64, 8, name="embedding")],
@@ -493,14 +557,15 @@ class TestCheckpointConfig:
         ckpt = _save(model, tmp_path)
         # A Sequential config records no vocab_size: an unknown vocabulary is
         # not a change, so nothing is exempted.
-        assert vocab_layers_if_changed(ckpt, 64, ("embedding",)) == ()
+        assert vocab_change(ckpt, 64, ("embedding",)) is None
 
-    def test_vocab_layers_follow_the_recorded_vocab_size(self, tmp_path, monkeypatch):
+    def test_a_vocab_change_follows_the_recorded_vocab_size(self, tmp_path, monkeypatch):
         import dl_techniques.utils.weight_transfer as wt
         monkeypatch.setattr(
             wt, "read_checkpoint_config", lambda p: {"config": {"vocab_size": 64}})
-        assert wt.vocab_layers_if_changed("x.keras", 64, ("embedding",)) == ()
-        assert wt.vocab_layers_if_changed("x.keras", 96, ("embedding",)) == ("embedding",)
+        assert wt.vocab_change("x.keras", 64, ("embedding",)) is None
+        assert wt.vocab_change("x.keras", 96, ("embedding",)) == VocabChange(
+            ("embedding",), 64, 96)
 
 
 # ---------------------------------------------------------------------------

@@ -264,7 +264,7 @@ Three things the mechanism requires:
 
 1.  **Call the encoder once before you save it.** `pretrained=` transfers weights *layer by layer* out of the saved model. `ModernBERT` is a subclassed model whose sublayers are built lazily, so saving an un-called encoder writes a file whose layers hold **zero** weights; the transfer then finds no overlap and raises *"No overlapping layers between target and source checkpoint"*.
 2.  **Only the encoder is transferred.** The transfer matches on layer name and skips the checkpoint's `task_head`, so the file may hold a bare encoder or a `ModernBERT` trained under any head; the new model's head keeps its fresh initialization. A whole model, head included, comes back with `keras.models.load_model`.
-3.  **Every encoder layer must load, or the call raises.** A checkpoint of another hidden size, depth or width is refused, never half-loaded. The one exception is `embeddings`, which keeps its fresh initialization when the checkpoint's own `vocab_size` differs from the model's.
+3.  **Every encoder layer must load, and every checkpoint layer must find its place, or the call raises.** A checkpoint of another hidden size, depth (deeper or shallower), width or `max_position_embeddings` is refused, never half-loaded or truncated. On a vocabulary change (the checkpoint's own `vocab_size` differs from the model's) only the variables shaped by the vocabulary in `embeddings` keep their fresh initialization; the rest load, or the call raises.
 
 ```python
 import keras

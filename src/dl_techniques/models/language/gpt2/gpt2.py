@@ -55,8 +55,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.harmonic_loss import harmonic_logits
 from dl_techniques.utils.weight_transfer import (
-    load_weights_from_checkpoint,
-    vocab_layers_if_changed,
+    load_backbone_from_checkpoint,
 )
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.utils.model_build import materialize_sublayers
@@ -640,10 +639,11 @@ class GPT2(keras.Model):
             initialization, so a checkpoint of any GPT2, headless or trained
             under any head, warm-starts a model with any other head or none.
             The decoder loads completely or the call raises: a checkpoint of
-            another depth, width or ``vocab_size`` is refused (the decoder is
-            one layer, so the token embedding cannot stay fresh on its own).
-            Only an untied ``lm_head`` the checkpoint does not hold (a headed
-            checkpoint) keeps its initialization. To restore a whole model,
+            another depth (deeper or shallower) or width is refused. On a
+            vocabulary change only the token table (and an untied ``lm_head``)
+            keeps its initialization, every other decoder variable loads. An
+            untied ``lm_head`` may otherwise be left out only when one side is
+            headed. To restore a whole model,
             head included, use ``keras.models.load_model``.
         :type pretrained: Union[bool, str]
         :param kwargs: Override any variant parameter, including
@@ -684,18 +684,6 @@ class GPT2(keras.Model):
                 # max_seq_len (a fixed 32 raised for max_seq_len < 32).
                 if not model.built:
                     model.build((1, min(32, model.max_seq_len)))
-                # DECISION plan-2026-10-11T004932-b83935e1/D-024: a vocabulary change is refused, not skipped; do NOT
-                # allow "decoder" unloaded for it -- the decoder is ONE layer holding the embedding, so the whole
-                # backbone would stay fresh and the load return normally. See decisions.md.
-                if vocab_layers_if_changed(weights_path, model.vocab_size, ("decoder",)):
-                    raise ValueError(
-                        f"Checkpoint {weights_path!r} has another vocab_size "
-                        f"than this model ({model.vocab_size}). GPT2 cannot "
-                        "restore its decoder without the token embedding (the "
-                        "whole decoder is one layer), so it refuses the load "
-                        "rather than leave the backbone at its initialization. "
-                        "Build the model with the checkpoint's vocab_size."
-                    )
                 # DECISION plan-2026-10-11T004932-b83935e1/D-012: by-name and strict; do NOT send a headed
                 # model through load_weights_or_raise (copies an equal-shape head) nor pass strict=False
                 # (the decoder is ONE layer, so a mismatch skips the whole backbone silently). See decisions.md.
@@ -705,13 +693,14 @@ class GPT2(keras.Model):
                 # A shape/name mismatch there restores nothing and reports success. See decisions.md.
                 # DECISION plan-2026-10-11T004932-b83935e1/D-024: complete-or-raise for headed AND headless; do NOT
                 # restore a headless model by whole file with skip_mismatch=True -- a deeper or wider model then
-                # keeps fresh layers and returns normally. Only lm_head (a top a headed checkpoint lacks) may stay fresh.
-                load_weights_from_checkpoint(
-                    target=model,
-                    ckpt_path=weights_path,
-                    skip_prefixes=(TASK_HEAD_NAME,),
-                    strict=True,
-                    allow_unloaded=("lm_head",),
+                # keeps fresh layers and returns normally. A vocabulary change keeps only the token table of the
+                # one-layer decoder fresh (D-031), never the whole decoder.
+                load_backbone_from_checkpoint(
+                    model,
+                    weights_path,
+                    head_prefixes=(TASK_HEAD_NAME,),
+                    vocab_layers=("decoder",),
+                    tops=("lm_head",),
                 )
             else:
                 # DECISION plan_2026-05-11_a9e8e6f6/D-001: pretrained=True raises, never silently

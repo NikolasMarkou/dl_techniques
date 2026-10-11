@@ -51,8 +51,7 @@ from dl_techniques.layers.heads.nlp import (
 from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.weight_transfer import (
-    load_weights_from_checkpoint,
-    vocab_layers_if_changed,
+    load_backbone_from_checkpoint,
 )
 from dl_techniques.layers.ssm.selective_ssm import MambaResidualBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -493,11 +492,11 @@ class Mamba(keras.Model):
             never copied and the model's own head keeps its fresh
             initialization, so a checkpoint of any Mamba, headless or trained
             under any head, warm-starts a model with any other head or none.
-            Every backbone layer loads or the call raises (another depth or
-            ``d_model`` is refused); only ``embedding`` stays fresh, and only
-            when the checkpoint's own ``vocab_size`` differs. A headed model or
-            a vocabulary change needs a ``.keras`` file (see
-            :func:`load_local_checkpoint`). To restore a whole model, head
+            Every backbone layer loads, and every checkpoint layer finds its
+            place, or the call raises (another depth, deeper or shallower, or
+            ``d_model`` is refused); only the ``embedding`` table stays fresh,
+            and only when the checkpoint's own ``vocab_size`` differs. Needs a
+            ``.keras`` file (see :func:`load_local_checkpoint`). To restore a whole model, head
             included, use ``keras.models.load_model``.
         :type pretrained: Union[bool, str]
         :param **kwargs: Additional arguments to override variant defaults,
@@ -639,53 +638,46 @@ def load_local_checkpoint(model: keras.Model, path: str) -> None:
     Interface contract (call sites: ``Mamba.from_variant`` and
     ``Mamba2.from_variant``): ``model`` is a freshly constructed ``Mamba`` or
     ``Mamba2``, built here if it is not built yet (by ``build``, so no RNG is
-    drawn and no forward pass runs). Every backbone layer loads or this raises;
-    the checkpoint's ``task_head`` is never copied. The one exception is
-    ``embedding`` when the checkpoint's own ``vocab_size`` differs from the
-    model's: it then keeps its fresh initialization. A headless model with the
-    checkpoint's vocabulary loads the whole file through ``model.load_weights``
-    (strict, so a deeper or wider model raises; a checkpoint's ``task_head``
-    and extra blocks are ignored). A headed model, or one with another
-    vocabulary, receives the backbone copied by layer name from a ``.keras``
-    file. Returns nothing; every failure raises.
+    drawn and no forward pass runs). The backbone is copied by layer name
+    through the shared language load rule
+    (:func:`dl_techniques.utils.weight_transfer.load_backbone_from_checkpoint`):
+    every backbone layer loads and every checkpoint layer finds its place, or
+    this raises (a deeper checkpoint is refused, never truncated); the
+    checkpoint's ``task_head`` is never copied. The one exception is the
+    ``embedding`` table when the checkpoint's own ``vocab_size`` differs from
+    the model's: it then keeps its fresh initialization. Returns nothing;
+    every failure raises.
 
     :param model: The model to restore into.
     :type model: keras.Model
-    :param path: Path to the checkpoint; a ``.keras`` file for a headed model
-        or a vocabulary change.
+    :param path: Path to a ``.keras`` checkpoint.
     :type path: str
-    :raises ValueError: If the by-name route is given a non-``.keras`` file or
-        a checkpoint that leaves a backbone layer unloaded, or Keras rejects a
-        headless load.
-    :raises FileNotFoundError: If the by-name route's checkpoint does not exist.
+    :raises ValueError: If the file is not ``.keras`` or the checkpoint does
+        not fit the backbone.
+    :raises FileNotFoundError: If the checkpoint does not exist.
     """
     if not model.built:
         # A build, not a dummy forward: weight shapes do not depend on the
         # length, and nothing reads the RNG. HEAD loaded into the unbuilt model,
         # which Keras refuses, so this route raised for every model.
         model.build((None, None))
+    # DECISION plan-2026-10-11T004932-b83935e1/D-013: by-name and strict; do NOT send a headed
+    # model through whole-file load_weights (raises on a headless checkpoint, copies an equal-shape
+    # head) nor pass strict=False (a backbone that does not fit would load partly or not at all,
+    # and return normally). See decisions.md.
     # DECISION plan-2026-10-11T004932-b83935e1/D-025: the embedding exemption is keyed on the CHECKPOINT's
-    # vocab_size and goes through the by-name route; do NOT pass skip_mismatch=True to the whole-file load
-    # for it -- that also returns normally for a deeper model with fresh blocks. See decisions.md.
-    vocab_layers = vocab_layers_if_changed(path, model.vocab_size, ("embedding",))
-    if model.include_top or vocab_layers:
-        # DECISION plan-2026-10-11T004932-b83935e1/D-013: by-name and strict; do NOT send a headed
-        # model through whole-file load_weights (raises on a headless checkpoint, copies an equal-shape
-        # head) nor pass strict=False (a backbone that does not fit would load partly or not at all,
-        # and return normally). See decisions.md.
-        # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
-        # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
-        # DECISION plan-2026-10-11T004932-b83935e1/D-025: complete-or-raise; do NOT drop allow_unloaded --
-        # strict=True alone lets a checkpoint with fewer blocks leave the extra blocks fresh. See decisions.md.
-        load_weights_from_checkpoint(
-            target=model,
-            ckpt_path=path,
-            skip_prefixes=(TASK_HEAD_NAME,),
-            strict=True,
-            allow_unloaded=vocab_layers,
-        )
-    else:
-        model.load_weights(path)
+    # vocab_size (inside the shared rule); do NOT pass skip_mismatch=True to a whole-file load for it --
+    # that also returns normally for a deeper model with fresh blocks. See decisions.md.
+    # DECISION plan-2026-10-11T004932-b83935e1/D-031: by name for a headless model too; do NOT go back
+    # to whole-file load_weights there -- Keras ignores a deeper checkpoint's extra blocks. See decisions.md.
+    # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+    # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
+    load_backbone_from_checkpoint(
+        model,
+        path,
+        head_prefixes=(TASK_HEAD_NAME,),
+        vocab_layers=("embedding",),
+    )
 
 
 def create_mamba(

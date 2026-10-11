@@ -289,11 +289,14 @@ except FileNotFoundError as e:
 
 An existing path must be a `.keras` file. The model is built by `build((1, min(32, max_seq_len)))`,
 then the `decoder` layer (and an untied `lm_head`) is copied by layer name, headed or headless, and
-the load is complete or it raises: a checkpoint of another depth, width or `vocab_size` is refused
-with a `ValueError`, never half-restored. The checkpoint's `task_head` is never copied, and an
-untied `lm_head` the checkpoint does not hold (a checkpoint saved with a head) keeps its
-initialization. Unlike the encoders, GPT2 refuses a vocabulary change rather than leaving only the
-token embedding fresh: the decoder, embedding included, is one layer to the by-name transfer.
+the load is complete or it raises: a checkpoint of another depth (deeper or shallower) or width is
+refused with a `ValueError`, never half-restored or truncated. The checkpoint's `task_head` is never
+copied. On a vocabulary change (the checkpoint's own `vocab_size` differs from the model's) the
+decoder is transferred variable by variable: only the token table (and an untied `lm_head`) keeps
+its fresh initialization, every other decoder variable loads or the call raises. An untied
+`lm_head` may otherwise be left out only when one side carries a task head: a tied headless
+checkpoint does not fill an untied headless model, and an untied `lm_head` is not dropped into a
+tied one.
 See Example 4 for a model with a task head.
 
 ### Example 4: a task head in the model (`include_top`)
@@ -334,8 +337,8 @@ created; the weights under `decoder/` have the same paths either way.
 A headed model's `pretrained=<path>` takes the same route as a headless one: it copies the
 `decoder` layer and skips the checkpoint's `task_head` (and a headless checkpoint's `lm_head`,
 which has no target); the model's own head keeps its fresh initialization. A checkpoint whose
-decoder does not fit (another depth, width or `vocab_size`) raises `ValueError` instead of loading
-nothing. To restore a whole model, head included, use `keras.models.load_model`.
+decoder does not fit (another depth or width) raises `ValueError` instead of loading nothing; a
+vocabulary change keeps only the token table fresh. To restore a whole model, head included, use `keras.models.load_model`.
 
 ---
 

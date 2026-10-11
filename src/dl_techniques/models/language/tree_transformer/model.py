@@ -62,8 +62,8 @@ from dl_techniques.layers.heads.nlp import (
 from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.weight_transfer import (
+    load_backbone_from_checkpoint,
     load_weights_from_checkpoint,
-    vocab_layers_if_changed,
 )
 
 from .components import (  # noqa: F401
@@ -576,17 +576,20 @@ class TreeTransformer(keras.Model):
         trained under any head, warm-starts a model with any other head or none. To
         restore a whole model, head included, use ``keras.models.load_model``.
 
-        ``embedding`` and ``lm_head`` are skipped only when the checkpoint's own
-        ``vocab_size`` differs from this model's; with the same vocabulary they
-        load like every other layer, whatever the value.
+        On a vocabulary change (the checkpoint's own ``vocab_size`` differs from
+        this model's) only the variables shaped by the vocabulary keep their
+        init; with the same vocabulary every layer loads, whatever the value.
 
         :param weights_path: Path to a ``.keras`` checkpoint.
         :param skip_prefixes: Further layer-name prefixes to skip during transfer,
             on top of ``task_head``.
-        :param strict: If True (default), every backbone layer must load or this
-            raises; only ``lm_head`` (a top, absent from a headed checkpoint) and
-            the skipped layers may stay at their initialization. If False, a
-            layer that does not fit is recorded in the logged report and skipped.
+        :param strict: If True (default), the shared language load rule
+            (:func:`dl_techniques.utils.weight_transfer.load_backbone_from_checkpoint`):
+            every backbone layer loads and every checkpoint layer finds its
+            place, or this raises; ``lm_head_projection`` may be left out only
+            when one side carries a task head, or the vocabulary changed. If
+            False, a layer that does not fit is recorded in the logged report
+            and skipped.
         :raises FileNotFoundError: If ``weights_path`` does not exist.
         :raises ValueError: If ``strict`` and a backbone layer is left unloaded.
         """
@@ -604,19 +607,26 @@ class TreeTransformer(keras.Model):
             }
             self(dummy_input, training=False)
         logger.info(f"Loading pretrained weights from {weights_path}")
-        # DECISION plan-2026-10-11T004932-b83935e1/D-022: the vocabulary layers are skipped only when the
-        # CHECKPOINT's vocab_size differs; do NOT compare against DEFAULT_VOCAB_SIZE -- any custom
-        # vocabulary then drops a same-vocabulary embedding. See decisions.md.
-        vocab_layers = vocab_layers_if_changed(
-            weights_path, self.vocab_size, ("embedding", "lm_head"))
         # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
         # drop TASK_HEAD_NAME from this list -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
-        load_weights_from_checkpoint(
-            target=self,
-            ckpt_path=weights_path,
-            skip_prefixes=(TASK_HEAD_NAME, *vocab_layers, *skip_prefixes),
-            strict=strict,
-            allow_unloaded=("lm_head",) if strict else None,
+        head_prefixes = (TASK_HEAD_NAME, *skip_prefixes)
+        if not strict:
+            load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=head_prefixes,
+                strict=False,
+            )
+            return
+        # DECISION plan-2026-10-11T004932-b83935e1/D-022: the vocabulary exception is keyed on the
+        # CHECKPOINT's vocab_size (inside the shared rule); do NOT compare against DEFAULT_VOCAB_SIZE --
+        # any custom vocabulary then drops a same-vocabulary embedding. See decisions.md.
+        load_backbone_from_checkpoint(
+            self,
+            weights_path,
+            head_prefixes=head_prefixes,
+            vocab_layers=("embedding",),
+            tops=("lm_head",),
         )
 
     @staticmethod

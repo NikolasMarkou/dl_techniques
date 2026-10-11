@@ -367,12 +367,12 @@ model2 = create_mamba2("130m", vocab_size=50288, include_top=True,
 The backbone's weight paths are the same with or without a head, so a backbone
 trained under one head is reused under another through `pretrained=<path.keras>`:
 headed or headless, the model receives the backbone only (the checkpoint's `task_head`
-is never copied), and every backbone layer loads or the call raises, so a checkpoint
-of another depth or `d_model` is refused. The one exception is `embedding`, which
-stays fresh when the checkpoint's own `vocab_size` differs from the model's. A
-headless model with the checkpoint's vocabulary loads the whole file (strict); a
-headed one, or a vocabulary change, copies by layer name. To restore a whole model,
-head included, use `keras.models.load_model`.
+is never copied), and every backbone layer loads, and every checkpoint layer finds
+its place, or the call raises, so a checkpoint of another depth (deeper or
+shallower) or `d_model` is refused, never truncated. The one exception is the
+`embedding` table, which stays fresh when the checkpoint's own `vocab_size` differs
+from the model's. Every route copies by layer name, so it needs a `.keras` file. To
+restore a whole model, head included, use `keras.models.load_model`.
 
 ```python
 clf = create_mamba("130m", vocab_size=50257, include_top=True,

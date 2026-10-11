@@ -34,10 +34,12 @@ Two functions live here, and they are not interchangeable:
   raises.
 
 :func:`load_weights_from_checkpoint` reports by default; pass ``allow_unloaded``
-to make it complete-or-raise instead (every target layer loads, except the ones
-named there). :func:`read_checkpoint_config` and :func:`vocab_layers_if_changed`
-read a ``.keras`` archive's own config, so a caller can name those layers from
-what the checkpoint actually holds rather than from a class default.
+to make it complete-or-raise instead (every target layer loads and every
+checkpoint layer finds a home, except the ones named there).
+:func:`read_checkpoint_config` and :func:`vocab_change` read a ``.keras``
+archive's own config, so a caller decides from what the checkpoint actually
+holds rather than from a class default. :func:`load_backbone_from_checkpoint`
+is the language models' load rule built from those pieces, in one place.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ import json
 import os
 import zipfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
@@ -69,6 +71,8 @@ class TransferReport:
     :ivar shape_mismatch: ``(layer_name, target_shapes, source_shapes)`` tuples where names matched but weights did not.
     :ivar missing_in_source: target layer names absent from the source checkpoint (kept at target's init).
     :ivar unused_in_source: source layer names with weights that had no home in the target.
+    :ivar vocab_fresh: ``layer/variable`` paths of vocabulary tables kept at the
+        target's init under a ``vocab_change`` (their layer's other variables loaded).
     """
 
     loaded: List[str] = field(default_factory=list)
@@ -78,6 +82,7 @@ class TransferReport:
     )
     missing_in_source: List[str] = field(default_factory=list)
     unused_in_source: List[str] = field(default_factory=list)
+    vocab_fresh: List[str] = field(default_factory=list)
 
     @property
     def num_loaded(self) -> int:
@@ -96,6 +101,7 @@ class TransferReport:
             f"  shape_mismatch     : {len(self.shape_mismatch)} layers",
             f"  missing_in_source  : {len(self.missing_in_source)} layers",
             f"  unused_in_source   : {len(self.unused_in_source)} layers",
+            f"  vocab_fresh        : {len(self.vocab_fresh)} variables",
         ]
         if self.shape_mismatch:
             lines.append("  shape_mismatch details:")
@@ -103,7 +109,38 @@ class TransferReport:
                 lines.append(f"    - {name}: target={tgt} source={src}")
             if len(self.shape_mismatch) > 10:
                 lines.append(f"    ... ({len(self.shape_mismatch) - 10} more)")
+        if self.vocab_fresh:
+            lines.append(f"  vocab_fresh: {self.vocab_fresh}")
         return "\n".join(lines)
+
+
+class VocabChange(NamedTuple):
+    """A checkpoint whose vocabulary differs from the receiving model's.
+
+    Interface contract (built by :func:`vocab_change`, consumed by
+    :func:`load_weights_from_checkpoint`'s ``vocab_change``):
+
+    :ivar layers: Layer-name prefixes of the layers that hold vocabulary tables.
+    :ivar checkpoint_size: The checkpoint's ``vocab_size``.
+    :ivar model_size: The receiving model's ``vocab_size``.
+    """
+
+    layers: Tuple[str, ...]
+    checkpoint_size: int
+    model_size: int
+
+    def is_vocab_table(
+        self, source_shape: Tuple[int, ...], target_shape: Tuple[int, ...]
+    ) -> bool:
+        """True when two variable shapes differ only by the vocabulary size."""
+        return (
+            len(source_shape) == len(target_shape)
+            and source_shape != target_shape
+            and all(
+                s == t or (s == self.checkpoint_size and t == self.model_size)
+                for s, t in zip(source_shape, target_shape)
+            )
+        )
 
 
 # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: this is a SECOND function, not a
@@ -219,6 +256,29 @@ def _layer_weight_shapes(layer: keras.layers.Layer) -> List[Tuple[int, ...]]:
     return [tuple(w.shape) for w in layer.get_weights()]
 
 
+def _vocab_layer_plan(
+    tgt_layer: keras.layers.Layer, src_weights: list, change: VocabChange
+) -> Optional[List[Optional[np.ndarray]]]:
+    """Per-variable plan for a vocabulary layer whose shapes differ.
+
+    Each entry is the source value to copy, or ``None`` for a vocabulary table
+    that keeps the target's init. ``None`` overall when any variable neither
+    fits nor differs only by the vocabulary size (or the counts differ).
+    """
+    tgt_shapes = _layer_weight_shapes(tgt_layer)
+    if len(tgt_shapes) != len(src_weights):
+        return None
+    plan: List[Optional[np.ndarray]] = []
+    for tgt_shape, value in zip(tgt_shapes, src_weights):
+        if tuple(value.shape) == tgt_shape:
+            plan.append(value)
+        elif change.is_vocab_table(tuple(value.shape), tgt_shape):
+            plan.append(None)
+        else:
+            return None
+    return plan
+
+
 def _unwrap_single_model(model: keras.Model) -> keras.Model:
     """The model whose layers a by-name transfer compares.
 
@@ -247,6 +307,7 @@ def load_weights_from_checkpoint(
     strict: bool = False,
     custom_objects: Optional[dict] = None,
     allow_unloaded: Optional[Sequence[str]] = None,
+    vocab_change: Optional[VocabChange] = None,
 ) -> TransferReport:
     """Copy weights layer-by-layer from a saved ``.keras`` checkpoint into *target*.
 
@@ -273,17 +334,26 @@ def load_weights_from_checkpoint(
     :param custom_objects: Forwarded to :func:`keras.models.load_model`.
     :param allow_unloaded: ``None`` (default) keeps the reporting behavior
         above. A sequence of layer-name prefixes makes the transfer
-        complete-or-raise: every target layer that holds weights must be
-        loaded, except layers matched by ``skip_prefixes`` and layers whose
-        name starts with one of these prefixes. A shape mismatch on an allowed
-        layer is recorded and never raises, even with ``strict=True``. ``()``
-        allows none. Any other target layer left at its initialization (shape
-        mismatch, or absent from the source) raises, naming the layers.
+        complete-or-raise, in both directions: every target layer that holds
+        weights must be loaded, and every source layer that holds weights must
+        find a target layer, except layers matched by ``skip_prefixes`` and
+        layers whose name starts with one of these prefixes. A shape mismatch
+        on an allowed layer is recorded and never raises, even with
+        ``strict=True``. ``()`` allows none. Any other target layer left at its
+        initialization (shape mismatch, or absent from the source), or source
+        layer left out (a deeper checkpoint), raises, naming the layers.
+    :param vocab_change: ``None`` (default), or the :class:`VocabChange` of a
+        checkpoint with another vocabulary. A layer named by its ``layers``
+        whose shapes differ is then transferred variable by variable: each
+        variable of equal shape is copied, a variable whose shape differs only
+        by the vocabulary size keeps the target's init (listed in
+        ``report.vocab_fresh`` and logged), and any other difference makes the
+        whole layer a shape mismatch.
     :returns: :class:`TransferReport` describing what happened.
     :raises FileNotFoundError: *ckpt_path* does not exist.
     :raises ValueError: *ckpt_path* does not end in ``.keras``; all source
         layers were filtered / missing in target (no overlap); or, with
-        ``allow_unloaded``, a target layer outside it was not loaded.
+        ``allow_unloaded``, a layer outside it was not transferred.
 
     Every check runs before the first weight is copied, so a raise leaves
     *target* untouched.
@@ -318,6 +388,7 @@ def load_weights_from_checkpoint(
 
     report = TransferReport()
     allowed = tuple(allow_unloaded or ())
+    # A value of None in a pending list keeps that target variable's init.
     pending: List[Tuple[keras.layers.Layer, list]] = []
 
     # Walk source layers — decide for each whether to transfer, skip, or record.
@@ -337,6 +408,24 @@ def load_weights_from_checkpoint(
 
         tgt_shapes = _layer_weight_shapes(tgt_layer)
         src_shapes = [tuple(w.shape) for w in src_weights]
+        if (
+            tgt_shapes != src_shapes
+            and vocab_change is not None
+            and _matches_any_prefix(name, vocab_change.layers)
+        ):
+            # DECISION plan-2026-10-11T004932-b83935e1/D-031: per variable; do NOT exempt
+            # the whole vocabulary layer -- BERT's `embeddings` also holds the position
+            # and token-type tables and a LayerNorm, which would then stay fresh silently.
+            plan = _vocab_layer_plan(tgt_layer, src_weights, vocab_change)
+            if plan is not None:
+                report.vocab_fresh.extend(
+                    variable.path
+                    for variable, value in zip(tgt_layer.weights, plan)
+                    if value is None
+                )
+                pending.append((tgt_layer, plan))
+                report.loaded.append(name)
+                continue
         if tgt_shapes != src_shapes:
             report.shape_mismatch.append((name, tgt_shapes, src_shapes))
             if strict and not _matches_any_prefix(name, allowed):
@@ -382,17 +471,36 @@ def load_weights_from_checkpoint(
             n for n in report.missing_in_source
             if not _matches_any_prefix(n, allowed)
         ]
-        if unloaded:
+        # DECISION plan-2026-10-11T004932-b83935e1/D-031: the source side too; do NOT
+        # let a checkpoint layer without a target home pass -- a deeper checkpoint is
+        # then truncated silently and a trained final norm runs after a block it never saw.
+        unused = [
+            n for n in report.unused_in_source
+            if not _matches_any_prefix(n, allowed)
+        ]
+        if unloaded or unused:
             raise ValueError(
                 f"Checkpoint {ckpt_path!r} leaves {len(unloaded)} target "
-                f"layer(s) unloaded: {unloaded}. Only layers starting with "
-                f"{list(allowed)} may stay at their initialization.\n"
-                f"{report.summary_string()}"
+                f"layer(s) unloaded: {unloaded}, and holds {len(unused)} "
+                f"layer(s) with no target layer: {unused}. Only layers "
+                f"starting with {list(allowed)} may be left out on either "
+                f"side.\n{report.summary_string()}"
             )
 
     for tgt_layer, src_weights in pending:
-        tgt_layer.set_weights(src_weights)
+        if all(value is not None for value in src_weights):
+            tgt_layer.set_weights(src_weights)
+            continue
+        for variable, value in zip(tgt_layer.weights, src_weights):
+            if value is not None:
+                variable.assign(value)
 
+    if report.vocab_fresh:
+        logger.warning(
+            f"Vocabulary change ({vocab_change.checkpoint_size} -> "
+            f"{vocab_change.model_size}): these variables keep their fresh "
+            f"initialization: {report.vocab_fresh}"
+        )
     logger.info(report.summary_string())
     return report
 
@@ -416,25 +524,82 @@ def read_checkpoint_config(ckpt_path: str) -> Dict[str, Any]:
     return config if isinstance(config, dict) else {}
 
 
-def vocab_layers_if_changed(
+def vocab_change(
     ckpt_path: str, vocab_size: int, vocab_layers: Sequence[str]
-) -> Tuple[str, ...]:
-    """Name the vocabulary-dependent layers only if the checkpoint's vocab differs.
+) -> Optional[VocabChange]:
+    """The checkpoint's vocabulary change, if it records one.
 
-    Interface contract (shared by the language-model ``pretrained=<path>``
-    loaders, which pass the result as ``allow_unloaded`` or ``skip_prefixes``
-    of :func:`load_weights_from_checkpoint`):
+    Interface contract (shared by the language-model loaders through
+    :func:`load_backbone_from_checkpoint`):
 
     :param ckpt_path: Path to a ``.keras`` archive of a model whose top-level
         config carries ``vocab_size``.
     :param vocab_size: The receiving model's vocabulary size.
-    :param vocab_layers: Layer-name prefixes that depend on the vocabulary.
-    :returns: ``tuple(vocab_layers)`` when the checkpoint records a
-        ``vocab_size`` other than *vocab_size*; ``()`` when it records the same
-        one or none (an unknown vocabulary is not a change, so nothing is
+    :param vocab_layers: Layer-name prefixes of the layers holding vocabulary
+        tables.
+    :returns: A :class:`VocabChange` when the checkpoint records a
+        ``vocab_size`` other than *vocab_size*; ``None`` when it records the
+        same one or none (an unknown vocabulary is not a change, so nothing is
         exempted).
     """
     recorded = (read_checkpoint_config(ckpt_path).get("config") or {}).get("vocab_size")
     if recorded is None or recorded == vocab_size:
-        return ()
-    return tuple(vocab_layers)
+        return None
+    return VocabChange(tuple(vocab_layers), int(recorded), int(vocab_size))
+
+
+def load_backbone_from_checkpoint(
+    target: keras.Model,
+    ckpt_path: str,
+    head_prefixes: Sequence[str],
+    vocab_layers: Sequence[str],
+    tops: Sequence[str] = (),
+    allow_vocab_change: bool = True,
+) -> TransferReport:
+    """The language models' ``pretrained=<path>`` load rule, in one place.
+
+    Interface contract (shared by the ten language classes with a pretrained
+    route):
+
+    :param target: A **built** model with ``vocab_size`` and ``include_top``
+        attributes.
+    :param ckpt_path: A ``.keras`` checkpoint of the same class, whose
+        top-level config records ``vocab_size`` and ``include_top``.
+    :param head_prefixes: Prefixes of the task head, never copied (and a
+        target head keeps its init).
+    :param vocab_layers: Prefixes of the layers holding vocabulary tables.
+    :param tops: Prefixes of a headless model's output layer (an untied
+        ``lm_head``), absent from a headed model.
+    :param allow_vocab_change: ``False`` refuses a checkpoint of another
+        vocabulary.
+    :returns: The :class:`TransferReport`.
+    :raises ValueError: when any backbone layer does not transfer, on either
+        side; failure modes as :func:`load_weights_from_checkpoint`, plus a
+        refused vocabulary change. A raise copies nothing.
+
+    The rule: every backbone layer loads, and every checkpoint backbone layer
+    has a home (a deeper checkpoint is refused, never truncated). On a
+    vocabulary change, only the variables shaped by the vocabulary keep their
+    init; every other variable of those layers must load. A top may be left
+    out only when one side carries a task head instead (the checkpoint's
+    config or the target says ``include_top``) or the vocabulary changed, so
+    a headless tied checkpoint does not fill an untied ``lm_head`` with
+    nothing, and an untied ``lm_head`` is not dropped into a tied model.
+    """
+    change = vocab_change(ckpt_path, target.vocab_size, (*vocab_layers, *tops))
+    if change is not None and not allow_vocab_change:
+        raise ValueError(
+            f"Checkpoint {ckpt_path!r} has another vocab_size "
+            f"({change.checkpoint_size}) than this model ({change.model_size}), "
+            "and the vocabulary exception was refused."
+        )
+    recorded = read_checkpoint_config(ckpt_path).get("config") or {}
+    headed = bool(recorded.get("include_top")) or bool(target.include_top)
+    return load_weights_from_checkpoint(
+        target=target,
+        ckpt_path=ckpt_path,
+        skip_prefixes=tuple(head_prefixes),
+        strict=True,
+        allow_unloaded=tuple(tops) if headed or change is not None else (),
+        vocab_change=change,
+    )

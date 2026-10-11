@@ -259,11 +259,13 @@ unless `alpha=0.0`. The backbone's weight paths are the same with or without a h
 
 `pretrained=<path>` must be a `.keras` file, headed or headless. It copies the backbone (and an
 untied `lm_head`) by layer name and never the checkpoint's `task_head`; the model's own head keeps
-its fresh initialization. Every backbone layer loads or the call raises `ValueError`, so a
-checkpoint of another depth or width is refused, never half-restored. The vocabulary layers
-(`word_embeddings` and `lm_head`) stay fresh only when the checkpoint's own `vocab_size` differs from the
-model's, and an untied `lm_head` the checkpoint does not hold (one saved with a head) keeps its
-initialization. The model is built first: before that, every
+its fresh initialization. Every backbone layer loads, and every checkpoint layer finds its place,
+or the call raises `ValueError`, so a checkpoint of another depth (deeper or shallower) or width
+is refused, never half-restored or truncated. The vocabulary tables (`word_embeddings` and an untied
+`lm_head`) stay fresh only when the checkpoint's own `vocab_size` differs from the model's. An
+untied `lm_head` may otherwise be left out only when one side carries a task head: a tied
+headless checkpoint does not fill an untied headless model, and an untied `lm_head` is not
+dropped into a tied one. The model is built first: before that, every
 `pretrained=<path>` raised "model must be built". To restore a whole model, head included, use
 `keras.models.load_model`.
 
