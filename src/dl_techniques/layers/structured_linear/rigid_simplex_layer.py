@@ -1,20 +1,36 @@
 """RigidSimplexLayer, a projection onto a frozen Equiangular Tight Frame.
 
 RigidSimplexLayer is a Keras layer that maps `[..., input_dim]` to
-`[..., units]`. Its projection matrix is a fixed regular simplex frame:
-`input_dim + 1` unit vectors in `input_dim` dimensions, every pair at inner
-product `-1/input_dim`. That matrix never trains. The learnable parts are a
-square rotation `R` and a scalar `s`, giving
+`[..., units]`. Its projection matrix is a fixed frame of unit vectors that
+never trains; the learnable parts are a square rotation `R` and a scalar `s`,
+giving
 
-    output = s * (x @ R) @ Simplex
+    output = s * (x @ R) @ Frame
 
 with `R` pulled toward orthogonality by a penalty on the mean squared
-entries of `R^T R - I`. The penalty is added through `add_loss` on every
-call, at inference as well as in training. The frame carries only
-`input_dim + 1` distinct vectors, so `units` past that count repeats
-columns and `units` below it drops them. The scale starts at 1.0 and is
-clipped into `[scale_min, scale_max]` after the first update. The last
-input dimension must be static.
+entries of `R^T R - I`. The scale starts at 1.0 and is clipped into
+`[scale_min, scale_max]` after the first update. The last input dimension
+must be static.
+
+**Frame width — the `frame` argument.** A single regular simplex holds
+exactly `input_dim + 1` unit vectors in `input_dim` dimensions, every pair at
+inner product `-1/input_dim`. Two constructions fill a wider `units`:
+
+- `frame='crystal'` (the default) packs several *rotated* simplexes onto the
+  sphere with a greedy minimax-angular-separation heuristic, so every one of
+  the `units` columns is a distinct direction.
+- `frame='tiled'` repeats one simplex's vertices. It is exact at or below
+  `input_dim + 1`, and **degenerate beyond it**: measured at
+  `input_dim=16, units=100` it yields 17 distinct columns of 100, with 490
+  column pairs at inner product exactly `1.0` — 83% of the outputs are exact
+  duplicates of another. The mode is retained so configurations written
+  against it keep producing their original values; it is not a codebook.
+
+Migration note: `frame` was added after the layer shipped. `get_config()`
+always emits it, but a config **lacking** the key is reconstructed as
+`frame='tiled'`, because that is what such a config was built with. Old
+`.keras` archives are unaffected either way — the frame is a saved weight and
+is restored bit-exactly, not rebuilt.
 
 References:
     - Papyan et al., 2020. Prevalence of Neural Collapse during the Terminal
@@ -36,6 +52,11 @@ from typing import Optional, Tuple, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.layers.structured_linear.crystal_frames import (
+    crystal_frame,
+    tiled_simplex_frame
+)
+from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -90,8 +111,7 @@ class RigidSimplexLayer(keras.layers.Layer):
         units <  vertices        columns dropped
                                  angles hold, frame no longer tight
         units == k * vertices    exact frame, operator = k*(N+1)/N * I
-        otherwise                columns tiled then cut
-                                 repeated columns sit at coherence 1
+        otherwise                see the `frame` argument below
 
     Input shape:
         N-D tensor ``(..., input_dim)``. The last dimension must be static.
@@ -104,7 +124,7 @@ class RigidSimplexLayer(keras.layers.Layer):
         applied after an optimizer update, so a range that excludes 1.0
         leaves the first forward pass outside the bounds.
 
-    :param units: Dimensionality of the output space (Simplex projections).
+    :param units: Dimensionality of the output space (frame projections).
     :type units: int
     :param scale_min: Minimum allowed scaling factor.
     :type scale_min: float
@@ -115,6 +135,17 @@ class RigidSimplexLayer(keras.layers.Layer):
     :param rotation_initializer: Initializer for the rotation matrix. Defaults
         to ``'identity'``, which starts the layer as the bare frame projection.
     :type rotation_initializer: Union[str, initializers.Initializer]
+    :param frame: How the frozen frame is built once ``units`` exceeds the
+        ``input_dim + 1`` a single simplex can supply. ``'crystal'`` packs
+        rotated simplexes for ``units`` distinct directions; ``'tiled'``
+        repeats one simplex's vertices and is exact only at or below
+        ``input_dim + 1``. Defaults to ``'crystal'``.
+    :type frame: str
+    :param frame_seed: Seed for the crystal frame's rotation sampling. ``None``
+        (the default) draws a fresh frame on every build; pass an integer for
+        a reproducible one. Ignored by ``frame='tiled'``, which is
+        deterministic.
+    :type frame_seed: Optional[int]
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any
 
@@ -128,7 +159,11 @@ class RigidSimplexLayer(keras.layers.Layer):
     :raises ValueError: If ``units`` is not positive.
     :raises ValueError: If ``scale_min`` is not less than ``scale_max``.
     :raises ValueError: If ``orthogonality_penalty`` is negative.
+    :raises ValueError: If ``frame`` is not one of ``'crystal'`` or ``'tiled'``.
     """
+
+    #: The two accepted values of the ``frame`` argument.
+    FRAME_MODES = ('crystal', 'tiled')
 
     def __init__(
             self,
@@ -137,6 +172,8 @@ class RigidSimplexLayer(keras.layers.Layer):
             scale_max: float = 2.0,
             orthogonality_penalty: float = 1e-4,
             rotation_initializer: Union[str, keras.initializers.Initializer] = 'identity',
+            frame: str = 'crystal',
+            frame_seed: Optional[int] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -151,12 +188,18 @@ class RigidSimplexLayer(keras.layers.Layer):
             raise ValueError(
                 f"orthogonality_penalty must be non-negative, got {orthogonality_penalty}"
             )
+        if frame not in self.FRAME_MODES:
+            raise ValueError(
+                f"frame must be one of {list(self.FRAME_MODES)}, got {frame!r}"
+            )
 
         self.units = units
         self.scale_min = scale_min
         self.scale_max = scale_max
         self.orthogonality_penalty = orthogonality_penalty
         self.rotation_initializer = keras.initializers.get(rotation_initializer)
+        self.frame = frame
+        self.frame_seed = frame_seed
 
         # Every shape below depends on the input width, so nothing exists yet.
         self.static_simplex = None
@@ -170,48 +213,25 @@ class RigidSimplexLayer(keras.layers.Layer):
             output_dim: int
     ) -> np.ndarray:
         """
-        Generate a centred, normalised Simplex weight matrix.
+        Generate the frozen frame, dispatching on the ``frame`` mode.
 
         :param input_dim: Input dimensionality.
         :type input_dim: int
-        :param output_dim: Number of Simplex projections.
+        :param output_dim: Number of frame projections.
         :type output_dim: int
-        :return: Weight matrix ``(input_dim, output_dim)`` as float32, columns
-            drawn from the ``input_dim + 1`` simplex vertices.
+        :return: Weight matrix ``(input_dim, output_dim)`` as float32 with
+            unit-norm columns.
         :rtype: np.ndarray
         """
 
-        dimensions = input_dim
-        matrix = np.identity(dimensions, dtype=np.float32)
+        if self.frame == 'tiled':
+            return tiled_simplex_frame(input_dim, output_dim)
 
-        # This value places the extra vertex equidistant from the identity rows.
-        last_point = np.ones((1, dimensions), dtype=np.float32) * \
-                     ((1.0 + np.sqrt(dimensions + 1.0)) / dimensions)
-
-        matrix = np.vstack([matrix, last_point])
-
-        # Centering makes the vertices sum to zero, which sets coherence to -1/N.
-        mean_m = np.mean(matrix, axis=0)
-        matrix = matrix - mean_m
-
-        # Norms are clamped so a degenerate vertex cannot divide by zero.
-        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-8)
-        matrix = matrix / norms
-
-        # Vertices become columns so that x @ W projects onto them.
-        W = matrix.T
-
-        # A width other than a multiple of N+1 repeats or discards vertices.
-        current_cols = W.shape[1]
-
-        if output_dim > current_cols:
-            tile_factor = int(np.ceil(output_dim / current_cols))
-            W = np.tile(W, (1, tile_factor))
-
-        W = W[:, :output_dim]
-
-        return W.astype(np.float32)
+        return crystal_frame(
+            dimensions=input_dim,
+            width=output_dim,
+            seed=self.frame_seed
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create Simplex, rotation kernel, and scale weights.
@@ -261,25 +281,40 @@ class RigidSimplexLayer(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass: rotate, project onto Simplex, and scale.
+        Forward pass: rotate, project onto the frozen frame, and scale.
 
         :param inputs: Input tensor ``(batch, ..., input_dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Training mode flag. Accepted for API symmetry; the
-            orthogonality loss is added regardless of its value.
+        :param training: Training mode flag. The orthogonality penalty is added
+            unless this is exactly ``False``, so an inference forward leaves
+            ``self.losses`` empty; an eager call or a ``fit`` step passes
+            ``None`` and still receives it.
         :type training: Optional[bool]
         :return: Output tensor ``(batch, ..., units)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If the last dimension of ``inputs`` disagrees with
+            the width this layer was built for.
         """
 
-        # The loss is a mean of squared entries, so it does not scale with input_dim.
-        r_t_r = keras.ops.matmul(
-            keras.ops.transpose(self.rotation_kernel),
-            self.rotation_kernel
-        )
-        identity = keras.ops.eye(self._input_dim, dtype=self.dtype)
-        ortho_loss = keras.ops.mean(keras.ops.square(r_t_r - identity))
-        self.add_loss(self.orthogonality_penalty * ortho_loss)
+        # The build-time contract is re-asserted here: build() only ever sees
+        # the shape that arrived first, so a contract checked there alone is
+        # checked exactly once.
+        if inputs.shape[-1] != self._input_dim:
+            raise ValueError(
+                f"RigidSimplexLayer was built for input_dim={self._input_dim} "
+                f"but received input_dim={inputs.shape[-1]}"
+            )
+
+        if training is not False and self.orthogonality_penalty > 0.0:
+            # The loss is a mean of squared entries, so it does not scale with
+            # input_dim.
+            r_t_r = keras.ops.matmul(
+                keras.ops.transpose(self.rotation_kernel),
+                self.rotation_kernel
+            )
+            identity = keras.ops.eye(self._input_dim, dtype=self.dtype)
+            ortho_loss = keras.ops.mean(keras.ops.square(r_t_r - identity))
+            self.add_loss(self.orthogonality_penalty * ortho_loss)
 
         rotated_inputs = keras.ops.matmul(inputs, self.rotation_kernel)
 
@@ -321,6 +356,8 @@ class RigidSimplexLayer(keras.layers.Layer):
             'scale_max': self.scale_max,
             'orthogonality_penalty': self.orthogonality_penalty,
             'rotation_initializer': keras.initializers.serialize(self.rotation_initializer),
+            'frame': self.frame,
+            'frame_seed': self.frame_seed,
         })
         return config
 
@@ -329,16 +366,34 @@ class RigidSimplexLayer(keras.layers.Layer):
         """
         Create a layer instance from a configuration dictionary.
 
+        ``frame`` postdates this layer, so a config written before it existed
+        carries no ``frame`` key and was necessarily built by tiling. Such a
+        config is reconstructed as ``frame='tiled'`` -- the values it was built
+        to produce -- rather than silently picking up the new default. The
+        caller's dict is copied, not edited in place.
+
         :param config: Configuration from ``get_config()``.
         :type config: Dict[str, Any]
         :return: New ``RigidSimplexLayer`` instance.
         :rtype: RigidSimplexLayer
         """
 
-        if 'rotation_initializer' in config:
-            config['rotation_initializer'] = keras.initializers.deserialize(
-                config['rotation_initializer']
+        config = dict(config)
+
+        if 'frame' not in config:
+            logger.warning(
+                "RigidSimplexLayer config predates the 'frame' argument and is "
+                "reconstructed with frame='tiled', the construction it was built "
+                "with. That frame repeats one simplex's vertices, so a width "
+                "beyond input_dim + 1 yields duplicated columns at inner product "
+                "1.0. Pass frame='crystal' explicitly to opt into packed frames."
             )
+            config['frame'] = 'tiled'
+
+        # rotation_initializer needs no handling here: __init__ runs it through
+        # keras.initializers.get, which accepts both a string and a serialized
+        # config dict. Deserializing in from_config would be both redundant and
+        # a second site to keep in step with __init__.
         return cls(**config)
 
 # ---------------------------------------------------------------------

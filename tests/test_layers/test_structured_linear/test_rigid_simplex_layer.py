@@ -206,38 +206,72 @@ class TestRigidSimplexLayerForwardPass:
         )
 
     def test_orthogonality_loss_added(self, sample_input):
-        """Test that orthogonality regularization loss is added."""
+        """Test that orthogonality regularization loss is added while training."""
         layer = RigidSimplexLayer(units=64, orthogonality_penalty=1e-4)
 
-        # Clear any existing losses
-        _ = layer(sample_input)
+        _ = layer(sample_input, training=True)
 
         assert len(layer.losses) > 0, "Orthogonality loss should be added"
 
-    def test_zero_orthogonality_penalty_still_adds_loss(self, sample_input):
-        """Test that loss is added even with zero penalty (just zero valued)."""
-        layer = RigidSimplexLayer(units=64, orthogonality_penalty=0.0)
+    def test_inference_carries_no_orthogonality_loss(self, sample_input):
+        """Inference must not carry a penalty term it was never trained against."""
+        layer = RigidSimplexLayer(units=64, orthogonality_penalty=1e-4)
+        _ = layer(sample_input, training=False)
+
+        assert layer.losses == [], "an inference forward must leave layer.losses empty"
+
+    def test_eager_call_still_receives_the_penalty(self, sample_input):
+        """The other half of the pair: ``training=None`` is a training call."""
+        layer = RigidSimplexLayer(units=64, orthogonality_penalty=1e-4)
         _ = layer(sample_input)
 
-        # Loss is still added but should be zero
-        assert len(layer.losses) > 0
+        assert len(layer.losses) == 1
+
+    def test_zero_orthogonality_penalty_adds_no_loss(self, sample_input):
+        """A zero weight makes the term identically zero, so it is not added."""
+        layer = RigidSimplexLayer(units=64, orthogonality_penalty=0.0)
+        _ = layer(sample_input, training=True)
+
+        assert layer.losses == []
 
     def test_identity_rotation_preserves_projection(self):
-        """Test that identity rotation correctly projects onto simplex."""
+        """At ``R = I`` and ``scale = 1`` the map is exactly ``x @ frame``.
+
+        This is an algebraic identity, not an approximation, so it is pinned at
+        a float32 tolerance rather than the loose 1e-2 this test previously used
+        -- a bound that loose cannot see a rotation kernel that is wrong.
+        """
         layer = RigidSimplexLayer(units=64, rotation_initializer='identity')
         inputs = np.random.randn(4, 32).astype(np.float32)
 
         output = layer(inputs)
 
-        # With identity rotation and scale=1, output = inputs @ simplex
         expected = np.matmul(inputs, keras.ops.convert_to_numpy(layer.static_simplex))
 
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(output),
             expected,
-            rtol=1e-2, atol=1e-2,
-            err_msg="Identity rotation should preserve simplex projection"
+            rtol=0, atol=1e-6,
+            err_msg="Identity rotation should preserve the bare frame projection"
         )
+
+    def test_a_non_identity_rotation_actually_changes_the_output(self):
+        """Anti-vacuity twin for the identity test above.
+
+        Without this arm, a layer that ignored ``rotation_kernel`` entirely would
+        pass the identity assertion perfectly.
+        """
+        inputs = np.random.default_rng(0).standard_normal((4, 32)).astype(np.float32)
+
+        identity_layer = RigidSimplexLayer(units=64, rotation_initializer='identity')
+        rotated_layer = RigidSimplexLayer(units=64, rotation_initializer='orthogonal')
+        identity_layer(inputs)
+        rotated_layer(inputs)
+
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(identity_layer(inputs)),
+            keras.ops.convert_to_numpy(rotated_layer(inputs))
+        ), "rotation_initializer had no effect on the output"
 
 
 class TestRigidSimplexLayerSimplexProperties:
@@ -289,19 +323,86 @@ class TestRigidSimplexLayerSimplexProperties:
         mean_off_diag = np.mean(off_diag)
         assert mean_off_diag < 0.5, f"Off-diagonal mean should be small/negative, got {mean_off_diag}"
 
-    def test_simplex_tiling_for_large_units(self):
-        """Test that simplex correctly tiles when units > input_dim + 1."""
-        input_dim = 16
-        units = 100  # Much larger than input_dim + 1 = 17
+    def test_the_default_frame_packs_distinct_columns_beyond_n_plus_1(self):
+        """A width past one simplex's capacity must not repeat its vertices.
 
-        layer = RigidSimplexLayer(units=units)
+        This is the guard the tiling implementation could not pass. Measured on
+        the tiled frame at ``input_dim=16, units=100``: 17 distinct columns of
+        100, and 490 column pairs at inner product exactly ``1.0`` -- 83% of the
+        outputs were exact duplicates of another output, each receiving an
+        identical logit. The coherence ceiling of a correctly packed frame at
+        these settings measures ~0.71, roughly 0.29 below the tiled value of
+        1.0, so a 0.9 ceiling sits well clear of both.
+        """
+        input_dim, units = 16, 100
+
+        layer = RigidSimplexLayer(units=units, frame_seed=0)
         layer.build((None, input_dim))
 
-        simplex = keras.ops.convert_to_numpy(layer.static_simplex)
+        frame = keras.ops.convert_to_numpy(layer.static_simplex)
+        assert frame.shape == (input_dim, units)
 
-        assert simplex.shape == (input_dim, units)
-        # Should not contain NaN or Inf
-        assert np.all(np.isfinite(simplex))
+        distinct = {tuple(np.round(column, 6)) for column in frame.T}
+        assert len(distinct) == units, (
+            f"expected {units} distinct columns, got {len(distinct)}; the frame "
+            f"was tiled rather than packed"
+        )
+
+        gram = frame.T @ frame
+        coherence = np.abs(gram[~np.eye(units, dtype=bool)]).max()
+        assert coherence < 0.9, (
+            f"max pairwise |inner product| {coherence:.6f} indicates duplicated "
+            f"columns; a packed frame keeps this well below 1.0"
+        )
+
+    def test_tiled_mode_really_is_tiled(self):
+        """The anti-vacuity twin: frame='tiled' must FAIL the guard above.
+
+        Without this arm the assertion could be satisfied by a layer that packs
+        under every configuration, and 'the packed frame is distinct' would
+        never have been a claim about the tiling path at all.
+        """
+        input_dim, units = 16, 100
+
+        layer = RigidSimplexLayer(units=units, frame='tiled')
+        layer.build((None, input_dim))
+
+        frame = keras.ops.convert_to_numpy(layer.static_simplex)
+
+        distinct = {tuple(np.round(column, 6)) for column in frame.T}
+        assert len(distinct) < units, (
+            f"frame='tiled' produced {len(distinct)} distinct columns of {units}; "
+            f"the mode under test is supposed to repeat vertices"
+        )
+
+    def test_the_crystal_frame_beats_the_tiled_one_on_coherence(self):
+        """Direct comparison: packing must separate more than tiling does."""
+        input_dim, units = 8, 30
+
+        packed = RigidSimplexLayer(units=units, frame='crystal', frame_seed=3)
+        packed.build((None, input_dim))
+        tiled = RigidSimplexLayer(units=units, frame='tiled')
+        tiled.build((None, input_dim))
+
+        def _max_coherence(layer):
+            frame = keras.ops.convert_to_numpy(layer.static_simplex)
+            gram = frame.T @ frame
+            return float(np.abs(gram[~np.eye(units, dtype=bool)]).max())
+
+        assert _max_coherence(packed) < _max_coherence(tiled)
+
+    def test_frame_seed_makes_the_frame_reproducible(self):
+        """The same seed must give the same frame across separate builds."""
+        first = RigidSimplexLayer(units=30, frame_seed=11)
+        first.build((None, 8))
+        second = RigidSimplexLayer(units=30, frame_seed=11)
+        second.build((None, 8))
+
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(first.static_simplex),
+            keras.ops.convert_to_numpy(second.static_simplex),
+            err_msg="frame_seed did not make the frame reproducible",
+        )
 
     def test_simplex_slicing_for_small_units(self):
         """Test that simplex correctly slices when units < input_dim + 1."""
@@ -470,6 +571,45 @@ class TestRigidSimplexLayerConfiguration:
         reconstructed = RigidSimplexLayer.from_config(config)
 
         assert reconstructed.rotation_initializer is not None
+
+    def test_config_carries_the_frame_arguments(self):
+        """``frame`` and ``frame_seed`` must survive a config round trip."""
+        original = RigidSimplexLayer(units=64, frame='tiled', frame_seed=7)
+        reconstructed = RigidSimplexLayer.from_config(original.get_config())
+
+        assert reconstructed.frame == 'tiled'
+        assert reconstructed.frame_seed == 7
+
+    def test_a_config_without_frame_reconstructs_as_tiled(self):
+        """The migration path: an old config was built by tiling.
+
+        A config written before ``frame`` existed carries no key, so it was
+        necessarily built by the tiling construction. Reconstructing it with
+        the new ``'crystal'`` default would silently change the values it is
+        meant to reproduce.
+        """
+        config = RigidSimplexLayer(units=64).get_config()
+        del config['frame']
+
+        assert RigidSimplexLayer.from_config(config).frame == 'tiled'
+
+    def test_from_config_does_not_mutate_the_callers_dict(self):
+        """``from_config`` must not edit the dict it was handed.
+
+        A caller that reuses one config dict for two constructions would
+        otherwise see the second receive an already-rewritten value.
+        """
+        config = RigidSimplexLayer(units=64).get_config()
+        del config['frame']
+        snapshot = dict(config)
+
+        RigidSimplexLayer.from_config(config)
+
+        assert config == snapshot, "from_config mutated the caller's config dict"
+
+    def test_invalid_frame_mode_is_rejected(self):
+        with pytest.raises(ValueError, match="frame must be one of"):
+            RigidSimplexLayer(units=64, frame='spherical-harmonics')
 
 
 class TestRigidSimplexLayerSerialization:
