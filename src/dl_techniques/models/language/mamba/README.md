@@ -245,6 +245,7 @@ model.summary()
 | :--- | :--- | :--- |
 | **`Mamba`** | `...mamba.mamba_v1` | The main Keras `Model` for the V1 architecture. |
 | **`Mamba2`** | `...mamba.mamba_v2` | The main Keras `Model` for the V2 architecture. |
+| **`create_mamba`** / **`create_mamba2`** | `...mamba` | Variant factories (delegate to `from_variant`; `include_top=True` adds a task head, see section 9). |
 
 ### 6.2 Core Building Blocks
 
@@ -330,26 +331,58 @@ ner_model.summary()
 
 ## 9. Advanced Usage Patterns
 
-### Pattern: Integrating with Task-Specific Heads (V1)
+### Pattern: An In-Model Task Head (`include_top`)
 
-The `create_mamba_with_head` function in `mamba_v1.py` provides a powerful pattern for combining the V1 Mamba encoder with pre-built task heads.
+Both `Mamba` and `Mamba2` take `include_top`, `task_config` and
+`head_config_overrides`. With `include_top=True` the model owns ONE head from
+`layers/heads/nlp`, named `task_head`, and returns only that head's output: a bare
+logits tensor (dict only for multi-output heads such as QA), so a plain loss compiles.
+The head pools `'last'` by default, the only position of a causal model that has seen
+the whole sequence (an explicit `pooling_type` in `head_config_overrides` wins), under
+the input dict's `attention_mask`, else `input_ids != pad_token_id`. The vocabulary is
+the model's own `vocab_size`; the task config needs no `vocabulary_size`.
+`create_mamba` and `create_mamba2` are the variant factories; both keep
+`from_variant`'s required `vocab_size`.
 
 ```python
-from dl_techniques.models.language.mamba.mamba_v1 import create_mamba_with_head
+import numpy as np
+from dl_techniques.models.language.mamba import create_mamba, create_mamba2
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 seq_cls_task = NLPTaskConfig(
     name="sentiment_analysis",
     task_type=NLPTaskType.TEXT_CLASSIFICATION,
     num_classes=3,
-    vocabulary_size=50257
 )
 
-model = create_mamba_with_head(
-    mamba_variant="130m",
-    task_config=seq_cls_task
+model = create_mamba("130m", vocab_size=50257, include_top=True,
+                     task_config=seq_cls_task)
+logits = model({"input_ids": np.array([[11, 42, 7, 0]], dtype="int32")})  # (1, 3)
+
+# The same for Mamba-2
+model2 = create_mamba2("130m", vocab_size=50288, include_top=True,
+                       task_config=seq_cls_task)
+```
+
+The backbone's weight paths are the same with or without a head, so a backbone
+trained under one head is reused under another through `pretrained=<path.keras>`:
+a headed model receives the backbone only (the checkpoint's `task_head` is never
+copied, and any backbone layer that does not fit raises), a headless model loads the
+whole file. To restore a whole model, head included, use `keras.models.load_model`.
+
+```python
+clf = create_mamba("130m", vocab_size=50257, include_top=True,
+                   task_config=seq_cls_task)
+clf(np.array([[11, 42, 7, 0]], dtype="int32"))  # builds it; train clf here
+clf.save("mamba_sentiment.keras")  # an unbuilt model saves no weights
+
+ner = create_mamba(
+    "130m", vocab_size=50257, include_top=True,
+    task_config=NLPTaskConfig(name="ner",
+                              task_type=NLPTaskType.TOKEN_CLASSIFICATION,
+                              num_classes=9),
+    pretrained="mamba_sentiment.keras",
 )
-model.summary()
 ```
 
 ---

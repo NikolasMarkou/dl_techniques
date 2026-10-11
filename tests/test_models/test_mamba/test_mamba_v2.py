@@ -22,11 +22,12 @@ import os
 from typing import Dict, Any
 from unittest import mock
 
-from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
+from dl_techniques.models.language.mamba.mamba_v2 import Mamba2, create_mamba2
 from dl_techniques.layers.ssm.mamba2 import Mamba2Layer
 
 from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
 from tests.numerics import reassociation_atol
+from .test_mamba_v1 import IncludeTopCases
 
 class TestMamba2ModelInitialization:
     """Test Mamba v2 model initialization and parameter validation."""
@@ -493,6 +494,21 @@ class TestMamba2LayerCheckpointedScanGradients:
             rtol=0,
             err_msg="forward output changed depending on GradientTape presence",
         )
+
+
+
+class TestMamba2IncludeTop(IncludeTopCases):
+    """``Mamba2`` with ``include_top`` (2 blocks: 21 backbone weights, measured).
+
+    The cases are shared with ``Mamba`` (``test_mamba_v1.IncludeTopCases``).
+    ``test_explicit_build_matches_lazy_build[False]`` also guards the new
+    ``Mamba2.build``: before it, an explicit build created no weight at all.
+    """
+
+    CLS = Mamba2
+    FACTORY = staticmethod(create_mamba2)
+    KW = {"d_model": 32, "num_layers": 2, "d_state": 8, "headdim": 16}
+    N_BACKBONE = 21
 
 
 if __name__ == "__main__":

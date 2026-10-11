@@ -8,7 +8,9 @@ counterpart to route through -- ``create_mamba_with_head`` (also in
 ``mamba_v1.py``) bakes a POOLED task head (classification/regression via
 ``pooling_type='last'``), which is architecturally wrong for next-token CLM
 pretraining (every position needs to be scored, not just the last); it is
-irrelevant here. So this module is a near-verbatim clone of
+irrelevant here. (SUPERSEDED 2026-10-11: that function is deleted; the same
+pooled head is now ``Mamba(include_top=True, task_config=...)``, equally
+irrelevant to CLM pretraining.) So this module is a near-verbatim clone of
 ``train.mamba.common`` (the Mamba-2 trainer), substituting ``Mamba`` for
 ``Mamba2`` throughout -- see
 ``plans/plan-2026-09-13T073704-245ab5d5/decisions.md`` D-002/D-012.

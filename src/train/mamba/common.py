@@ -62,6 +62,14 @@ is (a bare ``Mamba`` backbone wrapped in ``CausalLanguageModel``, NOT
 through ``create_mamba_with_head``). See ``common_v1.py``'s module docstring
 and this plan's ``decisions.md`` D-012.
 
+SUPERSEDED 2026-10-11 (plan-2026-10-11T004932-b83935e1 step 9): both
+``create_mamba_with_head`` and the later ``create_mamba2_with_head`` are
+deleted. ``Mamba`` and ``Mamba2`` take ``include_top=True`` plus a
+``task_config`` for a POOLED task head instead (``create_mamba`` /
+``create_mamba2`` are the variant factories). Neither is a CLM head, so the
+reasoning above is unchanged: this module still wraps the headless backbone in
+``CausalLanguageModel``.
+
 Public surface:
     * :data:`VARIANT_NAMES` -- the shipped :data:`Mamba2.MODEL_VARIANTS` keys
       plus their aliases.
@@ -691,6 +699,9 @@ def build_datasets(
 # SUPERSEDED 2026-10-05: the adapter is deleted; `CausalLanguageModel`
 # probes the singular `embedding` attribute generically (with the same
 # unbuilt-Embedding guard), so tying engages with no per-model method.
+# SUPERSEDED 2026-10-11: `mamba_v1.create_mamba_with_head` named above is
+# deleted; `Mamba`/`Mamba2(include_top=True, task_config=...)` own a POOLED task
+# head, still not a CLM head (plan-2026-10-11T004932-b83935e1 step 9).
 def build_optimizer(
         config: Mamba2TrainingConfig,
         steps_per_epoch: int,

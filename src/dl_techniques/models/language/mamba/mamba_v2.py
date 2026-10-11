@@ -12,9 +12,14 @@ come from one ``in_proj`` above the convolution. Setting ``d_ssm < d_inner`` rou
 the leading channels around the SSM as a gated MLP, concatenated back before the
 output projection. The scan is a sequential ``while_loop`` rather than the paper's
 chunked-matmul algorithm, so this is a correctness reference and not a speed
-benchmark. The model returns only ``{'last_hidden_state'}``, so a task head is
-attached externally; ``rmsnorm`` governs the in-block SSM-output norm while the final
-norm is always ``LayerNormalization``; and each block returns
+benchmark. By default the model returns only ``{'last_hidden_state'}``; with
+``include_top=True`` and a ``task_config`` it owns ONE task head from
+``layers/heads/nlp``, named ``task_head``, which pools the last real token under the
+input's ``attention_mask``, else ``input_ids != pad_token_id``, and returns only that
+head's output (as :class:`~dl_techniques.models.language.mamba.mamba_v1.Mamba`
+does). :func:`create_mamba2` is the variant factory. ``rmsnorm`` governs the
+in-block SSM-output norm while the final norm is always ``LayerNormalization``; and
+each block returns
 ``(output, running_residual)`` with the single add in the model tail.
 
 References:
@@ -37,8 +42,17 @@ from typing import Optional, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.ssm.mamba2 import Mamba2ResidualBlock
-from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    head_attention_mask,
+    task_config_to_dict,
+    validate_task_head_knobs,
+)
+from dl_techniques.models.language.mamba.mamba_v1 import load_local_checkpoint
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -48,9 +62,14 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 class Mamba2(keras.Model):
     """Encode token ids into hidden states with a stack of Mamba-2 blocks.
 
-    Every constructor argument past ``pad_token_id`` is a pass-through to the blocks,
-    which forward it to their ``Mamba2Layer``. The encoder has no task head; attach
-    one to ``last_hidden_state``.
+    Every constructor argument from ``rmsnorm`` to ``conv_bias`` is a pass-through to
+    the blocks, which forward it to their ``Mamba2Layer``. By default the encoder has
+    no task head. With ``include_top=True`` it owns one, fed ``{"hidden_states":
+    last_hidden_state, "attention_mask": <mask>}``, where the mask is the input dict's
+    ``attention_mask`` or, without one, ``input_ids != pad_token_id``, cast to the
+    hidden-state dtype, and ``call`` returns the head's output reduced by
+    :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`. The blocks never
+    see the mask, so the hidden states do not depend on the head.
 
     Architecture:
 
@@ -83,6 +102,12 @@ class Mamba2(keras.Model):
                  │
                  ▼
         {"last_hidden_state": [B, L, d_model]}
+
+        include_top=True: the dict is replaced by
+        ┌───────────────────┐
+        │ task_head         │──► finalized head output (only output)
+        │ (pools 'last')    │
+        └───────────────────┘
 
     Residual wiring:
 
@@ -128,8 +153,8 @@ class Mamba2(keras.Model):
     :param expand: Expansion factor for internal dimensions.
     :param headdim: Dimensionality of each SSM head.
     :param norm_epsilon: Epsilon for all normalization layers.
-    :param pad_token_id: ID of the padding token. Stored for callers that build a
-        mask; this model does not read it.
+    :param pad_token_id: Id treated as padding by the task head when the input
+        carries no ``attention_mask``. Read only with ``include_top=True``.
     :param rmsnorm: If True, the in-block SSM-output norm is an RMSNorm. The model's
         final norm is a ``LayerNormalization`` either way.
     :param d_ssm: Dimensionality of the SSM. Defaults to ``d_model * expand``. A
@@ -146,18 +171,31 @@ class Mamba2(keras.Model):
     :param dt_init_floor: Forwarded to every ``Mamba2Layer`` in the stack.
     :param bias: Forwarded to every ``Mamba2Layer`` in the stack.
     :param conv_bias: Forwarded to every ``Mamba2Layer`` in the stack.
+    :param include_top: Whether the model owns a task head. Defaults to False: no
+        head layer and no head weight exist.
+    :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of its
+        fields. Required when ``include_top`` is True, refused otherwise; stored as a
+        plain dict. ``MULTIPLE_CHOICE`` is refused. Its ``vocabulary_size`` is not
+        read: the vocabulary is ``vocab_size``.
+    :param head_config_overrides: Extra keyword arguments for the head constructor
+        (e.g. ``{"pooling_type": "mean"}``, which replaces the ``'last'`` default).
+        Only valid with ``include_top=True``.
     :param **kwargs: Additional keyword arguments for ``keras.Model``.
 
     :raises ValueError: If ``vocab_size``, ``d_model`` or ``num_layers`` is not
-        positive.
+        positive, if ``include_top=True`` comes without a ``task_config``, or if a
+        ``task_config`` or ``head_config_overrides`` comes with
+        ``include_top=False``.
 
     Input shape:
         A 2D tensor ``(batch_size, sequence_length)`` of token IDs, or a dictionary
-        holding that tensor under ``'input_ids'``.
+        holding that tensor under ``'input_ids'`` (and optionally an
+        ``'attention_mask'``, read only by a task head).
 
     Output shape:
-        Dictionary with ``'last_hidden_state'``, a 3D tensor
-        ``(batch_size, sequence_length, d_model)``.
+        With ``include_top=False``, a dictionary with ``'last_hidden_state'``, a 3D
+        tensor ``(batch_size, sequence_length, d_model)``. With ``include_top=True``,
+        the head's output: a bare tensor, or a dict of two or more tensors.
 
     Note:
         Every default here matches the corresponding `Mamba2Layer` default,
@@ -203,6 +241,9 @@ class Mamba2(keras.Model):
             dt_init_floor: float = 1e-4,
             bias: bool = False,
             conv_bias: bool = True,
+            include_top: bool = False,
+            task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+            head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs: Any,
     ) -> None:
         if vocab_size <= 0:
@@ -211,6 +252,7 @@ class Mamba2(keras.Model):
             raise ValueError("d_model must be positive")
         if num_layers <= 0:
             raise ValueError("num_layers must be positive")
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
         super().__init__(**kwargs)
 
         self.vocab_size = vocab_size
@@ -232,6 +274,13 @@ class Mamba2(keras.Model):
         self.dt_init_floor = dt_init_floor
         self.bias = bias
         self.conv_bias = conv_bias
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         d_inner = d_model * expand
         if d_ssm is None:
@@ -267,26 +316,61 @@ class Mamba2(keras.Model):
             epsilon=norm_epsilon, name="final_norm"
         )
 
+        # Created after the backbone and under its own fixed name, so the
+        # backbone's layer names, weight paths and RNG draws are the same with
+        # or without a head.
+        self.task_head = None
+        if self.include_top:
+            # DECISION plan-2026-08-17T183311-79c63e38/D-023: pool 'last', not 'cls'; Mamba-2 is
+            # causal, and 'last' needs the attention_mask below wired in. See decisions.md.
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.d_model,
+                head_config_overrides=self.head_config_overrides,
+                default_pooling="last",
+            )
+
+    def build(self, input_shape: Any) -> None:
+        """Materialize every sub-layer from ``input_shape``.
+
+        Without this method an explicit ``build`` marked the model built with no
+        weight created (Keras warns "does not have a ``build()`` method"), so a
+        weight load into it raised; only a forward pass built it. The shared
+        helper traces ``call()`` on symbolic inputs, as in
+        :class:`~dl_techniques.models.language.mamba.mamba_v1.Mamba`.
+
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        """
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
+
     def call(
             self,
             inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
             training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Embed the ids, run every block, then add the residual and normalize.
 
         :param inputs: A tensor of token ids ``(batch, seq_len)``, or a dictionary
-            holding one under ``'input_ids'``.
-        :param training: Accepted for the Keras signature. It is not forwarded to the
-            sub-layers, which have no training-dependent behaviour here.
-        :return: Dictionary with ``'last_hidden_state'`` of shape
-            ``(batch, seq_len, d_model)``.
+            holding one under ``'input_ids'`` (and optionally ``'attention_mask'``,
+            read only by a task head).
+        :param training: Forwarded to the task head only. The backbone sub-layers
+            have no training-dependent behaviour here.
+        :return: With ``include_top=False``, a dictionary with
+            ``'last_hidden_state'`` of shape ``(batch, seq_len, d_model)``. With
+            ``include_top=True``, only the head's output reduced by
+            ``finalize_head_outputs``.
         :raises ValueError: If a dictionary input has no ``'input_ids'`` key, or the
             ids are ``None``.
         """
+        attention_mask = None
         if isinstance(inputs, dict):
             if "input_ids" not in inputs:
                 raise ValueError("Dictionary input must contain 'input_ids' key")
             input_ids = inputs["input_ids"]
+            attention_mask = inputs.get("attention_mask")
         else:
             input_ids = inputs
 
@@ -300,6 +384,19 @@ class Mamba2(keras.Model):
 
         final_residual = hidden_states + residual if residual is not None else hidden_states
         last_hidden_state = self.final_norm(final_residual)
+
+        if self.include_top:
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": last_hidden_state,
+                    "attention_mask": head_attention_mask(
+                        input_ids, attention_mask, self.pad_token_id,
+                        last_hidden_state.dtype,
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
 
         return {"last_hidden_state": last_hidden_state}
 
@@ -320,7 +417,13 @@ class Mamba2(keras.Model):
         return self.d_model
 
     @classmethod
-    def from_variant(cls, variant: str, vocab_size: int, **kwargs: Any) -> "Mamba2":
+    def from_variant(
+            cls,
+            variant: str,
+            vocab_size: int,
+            pretrained: Union[bool, str] = False,
+            **kwargs: Any,
+    ) -> "Mamba2":
         """Create a Mamba-2 model from a variant or alias name.
 
         The variant row sets ``d_model`` and ``num_layers``, and the ``130m`` row also
@@ -330,20 +433,41 @@ class Mamba2(keras.Model):
 
         :param variant: A key of ``MODEL_VARIANTS`` or of ``VARIANT_ALIASES``.
         :param vocab_size: Size of the vocabulary.
-        :param **kwargs: Additional arguments, overriding the variant's values.
+        :param pretrained: If a string, loads weights from that local path; a model
+            with a head (``include_top=True``) receives the backbone only, from a
+            ``.keras`` file, and keeps its own fresh head (see
+            :meth:`~dl_techniques.models.language.mamba.mamba_v1.Mamba.from_variant`).
+            If True, raises ``NotImplementedError``. Defaults to False.
+        :param **kwargs: Additional arguments, overriding the variant's values,
+            including ``include_top``, ``task_config`` and ``head_config_overrides``.
         :return: A configured model.
         :rtype: Mamba2
         :raises ValueError: If ``variant`` is in neither table; the message lists both.
+        :raises NotImplementedError: If ``pretrained is True``.
         """
         variant = cls.VARIANT_ALIASES.get(variant, variant)
         if variant not in cls.MODEL_VARIANTS:
             available = list(cls.MODEL_VARIANTS.keys()) + list(cls.VARIANT_ALIASES.keys())
             raise ValueError(f"Unknown variant '{variant}'. Available: {available}")
+        if pretrained is True:
+            # Raising keeps a caller from training on weights they think are
+            # pretrained.
+            raise NotImplementedError(
+                f"No pretrained weights are distributed with dl_techniques "
+                f"for Mamba-2 variant '{variant}'. Pass a local checkpoint "
+                f"instead: Mamba2.from_variant('{variant}', "
+                f"vocab_size=..., pretrained='/path/to/weights.keras'), "
+                f"or use pretrained=False (default) for random init."
+            )
 
         config = cls.MODEL_VARIANTS[variant].copy()
         config.update(kwargs)
         config["vocab_size"] = vocab_size
-        return cls(**config)
+        model = cls(**config)
+        if isinstance(pretrained, str):
+            load_local_checkpoint(model, pretrained)
+            logger.info(f"Loaded pretrained weights from {pretrained}")
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Return every constructor argument for serialization.
@@ -367,168 +491,69 @@ class Mamba2(keras.Model):
             "dt_init_floor": self.dt_init_floor,
             "bias": self.bias,
             "conv_bias": self.conv_bias,
+            "include_top": self.include_top,
+            "task_config": (
+                dict(self.task_config) if self.task_config is not None else None
+            ),
+            "head_config_overrides": (
+                dict(self.head_config_overrides)
+                if self.head_config_overrides is not None else None
+            ),
         })
         return config
 
 
 # ---------------------------------------------------------------------
-# Integration with NLP Task Heads
+# Factory
 # ---------------------------------------------------------------------
 
 
-def create_mamba2_with_head(
-        mamba2_variant: str,
-        task_config: NLPTaskConfig,
+def create_mamba2(
+        variant: str,
+        vocab_size: int,
         pretrained: Union[bool, str] = False,
-        mamba2_config_overrides: Optional[Dict[str, Any]] = None,
-        head_config_overrides: Optional[Dict[str, Any]] = None,
-) -> keras.Model:
-    """Build an end-to-end model: a Mamba-2 encoder plus an NLP task head.
+        **kwargs: Any,
+) -> Mamba2:
+    """Create a Mamba-2 model from a named variant or alias.
 
-    Takes a variant name, instantiates the encoder, builds a head from the
-    ``dl_techniques.layers.heads.nlp`` factory, and joins them into one functional
-    ``keras.Model``. The only input is ``input_ids``; the padding mask is derived
-    here from ``input_ids != pad_token_id``, since Mamba-2 uses neither an attention
-    mask nor token type ids of its own. The head pools the last position by default,
-    which ``head_config_overrides`` can change.
+    Delegates to :meth:`Mamba2.from_variant`, whose ``vocab_size`` contract it
+    keeps: the variants fix ``d_model`` and ``num_layers`` only, so the
+    vocabulary is always the caller's.
 
-    .. code-block:: text
-
-        {"input_ids": [B, L] int32}
-                 │
-                 ├─────────────────────┐
-                 ▼                     ▼
-        ┌───────────────────┐     input_ids != pad_token_id
-        │ Mamba-2 encoder   │          │
-        └───────────────────┘          │
-                 │ last_hidden_state   │
-                 ▼                     ▼
-        ┌─────────────────────────────────┐
-        │ nlp head  pooling_type 'last'   │
-        └─────────────────────────────────┘
-                 │
-                 ▼
-            task outputs
-
-    :param mamba2_variant: The Mamba-2 variant to use (e.g., "130m", "base").
-    :type mamba2_variant: str
-    :param task_config: An ``NLPTaskConfig`` object defining the task, which must set
-        ``vocabulary_size``.
-    :type task_config: NLPTaskConfig
-    :param pretrained: If a string, path to a local weights file. If True, raises
+    :param variant: A key of ``Mamba2.MODEL_VARIANTS`` ("2.7b", "1.3b", "780m",
+        "370m", "130m") or of ``Mamba2.VARIANT_ALIASES`` ("base", "1.4b", "2.8b").
+    :type variant: str
+    :param vocab_size: Size of the vocabulary.
+    :type vocab_size: int
+    :param pretrained: If a string, loads weights from that local path (a model
+        with a head receives the backbone only). If True, raises
         ``NotImplementedError``. Defaults to False.
     :type pretrained: Union[bool, str]
-    :param mamba2_config_overrides: Optional dictionary to override default Mamba-2
-        configuration for the chosen variant. Defaults to None.
-    :type mamba2_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Optional dictionary to override default head
-        configuration, including ``pooling_type``. Defaults to None.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :return: A complete ``keras.Model`` ready for the specified task.
-    :rtype: keras.Model
-    :raises ValueError: If ``task_config`` has no ``vocabulary_size``, or the variant
-        is unknown.
+    :param kwargs: Forwarded to :meth:`Mamba2.from_variant`, e.g. ``headdim``,
+        or ``include_top=True`` with a ``task_config`` for a model with a task
+        head.
+    :type kwargs: Any
+    :return: The configured model.
+    :rtype: Mamba2
+    :raises ValueError: If ``variant`` is unknown, or a forwarded argument is
+        invalid (including inconsistent head knobs, see :class:`Mamba2`).
     :raises NotImplementedError: If ``pretrained is True``.
 
     Example:
         .. code-block:: python
 
-            from dl_techniques.layers.heads.nlp import NLPTaskType
+            encoder = create_mamba2("130m", vocab_size=50288)
 
-            # Define a task for sequence classification
-            seq_cls_task = NLPTaskConfig(
-                name="sentiment_analysis",
-                task_type=NLPTaskType.TEXT_CLASSIFICATION,
-                num_classes=3,
-                vocabulary_size=50277  # Mamba-2 needs the vocabulary at creation
-            )
-
-            # Create the full model with a Mamba-2-130m encoder
-            model = create_mamba2_with_head(
-                mamba2_variant="130m",
-                task_config=seq_cls_task,
-                pretrained=False, # No public weights yet
-                head_config_overrides={"dropout_rate": 0.15}
-            )
-            model.summary()
+            # The same encoder with a sentence-classification head (pools 'last')
+            clf = create_mamba2(
+                "130m", vocab_size=50288, include_top=True,
+                task_config=NLPTaskConfig(
+                    name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                    num_classes=2))
     """
-    mamba2_config_overrides = mamba2_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-
-    logger.info(
-        f"Creating Mamba2-{mamba2_variant} with a '{task_config.name}' head."
+    return Mamba2.from_variant(
+        variant, vocab_size=vocab_size, pretrained=pretrained, **kwargs
     )
 
-    # NLPTaskConfig's field is `vocabulary_size`, not `vocab_size`.
-    if not getattr(task_config, 'vocabulary_size', None):
-        raise ValueError(
-            "The `task_config` must set 'vocabulary_size' "
-            "to create a Mamba-2 model."
-        )
-
-    mamba2_encoder = Mamba2.from_variant(
-        mamba2_variant,
-        vocab_size=task_config.vocabulary_size,
-        **mamba2_config_overrides,
-    )
-
-    if pretrained:
-        if isinstance(pretrained, str):
-            try:
-                mamba2_encoder.load_weights(pretrained)
-                logger.info(f"Loaded pretrained weights from {pretrained}")
-            except Exception as e:
-                logger.error(f"Failed to load weights: {e}")
-                raise
-        elif pretrained is True:
-            # Raising keeps a caller from training on weights they think are
-            # pretrained.
-            raise NotImplementedError(
-                f"No pretrained weights are distributed with dl_techniques "
-                f"for Mamba-2 variant '{mamba2_variant}'. Pass a local checkpoint "
-                f"instead: Mamba2.from_variant('{mamba2_variant}', "
-                f"vocab_size=..., pretrained='/path/to/weights.keras'), "
-                f"or use pretrained=False (default) for random init."
-            )
-
-    # DECISION plan-2026-08-17T183311-79c63e38/D-023: pool 'last', not 'cls'; Mamba-2 is
-    # causal, and 'last' needs the attention_mask below wired in. See decisions.md.
-    head_kwargs = {'pooling_type': 'last'}
-    head_kwargs.update(head_config_overrides)
-    task_head = create_nlp_head(
-        task_config=task_config,
-        input_dim=mamba2_encoder.d_model,
-        **head_kwargs,
-    )
-
-    inputs = {
-        "input_ids": keras.Input(
-            shape=(None,), dtype="int32", name="input_ids"
-        ),
-    }
-
-    encoder_outputs = mamba2_encoder(inputs)
-
-    attention_mask = keras.ops.not_equal(
-        inputs["input_ids"], mamba2_encoder.pad_token_id
-    )
-
-    head_inputs = {
-        "hidden_states": encoder_outputs["last_hidden_state"],
-        "attention_mask": attention_mask,
-    }
-    task_outputs = task_head(head_inputs)
-
-    model_name = f"mamba2_{mamba2_variant}_with_{task_config.name}_head"
-    model = keras.Model(
-        inputs=inputs,
-        outputs=task_outputs,
-        name=model_name
-    )
-
-    logger.info(
-        f"Successfully created model with {model.count_params():,} parameters."
-    )
-    return model
 
 # ---------------------------------------------------------------------
