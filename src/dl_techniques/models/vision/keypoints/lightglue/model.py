@@ -26,26 +26,6 @@ graph function. The pure decision rules (:func:`confidence_threshold`,
 :func:`get_pruning_mask`, :func:`check_if_stop`) are module functions so that a test can
 compare them to the reference one by one.
 
-Architecture:
-    ::
-
-        keypoints0/1, image_size0/1                 descriptors0/1
-              |                                           |
-              | normalise per image                       | stop_gradient (the
-              | (p - size/2) / (max(size)/2)              |  reference detaches them)
-              v                                           v
-        posenc: LearnedFourierRotaryEncoding        input_proj (Dense, or identity
-              |   cos/sin table per image                  when input_dim == descriptor_dim)
-              |                                           |
-              |   +---------------- layer i = 0 .. L-1 --------------------+
-              +-->| self block on image 0 and on image 1 (shared weights)  |
-                  | cross block between the images (shared weights)        |
-                  | MatchAssignment -> log_assignments[i]  (M+1, N+1)      |
-                  | MatchTokenConfidence -> confidences[i]  (i < L-1)      |
-                  +--------------------------------------------------------+
-                                      |
-              filter_matches(log_assignments[L-1]) -> matches0/1, matching_scores0/1
-
 Output layout. Every per-layer tensor is BATCH-FIRST so that ``predict()`` can
 concatenate batches along axis 0: ``log_assignments`` is ``(B, L, M+1, N+1)`` (the
 dustbin row and column are the last index) and ``token_confidences0/1`` are
@@ -113,6 +93,7 @@ def normalize_keypoints(keypoints: Any, image_size: Any, dtype: Optional[str] = 
     scale = keras.ops.max(size, axis=-1, keepdims=True) / 2.0       # (B, 1)
     return (kpts - shift[:, None, :]) / scale[:, None, :]
 
+# ---------------------------------------------------------------------
 
 def confidence_threshold(layer_index: int, num_layers: int) -> float:
     """Confidence threshold of layer ``i``: ``clip(0.8 + 0.1 * exp(-4 i / L), 0, 1)``.
@@ -126,6 +107,7 @@ def confidence_threshold(layer_index: int, num_layers: int) -> float:
     """
     return float(min(max(0.8 + 0.1 * math.exp(-4.0 * layer_index / num_layers), 0.0), 1.0))
 
+# ---------------------------------------------------------------------
 
 def get_pruning_mask(
         confidences: Optional[Any],
@@ -154,6 +136,7 @@ def get_pruning_mask(
             keep, np.asarray(confidences) <= confidence_threshold(layer_index, num_layers))
     return keep
 
+# ---------------------------------------------------------------------
 
 def check_if_stop(
         confidences0: Any,
@@ -182,6 +165,7 @@ def check_if_stop(
     below = float(np.sum(confidences < confidence_threshold(layer_index, num_layers)))
     return bool(1.0 - below / num_points > depth_confidence)
 
+# ---------------------------------------------------------------------
 
 def _scatter_back(
         matches0: Any, matches1: Any, scores0: Any, scores1: Any,
@@ -204,6 +188,7 @@ def _scatter_back(
     sc1[ind1] = scores1
     return out0, out1, sc0, sc1
 
+# ---------------------------------------------------------------------
 
 def _detach_descriptors(descriptors: Any) -> Any:
     """Stop gradient into the input descriptors, as the reference ``descriptors.detach()``.
@@ -213,10 +198,52 @@ def _detach_descriptors(descriptors: Any) -> Any:
     """
     return keras.ops.stop_gradient(descriptors)
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.lightglue.model")
 class LightGlue(keras.Model):
     """LightGlue matcher, static masked training path.
+
+    Architecture:
+
+        .. code-block:: text
+
+            ┌───────────────────────────────┐   ┌───────────────────────────────┐
+            │  keypoints0/1, image_size0/1  │   │        descriptors0/1         │
+            └───────────────┬───────────────┘   └───────────────┬───────────────┘
+                            │                                   │
+                            ▼                                   ▼
+            ┌───────────────────────────────┐   ┌───────────────────────────────┐
+            │      normalise per image      │   │         stop_gradient         │
+            │  (p - size/2) / (max(size)/2) │   │   (reference detaches them)   │
+            └───────────────┬───────────────┘   └───────────────┬───────────────┘
+                            │                                   │
+                            ▼                                   ▼
+            ┌───────────────────────────────┐   ┌───────────────────────────────┐
+            │ posenc: LearnedFourierRotary  │   │          input_proj           │
+            │    cos/sin table per image    │   │   (Dense, or identity when    │
+            └───────────────┬───────────────┘   │  input_dim == descriptor_dim) │
+                            │                   └───────────────┬───────────────┘
+                            │                                   │
+                            │     ┌─────────────────────────────┴───────────┐
+                            │     │             layer i = 0 .. L-1          │
+                            │     ▼                                         ▼
+                            │ ┌─────────────────────────────────────────────────┐
+                            └─► self block on image 0 and 1 (shared weights)    │
+                              │ cross block between the images (shared weights) │
+                              │ MatchAssignment -> log_assignments[i]           │
+                              │ MatchTokenConfidence -> confidences[i] (i<L-1)  │
+                              └───────────────────────┬─────────────────────────┘
+                                                      │
+                                                      ▼
+                              ┌─────────────────────────────────────────────────┐
+                              │      filter_matches(log_assignments[L-1])       │
+                              └───────────────────────┬─────────────────────────┘
+                                                      │
+                                                      ▼
+                              ┌─────────────────────────────────────────────────┐
+                              │         matches0/1, matching_scores0/1          │
+                              └─────────────────────────────────────────────────┘
 
     :param input_dim: Width of the incoming descriptors. A ``Dense`` projection to
         ``descriptor_dim`` is created when it differs, else the projection is the

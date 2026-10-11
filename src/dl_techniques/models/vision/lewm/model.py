@@ -51,26 +51,51 @@ class LeWM(keras.Model):
 
     .. code-block:: text
 
-        pixels  [B, T, H, W, C]        action  [B, T-1, A]
-              |                             |
-              v                        zero-pad to T
-        ViT encoder (per frame)             |
-              |                             v
-        MLPProjector                  ActionEmbedder
-              |  emb [B, T, D]              |  act_emb [B, T, D]
-              +-------------+---------------+
-                            v
-                      ARPredictor
-                            |
-                      MLPProjector (pred_proj)
-                            |
-                            v
-                 pred_emb  [B, T, D]
-                            |
-                +-----------+-----------+
-                v                       v
-          MSE(pred[:-1], emb[1:])   SIGReg(emb)
-                added via add_loss, weighted and summed
+        ┌───────────────────────┐       ┌───────────────────────┐
+        │ Pixels [B, T, H, W, C]│       │   Action [B, T-1, A]  │
+        └───────────┬───────────┘       └───────────┬───────────┘
+                    │                               │
+                    ▼                               ▼
+        ┌───────────────────────┐       ┌───────────────────────┐
+        │ViT encoder (per frame)│       │     zero-pad to T     │
+        └───────────┬───────────┘       └───────────┬───────────┘
+                    │                               │
+                    ▼                               ▼
+        ┌───────────────────────┐       ┌───────────────────────┐
+        │      MLPProjector     │       │     ActionEmbedder    │
+        └───────────┬───────────┘       └───────────┬───────────┘
+                    │ emb [B, T, D]                 │ act_emb [B, T, D]
+                    └───────────────┬───────────────┘
+                                    │
+                                    ▼
+                        ┌───────────────────────┐
+                        │      ARPredictor      │
+                        └───────────┬───────────┘
+                                    │
+                                    ▼
+                        ┌───────────────────────┐
+                        │      MLPProjector     │
+                        │      (pred_proj)      │
+                        └───────────┬───────────┘
+                                    │
+                                    ▼
+                        ┌───────────────────────┐
+                        │   pred_emb [B, T, D]  │
+                        └───────────┬───────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+        ┌───────────────────────┐       ┌───────────────────────┐
+        │MSE(pred[:-1], emb[1:])│       │      SIGReg(emb)      │
+        └───────────┬───────────┘       └───────────┬───────────┘
+                    │                               │
+                    └───────────────┬───────────────┘
+                                    ▼
+                        ┌───────────────────────┐
+                        │  added via add_loss,  │
+                        │  weighted and summed  │
+                        └───────────────────────┘
 
     :param config: LeWMConfig dataclass (or None to use defaults).
     :param kwargs: passthrough to `keras.Model`.
