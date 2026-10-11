@@ -81,7 +81,9 @@ WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
   `task_type="classification"` with `num_labels` (the same model as
   `create_<model>_classification`), and, for `include_top=True,
   task_config=...`, a model named for the task type
-  (`<model>_for_token_classification`, ...). `include_top=True` together with
+  (`<model>_for_token_classification`, ...; one name per task, so a
+  `TEXT_CLASSIFICATION` head is `<model>_for_classification` on both routes,
+  from `task_model_name` in `layers/heads/nlp/model_head.py`). `include_top=True` together with
   `task_type="classification"` or `num_labels` / `pooling_strategy` /
   `classifier_dropout_rate` raises `ValueError`.
 

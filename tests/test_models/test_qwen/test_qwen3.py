@@ -1712,6 +1712,15 @@ class IncludeTopCases:
         np.testing.assert_array_equal(
             _np(model(pair)), _np(inner(batch, training=False)))
 
+        # One name per task (reviewer pass-2 NOTE 6, step-11.3): a
+        # TEXT_CLASSIFICATION head is named as the classification factory
+        # names that task, never `*_for_text_classification`.
+        text = self.DISPATCH_FACTORY(dict(config), include_top=True,
+                                     task_config=_CLF)
+        assert text.name == f"{prefix}_for_classification"
+        assert text.name == self.CLASSIFICATION_FACTORY(
+            dict(config), num_labels=3).name
+
         # The default is still the generation model.
         generation = self.DISPATCH_FACTORY(dict(config))
         assert generation.name == f"{prefix}_for_generation"

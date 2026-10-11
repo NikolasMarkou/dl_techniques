@@ -74,6 +74,7 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.heads.nlp.model_head import task_model_name
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
     NLPTaskType,
@@ -739,7 +740,8 @@ def create_qwen3_next_classification(
         head_config_overrides={"pooling_type": pooling_strategy},
         name="qwen3_next_backbone",
     )
-    return _two_input_model(classifier, "qwen3_next_for_classification")
+    return _two_input_model(
+        classifier, task_model_name("qwen3_next", NLPTaskType.TEXT_CLASSIFICATION))
 
 # ---------------------------------------------------------------------
 
@@ -773,7 +775,9 @@ def create_qwen3_next(
         with a `task_config` (and optional `head_config_overrides`) replaces
         the LM top with that task head: the result is named
         `qwen3_next_for_<task_type value>` (e.g.
-        `qwen3_next_for_token_classification`), and combining it with
+        `qwen3_next_for_token_classification`), except that
+        `TEXT_CLASSIFICATION` gives `qwen3_next_for_classification`, the name
+        `create_qwen3_next_classification` gives the same task; combining it with
         `task_type="classification"` or the classification settings raises
         `ValueError`.
     :return: A two-input (`[input_ids, attention_mask]`) Keras `Model`
@@ -843,7 +847,7 @@ def create_qwen3_next(
             )
         core = Qwen3Next(**config, name="qwen3_next_backbone")
         return _two_input_model(
-            core, f"qwen3_next_for_{core.task_config['task_type']}")
+            core, task_model_name("qwen3_next", core.task_config["task_type"]))
 
     # 5. Build the requested model based on task_type
     if task_type == "generation":

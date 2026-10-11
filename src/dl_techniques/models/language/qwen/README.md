@@ -202,7 +202,8 @@ classifier, is named the same way (`allow_unloaded=("lm_head",)`).
 `load_weights_from_checkpoint` compares the layers of the one model a functional wrapper
 holds. `create_qwen3(..., include_top=True, task_config=...)` (and `create_qwen3_next`)
 returns that task's two-input model, named for its task type
-(`qwen3_for_token_classification`, ...); combined with `task_type="classification"` or
+(`qwen3_for_token_classification`, ...; a `TEXT_CLASSIFICATION` head gives
+`qwen3_for_classification`, as `create_qwen3_classification` does); combined with `task_type="classification"` or
 `num_labels` it raises `ValueError`.
 
 Both classification factories default to `pooling_strategy="last"`: the last position kept by

@@ -69,6 +69,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.heads.nlp.model_head import task_model_name
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
     NLPTaskType,
@@ -666,7 +667,8 @@ def create_gemma3_classification(
         head_config_overrides={"pooling_type": pooling_strategy},
         name="gemma3_backbone",
     )
-    return _two_input_model(classifier, "gemma3_for_classification")
+    return _two_input_model(
+        classifier, task_model_name("gemma3", NLPTaskType.TEXT_CLASSIFICATION))
 
 
 def create_gemma3(
@@ -683,7 +685,8 @@ def create_gemma3(
     ``task_config`` (and optional ``head_config_overrides``) replaces the LM
     top with that task head: the result is named
     ``gemma3_for_<task_type value>`` (e.g. ``gemma3_for_token_classification``),
-    and combining it with ``task_type="classification"`` or the classification
+    except that ``TEXT_CLASSIFICATION`` gives ``gemma3_for_classification``, the
+    name :func:`create_gemma3_classification` gives the same task; combining it with ``task_type="classification"`` or the classification
     settings raises ``ValueError``. Every result takes
     ``[input_ids, attention_mask]``.
     """
@@ -721,7 +724,7 @@ def create_gemma3(
             )
         core = Gemma3(**config, name="gemma3_backbone")
         return _two_input_model(
-            core, f"gemma3_for_{core.task_config['task_type']}")
+            core, task_model_name("gemma3", core.task_config["task_type"]))
 
     if task_type == "generation":
         return create_gemma3_generation(config)

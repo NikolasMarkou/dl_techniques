@@ -351,8 +351,11 @@ checkpoint fills a bare `Gemma3` with any head, a headless one
 `create_gemma3_generation` model with the same backbone weights, because
 `load_weights_from_checkpoint` compares the layers of the one model a functional wrapper
 holds. The call is complete-or-raise on both sides, so a generation checkpoint's `lm_head`,
-which has no home in a classifier, is named the same way (`allow_unloaded=("lm_head",)`). `create_gemma3(..., include_top=True, task_config=...)` returns that task's two-input
-model, named for its task type (`gemma3_for_token_classification`, ...); combined with
+which has no home in a classifier, is named the same way (`allow_unloaded=("lm_head",)`).
+`create_gemma3(..., include_top=True, task_config=...)` returns that task's two-input
+model, named for its task type (`gemma3_for_token_classification`, ...; a
+`TEXT_CLASSIFICATION` head gives `gemma3_for_classification`, as
+`create_gemma3_classification` does); combined with
 `task_type="classification"` or `num_labels` it raises `ValueError`.
 
 ## 9. Advanced Usage Patterns
