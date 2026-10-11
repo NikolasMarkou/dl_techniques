@@ -8,7 +8,9 @@ This module provides extensive testing for the decoupled BERT implementation inc
 - Model variant creation and configuration.
 - Serialization and deserialization of the pure encoder.
 - Error handling and edge cases.
-- Factory function testing for integrating the encoder with task heads.
+- The in-model task head (``include_top=True``): output contract, config and
+  ``.keras`` round trips, build parity, the knob validation, and reuse of one
+  set of encoder weights under a different head.
 - End-to-end integration testing for gradient flow and training.
 """
 
@@ -20,7 +22,7 @@ import tempfile
 import os
 from typing import Dict, Any
 
-from dl_techniques.models.language.bert import BERT, create_bert_with_head
+from dl_techniques.models.language.bert import BERT, create_bert
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
@@ -302,15 +304,15 @@ class TestBERTEdgeCases:
 
 
 class TestBERTIntegrationFactory:
-    """Test the integration factory `create_bert_with_head`."""
+    """``create_bert(..., include_top=True, task_config=...)`` builds a headed BERT."""
 
     def test_create_with_classification_head(self):
         """Test creating a BERT model for sequence classification."""
         task_config = NLPTaskConfig(
             name="sentiment", task_type=NLPTaskType.SENTIMENT_ANALYSIS, num_classes=3
         )
-        model = create_bert_with_head("tiny", task_config)
-        assert isinstance(model, keras.Model)
+        model = create_bert("tiny", include_top=True, task_config=task_config)
+        assert isinstance(model, BERT)
 
         inputs = {
             'input_ids': keras.ops.cast(keras.random.uniform((2, 32), maxval=1000), 'int32'),
@@ -318,7 +320,7 @@ class TestBERTIntegrationFactory:
             'token_type_ids': keras.ops.zeros((2, 32), 'int32'),
         }
         outputs = model(inputs, training=False)
-        # The factory drops the head's `probabilities` entry -- it is exactly
+        # The model drops the head's `probabilities` entry -- it is exactly
         # `softmax(logits)` -- and exposes the one surviving tensor bare. That
         # is what makes the model compilable; see
         # `test_the_head_model_output_is_compilable.py`, which owns the full
@@ -332,8 +334,8 @@ class TestBERTIntegrationFactory:
         task_config = NLPTaskConfig(
             name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION, num_classes=9
         )
-        model = create_bert_with_head("tiny", task_config)
-        assert isinstance(model, keras.Model)
+        model = create_bert("tiny", include_top=True, task_config=task_config)
+        assert isinstance(model, BERT)
 
         inputs = {
             'input_ids': keras.ops.cast(keras.random.uniform((2, 32), maxval=1000), 'int32'),
@@ -356,11 +358,17 @@ class TestBERTIntegration:
         task_config = NLPTaskConfig(
             name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3
         )
-        return create_bert_with_head(
+        model = create_bert(
             "tiny",
-            task_config,
-            bert_config_overrides={"hidden_size": 64, "intermediate_size": 256}
+            include_top=True,
+            task_config=task_config,
+            hidden_size=64,
+            intermediate_size=256,
         )
+        # A subclassed model owns no weights until built; the functional
+        # wrapper this replaced was built at construction.
+        model.build((None, 16))
+        return model
 
     def test_gradient_flow_integration(self, classification_model):
         """Test that gradients flow through the entire integrated model.
@@ -559,12 +567,15 @@ class TestBERTIter1Refactor:
             BERT.from_variant("tiny", pretrained=True)
 
     def test_public_api_surface(self):
-        """The bert package public API is exactly ``{BERT, create_bert, create_bert_with_head}``."""
+        """The bert package public API is exactly ``{BERT, create_bert}``.
+
+        The head factory that used to be the third name was replaced by
+        ``include_top`` on the class (plan-2026-10-11T004932-b83935e1).
+        """
         import dl_techniques.models.language.bert as pkg
 
-        assert set(pkg.__all__) == {
-            "BERT", "create_bert", "create_bert_with_head",
-        }
+        assert set(pkg.__all__) == {"BERT", "create_bert"}
+        assert not hasattr(pkg, "create_bert_with_head")
         assert not hasattr(pkg, "create_nlp_head"), (
             "create_nlp_head must no longer be re-exported from the bert "
             "package; import it from dl_techniques.layers.heads.nlp instead."
@@ -574,6 +585,253 @@ class TestBERTIter1Refactor:
         # (renamed .bert -> .model by commit 2c4a0ca7c; existing tests rely on this).
         from dl_techniques.models.language.bert.model import BERT as BERTViaSubmodule
         assert BERTViaSubmodule is pkg.BERT
+
+
+
+# ---------------------------------------------------------------------
+# include_top: the in-model task head
+# ---------------------------------------------------------------------
+
+#: Small enough that every arm below runs in about a second.
+_HEAD_KW: Dict[str, Any] = {
+    "vocab_size": 64,
+    "hidden_size": 32,
+    "num_layers": 2,
+    "num_heads": 2,
+    "intermediate_size": 64,
+    "max_position_embeddings": 32,
+}
+_SEQ = 8
+_CLF = NLPTaskConfig(
+    name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3
+)
+_NER = NLPTaskConfig(
+    name="ner", task_type=NLPTaskType.TOKEN_CLASSIFICATION, num_classes=9
+)
+
+
+def _head_batch() -> Dict[str, np.ndarray]:
+    ids = np.random.default_rng(0).integers(1, 64, (2, _SEQ)).astype("int32")
+    mask = np.ones_like(ids)
+    mask[1, 5:] = 0
+    return {"input_ids": ids, "attention_mask": mask}
+
+
+def _np(x) -> np.ndarray:
+    return keras.ops.convert_to_numpy(x)
+
+
+def _relative_paths(model: keras.Model) -> list:
+    """Weight paths without the model-root segment (guide 8.3)."""
+    return sorted(w.path.split("/", 1)[-1] for w in model.weights)
+
+
+def _backbone_hidden(model: BERT, batch: Dict[str, np.ndarray]) -> np.ndarray:
+    """``last_hidden_state`` of ``model``'s encoder, whatever its head.
+
+    A headed model does not return its hidden states, so the encoder is read
+    through a headless twin rebuilt from the model's own config and given the
+    model's own encoder weights, layer by layer.
+    """
+    config = model.get_config()
+    config.update(include_top=False, task_config=None, head_config_overrides=None)
+    config.pop("name", None)
+    twin = BERT.from_config(config)
+    twin(batch, training=False)
+    for layer in twin.layers:
+        layer.set_weights(model.get_layer(layer.name).get_weights())
+    return _np(twin(batch, training=False)["last_hidden_state"])
+
+
+class TestBERTIncludeTop:
+    """The ``include_top`` / ``task_config`` / ``head_config_overrides`` knobs."""
+
+    def test_head_output_shapes(self):
+        """Bare logits for single-output heads, a dict for QA."""
+        batch = _head_batch()
+        clf = BERT(**_HEAD_KW, include_top=True, task_config=_CLF)
+        out = clf(batch, training=False)
+        assert not isinstance(out, dict)
+        assert tuple(out.shape) == (2, 3)
+
+        ner = BERT(**_HEAD_KW, include_top=True, task_config=_NER)
+        out = ner(batch, training=False)
+        assert not isinstance(out, dict)
+        assert tuple(out.shape) == (2, _SEQ, 9)
+
+        qa = BERT(**_HEAD_KW, include_top=True, task_config=NLPTaskConfig(
+            name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=2))
+        out = qa(batch, training=False)
+        assert set(out) == {"start_logits", "end_logits"}
+        assert tuple(out["start_logits"].shape) == (2, _SEQ)
+
+    def test_symbolic_output_matches_the_eager_one(self):
+        """``compute_output_shape`` branches with ``call`` (Keras builds from it)."""
+        model = BERT(**_HEAD_KW, include_top=True, task_config=_NER)
+        symbolic = model(keras.Input(shape=(None,), dtype="int32"))
+        assert tuple(symbolic.shape) == (None, None, 9)
+        headless = BERT(**_HEAD_KW)
+        symbolic = headless(keras.Input(shape=(None,), dtype="int32"))
+        assert set(symbolic) == {"last_hidden_state", "attention_mask"}
+
+    def test_config_round_trip_with_a_head(self):
+        """Every knob is serialized; ``task_config`` as a plain JSON dict."""
+        import json
+
+        overrides = {"pooling_type": "mean"}
+        model = BERT(**_HEAD_KW, include_top=True, task_config=_CLF,
+                     head_config_overrides=overrides)
+        config = model.get_config()
+        assert config["include_top"] is True
+        assert config["head_config_overrides"] == overrides
+        assert isinstance(config["task_config"], dict)
+        assert config["task_config"]["task_type"] == "text_classification"
+        json.dumps(config)  # plain data, no enum or dataclass inside
+
+        # A dict task_config and the dataclass serialize identically.
+        from_dict = BERT(**_HEAD_KW, include_top=True,
+                         task_config=dict(config["task_config"]),
+                         head_config_overrides=overrides)
+        assert from_dict.get_config()["task_config"] == config["task_config"]
+
+        rebuilt = BERT.from_config(config)
+        assert rebuilt.get_config() == config
+        assert rebuilt.task_head.pooling_type == "mean"
+
+        batch = _head_batch()
+        model(batch, training=False)
+        rebuilt(batch, training=False)
+        assert _relative_paths(rebuilt) == _relative_paths(model)
+        rebuilt.set_weights(model.get_weights())
+        np.testing.assert_array_equal(
+            _np(rebuilt(batch, training=False)), _np(model(batch, training=False)))
+
+    def test_a_config_without_the_head_keys_still_loads(self):
+        """A config written before the knobs existed rebuilds the encoder."""
+        config = BERT(**_HEAD_KW).get_config()
+        for key in ("include_top", "task_config", "head_config_overrides"):
+            config.pop(key)
+        model = BERT.from_config(config)
+        assert model.include_top is False and model.task_head is None
+
+    def test_keras_round_trip_restores_the_head_by_value(self, tmp_path):
+        """Weights compared BEFORE the first call on the loaded model (guide 8.4)."""
+        model = BERT(**_HEAD_KW, include_top=True, task_config=_CLF)
+        batch = _head_batch()
+        before = _np(model(batch, training=False))
+        saved = [_np(w).copy() for w in model.weights]
+        head_saved = [_np(w).copy() for w in model.task_head.weights]
+        assert head_saved, "the head has no weights to compare"
+
+        path = str(tmp_path / "bert_head.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert len(loaded.weights) == len(saved)
+        for s, w in zip(saved, loaded.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0,
+                                       err_msg=f"{w.path} not restored")
+        for s, w in zip(head_saved, loaded.task_head.weights):
+            np.testing.assert_allclose(s, _np(w), atol=0.0, rtol=0.0)
+        np.testing.assert_array_equal(_np(loaded(batch, training=False)), before)
+
+    @pytest.mark.parametrize("include_top", [False, True])
+    def test_explicit_build_matches_lazy_build(self, include_top):
+        """``build()`` materializes exactly the tree ``call()`` runs (guide 8.1)."""
+        kw = dict(_HEAD_KW, include_top=include_top,
+                  task_config=_CLF if include_top else None)
+        explicit = BERT(**kw)
+        explicit.build((None, _SEQ))
+        lazy = BERT(**kw)
+        lazy(_head_batch(), training=False)
+        assert _relative_paths(explicit) == _relative_paths(lazy)
+        assert explicit.count_params() == lazy.count_params() > 0
+
+    def test_a_disabled_head_builds_no_head_weights(self):
+        """Anti-vacuity sibling of the parity arm (guide 8.3)."""
+        headless = BERT(**_HEAD_KW)
+        headless(_head_batch(), training=False)
+        assert headless.task_head is None
+        assert not [w.path for w in headless.weights if "task_head" in w.path]
+
+        headed = BERT(**_HEAD_KW, include_top=True, task_config=_CLF)
+        headed(_head_batch(), training=False)
+        assert [w.path for w in headed.weights if "/task_head/" in w.path]
+
+    def test_the_encoder_weight_paths_do_not_depend_on_the_head(self):
+        """The head lives entirely under ``task_head/`` (D-005 of the plan)."""
+        def paths(**kw):
+            m = BERT(**_HEAD_KW, name="bert", **kw)
+            m(_head_batch(), training=False)
+            return [w.path for w in m.weights]
+
+        headless = paths()
+        for task in (_CLF, _NER):
+            headed = paths(include_top=True, task_config=task)
+            encoder_part = [p for p in headed if not p.startswith("bert/task_head/")]
+            assert encoder_part == headless, task.name
+            assert len(headed) > len(headless)
+
+    def test_backbone_weights_transfer_across_heads(self, tmp_path):
+        """An encoder trained under one head is reused, same weights, under another.
+
+        The supported route is a local ``pretrained`` path: ``load_pretrained_weights``
+        copies by layer name and never copies the checkpoint's ``task_head``
+        (D-007 of plan-2026-10-11T004932-b83935e1). Exercised here into a
+        TOKEN_CLASSIFICATION model and into a headless one.
+        """
+        source = create_bert("tiny", include_top=True, task_config=_CLF, **_HEAD_KW)
+        batch = _head_batch()
+        source(batch, training=False)
+        rng = np.random.default_rng(1)
+        for w in source.weights:
+            w.assign(rng.normal(0.0, 0.1, size=tuple(w.shape)).astype(w.dtype))
+        path = str(tmp_path / "trained_under_clf.keras")
+        source.save(path)
+        reference = _backbone_hidden(source, batch)
+
+        token = create_bert("tiny", include_top=True, task_config=_NER,
+                            pretrained=path, **_HEAD_KW)
+        headless = create_bert("tiny", pretrained=path, **_HEAD_KW)
+
+        np.testing.assert_array_equal(_backbone_hidden(token, batch), reference)
+        np.testing.assert_array_equal(
+            _np(headless(batch, training=False)["last_hidden_state"]), reference)
+        # The new head is the target's own: fresh, and of the new task's shape.
+        assert tuple(token(batch, training=False).shape) == (2, _SEQ, 9)
+
+        # Anti-vacuity: a fresh encoder does NOT reproduce the reference.
+        fresh = create_bert("tiny", **_HEAD_KW)
+        assert not np.array_equal(
+            _np(fresh(batch, training=False)["last_hidden_state"]), reference)
+
+    def test_pretrained_headless_checkpoint_into_a_headed_model(self, tmp_path):
+        """A headless checkpoint restores the encoder of a headed model by value."""
+        encoder = create_bert("tiny", **_HEAD_KW)
+        batch = _head_batch()
+        expected = _np(encoder(batch, training=False)["last_hidden_state"])
+        path = str(tmp_path / "encoder.keras")
+        encoder.save(path)
+
+        headed = create_bert("tiny", include_top=True, task_config=_CLF,
+                             pretrained=path, **_HEAD_KW)
+        np.testing.assert_array_equal(_backbone_hidden(headed, batch), expected)
+
+    def test_include_top_without_task_config_raises(self):
+        with pytest.raises(ValueError, match="include_top=True needs a task_config"):
+            BERT(**_HEAD_KW, include_top=True)
+
+    @pytest.mark.parametrize("dead", [
+        {"task_config": _CLF},
+        {"head_config_overrides": {"pooling_type": "mean"}},
+    ], ids=["task_config", "head_config_overrides"])
+    def test_head_knobs_without_include_top_raise(self, dead):
+        with pytest.raises(ValueError, match="only take effect with include_top=True"):
+            BERT(**_HEAD_KW, **dead)
+
+    def test_pretrained_true_still_raises_with_a_head(self):
+        with pytest.raises(NotImplementedError):
+            create_bert("tiny", pretrained=True, include_top=True, task_config=_CLF)
 
 
 if __name__ == "__main__":

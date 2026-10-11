@@ -4,10 +4,11 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-An implementation of **BERT** (Devlin et al., 2019) in **Keras 3**. The `BERT` class is a pure
-encoder: it turns token IDs into contextual embeddings and knows nothing about downstream tasks.
-Task heads live in `dl_techniques.layers.heads.nlp` and are attached by the
-`create_bert_with_head` factory.
+An implementation of **BERT** (Devlin et al., 2019) in **Keras 3**. By default the `BERT` class is
+a pure encoder: it turns token IDs into contextual embeddings and knows nothing about downstream
+tasks. Pass `include_top=True` with a `task_config` and the same class also owns one task head from
+`dl_techniques.layers.heads.nlp`, named `task_head`. The encoder's weights do not depend on the head,
+so an encoder trained under one head is reused, unchanged, under another (§9 Pattern 3).
 
 > **No pretrained weights are distributed by this library.**
 > `BERT.from_variant("base", pretrained=True)` raises `NotImplementedError`, and so does the
@@ -33,7 +34,7 @@ What this implementation adds:
 
 | Property | Detail |
 |:---|:---|
-| Foundation model design | `BERT` is a pure encoder, reusable across tasks and pre-training runs. |
+| Foundation model design | `BERT` is a pure encoder by default; `include_top=True` adds one task head whose weights all live under `task_head/`. |
 | Variants | `from_variant("tiny"/"small"/"base"/"large")`, each traced to a public checkpoint config. |
 | Serializable | Composite `keras.Model`; full `.keras` round-trip with no `custom_objects`. |
 | Configurable | Normalization type and position, FFN type, attention type are all constructor arguments. |
@@ -112,9 +113,12 @@ inference-changing choice, not a spelling.
 
 ### 4.3 Task-specific heads
 
-The encoder is deliberately separate from heads. `create_bert_with_head` is the intended
-integration point; §9 Pattern 2 shows the manual wiring, including the one rename that everyone
-gets wrong.
+The encoder's weights are deliberately separate from the head's. `include_top=True` is the
+intended integration point: `BERT.__init__` builds the head with
+`layers/heads/nlp/model_head.py::build_model_task_head`, and `call()` feeds it
+`{"hidden_states": last_hidden_state, "attention_mask": mask}` (the mask cast to the hidden-state
+dtype). §9 Pattern 2 shows the manual wiring for several heads at once, including the one rename
+that everyone gets wrong.
 
 ---
 
@@ -130,7 +134,7 @@ Build a sentiment model end to end:
 import keras
 import numpy as np
 
-from dl_techniques.models.language.bert import create_bert_with_head
+from dl_techniques.models.language.bert import create_bert
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the downstream task
@@ -141,8 +145,9 @@ sentiment_config = NLPTaskConfig(
 )
 
 # 2. Create the encoder + head. Swap "tiny" for "base" once you have the compute.
-model = create_bert_with_head(
-    bert_variant="tiny",
+model = create_bert(
+    "tiny",
+    include_top=True,
     task_config=sentiment_config,
     pretrained=False,  # or a local ".keras" path; True raises NotImplementedError
 )
@@ -170,18 +175,22 @@ print(predictions.shape)  # (4, 3) -- a bare tensor, not a dict
 
 Two contracts worth reading before you debug anything:
 
-- **Output.** `create_bert_with_head` returns a **bare tensor** whenever the head produces one
-  informative tensor. Keys that are pure functions of `logits` (`probabilities = softmax(logits)`,
-  `predictions = argmax(logits)`) are dropped: no loss can consume them, and a dict output cannot
-  be compiled with a string loss or any metric. A head with genuinely independent outputs keeps
-  its dict, and `QuestionAnsweringHead` returns `{"start_logits", "end_logits"}`, so there you
-  compile with a per-key `loss` dict.
-- **Input: all three keys are required.** The Functional wrapper declares a `keras.Input` for each
-  of `input_ids`, `attention_mask`, `token_type_ids`, and Keras matches your data dict exactly.
-  Omitting `token_type_ids` raises `ValueError: Missing data for input "token_type_ids"`; pass
-  `np.zeros_like(input_ids)` for single-segment tasks. The bare encoder is looser:
-  `BERT.from_variant("tiny")({"input_ids": ids})` forwards fine and returns
-  `['last_hidden_state', 'attention_mask']` (§9 Pattern 1).
+- **Output.** With `include_top=True` the model returns a **bare tensor** whenever the head
+  produces one informative tensor. Keys that are pure functions of `logits`
+  (`probabilities = softmax(logits)`, `predictions = argmax(logits)`) are dropped: no loss can
+  consume them, and a dict output cannot be compiled with a string loss or any metric. A head with
+  genuinely independent outputs keeps its dict, and `QuestionAnsweringHead` returns
+  `{"start_logits", "end_logits"}`, so there you compile with a per-key `loss` dict. The rule is
+  `layers/heads/nlp/model_head.py::finalize_head_outputs`.
+- **Input: only `input_ids` is required**, with or without a head. `attention_mask` and
+  `token_type_ids` are optional, exactly as for the encoder: a missing mask means "attend to every
+  token" and missing segments mean all zeros. `pad_token_id` does NOT derive a mask, so pass
+  `attention_mask` whenever the batch is padded.
+- **Construction.** `include_top=True` without a `task_config` raises `ValueError`, and so does a
+  `task_config` or `head_config_overrides` passed with `include_top=False` (the head would not
+  exist, so the knob would do nothing). `MULTIPLE_CHOICE` is refused: the head would see the token
+  sequence, not one row per choice. `head_config_overrides` reaches the head constructor, e.g.
+  `{"pooling_type": "mean"}`; `task_config` is stored in `get_config()` as a plain dict.
 
 ---
 
@@ -189,10 +198,9 @@ Two contracts worth reading before you debug anything:
 
 | Name | Kind | Purpose |
 |:---|:---|:---|
-| `BERT` | `keras.Model` | The encoder. Returns `{"last_hidden_state", "attention_mask"}`. |
-| `BERT.from_variant` | classmethod | Instantiate a named configuration, optionally from a local checkpoint. |
-| `create_bert` | factory | Build an encoder from explicit hyperparameters. |
-| `create_bert_with_head` | factory | End-to-end model: encoder + task head, wired and named. |
+| `BERT` | `keras.Model` | The encoder. Returns `{"last_hidden_state", "attention_mask"}`; with `include_top=True`, the task head's output. |
+| `BERT.from_variant` | classmethod | Instantiate a named configuration, optionally from a local checkpoint. Forwards `include_top` / `task_config` / `head_config_overrides`. |
+| `create_bert` | factory | Module-level wrapper around `from_variant`, with or without a head. |
 
 ```python
 from dl_techniques.models.language.bert import BERT
@@ -204,6 +212,11 @@ custom  = BERT.from_variant("small", vocab_size=50000)          # override any c
 
 Overriding `vocab_size` while loading a checkpoint is supported: the loader runs with
 `skip_mismatch=True` and logs the embedding layer it skipped.
+
+A local `pretrained` path restores the **encoder only**, by layer name. A `task_head` in the
+checkpoint is never copied and the model's own head (if any) keeps its fresh initialization, so the
+checkpoint may come from a headless BERT or from a BERT trained under any head. To restore a whole
+model, head included, use `keras.models.load_model`.
 
 ---
 
@@ -233,10 +246,10 @@ for variant in ["tiny", "small", "base", "large"]:
 ```
 
 These are **encoder-only** counts at this package's defaults (`vocab_size=30522`,
-`max_position_embeddings=512`, `type_vocab_size=2`). This `BERT` owns no pooler and no task head,
-so they are not comparable to a published `BertModel` total, which includes a pooler `Dense`
-(768x768 + 768 = 590,592 parameters at `base`). Add the head's parameters when sizing a
-`create_bert_with_head(...)` model.
+`max_position_embeddings=512`, `type_vocab_size=2`). This `BERT` owns no pooler, and no task head
+unless `include_top=True`, so they are not comparable to a published `BertModel` total, which
+includes a pooler `Dense` (768x768 + 768 = 590,592 parameters at `base`). Add the head's parameters
+when sizing a model built with `include_top=True`.
 
 ---
 
@@ -247,7 +260,7 @@ so they are not comparable to a published `BertModel` total, which includes a po
 ```python
 import keras
 
-from dl_techniques.models.language.bert import create_bert_with_head
+from dl_techniques.models.language.bert import create_bert
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 
 ner_config = NLPTaskConfig(
@@ -256,15 +269,16 @@ ner_config = NLPTaskConfig(
     num_classes=9,  # O, B-PER, I-PER, B-LOC, I-LOC, ...
 )
 
-# Pass a local ".keras" path to `pretrained` to warm-start from a checkpoint.
-ner_model = create_bert_with_head(
-    bert_variant="tiny",
+# Pass a local ".keras" path to `pretrained` to warm-start the encoder from a checkpoint.
+ner_model = create_bert(
+    "tiny",
+    include_top=True,
     task_config=ner_config,
     pretrained=False,
 )
 
 # `TokenClassificationHead` emits `logits` plus a `predictions` entry that is exactly
-# argmax(logits, axis=-1); the factory drops that derived duplicate, so the output is
+# argmax(logits, axis=-1); the model drops that derived duplicate, so the output is
 # the bare logits tensor of shape (batch, seq_len, num_classes). That is what lets you
 # compile a token-level objective directly.
 ner_model.compile(
@@ -310,7 +324,7 @@ Share one encoder across several heads.
 
 > **The heads do not read `last_hidden_state`.** Every head in `layers/heads/nlp/` reads
 > `inputs['hidden_states']`, while `BERT` emits `last_hidden_state`. You must build the rename
-> yourself (step 4 below), exactly as `create_bert_with_head` does internally. Feeding the
+> yourself (step 4 below), exactly as `BERT.call` does internally with `include_top=True`. Feeding the
 > encoder's dict straight into a head builds a graph that looks fine and raises **at forward
 > time**, because the heads' `build()` and `compute_output_shape()` use `.get(..., default)` and
 > never touch the missing key. Construction succeeds, then `predict()` raises
@@ -381,6 +395,34 @@ predictions = multi_task_model.predict(
 print({key: value.shape for key, value in predictions.items()})
 # {'sentiment': (2, 2), 'ner': (2, 16, 9)}  -- MEASURED, this snippet was run
 ```
+
+### Pattern 3: Reuse a trained encoder under a different head
+
+The encoder's weight paths are identical with or without a head and for every task: the head is
+the single layer `task_head`, and every one of its weights is under `task_head/`. So an encoder
+trained with one head is reused, same weights, with another, through a local `pretrained` path.
+The checkpoint's own head is skipped and the new head starts fresh.
+
+```python
+from dl_techniques.models.language.bert import create_bert
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+
+sentiment = create_bert("tiny", include_top=True, task_config=NLPTaskConfig(
+    name="sentiment", task_type=NLPTaskType.SENTIMENT_ANALYSIS, num_classes=3))
+# ... fit `sentiment` ...
+sentiment.save("sentiment.keras")
+
+ner = create_bert("tiny", include_top=True, pretrained="sentiment.keras",
+                  task_config=NLPTaskConfig(
+                      name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+                      num_classes=9))
+encoder = create_bert("tiny", pretrained="sentiment.keras")   # headless, same encoder
+```
+
+For a model that is already built, the same transfer is
+`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(model, "sentiment.keras",
+skip_prefixes=("task_head",))`. Both routes copy by layer name; pinned by
+`tests/test_models/test_bert/test_bert.py::TestBERTIncludeTop::test_backbone_weights_transfer_across_heads`.
 
 ---
 
@@ -454,8 +496,9 @@ The package's own suite is `tests/test_models/test_bert/`.
   local `.keras` path, or `pretrained=False`.
 - **`KeyError: 'hidden_states'` at predict time.** You fed the encoder's dict straight to a head.
   Add the rename from §9 Pattern 2.
-- **`ValueError: Missing data for input "token_type_ids"`.** `create_bert_with_head` requires all
-  three input keys. Pass `np.zeros_like(input_ids)` for single-segment tasks.
+- **`ValueError: include_top=True needs a task_config`**, or **`... only take effect with
+  include_top=True`.** The head knobs travel together: `include_top=True` with a `task_config`,
+  or none of them.
 - **OOM during training.** Attention is quadratic in sequence length. Reduce batch size, truncate
   harder, accumulate gradients, drop to a smaller variant, or enable mixed precision.
 - **Shape mismatch when loading a checkpoint.** Expected if you changed `vocab_size`. The loader

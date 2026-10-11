@@ -49,6 +49,11 @@ from .task_types import NLPTaskConfig, NLPTaskType
 # ``argmax(logits, axis=-1)``, which no loss can take as a target.
 _DERIVED_FROM_LOGITS = ("probabilities", "predictions")
 
+#: Layer name of the head a model owns. Every head weight path starts with it,
+#: so a model's weights split into backbone and head by this one prefix; models
+#: pass it as ``skip_prefixes`` to keep a pretrained transfer backbone-only.
+TASK_HEAD_NAME = "task_head"
+
 
 def _as_task_config(
         task_config: Union[NLPTaskConfig, Dict[str, Any]]
@@ -109,7 +114,7 @@ def build_model_task_head(
         input_dim: int,
         head_config_overrides: Optional[Dict[str, Any]] = None,
         default_pooling: Optional[str] = None,
-        name: str = "task_head",
+        name: str = TASK_HEAD_NAME,
 ) -> BaseNLPHead:
     """
     Build the task head a language model owns when ``include_top=True``.
@@ -176,6 +181,8 @@ def build_model_task_head(
     """
     task_config = _as_task_config(task_config)
 
+    # DECISION plan-2026-08-23T203721-009b7ccf/D-024: raise on MULTIPLE_CHOICE rather than
+    # build a wrong graph; this factory can only feed the head a rank-3 token sequence, not choices. See decisions.md.
     if task_config.task_type == NLPTaskType.MULTIPLE_CHOICE:
         raise ValueError(
             "A model cannot own a MULTIPLE_CHOICE head. MultipleChoiceHead "
@@ -231,6 +238,8 @@ def finalize_head_outputs(
     if not isinstance(outputs, dict):
         return outputs
 
+    # DECISION plan-2026-08-23T203721-009b7ccf/D-018: drop probabilities/predictions when
+    # logits is present, then unwrap any remaining single-key dict; a dict output made this factory uncompilable. See decisions.md.
     if "logits" in outputs:
         outputs = {
             key: value

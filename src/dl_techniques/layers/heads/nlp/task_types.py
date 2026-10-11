@@ -565,6 +565,10 @@ class NLPTaskConfig:
         # died with `ValueError: vocabulary_size must be specified for
         # generation tasks`. Do NOT drop MACHINE_TRANSLATION to match
         # `get_head_class`: callers skipping it need it. See decisions.md D-022.
+        # Superseded 2026-10-11 (plan-2026-10-11T004932-b83935e1): the named
+        # factory was deleted; the same failure now hits
+        # `BERT(include_top=True, task_config=...)` and every model built
+        # through `heads/nlp/model_head.py::build_model_task_head`.
         generation_tasks = [
             NLPTaskType.TEXT_GENERATION,
             NLPTaskType.MASKED_LANGUAGE_MODELING,

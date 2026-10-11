@@ -11,14 +11,18 @@ the bare ``create_bert`` ENCODER -- runs green from
 ``test_precision_arm_family.py``. Re-registering that subject here would be a
 second copy of an assertion the repo deliberately centralises.
 
-What the family subject does not reach is ``create_bert_with_head`` -- the
-package's flagship factory, the one every README example uses and the one this
-plan's step 4 is about to change. Pointing the arm at it found a real defect.
+What the family subject does not reach is a BERT WITH A HEAD -- today
+``create_bert("tiny", include_top=True, task_config=...)``; until 2026-10-11
+(plan-2026-10-11T004932-b83935e1) the functional head factory it replaced, the
+package's flagship factory at the time. Pointing the arm at it found a real
+defect. The finding below was measured on that factory; the arms now build the
+in-model head, which runs the same encoder and the same head layer.
 
 THE FINDING (MEASURED, GPU 1 / RTX 4070, TF32 on by default) -- NOW FIXED
 --------------------------------------------------------------------------
-``create_bert_with_head("tiny", NLPTaskConfig(SENTIMENT_ANALYSIS, num_classes=3))``
-under ``mixed_float16`` RAISED, verbatim::
+The head factory, called as
+``("tiny", NLPTaskConfig(SENTIMENT_ANALYSIS, num_classes=3))``, under
+``mixed_float16`` RAISED, verbatim::
 
     TypeError: Exception encountered when calling GELU.call().
 
@@ -78,6 +82,8 @@ ACTUAL observed text, recorded rather than predicted::
       FAILED test_the_gelu_layers_carry_the_input_dtype_onto_their_sqrt2[xGELU]
       FAILED test_every_expanded_activation_is_green_at_float16
       FAILED test_create_bert_with_head_runs_under_mixed_float16
+      (this arm, under its name at the time; renamed 2026-10-11 to
+      test_the_head_model_runs_under_mixed_float16)
 
     with, in all four, the SAME exception rather than an assertion message --
     recorded because it is not what was predicted: the layer RAISES before
@@ -109,7 +115,7 @@ import keras
 from keras import ops
 
 from dl_techniques.layers.activations.expanded_activations import GELU, xGELU
-from dl_techniques.models.language.bert import create_bert, create_bert_with_head
+from dl_techniques.models.language.bert import create_bert
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 from ..precision_arm_oracle import (
@@ -131,7 +137,7 @@ ENCODER_KWARGS: Dict[str, Any] = {
 
 
 def _inputs() -> Dict[str, np.ndarray]:
-    """The three inputs ``create_bert_with_head``'s Functional wrapper requires."""
+    """All three inputs, as the head factory's Functional wrapper required."""
     rng = np.random.RandomState(0)
     return {
         "input_ids": rng.randint(0, ENCODER_KWARGS["vocab_size"], (2, 16)).astype("int32"),
@@ -144,15 +150,16 @@ def _build_encoder() -> keras.Model:
     return create_bert("tiny", **ENCODER_KWARGS)
 
 
-def _build_with_head() -> keras.Model:
-    return create_bert_with_head(
+def _build_headed() -> keras.Model:
+    return create_bert(
         "tiny",
-        NLPTaskConfig(
+        include_top=True,
+        task_config=NLPTaskConfig(
             name="sentiment",
             task_type=NLPTaskType.SENTIMENT_ANALYSIS,
             num_classes=3,
         ),
-        bert_config_overrides=dict(ENCODER_KWARGS),
+        **ENCODER_KWARGS,
     )
 
 
@@ -286,7 +293,7 @@ def test_the_head_model_is_green_under_float32() -> None:
     a model that does not run under ANY policy, and the finding would be
     misattributed to mixed precision.
     """
-    report = run_forward(_build_with_head, _inputs, "float32", training=False)
+    report = run_forward(_build_headed, _inputs, "float32", training=False)
 
     assert report["model_policy"] == "float32"
     assert report["n_tensors"] > 0
@@ -316,10 +323,10 @@ def test_the_head_model_is_green_under_float32() -> None:
 #     Part 2 of the arm is the part most often silently dropped, and the
 #     original failure was a RAISE, not a numeric disagreement.
 # See decisions.md D-016 (the pin) and D-017 (the repair).
-def test_create_bert_with_head_runs_under_mixed_float16() -> None:
-    """All four parts of the arm on the flagship factory. GREEN since step 3.1."""
+def test_the_head_model_runs_under_mixed_float16() -> None:
+    """All four parts of the arm on a headed BERT. GREEN since step 3.1."""
     reports = assert_precision_arm(
-        build=_build_with_head,
+        build=_build_headed,
         make_inputs=_inputs,
     )
     assert reports["mixed_float16"]["model_policy"] == "mixed_float16"

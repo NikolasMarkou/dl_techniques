@@ -33,8 +33,9 @@ and the raise text names both the missing key and the keys that WERE offered::
                 'attention_mask': 'tf.Tensor(shape=(2, 16), dtype=int32)'}
       * training=False
 
-The fix is the rename at the call site, mirroring what
-``create_bert_with_head`` already does internally (``bert.py:1205-1208``). It is
+The fix is the rename at the call site, mirroring what ``BERT.call`` does
+internally with ``include_top=True`` (it feeds the head ``hidden_states``; the
+functional head factory that did it before was deleted 2026-10-11). It is
 NOT a ``last_hidden_state`` alias on ``BaseNLPHead``: that class is the base of
 every NLP head in the repo, and the README is the thing that was wrong. See
 ``decisions.md`` D-004 (plan-2026-08-23T203721-009b7ccf).

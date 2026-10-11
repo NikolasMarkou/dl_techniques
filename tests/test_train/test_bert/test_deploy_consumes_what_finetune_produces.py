@@ -11,12 +11,14 @@ tree checked it; ``src/train/bert/deploy.py`` had no test coverage of any kind.
 **A correction to the review that asked for this arm.** It said deploy.py
 "would have raised before step 4 and is correct after" -- i.e. that step 4
 accidentally repaired it. MEASURED: that is FALSE, because deploy.py never
-consumes a ``create_bert_with_head`` model at all. Its producer is
+consumed a head-factory model at all. Its producer is
 ``train.bert.finetune.create_sentiment_model``, which builds its own Functional
 graph and indexes ``head({...})['logits']`` itself, so its output has ALWAYS
 been a bare tensor. deploy.py was never broken and step 4 did not touch its
-path. What step 4 DID change is that a ``create_bert_with_head`` model is now
-substitutable there; that is pinned as a separate arm.
+path. What step 4 DID change is that a head-factory model became
+substitutable there; that is pinned as a separate arm, now on the in-model
+head that replaced the factory (``create_bert(..., include_top=True)``,
+plan-2026-10-11T004932-b83935e1).
 
 Why each arm is not satisfied by construction:
 
@@ -32,8 +34,8 @@ Why each arm is not satisfied by construction:
     free: fed a dict-output model, ``predict_sentiment`` fails. Without this,
     "it returned a label" says nothing about the container.
 ``test_a_factory_head_model_is_substitutable``
-    The claim step 4 actually earned: ``create_bert_with_head`` now yields a
-    bare tensor, so it can be dropped into this consumer unchanged.
+    The claim step 4 actually earned, kept on the new API: a headed BERT
+    yields a bare tensor, so it can be dropped into this consumer unchanged.
 
 Nothing here writes to disk and repo-root ``results/`` is never touched: the
 encoder load is stubbed and no model is saved.
@@ -44,7 +46,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
-from dl_techniques.models.language.bert.model import BERT, create_bert_with_head
+from dl_techniques.models.language.bert.model import BERT, create_bert
 
 import train.bert.finetune as finetune
 from train.bert.deploy import predict_sentiment
@@ -136,15 +138,18 @@ def test_predict_sentiment_raises_on_a_dict_output_model():
 
 def test_a_factory_head_model_is_substitutable():
     """What step 4 actually earned for this consumer."""
-    model = create_bert_with_head(
-        bert_variant="tiny",
+    model = create_bert(
+        "tiny",
+        include_top=True,
         task_config=NLPTaskConfig(
             name="sentiment_analysis",
             task_type=NLPTaskType.SENTIMENT_ANALYSIS,
             num_classes=NUM_CLASSES,
         ),
     )
-    assert not isinstance(model.output, dict), list(model.output)
+    output = model(_StubPreprocessor().encode("probe"), training=False)
+    assert not isinstance(output, dict), list(output)
+    assert tuple(output.shape) == (1, NUM_CLASSES), tuple(output.shape)
 
     label, confidence = predict_sentiment(
         "the film was surprisingly good", model, _StubPreprocessor()

@@ -26,21 +26,25 @@ MEASURED, GPU 1 (RTX 4070), TF32 on by default
                                         encoder     with head
 ======================================  ==========  ==========
 weights after one call                  17          25
-weights after ``.build()`` alone        17          n/a [1]
-``count_params()`` after ``.build()``   11,744      n/a [1]
-materialization ratio                   1.0         n/a [1]
+weights after ``.build()`` alone        17          25 [1]
+``count_params()`` after ``.build()``   11,744      13,027 [1]
+materialization ratio                   1.0         1.0 [1]
 weights perturbed                       17          25
-perturbation liveness                   9.181e-01   4.871e-02
+perturbation liveness                   9.181e-01   1.136e-01 [1]
 weights after reload                    17          25
 round-trip ``max|delta|`` at atol=0.0   0.000e+00   0.000e+00
 ======================================  ==========  ==========
 
-[1] The head factory returns a Functional model over a dict of three inputs;
-    ``measure_lazy_build``'s materialization arm takes a single ``input_shape``
-    and there is no honest one to give. The consequence arms -- which are the
-    ones that found both real defects in this tree -- run in full.
+[1] Re-measured 2026-10-11 on CPU (plan-2026-10-11T004932-b83935e1), when the
+    head moved into ``BERT`` (``include_top=True``). Until then the head model
+    was a Functional wrapper over a dict of three inputs and the
+    materialization arm had no honest single ``input_shape`` to take ("n/a");
+    the headed model is now the same subclassed ``BERT`` and takes
+    ``(None, SEQ_LEN)``. The liveness moved because the head is a different
+    object graph under a different RNG stream; it is a vacuity floor, not a pin.
 
-The ratio of 1.0 is the D-049 repair, still in place. Both round trips are
+The ratio of 1.0 is the D-049 repair, still in place, and it now covers the
+head: ``build()`` materializes the head ``call()`` runs. Both round trips are
 EXACTLY zero, so the lazy build costs nothing today; this file is what notices
 if that changes.
 """
@@ -50,7 +54,7 @@ from typing import Any, Dict
 import numpy as np
 import keras
 
-from dl_techniques.models.language.bert import create_bert, create_bert_with_head
+from dl_techniques.models.language.bert import create_bert
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 from ..lazy_build_contract_oracle import assert_lazy_build_costs_nothing
@@ -72,6 +76,8 @@ SEQ_LEN = 16
 N_WEIGHTS_ENCODER = 17
 N_WEIGHTS_WITH_HEAD = 25
 COUNT_PARAMS_AFTER_BUILD = 11_744
+#: Measured 2026-10-11 on CPU: the encoder's 11,744 plus the head's 1,283.
+COUNT_PARAMS_AFTER_BUILD_WITH_HEAD = 13_027
 
 
 def _build_encoder() -> keras.Model:
@@ -84,15 +90,16 @@ def _ids() -> np.ndarray:
     ).astype("int32")
 
 
-def _build_with_head() -> keras.Model:
-    return create_bert_with_head(
+def _build_headed() -> keras.Model:
+    return create_bert(
         "tiny",
-        NLPTaskConfig(
+        include_top=True,
+        task_config=NLPTaskConfig(
             name="sentiment",
             task_type=NLPTaskType.SENTIMENT_ANALYSIS,
             num_classes=3,
         ),
-        bert_config_overrides=dict(ENCODER_KWARGS),
+        **ENCODER_KWARGS,
     )
 
 
@@ -142,21 +149,35 @@ def test_the_bert_encoders_lazy_build_still_costs_nothing() -> None:
 
 
 def test_the_head_factorys_model_survives_a_round_trip_exactly() -> None:
-    """The same consequence arms on ``create_bert_with_head``.
+    """The same arms on a headed BERT, materialization included.
 
-    No ``input_shape``: the factory returns a Functional model over a dict of
-    three inputs and the materialization arm takes one shape, so it is skipped
-    rather than fed a shape that is not the model's. The arms that found both
-    real lazy-build defects in this tree -- live perturbation, then an EXACT
-    reload comparison -- all run.
+    The head model used to be a Functional wrapper over a dict of three inputs,
+    so the materialization arm was skipped. It is now ``BERT`` itself with
+    ``include_top=True``, so ``build((None, SEQ_LEN))`` must materialize the
+    head as well: an under-build of the head is exactly the D-049 shape, one
+    level down.
 
-    MEASURED (GPU 1): 25 weights, 25 perturbed, liveness **4.870642e-02**, 25
-    reloaded, round trip **0.000000e+00** at ``atol=0.0``.
+    MEASURED (CPU, 2026-10-11): 25 weights after ``build()`` alone,
+    ``count_params`` 13,027, ratio 1.0; 25 perturbed, liveness
+    **1.136254e-01**, 25 reloaded, round trip **0.000000e+00** at
+    ``atol=0.0``. (The pre-2026-10-11 Functional model measured 25 / 4.87e-02 /
+    0.0 on GPU 1, without the materialization arm.)
     """
     report = assert_lazy_build_costs_nothing(
-        build=_build_with_head,
+        build=_build_headed,
         make_inputs=_head_inputs,
+        input_shape=(None, SEQ_LEN),
     )
+    materialization = report["materialization"]
+    assert materialization["n_weights_after_build"] == N_WEIGHTS_WITH_HEAD, (
+        f"BERT(include_top=True).build() materializes "
+        f"{materialization['n_weights_after_build']} of {N_WEIGHTS_WITH_HEAD}"
+    )
+    assert (
+        materialization["count_params_after_build"]
+        == COUNT_PARAMS_AFTER_BUILD_WITH_HEAD
+    )
+    assert materialization["ratio"] == 1.0
 
     assert report["n_weights"] == N_WEIGHTS_WITH_HEAD, (
         f"the head model materialized {report['n_weights']} weights, expected "

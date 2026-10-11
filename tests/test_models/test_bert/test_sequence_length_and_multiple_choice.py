@@ -11,30 +11,32 @@
     on is the worst of the three outcomes.
 
     The check lives in ``BERT.call``, and that placement was re-derived rather
-    than assumed. Keras 3 executes a Functional graph by calling each
-    operation's ``call()`` with REAL tensors, so
-    ``create_bert_with_head(...).predict(x)`` reaches ``BERT.call`` with a
-    fully static ``TensorShape([2, 17])`` even though the graph was BUILT over
-    ``keras.Input(shape=(None,))``. One check therefore covers both entry
-    paths; a check in the factory would have covered neither, because the
-    factory only ever sees the symbolic ``None`` sequence axis.
+    than assumed. The head now lives in the model (``include_top=True``,
+    plan-2026-10-11T004932-b83935e1), and its ``predict(x)`` reaches
+    ``BERT.call`` with the batch's fully static ``TensorShape([2, 17])`` on a
+    fresh model, while a symbolic call over ``keras.Input(shape=(None,))``
+    never reaches ``BERT.call`` at all (Keras answers it from
+    ``compute_output_shape``; re-measured on the new API). The functional head
+    factory this replaced behaved the same way. One check therefore covers
+    both entry paths.
 
-(b) **``MULTIPLE_CHOICE`` through ``create_bert_with_head``.** It built without
-    error and produced a semantically wrong graph: ``MultipleChoiceHead``
-    scores a ``(batch, num_choices, hidden)`` tensor, the factory can only feed
-    it the token sequence ``(batch, seq_len, hidden)``, so ``logits`` came out
+(b) **``MULTIPLE_CHOICE`` with a head.** It built without error and produced
+    a semantically wrong graph: ``MultipleChoiceHead`` scores a
+    ``(batch, num_choices, hidden)`` tensor, the model can only feed it the
+    token sequence ``(batch, seq_len, hidden)``, so ``logits`` came out
     ``(None, None)`` -- one score per TOKEN -- and ``num_classes`` was ignored.
     Step 4's bare-tensor contract made that output look MORE legitimate. The
-    factory now refuses, matching the "NO SILENT FALLBACK" precedent
-    ``get_head_class`` already set in the same subsystem.
+    head builder (``build_model_task_head``) now refuses, matching the "NO
+    SILENT FALLBACK" precedent ``get_head_class`` already set in the same
+    subsystem.
 
 Why each arm is not satisfied by construction:
 
 ``test_over_long_sequence_raises_on_the_bare_encoder``
 ``test_over_long_sequence_raises_through_the_head_factory``
-    The two entry paths, separately. The factory arm is the one that was
+    The two entry paths, separately. The headed arm is the one that was
     silently finite on GPU before this change, so it is the arm that matters;
-    the bare-encoder arm proves the check is not factory-specific.
+    the bare-encoder arm proves the check is not head-specific.
 ``test_at_and_below_the_limit_are_unaffected``
     The anti-vacuity arm, and it is doing real work: a check written with
     ``>=`` instead of ``>`` would pass both raise arms above while breaking
@@ -46,14 +48,17 @@ Why each arm is not satisfied by construction:
 ``test_a_dynamic_sequence_axis_returns_silently``
     The check must return silently when the length is not statically known.
     This arm calls the validator DIRECTLY, because the obvious version ("the
-    factory still builds") was measured VACUOUS -- see the arm's own docstring.
+    head model still builds") was measured VACUOUS -- see the arm's own
+    docstring. It also pins that one headed model serves two different
+    sequence lengths, i.e. nothing fixes the length at build.
 ``test_multiple_choice_is_refused_with_an_actionable_message``
     Pins (b), message included.
 ``test_the_refusal_is_specific_to_multiple_choice``
     Anti-vacuity for (b): the sibling task types must still build. A refusal
     that caught everything would pass the arm above.
 ``test_the_multiple_choice_head_itself_still_works_on_a_rank_3_input``
-    The refusal is about THIS FACTORY, not about the head. If someone
+    The refusal is about feeding the head a token sequence, not about the
+    head. If someone
     "simplified" this by deleting or deprecating the head, this arm fails.
 """
 
@@ -66,7 +71,7 @@ from dl_techniques.layers.heads.nlp import (
     NLPTaskType,
     create_nlp_head,
 )
-from dl_techniques.models.language.bert import BERT, create_bert_with_head
+from dl_techniques.models.language.bert import BERT, create_bert
 
 MAX_POS = 16
 NUM_CLASSES = 3
@@ -92,14 +97,15 @@ def _encoder() -> BERT:
 
 
 def _head_model(task_type=NLPTaskType.SENTIMENT_ANALYSIS) -> keras.Model:
-    return create_bert_with_head(
-        bert_variant="tiny",
+    return create_bert(
+        "tiny",
+        include_top=True,
         task_config=NLPTaskConfig(
             name=task_type.name.lower(),
             task_type=task_type,
             num_classes=NUM_CLASSES,
         ),
-        bert_config_overrides={"max_position_embeddings": MAX_POS},
+        max_position_embeddings=MAX_POS,
     )
 
 
@@ -144,19 +150,26 @@ def test_the_message_names_both_numbers():
     assert f"max_position_embeddings={MAX_POS}" in message, message
 
 
-def test_a_dynamic_sequence_axis_returns_silently():
+def test_a_dynamic_sequence_axis_returns_silently(monkeypatch):
     """A length that is not statically known has nothing to check.
 
     This arm calls the validator DIRECTLY, and that is a correction to how it
-    was first written. The obvious version -- "``_head_model()`` still
-    builds" -- is VACUOUS, measured: an injection that raised on a ``None``
-    length left the whole module at ``13 passed``, because Keras builds the
-    Functional graph through ``compute_output_spec`` and never reaches
-    ``BERT.call`` symbolically at all (also measured: a probe patched onto
-    ``BERT.call`` records ZERO invocations during ``create_bert_with_head``,
-    then exactly one, with a fully static ``TensorShape([2, 17])``, during
-    ``predict``). So the dynamic branch is only reachable directly, and only a
-    direct call can guard it.
+    was first written. The obvious version -- "the head model still builds" --
+    is VACUOUS, measured: an injection that raised on a ``None`` length left
+    the whole module at ``13 passed``, because Keras answers a symbolic call
+    through ``compute_output_spec`` and never reaches ``BERT.call``
+    symbolically at all. Re-measured on the in-model head (2026-10-11): a
+    probe patched onto ``BERT.call`` records ZERO invocations during a
+    symbolic call over ``keras.Input(shape=(None,))``, then one with a static
+    ``TensorShape([2, 5])`` at the first ``predict``. The zero is asserted
+    below, so the reason for the direct call is pinned, not just told. So the
+    dynamic branch is only reachable directly, and only a direct call can
+    guard it.
+
+    What the old factory arm protected -- a head model over a dynamic
+    sequence axis builds, and the length is not fixed at build -- is asserted
+    on the new API: the symbolic call gives ``(None, NUM_CLASSES)``, and one
+    model predicts at two different lengths.
     """
     encoder = _encoder()
     symbolic = keras.Input(shape=(None,), dtype="int32")
@@ -165,10 +178,26 @@ def test_a_dynamic_sequence_axis_returns_silently():
     # Must return None, not raise. `int(None)` would be a TypeError.
     assert encoder._validate_sequence_length(symbolic) is None
 
-    # And the factory, which only ever sees this shape, still builds.
     model = _head_model()
-    assert model.inputs[0].shape[1] is None, model.inputs[0].shape
-    assert model.output.shape[-1] == NUM_CLASSES
+    calls = []
+    real_call = BERT.call
+
+    def counting_call(self, *args, **kwargs):
+        calls.append(1)
+        return real_call(self, *args, **kwargs)
+
+    monkeypatch.setattr(BERT, "call", counting_call)
+    output = model({
+        name: keras.Input(shape=(None,), dtype="int32", name=name)
+        for name in ("input_ids", "attention_mask", "token_type_ids")
+    })
+    assert not calls, "a symbolic call now reaches BERT.call; see docstring"
+    assert tuple(output.shape) == (None, NUM_CLASSES), output.shape
+    monkeypatch.setattr(BERT, "call", real_call)
+
+    for seq_len in (5, MAX_POS - 4):
+        predictions = model.predict(_feed(seq_len), verbose=0)
+        assert predictions.shape == (BATCH, NUM_CLASSES), predictions.shape
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +229,7 @@ def test_the_refusal_is_specific_to_multiple_choice(task_type):
 
 
 def test_the_multiple_choice_head_itself_still_works_on_a_rank_3_input():
-    """The head is fine; only this factory's wiring for it was not.
+    """The head is fine; only a model's token-sequence wiring for it was not.
 
     Pins the alternative the refusal message tells the caller to use, so the
     message cannot become a lie.

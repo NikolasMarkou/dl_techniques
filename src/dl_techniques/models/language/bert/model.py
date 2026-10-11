@@ -1,10 +1,14 @@
 """
-BERT implements a bidirectional transformer encoder as a pure foundation model, in the
-`BERT` class and its `create_bert` / `create_bert_with_head` factories. Masked language
-modeling lets every layer attend over the whole input sequence, unlike an autoregressive
-model that must hide future tokens from each position. The class stays a pure encoder: it
-returns `{"last_hidden_state", "attention_mask"}` with no pooler or head, so several task
-heads can share one set of weights during fine-tuning. Attention type, FFN type,
+BERT implements a bidirectional transformer encoder as a foundation model, in the `BERT`
+class and its `create_bert` factory. Masked language modeling lets every layer attend over
+the whole input sequence, unlike an autoregressive model that must hide future tokens from
+each position. By default (`include_top=False`) the class is a pure encoder: it returns
+`{"last_hidden_state", "attention_mask"}` with no pooler or head. With `include_top=True`
+and a `task_config` it owns ONE task head from `layers/heads/nlp`, named `task_head`, and
+returns that head's output instead (a bare tensor for every task but question answering).
+Every head weight lives under `task_head/`, so the encoder's weight paths are the same with
+or without a head and with any task, which is what lets an encoder trained under one head
+be reused, weights unchanged, under another. Attention type, FFN type,
 normalization type and normalization position are constructor arguments routed through
 `TransformerLayer`, so a caller can swap in a different block variant without forking the
 file; the embedding layer is the shared `BertEmbeddings`, also used by `distilbert/` and
@@ -45,7 +49,13 @@ from dl_techniques.layers.transformers import (
 )
 from dl_techniques.layers.activations import resolve_activation
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
-from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    task_config_to_dict,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -55,16 +65,18 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 class BERT(keras.Model):
     """BERT (Bidirectional Encoder Representations from Transformers) model.
 
-    This is a pure encoder implementation with pretrained weights support,
-    designed to produce contextual token representations. It separates the
-    core transformer architecture from any task-specific layers (like pooling
-    or classification heads), making it highly flexible for pre-training,
-    fine-tuning, and multi-task learning.
+    An encoder with pretrained weights support, designed to produce contextual
+    token representations. With ``include_top=False`` (the default) it holds no
+    task-specific layer at all, which keeps it usable for pre-training,
+    fine-tuning and multi-task learning. With ``include_top=True`` it also owns
+    one NLP task head, built from ``task_config``.
 
-    The model expects inputs as a dictionary containing 'input_ids', and
-    optionally 'attention_mask', 'token_type_ids', and 'position_ids'. It
-    outputs a dictionary containing the 'last_hidden_state' and the forwarded
-    'attention_mask'.
+    The model expects a tensor of ``input_ids``, or a dictionary containing
+    'input_ids' and optionally 'attention_mask', 'token_type_ids', and
+    'position_ids'. Headless, it outputs a dictionary containing the
+    'last_hidden_state' and the forwarded 'attention_mask'. With a head it
+    outputs what the head returns, reduced by
+    :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`.
 
     Architecture:
 
@@ -128,25 +140,27 @@ class BERT(keras.Model):
         base        12        768     12        3072
         large       24       1024     16        4096
 
-    Head integration (create_bert_with_head):
+    Head integration (``include_top=True``):
 
     .. code-block:: text
 
         ┌──────────────────────────────────────┐
-        │  keras.Input × 3 (all required)      │
-        │    input_ids / attention_mask /      │
-        │    token_type_ids                    │
+        │  same inputs as the headless model   │
+        │  (only input_ids is required)        │
         └───────────────┬──────────────────────┘
                         │
                         ▼
         ┌──────────────────────────────────────┐
-        │  BERT encoder (BERT.from_variant)    │
+        │  embeddings → encoder layers         │
+        │  (identical weights and paths)       │
         └───────────────┬──────────────────────┘
                         │
                         ▼
         ┌──────────────────────────────────────┐
-        │  NLP task head (create_nlp_head)     │
-        │    {hidden_states, attention_mask}   │
+        │  task_head (build_model_task_head)   │
+        │    {hidden_states: last_hidden_state,│
+        │     attention_mask: mask cast to the │
+        │     hidden-state dtype}              │
         └───────────────┬──────────────────────┘
                         │
                         ▼
@@ -246,14 +260,33 @@ class BERT(keras.Model):
     :param stochastic_depth_rate: Drop path rate for stochastic depth.
         Defaults to 0.1.
     :type stochastic_depth_rate: float
+    :param include_top: Whether the model owns a task head. Defaults to False,
+        which builds the bare encoder: no head layer and no head weight exist.
+    :type include_top: bool
+    :param task_config: The task the head serves, as an ``NLPTaskConfig`` or a
+        dict of its fields. Required when ``include_top`` is True, refused
+        otherwise. Stored, and serialized, as a plain dict.
+        ``MULTIPLE_CHOICE`` is refused: the head would be fed a token
+        sequence, not one row per choice.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (for example ``{"pooling_type": "mean"}``). Only valid
+        with ``include_top=True``. Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the `keras.Model`.
 
     :ivar embeddings: The embedding layer instance.
     :vartype embeddings: dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings
     :ivar encoder_layers: A list of `TransformerLayer` instances.
     :vartype encoder_layers: list[dl_techniques.layers.transformer.TransformerLayer]
+    :ivar task_head: The task head named ``"task_head"``, or None when
+        ``include_top`` is False.
+    :vartype task_head: Optional[dl_techniques.layers.heads.nlp.factory.BaseNLPHead]
 
-    :raises ValueError: If invalid configuration parameters are provided.
+    :raises ValueError: If invalid configuration parameters are provided,
+        including ``include_top=True`` without a ``task_config``, and a
+        ``task_config`` or ``head_config_overrides`` given with
+        ``include_top=False``.
 
     Example:
         .. code-block:: python
@@ -270,8 +303,21 @@ class BERT(keras.Model):
                 "attention_mask": keras.ops.ones((2, 128), dtype="int32")
             }
             outputs = model(inputs)
-            print(outputs["last_hidden_state"].shape)
+            outputs["last_hidden_state"].shape
             # (2, 128, 768)
+
+            # Same encoder, plus a sentiment head: returns bare logits (2, 3)
+            from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+            clf = BERT.from_variant(
+                "base",
+                include_top=True,
+                task_config=NLPTaskConfig(
+                    name="sentiment",
+                    task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+                    num_classes=3,
+                ),
+            )
+            logits = clf(inputs)
 
     """
 
@@ -342,6 +388,9 @@ class BERT(keras.Model):
         ffn_type: FFNType = "mlp",
         use_stochastic_depth: bool = False,
         stochastic_depth_rate: float = 0.1,
+        include_top: bool = False,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
         """Initializes the BERT model instance.
@@ -390,6 +439,13 @@ class BERT(keras.Model):
         :type use_stochastic_depth: bool
         :param stochastic_depth_rate: Drop rate for stochastic depth.
         :type stochastic_depth_rate: float
+        :param include_top: Whether to build the task head.
+        :type include_top: bool
+        :param task_config: Task of the head; required iff ``include_top``.
+        :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+        :param head_config_overrides: Head constructor overrides; only valid
+            with ``include_top``.
+        :type head_config_overrides: Optional[Dict[str, Any]]
         :param kwargs: Additional keyword arguments for the `keras.Model`.
         """
         super().__init__(**kwargs)
@@ -399,6 +455,19 @@ class BERT(keras.Model):
             vocab_size, hidden_size, num_layers, num_heads,
             hidden_dropout_rate, attention_probs_dropout_rate
         )
+        if include_top and task_config is None:
+            raise ValueError(
+                "include_top=True needs a task_config (an NLPTaskConfig or a "
+                "dict of its fields) to know which head to build."
+            )
+        if not include_top and (
+            task_config is not None or head_config_overrides is not None
+        ):
+            raise ValueError(
+                "task_config and head_config_overrides only take effect with "
+                "include_top=True; with include_top=False no head is built, so "
+                "they would be silently ignored."
+            )
 
         # Store all configuration parameters
         self.vocab_size = vocab_size
@@ -427,13 +496,32 @@ class BERT(keras.Model):
         self.ffn_type = ffn_type
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
+        self.include_top = include_top
+        self.task_config = (
+            task_config_to_dict(task_config) if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         # Build the model architecture
         self._build_architecture()
 
+        # Created after every encoder layer and under its own fixed name, so
+        # the encoder's layer names, weight paths and RNG draws are the same
+        # with or without a head.
+        self.task_head = None
+        if self.include_top:
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.hidden_size,
+                head_config_overrides=self.head_config_overrides,
+            )
+
         logger.info(
             f"Created BERT foundation model: {self.num_layers} layers, "
             f"hidden_size={self.hidden_size}, heads={self.num_heads}"
+            + (f", task head '{self.task_config['name']}'" if self.include_top else "")
         )
 
     def _validate_config(
@@ -533,7 +621,7 @@ class BERT(keras.Model):
             self.encoder_layers.append(transformer_layer)
 
     def build(self, input_shape: Any) -> None:
-        """Materialise the embeddings and every encoder layer.
+        """Materialise the embeddings, every encoder layer and, if any, the head.
 
         :param input_shape: Shape of ``input_ids`` — ``(batch, seq_len)`` — or a
             mapping/sequence of shapes whose ``input_ids`` entry has that shape.
@@ -567,15 +655,37 @@ class BERT(keras.Model):
         for encoder_layer in self.encoder_layers:
             encoder_layer.build(hidden_shape)
 
+        if self.include_top:
+            self.task_head.build(self._head_input_shape(ids_shape))
+
         super().build(input_shape)
 
-    def compute_output_shape(self, input_shape: Any) -> Dict[str, Any]:
-        """Compute the output shapes of the two returned tensors.
+    def _head_input_shape(self, ids_shape: tuple) -> Dict[str, tuple]:
+        """Shapes of the dict ``call`` feeds the head, from the ids shape.
+
+        :param ids_shape: Shape of ``input_ids`` — ``(batch, seq_len)``.
+        :type ids_shape: tuple
+        :return: ``hidden_states`` and ``attention_mask`` shapes.
+        :rtype: Dict[str, tuple]
+        """
+        return {
+            "hidden_states": (ids_shape[0], ids_shape[1], self.hidden_size),
+            "attention_mask": (ids_shape[0], ids_shape[1]),
+        }
+
+    def compute_output_shape(self, input_shape: Any) -> Any:
+        """Compute the output shapes of the returned tensors.
+
+        Keras builds a symbolic call of this model from this method, never
+        from ``call``, so it must report what ``call`` returns in both modes.
 
         :param input_shape: Shape of ``input_ids`` — ``(batch, seq_len)``.
         :type input_shape: Any
-        :return: Mapping with ``last_hidden_state`` and ``attention_mask``.
-        :rtype: Dict[str, Any]
+        :return: Headless, a mapping with ``last_hidden_state`` and
+            ``attention_mask``. With a head, the head's output shapes after
+            the same reduction ``call`` applies: one shape, or a mapping of
+            two or more.
+        :rtype: Any
         """
         ids_shape = input_shape
         if isinstance(ids_shape, dict):
@@ -587,6 +697,14 @@ class BERT(keras.Model):
         ):
             ids_shape = ids_shape[0]
         ids_shape = tuple(ids_shape)
+        if self.include_top:
+            # finalize_head_outputs only drops and unwraps dict entries, so it
+            # applies to a dict of shapes exactly as to a dict of tensors.
+            return finalize_head_outputs(
+                self.task_head.compute_output_shape(
+                    self._head_input_shape(ids_shape)
+                )
+            )
         return {
             "last_hidden_state": (ids_shape[0], ids_shape[1], self.hidden_size),
             "attention_mask": (ids_shape[0], ids_shape[1]),
@@ -599,7 +717,7 @@ class BERT(keras.Model):
         token_type_ids: Optional[keras.KerasTensor] = None,
         position_ids: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass of the BERT foundation model.
 
         :param inputs: Input token IDs or a dictionary containing 'input_ids'
@@ -613,13 +731,17 @@ class BERT(keras.Model):
         :type position_ids: Optional[keras.KerasTensor]
         :param training: Indicates if the model is in training mode.
         :type training: Optional[bool]
-        :return: A dictionary with the following keys:
+        :return: With ``include_top=False``, a dictionary with the keys:
                  - ``last_hidden_state``: The sequence of hidden states at the
                    output of the final layer. Shape:
                    `(batch, seq_len, hidden_size)`.
                  - ``attention_mask``: The original attention mask, passed
                    through for convenience in downstream models.
-        :rtype: Dict[str, keras.KerasTensor]
+                 With ``include_top=True``, the head's output reduced by
+                 ``finalize_head_outputs``: a bare tensor (logits, or
+                 embeddings for a similarity head), or a dict of two or more
+                 tensors (``start_logits``/``end_logits`` for QA).
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :raises ValueError: If dictionary input does not contain 'input_ids'.
         """
         if isinstance(inputs, dict):
@@ -652,12 +774,28 @@ class BERT(keras.Model):
 
         # DECISION plan-2026-08-19T163559-499b6f0e/D-032: resolve the echoed mask only
         # here, at the return, never before the encoder loop. See decisions.md.
+        resolved_mask = (
+            attention_mask if attention_mask is not None
+            else keras.ops.ones_like(input_ids)
+        )
+
+        if self.include_top:
+            # Cast so a float16 hidden state never meets an int mask inside
+            # the head's pooling (mixed precision).
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": hidden_states,
+                    "attention_mask": keras.ops.cast(
+                        resolved_mask, hidden_states.dtype
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
+
         return {
             "last_hidden_state": hidden_states,
-            "attention_mask": (
-                attention_mask if attention_mask is not None
-                else keras.ops.ones_like(input_ids)
-            )
+            "attention_mask": resolved_mask,
         }
 
     def _validate_sequence_length(
@@ -703,11 +841,17 @@ class BERT(keras.Model):
         weights_path: str,
         skip_mismatch: bool = True
     ) -> None:
-        """Load pretrained weights into the model.
+        """Load pretrained ENCODER weights into the model.
 
         This method handles loading weights with smart mismatch handling,
         particularly useful when the vocabulary size or architecture differs
         slightly from the pretrained model.
+
+        Only the encoder is transferred: a ``task_head`` in the checkpoint is
+        never copied, and this model's own head (if any) keeps its fresh
+        initialization. So a checkpoint of any BERT, headless or trained under
+        any head, warm-starts a model with any other head or none. To restore
+        a whole model, head included, use ``keras.models.load_model``.
 
         :param weights_path: Path to the weights file (.keras format).
         :type weights_path: str
@@ -730,15 +874,12 @@ class BERT(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
         try:
-            # Build model if not already built
+            # build() materializes the whole tree that call() runs. The dummy
+            # forward this replaced drew int32 ids from `keras.random.uniform`,
+            # which Keras 3.8 refuses (float dtypes only), so every
+            # `pretrained=<path>` load raised here before reaching the transfer.
             if not self.built:
-                dummy_input = {
-                    "input_ids": keras.random.uniform(
-                        (1, 128), 0, self.vocab_size, dtype="int32"
-                    ),
-                    "attention_mask": keras.ops.ones((1, 128), dtype="int32")
-                }
-                self(dummy_input, training=False)
+                self.build((1, min(128, self.max_position_embeddings)))
 
             logger.info(f"Loading pretrained weights from {weights_path}")
 
@@ -750,10 +891,12 @@ class BERT(keras.Model):
             # every caller. It went unnoticed because the only route here was
             # `pretrained=<path>` and the enclosing except turned the failure
             # into a warning that continued with random weights.
+            # DECISION plan-2026-10-11T004932-b83935e1/D-007: skip the checkpoint's task_head; do NOT
+            # pass skip_prefixes=() -- a head of another task raises on shape, one of equal shape is copied silently. See decisions.md.
             report = load_weights_from_checkpoint(
                 target=self,
                 ckpt_path=weights_path,
-                skip_prefixes=(),
+                skip_prefixes=(TASK_HEAD_NAME,),
                 strict=not skip_mismatch,
             )
             logger.info(f"Weight transfer complete: {report}")
@@ -825,7 +968,11 @@ class BERT(keras.Model):
         :param cache_dir: unreachable for the same reason; the
             ``_download_weights`` docstring already marks it ``(unused)``.
         :type cache_dir: Optional[str]
-        :param kwargs: Additional arguments to override the variant's defaults.
+        :param kwargs: Additional arguments to override the variant's defaults,
+            including ``include_top``, ``task_config`` and
+            ``head_config_overrides``. A local ``pretrained`` path restores
+            the encoder by layer name; a head absent from the checkpoint keeps
+            its fresh initialization.
         :type kwargs: Any
         :return: A BERT model instance configured for the specified variant.
         :rtype: BERT
@@ -943,6 +1090,14 @@ class BERT(keras.Model):
             "ffn_type": self.ffn_type,
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
+            "include_top": self.include_top,
+            "task_config": (
+                dict(self.task_config) if self.task_config is not None else None
+            ),
+            "head_config_overrides": (
+                dict(self.head_config_overrides)
+                if self.head_config_overrides is not None else None
+            ),
         })
         return config
 
@@ -1037,7 +1192,8 @@ def create_bert(
     :param cache_dir: unreachable for the same reason. Defaults to ``None``.
     :type cache_dir: Optional[str]
     :param kwargs: Additional keyword arguments forwarded to
-        :meth:`BERT.from_variant` (e.g. ``dropout_rate``, ``max_position_embeddings``).
+        :meth:`BERT.from_variant` (e.g. ``max_position_embeddings``, or
+        ``include_top=True`` with a ``task_config`` for a model with a head).
     :type kwargs: Any
 
     :returns: Configured ``BERT`` instance.
@@ -1046,11 +1202,17 @@ def create_bert(
     :raises NotImplementedError: If ``pretrained=True`` (no public weights).
     :raises FileNotFoundError: If ``pretrained`` is a string path that does
         not exist.
-    :raises ValueError: If ``variant`` is not a recognized BERT variant.
+    :raises ValueError: If ``variant`` is not a recognized BERT variant, or
+        the head knobs are inconsistent (see :class:`BERT`).
 
     Example:
         >>> bert = create_bert("base")
         >>> bert = create_bert("tiny", vocab_size=200)
+        >>> ner = create_bert(
+        ...     "tiny", include_top=True,
+        ...     task_config=NLPTaskConfig(
+        ...         name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+        ...         num_classes=9))
     """
     if vocab_size is not None:
         kwargs["vocab_size"] = vocab_size
@@ -1062,195 +1224,5 @@ def create_bert(
         **kwargs,
     )
 
-
-# ---------------------------------------------------------------------
-# Integration with NLP Task Heads
-# ---------------------------------------------------------------------
-
-
-def create_bert_with_head(
-    bert_variant: str,
-    task_config: NLPTaskConfig,
-    pretrained: Union[bool, str] = False,
-    weights_dataset: str = "uncased",
-    cache_dir: Optional[str] = None,
-    bert_config_overrides: Optional[Dict[str, Any]] = None,
-    head_config_overrides: Optional[Dict[str, Any]] = None,
-) -> keras.Model:
-    """Factory function to create a BERT model with a task-specific head.
-
-    This function demonstrates the intended integration pattern:
-    1. Instantiate a foundational `BERT` model (optionally pretrained).
-    2. Instantiate a task-specific head from the `dl_techniques.layers.heads.nlp`
-       factory.
-    3. Combine them into a single, end-to-end `keras.Model`.
-
-    :param bert_variant: The BERT variant to use (e.g., "base", "large").
-    :type bert_variant: str
-    :param task_config: An `NLPTaskConfig` object defining the task.
-    :type task_config: NLPTaskConfig
-    :param pretrained: If a string, a path to a local ``.keras`` weights file.
-        If True, raises ``NotImplementedError`` -- no public BERT weights ship
-        with ``dl_techniques``. If False (default), random init.
-    :type pretrained: Union[bool, str]
-    :param weights_dataset: unreachable. See ``create_bert``: it reaches
-        ``_download_weights``, which raises ``NotImplementedError`` before
-        reading it. No value does anything.
-    :type weights_dataset: str
-    :param cache_dir: unreachable for the same reason.
-    :type cache_dir: Optional[str]
-    :param bert_config_overrides: Optional dictionary to override default BERT
-        configuration for the chosen variant. Defaults to None.
-    :type bert_config_overrides: Optional[Dict[str, Any]]
-    :param head_config_overrides: Optional dictionary to override default head
-        configuration. Defaults to None.
-    :type head_config_overrides: Optional[Dict[str, Any]]
-    :raises ValueError: if ``task_config.task_type`` is
-        ``NLPTaskType.MULTIPLE_CHOICE``. That head needs a
-        ``(batch, num_choices, hidden)`` input this factory cannot produce; see
-        the ``D-024`` anchor in the body for the actionable alternative.
-    :return: A complete ``keras.Model`` ready for the specified task.
-
-        All three inputs are required, by name: ``input_ids``,
-        ``attention_mask`` and ``token_type_ids``. The functional wrapper
-        declares one ``keras.Input`` per key, so a data dict missing one
-        raises ``ValueError: Missing data for input "token_type_ids"``.
-        For a single-segment task pass ``np.zeros_like(input_ids)``.
-
-        This is stricter than the encoder it wraps: :class:`BERT` itself
-        treats the other two inputs as optional, and so does upstream
-        HuggingFace. The difference is not fixed here, since relaxing a
-        public factory's input signature is a breaking change for a
-        convenience gap; see ``decisions.md`` D-009
-        (plan-2026-08-23T203721-009b7ccf). Call the encoder directly for
-        the two-key form.
-
-        The head's output dict is post-processed by two rules, in order.
-        First, if it contains ``logits``, the derived duplicates
-        ``probabilities`` (``softmax(logits)``) and ``predictions``
-        (``argmax(logits, axis=-1)``, unusable as a loss target) are
-        dropped. Second, any dict left with a single key is unwrapped to
-        that bare tensor, including ``{"embeddings": ...}``, not only
-        ``{"logits": ...}``.
-
-        Of the 23 task types this factory builds, 21 give a bare tensor
-        and 2 give a dict (``QUESTION_ANSWERING`` and ``SPAN_EXTRACTION``,
-        which keep ``{"start_logits": ..., "end_logits": ...}`` since
-        those are two independent tensors; ``MULTIPLE_CHOICE`` is refused
-        with a ``ValueError``, see the D-024 anchor above). The three
-        ``TextSimilarityHead`` tasks (``TEXT_SIMILARITY``,
-        ``PARAPHRASE_DETECTION``, ``DUPLICATE_DETECTION``) return a bare
-        embeddings tensor ``(None, embedding_dim)``, not a dict and not
-        logits, since this factory always feeds the head a single
-        sequence and the head's pair branch is unreachable from here.
-
-        The bare-tensor form is what makes
-        ``loss="sparse_categorical_crossentropy"`` and
-        ``metrics=["accuracy"]`` compile, and what makes
-        ``model.predict(x).shape`` read.
-    :rtype: keras.Model
-
-    Example:
-        .. code-block:: python
-
-            from dl_techniques.layers.heads.nlp import NLPTaskType
-
-            # Define a task
-            ner_task = NLPTaskConfig(
-                name="ner",
-                task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
-                num_classes=9
-            )
-
-            # Create the full model (pass a local .keras path to `pretrained`
-            # to warm-start; `pretrained=True` raises NotImplementedError)
-            ner_model = create_bert_with_head(
-                bert_variant="base",
-                task_config=ner_task,
-                head_config_overrides={"use_task_attention": True}
-            )
-            ner_model.summary()
-    """
-    bert_config_overrides = bert_config_overrides or {}
-    head_config_overrides = head_config_overrides or {}
-
-    logger.info(
-        f"Creating BERT-{bert_variant} with a '{task_config.name}' head."
-    )
-
-    bert_encoder = BERT.from_variant(
-        bert_variant,
-        pretrained=pretrained,
-        weights_dataset=weights_dataset,
-        cache_dir=cache_dir,
-        **bert_config_overrides
-    )
-
-    # DECISION plan-2026-08-23T203721-009b7ccf/D-024: raise on MULTIPLE_CHOICE rather than
-    # build a wrong graph; this factory can only feed the head a rank-3 token sequence, not choices. See decisions.md.
-    if task_config.task_type == NLPTaskType.MULTIPLE_CHOICE:
-        raise ValueError(
-            "create_bert_with_head cannot build a MULTIPLE_CHOICE model. "
-            "MultipleChoiceHead scores a (batch, num_choices, hidden) tensor, "
-            "but this factory feeds the head the token sequence "
-            "(batch, seq_len, hidden), which yields one score per TOKEN and "
-            "ignores num_classes entirely. Build the encoder and the head "
-            "separately: encode each choice with BERT, stack the pooled "
-            "representations into (batch, num_choices, hidden), and call "
-            "create_nlp_head(task_config=...) on that."
-        )
-
-    task_head = create_nlp_head(
-        task_config=task_config,
-        input_dim=bert_encoder.hidden_size,
-        **head_config_overrides,
-    )
-
-    inputs = {
-        "input_ids": keras.Input(
-            shape=(None,), dtype="int32", name="input_ids"
-        ),
-        "attention_mask": keras.Input(
-            shape=(None,), dtype="int32", name="attention_mask"
-        ),
-        "token_type_ids": keras.Input(
-            shape=(None,), dtype="int32", name="token_type_ids"
-        ),
-    }
-
-    encoder_outputs = bert_encoder(inputs)
-
-    head_inputs = {
-        "hidden_states": encoder_outputs["last_hidden_state"],
-        "attention_mask": encoder_outputs["attention_mask"],
-    }
-    task_outputs = task_head(head_inputs)
-
-    # DECISION plan-2026-08-23T203721-009b7ccf/D-018: drop probabilities/predictions when
-    # logits is present, then unwrap any remaining single-key dict; a dict output made this factory uncompilable. See decisions.md.
-    derived_from_logits = ("probabilities", "predictions")
-
-    model_outputs = task_outputs
-    if isinstance(model_outputs, dict):
-        if "logits" in model_outputs:
-            model_outputs = {
-                key: value
-                for key, value in model_outputs.items()
-                if key not in derived_from_logits
-            }
-        if len(model_outputs) == 1:
-            model_outputs = next(iter(model_outputs.values()))
-
-    model_name = f"bert_{bert_variant}_with_{task_config.name}_head"
-    model = keras.Model(
-        inputs=inputs,
-        outputs=model_outputs,
-        name=model_name
-    )
-
-    logger.info(
-        f"Successfully created model with {model.count_params():,} parameters."
-    )
-    return model
 
 # ---------------------------------------------------------------------

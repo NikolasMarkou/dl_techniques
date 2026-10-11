@@ -1,6 +1,12 @@
-"""The output contract of EVERY reachable NLP head family, through the factory.
+"""The output contract of EVERY reachable NLP head family, through a headed BERT.
 
-Step 4 of this plan changed what ``create_bert_with_head`` returns: a head dict
+Since plan-2026-10-11T004932-b83935e1 the head lives in the model:
+``create_bert(..., include_top=True, task_config=...)``. The functional head
+factory that preceded it applied the same output rule, so the table below is
+unchanged; the rule itself now lives in
+``layers/heads/nlp/model_head.py::finalize_head_outputs``.
+
+Step 4 of the earlier plan changed what the head factory returned: a head dict
 with a single informative key is unwrapped to a bare tensor. Only three task
 types were covered by any test at the time (``SENTIMENT_ANALYSIS``,
 ``NAMED_ENTITY_RECOGNITION``, ``QUESTION_ANSWERING``), so the change silently
@@ -42,7 +48,7 @@ Why each arm is not satisfied by construction:
     ``vocabulary_size``, and it disagreed with ``get_head_class``: it carried
     ``MACHINE_TRANSLATION`` (which ``get_head_class`` refuses outright) and
     omitted ``TEXT_COMPLETION`` (which it routes to ``TextGenerationHead``). So
-    ``create_bert_with_head(task_type=TEXT_COMPLETION)`` raised
+    the head factory raised, for ``task_type=TEXT_COMPLETION``,
     ``ValueError: vocabulary_size must be specified for generation tasks``
     while its three siblings built fine. This arm CHECKS the lockstep instead
     of trusting it.
@@ -61,14 +67,14 @@ from dl_techniques.layers.heads.nlp.factory import (
     TextGenerationHead,
     get_head_class,
 )
-from dl_techniques.models.language.bert import create_bert_with_head
+from dl_techniques.models.language.bert import create_bert
 
 VARIANT = "tiny"
 NUM_CLASSES = 3
 
 # MEASURED on GPU 1, one row per reachable NLPTaskType. `T` marks a bare
-# tensor, `D` a dict. The shapes are the KerasTensor shapes of `model.output`
-# for `create_bert_with_head(bert_variant='tiny', num_classes=3)`.
+# tensor, `D` a dict. The shapes are the KerasTensor shapes of the symbolic
+# output of `create_bert('tiny', include_top=True, ...)` with num_classes=3.
 #
 # `None` in a shape is a dynamic axis (batch, or sequence length). The
 # similarity rows' 256 is the head's default embedding dim; the generation
@@ -76,7 +82,7 @@ NUM_CLASSES = 3
 _QA_DICT = {"start_logits": (None, None), "end_logits": (None, None)}
 
 # Sentinel for a task type that is reachable through `get_head_class` but that
-# `create_bert_with_head` deliberately REFUSES to build.
+# a headed BERT deliberately REFUSES to build.
 RAISES = "RAISES"
 
 EXPECTED_CONTRACT = {
@@ -137,14 +143,27 @@ REACHABLE = _reachable_task_types()
 
 
 def _build(task_type: NLPTaskType) -> keras.Model:
-    return create_bert_with_head(
-        bert_variant=VARIANT,
+    return create_bert(
+        VARIANT,
+        include_top=True,
         task_config=NLPTaskConfig(
             name=task_type.name.lower(),
             task_type=task_type,
             num_classes=NUM_CLASSES,
         ),
     )
+
+
+def _symbolic_output(model: keras.Model):
+    """The model's output over dynamic ``(batch, seq)`` inputs.
+
+    A subclassed model has no ``model.output``; a symbolic call gives the same
+    KerasTensors the functional wrapper exposed there.
+    """
+    return model({
+        name: keras.Input(shape=(None,), dtype="int32", name=name)
+        for name in ("input_ids", "attention_mask", "token_type_ids")
+    })
 
 
 def _describe(output) -> object:
@@ -155,7 +174,7 @@ def _describe(output) -> object:
 
 @pytest.mark.parametrize("task_type", REACHABLE, ids=lambda t: t.name)
 def test_the_output_contract_of_every_reachable_task_type(task_type):
-    """Each family's ``model.output`` container AND shape are pinned."""
+    """Each family's output container AND shape are pinned."""
     assert task_type in EXPECTED_CONTRACT, (
         f"{task_type.name} is reachable through get_head_class but has no row "
         "in EXPECTED_CONTRACT; add one with its MEASURED contract"
@@ -167,7 +186,7 @@ def test_the_output_contract_of_every_reachable_task_type(task_type):
         return
 
     model = _build(task_type)
-    actual = _describe(model.output)
+    actual = _describe(_symbolic_output(model))
 
     assert actual == expected, (
         f"{task_type.name} ({get_head_class(task_type).__name__}) output "
@@ -199,13 +218,14 @@ def test_the_two_dict_families_are_exactly_the_span_heads():
     dict_families = sorted(
         t.name
         for t in REACHABLE
-        if EXPECTED_CONTRACT[t] is not RAISES and isinstance(_build(t).output, dict)
+        if EXPECTED_CONTRACT[t] is not RAISES
+        and isinstance(_symbolic_output(_build(t)), dict)
     )
     assert dict_families == ["QUESTION_ANSWERING", "SPAN_EXTRACTION"], (
         f"the set of dict-output families changed to {dict_families}. If the "
         "similarity families are back, the unwrap was restricted to "
         "logits-bearing dicts -- that was considered and rejected; see the "
-        "D-018 anchor in models/language/bert/model.py"
+        "D-018 anchor in layers/heads/nlp/model_head.py"
     )
     for name in dict_families:
         task_type = NLPTaskType[name]
@@ -234,7 +254,7 @@ def test_every_generation_task_gets_a_vocabulary_size():
 
     assert not missing, (
         f"{missing} route to TextGenerationHead but NLPTaskConfig leaves "
-        "vocabulary_size=None, so create_bert_with_head raises "
+        "vocabulary_size=None, so a headed BERT raises "
         "'vocabulary_size must be specified for generation tasks' for them. "
         "Add them to generation_tasks in layers/heads/nlp/task_types.py "
         "(see the D-022 anchor there)."
@@ -273,7 +293,7 @@ def test_the_similarity_families_are_bare_embeddings_not_logits():
         NLPTaskType.PARAPHRASE_DETECTION,
         NLPTaskType.DUPLICATE_DETECTION,
     ):
-        output = _build(task_type).output
+        output = _symbolic_output(_build(task_type))
         assert not isinstance(output, dict), (
             f"{task_type.name} returned a dict {list(output)}; the "
             "single-key unwrap no longer covers {'embeddings'}"
