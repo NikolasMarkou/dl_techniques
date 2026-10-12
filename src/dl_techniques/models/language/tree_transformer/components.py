@@ -309,8 +309,14 @@ class GroupAttention(keras.layers.Layer):
 
         # DECISION plan-2026-08-19T070627-a616f581/D-007: layer_norm_eps is a real
         # parameter, not the factory's 1e-6 default. See decisions.md.
+        # DECISION plan-2026-10-11T170958-dc4d2202/D-014: explicit names on this
+        # norm and on the two layers of TreeTransformerBlock. Do NOT leave them to
+        # Keras's per-process counter (`group_attention_4`, `layer_normalization_7`):
+        # two same-config builds then disagree on weight paths and a by-path
+        # comparison misses. Archives are keyed by the attribute tree, so the names
+        # are load-neutral in both directions (probed). See decisions.md.
         self.norm = create_normalization_layer(
-            normalization_type, epsilon=layer_norm_eps
+            normalization_type, epsilon=layer_norm_eps, name="norm"
         )
         self.linear_key = keras.layers.Dense(
             hidden_size, name="key_projection"
@@ -371,8 +377,17 @@ class GroupAttention(keras.layers.Layer):
         neibor_attn = ops.softmax(scores, axis=-1)
 
         # The geometric mean of a pair and its transpose symmetrizes the matrix.
-        neibor_attn = ops.sqrt(
-            neibor_attn * ops.transpose(neibor_attn, axes=(0, 2, 1)) + 1e-9
+        # DECISION plan-2026-10-11T170958-dc4d2202/D-014: float32 for this one
+        # expression. In float16 the constant 1e-9 is exactly 0 and the softmax is
+        # exactly 0 off the adjacent band, so sqrt(0) has an infinite derivative and
+        # 0 * inf = NaN reaches 29 of 49 gradients (the forward stays finite, which is
+        # why the forward-only fp16 test never saw it). Do NOT add a maximum() floor
+        # instead: it also gives finite gradients but changes the float32 forward.
+        # See decisions.md.
+        attn_f32 = ops.cast(neibor_attn, "float32")
+        neibor_attn = ops.cast(
+            ops.sqrt(attn_f32 * ops.transpose(attn_f32, axes=(0, 2, 1)) + 1e-9),
+            self.compute_dtype,
         )
 
         # Blend in the prior, so structure accumulates across blocks.
@@ -791,11 +806,13 @@ class TreeTransformerBlock(keras.layers.Layer):
             hidden_size=hidden_size,
             normalization_type=normalization_type,
             layer_norm_eps=layer_norm_eps,
+            name="group_attention",
         )
         self.self_attn = TreeMHA(
             num_heads=num_heads,
             hidden_size=hidden_size,
             attention_dropout_rate=attention_dropout_rate,
+            name="tree_mha",
         )
         # DECISION plan-2026-07-30T140922-8af1028f/D-022: pre-filter the config
         # against what ffn_type accepts; create_ffn_layer raises on a key it

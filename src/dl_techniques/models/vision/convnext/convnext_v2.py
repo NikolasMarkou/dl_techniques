@@ -559,7 +559,8 @@ class ConvNeXtV2(keras.Model):
                 x = keras.layers.add([residual, x])
 
         if self.include_top:
-            return self.classification_head(x, training=training)
+            head_output = self.classification_head(x, training=training)
+            return head_output['probabilities']
 
         return x
 

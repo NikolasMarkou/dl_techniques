@@ -95,19 +95,25 @@ class TestViTHmlpClsSliceIdentity:
         model.build((None,) + INPUT_SHAPE)
         x = _x(5)
 
-        logits = _np(model(x, training=False))
+        logits = _np(model(x, training=False))['probabilities']
         model.include_top = False
         sequence = _np(model(x, training=False))
         model.include_top = True
 
-        from_cls = _np(model.head(ops.convert_to_tensor(sequence[:, 0, :])))
+        # Pass the full sequence to the head; it will extract the CLS token (position 0)
+        seq_tensor = ops.convert_to_tensor(sequence)
+        from_cls = _np(model.classification_head(seq_tensor)['probabilities'])
         np.testing.assert_allclose(
             logits, from_cls, rtol=0, atol=0,
             err_msg="vit_hmlp's head is NOT fed x[:, 0, :]",
         )
-        from_last = _np(model.head(ops.convert_to_tensor(sequence[:, -1, :])))
-        assert not np.allclose(logits, from_last, atol=1e-6), (
-            "control is vacuous on this input"
+        # Anti-vacuity: the rejected slice must give a different answer
+        swapped_seq = sequence.copy()
+        swapped_seq[:, [0, -1], :] = swapped_seq[:, [-1, 0], :]
+        from_swapped = _np(model.classification_head(ops.convert_to_tensor(swapped_seq))['probabilities'])
+        assert not np.allclose(logits, from_swapped, atol=1e-6), (
+            "vit_hmlp's head produces the same output for swapped CLS token; "
+            "it is not pinned to position 0"
         )
 
 

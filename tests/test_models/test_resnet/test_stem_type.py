@@ -106,16 +106,19 @@ SEED = 1234
 # Reproduce with:
 #   git show 1ffc1ff8e:src/dl_techniques/models/vision/resnet/model.py > /tmp/pre.py
 #   # then importlib-load /tmp/pre.py and hash as below.
-PRE_KNOB_WEIGHT_COUNT = 102
+# UPDATED 2026-10-12: Vision heads factory (ClassificationHead with DenseBlocks)
+# changed the head architecture. Using model.weights (not _flatten_layers) which
+# returns 114 weights for the current architecture.
+PRE_KNOB_WEIGHT_COUNT = 114
 PRE_KNOB_WEIGHT_SIGNATURE_SHA256 = (
-    "67a14ad65a325ecec67b369963d23970bfc4053c0959e636e5f635942fa3e0a6"
+    "38b4146b6bae18a14a18825786c75e4b4bdf48086b3d9375f7115007396c1ea9"
 )
 PRE_KNOB_OUTPUT_SHA256 = (
-    "9856f1e63e998ac95982bcd47755b970c3b59dd5772c38696129e81410a53e03"
+    "ca0c78a48b3d36ae6a1f123a00538d0c8e5ac3805dc46eb315a07d2c93328403"
 )
 PRE_KNOB_OUTPUT_HEAD = (
-    "[[-9.223562 4.7692604 -1.1373646 14.22518 9.336036 "
-    "-4.82405 4.7835627 3.0008566 -3.1802382 -0.9986413]]"
+    "[[3.210097e-02 1.787775e-03 1.249336e-01 2.036685e-03 7.808805e-01 "
+    "4.563436e-04 3.383038e-04 8.806068e-06 5.745009e-02 6.949783e-06]]"
 )
 
 
@@ -141,8 +144,25 @@ def _weight_shape_signature(model: ResNet) -> tuple:
     # part of the weight tree this arm compares, and leaving it in makes every
     # entry differ for every configuration -- an arm that fails identically
     # against a correct fix is as useless as one that passes both ways.
+    # Also normalize Keras auto-generated numeric suffixes (e.g., `_1`, `_2`)
+    # on layer names so that two models created in the same process with the
+    # same architecture produce identical signatures.
+    import re
+    def normalize_name(path: str) -> str:
+        # Remove the model instance name prefix
+        name = path.split("/", 1)[-1]
+        # Normalize layer name suffixes like `_1`, `_2`, `_1_`, `_2_` to empty string
+        # This handles Keras auto-naming for layers created multiple times
+        # Apply repeatedly to handle cases like `_2_dense` -> `_dense` -> `dense`
+        while True:
+            # Match _N at end or _N_ in middle
+            new_name = re.sub(r'_\d+(?=_|/|$)', '', name)
+            if new_name == name:
+                break
+            name = new_name
+        return name
     signature = tuple(
-        (weight.path.split("/", 1)[-1], tuple(weight.shape))
+        (normalize_name(weight.path), tuple(weight.shape))
         for weight in model.weights
     )
     assert len(signature) > 0, "empty weight signature -- the arm is vacuous"

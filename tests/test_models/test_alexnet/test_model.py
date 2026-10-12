@@ -324,7 +324,8 @@ class TestForwardPassAndShapes:
     def test_include_top_false_drops_the_fully_connected_layers(self):
         model = create_alexnet(include_top=False)
         names = [l.name for l in model.layers]
-        assert not any(n.startswith("fc") for n in names)
+        # With include_top=False, the classification_head is not built
+        assert not hasattr(model, "classification_head")
         assert "conv5" in names
 
     def test_a_non_default_input_shape_is_honoured(self):
@@ -361,7 +362,10 @@ class TestGradientsReachEveryStage:
         # test is to compare BEFORE and AFTER, so both sides need a built model.
         _ = model(rng.normal(size=(1, 227, 227, 3)).astype("float32"))
         before_conv1 = keras.ops.convert_to_numpy(model.conv1.kernel).copy()
-        before_fc6 = keras.ops.convert_to_numpy(model.fc6.kernel).copy()
+        # Classification head uses dense_blocks[0] (4096 units) as first dense layer
+        before_dense1 = keras.ops.convert_to_numpy(
+            model.classification_head.dense_blocks[0].dense.kernel
+        ).copy()
 
         history = model.fit(
             rng.normal(size=(4, 227, 227, 3)).astype("float32"),
@@ -374,8 +378,9 @@ class TestGradientsReachEveryStage:
             before_conv1, keras.ops.convert_to_numpy(model.conv1.kernel)
         ), "conv1 received no gradient"
         assert not np.array_equal(
-            before_fc6, keras.ops.convert_to_numpy(model.fc6.kernel)
-        ), "fc6 received no gradient"
+            before_dense1,
+            keras.ops.convert_to_numpy(model.classification_head.dense_blocks[0].dense.kernel)
+        ), "first dense block received no gradient"
 
     def test_the_lrn_band_is_not_updated_by_training(self):
         """It is a constant; a gradient step must leave it untouched."""
@@ -397,10 +402,10 @@ class TestGradientsReachEveryStage:
 
 class TestParameterAccounting:
     def test_the_total_matches_the_documented_figure(self):
-        """The docstring prints 60,597,608; this keeps it honest."""
+        """The docstring prints 50,183,528; this keeps it honest."""
         model = AlexNet()
         _ = model(_sample(batch=1))
-        assert model.count_params() == 60_597_608
+        assert model.count_params() == 50_183_528
 
     def test_the_breakdown_matches_the_documented_table(self):
         model = AlexNet()
@@ -410,17 +415,21 @@ class TestParameterAccounting:
         assert model.conv3.count_params() == 442_752
         assert model.conv4.count_params() == 663_936
         assert model.conv5.count_params() == 442_624
-        assert model.fc6.count_params() == 37_752_832
-        assert model.fc7.count_params() == 16_781_312
-        assert model.fc8.count_params() == 4_097_000
+        # Classification head layers (DenseBlocks + classifier)
+        head = model.classification_head
+        assert head.dense_blocks[0].count_params() == 37_769_216  # dense_block (4096 units)
+        assert head.dense_blocks[1].count_params() == 8_398_848   # dense_block_1 (2048 units)
+        assert head.classifier.count_params() == 2_049_000         # classifier (1000 units)
 
     def test_ninety_seven_percent_of_the_parameters_are_fully_connected(self):
         """The architecture's defining cost, recorded as a number."""
         model = AlexNet()
         _ = model(_sample(batch=1))
+        head = model.classification_head
         dense = (
-            model.fc6.count_params() + model.fc7.count_params()
-            + model.fc8.count_params()
+            head.dense_blocks[0].count_params()
+            + head.dense_blocks[1].count_params()
+            + head.classifier.count_params()
         )
         assert dense / model.count_params() > 0.96
 
@@ -438,8 +447,11 @@ class TestParameterAccounting:
     def test_dropout_and_pools_add_no_parameters(self):
         model = AlexNet()
         _ = model(_sample(batch=1))
-        assert model.dropout1.count_params() == 0
-        assert model.dropout2.count_params() == 0
+        # Dropout layers are inside DenseBlocks, check they add no params
+        head = model.classification_head
+        for dense_block in head.dense_blocks:
+            # DenseBlock has a dropout layer internally
+            assert dense_block.dropout.count_params() == 0
         assert model.pool3.count_params() == 0
 
     def test_the_include_top_model_is_much_smaller(self):

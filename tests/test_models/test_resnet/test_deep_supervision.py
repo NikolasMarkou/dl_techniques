@@ -176,16 +176,22 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
 
     def test_documented_output_order_is_deepest_supervision_first(self):
         """The docstrings promise ``[final, stage3, stage2, stage1]``; the layer
-        names must actually come out in that order."""
+        names must actually come out in that order.
+
+        With the vision heads factory, the head names are auto-generated.
+        We verify the structure and that the reversed iteration produces the
+        correct stage order.
+
+        With 4 stages (0,1,2,3), supervision heads are created for stages 0,1,2
+        (stage 3 is handled by the main head). Reversed order should be [2,1,0]."""
         model = _model()
-        names = [
-            h["classifier"].name for h in reversed(model.supervision_heads)
+        stage_indices = [
+            h["stage_idx"] for h in reversed(model.supervision_heads)
         ]
-        assert names == [
-            "supervision_classifier_stage3",
-            "supervision_classifier_stage2",
-            "supervision_classifier_stage1",
-        ]
+        assert stage_indices == [2, 1, 0], (
+            f"supervision heads in reversed order should be stages 2,1,0 "
+            f"but got {stage_indices}"
+        )
 
     def test_output_count_matches_the_schedule_width_the_trainer_builds(self):
         """`src/train/resnet/train_resnet.py` derives ``num_outputs`` from

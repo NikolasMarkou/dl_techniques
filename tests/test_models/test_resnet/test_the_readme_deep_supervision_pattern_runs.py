@@ -122,7 +122,7 @@ def test_the_documented_list_indexed_pattern_trains() -> None:
     num_outputs = info["num_outputs"]
     assert num_outputs == 4, f"expected 4 supervision heads, got {num_outputs}"
 
-    losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
+    losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=False)] * num_outputs
     loss_weights = [1.0, 0.3, 0.2, 0.1]
     metrics = [[keras.metrics.SparseCategoricalAccuracy(name="primary_accuracy")]]
     metrics += [[] for _ in range(num_outputs - 1)]
@@ -214,13 +214,15 @@ def test_layers_pop_is_a_silent_no_op_not_an_error() -> None:
     n_before = len(model.layers)
 
     popped = model.layers.pop()          # raises nothing
-    assert popped.name == "classifier"
+    assert popped.name.startswith("classification_head"), (
+        f"expected classification_head*, got {popped.name}"
+    )
 
     assert len(model.layers) == n_before, (
         "layers.pop() appeared to persist; the README's rationale for "
         "include_top=False assumes `layers` is a recomputed property"
     )
-    assert model.classifier is not None
+    assert model.classification_head is not None
 
     after = np.asarray(model(x, training=False))
     assert float(np.max(np.abs(before - after))) == 0.0, (

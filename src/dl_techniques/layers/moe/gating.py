@@ -1014,14 +1014,15 @@ def create_gating(gating_type: str, num_experts: int, **kwargs) -> BaseGating:
     :type gating_type: str
     :param num_experts: Number of expert networks.
     :type num_experts: int
-    :param kwargs: Configuration parameters for the gating network.
+    :param kwargs: Configuration parameters for the gating network. ``name`` is
+        forwarded to the layer; keys a gating type does not accept are dropped.
     :type kwargs: Any
     :return: Configured gating network.
     :rtype: BaseGating
     :raises ValueError: If gating_type is not supported.
     """
     # Shared keys forwarded to every BaseGating subclass.
-    shared_keys = ['norm_type', 'norm_config']
+    shared_keys = ['norm_type', 'norm_config', 'name']
     shared_kwargs = {k: v for k, v in kwargs.items() if k in shared_keys}
 
     if gating_type == 'linear':

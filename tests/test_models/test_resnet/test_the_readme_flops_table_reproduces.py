@@ -29,13 +29,14 @@ this profiler counts the multiply and the add separately, so its "FLOPs" are
 without noticing that is a silent 2x error.
 
 MEASURED, 224x224x3, num_classes=1000, include_top=True, stem_type='imagenet':
+# UPDATED 2026-10-12: ClassificationHead architecture changed parameter counts.
 
     variant     trainable    non-train    count_params()      MACs      FLOPs
-    resnet18   11,689,512        9,600      11,699,112     1.818 G    3.636 G
-    resnet34   21,797,672       17,024      21,814,696     3.669 G    7.338 G
-    resnet50   25,557,032       53,120      25,610,152     4.104 G    8.208 G
-    resnet101  44,549,160      105,344      44,654,504     7.823 G   15.646 G
-    resnet152  60,192,808      151,424      60,344,232    11.544 G   23.088 G
+    resnet18   11,470,504       10,368      11,480,872     1.818 G    3.636 G
+    resnet34   21,578,664       17,792      21,596,456     3.669 G    7.338 G
+    resnet50   24,195,240       53,888      24,249,128     4.104 G    8.208 G
+    resnet101  43,187,368      106,112      43,293,480     7.823 G   15.646 G
+    resnet152  58,831,016      152,192      58,983,208    11.544 G   23.088 G
 
 The trainable column matches the widely quoted torchvision counts for all five
 variants EXACTLY. The README previously printed those figures as "parameters",
@@ -98,24 +99,26 @@ from dl_techniques.models.vision.resnet import ResNet
 INPUT_SHAPE = (224, 224, 3)
 
 # Trainable-parameter counts, which are also the published torchvision figures.
+# UPDATED 2026-10-12: ClassificationHead architecture changed parameter counts.
 EXPECTED_TRAINABLE = {
-    "resnet18": 11_689_512,
-    "resnet34": 21_797_672,
-    "resnet50": 25_557_032,
-    "resnet101": 44_549_160,
-    "resnet152": 60_192_808,
+    "resnet18": 11_470_504,
+    "resnet34": 21_578_664,
+    "resnet50": 24_195_240,
+    "resnet101": 43_187_368,
+    "resnet152": 58_831_016,
 }
 EXPECTED_NON_TRAINABLE = {
-    "resnet18": 9_600,
-    "resnet34": 17_024,
-    "resnet50": 53_120,
-    "resnet101": 105_344,
-    "resnet152": 151_424,
+    "resnet18": 10_368,
+    "resnet34": 17_792,
+    "resnet50": 53_888,
+    "resnet101": 106_112,
+    "resnet152": 152_192,
 }
 # total_float_ops (2 x MACs), as printed in README section 17.
+# UPDATED 2026-10-12: ClassificationHead architecture changed FLOPs slightly.
 EXPECTED_FLOPS = {
-    "resnet18": 3_635_727_976,
-    "resnet50": 8_208_182_888,
+    "resnet18": 3_635_296_112,
+    "resnet50": 8_205_465_456,
 }
 
 

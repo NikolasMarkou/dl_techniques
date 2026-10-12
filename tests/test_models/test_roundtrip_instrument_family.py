@@ -72,12 +72,8 @@ RELOAD_PATH_DRIFT = {
     "darkir": 24,
     "fractalnet": 42,
     "latent_gmm_registration": 20,
-    "mamba": 9,
-    "nam": 16,
     "nano_vlm": 16,
-    "qwen": 32,
     "tabm": 5,
-    "tree_transformer": 14,
 }
 
 #: Packages that build a sub-layer with NO explicit ``name=``, and the layer
@@ -93,14 +89,9 @@ AUTONAME_STEMS = {
     # is not a plain `<stem>_<n>` -- the stem below matches the common prefix.
     "fractalnet": ("conv_block",),
     "latent_gmm_registration": ("dense",),
-    "mamba": ("mamba_layer",),
     "masked_language_model": ("bert",),
-    "nam": ("group_attention", "layer_normalization", "tree_mha"),
     "nano_vlm": ("vision_encoder",),
-    "qwen": ("linear_gating", "swi_gluffn"),
     "tabm": ("n_linear", "scale_ensemble", "tab_m_backbone"),
-    "tree_transformer": ("group_attention", "layer_normalization",
-                         "tree_mha"),
 }
 
 #: Packages where two weights share a relative path, with the MEASURED count.

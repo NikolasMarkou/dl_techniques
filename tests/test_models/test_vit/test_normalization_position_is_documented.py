@@ -93,8 +93,10 @@ class TestTheDivergenceIsRealAndNotCosmetic:
         keras.utils.set_random_seed(0)
         pre = vit_model.ViT(**common, normalization_position="pre")
         x = np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32")
-        a = keras.ops.convert_to_numpy(post(x, training=False))
-        b = keras.ops.convert_to_numpy(pre(x, training=False))
+        a = post(x, training=False)['probabilities']
+        b = pre(x, training=False)['probabilities']
+        a = keras.ops.convert_to_numpy(a)
+        b = keras.ops.convert_to_numpy(b)
         assert float(np.max(np.abs(a - b))) > 1e-4, (
             "if these agree the knob is inert and the whole finding is moot"
         )

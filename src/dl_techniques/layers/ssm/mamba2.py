@@ -615,7 +615,11 @@ class Mamba2ResidualBlock(keras.layers.Layer):
             self.norm = keras.layers.LayerNormalization(
                 epsilon=self.norm_epsilon, name="norm"
             )
+        # DECISION plan-2026-10-11T170958-dc4d2202/D-014: explicit name; do NOT leave it to
+        # Keras's counter (`mamba2_layer_4`), which makes two same-config builds disagree on
+        # weight paths. Archives are keyed by the attribute tree: load-neutral. See decisions.md.
         self.mamba2 = Mamba2Layer(
+            name="mamba2",
             d_model=self.d_model,
             d_state=self.d_state,
             d_conv=self.d_conv,

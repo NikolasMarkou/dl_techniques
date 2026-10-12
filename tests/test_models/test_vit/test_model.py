@@ -1296,21 +1296,12 @@ class TestViTGradientFlow:
         x = np.random.default_rng(0).random((2, 64, 64, 3)).astype("float32")
         model(x, training=False)  # subclassed model: unbuilt until first call
 
-        # Waive gamma/beta of the unused norm layer and FFN in ClassificationHead
-        report = assert_gradients_reach_every_trainable_weight(
-            model, x,
-            expect_zero=(
-                "classification_head/classification_head_norm/gamma",
-                "classification_head/classification_head_norm/beta",
-                "classification_head/classification_head_ffn/fc1/kernel",
-                "classification_head/classification_head_ffn/fc1/bias",
-                "classification_head/classification_head_ffn/fc2/kernel",
-                "classification_head/classification_head_ffn/fc2/bias",
-            )
-        )
+        # The new ClassificationHead uses DenseBlocks which are all active.
+        # No weights should be waived as zero-gradient.
+        report = assert_gradients_reach_every_trainable_weight(model, x)
 
         assert len(report) == len(model.trainable_weights)
-        assert len(report) == 166, (
+        assert len(report) == 160, (
             "the tiny variant's weight set changed shape; re-measure before "
             "editing this number"
         )

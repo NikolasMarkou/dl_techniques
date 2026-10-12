@@ -51,8 +51,9 @@ from ..smoke_contract_oracle import (
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 10
 
-#: Measured 2026-08-21 at ``blocks_per_stage=[1, 1]``, ``block_type='basic'``.
-GF_N_WEIGHTS_BASIC = 20
+#: Measured 2026-10-12 at ``blocks_per_stage=[1, 1]``, ``block_type='basic'``.
+#: Updated for ClassificationHead with DenseBlocks (vision heads factory).
+GF_N_WEIGHTS_BASIC = 28
 
 
 def _images(batch: int = 2) -> np.ndarray:
@@ -209,9 +210,9 @@ class TestResNetLazyBuildContract:
     ============================  ===========  ==========================
     """
 
-    #: Measured 2026-08-24 on GPU 1; see the class docstring.
-    N_WEIGHTS_BASIC = 32
-    N_WEIGHTS_DEEP_SUPERVISED = 93
+    #: Measured 2026-10-12 on GPU 1; see the class docstring.
+    N_WEIGHTS_BASIC = 44
+    N_WEIGHTS_DEEP_SUPERVISED = 141
 
     @staticmethod
     def _unbuilt_basic() -> ResNet:

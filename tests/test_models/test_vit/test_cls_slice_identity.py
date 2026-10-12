@@ -79,16 +79,21 @@ class TestViTClsSliceIdentity:
         model = self._built_model()
         x = _x(1)
 
-        logits = _np(model(x, training=False))
+        logits = model(x, training=False)['probabilities']
+        logits = _np(logits)
 
         # Same weights, sequence output: ``call`` branches on include_top.
         model.include_top = False
-        sequence = _np(model(x, training=False))
+        sequence = model(x, training=False)
+        sequence = _np(sequence)
         model.include_top = True
 
         assert sequence.shape[1] > 1, "need >1 position for this to discriminate"
 
-        from_cls = _np(model.head(ops.convert_to_tensor(sequence[:, 0, :])))
+        # Pass the full sequence to the head; it will extract the CLS token (position 0)
+        seq_tensor = ops.convert_to_tensor(sequence)
+        from_cls = model.classification_head(seq_tensor)['probabilities']
+        from_cls = _np(from_cls)
         np.testing.assert_allclose(
             logits, from_cls, rtol=0, atol=0,
             err_msg="the classification head is NOT fed x_norm[:, 0, :]",
@@ -96,10 +101,14 @@ class TestViTClsSliceIdentity:
 
         # Anti-vacuity: the rejected slice must give a different answer, else
         # the assertion above would hold for any position.
-        from_last = _np(model.head(ops.convert_to_tensor(sequence[:, -1, :])))
-        assert not np.allclose(logits, from_last, atol=1e-6), (
-            "control is vacuous: the last token feeds the head identically to "
-            "the CLS token, so this test could not detect the slice moving"
+        # Create a sequence where position 0 and -1 are swapped
+        swapped_seq = sequence.copy()
+        swapped_seq[:, [0, -1], :] = swapped_seq[:, [-1, 0], :]
+        from_swapped = model.classification_head(ops.convert_to_tensor(swapped_seq))['probabilities']
+        from_swapped = _np(from_swapped)
+        assert not np.allclose(logits, from_swapped, atol=1e-6), (
+            "the classification head produces the same output for swapped CLS token; "
+            "it is not pinned to position 0"
         )
 
     def test_the_cls_position_is_not_a_pooled_summary(self):
@@ -107,7 +116,8 @@ class TestViTClsSliceIdentity:
         model = self._built_model()
         x = _x(2)
 
-        logits = _np(model(x, training=False))
+        logits = model(x, training=False)['probabilities']
+        logits = _np(logits)
         model.include_top = False
         sequence = _np(model(x, training=False))
         model.include_top = True
@@ -116,7 +126,9 @@ class TestViTClsSliceIdentity:
             ("mean", sequence.mean(axis=1)),
             ("max", sequence.max(axis=1)),
         ):
-            alt = _np(model.head(ops.convert_to_tensor(pooled)))
+            # Reshape pooled (batch, dim) to (batch, 1, dim) for ClassificationHead
+            pooled_tensor = ops.convert_to_tensor(pooled[:, None, :])
+            alt = _np(model.classification_head(pooled_tensor)['probabilities'])
             assert not np.allclose(logits, alt, atol=1e-6), (
                 f"the head's input is indistinguishable from a {name}-pool of "
                 "the sequence; the CLS slice is not pinned"

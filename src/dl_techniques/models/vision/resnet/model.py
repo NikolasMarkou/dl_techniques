@@ -524,7 +524,8 @@ class ResNet(keras.Model):
                 stage_features.append(x)
 
         if self.include_top:
-            final_output = self.classification_head(x, training=training)
+            head_output = self.classification_head(x, training=training)
+            final_output = head_output['probabilities']
         else:
             final_output = x
 
@@ -534,7 +535,7 @@ class ResNet(keras.Model):
             for sup_head in reversed(self.supervision_heads):
                 feat = stage_features[sup_head["stage_idx"]]
                 sup_output = sup_head["head"](feat, training=training)
-                supervision_outputs.append(sup_output)
+                supervision_outputs.append(sup_output['probabilities'])
             return [final_output] + supervision_outputs
 
         return final_output

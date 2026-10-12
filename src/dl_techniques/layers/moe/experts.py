@@ -171,7 +171,13 @@ class FFNExpert(BaseExpert):
 
         # CREATE the FFN block in __init__ (Golden Rule: create sub-layers here)
         try:
-            self.ffn_block = create_ffn_from_config(self.ffn_config)
+            # DECISION plan-2026-10-11T170958-dc4d2202/D-014: a named copy; do NOT leave the
+            # name to Keras's counter (`swi_gluffn_16`), which makes two same-config builds
+            # disagree on weight paths. The copy keeps `self.ffn_config` (serialized) unchanged,
+            # and archives are keyed by the attribute tree: load-neutral. See decisions.md.
+            self.ffn_block = create_ffn_from_config(
+                {"name": "ffn", **self.ffn_config}
+            )
             logger.debug(f"Created {self.ffn_config['type']} expert using FFN factory")
         except Exception as e:
             raise ValueError(

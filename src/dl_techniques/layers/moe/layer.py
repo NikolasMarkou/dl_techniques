@@ -147,9 +147,13 @@ class MixtureOfExperts(keras.layers.Layer):
             for k in ('num_slots',):
                 gating_kwargs[k] = getattr(self.gating_config, k)
 
+        # DECISION plan-2026-10-11T170958-dc4d2202/D-014: explicit name; do NOT leave it to
+        # Keras's counter (`linear_gating_8`), which makes two same-config builds disagree
+        # on weight paths. Archives are keyed by the attribute tree: load-neutral.
         self.gating_network = create_gating(
             gating_type=gating_type,
             num_experts=self.num_experts,
+            name='gating',
             **gating_kwargs
         )
 

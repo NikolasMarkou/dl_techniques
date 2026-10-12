@@ -97,7 +97,7 @@ class TestShippedVariantsAreUnaffected:
         )
 
     @pytest.mark.parametrize("variant,params", [
-        ("resnet18", 11187651), ("resnet34", 21303235), ("resnet50", 23567299),
+        ("resnet18", 11352259), ("resnet34", 21467843), ("resnet50", 24120515),
     ])
     def test_the_parameter_count_is_unchanged(self, variant, params, images):
         model = ResNet.from_variant(variant, num_classes=3,
