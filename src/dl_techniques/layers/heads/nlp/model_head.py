@@ -65,18 +65,35 @@ _DERIVED_FROM_LOGITS = ("probabilities", "predictions")
 TASK_HEAD_NAME = "task_head"
 
 
+#: The task types whose head is a ``TextGenerationHead``: logits over a
+#: vocabulary, whose size the task config carries as ``vocabulary_size``.
+_GENERATION_HEAD_TASKS = frozenset({
+    NLPTaskType.TEXT_GENERATION,
+    NLPTaskType.MASKED_LANGUAGE_MODELING,
+    NLPTaskType.TEXT_COMPLETION,
+    NLPTaskType.TEXT_SUMMARIZATION,
+})
+
+
 def _as_task_config(
-        task_config: Union[NLPTaskConfig, Dict[str, Any]]
+        task_config: Union[NLPTaskConfig, Dict[str, Any]],
+        vocab_size: Optional[int] = None,
 ) -> NLPTaskConfig:
     """
     Return ``task_config`` as an :class:`NLPTaskConfig`.
 
     A dict may carry ``task_type`` as an :class:`NLPTaskType` member or as its
     string value, which is the form :func:`task_config_to_dict` and the head's
-    own ``get_config`` write. The caller's dict is not modified.
+    own ``get_config`` write. The caller's dict is not modified. A dict for a
+    generation-type task that sets no ``vocabulary_size`` gets ``vocab_size``
+    (the model's) when one is given; an :class:`NLPTaskConfig` instance has
+    already been given the dataclass default 32000 by then, which cannot be told
+    from an explicit 32000, so it is returned as is.
 
     :param task_config: A config instance, or a dict of its fields.
     :type task_config: Union[NLPTaskConfig, Dict[str, Any]]
+    :param vocab_size: The owning model's vocabulary size, or None.
+    :type vocab_size: Optional[int]
     :return: The config as a dataclass instance.
     :rtype: NLPTaskConfig
     :raises TypeError: If ``task_config`` is neither a dict nor an
@@ -93,6 +110,12 @@ def _as_task_config(
     fields = dict(task_config)
     if isinstance(fields.get("task_type"), str):
         fields["task_type"] = NLPTaskType.from_string(fields["task_type"])
+    if (
+            vocab_size is not None
+            and fields.get("task_type") in _GENERATION_HEAD_TASKS
+            and fields.get("vocabulary_size") is None
+    ):
+        fields["vocabulary_size"] = int(vocab_size)
     return NLPTaskConfig(**fields)
 
 
@@ -136,7 +159,8 @@ def validate_task_head_knobs(
 
 
 def task_config_to_dict(
-        task_config: Union[NLPTaskConfig, Dict[str, Any]]
+        task_config: Union[NLPTaskConfig, Dict[str, Any]],
+        vocab_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Serialize a task config to a plain dict for a model's ``get_config``.
@@ -148,12 +172,16 @@ def task_config_to_dict(
 
     :param task_config: A config instance, or a dict of its fields.
     :type task_config: Union[NLPTaskConfig, Dict[str, Any]]
+    :param vocab_size: The owning model's vocabulary size: fills an unset
+        ``vocabulary_size`` of a generation-type dict (see
+        :func:`build_model_task_head`).
+    :type vocab_size: Optional[int]
     :return: A new dict of all :class:`NLPTaskConfig` fields.
     :rtype: Dict[str, Any]
     :raises TypeError: As :func:`_as_task_config`.
     :raises ValueError: As :func:`_as_task_config`.
     """
-    fields = dataclasses.asdict(_as_task_config(task_config))
+    fields = dataclasses.asdict(_as_task_config(task_config, vocab_size))
     fields["task_type"] = fields["task_type"].value
     return fields
 
@@ -164,6 +192,7 @@ def build_model_task_head(
         head_config_overrides: Optional[Dict[str, Any]] = None,
         default_pooling: Optional[str] = None,
         name: str = TASK_HEAD_NAME,
+        vocab_size: Optional[int] = None,
 ) -> BaseNLPHead:
     """
     Build the task head a language model owns when ``include_top=True``.
@@ -202,6 +231,18 @@ def build_model_task_head(
     a ``(batch, num_choices, hidden)`` tensor. Fed the sequence, it returns one
     score per token and ignores ``num_classes``.
 
+    ``vocab_size`` is the model's own vocabulary. A generation-type head
+    (``TEXT_GENERATION``, ``MASKED_LANGUAGE_MODELING``, ``TEXT_COMPLETION``,
+    ``TEXT_SUMMARIZATION``) emits logits over ``task_config.vocabulary_size``,
+    which defaulted to 32000 whatever the model: BERT with vocabulary 64 and a
+    summarization head returned ``(batch, seq_len, 32000)``. With ``vocab_size``
+    given, a dict config that sets no ``vocabulary_size`` takes it from the
+    model, and any different value raises ``ValueError``. The dataclass default
+    32000 cannot be told from an explicit 32000, so an
+    :class:`NLPTaskConfig` that leaves it unset on a model of another
+    vocabulary raises too and must state ``vocabulary_size``. Other task types
+    ignore ``vocab_size``. With ``vocab_size=None`` nothing is checked.
+
     ``default_pooling`` lets a backbone state the pooling its states need, for
     example ``'last'`` for a causal decoder, where position 0 has seen only
     itself. An explicit ``pooling_type`` in ``head_config_overrides`` always
@@ -220,15 +261,36 @@ def build_model_task_head(
     :param name: Layer name of the head. Every head weight path starts with
         it. Defaults to ``"task_head"``.
     :type name: str
+    :param vocab_size: The model's vocabulary size, checked against a
+        generation-type head's ``vocabulary_size`` (see above). Defaults to
+        None: no check.
+    :type vocab_size: Optional[int]
     :return: The head layer, not yet built.
     :rtype: BaseNLPHead
     :raises ValueError: If the task type is ``MULTIPLE_CHOICE``, if the
-        overrides contain ``name``, or if the task type has no implemented
-        head.
+        overrides contain ``name``, if the task type has no implemented
+        head, or if a generation-type head's ``vocabulary_size`` differs from
+        ``vocab_size``.
     :raises TypeError: If ``task_config`` is neither a dict nor an
         :class:`NLPTaskConfig`.
     """
-    task_config = _as_task_config(task_config)
+    task_config = _as_task_config(task_config, vocab_size)
+
+    # DECISION plan-2026-10-11T170958-dc4d2202/D-009: the head's vocabulary is the model's,
+    # checked here, not in the head classes (they stay untouched); do NOT drop the check for an
+    # NLPTaskConfig that kept the 32000 default -- it is indistinguishable from an explicit 32000.
+    if (
+            vocab_size is not None
+            and task_config.task_type in _GENERATION_HEAD_TASKS
+            and task_config.vocabulary_size != vocab_size
+    ):
+        raise ValueError(
+            f"The {task_config.task_type.value!r} head would emit logits over "
+            f"vocabulary_size={task_config.vocabulary_size}, but the model's "
+            f"vocabulary is {vocab_size}. Set vocabulary_size={vocab_size} in "
+            "the task config (an NLPTaskConfig that leaves it unset carries the "
+            "default 32000; a dict that leaves it out gets the model's)."
+        )
 
     # DECISION plan-2026-08-23T203721-009b7ccf/D-024: raise on MULTIPLE_CHOICE rather than
     # build a wrong graph; this factory can only feed the head a rank-3 token sequence, not choices. See decisions.md.

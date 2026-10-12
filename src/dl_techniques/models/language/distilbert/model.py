@@ -430,7 +430,8 @@ class DistilBERT(keras.Model):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.include_top = include_top
         self.task_config = (
-            task_config_to_dict(task_config) if task_config is not None else None
+            task_config_to_dict(task_config, vocab_size=vocab_size)
+            if task_config is not None else None
         )
         self.head_config_overrides = (
             dict(head_config_overrides) if head_config_overrides is not None else None
@@ -448,6 +449,7 @@ class DistilBERT(keras.Model):
                 self.task_config,
                 input_dim=self.hidden_size,
                 head_config_overrides=self.head_config_overrides,
+                vocab_size=self.vocab_size,
             )
 
         logger.info(

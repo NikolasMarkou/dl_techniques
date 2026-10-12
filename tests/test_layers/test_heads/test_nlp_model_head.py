@@ -291,6 +291,80 @@ class TestFinalizeHeadOutputs:
 
 
 # ---------------------------------------------------------------------
+# a generation head's vocabulary is the model's
+# ---------------------------------------------------------------------
+
+_GENERATION_TYPES = [
+    NLPTaskType.TEXT_GENERATION,
+    NLPTaskType.MASKED_LANGUAGE_MODELING,
+    NLPTaskType.TEXT_COMPLETION,
+    NLPTaskType.TEXT_SUMMARIZATION,
+]
+_MODEL_VOCAB = 11
+
+
+def _generation_dict(task_type, **extra) -> dict:
+    return {"name": "g", "task_type": task_type, **extra}
+
+
+@pytest.mark.parametrize("task_type", _GENERATION_TYPES, ids=lambda t: t.name)
+class TestGenerationVocabulary:
+
+    def test_an_unset_vocabulary_is_filled_from_the_model(self, task_type) -> None:
+        head = build_model_task_head(
+            _generation_dict(task_type), input_dim=D, vocab_size=_MODEL_VOCAB)
+        assert head.task_config.vocabulary_size == _MODEL_VOCAB
+        out = head(_head_inputs(), training=False)
+        assert tuple(out["logits"].shape) == (B, S, _MODEL_VOCAB)
+
+    def test_the_string_form_of_the_task_type_is_filled_too(self, task_type) -> None:
+        head = build_model_task_head(
+            _generation_dict(task_type.value), input_dim=D, vocab_size=_MODEL_VOCAB)
+        assert head.task_config.vocabulary_size == _MODEL_VOCAB
+
+    def test_the_same_explicit_vocabulary_is_accepted(self, task_type) -> None:
+        head = build_model_task_head(
+            _generation_dict(task_type, vocabulary_size=_MODEL_VOCAB),
+            input_dim=D, vocab_size=_MODEL_VOCAB)
+        assert head.task_config.vocabulary_size == _MODEL_VOCAB
+
+    def test_a_different_explicit_vocabulary_raises(self, task_type) -> None:
+        with pytest.raises(ValueError, match="vocabulary_size=7.*model's vocabulary is 11"):
+            build_model_task_head(
+                _generation_dict(task_type, vocabulary_size=7),
+                input_dim=D, vocab_size=_MODEL_VOCAB)
+
+    def test_a_dataclass_that_kept_the_default_raises(self, task_type) -> None:
+        """The default 32000 cannot be told from an explicit 32000."""
+        config = NLPTaskConfig(name="g", task_type=task_type)
+        assert config.vocabulary_size == 32000
+        with pytest.raises(ValueError, match="vocabulary_size=32000"):
+            build_model_task_head(config, input_dim=D, vocab_size=_MODEL_VOCAB)
+        # ...and is fine on a model whose vocabulary IS 32000.
+        build_model_task_head(config, input_dim=D, vocab_size=32000)
+
+    def test_no_model_vocabulary_means_no_check(self, task_type) -> None:
+        head = build_model_task_head(
+            NLPTaskConfig(name="g", task_type=task_type), input_dim=D)
+        assert head.task_config.vocabulary_size == 32000
+
+    def test_task_config_to_dict_fills_the_same_way(self, task_type) -> None:
+        filled = task_config_to_dict(_generation_dict(task_type), vocab_size=_MODEL_VOCAB)
+        assert filled["vocabulary_size"] == _MODEL_VOCAB
+        explicit = task_config_to_dict(
+            _generation_dict(task_type, vocabulary_size=5), vocab_size=_MODEL_VOCAB)
+        assert explicit["vocabulary_size"] == 5  # converting never raises
+        assert task_config_to_dict(_generation_dict(task_type))["vocabulary_size"] == 32000
+
+
+def test_a_task_that_is_not_generation_ignores_the_model_vocabulary() -> None:
+    head = build_model_task_head(
+        _classification_config(), input_dim=D, vocab_size=_MODEL_VOCAB)
+    out = head(_head_inputs(), training=False)
+    assert tuple(out["logits"].shape) == (B, 3)
+
+
+# ---------------------------------------------------------------------
 # the shapes a headed model returns
 # ---------------------------------------------------------------------
 

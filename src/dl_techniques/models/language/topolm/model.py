@@ -342,7 +342,8 @@ class TopoLM(keras.Model):
         self.pad_token_id = None if pad_token_id is None else int(pad_token_id)
         self.include_top = bool(include_top)
         self.task_config = (
-            task_config_to_dict(task_config) if task_config is not None else None
+            task_config_to_dict(task_config, vocab_size=vocab_size)
+            if task_config is not None else None
         )
         self.head_config_overrides = (
             dict(head_config_overrides) if head_config_overrides is not None else None
@@ -361,6 +362,7 @@ class TopoLM(keras.Model):
                 self.task_config,
                 input_dim=self.embed_dim,
                 head_config_overrides=self.head_config_overrides,
+                vocab_size=self.vocab_size,
                 default_pooling="last",
             )
 

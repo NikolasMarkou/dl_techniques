@@ -5,7 +5,7 @@ each" (``test_a_decoder_assumes_no_padding_token``,
 ``test_a_language_model_reports_its_output_shape``). The vocabulary is
 ``VOCAB`` for every row, a value that is no class's default.
 
-Interface contract: ``TINY[name]`` is a :class:`Tiny`; ``tiny.cls()`` imports
+Interface contract: ``TINY[name]`` is a :class:`Tiny` (all thirteen classes that own a head); ``tiny.cls()`` imports
 and returns the class; ``tiny.kwargs`` are constructor keyword arguments that
 build a one-layer model in a fraction of a second (no ``include_top``, no
 ``task_config``: the caller adds those). Adding a class is one row.
@@ -27,6 +27,14 @@ class Tiny(NamedTuple):
 
 
 TINY = {
+    "bert": Tiny(
+        "dl_techniques.models.language.bert.model", "BERT",
+        dict(vocab_size=VOCAB, hidden_size=32, num_layers=1, num_heads=2,
+             intermediate_size=64, max_position_embeddings=32)),
+    "tree_transformer": Tiny(
+        "dl_techniques.models.language.tree_transformer.model", "TreeTransformer",
+        dict(vocab_size=VOCAB, hidden_size=32, num_layers=1, num_heads=2,
+             intermediate_size=64, max_len=16)),
     "distilbert": Tiny(
         "dl_techniques.models.language.distilbert.model", "DistilBERT",
         dict(vocab_size=VOCAB, hidden_size=32, num_layers=1, num_heads=2,

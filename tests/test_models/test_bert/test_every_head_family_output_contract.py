@@ -71,6 +71,7 @@ from dl_techniques.models.language.bert import create_bert
 
 VARIANT = "tiny"
 NUM_CLASSES = 3
+BERT_VOCAB = create_bert(VARIANT).vocab_size
 
 # MEASURED on GPU 1, one row per reachable NLPTaskType. `T` marks a bare
 # tensor, `D` a dict. The shapes are the KerasTensor shapes of the symbolic
@@ -78,7 +79,10 @@ NUM_CLASSES = 3
 #
 # `None` in a shape is a dynamic axis (batch, or sequence length). The
 # similarity rows' 256 is the head's default embedding dim; the generation
-# rows' 32000 is `NLPTaskConfig`'s default vocabulary size.
+# rows' last axis is the model's own vocabulary: a generation-type head states
+# its `vocabulary_size` and `build_model_task_head` refuses one that differs
+# from the model's (plan-2026-10-11T170958-dc4d2202 D-009). It used to be
+# `NLPTaskConfig`'s default 32000 on a 30522-word BERT.
 _QA_DICT = {"start_logits": (None, None), "end_logits": (None, None)}
 
 # Sentinel for a task type that is reachable through `get_head_class` but that
@@ -113,11 +117,11 @@ EXPECTED_CONTRACT = {
     NLPTaskType.PARAPHRASE_DETECTION: (None, 256),
     NLPTaskType.DUPLICATE_DETECTION: (None, 256),
     # TextGenerationHead -- vocabulary logits per position
-    NLPTaskType.TEXT_GENERATION: (None, None, 32000),
-    NLPTaskType.MASKED_LANGUAGE_MODELING: (None, None, 32000),
-    NLPTaskType.TEXT_SUMMARIZATION: (None, None, 32000),
+    NLPTaskType.TEXT_GENERATION: (None, None, BERT_VOCAB),
+    NLPTaskType.MASKED_LANGUAGE_MODELING: (None, None, BERT_VOCAB),
+    NLPTaskType.TEXT_SUMMARIZATION: (None, None, BERT_VOCAB),
     # TEXT_COMPLETION used to RAISE here; see the D-022 anchor in task_types.py
-    NLPTaskType.TEXT_COMPLETION: (None, None, 32000),
+    NLPTaskType.TEXT_COMPLETION: (None, None, BERT_VOCAB),
     # MultipleChoiceHead -- REFUSED by the factory (step 13.3, D-024). It is
     # reachable through get_head_class but cannot be built here, because this
     # factory can only feed it a token sequence. `RAISES` is the sentinel; the
@@ -150,6 +154,7 @@ def _build(task_type: NLPTaskType) -> keras.Model:
             name=task_type.name.lower(),
             task_type=task_type,
             num_classes=NUM_CLASSES,
+            vocabulary_size=BERT_VOCAB,
         ),
     )
 
