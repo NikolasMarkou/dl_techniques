@@ -929,6 +929,7 @@ class BERT(keras.Model):
                 weights_path,
                 head_prefixes=(TASK_HEAD_NAME,),
                 vocab_layers=("embeddings",),
+                tables=("word_embeddings/embeddings",),
                 allow_vocab_change=skip_mismatch,
             )
         except Exception as e:

@@ -969,6 +969,7 @@ class TopoLM(keras.Model):
                 weights_path,
                 head_prefixes=(TASK_HEAD_NAME,),
                 vocab_layers=("word_embeddings",),
+                tables=("word_embeddings/embeddings", "lm_head/kernel"),
                 tops=("lm_head",),
             )
 

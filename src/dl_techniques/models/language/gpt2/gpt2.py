@@ -712,6 +712,7 @@ class GPT2(keras.Model):
                     weights_path,
                     head_prefixes=(TASK_HEAD_NAME,),
                     vocab_layers=("decoder",),
+                    tables=("word_embeddings/embeddings", "lm_head/kernel"),
                     tops=("lm_head",),
                 )
             else:

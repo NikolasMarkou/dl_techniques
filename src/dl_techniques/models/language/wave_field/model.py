@@ -985,6 +985,7 @@ class WaveFieldLLM(keras.Model):
                     weights_path,
                     head_prefixes=(TASK_HEAD_NAME,),
                     vocab_layers=("token_embeddings",),
+                    tables=("token_embeddings/embeddings", "lm_head/kernel"),
                     tops=("lm_head",),
                 )
             else:

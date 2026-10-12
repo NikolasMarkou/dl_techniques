@@ -140,8 +140,11 @@ Reusing a backbone under a new head:
 
   Every route copies by layer name, so it needs a `.keras` file.
 - On a built model of the ten: `load_backbone_from_checkpoint(model, path,
-  head_prefixes=(TASK_HEAD_NAME,), vocab_layers=..., tops=...)`, with the
-  class's row above. The lower-level call is
+  head_prefixes=(TASK_HEAD_NAME,), vocab_layers=..., tables=..., tops=...)`, with the
+  class's row above. `tables` are the variable-path suffixes of the token table
+  (`word_embeddings/embeddings`, `embedding/embeddings`, ...) and of an untied
+  `lm_head/kernel`: on a vocabulary change only those stay fresh, so a resized
+  position table raises (plan-2026-10-11T170958-dc4d2202 D-007). The lower-level call is
   `load_weights_from_checkpoint(model, path,
   skip_prefixes=(TASK_HEAD_NAME,), strict=True, allow_unloaded=())`
   (add `"lm_head"` to `allow_unloaded` when one side is headed). Without

@@ -417,7 +417,7 @@ class TestVocabChange:
 
         report = load_weights_from_checkpoint(
             tgt, ckpt, strict=True, allow_unloaded=(),
-            vocab_change=VocabChange(("stem_",), _INPUT_DIM, 12))
+            vocab_change=VocabChange(("stem_",), _INPUT_DIM, 12, ("stem_dense/kernel",)))
 
         kernel, bias = tgt.get_layer("stem_dense").get_weights()
         np.testing.assert_array_equal(kernel, kernel_before)
@@ -433,7 +433,7 @@ class TestVocabChange:
         with pytest.raises(ValueError, match="stem_dense"):
             load_weights_from_checkpoint(
                 tgt, ckpt, allow_unloaded=(),
-                vocab_change=VocabChange(("stem_",), _INPUT_DIM, 13))
+                vocab_change=VocabChange(("stem_",), _INPUT_DIM, 13, ("stem_dense/kernel",)))
 
     def test_a_layer_not_named_is_never_split(self, tmp_path):
         src = _build_classifier()
@@ -443,7 +443,45 @@ class TestVocabChange:
         with pytest.raises(ValueError, match="stem_dense"):
             load_weights_from_checkpoint(
                 tgt, ckpt, allow_unloaded=(),
-                vocab_change=VocabChange(("enc_",), _INPUT_DIM, 12))
+                vocab_change=VocabChange(("enc_",), _INPUT_DIM, 12, ("stem_dense/kernel",)))
+
+    @pytest.mark.parametrize(
+        "tables", [(), ("stem_dense/bias",), ("dense/kernel",)],
+        ids=["no_table", "another_variable", "another_layer"])
+    def test_a_vocabulary_shaped_variable_that_is_not_a_declared_table_raises(
+            self, tmp_path, tables):
+        """D-007: the kernel's shape is exactly vocabulary-shaped (8 -> 12 on
+        the "vocabulary" axis), yet it is not a declared table, so it is a
+        mismatch. Before D-007 the shape alone made it a fresh table."""
+        src = _build_classifier()
+        ckpt = _save(src, tmp_path)
+        tgt = _build_classifier(input_dim=12)
+
+        with pytest.raises(ValueError, match="stem_dense"):
+            load_weights_from_checkpoint(
+                tgt, ckpt, strict=True, allow_unloaded=(),
+                vocab_change=VocabChange(("stem_",), _INPUT_DIM, 12, tables))
+
+    def test_a_table_is_matched_by_whole_path_components(self):
+        change = VocabChange(("e",), 64, 96, ("word_embeddings/embeddings",))
+        shape_from, shape_to = (64, 8), (96, 8)
+        assert change.is_vocab_table(
+            "bert/embeddings/word_embeddings/embeddings", shape_from, shape_to)
+        assert change.is_vocab_table(
+            "word_embeddings/embeddings", shape_from, shape_to)
+        # a suffix of the string, not of the path components
+        assert not change.is_vocab_table(
+            "bert/embeddings/my_word_embeddings/embeddings", shape_from, shape_to)
+        # another role, even with the table's exact shapes
+        assert not change.is_vocab_table(
+            "bert/embeddings/position_embeddings/embeddings", shape_from, shape_to)
+
+    def test_a_declared_table_still_needs_a_vocabulary_shaped_difference(self):
+        change = VocabChange(("e",), 64, 96, ("word_embeddings/embeddings",))
+        path = "word_embeddings/embeddings"
+        assert not change.is_vocab_table(path, (64, 8), (64, 8))
+        assert not change.is_vocab_table(path, (64, 8), (96, 16))
+        assert not change.is_vocab_table(path, (32, 8), (96, 8))
 
 
 def _wrapped(inner, extra_layer: bool = False):
@@ -557,15 +595,17 @@ class TestCheckpointConfig:
         ckpt = _save(model, tmp_path)
         # A Sequential config records no vocab_size: an unknown vocabulary is
         # not a change, so nothing is exempted.
-        assert vocab_change(ckpt, 64, ("embedding",)) is None
+        assert vocab_change(ckpt, 64, ("embedding",), ("embedding/embeddings",)) is None
 
     def test_a_vocab_change_follows_the_recorded_vocab_size(self, tmp_path, monkeypatch):
         import dl_techniques.utils.weight_transfer as wt
         monkeypatch.setattr(
             wt, "read_checkpoint_config", lambda p: {"config": {"vocab_size": 64}})
-        assert wt.vocab_change("x.keras", 64, ("embedding",)) is None
-        assert wt.vocab_change("x.keras", 96, ("embedding",)) == VocabChange(
-            ("embedding",), 64, 96)
+        assert wt.vocab_change(
+            "x.keras", 64, ("embedding",), ("embedding/embeddings",)) is None
+        assert wt.vocab_change(
+            "x.keras", 96, ("embedding",), ("embedding/embeddings",)
+        ) == VocabChange(("embedding",), 64, 96, ("embedding/embeddings",))
 
 
 # ---------------------------------------------------------------------------

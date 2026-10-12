@@ -123,18 +123,38 @@ class VocabChange(NamedTuple):
     :ivar layers: Layer-name prefixes of the layers that hold vocabulary tables.
     :ivar checkpoint_size: The checkpoint's ``vocab_size``.
     :ivar model_size: The receiving model's ``vocab_size``.
+    :ivar tables: Variable-path suffixes naming the vocabulary tables (token
+        embedding, untied output kernel/bias), for example
+        ``("word_embeddings/embeddings", "lm_head/kernel")``. A suffix matches
+        whole path components (``embeddings`` does not match
+        ``word_embeddings``). ``()`` declares no vocabulary table: every shape
+        difference is then a mismatch, so a checkpoint of another vocabulary
+        raises instead of loading.
     """
 
     layers: Tuple[str, ...]
     checkpoint_size: int
     model_size: int
+    tables: Tuple[str, ...]
+
+    def is_table(self, path: str) -> bool:
+        """True when a variable path ends with a declared table suffix."""
+        return any(path == t or path.endswith("/" + t) for t in self.tables)
 
     def is_vocab_table(
-        self, source_shape: Tuple[int, ...], target_shape: Tuple[int, ...]
+        self,
+        path: str,
+        source_shape: Tuple[int, ...],
+        target_shape: Tuple[int, ...],
     ) -> bool:
-        """True when two variable shapes differ only by the vocabulary size."""
+        """True for a declared table whose shape differs only by the vocabulary."""
+        # DECISION plan-2026-10-11T170958-dc4d2202/D-007: the ROLE (the path) gates,
+        # and the shape only confirms. Do NOT go back to the shape test alone: a
+        # position table resized from exactly the old vocab size then passes as
+        # "vocabulary-shaped" and stays random with a warning. See decisions.md.
         return (
-            len(source_shape) == len(target_shape)
+            self.is_table(path)
+            and len(source_shape) == len(target_shape)
             and source_shape != target_shape
             and all(
                 s == t or (s == self.checkpoint_size and t == self.model_size)
@@ -262,17 +282,21 @@ def _vocab_layer_plan(
     """Per-variable plan for a vocabulary layer whose shapes differ.
 
     Each entry is the source value to copy, or ``None`` for a vocabulary table
-    that keeps the target's init. ``None`` overall when any variable neither
-    fits nor differs only by the vocabulary size (or the counts differ).
+    that keeps the target's init. A variable is a vocabulary table only when
+    its path ends with one of ``change.tables`` AND its shape differs only by
+    the vocabulary size. ``None`` overall when any variable neither fits nor is
+    such a table (or the counts differ).
     """
-    tgt_shapes = _layer_weight_shapes(tgt_layer)
-    if len(tgt_shapes) != len(src_weights):
+    variables = tgt_layer.weights
+    if len(variables) != len(src_weights):
         return None
     plan: List[Optional[np.ndarray]] = []
-    for tgt_shape, value in zip(tgt_shapes, src_weights):
-        if tuple(value.shape) == tgt_shape:
+    for variable, value in zip(variables, src_weights):
+        if tuple(value.shape) == tuple(variable.shape):
             plan.append(value)
-        elif change.is_vocab_table(tuple(value.shape), tgt_shape):
+        elif change.is_vocab_table(
+            variable.path, tuple(value.shape), tuple(variable.shape)
+        ):
             plan.append(None)
         else:
             return None
@@ -345,10 +369,11 @@ def load_weights_from_checkpoint(
     :param vocab_change: ``None`` (default), or the :class:`VocabChange` of a
         checkpoint with another vocabulary. A layer named by its ``layers``
         whose shapes differ is then transferred variable by variable: each
-        variable of equal shape is copied, a variable whose shape differs only
-        by the vocabulary size keeps the target's init (listed in
+        variable of equal shape is copied, a declared table whose shape differs
+        only by the vocabulary size keeps the target's init (listed in
         ``report.vocab_fresh`` and logged), and any other difference makes the
-        whole layer a shape mismatch.
+        whole layer a shape mismatch. A variable counts as a vocabulary table
+        only when its path ends with one of ``vocab_change.tables``.
     :returns: :class:`TransferReport` describing what happened.
     :raises FileNotFoundError: *ckpt_path* does not exist.
     :raises ValueError: *ckpt_path* does not end in ``.keras``; all source
@@ -525,7 +550,10 @@ def read_checkpoint_config(ckpt_path: str) -> Dict[str, Any]:
 
 
 def vocab_change(
-    ckpt_path: str, vocab_size: int, vocab_layers: Sequence[str]
+    ckpt_path: str,
+    vocab_size: int,
+    vocab_layers: Sequence[str],
+    tables: Sequence[str],
 ) -> Optional[VocabChange]:
     """The checkpoint's vocabulary change, if it records one.
 
@@ -537,6 +565,8 @@ def vocab_change(
     :param vocab_size: The receiving model's vocabulary size.
     :param vocab_layers: Layer-name prefixes of the layers holding vocabulary
         tables.
+    :param tables: Variable-path suffixes of the vocabulary tables themselves
+        (required: there is no shape-only default); see :class:`VocabChange`.
     :returns: A :class:`VocabChange` when the checkpoint records a
         ``vocab_size`` other than *vocab_size*; ``None`` when it records the
         same one or none (an unknown vocabulary is not a change, so nothing is
@@ -545,7 +575,9 @@ def vocab_change(
     recorded = (read_checkpoint_config(ckpt_path).get("config") or {}).get("vocab_size")
     if recorded is None or recorded == vocab_size:
         return None
-    return VocabChange(tuple(vocab_layers), int(recorded), int(vocab_size))
+    return VocabChange(
+        tuple(vocab_layers), int(recorded), int(vocab_size), tuple(tables)
+    )
 
 
 def load_backbone_from_checkpoint(
@@ -553,6 +585,7 @@ def load_backbone_from_checkpoint(
     ckpt_path: str,
     head_prefixes: Sequence[str],
     vocab_layers: Sequence[str],
+    tables: Sequence[str],
     tops: Sequence[str] = (),
     allow_vocab_change: bool = True,
 ) -> TransferReport:
@@ -568,6 +601,11 @@ def load_backbone_from_checkpoint(
     :param head_prefixes: Prefixes of the task head, never copied (and a
         target head keeps its init).
     :param vocab_layers: Prefixes of the layers holding vocabulary tables.
+    :param tables: Variable-path suffixes of the vocabulary tables themselves
+        (token embedding, untied output kernel/bias), required. Only these
+        variables may keep their init on a vocabulary change; any other shape
+        difference in a vocabulary layer, for example a resized position
+        table, raises. ``()`` makes every vocabulary change raise.
     :param tops: Prefixes of a headless model's output layer (an untied
         ``lm_head``), absent from a headed model.
     :param allow_vocab_change: ``False`` refuses a checkpoint of another
@@ -579,14 +617,17 @@ def load_backbone_from_checkpoint(
 
     The rule: every backbone layer loads, and every checkpoint backbone layer
     has a home (a deeper checkpoint is refused, never truncated). On a
-    vocabulary change, only the variables shaped by the vocabulary keep their
-    init; every other variable of those layers must load. A top may be left
+    vocabulary change, only the declared ``tables``, shaped by the vocabulary, keep
+    their init; every other variable of those layers must load (a resized
+    position table raises). A top may be left
     out only when one side carries a task head instead (the checkpoint's
     config or the target says ``include_top``) or the vocabulary changed, so
     a headless tied checkpoint does not fill an untied ``lm_head`` with
     nothing, and an untied ``lm_head`` is not dropped into a tied model.
     """
-    change = vocab_change(ckpt_path, target.vocab_size, (*vocab_layers, *tops))
+    change = vocab_change(
+        ckpt_path, target.vocab_size, (*vocab_layers, *tops), tables
+    )
     if change is not None and not allow_vocab_change:
         raise ValueError(
             f"Checkpoint {ckpt_path!r} has another vocab_size "

@@ -5,9 +5,10 @@ plan-2026-10-11T004932-b83935e1 D-020 (encoders), D-024 (decoders) and D-031
 restores EVERY backbone layer from a local checkpoint, and finds a home for
 every checkpoint backbone layer, or raises. The checkpoint's ``task_head`` is
 never copied. On a vocabulary change (the checkpoint's own ``vocab_size``
-differs from the model's) only the variables shaped by the vocabulary keep
-their fresh init; every other variable, the position table living in the same
-layer included, loads or the call raises. An untied ``lm_head`` is a top: it
+differs from the model's) only the DECLARED vocabulary tables (identified by
+what they are, a variable-path suffix, and confirmed by shape) keep their
+fresh init; every other variable, the position table living in the same layer
+included, loads or the call raises (plan-2026-10-11T170958-dc4d2202 D-007). An untied ``lm_head`` is a top: it
 may be left out only when one side carries a task head instead, or the
 vocabulary changed.
 
@@ -245,6 +246,23 @@ def test_a_vocabulary_change_does_not_excuse_a_position_change(
     with pytest.raises(ValueError, match=_MISFIT):
         _build(model, head, pretrained=path, vocab_size=_OTHER_VOCAB,
                **_MODELS[model].position)
+
+
+@pytest.mark.parametrize("model", _POSITIONED)
+def test_a_resized_position_table_that_looks_like_a_vocabulary_raises(
+        model, head, tmp_path):
+    """D-007: a table is a vocabulary table by what it IS, not by its shape.
+
+    The position length goes from exactly the old vocabulary size to exactly
+    the new one (64 -> 96, as the vocabulary does), the one coincidence the
+    shape test cannot tell from a token table. Before D-007 BERT, DistilBERT,
+    FNet and GPT2 returned normally with a RANDOM position table and a warning.
+    """
+    key = next(iter(_MODELS[model].position))
+    _, path = _checkpoint(model, head, tmp_path, **{key: _VOCAB})
+    with pytest.raises(ValueError, match=_MISFIT):
+        _build(model, head, pretrained=path, vocab_size=_OTHER_VOCAB,
+               **{key: _OTHER_VOCAB})
 
 
 def test_the_same_checkpoint_restores_every_layer(model, head, tmp_path):

@@ -677,6 +677,7 @@ def load_local_checkpoint(model: keras.Model, path: str) -> None:
         path,
         head_prefixes=(TASK_HEAD_NAME,),
         vocab_layers=("embedding",),
+        tables=("embedding/embeddings",),
     )
 
 

@@ -638,6 +638,11 @@ class TreeTransformer(keras.Model):
             weights_path,
             head_prefixes=head_prefixes,
             vocab_layers=("embedding",),
+            tables=(
+                "embedding/embeddings",
+                "lm_head_projection/kernel",
+                "lm_head_projection/bias",
+            ),
             tops=("lm_head",),
         )
 
