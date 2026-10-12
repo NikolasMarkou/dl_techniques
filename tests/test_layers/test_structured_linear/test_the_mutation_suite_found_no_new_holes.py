@@ -14,19 +14,20 @@ defect, runs the suites, and restores the file from its original bytes.
 
 What was found, and what it means for this suite:
 
-* **15 of 16 mutations detected** on the run recorded here. The sixteenth was
-  ``l2_normalize-drops-the-zero-guard``, which was caught by nothing -- because
-  the guard it removed turned out to be DEAD CODE. ``peak == 0`` implies ``x``
+* **13 of 13 mutations detected** on the run recorded here. An earlier run had
+  16 entries including three targeting ``rigid_simplex_layer.py``; that layer
+  was deleted, so the table is shorter. The sixteenth original entry,
+  ``l2_normalize-drops-the-zero-guard``, was caught by nothing -- because the
+  guard it removed turned out to be DEAD CODE. ``peak == 0`` implies ``x``
   is all zeros, so the pre-scaled vector is already ``0``, the norm is
   ``sqrt(eps)``, and the correct answer falls out of the divisor substitution
   alone. The trailing ``ops.where`` was deleted and the mutation re-pointed at
   the divisor substitution that actually does the work.
 
-* **Several mutations are caught by only one or two tests**, which is worth
-  knowing rather than hiding: dropping the GELU, dropping the range constraint
-  on the global scale, and dropping the tiled shim are each caught by exactly
-  one. Those three guards are single-threaded, and deleting any one of them
-  costs that one test rather than a cluster.
+* **One mutation is caught by exactly one test**: dropping the GELU. That guard
+  is single-threaded, and deleting it costs that one test rather than a
+  cluster. (An earlier run had two more single-threaded guards, both on the
+  deleted ``RigidSimplexLayer``; they left with it.)
 
 This test asserts the SHAPE of the result, not the full table: that every
 mutation snippet still exists in the tree (a stale snippet silently applies
@@ -52,9 +53,9 @@ class TestTheHarnessItself:
     """Guards the instrument, since a broken instrument measures nothing."""
 
     def test_the_mutation_table_is_not_empty(self):
-        """Anti-vacuity: if the table failed to import, every check below would
+        """Anti-vacuity: if the table failed to import, everything below would
         pass over an empty subject set."""
-        assert len(mutation_audit.MUTATIONS) >= 16, (
+        assert len(mutation_audit.MUTATIONS) >= 13, (
             f"only {len(mutation_audit.MUTATIONS)} mutations are defined; the "
             f"import may have failed and the checks below would be vacuous"
         )
@@ -97,8 +98,6 @@ class TestTheRecordedResult:
     #: zero is visible in the diff of this file rather than only in a log.
     SINGLE_THREADED = {
         'multihead-drops-the-gelu': 1,
-        'rigid-simplex-ignores-the-scale-constraint': 1,
-        'rigid-simplex-drops-the-tiling-shim': 1,
     }
 
     def test_the_dead_guard_the_audit_found_stays_dead(self):

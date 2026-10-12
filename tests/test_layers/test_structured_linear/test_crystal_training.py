@@ -1,9 +1,9 @@
 """Training integration for the crystal-structured layers.
 
 Every other suite in this package checks forward passes, shapes, gradients and
-serialization. None of them ever calls ``fit()`` on a layer other than
-``RigidSimplexLayer`` -- measured before this module existed: ``fit()`` call
-count of 0 in the ``CrystalLayer``, ``HierarchicalCrystalLayer`` and
+serialization. None of them ever called ``fit()`` on the crystal layers --
+measured before this module existed: ``fit()`` call count of 0 in the
+``CrystalLayer``, ``HierarchicalCrystalLayer`` and
 ``CrystalMultiHeadProjection`` suites.
 
 That gap matters for two reasons the forward-pass tests cannot cover:
@@ -20,7 +20,6 @@ That gap matters for two reasons the forward-pass tests cannot cover:
 """
 
 import numpy as np
-import pytest
 import keras
 from keras import ops
 

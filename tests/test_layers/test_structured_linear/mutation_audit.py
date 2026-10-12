@@ -41,7 +41,6 @@ _ALLOWED = (
     os.path.join(_PACKAGE, 'crystal_layer.py'),
     os.path.join(_PACKAGE, 'hierarchical_crystal_layer.py'),
     os.path.join(_PACKAGE, 'crystal_multihead_projection.py'),
-    os.path.join(_PACKAGE, 'rigid_simplex_layer.py'),
     os.path.join(_UTILS, 'tensors.py'),
 )
 
@@ -124,24 +123,6 @@ MUTATIONS = {
         "        if output_dim is not None and output_dim <= 0:",
         "        if output_dim is not None and output_dim > 0:",
         'invert the output_dim validation condition',
-    ),
-    'rigid-simplex-ignores-the-scale-constraint': (
-        os.path.join(_PACKAGE, 'rigid_simplex_layer.py'),
-        "            constraint=ValueRangeConstraint(min_value=self.scale_min, max_value=self.scale_max),",
-        "            constraint=None,",
-        'drop the range constraint on the global scale',
-    ),
-    'rigid-simplex-gates-the-loss-inverted': (
-        os.path.join(_PACKAGE, 'rigid_simplex_layer.py'),
-        "        if training is not False and self.orthogonality_penalty > 0.0:",
-        "        if training is False and self.orthogonality_penalty > 0.0:",
-        'add the penalty only at inference, inverting the training gate',
-    ),
-    'rigid-simplex-drops-the-tiling-shim': (
-        os.path.join(_PACKAGE, 'rigid_simplex_layer.py'),
-        "            config['frame'] = 'tiled'",
-        "            config['frame'] = 'crystal'",
-        'reconstruct an old config with the new default instead of tiled',
     ),
 }
 

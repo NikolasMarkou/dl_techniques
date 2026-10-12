@@ -3,7 +3,42 @@
 Checkpoint-affecting changes, recorded here because this file ships with the
 code. A note in an untracked planning directory does not reach the next reader.
 
-## `RigidSimplexLayer` — the `frame` argument (2026-10-11)
+## DELETED: `RigidSimplexLayer` (2026-10-12)
+
+The layer and its entire suite are gone: `structured_linear/rigid_simplex_layer.py`
+and `tests/test_layers/test_structured_linear/test_rigid_simplex_layer.py`. The
+MIGRATION sections below marked `[DELETED LAYER]` describe its history and are
+kept so the removal, and the reasons for it, stay on the record.
+
+**Why.** The layer shipped a trainable square rotation `R` in front of a frozen
+simplex frame `W`, with an orthogonality penalty meant to keep `R` close to
+`O(N)`:
+
+* The rotation **destroyed the property the layer was named for**. The frozen
+  `W` kept equiangularity at every checkpoint (off-diagonal spread `0.000000`),
+  but the map the layer actually computes is `x @ (R·W)` -- and spread grew to
+  `0.1063` after 8 epochs and `0.2222` after 40. A trained `RigidSimplexLayer`
+  no longer projected onto a simplex frame; it was a general linear projection
+  that had started from one.
+* The Saxe et al. citation on orthogonal-init stability was **contradicted by
+  measurement**. Controlled properly (identical head weights, identical data,
+  five seeds, only `R` differing), non-orthogonal Glorot init beat orthogonal
+  at every penalty value, including zero: 0.0027/0.1760/0.6931 against the
+  orthogonal arm's 0.2031/0.1760 and identity's stuck 0.6931. The
+  `orthogonality_penalty` knob made training worse monotonically, and the
+  penalty did not protect the simplex property at any value from `0.0` to
+  `100.0` -- measured spread `0.3153` down to only `0.1971`.
+* The degree-1 `x -> (x@R)@W` linear map is **genuinely distinct** from
+  `CrystalLayer`'s degree-0 `x/||x||` cosine map -- no weights make one the
+  other -- but that linearity earns no advantage over a plain `Dense` in the
+  measurement above, and `trainable_crystal=True` on the surviving
+  `CrystalLayer` subsumes the frame-rotation expressivity for the cosine case.
+
+No model, trainer or application consumed the layer, so the deletion has zero
+blast radius. `tiled_simplex_frame` survives in `crystal_frames.py` because its
+test asserts the degenerate construction, not because anything uses it.
+
+## [DELETED LAYER] `RigidSimplexLayer` — the `frame` argument (2026-10-11)
 
 `frame` was added after the layer shipped. `get_config()` always emits it.
 
@@ -35,7 +70,7 @@ mutates the caller's dict, and no longer re-deserializes
 `rotation_initializer` — `__init__` resolves it through
 `keras.initializers.get`, which accepts both a string and a serialized dict.
 
-## `RigidSimplexLayer` — the orthogonality penalty is gated on `training` (2026-10-11)
+## [DELETED LAYER] `RigidSimplexLayer` — the orthogonality penalty is gated on `training` (2026-10-11)
 
 The penalty was previously added on **every** call, so `layer.losses` was
 non-empty after a `training=False` forward and an inference pass carried a term
