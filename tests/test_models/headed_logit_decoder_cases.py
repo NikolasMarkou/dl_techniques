@@ -244,6 +244,10 @@ class HeadedLogitDecoderCases:
         """Changing the last real token of row 1 changes only row 1's output."""
         model = self.model(include_top=True, task_config=CLF)
         batch = head_batch()
+        model(batch, training=False)
+        # Initial weights can make the head's answer nearly input-independent
+        # (H-Net's residual writes start at 0.02): randomize, so the edit is visible.
+        randomized(model, 5)
         base = to_np(model(batch, training=False))
         edited = {k: v.copy() for k, v in batch.items()}
         edited["input_ids"][1, 4] = (edited["input_ids"][1, 4] % 63) + 1

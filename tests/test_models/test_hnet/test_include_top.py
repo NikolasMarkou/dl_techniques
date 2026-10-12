@@ -218,6 +218,8 @@ class TestHNetIncludeTop(HeadedLogitDecoderCases):
         the same ids without it give another answer for that row only."""
         model = tiny(include_top=True, task_config=CLF)
         batch = head_batch()
+        model(batch, training=False)
+        randomized(model, 6)  # initial weights make the head's answer nearly constant
         masked = to_np(model(batch, training=False))
         unmasked = to_np(model(batch["input_ids"], training=False))
         np.testing.assert_allclose(masked[0], unmasked[0], atol=1e-5, rtol=0)
