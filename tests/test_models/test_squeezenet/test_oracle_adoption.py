@@ -91,7 +91,8 @@ V2_SHAPE = (40, 40, 1)
 BUILD_SEED = 0
 
 #: Measured 2026-08-21, one Adam step, ramp loss.
-GF_WEIGHTS = {"v1": 52, "v2": 36}
+# UPDATED 2026-10-12: ClassificationHead with DenseBlocks adds more weights
+GF_WEIGHTS = {"v1": 60, "v2": 44}
 
 
 def ramp_loss(outputs: Any) -> Any:

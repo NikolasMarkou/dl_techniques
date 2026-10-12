@@ -149,12 +149,15 @@ class TestSqueezeNoduleNetV2:
         previous num_classes == 2 -> sigmoid special case emitted two INDEPENDENT
         scores that did not sum to 1, disagreeing with SqueezeNetV1 and with this
         package's own categorical_crossentropy examples.
+
+        With the new ClassificationHead architecture, the head is a ClassificationHead
+        object that internally applies softmax.
         """
         model = SqueezeNoduleNetV2(num_classes=num_classes_binary, input_shape=sample_data_2d.shape[1:])
 
-        # The last layer should be an Activation layer with softmax
-        assert isinstance(model.head_layers[-1], keras.layers.Activation)
-        assert model.head_layers[-1].activation.__name__ == 'softmax'
+        # The model now uses ClassificationHead which applies softmax internally
+        assert hasattr(model, 'classification_head')
+        assert hasattr(model.classification_head, 'classifier')
 
         outputs = model(sample_data_2d)
         assert outputs.shape == (sample_data_2d.shape[0], num_classes_binary)
