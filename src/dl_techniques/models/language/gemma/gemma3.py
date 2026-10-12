@@ -69,7 +69,11 @@ from typing import Any, Dict, List, Optional, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.heads.nlp.model_head import task_model_name
+from dl_techniques.layers.heads.nlp.model_head import (
+    head_output_shape,
+    ids_shape_of,
+    task_model_name,
+)
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
     NLPTaskType,
@@ -500,6 +504,27 @@ class Gemma3(keras.Model):
             return
         materialize_sublayers(self, input_shape)
         super().build(input_shape)
+
+    def compute_output_shape(self, input_shape: Any) -> Any:
+        """Compute the shape of what ``call`` returns.
+
+        Keras builds a symbolic call of this model from this method, never
+        from ``call``, so it must report what ``call`` returns in both modes.
+        It describes the default ``return_dict=False`` form.
+
+        :param input_shape: Shape of ``input_ids`` ``(batch, seq_len)``, or a
+            dict holding it under ``'input_ids'``.
+        :type input_shape: Any
+        :return: The LM logits shape ``(batch, seq_len, vocab_size)``. With a
+            head, the head's output shapes after the reduction ``call`` applies:
+            one shape, or a mapping of two or more.
+        :rtype: Any
+        """
+        ids_shape = ids_shape_of(input_shape)
+        if self.include_top:
+            return head_output_shape(
+                self.task_head, ids_shape, self.hidden_size)
+        return (*ids_shape, self.vocab_size)
 
     def call(
         self,

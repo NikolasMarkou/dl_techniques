@@ -18,6 +18,8 @@ Functions
   dict that :func:`build_model_task_head` accepts back.
 * :func:`finalize_head_outputs` -- drop the outputs derived from ``logits`` and
   unwrap a single-key dict to a bare tensor.
+* :func:`head_output_shape` and :func:`ids_shape_of` -- the shapes a headed
+  model returns, for its ``compute_output_shape``.
 * :func:`head_attention_mask` -- the mask a head pools under: the caller's
   ``attention_mask``, else ``input_ids != pad_token_id``, else all ones, in a
   given dtype.
@@ -299,6 +301,60 @@ def finalize_head_outputs(
     if len(outputs) == 1:
         return next(iter(outputs.values()))
     return outputs
+
+
+def head_output_shape(
+        task_head: keras.layers.Layer,
+        input_shape: Any,
+        hidden_size: int,
+) -> Union[tuple, Dict[str, tuple]]:
+    """
+    Return the shape(s) a model with a task head returns, from its input shape.
+
+    Interface contract (shared by the ``compute_output_shape`` of the language
+    models that own a head): the headed counterpart of what ``call`` does with
+    :func:`finalize_head_outputs`, applied to shapes. Keras builds a symbolic
+    call of a model from ``compute_output_shape``, never from ``call``, so the
+    two must describe the same structure.
+
+    :param task_head: The model's head (``TASK_HEAD_NAME``).
+    :type task_head: keras.layers.Layer
+    :param input_shape: Shape of ``input_ids`` ``(batch, seq_len)``, or a dict
+        holding it under ``'input_ids'``, or a list whose first entry is it.
+    :type input_shape: Any
+    :param hidden_size: Width of the hidden states the head pools.
+    :type hidden_size: int
+    :return: One shape (a tuple), or a dict of two or more shapes (question
+        answering), as ``finalize_head_outputs`` would give for tensors.
+    :rtype: Union[tuple, Dict[str, tuple]]
+    :raises ValueError: if the head cannot report its output shape.
+    """
+    ids_shape = ids_shape_of(input_shape)
+    return finalize_head_outputs(task_head.compute_output_shape({
+        "hidden_states": (*ids_shape, hidden_size),
+        "attention_mask": ids_shape,
+    }))
+
+
+def ids_shape_of(input_shape: Any) -> tuple:
+    """
+    Return the ``(batch, seq_len)`` shape out of the forms a model is given.
+
+    :param input_shape: A shape, a dict holding it under ``'input_ids'`` (the
+        other entries are ignored), or a list of shapes whose first is the ids.
+    :type input_shape: Any
+    :return: The ids shape as a tuple.
+    :rtype: tuple
+    """
+    if isinstance(input_shape, dict):
+        input_shape = input_shape["input_ids"]
+    if (
+            isinstance(input_shape, (list, tuple))
+            and input_shape
+            and isinstance(input_shape[0], (list, tuple))
+    ):
+        input_shape = input_shape[0]
+    return tuple(input_shape)
 
 
 def head_attention_mask(

@@ -24,6 +24,10 @@ import keras
 import numpy as np
 import pytest
 
+from dl_techniques.layers.heads.nlp.model_head import (
+    head_output_shape,
+    ids_shape_of,
+)
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
     NLPTaskType,
@@ -284,6 +288,48 @@ class TestFinalizeHeadOutputs:
             _head_inputs(), np.array([0, 2]), verbose=0, return_dict=True
         )
         assert np.isfinite(result["loss"])
+
+
+# ---------------------------------------------------------------------
+# the shapes a headed model returns
+# ---------------------------------------------------------------------
+
+
+def _structure_of_shapes(outputs):
+    if isinstance(outputs, dict):
+        return {key: tuple(value.shape) for key, value in outputs.items()}
+    return tuple(outputs.shape)
+
+
+class TestHeadOutputShape:
+
+    @pytest.mark.parametrize(
+        "task_type, extra, raw_keys, expected",
+        _FINALIZE_CASES,
+        ids=[case[0].name for case in _FINALIZE_CASES],
+    )
+    def test_it_reports_the_shapes_finalized_outputs_have(
+            self, task_type, extra, raw_keys, expected
+    ) -> None:
+        cfg = NLPTaskConfig(name="t", task_type=task_type, **extra)
+        head = build_model_task_head(cfg, input_dim=D)
+        actual = _structure_of_shapes(
+            finalize_head_outputs(head(_head_inputs(), training=False)))
+        reported = head_output_shape(head, (B, S), D)
+        if isinstance(reported, dict):
+            reported = {key: tuple(value) for key, value in reported.items()}
+        else:
+            reported = tuple(reported)
+        assert reported == actual
+
+    @pytest.mark.parametrize("form", ["tuple", "dict", "list of shapes"])
+    def test_the_ids_shape_is_accepted_in_every_form_a_model_gets(self, form) -> None:
+        shape = {"tuple": (B, S),
+                 "dict": {"input_ids": (B, S), "attention_mask": (B, S)},
+                 "list of shapes": [(B, S), (B, S)]}[form]
+        assert ids_shape_of(shape) == (B, S)
+        head = build_model_task_head(_classification_config(), input_dim=D)
+        assert head_output_shape(head, shape, D) == (B, 3)
 
 
 # ---------------------------------------------------------------------

@@ -42,6 +42,10 @@ from typing import Optional, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.ssm.mamba2 import Mamba2ResidualBlock
+from dl_techniques.layers.heads.nlp.model_head import (
+    head_output_shape,
+    ids_shape_of,
+)
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
     build_model_task_head,
@@ -348,6 +352,26 @@ class Mamba2(keras.Model):
             return
         materialize_sublayers(self, input_shape)
         super().build(input_shape)
+
+    def compute_output_shape(self, input_shape: Any) -> Any:
+        """Compute the shapes of what ``call`` returns.
+
+        Keras builds a symbolic call of this model from this method, never
+        from ``call``, so it must report what ``call`` returns in both modes.
+
+        :param input_shape: Shape of ``input_ids`` ``(batch, seq_len)``, or a
+            dict holding it under ``'input_ids'``.
+        :type input_shape: Any
+        :return: Headless, a dictionary with ``last_hidden_state`` (the only
+            key ``call`` returns). With a head, the head's output shapes after the
+            reduction ``call`` applies: one shape, or a mapping of two or more.
+        :rtype: Any
+        """
+        ids_shape = ids_shape_of(input_shape)
+        if self.include_top:
+            return head_output_shape(
+                self.task_head, ids_shape, self.d_model)
+        return {"last_hidden_state": (*ids_shape, self.d_model)}
 
     def call(
             self,

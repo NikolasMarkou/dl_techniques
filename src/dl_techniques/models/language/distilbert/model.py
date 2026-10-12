@@ -58,7 +58,11 @@ from dl_techniques.layers.heads.nlp import (
     task_config_to_dict,
     validate_task_head_knobs,
 )
-from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
+from dl_techniques.layers.heads.nlp.model_head import (
+    TASK_HEAD_NAME,
+    head_output_shape,
+    ids_shape_of,
+)
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.sequence_length_guard import check_sequence_length
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -573,6 +577,29 @@ class DistilBERT(keras.Model):
             return
         materialize_sublayers(self, input_shape)
         super().build(input_shape)
+
+    def compute_output_shape(self, input_shape: Any) -> Any:
+        """Compute the shapes of what ``call`` returns.
+
+        Keras builds a symbolic call of this model from this method, never
+        from ``call``, so it must report what ``call`` returns in both modes.
+
+        :param input_shape: Shape of ``input_ids`` ``(batch, seq_len)``, or a
+            dict holding it under ``'input_ids'``.
+        :type input_shape: Any
+        :return: Headless, a dictionary with ``last_hidden_state`` and
+            ``attention_mask``. With a head, the head's output shapes after the
+            reduction ``call`` applies: one shape, or a mapping of two or more.
+        :rtype: Any
+        """
+        ids_shape = ids_shape_of(input_shape)
+        if self.include_top:
+            return head_output_shape(
+                self.task_head, ids_shape, self.hidden_size)
+        return {
+            "last_hidden_state": (*ids_shape, self.hidden_size),
+            "attention_mask": ids_shape,
+        }
 
     def call(
         self,
