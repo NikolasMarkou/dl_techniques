@@ -49,17 +49,15 @@ _ALLOWED = (
 MUTATIONS = {
     'l2_normalize-drops-the-rescale': (
         os.path.join(_UTILS, 'tensors.py'),
-        "    peak = ops.max(ops.abs(x), axis=axis, keepdims=True)\n"
-        "    nonzero = peak > 0.0\n",
-        "    peak = ops.maximum(ops.abs(x), 1.0)\n"
-        "    nonzero = peak > 0.0\n",
+        "    peak = ops.max(ops.abs(x), axis=axis, keepdims=True)\n",
+        "    peak = ops.maximum(ops.abs(x), 1.0)\n",
         'rescale by a constant instead of the vector peak, which is a no-op',
     ),
     'l2_normalize-drops-the-zero-guard': (
         os.path.join(_UTILS, 'tensors.py'),
-        "    return ops.where(nonzero, normalized, ops.zeros_like(normalized))",
-        "    return normalized",
-        'let an all-zero row divide into the norm unguarded',
+        "    scaled = x / ops.where(peak > 0.0, peak, ops.ones_like(peak))\n",
+        "    scaled = x / peak\n",
+        'remove the zero-divisor substitution, so an all-zero row divides 0/0',
     ),
     'crystal-frame-drops-the-search': (
         os.path.join(_PACKAGE, 'crystal_frames.py'),
@@ -81,12 +79,8 @@ MUTATIONS = {
     ),
     'crystal-layer-transposes-the-weight-axis': (
         os.path.join(_PACKAGE, 'crystal_layer.py'),
-        "        normalized_weights = l2_normalize(\n"
-        "            self.crystal_weights, axis=0, eps=self.eps\n"
-        "        )",
-        "        normalized_weights = l2_normalize(\n"
-        "            self.crystal_weights, axis=-1, eps=self.eps\n"
-        "        )",
+        "            self.crystal_weights, axis=0, eps=self.eps\n",
+        "            self.crystal_weights, axis=-1, eps=self.eps\n",
         'normalize the frame along the wrong axis',
     ),
     'crystal-layer-drops-the-scale': (
@@ -115,8 +109,8 @@ MUTATIONS = {
     ),
     'multihead-drops-the-head-index': (
         os.path.join(_PACKAGE, 'crystal_multihead_projection.py'),
-        "            '...hd,hdv->...hv', normalized_heads, normalized_prisms",
-        "            '...d,hdv->...hv', normalized_heads, normalized_prisms",
+        "            '...hd,hdv->...hv', normalized_heads, normalized_prisms\n",
+        "            '...d,hdv->...hv', normalized_heads, normalized_prisms\n",
         'drop h from the einsum subscript, mixing every head together',
     ),
     'multihead-drops-the-gelu': (
@@ -272,6 +266,30 @@ def run_mutation(
     return MutationResult(name, caught, total, True)
 
 
+def check_snippets_current() -> list:
+    """Return the names of every mutation whose snippet no longer matches.
+
+    A stale snippet is the worst failure mode this harness has: the mutation
+    reports "NOT APPLIED", which a reader can dismiss, but if that is skimmed
+    the audit silently covers less than it appears to. Three snippets went stale
+    during the first pass -- editing the source under the harness invalidated
+    them -- so the check is run and its result printed rather than left implicit.
+    """
+    stale = []
+    for name, (relative_path, original, _, _) in MUTATIONS.items():
+        path = os.path.join(_REPO_ROOT, relative_path)
+        try:
+            with open(path, encoding='utf-8') as handle:
+                source = handle.read()
+        except OSError:
+            stale.append(name)
+            continue
+        if original not in source:
+            stale.append(name)
+
+    return stale
+
+
 def run_all(suites) -> list:
     """Run every mutation in :data:`MUTATIONS` and return the results."""
     return [run_mutation(name, suites) for name in MUTATIONS]
@@ -283,6 +301,13 @@ if __name__ == '__main__':
         'tests/test_utils/test_l2_normalize.py',
     ]
 
+    stale = check_snippets_current()
+    if stale:
+        print('!! STALE MUTATION SNIPPETS -- these would silently not apply:')
+        for name in stale:
+            print(f'   {name}')
+        print()
+
     results = run_all(SUITES)
 
     print('=' * 78)
@@ -291,7 +316,11 @@ if __name__ == '__main__':
     for result in results:
         print(f'  {result}')
     survivors = [r for r in results if r.applied and not r.detected]
+    unapplied = [r for r in results if not r.applied]
     print('-' * 78)
-    print(f'{len(results)} mutations, {len(survivors)} undetected')
+    print(f'{len(results)} mutations, {len(survivors)} undetected, '
+          f'{len(unapplied)} failed to apply')
     for result in survivors:
         print(f'  HOLE: {result.name}')
+    for result in unapplied:
+        print(f'  NOT APPLIED: {result.name}')

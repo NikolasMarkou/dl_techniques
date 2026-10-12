@@ -261,7 +261,7 @@ def crystal_frame(
     stacked = None
 
     for index in range(num_simplexes):
-        if True:
+        if index == 0 or candidate_trials < 2 or stacked is None:
             # Nothing to repel from yet, or the caller declined a search.
             rotation = haar_orthogonal(dimensions, rng)
             best = simplex @ rotation

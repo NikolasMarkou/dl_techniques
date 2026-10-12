@@ -137,6 +137,46 @@ has 2 distinct columns and one repeat no matter how it is built. The claim is
 now bounded in the docstring and pinned by a parametrized test that checks
 both sides of the ceiling.
 
+## `CrystalMultiHeadProjection` — the rank-2 reshape (2026-10-12)
+
+The final reshape built its target from the **input's** shape while flattening
+a tensor that had already gained the head axis:
+
+```python
+flat_shape = keras.ops.shape(inputs)[:-1] + (total_features,)   # wrong
+```
+
+`features` is `(..., H, V)` — the einsum has already split the head axis off
+the trailing end — so collapsing to `(..., H * V)` drops **two** trailing axes,
+not one. The two spellings coincide by accident at rank 3 and only there:
+`inputs` is `(..., D)`, so `shape[:-1]` keeps one leading axis, which by chance
+matches `features`' `shape[:-2]`. At every other rank they disagree:
+
+```
+Input to reshape has 1024 values, but the requested shape has 1152
+```
+
+A rank-2 `(B, D)` input asks for `B*H*V` elements out of `B*H*V/B`. **Every
+pre-existing test used rank 3**, so the defect survived three audit rounds. It
+is also invisible to a shape assertion, because the reshape raises before any
+shape exists to compare — the only probe that found it was a `fit()` call on a
+model whose preceding `Dense` collapsed rank 3 to rank 2.
+
+Fixed by slicing `features`' own shape. Verified against a hand-written NumPy
+reference at `max|delta| = 4.8e-07`, with ranks 2/3/4 swept. Rank-1 is
+correctly rejected: a bare feature vector has no batch axis to split heads over.
+
+## `l2_normalize` — a redundant guard removed (2026-10-12)
+
+Mutation testing found that deleting the trailing `ops.where` in
+`dl_techniques.utils.tensors.l2_normalize` changed **nothing** — bit-identical
+on zero, ordinary, `1e-30`, `1e30` and mixed zero/huge rows. `peak == 0`
+implies `x` is all zeros, so the pre-scaled vector is already `0`, the norm is
+`sqrt(eps)`, and the correct answer falls out of the divisor substitution
+alone. The trailing `ops.where` was dead code that only looked like a safety
+net, and has been removed; the mutation now targets the divisor substitution
+that actually does the work, and is caught by 18 tests.
+
 ## Removed: a guard that could not fire
 
 `CrystalMultiHeadProjection.call()` re-checked `input_dim % num_heads == 0`.

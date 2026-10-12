@@ -359,13 +359,22 @@ def l2_normalize(
     upstream.
 
     An all-zero vector has ``max|x| = 0``, which would divide into ``0/0``. That
-    case is handled by branching on it directly rather than by flooring the
-    divisor with a constant. Flooring does not work here: legitimate float32
+    is handled by substituting ``1`` for a zero divisor rather than by flooring
+    the divisor with a constant. Flooring does not work here: legitimate float32
     data reaches down to ``1.175e-38``, so any floor above that clamps real
     input -- a floor of ``1e-30`` was measured leaving a genuine ``1e-30``
     vector with an error of ``5.8e-07`` -- while any floor below that is
-    subnormal, and ``0 / subnormal`` rounds to ``nan`` in float32. Branching has
-    no threshold to get wrong.
+    subnormal, and ``0 / subnormal`` rounds to ``nan`` in float32. The
+    substitution has no threshold to get wrong.
+
+    Note there is deliberately NO second guard on the RESULT. ``peak == 0``
+    implies ``x`` is all zeros, so ``scaled`` is already ``0``, the norm is
+    ``sqrt(eps)``, and ``0 / sqrt(eps)`` is ``0`` -- the correct answer falls out
+    of the divisor substitution alone. A trailing ``ops.where`` was present and
+    has been removed: mutation testing found that deleting it changed nothing
+    at all (bit-identical on zero, ordinary, ``1e-30``, ``1e30`` and mixed
+    zero/huge rows), which makes it dead code that only LOOKS like a safety
+    net.
 
     Args:
         x: Tensor to normalize.
@@ -386,16 +395,11 @@ def l2_normalize(
     # by a strictly positive peak is safe at ANY positive float32 -- including a
     # subnormal one -- because the quotient is bounded by 1 by construction.
     peak = ops.max(ops.abs(x), axis=axis, keepdims=True)
-    nonzero = peak > 0.0
 
-    scaled = x / ops.where(nonzero, peak, ops.ones_like(peak))
+    scaled = x / ops.where(peak > 0.0, peak, ops.ones_like(peak))
     norms = ops.sqrt(ops.sum(ops.square(scaled), axis=axis, keepdims=True) + eps)
-    normalized = scaled / norms
 
-    # A zero row has no direction, so it is returned as zeros -- the limit of
-    # the map. `nonzero` is broadcast along the reduced axis and is used as the
-    # gate, so this is a value-level selection rather than a Python branch.
-    return ops.where(nonzero, normalized, ops.zeros_like(normalized))
+    return scaled / norms
 
 
 # ---------------------------------------------------------------------

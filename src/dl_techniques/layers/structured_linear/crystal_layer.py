@@ -235,7 +235,7 @@ class CrystalLayer(keras.layers.Layer):
         # keeps one branch and makes a drifted trainable frame still yield
         # true cosines.
         normalized_weights = l2_normalize(
-            self.crystal_weights, axis=-1, eps=self.eps
+            self.crystal_weights, axis=0, eps=self.eps
         )
 
         return keras.ops.matmul(normalized_inputs, normalized_weights) * self.scale
