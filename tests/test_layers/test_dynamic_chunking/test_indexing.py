@@ -1,15 +1,15 @@
-"""Guards for ``dl_techniques.layers.dynamic_chunking.indexing``.
+"""Guards for ``dl_techniques.utils.sequence_ops``.
 
 Why this module exists
-----------------------
-``indexing.py`` is the shared index arithmetic step 6.1 introduced so that
+---------------------
+``sequence_ops.py`` is the shared index arithmetic step 6.1 introduced so that
 ``ChunkLayer`` and ``DeChunkLayer`` could stop holding the same partition rule
 in two hand-copied blocks. Its two gather helpers are exercised heavily and
 indirectly by ``test_chunk_layer.py`` and ``test_dechunk_layer.py`` -- mutating
 either reds those suites hard (the filler index: 4 failed; the row offsets:
 45 failed).
 
-:func:`~dl_techniques.layers.dynamic_chunking.indexing.dim` is the exception,
+:func:`~dl_techniques.utils.sequence_ops.dim` is the exception,
 and this module is its home. Review pass 2 forced it to always return the
 dynamic shape and measured **234 passed on CPU** and green on GPU 0 under
 ``jit_compile="auto"``, then asked the right question: is the static path
@@ -38,7 +38,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.dynamic_chunking.indexing import (
+from dl_techniques.utils.sequence_ops import (
     batched_gather,
     dim,
     pad_permutation_to_width,

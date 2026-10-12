@@ -34,7 +34,7 @@ import keras
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from .indexing import batched_gather, dim, pad_permutation_to_width
+from dl_techniques.utils.sequence_ops import batched_gather, dim, pad_permutation_to_width
 
 # ---------------------------------------------------------------------
 
@@ -127,7 +127,7 @@ class DeChunkLayer(keras.layers.Layer):
         M < L   permutation truncated to the first M columns
 
     The padding and truncation come from
-    :func:`~dl_techniques.layers.dynamic_chunking.indexing.pad_permutation_to_width`,
+    :func:`~dl_techniques.utils.sequence_ops.pad_permutation_to_width`,
     which :class:`~dl_techniques.layers.dynamic_chunking.chunk_layer.ChunkLayer`
     also calls, so both layers treat the three cases the same way. The scatter
     index is clipped because ``M`` is the fixed ``max_chunks`` cap rather than

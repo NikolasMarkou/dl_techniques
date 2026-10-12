@@ -5,6 +5,70 @@ A position ``t`` opens a new patch when ``H(x_t) > entropy_threshold``. Each
 byte is assigned the number of boundaries at or before it, saturated at
 ``max_patches - 1``; the returned patch lengths are the occupancy counts of
 that assignment. The layer holds no weights.
+
+This layer implements the :class:`~dl_techniques.utils.sequence_ops.DynamicSegmenter`
+protocol (structural, no explicit declaration).
+
+Architecture:
+
+.. code-block:: text
+
+    entropy [B, S]
+          │
+          ▼
+    ┌──────────────────────────────┐
+    │ entropy > threshold          │
+    └──────────────────────────────┘
+          │ is_boundary [B, S]
+          ▼
+    ┌──────────────────────────────┐
+    │ cap_boundaries_by_position   │  ◄── position-order cap (D-007)
+    └──────────────────────────────┘
+          │ capped_boundary [B, S]
+          ▼
+    ┌──────────────────────────────┐
+    │ cumsum, min at P-1           │
+    └──────────────────────────────┘
+          │ patch_index [B, S]
+          ▼
+    ┌──────────────────────────────┐
+    │ one-hot, then sum over S     │
+    └──────────────────────────────┘
+          │
+          ▼
+    patch_lengths [B, max_patches]
+
+Segmentation, with max_patches 4:
+
+.. code-block:: text
+
+    position           0   1   2   3   4   5
+    is_boundary        0   1   0   0   1   0
+    patch_index        0   1   1   1   2   2
+    patch_lengths      1   3   2   0
+
+Rows sum to ``seq_len`` by construction, since every byte is counted into
+exactly one patch; ``compute_patch_ids`` does not re-validate that sum. The
+cap truncates by position, not by entropy magnitude, so everything after
+the ``(max_patches - 1)``-th boundary merges into the final patch. Keeping
+the highest-entropy boundaries instead would let a late high-entropy byte
+displace an earlier one, making an earlier byte's patch id depend on a
+later byte.
+
+A leading zero-length patch is legal when position 0 is itself a
+boundary; trailing patches are zero-length whenever a sequence produces
+fewer boundaries than ``max_patches - 1``. Both leave patch ids
+non-decreasing, which ``LocalDecoder``'s preceding-patch gather requires.
+
+:param entropy_threshold: Entropy in nats above which a byte opens a new
+    patch. For a vocabulary of size ``V`` the entropy of a uniform
+    distribution is ``ln(V)``; a threshold at or below the model's
+    typical entropy makes every position a boundary, and one above
+    ``ln(V)`` makes none.
+:type entropy_threshold: float
+:param max_patches: Maximum number of patches to create.
+:type max_patches: int
+:param kwargs: Additional ``keras.layers.Layer`` arguments.
 """
 
 import keras
@@ -17,6 +81,7 @@ from typing import Optional, Dict, Any, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.sequence_ops import cap_boundaries_by_position
 
 # ---------------------------------------------------------------------
 
@@ -118,11 +183,14 @@ class DynamicPatcher(keras.layers.Layer):
         # DECISION plan-2026-08-14T183218-f4c612aa/D-012: cap by position, not by
         # entropy magnitude; a top-k cap breaks causality, moving logits 4.85e-01.
         # See decisions.md.
-        is_boundary = ops.cast(entropy > self.entropy_threshold, 'int32')
+        # Use shared position-order capping helper (D-007/D-012).
+        is_boundary = entropy > self.entropy_threshold
+        capped_boundary = cap_boundaries_by_position(
+            is_boundary, self.max_patches - 1
+        )
 
         # The saturating cumsum depends only on entropy[..., :t + 1].
-        patch_index = ops.cumsum(is_boundary, axis=1)
-        patch_index = ops.minimum(patch_index, self.max_patches - 1)
+        patch_index = ops.cumsum(ops.cast(capped_boundary, 'int32'), axis=1)
 
         # compute_patch_ids already materializes a tensor of this exact shape, so
         # the one-hot is not a new memory regime.

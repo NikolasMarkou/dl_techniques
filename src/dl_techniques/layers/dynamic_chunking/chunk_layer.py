@@ -29,7 +29,7 @@ import keras
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from .indexing import batched_gather, pad_permutation_to_width
+from dl_techniques.utils.sequence_ops import batched_gather, pad_permutation_to_width, cap_boundaries_by_position
 
 # ---------------------------------------------------------------------
 
@@ -94,7 +94,7 @@ class ChunkLayer(keras.layers.Layer):
     and are marked invalid, since ``num_tokens <= L < max_chunks``. The padding
     uses ``repeat`` on a static count rather than a data-dependent ``pad``, so
     the path stays traceable. Padding and truncation both live in
-    :func:`~dl_techniques.layers.dynamic_chunking.indexing.pad_permutation_to_width`,
+    :func:`~dl_techniques.utils.sequence_ops.pad_permutation_to_width`,
     which :class:`~dl_techniques.layers.dynamic_chunking.dechunk_layer.DeChunkLayer`
     calls with the same width, so both sides agree on what inner column j means.
 
@@ -190,6 +190,12 @@ class ChunkLayer(keras.layers.Layer):
         if mask is not None:
             keep = keras.ops.logical_and(keep, keras.ops.cast(mask, "bool"))
 
+        # Position-order capping: keep only the first max_chunks boundaries (D-007/D-012).
+        # This matches the truncation behavior of pad_permutation_to_width but is applied
+        # earlier to the boundary mask itself, making the intent explicit and the
+        # subsequent argsort more efficient.
+        keep = cap_boundaries_by_position(keep, self.max_chunks)
+
         # Number of real chunks in each row, shape (B,) (dc.py:183).
         num_tokens = keras.ops.sum(keras.ops.cast(keep, "int32"), axis=-1)
 
@@ -214,7 +220,7 @@ class ChunkLayer(keras.layers.Layer):
         )
 
         # Per-row gather, not take_along_axis, which is unusable here under XLA
-        # (dc.py:193-199; D-029 in indexing.batched_gather).
+        # (dc.py:193-199; D-029 in sequence_ops.batched_gather).
         next_hidden_states = batched_gather(hidden_states, gather_idx)
 
         # A row with more than max_chunks boundaries gets an all-True mask and

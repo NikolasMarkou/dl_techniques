@@ -1,63 +1,88 @@
-"""Shared index arithmetic for H-Net's chunk/dechunk pair.
+"""Shared sequence operations for dynamic chunking and patching.
 
-:class:`~dl_techniques.layers.dynamic_chunking.chunk_layer.ChunkLayer` and
-:class:`~dl_techniques.layers.dynamic_chunking.dechunk_layer.DeChunkLayer` both
-gather through the *same* stable partition of the same boundary predicate -- one
-to build the inner sequence, the other to pair each inner column with the
-probability of the position that produced it. Anything either of them does to
-that permutation, the other must do identically, or inner column ``j`` stops
-meaning the same thing on the two sides.
+Provides the canonical implementation of permutation padding and batched gathering
+used by H-Net's chunk/dechunk layers and BLT's dynamic patcher. Having ONE
+definition prevents the two sides from drifting apart (D-029).
 
-That symmetry used to be a convention held by two hand-copied code blocks, and
-the convention broke: ``ChunkLayer`` right-padded the permutation when the inner
-width ``M`` exceeded the outer length ``L`` and ``DeChunkLayer`` did not, so every
-H-Net raised on any sequence shorter than its own ``max_chunks[0]`` -- including
-at the constructor default, where ``default_max_chunks(2, max_seq_len=2048)``
-yields ``(1024,)`` and any prompt below 1024 bytes was rejected. The two
-functions here are the repair: the padding rule and the gather live in ONE place
-and both layers call them, so the two sides cannot drift apart again.
-
-Both functions are pure, stateless, weight-free and written in ``keras.ops``
-only.
+Also defines the :class:`DynamicSegmenter` protocol capturing the shared
+pattern: score → boundary_mask → gather → process → scatter.
+Implemented by:
+  - BLT: DynamicPatcher (entropy) + LocalEncoder/Decoder
+  - H-Net: RoutingModule (cosine) + ChunkLayer/DeChunkLayer
 """
 
-from typing import Union
+from typing import Union, Protocol, runtime_checkable
 
 import keras
 
 # ---------------------------------------------------------------------
 
-__all__ = [
-    "batched_gather",
-    "dim",
-    "pad_permutation_to_width",
-]
 
-# ---------------------------------------------------------------------
+@runtime_checkable
+class DynamicSegmenter(Protocol):
+    """Dynamic sequence segmenter protocol.
+
+    Captures the shared pattern: score → boundary_mask → gather → process → scatter.
+    Implemented by:
+      - BLT: DynamicPatcher (entropy) + LocalEncoder/Decoder
+      - H-Net: RoutingModule (cosine) + ChunkLayer/DeChunkLayer
+
+    This is a structural protocol (no explicit declaration needed).
+    """
+
+    def segment(self, scores: keras.KerasTensor) -> keras.KerasTensor:
+        """Convert scores to a boundary mask or segment ids.
+
+        :param scores: Per-position scores, shape ``(B, L)`` (entropy in nats,
+            boundary probability, cosine similarity, etc.).
+        :return: Boundary mask ``(B, L)`` bool or segment ids ``(B, L)`` int.
+        """
+        ...
+
+    def gather(self, hidden: keras.KerasTensor, segment_ids: keras.KerasTensor) -> keras.KerasTensor:
+        """Gather hidden states at segment boundaries into a shorter sequence.
+
+        :param hidden: Full-resolution hidden states, shape ``(B, L, D)``.
+        :param segment_ids: Segment ids or boundary mask, shape ``(B, L)``.
+        :return: Compressed sequence, shape ``(B, max_segments, D)``.
+        """
+        ...
+
+    def scatter(self, inner: keras.KerasTensor, segment_ids: keras.KerasTensor) -> keras.KerasTensor:
+        """Scatter inner sequence back to full resolution.
+
+        :param inner: Compressed sequence, shape ``(B, M, D)``.
+        :param segment_ids: Segment ids or boundary mask, shape ``(B, L)``.
+        :return: Full-resolution sequence, shape ``(B, L, D)``.
+        """
+        ...
 
 
-# DECISION plan-2026-09-09T042752-6d66ac56/D-032: this function's original
-# docstring claimed the static path was REQUIRED under XLA ("a tensor that XLA
-# may refuse as an operand to a shape-consuming op"). That claim is FALSE on
-# this backend, and it was settled by measurement rather than by argument.
-# MEASURED (2026-09-10, TF 2.18 / Keras 3, CPU and GPU 0):
-#   keras.ops.shape(zeros((2,5,3)))          -> (2, 5, 3), all Python int
-#   the same call INSIDE a traced tf.function -> (2, 5, 3), all Python int
-#   traced at TensorSpec([2, None, 3])        -> (2, <SymbolicTensor>, 3)
-# i.e. `keras.ops.shape` ALREADY returns a Python int for every statically
-# known axis and a tensor only for an unknown one -- which is exactly this
-# function's stated behaviour. Deleting the static branch therefore leaves
-# `tests/test_layers/test_dynamic_chunking/` at 249 passed on CPU: mutation
-# S-10 is EQUIVALENT on this backend, not an untested path. No guard can fail
-# without the static branch, because there is nothing for it to detect; what
-# `test_indexing.py::TestDimIsTheBackendsOwnAnswer` pins instead is that
-# EQUIVALENCE, so the false rationale is not re-invented from the code's shape.
-# Do NOT restore the "XLA may refuse it" wording without a failing case to cite.
-# Keeping the wrapper (rather than inlining `keras.ops.shape(x)[axis]` at its
-# three call sites) is a readability choice with the cost stated: it is one
-# named place both chunking layers ask for an axis length, and it is where a
-# non-TF backend's divergence would be handled if one ever appeared.
-# Rationale: decisions.md D-032.
+def cap_boundaries_by_position(
+    boundary_mask: keras.KerasTensor, max_segments: int
+) -> keras.KerasTensor:
+    """Keep first ``max_segments`` boundaries in position order; truncate tail.
+
+    This is the POSITION-ORDER CAPPING rule (D-007/D-012): when a sequence has
+    more boundaries than ``max_segments``, we keep the FIRST boundaries in
+    position order and drop the tail. We do NOT re-rank by score magnitude.
+
+    Both BLT's DynamicPatcher and H-Net's ChunkLayer implement this identical rule.
+    This helper centralises it so neither side can drift.
+
+    :param boundary_mask: Boolean mask ``(B, L)`` where ``True`` = boundary.
+    :param max_segments: Maximum number of segments/boundaries to keep.
+    :return: Capped boundary mask ``(B, L)`` bool with at most ``max_segments``
+        True values per row, preserving position order.
+    """
+    # Count boundaries per row (cumulative sum gives position-order index)
+    # Each True gets a 1-based index; we keep those <= max_segments
+    boundary_idx = keras.ops.cumsum(keras.ops.cast(boundary_mask, "int32"), axis=1)
+    # Keep only boundaries whose index <= max_segments
+    capped = boundary_idx <= max_segments
+    return keras.ops.logical_and(boundary_mask, capped)
+
+
 def dim(x: keras.KerasTensor, axis: int) -> Union[int, keras.KerasTensor]:
     """Return an axis length as a Python ``int`` when it is statically known.
 

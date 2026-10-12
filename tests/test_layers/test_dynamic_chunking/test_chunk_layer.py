@@ -969,9 +969,9 @@ class TestGuardFiveWidthSymmetry:
     """``max_chunks`` may sit below, at, or above the sequence length ``L``.
 
     This layer always handled all three; :class:`DeChunkLayer` did not, and the
-    ONE-SIDEDNESS was the defect (see ``indexing.py``'s module docstring and
+    ONE-SIDEDNESS was the defect (see ``sequence_ops.py``'s module docstring and
     decisions.md D-029). Both layers now share
-    :func:`~dl_techniques.layers.dynamic_chunking.indexing.pad_permutation_to_width`,
+    :func:`~dl_techniques.utils.sequence_ops.pad_permutation_to_width`,
     and both suites carry a class of this name so the pair is graded on the same
     three regimes.
 
