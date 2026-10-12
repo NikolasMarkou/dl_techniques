@@ -60,6 +60,7 @@ from dl_techniques.layers.heads.nlp import (
 )
 from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.sequence_length_guard import check_sequence_length
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -305,6 +306,12 @@ class DistilBERT(keras.Model):
     DEFAULT_LAYER_NORM_EPSILON = 1e-12
     DEFAULT_HIDDEN_ACT = "gelu"
     DEFAULT_PAD_TOKEN_ID = 0
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_position_embeddings={limit}. "
+        "DistilBERT's position embeddings are a learned table of {limit} rows, "
+        "so there is no embedding for position {limit}. Truncate the input to "
+        "{limit} tokens, or build the model with max_position_embeddings>={seq_len}."
+    )
 
     def __init__(
         self,
@@ -618,6 +625,11 @@ class DistilBERT(keras.Model):
             position_ids = inputs.get("position_ids", position_ids)
         else:
             input_ids = inputs
+
+        input_ids = check_sequence_length(
+            self, input_ids, self.max_position_embeddings,
+            "max_position_embeddings", self._SEQUENCE_LENGTH_MESSAGE,
+        )
 
         # Get embeddings (no token_type_ids for DistilBERT)
         embedding_output = self.embeddings(

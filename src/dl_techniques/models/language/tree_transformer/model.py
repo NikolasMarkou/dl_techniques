@@ -61,6 +61,7 @@ from dl_techniques.layers.heads.nlp import (
 )
 from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.sequence_length_guard import check_sequence_length
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
     load_weights_from_checkpoint,
@@ -259,6 +260,12 @@ class TreeTransformer(keras.Model):
     DEFAULT_LAYER_NORM_EPSILON = 1e-6
     DEFAULT_HIDDEN_ACT = "gelu"
     DEFAULT_PAD_TOKEN_ID = 0
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_len={limit}. TreeTransformer's "
+        "sinusoidal positional encoding is precomputed for {limit} positions, "
+        "so there is no encoding for position {limit}. Truncate the input to "
+        "{limit} tokens, or build the model with max_len>={seq_len}."
+    )
 
     def __init__(
         self,
@@ -506,6 +513,11 @@ class TreeTransformer(keras.Model):
             explicit_attention_mask = inputs.get("attention_mask")
         else:
             input_ids = inputs
+
+        input_ids = check_sequence_length(
+            self, input_ids, self.max_len, "max_len",
+            self._SEQUENCE_LENGTH_MESSAGE,
+        )
 
         if explicit_attention_mask is not None:
             token_mask = ops.cast(explicit_attention_mask, "int32")

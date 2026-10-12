@@ -53,6 +53,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.utils import sequence_length_guard as guard
 from dl_techniques.models.language.bert import create_bert
 
 # ---------------------------------------------------------------------
@@ -78,6 +79,11 @@ class Subject:
     :param feed: ``(model, seq_len) -> model input`` of that sequence length.
     :param message_regex: Pattern (with ``{limit}``) the graph-path refusal
         must match.
+    :param single_length: True when the model can serve only the ONE length it
+        was first built at (FNet: its DFT matrix is ``(S, S)`` for the first
+        ``S`` seen, and any other length raises ``Incompatible shapes``). Its
+        only legal length is then the limit itself, and the relaxed retrace is
+        reached by one legal call followed by the over-long one.
     """
 
     name: str
@@ -86,6 +92,7 @@ class Subject:
     factory: Callable[[], keras.Model]
     feed: Callable[[keras.Model, int], Any]
     message_regex: str
+    single_length: bool = False
 
 
 def _bert_factory() -> keras.Model:
@@ -101,8 +108,12 @@ def _bert_factory() -> keras.Model:
     )
 
 
+def _ids(seq_len: int) -> np.ndarray:
+    return np.random.RandomState(7).randint(0, 60, (BATCH, seq_len)).astype("int32")
+
+
 def _bert_feed(model: keras.Model, seq_len: int) -> Dict[str, np.ndarray]:
-    ids = np.random.RandomState(7).randint(0, 100, (BATCH, seq_len)).astype("int32")
+    ids = _ids(seq_len)
     return {
         "input_ids": ids,
         "attention_mask": np.ones_like(ids),
@@ -110,14 +121,86 @@ def _bert_feed(model: keras.Model, seq_len: int) -> Dict[str, np.ndarray]:
     }
 
 
+def _mask_feed(model: keras.Model, seq_len: int) -> Dict[str, np.ndarray]:
+    ids = _ids(seq_len)
+    return {"input_ids": ids, "attention_mask": np.ones_like(ids)}
+
+
+def _ids_only_feed(model: keras.Model, seq_len: int) -> Dict[str, np.ndarray]:
+    return {"input_ids": _ids(seq_len)}
+
+
+def _tiny(module: str, cls: str, **kwargs: Any) -> Callable[[], keras.Model]:
+    """A factory for a tiny, unbuilt ``cls`` from ``module`` (vocab 64)."""
+
+    def factory() -> keras.Model:
+        klass = getattr(importlib.import_module(module), cls)
+        return klass(vocab_size=64, **kwargs)
+
+    return factory
+
+
+_LANG = "dl_techniques.models.language."
+_POSITION_TABLE = r"exceeds max_position_embeddings={limit}(?![0-9])"
+
 SUBJECTS = [
     Subject(
         name="bert",
-        module="dl_techniques.models.language.bert.model",
+        module=_LANG + "bert.model",
         limit_name="max_position_embeddings",
         factory=_bert_factory,
         feed=_bert_feed,
-        message_regex=r"exceeds max_position_embeddings={limit}(?![0-9])",
+        message_regex=_POSITION_TABLE,
+    ),
+    Subject(
+        name="distilbert",
+        module=_LANG + "distilbert.model",
+        limit_name="max_position_embeddings",
+        factory=_tiny(
+            _LANG + "distilbert.model", "DistilBERT", hidden_size=32,
+            num_layers=1, num_heads=2, intermediate_size=64,
+            max_position_embeddings=16,
+        ),
+        feed=_mask_feed,
+        message_regex=_POSITION_TABLE,
+    ),
+    Subject(
+        name="fnet",
+        module=_LANG + "fnet.model",
+        limit_name="max_position_embeddings",
+        factory=_tiny(
+            _LANG + "fnet.model", "FNet", hidden_size=32, num_layers=1,
+            intermediate_size=64, max_position_embeddings=16,
+        ),
+        feed=_mask_feed,
+        message_regex=_POSITION_TABLE,
+        single_length=True,
+    ),
+    Subject(
+        name="modern_bert",
+        module=_LANG + "modern_bert.model",
+        limit_name="max_position_embeddings",
+        # Three layers, global attention every 3rd: only a global layer has a
+        # RoPE table, and a model without one has no position limit.
+        factory=_tiny(
+            _LANG + "modern_bert.model", "ModernBERT", hidden_size=32,
+            num_layers=3, num_heads=2, intermediate_size=64,
+            max_position_embeddings=16, local_attention_window_size=8,
+        ),
+        feed=_mask_feed,
+        message_regex=_POSITION_TABLE,
+    ),
+    Subject(
+        name="tree_transformer",
+        module=_LANG + "tree_transformer.model",
+        limit_name="max_len",
+        factory=_tiny(
+            _LANG + "tree_transformer.model", "TreeTransformer",
+            hidden_size=32, num_layers=1, num_heads=2, intermediate_size=64,
+            max_len=16,
+        ),
+        feed=_mask_feed,
+        message_regex=r"exceeds max_len={limit}(?![0-9])",
     ),
 ]
 
@@ -128,6 +211,11 @@ SUBJECT_IDS = [s.name for s in SUBJECTS]
 
 def _limit(subject: Subject, model: keras.Model) -> int:
     return int(getattr(model, subject.limit_name))
+
+
+def _legal_lengths(subject: Subject, limit: int) -> tuple:
+    """The lengths a healthy model is served, ending in the limit itself."""
+    return (limit,) if subject.single_length else LEGAL_LENGTHS
 
 
 def _finite(out: Any) -> bool:
@@ -179,7 +267,7 @@ def test_a_refused_first_predict_leaves_the_model_usable(subject):
     limit = _limit(subject, model)
     with pytest.raises(ValueError, match=subject.limit_name):
         model.predict(subject.feed(model, limit + OVER_BY), verbose=0)
-    for seq_len in LEGAL_LENGTHS:
+    for seq_len in _legal_lengths(subject, limit):
         out = model.predict(subject.feed(model, seq_len), verbose=0)
         assert _finite(out)
 
@@ -203,7 +291,7 @@ def test_a_relaxed_retrace_refuses_an_over_long_batch_and_stays_usable(
     limit = _limit(subject, model)
     if config == "jit_compile_true":
         model.jit_compile = True
-    for seq_len in LEGAL_LENGTHS:
+    for seq_len in _legal_lengths(subject, limit):
         assert _finite(model.predict(subject.feed(model, seq_len), verbose=0))
     assert model.jit_compile is expected_jit, (config, model.jit_compile)
 
@@ -222,24 +310,38 @@ def test_a_relaxed_retrace_refuses_an_over_long_batch_and_stays_usable(
 
 @pytest.mark.parametrize("subject", SUBJECTS, ids=SUBJECT_IDS)
 def test_the_model_reaches_the_shared_guard(monkeypatch, subject):
-    """Both shared functions are called by the module-level names the model imports."""
+    """Both shared primitives are reached, however the model names them.
+
+    The model calls ``check_sequence_length`` (which looks the primitives up in
+    the guard module) and may also import a primitive by name for its
+    ``build``; the counter wraps every binding that exists.
+    """
     module = importlib.import_module(subject.module)
+    assert any(
+        hasattr(module, name)
+        for name in (
+            "check_sequence_length",
+            "refuse_static_sequence_length",
+            "gate_dynamic_sequence_length",
+        )
+    ), f"{subject.module} imports nothing from the shared guard"
     calls = {"refuse": 0, "gate": 0}
-    real_refuse = module.refuse_static_sequence_length
-    real_gate = module.gate_dynamic_sequence_length
 
-    def refuse(*args, **kwargs):
-        calls["refuse"] += 1
-        return real_refuse(*args, **kwargs)
+    def counted(key, real):
+        def wrapper(*args, **kwargs):
+            calls[key] += 1
+            return real(*args, **kwargs)
 
-    def gate(*args, **kwargs):
-        calls["gate"] += 1
-        return real_gate(*args, **kwargs)
+        return wrapper
 
-    # `raising=True` (the default): a model that stopped importing the shared
-    # name would make this attribute lookup fail instead of passing vacuously.
-    monkeypatch.setattr(module, "refuse_static_sequence_length", refuse)
-    monkeypatch.setattr(module, "gate_dynamic_sequence_length", gate)
+    for key, name in (
+        ("refuse", "refuse_static_sequence_length"),
+        ("gate", "gate_dynamic_sequence_length"),
+    ):
+        wrapper = counted(key, getattr(guard, name))
+        monkeypatch.setattr(guard, name, wrapper)
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, wrapper)
 
     model = subject.factory()
     limit = _limit(subject, model)
@@ -247,6 +349,9 @@ def test_the_model_reaches_the_shared_guard(monkeypatch, subject):
         model(subject.feed(model, limit + OVER_BY))
     assert calls["refuse"] >= 1, calls
     # Two lengths make Keras retrace `predict` with a relaxed (None) axis.
-    for seq_len in LEGAL_LENGTHS:
+    for seq_len in _legal_lengths(subject, limit):
         model.predict(subject.feed(model, seq_len), verbose=0)
+    if subject.single_length:
+        with pytest.raises(Exception):
+            model.predict(subject.feed(model, limit + OVER_BY), verbose=0)
     assert calls["gate"] >= 1, calls

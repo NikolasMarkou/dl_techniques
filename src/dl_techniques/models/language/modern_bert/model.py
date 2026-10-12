@@ -62,6 +62,7 @@ from typing import Optional, Union, Any, Dict, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.sequence_length_guard import check_sequence_length
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
 )
@@ -391,6 +392,13 @@ class ModernBERT(keras.Model):
     #: RoPE base for the global layers. Warner et al. use a large base on the
     #: global layers precisely because they must resolve 8192-token distances.
     DEFAULT_GLOBAL_ROPE_THETA = 160000.0
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_position_embeddings={limit}. "
+        "ModernBERT's global-attention layers precompute their RoPE tables for "
+        "{limit} positions, so there is no rotation for position {limit}. "
+        "Truncate the input to {limit} tokens, or build the model with "
+        "max_position_embeddings>={seq_len}."
+    )
 
     def __init__(
             self,
@@ -701,6 +709,14 @@ class ModernBERT(keras.Model):
             token_type_ids = inputs.get("token_type_ids", token_type_ids)
         else:
             input_ids = inputs
+
+        # Only the global layers' RoPE tables bound the length; a model with no
+        # global layer (num_layers < global_attention_interval) has no limit.
+        if self.num_layers >= self.global_attention_interval:
+            input_ids = check_sequence_length(
+                self, input_ids, self.max_position_embeddings,
+                "max_position_embeddings", self._SEQUENCE_LENGTH_MESSAGE,
+            )
 
         embedding_output = self.embeddings(
             input_ids=input_ids,

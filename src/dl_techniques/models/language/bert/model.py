@@ -40,7 +40,7 @@ from typing import Optional, Union, Any, Dict, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.sequence_length_guard import (
-    gate_dynamic_sequence_length,
+    check_sequence_length,
     refuse_static_sequence_length,
 )
 from dl_techniques.utils.weight_transfer import (
@@ -372,6 +372,12 @@ class BERT(keras.Model):
     # the two differ by max|erf - tanh| = 4.732e-04 per call. See decisions.md.
     DEFAULT_HIDDEN_ACT = "gelu_tanh"
     DEFAULT_PAD_TOKEN_ID = 0
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_position_embeddings={limit}. BERT's "
+        "position embeddings are a learned table of {limit} rows, so there is "
+        "no embedding for position {limit}. Truncate the input to {limit} "
+        "tokens, or build the model with max_position_embeddings>={seq_len}."
+    )
 
     def __init__(
         self,
@@ -827,16 +833,19 @@ class BERT(keras.Model):
         # DECISION plan-2026-08-23T203721-009b7ccf/D-023: without this check an
         # over-length sequence fails differently per device (finite garbage on
         # GPU, InvalidArgumentError on CPU). See decisions.md.
-        shape = getattr(input_ids, "shape", None)
-        if shape is None or len(shape) < 2:
-            return input_ids
-        if shape[-1] is None:
-            return self._check_dynamic_sequence_length(input_ids)
-        self._refuse_over_long_sequence(int(shape[-1]))
-        return input_ids
+        return check_sequence_length(
+            self,
+            input_ids,
+            self.max_position_embeddings,
+            "max_position_embeddings",
+            self._SEQUENCE_LENGTH_MESSAGE,
+        )
 
     def _refuse_over_long_sequence(self, seq_len: Optional[int]) -> None:
         """Raise for a static ``seq_len`` above ``max_position_embeddings``.
+
+        Called from ``build``, which parses the shape itself and does not trace
+        ``call``, so it needs the refusal before any sub-layer is built.
 
         :param seq_len: The static sequence length, or None when unknown.
         :type seq_len: Optional[int]
@@ -846,48 +855,9 @@ class BERT(keras.Model):
             self,
             seq_len,
             self.max_position_embeddings,
-            self._sequence_length_message(seq_len),
-        )
-
-    def _sequence_length_message(self, seq_len: Union[int, str]) -> str:
-        """The over-length message, shared by the static and runtime checks.
-
-        :param seq_len: The offending length, or a placeholder when it is only
-            known at run time.
-        :type seq_len: Union[int, str]
-        :return: The message.
-        :rtype: str
-        """
-        return (
-            f"seq_len={seq_len} exceeds max_position_embeddings="
-            f"{self.max_position_embeddings}. BERT's position embeddings "
-            f"are a learned table of {self.max_position_embeddings} rows, "
-            "so there is no embedding for position "
-            f"{self.max_position_embeddings}. Truncate the input to "
-            f"{self.max_position_embeddings} tokens, or build the model "
-            f"with max_position_embeddings>={seq_len}."
-        )
-
-    def _check_dynamic_sequence_length(
-        self, input_ids: keras.KerasTensor
-    ) -> keras.KerasTensor:
-        """Gate ``input_ids`` on a run-time length check inside a TF graph.
-
-        :param input_ids: Token ids whose sequence axis is not statically known.
-        :type input_ids: keras.KerasTensor
-        :return: ``input_ids``, unchanged outside a TensorFlow graph; inside
-            one, ``input_ids`` plus an all-zero term sized
-            ``max_position_embeddings - seq_len``, both gated on the run-time
-            assertion. The term is what refuses an over-long batch under XLA,
-            which ignores the assertion but must give every size at compile
-            time.
-        :rtype: keras.KerasTensor
-        """
-        return gate_dynamic_sequence_length(
-            input_ids,
-            self.max_position_embeddings,
-            self._sequence_length_message("<run-time length>"),
-            "max_position_embeddings",
+            self._SEQUENCE_LENGTH_MESSAGE.format(
+                seq_len=seq_len, limit=self.max_position_embeddings
+            ),
         )
 
     def load_pretrained_weights(

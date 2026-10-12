@@ -11,6 +11,11 @@ pins the module's own promises, which no model test isolates:
 * ``gate_dynamic_sequence_length`` returns a symbolic ``KerasTensor`` unchanged,
   returns the VALUES of a legal input bit for bit, and names the XLA guard node
   after the caller's limit name.
+* ``check_sequence_length`` routes by the sequence axis: a static length above
+  the limit raises the formatted message and drops the cached functions, the
+  limit itself and anything of rank below 2 pass through untouched, and a
+  ``None`` axis goes to the dynamic gate with ``{seq_len}`` rendered as
+  ``<run-time length>``.
 """
 
 import keras
@@ -19,6 +24,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.utils.sequence_length_guard import (
+    check_sequence_length,
     gate_dynamic_sequence_length,
     refuse_static_sequence_length,
 )
@@ -85,3 +91,42 @@ def test_the_xla_guard_node_is_named_after_the_limit_name():
 
     names = [op.name for op in run.get_concrete_function().graph.get_operations()]
     assert any(n.endswith("seq_len_exceeds_max_len_16") for n in names), names
+
+
+_TEMPLATE = "len {seq_len} over {limit}"
+
+
+def test_check_a_static_over_long_length_raises_the_formatted_message():
+    holder = _Holder()
+    ids = keras.KerasTensor((2, 17), dtype="int32")
+    with pytest.raises(ValueError) as excinfo:
+        check_sequence_length(holder, ids, 16, "max_len", _TEMPLATE)
+    assert str(excinfo.value) == "len 17 over 16"
+    assert holder.cached() == [None, None, None]
+
+
+@pytest.mark.parametrize("shape", [(2, 16), (2, 3), (7,), ()])
+def test_check_the_limit_itself_and_low_rank_tensors_pass_through(shape):
+    holder = _Holder()
+    before = holder.cached()
+    ids = keras.KerasTensor(shape, dtype="int32")
+    assert check_sequence_length(holder, ids, 16, "max_len", _TEMPLATE) is ids
+    assert holder.cached() == before
+
+
+def test_check_a_symbolic_dynamic_axis_is_returned_unchanged():
+    ids = keras.Input(shape=(None,), dtype="int32")
+    assert check_sequence_length(_Holder(), ids, 16, "max_len", _TEMPLATE) is ids
+
+
+def test_check_a_dynamic_axis_goes_to_the_gate_with_the_run_time_placeholder():
+    ids = np.zeros((2, 17), dtype="int32")
+
+    @tf.function(input_signature=[tf.TensorSpec([None, None], tf.int32)])
+    def run(x):
+        return check_sequence_length(_Holder(), x, 16, "max_len", _TEMPLATE)
+
+    with pytest.raises(
+        tf.errors.InvalidArgumentError, match="len <run-time length> over 16"
+    ):
+        run(ids)

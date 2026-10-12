@@ -19,23 +19,27 @@ item 1):
   have the same nested structure", "Creating variables on a non-first call"),
   so the next legal ``predict`` fails too.
 
-Two functions answer the two defects. A model calls the first from ``build``
-(before any variable exists) and again from ``call`` for a statically known
-length, and calls the second from ``call`` when the sequence axis is ``None``.
+Two functions answer the two defects, and a third routes between them.
+:func:`refuse_static_sequence_length` raises for a statically known length and
+:func:`gate_dynamic_sequence_length` guards a length known only at run time.
+A model calls :func:`check_sequence_length` from ``call`` right after it
+resolves ``input_ids``; that is the whole wiring for a model whose ``build``
+traces ``call`` (``materialize_sublayers``), because the trace reaches the
+refusal before any sub-layer is built. A model whose ``build`` builds its
+sub-layers by hand calls :func:`refuse_static_sequence_length` first in
+``build`` too, so no variable exists when it refuses.
 
 .. code-block:: python
 
-    def build(self, input_shape):
-        refuse_static_sequence_length(
-            self, seq_len, self.max_position_embeddings, message
+    class MyModel(keras.Model):
+        _SEQUENCE_LENGTH_MESSAGE = (
+            "seq_len={seq_len} exceeds max_position_embeddings={limit}. ..."
         )
-        ...
 
-    def call(self, input_ids, ...):
-        if input_ids.shape[-1] is None:
-            input_ids = gate_dynamic_sequence_length(
-                input_ids, self.max_position_embeddings, message,
-                "max_position_embeddings",
+        def call(self, input_ids, ...):
+            input_ids = check_sequence_length(
+                self, input_ids, self.max_position_embeddings,
+                "max_position_embeddings", self._SEQUENCE_LENGTH_MESSAGE,
             )
 
 The model keeps its own message (it names its own attribute and what to do)
@@ -48,7 +52,11 @@ import keras
 
 # ---------------------------------------------------------------------
 
-__all__ = ["gate_dynamic_sequence_length", "refuse_static_sequence_length"]
+__all__ = [
+    "check_sequence_length",
+    "gate_dynamic_sequence_length",
+    "refuse_static_sequence_length",
+]
 
 # ---------------------------------------------------------------------
 
@@ -150,5 +158,55 @@ def gate_dynamic_sequence_length(
             name=f"seq_len_exceeds_{limit_name}_{limit}",
         )
         return input_ids + tf.reduce_sum(xla_guard)
+
+# ---------------------------------------------------------------------
+
+
+def check_sequence_length(
+        model: keras.Model,
+        input_ids: keras.KerasTensor,
+        limit: int,
+        limit_name: str,
+        message: str,
+) -> keras.KerasTensor:
+    """Apply the right half of the guard to the ids a model's ``call`` resolved.
+
+    Interface contract (call site: one line in the ``call`` of every model
+    with a position limit, right after it resolves ``input_ids``). A statically
+    known sequence axis goes to :func:`refuse_static_sequence_length`; an
+    unknown one (``None``) goes to :func:`gate_dynamic_sequence_length`. A
+    tensor of rank below 2, or one with no ``shape``, is returned untouched.
+    Returns ``input_ids`` (gated when the axis is dynamic); the value is
+    unchanged bit for bit for every legal length.
+
+    :param model: The model whose limit is enforced.
+    :param input_ids: Token ids whose LAST axis is the sequence.
+    :param limit: The largest legal sequence length.
+    :param limit_name: Name of the limit attribute on the model, shown in the
+        XLA guard node name.
+    :param message: Error text, a ``str.format`` template that may use
+        ``{seq_len}`` (the offending length, or ``<run-time length>`` when it
+        is only known inside a graph) and ``{limit}``.
+    :return: ``input_ids``, or ``input_ids`` gated on the length check.
+    :raises ValueError: For a statically known length above ``limit``.
+    """
+    shape = getattr(input_ids, "shape", None)
+    if shape is None or len(shape) < 2:
+        return input_ids
+    seq_len = shape[-1]
+    if seq_len is None:
+        return gate_dynamic_sequence_length(
+            input_ids,
+            limit,
+            message.format(seq_len="<run-time length>", limit=limit),
+            limit_name,
+        )
+    refuse_static_sequence_length(
+        model,
+        int(seq_len),
+        limit,
+        message.format(seq_len=int(seq_len), limit=limit),
+    )
+    return input_ids
 
 # ---------------------------------------------------------------------
