@@ -26,8 +26,11 @@ What the family found, rather than merely instrumented
   from a renamed config) changes how the teacher is constructed.
 * **17 packages built sub-layers with no explicit ``name=``**, so two instances
   of the same builder disagreed by weight path and R-072 could not be asserted
-  at all. Five were repaired at three shared sites (D-081); twelve are pinned
-  by name below.
+  at all. Five were repaired at three shared sites (D-081); twelve were pinned
+  by name. plan-2026-10-11T170958-dc4d2202 D-014 then named the sub-layers of
+  ``mamba``, ``nam``, ``qwen`` and ``tree_transformer`` (shared MoE, Mamba,
+  Mamba2 and TreeTransformer layers) and deleted their ``AUTONAME_STEMS`` and
+  ``RELOAD_PATH_DRIFT`` entries; seven stems remain pinned below.
 * Two readings were the INSTRUMENT and are recorded in the oracle: a
   ``split("/", 1)[-1]`` "relative" path that pairs nothing after a reload, and
   a ``yolo12`` weight snapshot taken before a ``training=True`` forward, which
