@@ -147,9 +147,26 @@ MODEL_VARIANTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
+from dl_techniques.utils.weight_transfer import (
+    load_backbone_from_checkpoint,
+    pretrained_path_or_raise,
+)
 from dl_techniques.utils.sequence_length_guard import (
     check_sequence_length,
     refuse_static_sequence_length,
+)
+from dl_techniques.layers.heads.nlp import (
+    NLPTaskConfig,
+    build_model_task_head,
+    finalize_head_outputs,
+    head_attention_mask,
+    task_config_to_dict,
+    validate_task_head_knobs,
+)
+from dl_techniques.layers.heads.nlp.model_head import (
+    TASK_HEAD_NAME,
+    head_output_shape,
+    ids_shape_of,
 )
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.models.language.zamba2.layers import (
@@ -173,7 +190,10 @@ class Zamba2Model(keras.Model):
     position (round-robin, each carrying its own LoRA delta via a global
     occurrence counter), applies a final :class:`RMSNorm`, and projects to
     vocabulary logits through the **tied** embedding matrix -- no separate
-    output ``Dense`` layer.
+    output ``Dense`` layer. With ``include_top=True`` and a ``task_config`` the
+    model instead owns ONE task head from ``layers/heads/nlp``, named
+    ``task_head``, fed the final-norm output and a padding mask; the tied
+    logits are then not computed and the head's output is returned.
 
     Architecture:
 
@@ -205,6 +225,12 @@ class Zamba2Model(keras.Model):
                ▼
         logits = hidden_state @ embedding.weights[0]^T   (tied LM head)
         [B, S, vocab_size]
+
+        include_top=True: the logits are replaced by
+        ┌───────────────────┐
+        │ task_head         │──► finalized head output (only output)
+        │ (pools 'last')    │    (hidden_state + padding mask in)
+        └───────────────────┘
 
     :param vocab_size: Size of the token vocabulary. Must be positive.
     :type vocab_size: int
@@ -318,9 +344,29 @@ class Zamba2Model(keras.Model):
     :type final_norm_epsilon: float
     :param pretrained: If True, raises ``NotImplementedError`` -- no
         pretrained Zamba2 checkpoint is distributed with ``dl_techniques``.
-        Must be False (the default) to construct a model; warm-start a
-        built model via ``model.load_weights(path)`` instead.
+        Must be False (the default) to construct a model. A local checkpoint
+        is restored through :meth:`from_variant` (``pretrained=<path>``).
     :type pretrained: bool
+    :param pad_token_id: Id treated as padding by the task head when the input
+        carries no ``attention_mask``. Read only with ``include_top=True``.
+        Defaults to None, which derives no padding (the head sees every
+        position): id 0 is a real token, so with right-padded batches pass the
+        tokenizer's pad id or an ``attention_mask``.
+    :type pad_token_id: Optional[int]
+    :param include_top: Whether the model owns a task head. Defaults to False:
+        no head layer and no head weight exist, and ``call`` returns the tied
+        logits exactly as before.
+    :type include_top: bool
+    :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of
+        its fields. Required when ``include_top`` is True, refused otherwise;
+        stored as a plain dict. ``MULTIPLE_CHOICE`` is refused. A
+        generation-type head's ``vocabulary_size`` is checked against
+        ``vocab_size``.
+    :type task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]]
+    :param head_config_overrides: Extra keyword arguments for the head
+        constructor (e.g. ``{"pooling_type": "mean"}``, which replaces the
+        ``'last'`` default). Only valid with ``include_top=True``.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for ``keras.Model``.
     :type kwargs: Any
 
@@ -342,18 +388,28 @@ class Zamba2Model(keras.Model):
     :vartype mem_mlp_blocks: List[Zamba2SharedMLPBlock]
     :ivar final_norm: The pre-LM-head :class:`RMSNorm`.
     :vartype final_norm: RMSNorm
+    :ivar task_head: The task head, or None without ``include_top``.
+    :vartype task_head: Optional[keras.layers.Layer]
 
     :raises ValueError: If ``vocab_size``, ``hidden_size``, ``num_mem_blocks``,
         ``num_heads``, or ``max_seq_len`` is not positive; if
         ``num_heads`` does not divide ``hidden_size``; if ``layer_mapping``
-        is empty or contains an entry other than ``'m'``/``'g'``.
+        is empty or contains an entry other than ``'m'``/``'g'``; if
+        ``include_top=True`` comes without a ``task_config``, or a
+        ``task_config`` or ``head_config_overrides`` comes with
+        ``include_top=False``.
     :raises NotImplementedError: If ``pretrained`` is True.
 
     Input shape:
-        ``input_ids``: ``(batch_size, seq_len)``, integer token ids.
+        ``input_ids``: ``(batch_size, seq_len)``, integer token ids, or a
+        dictionary holding them under ``'input_ids'`` (and optionally an
+        ``'attention_mask'``, read only by a task head).
 
     Output shape:
-        ``(batch_size, seq_len, vocab_size)``, next-token logits.
+        With ``include_top=False``, ``(batch_size, seq_len, vocab_size)``,
+        next-token logits (a bare tensor, not a dictionary). With
+        ``include_top=True``, the head's output: a bare tensor, or a dict of
+        two or more tensors (question answering).
 
     Example:
         .. code-block:: python
@@ -428,6 +484,10 @@ class Zamba2Model(keras.Model):
         embeddings_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         final_norm_epsilon: float = 1e-6,
         pretrained: bool = False,
+        pad_token_id: Optional[int] = None,
+        include_top: bool = False,
+        task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         """Validate the configuration, resolve the ``layer_mapping`` dispatch
@@ -437,7 +497,7 @@ class Zamba2Model(keras.Model):
             ``num_mem_blocks``, ``num_heads``, or ``max_seq_len`` is not
             positive; if ``num_heads`` does not divide ``hidden_size``; if
             ``layer_mapping`` is empty or contains an entry other than
-            ``'m'``/``'g'``.
+            ``'m'``/``'g'``; or the three task-head knobs are inconsistent.
         :raises NotImplementedError: If ``pretrained`` is True.
         """
         super().__init__(**kwargs)
@@ -465,6 +525,7 @@ class Zamba2Model(keras.Model):
             )
         if max_seq_len <= 0:
             raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
+        validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         layer_mapping = list(layer_mapping)
         if not layer_mapping:
@@ -508,6 +569,15 @@ class Zamba2Model(keras.Model):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.embeddings_initializer = keras.initializers.get(embeddings_initializer)
         self.final_norm_epsilon = final_norm_epsilon
+        self.pad_token_id = None if pad_token_id is None else int(pad_token_id)
+        self.include_top = bool(include_top)
+        self.task_config = (
+            task_config_to_dict(task_config, vocab_size=vocab_size)
+            if task_config is not None else None
+        )
+        self.head_config_overrides = (
+            dict(head_config_overrides) if head_config_overrides is not None else None
+        )
 
         # Number of independent LoRA occurrences every shared MLP mem-block
         # must allocate: one per 'g' position in layer_mapping. `max(..., 1)`
@@ -607,6 +677,25 @@ class Zamba2Model(keras.Model):
 
         self.final_norm = RMSNorm(epsilon=self.final_norm_epsilon, name="final_norm")
 
+        # Created after the backbone and under its own fixed name, so the
+        # backbone's layer names and weight paths are the same with or without
+        # a head. Its random initial VALUES are not: the LoRA ``A`` slices draw
+        # their seeds when they are built, after the head's initializers drew
+        # theirs.
+        self.task_head = None
+        if self.include_top:
+            # DECISION plan-2026-10-11T170958-dc4d2202/D-005: headless stays the tied-logits tensor
+            # and the head reads the FINAL-NORM output; do NOT feed it the logits, flip the headless
+            # output to a hidden-state dict (breaks every logits test and the skip_head trainer), or keep
+            # the head's 'cls' default -- position 0 of a causal decoder has seen only itself. See decisions.md.
+            self.task_head = build_model_task_head(
+                self.task_config,
+                input_dim=self.hidden_size,
+                head_config_overrides=self.head_config_overrides,
+                vocab_size=self.vocab_size,
+                default_pooling="last",
+            )
+
         logger.info(
             f"Initialized Zamba2Model with vocab_size={vocab_size}, "
             f"hidden_size={hidden_size}, depth={len(self.layer_mapping)}, "
@@ -616,15 +705,17 @@ class Zamba2Model(keras.Model):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the embedding, every sub-block, and the final norm in order.
+        Build the embedding, every sub-block, the final norm and the task head
+        (when there is one) in order.
 
-        :param input_shape: Shape of ``input_ids``, ``(batch_size, seq_len)``.
+        :param input_shape: Shape of ``input_ids``, ``(batch_size, seq_len)``,
+            or a dict holding it under ``'input_ids'``.
         :type input_shape: Tuple[Optional[int], ...]
         """
         if self.built:
             return
 
-        ids_shape = tuple(input_shape)
+        ids_shape = ids_shape_of(input_shape)
         # First, so the cached step functions are dropped and no variable exists.
         if "g" in self.layer_mapping:
             refuse_static_sequence_length(
@@ -644,25 +735,44 @@ class Zamba2Model(keras.Model):
             attention_block.build(hidden_shape)
             mlp_block.build(hidden_shape)
         self.final_norm.build(hidden_shape)
+        if self.task_head is not None:
+            self.task_head.build(
+                {"hidden_states": hidden_shape, "attention_mask": ids_shape}
+            )
 
         super().build(input_shape)
 
     def call(
         self,
-        input_ids: keras.KerasTensor,
+        inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
         training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
+    ) -> Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """
-        Run the full decoder stack and project to tied-embedding logits.
+        Run the full decoder stack, then project to tied-embedding logits or
+        pool the final hidden states through the task head.
 
-        :param input_ids: Token ids, shape ``(batch_size, seq_len)``.
-        :type input_ids: keras.KerasTensor
+        :param inputs: Token ids, shape ``(batch_size, seq_len)``, or a
+            dictionary holding them under ``'input_ids'`` (and optionally an
+            ``'attention_mask'``, read only by a task head).
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :param training: Whether in training mode, forwarded to every
-            sub-block.
+            sub-block and the task head.
         :type training: Optional[bool]
-        :return: Next-token logits, shape ``(batch_size, seq_len, vocab_size)``.
-        :rtype: keras.KerasTensor
+        :return: With ``include_top=False``, next-token logits, shape
+            ``(batch_size, seq_len, vocab_size)``. With ``include_top=True``,
+            only the head's output reduced by ``finalize_head_outputs``.
+        :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :raises ValueError: If a dictionary input has no ``'input_ids'`` key.
         """
+        attention_mask = None
+        if isinstance(inputs, dict):
+            if "input_ids" not in inputs:
+                raise ValueError("Dictionary input must contain 'input_ids' key")
+            input_ids = inputs["input_ids"]
+            attention_mask = inputs.get("attention_mask")
+        else:
+            input_ids = inputs
+
         if "g" in self.layer_mapping:  # only the shared attention has RoPE tables
             input_ids = check_sequence_length(
                 self, input_ids, self.max_seq_len, "max_seq_len",
@@ -686,22 +796,38 @@ class Zamba2Model(keras.Model):
 
         hidden_states = self.final_norm(hidden_states, training=training)
 
+        if self.include_top:
+            head_outputs = self.task_head(
+                {
+                    "hidden_states": hidden_states,
+                    "attention_mask": head_attention_mask(
+                        input_ids, attention_mask, self.pad_token_id,
+                        hidden_states.dtype,
+                    ),
+                },
+                training=training,
+            )
+            return finalize_head_outputs(head_outputs)
+
         embedding_weights = self.embedding.weights[0]
         return tied_embedding_logits(hidden_states, embedding_weights)
 
-    def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(self, input_shape: Any) -> Any:
         """
-        Compute the output shape of the model.
+        Compute the shapes of what :meth:`call` returns.
 
-        :param input_shape: Shape of ``input_ids``, ``(batch_size, seq_len)``.
-        :type input_shape: Tuple[Optional[int], ...]
-        :return: ``(batch_size, seq_len, vocab_size)``.
-        :rtype: Tuple[Optional[int], ...]
+        :param input_shape: Shape of ``input_ids``, ``(batch_size, seq_len)``,
+            or a dict holding it under ``'input_ids'``.
+        :type input_shape: Any
+        :return: Headless, ``(batch_size, seq_len, vocab_size)``. With a head,
+            the head's output shape after the reduction ``call`` applies: one
+            shape, or a mapping of two or more.
+        :rtype: Any
         """
-        batch_size, seq_len = input_shape[0], input_shape[1]
-        return (batch_size, seq_len, self.vocab_size)
+        ids_shape = ids_shape_of(input_shape)
+        if self.include_top:
+            return head_output_shape(self.task_head, ids_shape, self.hidden_size)
+        return (ids_shape[0], ids_shape[1], self.vocab_size)
 
     #: Re-exported, not redefined: the module-level :data:`MODEL_VARIANTS`,
     #: aliased onto the class so ``from_variant``/``create_zamba2`` and the
@@ -718,6 +844,7 @@ class Zamba2Model(keras.Model):
     def from_variant(
         cls,
         variant: str,
+        pretrained: Union[bool, str] = False,
         **overrides: Any,
     ) -> "Zamba2Model":
         """
@@ -743,16 +870,30 @@ class Zamba2Model(keras.Model):
 
         :param variant: A key of :data:`MODEL_VARIANTS`.
         :type variant: str
-        :param overrides: Override or extend any variant parameter,
-            including ``pretrained`` (which :meth:`__init__` raises
-            ``NotImplementedError`` for when True -- no Zamba2 checkpoint is
-            distributed with ``dl_techniques``).
+        :param pretrained: If a string, the path of a local ``.keras``
+            checkpoint: the backbone (the embedding and every block, by layer
+            name) is restored from it, headed or headless; a ``task_head`` in
+            the checkpoint is never copied and the model's own head keeps its
+            fresh initialization, so a checkpoint of any Zamba2, headless or
+            trained under any head, warm-starts a model with any other head or
+            none. The backbone loads completely or the call raises: a
+            checkpoint of another depth or width is refused, never truncated;
+            on a vocabulary change only the token table keeps its init. To
+            restore a whole model, head included, use
+            ``keras.models.load_model``. If True, raises
+            ``NotImplementedError`` -- no Zamba2 checkpoint is distributed
+            with ``dl_techniques``. Defaults to False (random init).
+        :type pretrained: Union[bool, str]
+        :param overrides: Override or extend any variant parameter, including
+            ``include_top``, ``task_config``, ``head_config_overrides`` and
+            ``pad_token_id``.
         :type overrides: Any
         :return: The constructed model.
         :rtype: Zamba2Model
-        :raises ValueError: If ``variant`` is not a recognized key.
-        :raises NotImplementedError: If ``pretrained=True`` is passed in
-            ``overrides``.
+        :raises ValueError: If ``variant`` is not a recognized key, or a
+            ``pretrained`` checkpoint does not fit the backbone.
+        :raises NotImplementedError: If ``pretrained`` is True.
+        :raises FileNotFoundError: If a ``pretrained`` path does not exist.
 
         Example:
             .. code-block:: python
@@ -788,7 +929,23 @@ class Zamba2Model(keras.Model):
             config.pop("num_mamba_blocks", None)
 
         config.update(overrides)
-        return cls(**config)
+        weights_path = pretrained_path_or_raise(pretrained, "Zamba2")
+        model = cls(**config)
+        if weights_path is not None:
+            # A build, not a forward: no RNG is drawn and no weight is touched.
+            if not model.built:
+                model.build((None, None))
+            # DECISION plan-2026-10-11T170958-dc4d2202/D-005: by name and strict through the shared
+            # rule; do NOT use model.load_weights (restores nothing on a mismatch and reports success)
+            # nor drop TASK_HEAD_NAME (a head of equal shape would be copied). See decisions.md.
+            load_backbone_from_checkpoint(
+                model,
+                weights_path,
+                head_prefixes=(TASK_HEAD_NAME,),
+                vocab_layers=("embedding",),
+                tables=("embedding/embeddings",),
+            )
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -837,6 +994,15 @@ class Zamba2Model(keras.Model):
                     self.embeddings_initializer
                 ),
                 "final_norm_epsilon": self.final_norm_epsilon,
+                "pad_token_id": self.pad_token_id,
+                "include_top": self.include_top,
+                "task_config": (
+                    dict(self.task_config) if self.task_config is not None else None
+                ),
+                "head_config_overrides": (
+                    dict(self.head_config_overrides)
+                    if self.head_config_overrides is not None else None
+                ),
             }
         )
         return config
@@ -849,7 +1015,7 @@ class Zamba2Model(keras.Model):
 
 def create_zamba2(
     variant: str = "zamba2_small",
-    pretrained: bool = False,
+    pretrained: Union[bool, str] = False,
     **overrides: Any,
 ) -> Zamba2Model:
     """
@@ -862,16 +1028,21 @@ def create_zamba2(
     :param variant: A key of :data:`MODEL_VARIANTS` --  ``'zamba2_mini'``,
         ``'zamba2_small'`` (default), or ``'zamba2_base'``.
     :type variant: str
-    :param pretrained: If ``True``, raises ``NotImplementedError`` -- no
-        pretrained Zamba2 checkpoint is distributed with ``dl_techniques``
-        (decisions.md D-004). Must be ``False`` (the default).
-    :type pretrained: bool
+    :param pretrained: If a string, loads the backbone from that local
+        ``.keras`` checkpoint (a model with a head receives the backbone only;
+        see :meth:`Zamba2Model.from_variant`). If ``True``, raises
+        ``NotImplementedError`` -- no pretrained Zamba2 checkpoint is
+        distributed with ``dl_techniques`` (decisions.md D-004). Defaults to
+        ``False``.
+    :type pretrained: Union[bool, str]
     :param overrides: Forwarded to :meth:`Zamba2Model.from_variant`,
-        overriding any variant parameter.
+        overriding any variant parameter, including ``include_top=True`` with
+        a ``task_config`` for a model with a task head.
     :type overrides: Any
     :return: The constructed model.
     :rtype: Zamba2Model
-    :raises ValueError: If ``variant`` is not a recognized key.
+    :raises ValueError: If ``variant`` is not a recognized key, or a forwarded
+        argument is invalid.
     :raises NotImplementedError: If ``pretrained`` is True.
 
     Example:

@@ -50,6 +50,7 @@ from dl_techniques.models.language.qwen import create_qwen3, create_qwen3_next
 from dl_techniques.models.language.topolm import create_topolm
 from dl_techniques.models.language.tree_transformer import create_tree_transformer
 from dl_techniques.models.language.wave_field import create_wave_field_llm
+from dl_techniques.models.language.zamba2 import create_zamba2
 
 from .tiny_language_models import TINY
 
@@ -161,6 +162,14 @@ _MODELS = {
                         "sliding_window", "sliding_window", "full_attention"]),
                      "wider": dict(hidden_size=64)},
                     {}),
+    # Tied, no position table: the token table is `embedding`; the RoPE caches
+    # of the shared attention block are sized by `max_seq_len`.
+    "zamba2": _Spec(lambda **k: create_zamba2("zamba2_mini", **k),
+                    dict(TINY["zamba2"].kwargs, layer_mapping=["m", "m", "g"],
+                         max_seq_len=16),
+                    {"deeper": dict(layer_mapping=["m", "m", "m", "g"]),
+                     "wider": dict(hidden_size=64)},
+                    dict(max_seq_len=32)),
     "wave_field": _Spec(lambda **k: create_wave_field_llm("tiny", **k),
                         dict(vocab_size=_VOCAB, embed_dim=32, depth=1,
                              num_heads=2, max_seq_len=16,

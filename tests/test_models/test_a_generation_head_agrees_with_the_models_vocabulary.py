@@ -1,6 +1,6 @@
 """A generation-type head's vocabulary is the model's own, in every class that owns a head.
 
-Subject: the thirteen language classes with ``include_top`` and the
+Subject: the fourteen language classes with ``include_top`` and the
 ``vocab_size`` they hand to ``build_model_task_head``
 (plan-2026-10-11T170958-dc4d2202 step 8c, D-009). A generation head emits logits
 over ``task_config.vocabulary_size``, which defaulted to 32000 whatever the
@@ -36,8 +36,8 @@ def subject(request):
     return request.param
 
 
-def test_the_census_covers_the_thirteen_head_owners():
-    assert len(SUBJECTS) == 13
+def test_the_census_covers_the_fourteen_head_owners():
+    assert len(SUBJECTS) == 14
 
 
 def test_an_unset_vocabulary_is_the_models(subject):

@@ -5,7 +5,7 @@ each" (``test_a_decoder_assumes_no_padding_token``,
 ``test_a_language_model_reports_its_output_shape``). The vocabulary is
 ``VOCAB`` for every row, a value that is no class's default.
 
-Interface contract: ``TINY[name]`` is a :class:`Tiny` (all thirteen classes that own a head); ``tiny.cls()`` imports
+Interface contract: ``TINY[name]`` is a :class:`Tiny` (all fourteen classes that own a head); ``tiny.cls()`` imports
 and returns the class; ``tiny.kwargs`` are constructor keyword arguments that
 build a one-layer model in a fraction of a second (no ``include_top``, no
 ``task_config``: the caller adds those). Adding a class is one row.
@@ -85,4 +85,9 @@ TINY = {
         "dl_techniques.models.language.mamba.mamba_v2", "Mamba2",
         dict(vocab_size=VOCAB, d_model=32, num_layers=1, d_state=8, d_conv=4,
              expand=2, headdim=16)),
+    "zamba2": Tiny(
+        "dl_techniques.models.language.zamba2.model", "Zamba2Model",
+        dict(vocab_size=VOCAB, hidden_size=32, layer_mapping=["m", "g"],
+             num_mem_blocks=1, num_heads=2, max_seq_len=32, d_state=8,
+             headdim=16)),
 }

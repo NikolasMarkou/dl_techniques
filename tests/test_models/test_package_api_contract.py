@@ -27,6 +27,7 @@ import re
 import sys
 import types
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -90,7 +91,8 @@ def _smallest_variant(keys) -> str:
 def _variant_table_for(fn):
     """The ``MODEL_VARIANTS`` table a ``variant``-taking callable looks names up in.
 
-    Contract: takes any callable; returns a non-empty ``dict`` or ``None``.
+    Contract: takes any callable; returns a non-empty mapping (a ``dict``, or a
+    read-only ``MappingProxyType`` like Zamba2's) or ``None``.
     Resolution order, and why:
 
     1. ``fn.__self__`` -- a bound ``from_variant`` classmethod carries its owning
@@ -112,7 +114,7 @@ def _variant_table_for(fn):
     owner = getattr(fn, "__self__", None)
     if inspect.isclass(owner):
         table = getattr(owner, "MODEL_VARIANTS", None)
-        if isinstance(table, dict) and table:
+        if isinstance(table, Mapping) and table:
             return table
     module = sys.modules.get(getattr(fn, "__module__", ""))
     if module is None:
@@ -122,7 +124,7 @@ def _variant_table_for(fn):
         if not (inspect.isclass(obj) and obj.__module__ == fn.__module__):
             continue
         table = getattr(obj, "MODEL_VARIANTS", None)
-        if isinstance(table, dict) and table:
+        if isinstance(table, Mapping) and table:
             return table
     return None
 

@@ -74,6 +74,12 @@ WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
   `create_topolm`, `create_wave_field_llm`. Build a headed model with
   `create_<model>(variant, include_top=True, task_config=...)`; the old
   functional head wrappers are gone.
+- Zamba2 owns a head too, with one difference: headless, `call()` returns the tied
+  LOGITS tensor (not a hidden-state dict; its CLM wrapper uses `skip_head=True`), and that
+  does not change. With `include_top=True` the final-norm output feeds the head
+  (`'last'` pooling) and the logits are not computed. Input may be the ids or a dict with
+  `attention_mask`. `create_zamba2` forwards to `from_variant`, which takes
+  `pretrained=<path>` through the shared load rule (`pretrained=True` raises).
 - `create_qwen3`, `create_qwen3_next` and `create_gemma3` dispatch instead. Each
   returns a two-input (`[input_ids, attention_mask]`) functional model whose
   only layer besides the inputs is the class, named `<model>_backbone`:
@@ -94,7 +100,7 @@ own attention is unchanged):
 |---|---|---|
 | BERT, DistilBERT, ModernBERT, FNet (bidirectional encoders) | all ones, the same mask the encoder returns: padding is pooled under `mean` / `max` / `attention` | `cls` |
 | TreeTransformer | `input_ids != pad_token_id` | `cls` |
-| GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3 (causal decoders) | `input_ids != pad_token_id` if a pad id was given, else all ones | `last` |
+| GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3, Zamba2 (causal decoders) | `input_ids != pad_token_id` if a pad id was given, else all ones | `last` |
 
 A caller's `attention_mask` always wins. The decoders' `pad_token_id` defaults to
 `None`, which means no padding (the all-ones mask): id 0 is a real token in the
@@ -143,6 +149,7 @@ Reusing a backbone under a new head:
   | TreeTransformer | `embedding` | `lm_head_projection` |
   | GPT2 | `decoder` (the token table inside the one-layer decoder) | `lm_head` when untied |
   | Mamba, Mamba2 | `embedding` | none |
+  | Zamba2 | `embedding` | none (tied) |
   | TopoLM | `word_embeddings` | `lm_head` when untied |
   | WaveFieldLLM | `token_embeddings` | `lm_head` when untied |
 

@@ -8,8 +8,8 @@ per depth without multiplying its parameter count.
 
 > **No pretrained weights are distributed by this library.** `create_zamba2(pretrained=True)` /
 > `Zamba2Model(pretrained=True)` raise `NotImplementedError` — no Zamba2 checkpoint is fetched
-> from Hugging Face or converted here. Warm-start a built model via
-> `model.load_weights("/path/to/weights.keras")` instead.
+> from Hugging Face or converted here. Warm-start from a local checkpoint of your own with
+> `create_zamba2(..., pretrained="/path/to/model.keras")` (backbone only, see section 5).
 
 ---
 
@@ -106,6 +106,28 @@ logits = model(input_ids)
 print(logits.shape)  # (2, 32, 100277)
 ```
 
+### Task head
+
+`include_top=True` with a `task_config` gives the model ONE task head from `layers/heads/nlp`
+(layer name `task_head`) in place of the tied logits: it pools the final-norm output under the
+input's `attention_mask` (else `input_ids != pad_token_id` when `pad_token_id` is given, else
+every position), `'last'` by default, and `call` returns the head's output (a bare tensor, or a
+dict for question answering). Headless, nothing changes: the model still returns the logits tensor.
+
+```python
+import keras
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.zamba2 import create_zamba2
+
+classifier = create_zamba2(
+    "zamba2_mini", include_top=True,
+    task_config=NLPTaskConfig(
+        name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2),
+)
+input_ids = keras.random.randint((2, 32), 0, 100277, dtype="int32")
+print(classifier({"input_ids": input_ids}).shape)  # (2, 2)
+```
+
 ---
 
 ## 4. Variants
@@ -151,8 +173,13 @@ except NotImplementedError as e:
 ```
 
 No Zamba2 checkpoint is distributed with this repository; `pretrained=True` raises rather than
-silently returning a random-init model (`decisions.md` D-004). Warm-start a built model with
-`model.load_weights("/path/to/weights.keras")` instead.
+silently returning a random-init model (`decisions.md` D-004).
+
+`pretrained="/path/to/model.keras"` restores a local checkpoint's backbone, headless or headed,
+by layer name through the shared load rule (`utils/weight_transfer.py`
+`load_backbone_from_checkpoint`): every backbone layer loads and every checkpoint layer finds a
+home, or the call raises; the checkpoint's `task_head` is never copied. A backbone trained under
+one head therefore warm-starts a model with any other head, or none, with the same weights.
 
 ---
 
