@@ -6,11 +6,11 @@ redundant / undocumented.
 
 Run with::
 
-    pytest tests/test_train/_cli_contract.py -xvs
+    pytest tests/test_train/test_neural_hmm/test_cli_flag_contract.py -xvs
 
 or via make::
 
-    pytest tests/test_train/_cli_contract.py -xvs
+    pytest tests/test_train/test_neural_hmm/test_cli_flag_contract.py -xvs
 """
 
 import argparse
