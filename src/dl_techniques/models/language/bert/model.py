@@ -39,6 +39,10 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.sequence_length_guard import (
+    gate_dynamic_sequence_length,
+    refuse_static_sequence_length,
+)
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
 )
@@ -838,16 +842,12 @@ class BERT(keras.Model):
         :type seq_len: Optional[int]
         :raises ValueError: if ``seq_len`` exceeds ``max_position_embeddings``.
         """
-        if seq_len is None or seq_len <= self.max_position_embeddings:
-            return
-        # A refusal during the FIRST trace of a cached Keras step function
-        # leaves that function unusable for every later call ("Structures
-        # don't have the same nested structure", or "Creating variables on a
-        # non-first call"); drop them so the next call builds fresh ones.
-        self.predict_function = None
-        self.train_function = None
-        self.test_function = None
-        raise ValueError(self._sequence_length_message(seq_len))
+        refuse_static_sequence_length(
+            self,
+            seq_len,
+            self.max_position_embeddings,
+            self._sequence_length_message(seq_len),
+        )
 
     def _sequence_length_message(self, seq_len: Union[int, str]) -> str:
         """The over-length message, shared by the static and runtime checks.
@@ -883,35 +883,12 @@ class BERT(keras.Model):
             time.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-10-11T004932-b83935e1/D-021: raw TF on purpose; do NOT replace with a
-        # keras.ops expression -- keras.ops has no assertion, and without the control dependency the
-        # out-of-range gather can fail first with an opaque message (or, on GPU, return zeros). See decisions.md.
-        if keras.backend.backend() != "tensorflow" or isinstance(
-            input_ids, keras.KerasTensor
-        ):
-            return input_ids
-        import tensorflow as tf
-
-        seq_len = tf.shape(input_ids)[-1]
-        check = tf.debugging.assert_less_equal(
-            seq_len,
+        return gate_dynamic_sequence_length(
+            input_ids,
             self.max_position_embeddings,
-            message=self._sequence_length_message("<run-time length>"),
+            self._sequence_length_message("<run-time length>"),
+            "max_position_embeddings",
         )
-        with tf.control_dependencies([check]):
-            # DECISION plan-2026-10-11T004932-b83935e1/D-030: XLA drops `check`, which Keras enables
-            # by default when a GPU is visible; do NOT remove this zero-sum term or opt BERT out of
-            # XLA instead. XLA compiles each length with static shapes, so a negative size here
-            # fails that compile, naming this node. See decisions.md.
-            xla_guard = tf.zeros(
-                tf.reshape(self.max_position_embeddings - seq_len, [1]),
-                dtype=input_ids.dtype,
-                name=(
-                    "seq_len_exceeds_max_position_embeddings_"
-                    f"{self.max_position_embeddings}"
-                ),
-            )
-            return input_ids + tf.reduce_sum(xla_guard)
 
     def load_pretrained_weights(
         self,
