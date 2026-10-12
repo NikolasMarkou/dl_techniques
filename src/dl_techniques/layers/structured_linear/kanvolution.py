@@ -135,6 +135,10 @@ class KANvolution(keras.layers.Layer):
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param activity_regularizer: Optional regularizer applied to layer output.
     :type activity_regularizer: Optional[keras.regularizers.Regularizer]
+    :param seed: Seed for the random initializer. If provided and
+        ``kernel_initializer`` is a string, a seeded instance is created.
+        Defaults to ``None``.
+    :type seed: Optional[int]
     :param kwargs: Additional arguments for Layer base class.
     """
 
@@ -153,6 +157,7 @@ class KANvolution(keras.layers.Layer):
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         activity_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -170,7 +175,14 @@ class KANvolution(keras.layers.Layer):
         self.dilation_rate = self._normalize_tuple(dilation_rate, 2, 'dilation_rate')
         self.activation = resolve_activation(activation)
         self.use_bias = use_bias
+        self.seed = seed
         self._is_identity_activation = self.activation is keras.activations.linear
+
+        # If a seed is provided and the initializer is a string, create a seeded instance
+        if seed is not None and isinstance(kernel_initializer, str):
+            kernel_initializer = keras.initializers.get(kernel_initializer)
+            if hasattr(kernel_initializer, 'seed'):
+                kernel_initializer = type(kernel_initializer)(seed=seed)
 
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -529,5 +541,29 @@ class KANvolution(keras.layers.Layer):
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'activity_regularizer': keras.regularizers.serialize(self.activity_regularizer),
+            'seed': self.seed,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "KANvolution":
+        """Create a layer instance from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New KANvolution instance.
+        :rtype: KANvolution
+        """
+        config = dict(config)
+
+        if isinstance(config.get("kernel_initializer"), dict):
+            config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
+        if isinstance(config.get("bias_initializer"), dict):
+            config["bias_initializer"] = keras.initializers.deserialize(config["bias_initializer"])
+        for key in ("kernel_regularizer", "bias_regularizer", "activity_regularizer"):
+            if isinstance(config.get(key), dict):
+                config[key] = keras.regularizers.deserialize(config[key])
+
+        return cls(**config)
+
+# ---------------------------------------------------------------------

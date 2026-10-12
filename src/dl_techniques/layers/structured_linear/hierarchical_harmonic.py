@@ -237,6 +237,7 @@ class HierarchicalHarmonicHead(keras.layers.Layer):
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             node_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             node_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            seed: Optional[int] = None,
             **kwargs: Any
     ) -> None:
         """Validate the configuration and store it.
@@ -266,6 +267,10 @@ class HierarchicalHarmonicHead(keras.layers.Layer):
         :type node_initializer: Union[str, keras.initializers.Initializer]
         :param node_regularizer: Regularizer for internal-node prototypes.
         :type node_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param seed: Seed for the random initializers. If provided and
+            ``kernel_initializer`` or ``node_initializer`` is a string, seeded instances are created.
+            Defaults to ``None``.
+        :type seed: Optional[int]
         :param kwargs: Additional keyword arguments for the Layer base class.
         :raises ValueError: If any argument violates its contract above.
         """
@@ -317,6 +322,19 @@ class HierarchicalHarmonicHead(keras.layers.Layer):
         self.n = n
         self.output_mode = output_mode
         self.epsilon = float(epsilon)
+        self.seed = seed
+
+        # If a seed is provided and the initializer is a string, create seeded instances
+        if seed is not None:
+            if isinstance(kernel_initializer, str):
+                kernel_initializer = keras.initializers.get(kernel_initializer)
+                if hasattr(kernel_initializer, 'seed'):
+                    kernel_initializer = type(kernel_initializer)(seed=seed)
+            if isinstance(node_initializer, str):
+                node_initializer = keras.initializers.get(node_initializer)
+                if hasattr(node_initializer, 'seed'):
+                    node_initializer = type(node_initializer)(seed=seed)
+
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.node_initializer = keras.initializers.get(node_initializer)
@@ -936,7 +954,37 @@ class HierarchicalHarmonicHead(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "node_initializer": keras.initializers.serialize(self.node_initializer),
             "node_regularizer": keras.regularizers.serialize(self.node_regularizer),
+            "seed": self.seed,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "HierarchicalHarmonicHead":
+        """Create a layer instance from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New HierarchicalHarmonicHead instance.
+        :rtype: HierarchicalHarmonicHead
+        """
+        config = dict(config)
+
+        if isinstance(config.get("kernel_initializer"), dict):
+            config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
+        if isinstance(config.get("kernel_regularizer"), dict):
+            config["kernel_regularizer"] = keras.regularizers.deserialize(config["kernel_regularizer"])
+        if isinstance(config.get("node_initializer"), dict):
+            config["node_initializer"] = keras.initializers.deserialize(config["node_initializer"])
+        if isinstance(config.get("node_regularizer"), dict):
+            config["node_regularizer"] = keras.regularizers.deserialize(config["node_regularizer"])
+
+        # Convert branching back to tuple if it's a list
+        if isinstance(config.get("branching"), list):
+            config["branching"] = tuple(config["branching"])
+        # Convert n back to tuple if it's a list
+        if isinstance(config.get("n"), list):
+            config["n"] = tuple(config["n"])
+
+        return cls(**config)
 
 # ---------------------------------------------------------------------

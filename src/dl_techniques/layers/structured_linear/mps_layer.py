@@ -116,6 +116,10 @@ class MPSLayer(keras.layers.Layer):
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param activity_regularizer: Regularizer for layer output. Defaults to None.
     :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param seed: Seed for the random initializer. If provided and
+        ``kernel_initializer`` is a string, a seeded instance is created.
+        Defaults to ``None``.
+    :type seed: Optional[int]
     :param kwargs: Additional keyword arguments for the Layer base class.
 
     :raises ValueError: If output_dim or bond_dim are not positive.
@@ -131,6 +135,7 @@ class MPSLayer(keras.layers.Layer):
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
         """Initialize the MPSLayer."""
@@ -144,6 +149,14 @@ class MPSLayer(keras.layers.Layer):
         self.output_dim = output_dim
         self.bond_dim = bond_dim
         self.use_bias = use_bias
+        self.seed = seed
+
+        # If a seed is provided and the initializer is a string, create a seeded instance
+        if seed is not None and isinstance(kernel_initializer, str):
+            kernel_initializer = keras.initializers.get(kernel_initializer)
+            if hasattr(kernel_initializer, 'seed'):
+                kernel_initializer = type(kernel_initializer)(seed=seed)
+
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -341,7 +354,28 @@ class MPSLayer(keras.layers.Layer):
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'activity_regularizer': keras.regularizers.serialize(self.activity_regularizer),
+            'seed': self.seed,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MPSLayer":
+        """Create a layer instance from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New MPSLayer instance.
+        :rtype: MPSLayer
+        """
+        config = dict(config)
+
+        for key in ("kernel_initializer", "bias_initializer"):
+            if isinstance(config.get(key), dict):
+                config[key] = keras.initializers.deserialize(config[key])
+        for key in ("kernel_regularizer", "bias_regularizer", "activity_regularizer"):
+            if isinstance(config.get(key), dict):
+                config[key] = keras.regularizers.deserialize(config[key])
+
+        return cls(**config)
 
 # ---------------------------------------------------------------------

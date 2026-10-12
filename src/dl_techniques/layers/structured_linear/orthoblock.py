@@ -146,6 +146,10 @@ class OrthoBlock(keras.layers.Layer):
         toward ``{0, 1}``. Set to 0.0 to disable binarization and keep graded
         gates.
     :type binary_preference_factor: float
+    :param seed: Seed for the random initializer. If provided and
+        ``kernel_initializer`` is a string or ``None``, a seeded instance is created.
+        Defaults to ``None``.
+    :type seed: Optional[int]
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any
     """
@@ -163,6 +167,7 @@ class OrthoBlock(keras.layers.Layer):
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         scale_initial_value: float = 0.8,
         binary_preference_factor: float = 1e-4,
+        seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -192,13 +197,22 @@ class OrthoBlock(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.scale_initial_value = scale_initial_value
         self.binary_preference_factor = binary_preference_factor
+        self.seed = seed
 
         # A default-argument initializer instance would be constructed once at
         # import and shared by every OrthoBlock in the process. Build a fresh
         # one per layer instead.
         if kernel_initializer is None:
-            self.kernel_initializer = OrthogonalHypersphereInitializer()
+            if seed is not None:
+                self.kernel_initializer = OrthogonalHypersphereInitializer(seed=seed)
+            else:
+                self.kernel_initializer = OrthogonalHypersphereInitializer()
         else:
+            # If a seed is provided and the initializer is a string, create a seeded instance
+            if seed is not None and isinstance(kernel_initializer, str):
+                kernel_initializer = keras.initializers.get(kernel_initializer)
+                if hasattr(kernel_initializer, 'seed'):
+                    kernel_initializer = type(kernel_initializer)(seed=seed)
             self.kernel_initializer = keras.initializers.get(kernel_initializer)
 
         # resolve_activation(None) returns `keras.activations.linear`, not None,
@@ -368,7 +382,28 @@ class OrthoBlock(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "scale_initial_value": self.scale_initial_value,
             "binary_preference_factor": self.binary_preference_factor,
+            "seed": self.seed,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "OrthoBlock":
+        """Create a layer instance from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New OrthoBlock instance.
+        :rtype: OrthoBlock
+        """
+        config = dict(config)
+
+        if isinstance(config.get("kernel_initializer"), dict):
+            config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
+        if isinstance(config.get("bias_initializer"), dict):
+            config["bias_initializer"] = keras.initializers.deserialize(config["bias_initializer"])
+        if isinstance(config.get("bias_regularizer"), dict):
+            config["bias_regularizer"] = keras.regularizers.deserialize(config["bias_regularizer"])
+
+        return cls(**config)
 
 # ---------------------------------------------------------------------

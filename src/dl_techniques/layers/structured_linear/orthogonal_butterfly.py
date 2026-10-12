@@ -57,6 +57,9 @@ def _butterfly_apply(
     :return: ``(N, d)`` transformed tensor with ``||output|| == ||input||``
         per row.
     """
+    # Cast angles to input dtype to preserve dtype (e.g., mixed_float16)
+    angles = keras.ops.cast(angles, x.dtype)
+    
     block_iter = range(num_blocks - 1, -1, -1) if inverse else range(num_blocks)
     for block in block_iter:
         stage_iter = range(levels - 1, -1, -1) if inverse else range(levels)
@@ -121,6 +124,10 @@ class OrthogonalButterfly(keras.layers.Layer):
     :param angle_regularizer: Optional regularizer on the angles.
     :param bias_initializer: Initializer for the bias. Defaults to ``'zeros'``.
     :param bias_regularizer: Optional regularizer on the bias.
+    :param seed: Seed for the angle initializer. If provided and
+        ``angle_initializer`` is a string, a seeded instance is created.
+        Defaults to ``None``.
+    :type seed: Optional[int]
     :param kwargs: Passed to ``keras.layers.Layer``.
 
     Input shape:
@@ -140,6 +147,7 @@ class OrthogonalButterfly(keras.layers.Layer):
         angle_regularizer: Optional[Union[str, Any]] = None,
         bias_initializer: Union[str, Any] = "zeros",
         bias_regularizer: Optional[Union[str, Any]] = None,
+        seed: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -147,6 +155,14 @@ class OrthogonalButterfly(keras.layers.Layer):
 
         self.num_blocks = int(num_blocks)
         self.use_bias = use_bias
+        self.seed = seed
+
+        # If a seed is provided and the initializer is a string, create a seeded instance
+        if seed is not None and isinstance(angle_initializer, str):
+            angle_initializer = keras.initializers.get(angle_initializer)
+            if hasattr(angle_initializer, 'seed'):
+                angle_initializer = type(angle_initializer)(seed=seed)
+
         self.angle_initializer = keras.initializers.get(angle_initializer)
         self.angle_regularizer = keras.regularizers.get(angle_regularizer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -208,24 +224,25 @@ class OrthogonalButterfly(keras.layers.Layer):
         With a bias, the forward map is ``y = W x + b`` and the inverse is
         ``x = W^T (y - b)`` (bias subtracted before the inverse rotation).
         """
-        inputs_fp32 = keras.ops.cast(inputs, "float32")
-        orig_shape = keras.ops.shape(inputs_fp32)
-        x = keras.ops.reshape(inputs_fp32, (-1, self._dim))  # flatten leading dims
-        if inverse and self.use_bias:
-            x = keras.ops.subtract(x, keras.ops.cast(self.bias, "float32"))
+        orig_shape = keras.ops.shape(inputs)
+        x = keras.ops.reshape(inputs, (-1, self._dim))  # flatten leading dims
+        if self.use_bias:
+            bias = keras.ops.cast(self.bias, x.dtype)
+            if inverse:
+                x = keras.ops.subtract(x, bias)
         if self._levels > 0:
             x = _butterfly_apply(
                 x,
-                keras.ops.cast(self.angles, "float32"),
+                self.angles,
                 self._dim,
                 self.num_blocks,
                 self._levels,
                 inverse=inverse,
             )
         if self.use_bias and not inverse:
-            x = keras.ops.add(x, keras.ops.cast(self.bias, "float32"))
+            x = keras.ops.add(x, bias)
         x = keras.ops.reshape(x, orig_shape)
-        return keras.ops.cast(x, inputs.dtype)
+        return x
 
     def inverse(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Convenience alias for ``call(inputs, inverse=True)``."""
@@ -271,7 +288,30 @@ class OrthogonalButterfly(keras.layers.Layer):
             "angle_regularizer": keras.regularizers.serialize(self.angle_regularizer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
+            "seed": self.seed,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "OrthogonalButterfly":
+        """Create a layer instance from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New OrthogonalButterfly instance.
+        :rtype: OrthogonalButterfly
+        """
+        config = dict(config)
+
+        if isinstance(config.get("angle_initializer"), dict):
+            config["angle_initializer"] = keras.initializers.deserialize(config["angle_initializer"])
+        if isinstance(config.get("angle_regularizer"), dict):
+            config["angle_regularizer"] = keras.regularizers.deserialize(config["angle_regularizer"])
+        if isinstance(config.get("bias_initializer"), dict):
+            config["bias_initializer"] = keras.initializers.deserialize(config["bias_initializer"])
+        if isinstance(config.get("bias_regularizer"), dict):
+            config["bias_regularizer"] = keras.regularizers.deserialize(config["bias_regularizer"])
+
+        return cls(**config)
 
 # ---------------------------------------------------------------------

@@ -601,4 +601,15 @@ class HierarchicalCrystalLayer(keras.layers.Layer):
 
         return config
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "HierarchicalCrystalLayer":
+        """Create a layer instance from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New HierarchicalCrystalLayer instance.
+        :rtype: HierarchicalCrystalLayer
+        """
+        return cls(**config)
+
 # ---------------------------------------------------------------------

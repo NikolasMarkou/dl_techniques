@@ -291,4 +291,25 @@ class RFFKernelLayer(keras.layers.Layer):
         })
         return config
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "RFFKernelLayer":
+        """Create a layer instance from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New RFFKernelLayer instance.
+        :rtype: RFFKernelLayer
+        """
+        config = dict(config)
+
+        if isinstance(config.get("kernel_initializer"), dict):
+            config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
+        if isinstance(config.get("bias_initializer"), dict):
+            config["bias_initializer"] = keras.initializers.deserialize(config["bias_initializer"])
+        for key in ("kernel_regularizer", "bias_regularizer", "kernel_constraint", "bias_constraint"):
+            if isinstance(config.get(key), dict):
+                config[key] = getattr(keras, key.split('_')[0] + 's').deserialize(config[key])
+
+        return cls(**config)
+
 # ---------------------------------------------------------------------

@@ -289,4 +289,15 @@ class CrystalLayer(keras.layers.Layer):
 
         return config
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "CrystalLayer":
+        """Create a layer instance from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New CrystalLayer instance.
+        :rtype: CrystalLayer
+        """
+        return cls(**config)
+
 # ---------------------------------------------------------------------

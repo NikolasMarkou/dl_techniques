@@ -370,4 +370,20 @@ class CrystalMultiHeadProjection(keras.layers.Layer):
 
         return config
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "CrystalMultiHeadProjection":
+        """Create a layer instance from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New CrystalMultiHeadProjection instance.
+        :rtype: CrystalMultiHeadProjection
+        """
+        config = dict(config)
+
+        if isinstance(config.get("kernel_initializer"), dict):
+            config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
+
+        return cls(**config)
+
 # ---------------------------------------------------------------------
