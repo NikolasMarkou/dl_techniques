@@ -67,7 +67,9 @@ class TestKANvolution:
         assert layer.strides == (1, 1)
         assert layer.padding == 'same'
         assert layer.dilation_rate == (1, 1)
-        assert layer.activation is None
+        # `None` resolves to the linear identity via `activations/common.py`,
+        # like every sibling layer (BitLinear, OrthoBlock, RFFKernelLayer).
+        assert layer.activation is keras.activations.linear
         assert layer.use_bias is True
 
     def test_initialization_with_int_kernel_size(self):
@@ -99,7 +101,7 @@ class TestKANvolution:
         assert layer.strides == (1, 1)
         assert layer.padding == 'valid'
         assert layer.dilation_rate == (1, 2)
-        assert layer.activation == 'gelu'
+        assert layer.activation is keras.activations.gelu
         assert layer.kernel_regularizer is not None
         assert layer.bias_regularizer is not None
 

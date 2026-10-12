@@ -29,7 +29,6 @@ from dl_techniques.layers.structured_linear.crystal_layer import CrystalLayer
 | `crystal_layer.py` | `CrystalLayer` — cosine logits against a packed spherical-code frame |
 | `hierarchical_crystal_layer.py` | `HierarchicalCrystalLayer` — two-tier crystal classifier over a class tree |
 | `crystal_multihead_projection.py` | `CrystalMultiHeadProjection` — per-head simplex prisms + learned projection |
-| `MIGRATION.md` | Checkpoint-affecting changes and retired claims for this package |
 
 ## `BitLinear`
 
@@ -37,7 +36,7 @@ from dl_techniques.layers.structured_linear.crystal_layer import CrystalLayer
 straight-through estimator through the round. Weights default to ternary
 `{-1, 0, 1}` (`weight_bits=1.58`); `weight_bits=1` is a distinct binary path
 (`{-1, +1}` via `sign`). Activations default to 8-bit. `gamma` never reduces
-over the batch axis, so the layer is batch-size independent.
+over the batch axis, so the layer computes the same function at any batch size.
 
 `use_bias` defaults to **`False`**, matching the BitNet formulation — unlike
 `keras.layers.Dense`. `get_config` has always carried it, so saved archives
@@ -94,6 +93,9 @@ layers share `omega`/`b` bit-exactly and differ downstream.
 
 ## `KANvolution`
 
+Convolution layer whose per-tap activation is a learnable B-spline combined
+with SiLU, instead of a fixed kernel weight and activation.
+
 Each kernel tap computes `K(x) = w_spline * B(x) + w_silu * SiLU(x)`, with
 `B(x)` a linear B-spline over a fixed `[-1, 1]` grid and `x` squashed by
 `tanh`. `control_points`, `w_spline` and `w_silu` each draw from their **own
@@ -145,7 +147,7 @@ All three route `compute_output_shape` through
 inside weight initializers (a `StatelessScope` build discards out-of-
 initializer assignments). `seed` covers the geometric frames only.
 
-## Known limits (measured)
+### Known limits (measured)
 
 - **Separation, not distinctness.** Packing yields `width` distinct columns at
   every width measured (up to 50,000 in 2-D). What degrades is the minimum
@@ -162,9 +164,10 @@ initializer assignments). `seed` covers the geometric frames only.
 - **`cluster_spread=1` can zero a leaf** (displacement exactly opposite the
   centroid → all-zero column → permanent zero score). Measure-zero, stays
   legal, pinned by tests.
-- The other eight layers' `compute_output_shape` previously corrupted the
-  batch axis for list-wrapped shapes (`OrthoBlock cos([[None, 8]]) = (4,)`).
-  All eleven now route through the shared helper (see `MIGRATION.md`).
+- All eleven layers' `compute_output_shape` now routes through the shared
+  helper `canonical_binary_input_shape`, fixing the list-wrapped shape issue
+  that previously corrupted the batch axis (e.g. `OrthoBlock cos([[None, 8]])
+  = (4,)` instead of `(None, 4)`).
 
 ## Tests
 

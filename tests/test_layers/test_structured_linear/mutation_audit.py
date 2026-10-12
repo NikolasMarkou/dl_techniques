@@ -41,6 +41,14 @@ _ALLOWED = (
     os.path.join(_PACKAGE, 'crystal_layer.py'),
     os.path.join(_PACKAGE, 'hierarchical_crystal_layer.py'),
     os.path.join(_PACKAGE, 'crystal_multihead_projection.py'),
+    os.path.join(_PACKAGE, 'bitlinear_layer.py'),
+    os.path.join(_PACKAGE, 'harmonic_dense.py'),
+    os.path.join(_PACKAGE, 'hierarchical_harmonic.py'),
+    os.path.join(_PACKAGE, 'kanvolution.py'),
+    os.path.join(_PACKAGE, 'mps_layer.py'),
+    os.path.join(_PACKAGE, 'orthoblock.py'),
+    os.path.join(_PACKAGE, 'orthogonal_butterfly.py'),
+    os.path.join(_PACKAGE, 'random_fourier_features.py'),
     os.path.join(_UTILS, 'tensors.py'),
 )
 

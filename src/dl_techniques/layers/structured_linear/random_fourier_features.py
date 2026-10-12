@@ -84,8 +84,10 @@ class RFFKernelLayer(keras.layers.Layer):
     :type output_dim: Optional[int]
     :param n_features: Number of random Fourier features (``D``).
     :type n_features: int
-    :param gamma: RBF kernel bandwidth parameter.
+    :param gamma: RBF kernel bandwidth parameter. Must be positive.
     :type gamma: float
+
+    :raises ValueError: If ``gamma`` is not positive.
     :param use_bias: Whether the output dense layer uses a bias.
     :type use_bias: bool
     :param activation: Optional activation after the linear transform.
@@ -96,9 +98,9 @@ class RFFKernelLayer(keras.layers.Layer):
         bit-exactly regardless of this value.
     :type seed: Optional[int]
     :param kernel_initializer: Initializer for output weight matrix.
-    :type kernel_initializer: Union[str, initializers.Initializer]
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for output bias vector.
-    :type bias_initializer: Union[str, initializers.Initializer]
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer for output weights.
     :type kernel_regularizer: Optional[regularizers.Regularizer]
     :param bias_regularizer: Optional regularizer for output bias.
