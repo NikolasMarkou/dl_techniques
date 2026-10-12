@@ -36,6 +36,7 @@ from dl_techniques.utils.weight_transfer import (
     VocabChange,
     load_weights_from_checkpoint,
     load_weights_or_raise,
+    pretrained_path_or_raise,
     read_checkpoint_config,
     vocab_change,
 )
@@ -606,6 +607,66 @@ class TestCheckpointConfig:
         assert wt.vocab_change(
             "x.keras", 96, ("embedding",), ("embedding/embeddings",)
         ) == VocabChange(("embedding",), 64, 96, ("embedding/embeddings",))
+
+
+def _functional_config(*layer_classes, **top):
+    """A ``config.json`` as a functional model's archive writes it."""
+    layers = [{"class_name": "InputLayer", "config": {"name": "input_ids"}}]
+    layers += [{"class_name": name, "config": dict(cfg)}
+               for name, cfg in layer_classes]
+    return {"class_name": "Functional", "config": dict(top, layers=layers)}
+
+
+class TestWrapperCheckpointConfig:
+    """D-015 of plan-2026-10-11T170958-dc4d2202: a wrapper records no vocab_size itself."""
+
+    def _vocab_change(self, monkeypatch, archive_config, model_vocab=96):
+        import dl_techniques.utils.weight_transfer as wt
+        monkeypatch.setattr(wt, "read_checkpoint_config", lambda p: archive_config)
+        return wt.vocab_change(
+            "x.keras", model_vocab, ("token_embedding",), ("token_embedding/embeddings",))
+
+    def test_the_wrapped_models_vocab_size_is_the_recorded_one(self, monkeypatch):
+        archive = _functional_config(("Qwen3", {"vocab_size": 64}))
+        assert self._vocab_change(monkeypatch, archive) == VocabChange(
+            ("token_embedding",), 64, 96, ("token_embedding/embeddings",))
+        assert self._vocab_change(monkeypatch, archive, model_vocab=64) is None
+
+    def test_a_top_level_vocab_size_wins_over_a_nested_one(self, monkeypatch):
+        archive = _functional_config(
+            ("Qwen3", {"vocab_size": 64}), vocab_size=32)
+        change = self._vocab_change(monkeypatch, archive)
+        assert change.checkpoint_size == 32
+
+    def test_a_wrapper_around_two_models_records_nothing(self, monkeypatch):
+        """Anti-vacuity: only a wrapper around ONE model is read through."""
+        archive = _functional_config(
+            ("Qwen3", {"vocab_size": 64}), ("Qwen3", {"vocab_size": 64}))
+        assert self._vocab_change(monkeypatch, archive) is None
+
+    def test_a_model_of_plain_layers_is_not_read_through(self, monkeypatch):
+        archive = _functional_config(("Dense", {"units": 4}))
+        assert self._vocab_change(monkeypatch, archive) is None
+
+
+class TestPretrainedPathOrRaise:
+    def test_a_falsy_argument_means_random_init(self):
+        for falsy in (False, None, ""):
+            assert pretrained_path_or_raise(falsy, "M") is None
+
+    def test_true_is_refused_not_faked(self):
+        for truthy in (True, 1):
+            with pytest.raises(NotImplementedError, match="not distributed"):
+                pretrained_path_or_raise(truthy, "M")
+
+    def test_a_missing_path_is_refused(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="Weights file not found"):
+            pretrained_path_or_raise(str(tmp_path / "nope.keras"), "M")
+
+    def test_an_existing_path_is_returned_unchanged(self, tmp_path):
+        path = tmp_path / "w.keras"
+        path.write_bytes(b"")
+        assert pretrained_path_or_raise(str(path), "M") == str(path)
 
 
 # ---------------------------------------------------------------------------

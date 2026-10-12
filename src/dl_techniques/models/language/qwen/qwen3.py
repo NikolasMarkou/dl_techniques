@@ -35,7 +35,9 @@ does. `create_qwen3_classification` is that model behind a two-input
 functional wrapper. Before this, the classifier pooled the vocab_size-wide
 logits (and since c6f5a13f2 could not even be built), so no classifier
 checkpoint written earlier is portable. `from_variant` takes no `pretrained`
-argument; no pretrained-weight path exists in this package.
+argument; `create_qwen3(..., pretrained=<path>)` restores the backbone of a local
+`.keras` checkpoint, and `pretrained=True` raises `NotImplementedError` (no weights
+are distributed with this package).
 
 References:
     - Qwen Team, 2025. Qwen3 Technical Report.
@@ -67,6 +69,11 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
 from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.weight_transfer import (
+    load_backbone_from_checkpoint,
+    pretrained_path_or_raise,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.nlp.model_head import (
@@ -815,6 +822,7 @@ def create_qwen3_classification(
 def create_qwen3(
     config_or_variant: Union[str, Dict[str, Any]],
     task_type: str = "generation",
+    pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> keras.Model:
     """
@@ -835,6 +843,15 @@ def create_qwen3(
     :param task_type: Type of model to create: "generation" for
         autoregressive language modeling, or "classification" for sequence
         classification.
+    :param pretrained: `False` (default) or any other falsy value: random
+        initialization. A `str`: the path of a local `.keras` checkpoint (of the
+        `Qwen3` itself or of a model this factory returned, headed or headless)
+        whose backbone is restored into the result by layer name. A task head in
+        the checkpoint is never copied, and the result's own head (if any) keeps
+        its fresh initialization. The backbone loads completely or the call raises
+        (another depth or width is refused); on a vocabulary change only the token
+        table and the `lm_head` keep their initialization. `True` raises
+        `NotImplementedError`: no weights are distributed with this package.
     :param kwargs: Additional keyword arguments to override configuration
         parameters (e.g. `hidden_size`, `num_layers`) or provide
         task-specific settings for classification (`num_labels`,
@@ -868,6 +885,36 @@ def create_qwen3(
                 num_labels=10,
                 pooling_strategy="mean"
             )
+    """
+    weights_path = pretrained_path_or_raise(pretrained, "Qwen3")
+    model = _dispatch_qwen3(config_or_variant, task_type, dict(kwargs))
+    if weights_path is not None:
+        # DECISION plan-2026-10-11T170958-dc4d2202/D-015: the shared load rule on the
+        # wrapper's core, never `model.load_weights` (it restores nothing on a
+        # name or shape mismatch and reports success); do NOT drop TASK_HEAD_NAME
+        # (a head of equal shape would be copied). See decisions.md.
+        load_backbone_from_checkpoint(
+            model,
+            weights_path,
+            head_prefixes=(TASK_HEAD_NAME,),
+            vocab_layers=("token_embedding",),
+            tables=("token_embedding/embeddings", "lm_head/kernel"),
+            tops=("lm_head",),
+        )
+    return model
+
+
+def _dispatch_qwen3(
+    config_or_variant: Union[str, Dict[str, Any]],
+    task_type: str,
+    kwargs: Dict[str, Any],
+) -> keras.Model:
+    """The task dispatch of :func:`create_qwen3`, without its `pretrained` route.
+
+    :param config_or_variant: As for :func:`create_qwen3`.
+    :param task_type: As for :func:`create_qwen3`.
+    :param kwargs: Overrides and task settings; may be modified.
+    :return: The two-input functional model.
     """
     # 1. Determine base configuration from variant or dict
     if isinstance(config_or_variant, str):

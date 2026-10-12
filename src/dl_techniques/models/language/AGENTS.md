@@ -110,9 +110,12 @@ Reusing a backbone under a new head:
 
 - At construction: `pretrained="<path>.keras"`, headed or headless, restores
   the backbone only; the checkpoint's `task_head` is never copied and a new
-  head keeps its fresh init. Available on the first ten models above (not
-  Qwen3, Qwen3Next, Gemma3).
-- The load rule, one for all ten classes, headed and headless, enforced in
+  head keeps its fresh init. Available on all thirteen models above. Qwen3,
+  Qwen3Next and Gemma3 take it on their dispatching `create_<model>(config_or_variant,
+  task_type, pretrained=...)` (they return a functional wrapper; the checkpoint may be the
+  bare class or such a wrapper, both are read through the same rule), and for them
+  `pretrained=True` raises `NotImplementedError`, like GPT2's.
+- The load rule, one for all thirteen classes, headed and headless, enforced in
   one place (`load_backbone_from_checkpoint` in
   `dl_techniques.utils.weight_transfer`, which every class calls): every
   backbone layer loads, and every backbone layer of the checkpoint finds a

@@ -25,8 +25,10 @@ every layer rather than a larger base in the global layers, so long-context
 behavior differs from the published report; a reader should not assume
 checkpoint compatibility. The LM head is an independent `Dense`, not the tied
 embedding matrix. This package is text-only; the multimodal vision tower is
-not included. `from_variant` takes no `pretrained` argument, so there is no
-path to a silently random-initialized "pretrained" model.
+not included. `from_variant` takes no `pretrained` argument, and `create_gemma3`'s
+`pretrained=True` raises `NotImplementedError`, so there is no path to a silently
+random-initialized "pretrained" model; `pretrained=<path>` restores the backbone
+of a local `.keras` checkpoint.
 
 With `include_top=True` and a `task_config` the model owns ONE task head from
 `layers/heads/nlp`, named `task_head`, in place of the LM head (no `lm_head`
@@ -85,6 +87,11 @@ from dl_techniques.layers.heads.nlp import (
 )
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.weight_transfer import (
+    load_backbone_from_checkpoint,
+    pretrained_path_or_raise,
+)
+from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.layers.transformers.gemma3_transformer import Gemma3TransformerBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -715,6 +722,7 @@ def create_gemma3_classification(
 def create_gemma3(
     config_or_variant: Union[str, Dict[str, Any]],
     task_type: str = "generation",
+    pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> keras.Model:
     """High-level factory to create Gemma3 models for common tasks.
@@ -730,6 +738,46 @@ def create_gemma3(
     name :func:`create_gemma3_classification` gives the same task; combining it with ``task_type="classification"`` or the classification
     settings raises ``ValueError``. Every result takes
     ``[input_ids, attention_mask]``.
+
+    :param pretrained: ``False`` (default) or any other falsy value: random
+        initialization. A ``str``: the path of a local ``.keras`` checkpoint (of the
+        ``Gemma3`` itself or of a model this factory returned, headed or headless)
+        whose backbone is restored into the result by layer name. A task head in
+        the checkpoint is never copied, and the result's own head (if any) keeps
+        its fresh initialization. The backbone loads completely or the call raises
+        (another depth or width is refused); on a vocabulary change only the token
+        table and the ``lm_head`` keep their initialization. ``True`` raises
+        ``NotImplementedError``: no weights are distributed with this package.
+    """
+    weights_path = pretrained_path_or_raise(pretrained, "Gemma3")
+    model = _dispatch_gemma3(config_or_variant, task_type, dict(kwargs))
+    if weights_path is not None:
+        # DECISION plan-2026-10-11T170958-dc4d2202/D-015: the shared load rule on the
+        # wrapper's core, never `model.load_weights` (it restores nothing on a
+        # name or shape mismatch and reports success); do NOT drop TASK_HEAD_NAME
+        # (a head of equal shape would be copied). See decisions.md.
+        load_backbone_from_checkpoint(
+            model,
+            weights_path,
+            head_prefixes=(TASK_HEAD_NAME,),
+            vocab_layers=("token_embedding",),
+            tables=("token_embedding/embeddings", "lm_head/kernel"),
+            tops=("lm_head",),
+        )
+    return model
+
+
+def _dispatch_gemma3(
+    config_or_variant: Union[str, Dict[str, Any]],
+    task_type: str,
+    kwargs: Dict[str, Any],
+) -> keras.Model:
+    """The task dispatch of :func:`create_gemma3`, without its `pretrained` route.
+
+    :param config_or_variant: As for :func:`create_gemma3`.
+    :param task_type: As for :func:`create_gemma3`.
+    :param kwargs: Overrides and task settings; may be modified.
+    :return: The two-input functional model.
     """
     if isinstance(config_or_variant, str):
         if config_or_variant not in Gemma3.MODEL_VARIANTS:

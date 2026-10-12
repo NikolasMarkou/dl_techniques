@@ -168,8 +168,12 @@ pooled the vocabulary logits (`Qwen3`, unbuildable since c6f5a13f2) or used a ha
 `SequencePooling` + `Dense` (`Qwen3Next`), and does not load into the new layout.
 
 The backbone's weight paths are the same with or without a head, so a backbone saved under
-one head moves to another, weights unchanged, by layer name (neither class has a
-`pretrained` argument):
+one head moves to another, weights unchanged, by layer name. At construction that is
+`create_qwen3(..., pretrained="<path>.keras")` / `create_qwen3_next(...)`: the path may be a
+checkpoint of the bare class or of any model the factory returned, headed or headless; a task
+head in it is never copied; the backbone loads completely or the call raises (another depth or
+width is refused; on a vocabulary change only the token table and `lm_head` stay fresh);
+`pretrained=True` raises `NotImplementedError`. By hand:
 
 ```python
 import numpy as np

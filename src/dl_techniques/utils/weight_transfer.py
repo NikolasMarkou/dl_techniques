@@ -39,7 +39,9 @@ checkpoint layer finds a home, except the ones named there).
 :func:`read_checkpoint_config` and :func:`vocab_change` read a ``.keras``
 archive's own config, so a caller decides from what the checkpoint actually
 holds rather than from a class default. :func:`load_backbone_from_checkpoint`
-is the language models' load rule built from those pieces, in one place.
+is the language models' load rule built from those pieces, in one place, and
+:func:`pretrained_path_or_raise` is the factories' shared reading of their
+``pretrained`` argument.
 """
 
 from __future__ import annotations
@@ -549,6 +551,35 @@ def read_checkpoint_config(ckpt_path: str) -> Dict[str, Any]:
     return config if isinstance(config, dict) else {}
 
 
+def _backbone_config(ckpt_path: str) -> Dict[str, Any]:
+    """The config that records a language model's ``vocab_size`` / ``include_top``.
+
+    The archive's own top-level config; for a functional wrapper around ONE
+    model (``create_qwen3``'s two-input interface; the same shape
+    :func:`_unwrap_single_model` compares by), the wrapped model's config
+    instead, since the wrapper itself records neither.
+
+    :param ckpt_path: Path to a ``.keras`` archive.
+    :returns: The config dict, ``{}`` when unreadable (see
+        :func:`read_checkpoint_config`).
+    """
+    # DECISION plan-2026-10-11T170958-dc4d2202/D-015: read through a one-model wrapper; do NOT
+    # require the checkpoint to be the bare class -- the dispatching factories return the wrapper,
+    # so that is what users save, and without this a headed wrapper cannot warm-start a headless
+    # model and a vocabulary change is a shape mismatch. See decisions.md.
+    config = read_checkpoint_config(ckpt_path).get("config") or {}
+    layers = config.get("layers")
+    if "vocab_size" in config or not isinstance(layers, list):
+        return config
+    inner = [
+        layer for layer in layers
+        if isinstance(layer, dict) and layer.get("class_name") != "InputLayer"
+    ]
+    if len(inner) == 1 and len(inner) < len(layers):
+        return inner[0].get("config") or {}
+    return config
+
+
 def vocab_change(
     ckpt_path: str,
     vocab_size: int,
@@ -561,7 +592,8 @@ def vocab_change(
     :func:`load_backbone_from_checkpoint`):
 
     :param ckpt_path: Path to a ``.keras`` archive of a model whose top-level
-        config carries ``vocab_size``.
+        config carries ``vocab_size`` (or a functional wrapper around one such
+        model, whose config is then read, see :func:`_backbone_config`).
     :param vocab_size: The receiving model's vocabulary size.
     :param vocab_layers: Layer-name prefixes of the layers holding vocabulary
         tables.
@@ -572,7 +604,7 @@ def vocab_change(
         same one or none (an unknown vocabulary is not a change, so nothing is
         exempted).
     """
-    recorded = (read_checkpoint_config(ckpt_path).get("config") or {}).get("vocab_size")
+    recorded = _backbone_config(ckpt_path).get("vocab_size")
     if recorded is None or recorded == vocab_size:
         return None
     return VocabChange(
@@ -595,9 +627,11 @@ def load_backbone_from_checkpoint(
     route):
 
     :param target: A **built** model with ``vocab_size`` and ``include_top``
-        attributes.
-    :param ckpt_path: A ``.keras`` checkpoint of the same class, whose
-        top-level config records ``vocab_size`` and ``include_top``.
+        attributes, or a functional wrapper around exactly one such model (its
+        layers are then the ones transferred, see :func:`_unwrap_single_model`).
+    :param ckpt_path: A ``.keras`` checkpoint of the same class, or of a
+        functional wrapper around it, whose config records ``vocab_size`` and
+        ``include_top``.
     :param head_prefixes: Prefixes of the task head, never copied (and a
         target head keeps its init).
     :param vocab_layers: Prefixes of the layers holding vocabulary tables.
@@ -625,6 +659,7 @@ def load_backbone_from_checkpoint(
     a headless tied checkpoint does not fill an untied ``lm_head`` with
     nothing, and an untied ``lm_head`` is not dropped into a tied model.
     """
+    target = _unwrap_single_model(target)
     change = vocab_change(
         ckpt_path, target.vocab_size, (*vocab_layers, *tops), tables
     )
@@ -634,7 +669,7 @@ def load_backbone_from_checkpoint(
             f"({change.checkpoint_size}) than this model ({change.model_size}), "
             "and the vocabulary exception was refused."
         )
-    recorded = read_checkpoint_config(ckpt_path).get("config") or {}
+    recorded = _backbone_config(ckpt_path)
     headed = bool(recorded.get("include_top")) or bool(target.include_top)
     return load_weights_from_checkpoint(
         target=target,
@@ -644,3 +679,33 @@ def load_backbone_from_checkpoint(
         allow_unloaded=tuple(tops) if headed or change is not None else (),
         vocab_change=change,
     )
+
+
+def pretrained_path_or_raise(pretrained: Any, model_label: str) -> Optional[str]:
+    """Resolve a language model factory's ``pretrained`` argument to a path.
+
+    Interface contract (shared by the Qwen3, Qwen3Next and Gemma3 dispatching
+    factories, which follow what ``GPT2.from_variant`` does with it):
+
+    :param pretrained: The factory's argument. Falsy (``False``, ``None``,
+        ``""``) means random initialization. A ``str`` is the path of a local
+        ``.keras`` checkpoint. Anything else truthy (``True``) asks for
+        released weights.
+    :param model_label: Name used in the refusal message.
+    :returns: ``None`` for a falsy argument, else the existing path.
+    :raises NotImplementedError: for ``True`` (or any non-string truthy value):
+        no pretrained weights are distributed, and a silent random
+        initialization would be indistinguishable from a successful download.
+    :raises FileNotFoundError: when a path is given and does not exist.
+    """
+    if not pretrained:
+        return None
+    if not isinstance(pretrained, str):
+        raise NotImplementedError(
+            f"Pretrained {model_label} weights are not distributed with "
+            "dl_techniques. Pass pretrained=<local .keras path> to load a "
+            "local checkpoint, or pretrained=False to random-init."
+        )
+    if not os.path.exists(pretrained):
+        raise FileNotFoundError(f"Weights file not found: {pretrained}")
+    return pretrained

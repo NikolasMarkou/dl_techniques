@@ -461,7 +461,7 @@ A: The key differentiators are the **dual normalization** pattern within the tra
 
 **Q: Can I use this for fine-tuning?**
 
-A: Yes. `Gemma3` has no `pretrained` argument; a backbone saved as `.keras` moves into a model with a fresh task head through `load_weights_from_checkpoint(..., skip_prefixes=(TASK_HEAD_NAME,))` (Example 3). You can then train the new head, or the entire model, on a downstream task.
+A: Yes. `create_gemma3(..., pretrained="<path>.keras")` restores the backbone of a local checkpoint (of the bare `Gemma3` or of any model the factory returned) into a model with a fresh task head or none; the backbone loads completely or the call raises, and `pretrained=True` raises `NotImplementedError`. By hand, `load_weights_from_checkpoint(..., skip_prefixes=(TASK_HEAD_NAME,))` does the same by layer name (Example 3). You can then train the new head, or the entire model, on a downstream task.
 
 ---
 
