@@ -5,16 +5,66 @@ each" (``test_a_decoder_assumes_no_padding_token``,
 ``test_a_language_model_reports_its_output_shape``). The vocabulary is
 ``VOCAB`` for every row, a value that is no class's default.
 
-Interface contract: ``TINY[name]`` is a :class:`Tiny` (all fourteen classes that own a head); ``tiny.cls()`` imports
+Interface contract: ``TINY[name]`` is a :class:`Tiny` (all fifteen classes that own a head); ``tiny.cls()`` imports
 and returns the class; ``tiny.kwargs`` are constructor keyword arguments that
 build a one-layer model in a fraction of a second (no ``include_top``, no
 ``task_config``: the caller adds those). Adding a class is one row.
 """
 
 import importlib
-from typing import Any, Dict, NamedTuple
+from typing import Any, Dict, NamedTuple, Optional, Sequence
+from unittest import mock
+
+from dl_techniques.models.language.hnet.config import (
+    MODEL_VARIANTS as HNET_VARIANTS,
+    AttnSpec,
+    HNetArchConfig,
+    SSMSpec,
+)
 
 VOCAB = 64
+
+
+def tiny_hnet_arch(
+        vocab_size: int = VOCAB,
+        d_model: int = 16,
+        layout: Optional[Sequence[Any]] = None,
+) -> HNetArchConfig:
+    """A two-stage H-Net layout a CPU builds in a fraction of a second.
+
+    The vocabulary lives in the architecture, not in a constructor argument, so
+    a vocabulary-64 HNet is a vocabulary-64 ``HNetArchConfig``. The default
+    layout has attention only in the inner stage (no input-length limit);
+    ``layout`` swaps it (``["T1", ["T1"], "T1"]`` puts attention at stage 0).
+    """
+    return HNetArchConfig(
+        arch_layout=list(layout) if layout is not None else ["m1", ["T1"], "m1"],
+        d_model=[d_model, d_model],
+        d_intermediate=[0, 0],
+        vocab_size=vocab_size,
+        ssm_cfg=SSMSpec(d_conv=4, expand=2, d_state=8),
+        attn_cfg=AttnSpec(num_heads=(2, 2), rotary_emb_dim=(4, 4),
+                          window_size=(-1, -1)),
+    )
+
+
+def create_tiny_hnet(pretrained: Any = False, vocab_size: int = VOCAB,
+                     d_model: int = 16, layout: Optional[Sequence[Any]] = None,
+                     **model_kwargs: Any):
+    """``create_hnet`` on a tiny variant registered for the call only.
+
+    Every shipped variant is 1024 wide or more, so the ``pretrained=<path>``
+    route of ``create_hnet`` / ``HNet.from_variant`` can only be exercised on
+    a CPU through a variant of the test's own. ``model_kwargs`` go to the
+    constructor (``max_seq_len`` defaults to 16 and ``headdim`` to 8).
+    """
+    from dl_techniques.models.language.hnet.model import create_hnet
+
+    arch = tiny_hnet_arch(vocab_size, d_model, layout)
+    model_kwargs.setdefault("max_seq_len", 16)
+    model_kwargs.setdefault("headdim", 8)
+    with mock.patch.dict(HNET_VARIANTS, {"hnet_tiny_test": arch}):
+        return create_hnet("hnet_tiny_test", pretrained=pretrained, **model_kwargs)
 
 
 class Tiny(NamedTuple):
@@ -90,4 +140,7 @@ TINY = {
         dict(vocab_size=VOCAB, hidden_size=32, layer_mapping=["m", "g"],
              num_mem_blocks=1, num_heads=2, max_seq_len=32, d_state=8,
              headdim=16)),
+    "hnet": Tiny(
+        "dl_techniques.models.language.hnet.model", "HNet",
+        dict(arch_config=tiny_hnet_arch(), max_seq_len=32, headdim=8)),
 }

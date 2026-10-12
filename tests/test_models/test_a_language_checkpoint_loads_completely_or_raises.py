@@ -52,7 +52,7 @@ from dl_techniques.models.language.tree_transformer import create_tree_transform
 from dl_techniques.models.language.wave_field import create_wave_field_llm
 from dl_techniques.models.language.zamba2 import create_zamba2
 
-from .tiny_language_models import TINY
+from .tiny_language_models import TINY, create_tiny_hnet
 
 # Keras warns "A total of N objects could not be loaded" when a whole-file
 # restore skips variables, and this repo's pytest config escalates UserWarning
@@ -170,6 +170,15 @@ _MODELS = {
                     {"deeper": dict(layer_mapping=["m", "m", "m", "g"]),
                      "wider": dict(hidden_size=64)},
                     dict(max_seq_len=32)),
+    # Untied by default, like the 2-stage variants: a headless target holds an
+    # `lm_head`. The vocabulary lives in the architecture config, so it is a
+    # tiny variant registered for the call; the RoPE caches of the inner
+    # attention are sized by `max_seq_len`.
+    "hnet": _Spec(lambda **k: create_tiny_hnet(**k),
+                  dict(max_seq_len=16, headdim=8, tie_word_embeddings=False),
+                  {"deeper": dict(layout=["m2", ["T1"], "m1"]),
+                   "wider": dict(d_model=32)},
+                  dict(max_seq_len=32), tieable=True),
     "wave_field": _Spec(lambda **k: create_wave_field_llm("tiny", **k),
                         dict(vocab_size=_VOCAB, embed_dim=32, depth=1,
                              num_heads=2, max_seq_len=16,
@@ -263,13 +272,14 @@ def test_a_deeper_checkpoint_is_refused_not_truncated(model, head, tmp_path):
     dropped, and ModernBERT/TreeTransformer/Mamba's trained final norm then
     ran after a block it was never trained after. GPT2's blocks live inside
     its one ``decoder`` layer, so there the extra block is a mismatch on it
-    (GPT2 already refused, the one exception the reviewer measured).
+    (GPT2 already refused, the one exception the reviewer measured); H-Net's
+    stages live inside its one ``backbone`` layer, for the same reason.
     """
     _, path = _checkpoint(model, head, tmp_path, **_MODELS[model].misfits["deeper"])
     with pytest.raises(
         ValueError,
         match=r"holds [1-9][0-9]* layer\(s\) with no target layer"
-              r"|Shape mismatch on layer 'decoder'",
+              r"|Shape mismatch on layer '(decoder|backbone)'",
     ):
         _build(model, head, pretrained=path)
 

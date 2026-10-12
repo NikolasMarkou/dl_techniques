@@ -3,8 +3,8 @@
 Subject: ``compute_output_shape`` of the eight classes that had none
 (DistilBERT, ModernBERT, FNet, Mamba, Mamba2, Qwen3, Qwen3Next, Gemma3;
 plan-2026-10-11T170958-dc4d2202 step 8a; Keras guide 3.4), and of the headless
-logits models that gained a head (Zamba2, whose headless answer is the logits
-shape, not a dict; step 9). Keras builds a
+logits models that gained a head (Zamba2 and HNet, whose headless answer is the
+logits shape, not a dict; steps 9 and 10). Keras builds a
 symbolic call of a layer that overrides ``compute_output_shape`` from that
 method, never from ``call``, so a wrong answer there is a wrong functional graph
 (and the headed branch was never shape-checked at all).
@@ -35,7 +35,7 @@ from .tiny_language_models import TINY, VOCAB
 # ---------------------------------------------------------------------
 
 SUBJECTS = ("distilbert", "modern_bert", "fnet", "mamba", "mamba2", "qwen3",
-            "qwen3_next", "gemma3", "zamba2")
+            "qwen3_next", "gemma3", "zamba2", "hnet")
 
 TASKS = {
     "headless": None,

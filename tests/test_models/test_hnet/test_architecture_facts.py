@@ -489,10 +489,13 @@ class TestPretrainedAlwaysRaises:
     """H10. The alternative -- warning and returning random weights -- lets a caller
     publish numbers from an untrained model."""
 
-    @pytest.mark.parametrize("truthy", [True, 1, "local.keras", ["path"], 0.5])
+    @pytest.mark.parametrize("truthy", [True, 1, ["path"], 0.5])
     def test_every_truthy_value_raises(self, truthy):
         """``if pretrained:`` must be a truth test, not ``is True``: a caller who passes
-        a path is asking for weights just as loudly as one who passes ``True``."""
+        any non-path truthy value is asking for released weights just as loudly as one
+        who passes ``True``. A STRING is the one other meaning, a local ``.keras``
+        checkpoint to restore the backbone from (plan-2026-10-11T170958-dc4d2202 step 10);
+        ``test_include_top.py`` covers it, and this case used to list ``"local.keras"``."""
         with pytest.raises(NotImplementedError):
             HNet.from_variant("hnet_1stage_L", pretrained=truthy)
 

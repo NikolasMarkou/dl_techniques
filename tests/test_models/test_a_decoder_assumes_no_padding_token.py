@@ -2,7 +2,7 @@
 
 Subject: the ``pad_token_id`` constructor knob of the decoders that own a
 task head (GPT2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3, Mamba, Mamba2,
-Zamba2) and ``head_attention_mask``, the one place that reads it
+Zamba2, HNet) and ``head_attention_mask``, the one place that reads it
 (plan-2026-10-11T170958-dc4d2202 D-008).
 
 The knob used to default to ``0``. Id 0 is a real token (``!`` in the ``gpt2``
@@ -48,7 +48,7 @@ _CLF = NLPTaskConfig(
 _HEAD = dict(include_top=True, task_config=_CLF)
 
 SUBJECTS = ("gpt2", "topolm", "wave_field", "qwen3", "qwen3_next", "gemma3",
-            "mamba", "mamba2", "zamba2")
+            "mamba", "mamba2", "zamba2", "hnet")
 
 
 @pytest.fixture(params=SUBJECTS)

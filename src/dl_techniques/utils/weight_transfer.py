@@ -593,7 +593,8 @@ def vocab_change(
 
     :param ckpt_path: Path to a ``.keras`` archive of a model whose top-level
         config carries ``vocab_size`` (or a functional wrapper around one such
-        model, whose config is then read, see :func:`_backbone_config`).
+        model, whose config is then read, see :func:`_backbone_config`), or
+        whose ``arch_config`` dict does (H-Net keeps its vocabulary there).
     :param vocab_size: The receiving model's vocabulary size.
     :param vocab_layers: Layer-name prefixes of the layers holding vocabulary
         tables.
@@ -604,7 +605,10 @@ def vocab_change(
         same one or none (an unknown vocabulary is not a change, so nothing is
         exempted).
     """
-    recorded = _backbone_config(ckpt_path).get("vocab_size")
+    config = _backbone_config(ckpt_path)
+    recorded = config.get("vocab_size")
+    if recorded is None and isinstance(config.get("arch_config"), dict):
+        recorded = config["arch_config"].get("vocab_size")
     if recorded is None or recorded == vocab_size:
         return None
     return VocabChange(

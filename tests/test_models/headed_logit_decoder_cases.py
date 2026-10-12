@@ -155,14 +155,18 @@ class HeadedLogitDecoderCases:
     # -- outputs ---------------------------------------------------------
 
     def test_headless_output_is_still_the_logits_tensor(self):
-        """No head: a bare logits tensor, from a tensor or a dict input alike."""
+        """No head: a bare logits tensor, from a tensor or a dict input alike
+        (a dict carrying an all-ones mask: a mask that removes positions is the
+        backbone's business for HNet, which chunks around it)."""
         model = self.model()
-        batch = head_batch()
-        plain = model(batch["input_ids"], training=False)
+        ids = head_batch()["input_ids"]
+        plain = model(ids, training=False)
         assert not isinstance(plain, dict)
         assert tuple(plain.shape) == (2, SEQ, 64)
-        np.testing.assert_array_equal(
-            to_np(model(batch, training=False)), to_np(plain))
+        as_dict = {"input_ids": ids, "attention_mask": np.ones_like(ids)}
+        np.testing.assert_allclose(
+            to_np(model(as_dict, training=False)), to_np(plain),
+            atol=1e-5, rtol=0)
 
     def test_head_output_shapes(self):
         """Bare logits for single-output heads, a dict for QA; nothing else."""

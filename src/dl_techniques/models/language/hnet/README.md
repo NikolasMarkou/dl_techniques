@@ -14,7 +14,8 @@ resolution.
 > `HNet.from_variant(..., pretrained=True)` and `create_hnet(..., pretrained=True)` both raise
 > `NotImplementedError`, naming the variant. They never warn-and-return-random-weights.
 > The reference checkpoints are **not loadable here** either — see § 5, where the two structural
-> reasons are stated. To get a model, build it and train it.
+> reasons are stated. To get a model, build it and train it. A checkpoint of your own warm-starts
+> a model with `pretrained="/path/to/model.keras"` (backbone only, see § 4).
 
 > **Nothing here has been trained.** This README carries no benchmark numbers, no perplexity and
 > no quality claim, because none has been measured. What is documented is the architecture, the
@@ -98,6 +99,43 @@ model = HNet(cfg, max_chunks=(8,), max_seq_len=32, headdim=8)
 model(keras.ops.zeros((2, 16), dtype="int32")).shape       # (2, 16, 256)
 ```
 
+### Task head
+
+`include_top=True` with a `task_config` gives the model ONE task head from `layers/heads/nlp`
+(layer name `task_head`) in place of the logits. The head reads `hidden`, the backbone's output,
+which has one vector per input position (the chunked inner stages are scattered back to full
+resolution before it), and pools it under the padding mask: `'last'` by default. `call` returns
+the head's output (a bare tensor, or a dict for question answering). No `lm_head` is built
+under a head, tied or untied, and the ratio loss is contributed all the same: `len(model.losses)`
+is 1 in both tops. Headless, nothing changes: the model still returns the logits.
+
+```python
+import keras
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.hnet import HNet, HNetArchConfig
+from dl_techniques.models.language.hnet.config import AttnSpec
+
+cfg = HNetArchConfig(
+    arch_layout=["m1", ["T1"], "m1"],
+    d_model=[16, 16],
+    d_intermediate=[0, 0],
+    attn_cfg=AttnSpec(num_heads=(2, 2), rotary_emb_dim=(4, 4), window_size=(-1, -1)),
+)
+classifier = HNet(
+    cfg, max_chunks=(8,), max_seq_len=32, headdim=8, include_top=True,
+    task_config=NLPTaskConfig(
+        name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2),
+)
+ids = keras.ops.zeros((2, 16), dtype="int32")
+classifier({"input_ids": ids}).shape                         # (2, 2)
+```
+
+**Padding is supported on the right only.** A mask (`padding_mask=` or a dict's
+`attention_mask`) reaches the backbone and the head; at the real positions of a right-padded row
+the hidden states equal the same row run alone, and the padded token values change nothing.
+Interior or left padding is not supported: the Mamba-2 mixer takes no mask, so every position
+after a masked token depends on that token's value.
+
 The **ratio (load-balancing) loss** is contributed through `self.add_loss` with coefficient
 `RATIO_LOSS_ALPHA = 0.03`, so stock `model.fit()` picks it up. There is no custom `train_step`
 anywhere in this package, deliberately: a hand-written one silently discards Keras' own
@@ -147,7 +185,15 @@ without extra work (§ 5.1 and § 5.2 each independently prevent a straight load
 create_hnet("hnet_1stage_L", pretrained=True)     # NotImplementedError, naming the variant
 ```
 
-`keras.models.load_model("your_own.keras")` is the supported warm-start path; importing this
+`pretrained="/path/to/model.keras"` (on `HNet.from_variant` and `create_hnet`) restores a local
+checkpoint's backbone, headless or headed, by layer name through the shared load rule
+(`utils/weight_transfer.py` `load_backbone_from_checkpoint`): every backbone layer loads and every
+checkpoint layer finds a home, or the call raises; the checkpoint's `task_head` is never copied,
+so a backbone trained under one head serves any other head with the same weights. An untied
+`lm_head` is a top: it may be left out on either side only when one side carries a task head
+instead (or the vocabulary changed), so a tied headless checkpoint does not fill an untied model.
+
+`keras.models.load_model("your_own.keras")` restores a whole model; importing this
 package registers `HNet`, `HNetStage`, `HNetBlock` and `HNetIsotropic` (and, transitively, the
 three chunking layers) for deserialization, so no `custom_objects` argument is needed.
 

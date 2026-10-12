@@ -608,6 +608,30 @@ class TestCheckpointConfig:
             "x.keras", 96, ("embedding",), ("embedding/embeddings",)
         ) == VocabChange(("embedding",), 64, 96, ("embedding/embeddings",))
 
+    def test_a_vocab_size_inside_arch_config_is_the_recorded_one(self, monkeypatch):
+        """H-Net keeps its vocabulary in ``arch_config``, not at the top."""
+        import dl_techniques.utils.weight_transfer as wt
+        monkeypatch.setattr(
+            wt, "read_checkpoint_config",
+            lambda p: {"config": {"arch_config": {"vocab_size": 256}}})
+        assert wt.vocab_change(
+            "x.keras", 256, ("embeddings",), ("embeddings/embeddings",)) is None
+        assert wt.vocab_change(
+            "x.keras", 96, ("embeddings",), ("embeddings/embeddings",)
+        ) == VocabChange(("embeddings",), 256, 96, ("embeddings/embeddings",))
+        # a top-level vocab_size still wins, and a config with neither records none
+        monkeypatch.setattr(
+            wt, "read_checkpoint_config",
+            lambda p: {"config": {"vocab_size": 64,
+                                  "arch_config": {"vocab_size": 256}}})
+        assert wt.vocab_change(
+            "x.keras", 96, ("embeddings",), ("embeddings/embeddings",)
+        ).checkpoint_size == 64
+        monkeypatch.setattr(wt, "read_checkpoint_config",
+                            lambda p: {"config": {"arch_config": {}}})
+        assert wt.vocab_change(
+            "x.keras", 96, ("embeddings",), ("embeddings/embeddings",)) is None
+
 
 def _functional_config(*layer_classes, **top):
     """A ``config.json`` as a functional model's archive writes it."""
