@@ -167,9 +167,15 @@ Plus `orthogonal_butterfly.py`, `kanvolution.py`, `hierarchical_harmonic.py`,
 `harmonic_dense.py`, `mps_layer.py` and `random_fourier_features.py`. An
 earlier revision of the section above claimed the fix covered "all five
 layers in this package"; that count was wrong in both directions and is
-corrected here. The eight are deliberately left alone -- routing them through
-the helper is a separate change with its own blast radius outside the crystal
-family.
+corrected here.
+
+**CLOSED (2026-10-12).** All eight now route through
+`canonical_binary_input_shape`, verified at all three list forms
+(`[[None, 8]]`, `[(None, 8)]`, `[None, 8]`) for each of the seven non-crystal
+layers with a static last dim (`test_the_seven_layers_take_a_list_wrapped_shape.py`;
+`KANvolution` was already correct and is covered by its own suite). Tuple-form
+behaviour is unchanged. No checkpoint impact: `compute_output_shape` touches
+no weights.
 
 ## `cluster_spread=0` is degenerate, and is now documented as such (2026-10-12)
 
@@ -264,3 +270,86 @@ was structurally unreachable. Reinstatement was verified to leave the line
 **uncovered with all 63 module tests passing** — no input can reach it. Removed
 rather than left as decoration; the width check beside it, which *is* reachable,
 stays.
+
+## `RFFKernelLayer` — reproducible seed + dtype-honest initializers (2026-10-12)
+
+Two defects, fixed together, both in `build()`:
+
+- The frozen `omega`/`b` were drawn with `keras.random.*(seed=None)`, which
+  resolves to the stateful global `SeedGenerator` that
+  `keras.utils.set_random_seed` does not pin -- two identically-seeded
+  processes drew different projections (measured `max|delta| = 0.46`) -- and
+  the layer offered no `seed` knob. The draw is now
+  `np.random.default_rng(self.seed)`, matching the crystal family: an integer
+  seed reproduces `omega`/`b` bit-exactly, `None` stays fresh. New additive
+  `seed` constructor argument, carried in `get_config`; a config lacking it
+  loads as `None`.
+- The wrapping `lambda shape, dtype: <eager float32 tensor>` ignored `dtype`,
+  crashing under `mixed_float16` (`Tensor conversion requested dtype float16
+  for Tensor with dtype float32`). The lambdas now cast the stored NumPy
+  arrays to the requested dtype, and `call()` casts the frozen projection to
+  the compute dtype before the contraction.
+
+**Checkpoints.** `omega`/`b` are saved weights, so old `.keras` archives
+restore bit-exactly and never redraw. Fresh-build values move (the draw
+changes), so a training run relying on unseeded initial projections will not
+reproduce bit-for-bit.
+
+## `MPSLayer` — rank-N forward + input-dtype boundary (2026-10-12)
+
+`build()` admitted any rank >= 2 and `compute_output_shape` promised N-D, but
+`call()` indexed `inputs[:, i]` and read `shape[0]`/`shape[1]`: a rank-3 input
+died in `Einsum` (`Expected input 1 to have rank 3 but got: 4`). The chain now
+flattens leading dims through the contraction and restores them; the loop
+bound is the static `self._input_dim`, and a wrong last dimension raises a
+`ValueError` naming the built width (same contract as the crystal layers).
+Rank-2 output is bit-identical (the flatten is a no-op reshape there).
+
+The boundary vector was float32 `ones`, upcasting the chain and returning
+float32 under `mixed_float16` while every peer returns float16. It now takes
+the input dtype. No checkpoint impact: no weight shape changed.
+
+## `KANvolution` — strides/dilation guard + shared activation helper (2026-10-12)
+
+- `strides > 1` with `dilation_rate > 1` built fine and died inside TF at
+  `call()`. The docstring already declared them incompatible; the constructor
+  now raises `ValueError`. Only already-crashing configs are rejected.
+- The layer imported the raw `utils/activation_serialization` pair -- the one
+  path `layers/AGENTS.md` names as unsafe at call sites -- and stored the raw
+  spec (`activation is None`, `activation == 'gelu'`). It now stores the
+  resolved callable via `layers/activations/common.py` like every sibling
+  (`BitLinear`, `OrthoBlock`, `RFFKernelLayer`), with the `_is_identity_activation`
+  flag replacing the dead `is not None` guard. `get_config` output is
+  unchanged (both serializers emit the same strings); the two suites asserting
+  the raw storage were updated to the resolved contract.
+- `from keras import ops` replaced with `keras.ops` (repo import rule).
+
+## `compute_output_shape` uniform across all eleven (2026-10-12)
+
+`BitLinear`, `OrthoBlock`, `HarmonicDense`, `HierarchicalHarmonicHead`,
+`MPSLayer`, `RFFKernelLayer` and `OrthogonalButterfly` join the three crystal
+layers on `canonical_binary_input_shape`. `KANvolution` was already correct.
+Tuple-form behaviour unchanged; no checkpoint impact.
+
+Smaller fixes in the same pass, none checkpoint-affecting: `BitLinear` gains
+the `_is_identity_activation` flag (the dead `is not None` guard never fired
+since `resolve_activation(None)` is `linear`); `OrthoBlock` rejects
+`units=True` like its three siblings; `OrthogonalButterfly` drops its
+`from keras import ops` and documents `compute_output_shape`/`get_config`;
+`HierarchicalHarmonicHead.set_n_per_level` documents that a pre-`build()` call
+is overwritten by `build()`.
+
+## `crystal_frame` antipodal degeneracy — documented, not changed (2026-10-12)
+
+The conflict metric minimises the SIGNED max inner product, so antipodal
+pairs (`cos -> -1`, the same line in the opposite sense) are never penalised.
+Measured at `seed=0`: `dimensions=2, width=64` holds a pair at `cos = -1.0000`
+-- an exact antipodal pair, worse than the `cos ~= +1` duplicate the
+docstring warns about; `dimensions=3, width=1000` holds 4714 pairs at
+`|cos| > 0.99`. Minimising `max|.|` is uniformly better-or-equal where
+measured (`dimensions=8, width=256`: 0.923 vs 0.958; `dimensions=16,
+width=512`: 0.793 vs 0.827) but moves every frame with
+`width > dimensions + 1`, so per the user's ruling it is recorded as a
+deferred option and NOT taken. A characterisation test pins today's state
+(`test_the_crystal_frame_antipodal_characterisation.py`) so a future metric
+change is deliberate. No behaviour change; no checkpoint impact.

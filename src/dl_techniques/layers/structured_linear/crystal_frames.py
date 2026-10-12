@@ -63,6 +63,22 @@ code, not an equiangular set; the first ``dimensions + 1`` columns are
 equiangular at ``-1/dimensions``, the rest are packed as best the greedy
 search manages.
 
+**A frame is a set of lines, but the search prices only one sense.**
+The conflict metric is ``max <v, w>`` over the signed inner product, so a
+candidate sitting *antipodal* to a placed column (``cos -> -1``, the same
+line in the opposite sense) pays no penalty. Measured on the shipped
+construction at ``seed=0``: ``dimensions=2, width=64`` holds a pair at
+``cos = -1.0000`` -- an exact antipodal pair, a worse line-duplication than
+the ``cos ~= +1`` duplicate the paragraph above warns about, and unreported
+until now. At ``dimensions=3, width=1000`` there are 4714 pairs at
+``|cos| > 0.99``; at ``dimensions=8, width=256`` ``max|cos| = 0.958``; at
+``dimensions=16, width=512`` ``max|cos| = 0.827``. Minimising ``max|.|``
+instead is uniformly better or equal in the well-separated regime
+(``0.923`` / ``0.793`` on the last two) and never worse where measured --
+but it moves every frame with ``width > dimensions + 1``, so it is recorded
+here as a deferred option, not taken: the metric stays ``max <v, w>`` and
+existing frames keep their values.
+
 Pure NumPy by design. These run once per layer, inside a weight initializer,
 where a ``keras.ops`` call would be tracing-time work for no benefit. The
 layers consume the result as a NumPy array and hand it to

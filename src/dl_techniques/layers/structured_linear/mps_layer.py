@@ -26,6 +26,7 @@ from typing import Tuple, Optional, Union, Dict, Any
 
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -47,13 +48,13 @@ class MPSLayer(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────┐
-        │    Input [batch, input_dim]          │
+        │    Input [..., input_dim]          │
         └───────────────┬──────────────────────┘
                         │
                         ▼
         ┌──────────────────────────────────────┐
         │  Initialize boundary vector B        │
-        │  [batch, bond_dim] = ones            │
+        │  [(...), bond_dim] = ones            │
         └───────────────┬──────────────────────┘
                         │
                         ▼
@@ -71,7 +72,7 @@ class MPSLayer(keras.layers.Layer):
                         │
                         ▼
         ┌──────────────────────────────────────┐
-        │    Output [batch, output_dim]        │
+        │    Output [..., output_dim]        │
         └──────────────────────────────────────┘
 
     :param output_dim: Dimension of the output tensor. Must be positive.
@@ -150,6 +151,7 @@ class MPSLayer(keras.layers.Layer):
         self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
         # Created in build(), once input_dim is known.
+        self._input_dim = None
         self.cores = None
         self.projection = None
         self.bias_weight = None
@@ -175,6 +177,7 @@ class MPSLayer(keras.layers.Layer):
             )
 
         input_dim = int(input_dim)
+        self._input_dim = input_dim
 
         # DECISION plan-2026-09-07T161712-985e4d31/D-008: mps_cores and
         # projection each draw from their OWN clone of self.kernel_initializer.
@@ -264,22 +267,36 @@ class MPSLayer(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass implementing MPS tensor contraction.
 
-        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :param inputs: Input tensor of shape ``(..., input_dim)``.
         :type inputs: keras.KerasTensor
         :param training: Unused, present for API consistency.
         :type training: Optional[bool]
-        :return: Output tensor of shape ``(batch_size, output_dim)``.
+        :return: Output tensor of shape ``(..., output_dim)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If the last dimension of ``inputs`` disagrees with
+            the width this layer was built for.
         """
-        batch_size = keras.ops.shape(inputs)[0]
-        input_dim = keras.ops.shape(inputs)[1]
+        if inputs.shape[-1] != self._input_dim:
+            raise ValueError(
+                f"MPSLayer was built for input_dim={self._input_dim} "
+                f"but received input_dim={inputs.shape[-1]}"
+            )
 
-        # Left boundary vector of the MPS chain.
-        boundary = keras.ops.ones((batch_size, self.bond_dim))
+        # Rank-N generalisation: the chain contracts the last axis only, so
+        # leading dims flatten through it and are restored afterwards. The
+        # loop bound is the static `self._input_dim`, not a traced shape
+        # element -- `range()` over a symbolic scalar does not trace.
+        flat = keras.ops.reshape(inputs, (-1, self._input_dim))
+        batch = keras.ops.shape(flat)[0]
+
+        # Left boundary vector of the MPS chain, in the input dtype: the
+        # default float32 `ones` upcast the whole chain and returned float32
+        # under mixed_float16 while every peer layer returns float16.
+        boundary = keras.ops.ones((batch, self.bond_dim), dtype=flat.dtype)
 
         # B x A^1[x_1] x A^2[x_2] x ... x A^n[x_n], one core per step.
-        for i in range(input_dim):
-            x_i = keras.ops.expand_dims(inputs[:, i], axis=-1)
+        for i in range(self._input_dim):
+            x_i = keras.ops.expand_dims(flat[:, i], axis=-1)
             core_i = self.cores[i, :, :]
             weighted_core = keras.ops.expand_dims(x_i, axis=-1) * keras.ops.expand_dims(core_i, axis=0)
             boundary = keras.ops.einsum('bi,bij->bj', boundary, weighted_core)
@@ -289,7 +306,9 @@ class MPSLayer(keras.layers.Layer):
         if self.use_bias:
             output = keras.ops.add(output, self.bias_weight)
 
-        return output
+        return keras.ops.reshape(
+            output, keras.ops.shape(inputs)[:-1] + (self.output_dim,)
+        )
 
     def compute_output_shape(
         self,
@@ -302,7 +321,7 @@ class MPSLayer(keras.layers.Layer):
         :return: Output shape tuple.
         :rtype: Tuple[Optional[int], ...]
         """
-        output_shape = list(input_shape)
+        output_shape = list(canonical_binary_input_shape(input_shape))
         output_shape[-1] = self.output_dim
         return tuple(output_shape)
 

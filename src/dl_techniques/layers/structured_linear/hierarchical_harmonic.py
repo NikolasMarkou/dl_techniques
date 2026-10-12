@@ -87,6 +87,7 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -376,7 +377,9 @@ class HierarchicalHarmonicHead(keras.layers.Layer):
 
         Takes effect on the next call (floats bake into the graph as
         constants, so changing them retraces -- the same cost class as any
-        per-epoch schedule). Values must be positive.
+        per-epoch schedule). Values must be positive. Note a call before
+        :meth:`build` is overwritten there: `build` resolves `effective_n`
+        from the constructor `n` and the input dimension.
 
         :param values: A single positive float broadcast to all levels, or
             one positive float per level.
@@ -910,7 +913,7 @@ class HierarchicalHarmonicHead(keras.layers.Layer):
         :return: Output shape tuple.
         :rtype: Tuple[Optional[int], ...]
         """
-        return tuple(input_shape[:-1]) + (self.num_classes,)
+        return tuple(canonical_binary_input_shape(input_shape)[:-1]) + (self.num_classes,)
 
     def get_config(self) -> Dict[str, Any]:
         """Return the config needed to rebuild the layer.

@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -258,7 +259,7 @@ class HarmonicDense(keras.layers.Layer):
         :return: Output shape tuple.
         :rtype: Tuple[Optional[int], ...]
         """
-        return tuple(input_shape[:-1]) + (self.units,)
+        return tuple(canonical_binary_input_shape(input_shape)[:-1]) + (self.units,)
 
     def get_config(self) -> Dict[str, Any]:
         """Return the config needed to rebuild the layer.

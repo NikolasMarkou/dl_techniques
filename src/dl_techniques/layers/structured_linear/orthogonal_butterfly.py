@@ -24,7 +24,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -33,7 +32,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.tensors import is_power_of_two
+from dl_techniques.utils.tensors import canonical_binary_input_shape, is_power_of_two
 
 # ---------------------------------------------------------------------
 
@@ -65,12 +64,12 @@ def _butterfly_apply(
             stride = 1 << s
             g = d // (2 * stride)
             # Partners are `stride` apart.
-            xr = ops.reshape(x, (-1, g, 2, stride))
+            xr = keras.ops.reshape(x, (-1, g, 2, stride))
             a = xr[:, :, 0, :]
             b = xr[:, :, 1, :]
-            theta = ops.reshape(angles[block, s, :], (g, stride))
-            cos_t = ops.cos(theta)
-            sin_t = ops.sin(theta)
+            theta = keras.ops.reshape(angles[block, s, :], (g, stride))
+            cos_t = keras.ops.cos(theta)
+            sin_t = keras.ops.sin(theta)
             if inverse:
                 # R(-theta): transpose of the forward 2x2 rotation.
                 a_rot = a * cos_t + b * sin_t
@@ -78,8 +77,8 @@ def _butterfly_apply(
             else:
                 a_rot = a * cos_t - b * sin_t
                 b_rot = a * sin_t + b * cos_t
-            xr = ops.stack([a_rot, b_rot], axis=2)
-            x = ops.reshape(xr, (-1, d))
+            xr = keras.ops.stack([a_rot, b_rot], axis=2)
+            x = keras.ops.reshape(xr, (-1, d))
     return x
 
 # ---------------------------------------------------------------------
@@ -209,24 +208,24 @@ class OrthogonalButterfly(keras.layers.Layer):
         With a bias, the forward map is ``y = W x + b`` and the inverse is
         ``x = W^T (y - b)`` (bias subtracted before the inverse rotation).
         """
-        inputs_fp32 = ops.cast(inputs, "float32")
-        orig_shape = ops.shape(inputs_fp32)
-        x = ops.reshape(inputs_fp32, (-1, self._dim))  # flatten leading dims
+        inputs_fp32 = keras.ops.cast(inputs, "float32")
+        orig_shape = keras.ops.shape(inputs_fp32)
+        x = keras.ops.reshape(inputs_fp32, (-1, self._dim))  # flatten leading dims
         if inverse and self.use_bias:
-            x = ops.subtract(x, ops.cast(self.bias, "float32"))
+            x = keras.ops.subtract(x, keras.ops.cast(self.bias, "float32"))
         if self._levels > 0:
             x = _butterfly_apply(
                 x,
-                ops.cast(self.angles, "float32"),
+                keras.ops.cast(self.angles, "float32"),
                 self._dim,
                 self.num_blocks,
                 self._levels,
                 inverse=inverse,
             )
         if self.use_bias and not inverse:
-            x = ops.add(x, ops.cast(self.bias, "float32"))
-        x = ops.reshape(x, orig_shape)
-        return ops.cast(x, inputs.dtype)
+            x = keras.ops.add(x, keras.ops.cast(self.bias, "float32"))
+        x = keras.ops.reshape(x, orig_shape)
+        return keras.ops.cast(x, inputs.dtype)
 
     def inverse(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Convenience alias for ``call(inputs, inverse=True)``."""
@@ -242,15 +241,28 @@ class OrthogonalButterfly(keras.layers.Layer):
         per transformed vector), the standard contribution of an orthogonal
         flow step to a change-of-variables log-likelihood.
         """
-        return ops.zeros(ops.shape(inputs)[:-1], dtype=inputs.dtype)
+        return keras.ops.zeros(keras.ops.shape(inputs)[:-1], dtype=inputs.dtype)
 
     def compute_output_shape(
         self,
         input_shape: Tuple[Optional[int], ...],
     ) -> Tuple[Optional[int], ...]:
-        return tuple(input_shape)
+        """Return the input shape unchanged: the map is ``d x d``.
+
+        :param input_shape: Shape of the input tensor. A shape arriving as a
+            list is canonicalized first.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple, identical to the input shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        return tuple(canonical_binary_input_shape(input_shape))
 
     def get_config(self) -> Dict[str, Any]:
+        """Return layer configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "num_blocks": self.num_blocks,

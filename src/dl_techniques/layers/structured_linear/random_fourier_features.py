@@ -24,6 +24,7 @@ from typing import Optional, Union, Tuple, Any, Dict, Callable
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -89,6 +90,11 @@ class RFFKernelLayer(keras.layers.Layer):
     :type use_bias: bool
     :param activation: Optional activation after the linear transform.
     :type activation: Optional[Union[str, callable]]
+    :param seed: Seed for the frozen ``omega``/``b`` draw. ``None`` (the default)
+        draws a fresh projection per build; pass an integer for a reproducible one.
+        The projection is a saved weight, so a ``.keras`` archive restores it
+        bit-exactly regardless of this value.
+    :type seed: Optional[int]
     :param kernel_initializer: Initializer for output weight matrix.
     :type kernel_initializer: Union[str, initializers.Initializer]
     :param bias_initializer: Initializer for output bias vector.
@@ -118,6 +124,7 @@ class RFFKernelLayer(keras.layers.Layer):
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             kernel_constraint: Optional[keras.constraints.Constraint] = None,
             bias_constraint: Optional[keras.constraints.Constraint] = None,
+            seed: Optional[int] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -135,6 +142,8 @@ class RFFKernelLayer(keras.layers.Layer):
         self.gamma = gamma
         self.use_bias = use_bias
         self.activation = resolve_activation(activation)
+        self.seed = seed
+        self._is_identity_activation = self.activation is keras.activations.linear
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -173,32 +182,40 @@ class RFFKernelLayer(keras.layers.Layer):
                 f"input_dim ({self.input_dim})"
             )
 
-        omega_init = keras.random.normal(
-            shape=(self.input_dim, self.n_features),
-            mean=0.0,
-            stddev=self.gamma,
-            seed=None
-        )
+        # Drawn with NumPy, not keras.random: a `seed=None` keras draw resolves
+        # to the stateful global SeedGenerator, which `keras.utils.set_random_seed`
+        # does not pin, so two identically-seeded processes drew different
+        # projections (measured max|delta| = 0.46) and there was no knob to opt
+        # into reproducibility. `np.random.default_rng(self.seed)` makes an
+        # integer seed reproducible and `None` fresh, matching the crystal family.
+        # The arrays are captured by the lambdas below and cast to the requested
+        # dtype there: the previous spelling closed over an eager float32 tensor
+        # and ignored `dtype`, which crashed under mixed_float16.
+        rng = np.random.default_rng(self.seed)
+        omega_values = rng.normal(
+            loc=0.0, scale=self.gamma,
+            size=(self.input_dim, self.n_features),
+        ).astype(np.float32)
+        b_values = rng.uniform(
+            low=0.0, high=2.0 * np.pi,
+            size=(self.n_features,),
+        ).astype(np.float32)
         self.omega = self.add_weight(
             name='omega',
             shape=(self.input_dim, self.n_features),
-            initializer=lambda shape, dtype: omega_init,
+            initializer=lambda shape, dtype=None: keras.ops.convert_to_tensor(
+                omega_values, dtype=dtype or self.variable_dtype
+            ),
             trainable=False,
-            dtype=self.compute_dtype
         )
 
-        b_init = keras.random.uniform(
-            shape=(self.n_features,),
-            minval=0.0,
-            maxval=2.0 * np.pi,
-            seed=None
-        )
         self.b = self.add_weight(
             name='b',
             shape=(self.n_features,),
-            initializer=lambda shape, dtype: b_init,
+            initializer=lambda shape, dtype=None: keras.ops.convert_to_tensor(
+                b_values, dtype=dtype or self.variable_dtype
+            ),
             trainable=False,
-            dtype=self.compute_dtype
         )
 
         self._scale_factor = keras.ops.sqrt(2.0 / self.n_features)
@@ -222,11 +239,18 @@ class RFFKernelLayer(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Output tensor ``(batch, ..., output_dim)``.
         :rtype: keras.KerasTensor"""
-        projection = keras.ops.matmul(inputs, self.omega) + self.b
-        features = self._scale_factor * keras.ops.cos(projection)
+        # Cast the frozen float32 projection to the compute dtype: under
+        # mixed_float16 the inputs arrive as float16 while the variables stay
+        # float32, and a mixed-dtype Mul raises on this backend.
+        omega = keras.ops.cast(self.omega, inputs.dtype)
+        phase = keras.ops.cast(self.b, inputs.dtype)
+        projection = keras.ops.matmul(inputs, omega) + phase
+        scale = keras.ops.cast(self._scale_factor, projection.dtype)
+        features = scale * keras.ops.cos(projection)
         output = self.linear(features, training=training)
 
-        if self.activation is not None:
+        # Skipped when activation is the identity (resolve_activation(None)).
+        if not self._is_identity_activation:
             output = self.activation(output)
 
         return output
@@ -238,7 +262,7 @@ class RFFKernelLayer(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :return: Output shape tuple.
         :rtype: Tuple[Optional[int], ...]"""
-        output_shape = list(input_shape)
+        output_shape = list(canonical_binary_input_shape(input_shape))
         output_shape[-1] = self.output_dim
         return tuple(output_shape)
 
@@ -261,6 +285,7 @@ class RFFKernelLayer(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'kernel_constraint': keras.constraints.serialize(self.kernel_constraint),
             'bias_constraint': keras.constraints.serialize(self.bias_constraint),
+            'seed': self.seed,
         })
         return config
 

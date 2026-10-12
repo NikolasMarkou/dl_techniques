@@ -23,7 +23,6 @@ References:
 
 import keras
 import numpy as np
-from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict, Callable
 
 # ---------------------------------------------------------------------
@@ -32,10 +31,7 @@ from typing import Tuple, Optional, Union, Any, Dict, Callable
 
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.activation_serialization import (
-    serialize_activation,
-    deserialize_activation,
-)
+from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -172,8 +168,9 @@ class KANvolution(keras.layers.Layer):
         self.strides = self._normalize_tuple(strides, 2, 'strides')
         self.padding = padding.lower()
         self.dilation_rate = self._normalize_tuple(dilation_rate, 2, 'dilation_rate')
-        self.activation = deserialize_activation(activation)
+        self.activation = resolve_activation(activation)
         self.use_bias = use_bias
+        self._is_identity_activation = self.activation is keras.activations.linear
 
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
@@ -183,6 +180,12 @@ class KANvolution(keras.layers.Layer):
 
         if self.padding not in ('valid', 'same'):
             raise ValueError(f"padding must be 'valid' or 'same', got {padding}")
+
+        if any(s > 1 for s in self.strides) and any(d > 1 for d in self.dilation_rate):
+            raise ValueError(
+                f"strides > 1 is not supported in conjunction with dilation_rate > 1. "
+                f"Received: strides={self.strides} and dilation_rate={self.dilation_rate}"
+            )
 
         self.control_points = None
         self.w_spline = None
@@ -352,14 +355,14 @@ class KANvolution(keras.layers.Layer):
 
         # Grid must come from an initializer, not add_weight+assign: a StatelessScope
         # build pass discards the assign, leaving every knot at 0. See decisions.md D-028.
-        # np.linspace, not ops.linspace: an ops tensor built here is scoped to the
+        # np.linspace, not keras.ops.linspace: an ops tensor built here is scoped to the
         # symbolic build pass and raises when the initializer runs on the eager pass.
         grid_values = np.linspace(-1.0, 1.0, self.grid_size + 1, dtype='float32')
         self.grid = self.add_weight(
             name='grid',
             shape=(self.grid_size + 1,),
-            initializer=lambda shape, dtype=None: ops.cast(
-                ops.convert_to_tensor(grid_values), dtype or self.variable_dtype
+            initializer=lambda shape, dtype=None: keras.ops.cast(
+                keras.ops.convert_to_tensor(grid_values), dtype or self.variable_dtype
             ),
             trainable=False,
         )
@@ -379,18 +382,18 @@ class KANvolution(keras.layers.Layer):
         :return: Basis function weights for each grid point.
         :rtype: keras.KerasTensor
         """
-        x_clamped = ops.clip(x, -1.0, 1.0)
+        x_clamped = keras.ops.clip(x, -1.0, 1.0)
 
-        x_expanded = ops.expand_dims(x_clamped, axis=-1)
+        x_expanded = keras.ops.expand_dims(x_clamped, axis=-1)
 
-        grid_expanded = ops.expand_dims(self.grid, axis=0)
-        distances = ops.abs(x_expanded - grid_expanded)
+        grid_expanded = keras.ops.expand_dims(self.grid, axis=0)
+        distances = keras.ops.abs(x_expanded - grid_expanded)
 
         # Linear B-spline basis: weight = max(0, 1 - distance / spacing)
         grid_spacing = 2.0 / self.grid_size  # Spacing in [-1, 1] range
-        weights = ops.maximum(0.0, 1.0 - distances / grid_spacing)
+        weights = keras.ops.maximum(0.0, 1.0 - distances / grid_spacing)
 
-        weight_sum = ops.sum(weights, axis=-1, keepdims=True)
+        weight_sum = keras.ops.sum(weights, axis=-1, keepdims=True)
         normalized_weights = weights / (weight_sum + 1e-8)
 
         return normalized_weights
@@ -414,13 +417,13 @@ class KANvolution(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # DECISION plan-2026-08-22T035419-a11304c8/D-052: never simplify this to
-        # ops.conv(inputs, w_spline + w_silu) -- that skips the spline entirely.
+        # keras.ops.conv(inputs, w_spline + w_silu) -- that skips the spline entirely.
         # The basis tensor's grid_size factor is inherent to a conv KAN. See decisions.md.
         num_taps = self.kernel_size[0] * self.kernel_size[1] * self._input_channels
 
         # Patches in the SAME (kernel_h, kernel_w, channels) tap order that the
         # weight reshapes below assume.
-        patches = ops.image.extract_patches(
+        patches = keras.ops.image.extract_patches(
             inputs,
             size=self.kernel_size,
             strides=self.strides,
@@ -431,7 +434,7 @@ class KANvolution(keras.layers.Layer):
         # Normalize tap values into the spline's [-1, 1] grid domain. tanh is the
         # squashing the module docstring specifies, and it is what makes the
         # B-spline basis well defined for unbounded inputs.
-        taps = ops.tanh(patches)
+        taps = keras.ops.tanh(patches)
 
         # (batch, out_h, out_w, num_taps, grid_size + 1)
         basis = self._compute_bspline_basis(taps)
@@ -439,33 +442,33 @@ class KANvolution(keras.layers.Layer):
         # Weights are stored (filters, channels, kernel_h, kernel_w[, grid]);
         # transpose to (filters, kernel_h, kernel_w, channels[, grid]) so that
         # flattening matches `extract_patches`' tap order exactly.
-        w_spline_flat = ops.reshape(
-            ops.transpose(self.w_spline, (0, 2, 3, 1)), (self.filters, num_taps)
+        w_spline_flat = keras.ops.reshape(
+            keras.ops.transpose(self.w_spline, (0, 2, 3, 1)), (self.filters, num_taps)
         )
-        w_silu_flat = ops.reshape(
-            ops.transpose(self.w_silu, (0, 2, 3, 1)), (self.filters, num_taps)
+        w_silu_flat = keras.ops.reshape(
+            keras.ops.transpose(self.w_silu, (0, 2, 3, 1)), (self.filters, num_taps)
         )
-        control_flat = ops.reshape(
-            ops.transpose(self.control_points, (0, 2, 3, 1, 4)),
+        control_flat = keras.ops.reshape(
+            keras.ops.transpose(self.control_points, (0, 2, 3, 1, 4)),
             (self.filters, num_taps, self.grid_size + 1),
         )
 
         # w_spline * B(x) folded into one contraction: the per-tap spline
         # coefficients are `w_spline[f, m] * control_points[f, m, :]`.
-        spline_coeffs = ops.expand_dims(w_spline_flat, axis=-1) * control_flat
-        spline_term = ops.einsum('bhwmg,fmg->bhwf', basis, spline_coeffs)
+        spline_coeffs = keras.ops.expand_dims(w_spline_flat, axis=-1) * control_flat
+        spline_term = keras.ops.einsum('bhwmg,fmg->bhwf', basis, spline_coeffs)
 
         # w_silu * SiLU(x) on the same normalized taps.
-        silu_term = ops.einsum('bhwm,fm->bhwf', ops.silu(taps), w_silu_flat)
+        silu_term = keras.ops.einsum('bhwm,fm->bhwf', keras.ops.silu(taps), w_silu_flat)
 
         outputs = spline_term + silu_term
 
         if self.use_bias:
-            outputs = ops.add(outputs, self.bias)
+            outputs = keras.ops.add(outputs, self.bias)
 
-        if self.activation is not None:
-            activation_fn = keras.activations.get(self.activation)
-            outputs = activation_fn(outputs)
+        # Skipped when activation is the identity (resolve_activation(None)).
+        if not self._is_identity_activation:
+            outputs = self.activation(outputs)
 
         return outputs
 

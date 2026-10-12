@@ -46,6 +46,7 @@ from dl_techniques.initializers.hypersphere_orthogonal_initializer import Orthog
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -166,7 +167,7 @@ class OrthoBlock(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        if not isinstance(units, int) or units <= 0:
+        if isinstance(units, bool) or not isinstance(units, int) or units <= 0:
             raise ValueError(f"units must be a positive integer, got {units}")
         if not isinstance(ortho_reg_factor, (int, float)) or ortho_reg_factor < 0:
             raise ValueError(f"ortho_reg_factor must be non-negative, got {ortho_reg_factor}")
@@ -342,7 +343,7 @@ class OrthoBlock(keras.layers.Layer):
         :return: Output shape with last dimension replaced by ``units``.
         :rtype: Tuple[Optional[int], ...]
         """
-        output_shape = list(input_shape)
+        output_shape = list(canonical_binary_input_shape(input_shape))
 
         output_shape[-1] = self.units
 

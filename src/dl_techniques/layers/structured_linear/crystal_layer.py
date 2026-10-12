@@ -26,7 +26,12 @@ feature has only two distinct directions available. What degrades with width is
 the angular separation between columns, not their distinctness: the frame is a
 dense spherical code past the simplex count, and at low dimension a wide frame
 holds near-identical columns (measured at `input_dim=2, num_classes=64`: a
-pair at inner product 0.9992, i.e. near-identical logits).
+pair at inner product 0.9992, i.e. near-identical logits). A frame is a set of
+*lines*, but the packing search prices only the signed inner product, so an
+antipodal pair (``cos -> -1``, the same line in the opposite sense) is never
+penalised -- see :mod:`dl_techniques.layers.structured_linear.crystal_frames`
+for the measured antipodal degeneracy, which is documented there and left
+unchanged here by design.
 
 Setting ``trainable_crystal=True`` releases the frame so the network may leave
 the collapsed configuration it was handed. Weights are re-normalized inside

@@ -31,6 +31,7 @@ from typing import Optional, Dict, Any, Callable, Union, Tuple, Sequence
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -246,6 +247,7 @@ class BitLinear(keras.layers.Layer):
         self.weight_per_channel = weight_per_channel
         self.quantization_method = quantization_method
         self.activation = resolve_activation(activation)
+        self._is_identity_activation = self.activation is keras.activations.linear
         self.use_bias = use_bias
         self.use_input_norm = use_input_norm
         self.ste_lambda = ste_lambda
@@ -570,7 +572,8 @@ class BitLinear(keras.layers.Layer):
         if self.use_bias and self.bias is not None:
             output = output + keras.ops.cast(self.bias, output.dtype)
 
-        if self.activation is not None:
+        # Skipped when activation is the identity (resolve_activation(None)).
+        if not self._is_identity_activation:
             output = self.activation(output)
 
         return output
@@ -586,7 +589,7 @@ class BitLinear(keras.layers.Layer):
         :return: Shape tuple of output.
         :rtype: Tuple[Optional[int], ...]
         """
-        return tuple(input_shape[:-1]) + (self.units,)
+        return tuple(canonical_binary_input_shape(input_shape)[:-1]) + (self.units,)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
