@@ -300,7 +300,18 @@ class CrystalMultiHeadProjection(keras.layers.Layer):
         features = keras.ops.gelu(features)
 
         total_features = self.num_heads * self._vertices_per_head
-        flat_shape = keras.ops.shape(inputs)[:-1] + (total_features,)
+        # `features` is (..., H, V): the einsum has ALREADY split the head axis
+        # off the trailing end. Collapsing to (..., H*V) therefore drops two
+        # trailing axes, not one, so this must slice `features`' own shape.
+        #
+        # Slicing `inputs` instead -- which reads as the natural thing, since
+        # the leading dims are shared -- happens to give the right answer at
+        # rank 3 and only there: inputs is (..., D) so shape[:-1] keeps one
+        # leading axis, which by coincidence matches features' (..., H, V)
+        # shape[:-2]. At rank 2 inputs is (B, D), so shape[:-1] keeps (B,) while
+        # features is (B, H, V) and needs (B,) from shape[:-2] -- the two
+        # disagree and the reshape asks for B*H*V elements out of B*H*V/B.
+        flat_shape = keras.ops.shape(features)[:-2] + (total_features,)
 
         return self.out_projection(
             keras.ops.reshape(features, flat_shape), training=training

@@ -202,12 +202,63 @@ class TestCrystalMultiHeadProjectionForwardPass:
 
     @pytest.mark.parametrize('rank', [2, 3, 4])
     def test_forward_preserves_rank(self, rank):
+        """Ranks 2, 3 and 4 together, because rank 3 was masking a real bug.
+
+        The final reshape built its target from the INPUT's shape while
+        flattening a tensor that had already gained the head axis, so
+        ``shape[:-1]`` and ``shape[:-2]`` coincided at rank 3 and disagreed at
+        every other rank: a rank-2 input asked for ``B*H*V`` elements out of
+        ``B*H*V/B``. Every pre-existing test in this file used rank 3, so the
+        defect was invisible -- and a shape assertion cannot see it either,
+        because the reshape raises before any shape exists to compare.
+        """
         inputs = _sample_input(rank=rank)
         layer = CrystalMultiHeadProjection(num_heads=4, output_dim=32, seed=0)
 
         output = layer(inputs)
 
         assert output.shape == tuple(inputs.shape[:-1]) + (32,)
+
+    def test_the_head_split_is_flattened_correctly_at_rank_two(self):
+        """The rank where the old reshape disagreed, checked on VALUES.
+
+        Recomputed by hand from the layer's own weights -- head split, both
+        normalizations, the per-head einsum, GELU, then the Dense -- so the
+        assertion is on the arithmetic rather than on a second call through the
+        same code path. MEASURED delta 4.8e-07 at float32 against this oracle.
+        """
+        layer = CrystalMultiHeadProjection(num_heads=4, output_dim=16, seed=0)
+        x = np.random.default_rng(7).standard_normal((4, 32)).astype(np.float32)
+
+        output = ops.convert_to_numpy(layer(x)).astype(np.float64)
+
+        num_heads, head_dim = 4, 8
+        vertices = head_dim + 1
+
+        heads = x.reshape(4, num_heads, head_dim).astype(np.float64)
+        heads /= np.linalg.norm(heads, axis=-1, keepdims=True)
+
+        prisms = ops.convert_to_numpy(layer.crystal_prisms).astype(np.float64)
+        prisms /= np.linalg.norm(prisms, axis=1, keepdims=True)
+
+        features = np.einsum('bhd,hdv->bhv', heads, prisms) * layer.scale
+        features = 0.5 * features * (
+            1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (features + 0.044715 * features ** 3))
+        )
+
+        kernel = ops.convert_to_numpy(layer.out_projection.kernel).astype(np.float64)
+        bias = ops.convert_to_numpy(layer.out_projection.bias).astype(np.float64)
+        reference = features.reshape(4, num_heads * vertices) @ kernel + bias
+
+        np.testing.assert_allclose(output, reference, rtol=0, atol=1e-5)
+
+    def test_rank_one_is_rejected(self):
+        """A bare feature vector has no batch axis to split heads over."""
+        layer = CrystalMultiHeadProjection(num_heads=4, seed=0)
+        layer(_sample_input(rank=2))
+
+        with pytest.raises(ValueError):
+            layer(np.zeros((32,), dtype=np.float32))
 
     @pytest.mark.parametrize('num_heads', [1, 2, 4, 8, 16])
     def test_forward_over_head_counts(self, num_heads):
