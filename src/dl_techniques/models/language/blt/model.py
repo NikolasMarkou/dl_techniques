@@ -41,6 +41,10 @@ from dl_techniques.layers.blt.local_encoder import LocalEncoder
 from dl_techniques.layers.transformers.patch_causal_transformer import PatchCausalTransformer
 from dl_techniques.layers.blt.local_decoder import LocalDecoder
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.sequence_length_guard import (
+    check_sequence_length,
+    refuse_static_sequence_length,
+)
 
 
 # ---------------------------------------------------------------------
@@ -170,6 +174,14 @@ class ByteLatentTransformer(keras.Model):
         }
     }
 
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_sequence_length={limit}. BLT's local "
+        "encoder, decoder and entropy model use learned position tables of "
+        "{limit} rows, so there is no embedding for position {limit}. Truncate "
+        "the input to {limit} bytes, or build the model with "
+        "max_sequence_length>={seq_len}."
+    )
+
     def __init__(
             self,
             vocab_size: int = 260,
@@ -205,6 +217,7 @@ class ByteLatentTransformer(keras.Model):
         self.dropout_rate = dropout_rate
         self.patch_pooling_method = patch_pooling_method
         self._custom_entropy_model = entropy_model is not None
+        self._loading_recorded_build_shape = False  # set by build_from_config only
 
         # Validate configuration before constructing sub-layers
         self._validate_config()
@@ -327,6 +340,15 @@ class ByteLatentTransformer(keras.Model):
 
         :param input_shape: Shape ``(batch_size, sequence_length)``.
         """
+        # First, so the cached step functions are dropped and no variable exists. A
+        # recorded shape from an old archive is only warned about (build_from_config).
+        if not self._loading_recorded_build_shape:
+            refuse_static_sequence_length(
+                self, input_shape[-1], self.max_sequence_length,
+                self._SEQUENCE_LENGTH_MESSAGE.format(
+                    seq_len=input_shape[-1], limit=self.max_sequence_length
+                ),
+            )
         # Remember the shape so the model can be rebuilt on .keras deserialization
         self._build_input_shape = input_shape
 
@@ -377,6 +399,10 @@ class ByteLatentTransformer(keras.Model):
         else:
             byte_tokens = inputs
             patch_ids = None
+        byte_tokens = check_sequence_length(
+            self, byte_tokens, self.max_sequence_length, "max_sequence_length",
+            self._SEQUENCE_LENGTH_MESSAGE,
+        )
 
         # If patch information not provided, compute it
         if patch_ids is None:
@@ -699,10 +725,33 @@ class ByteLatentTransformer(keras.Model):
         """
         Rebuild the model (and all sub-layers) from a saved build configuration.
 
-        :param config: Dict produced by :meth:`get_build_config`.
+        :param config: Dict produced by :meth:`get_build_config`. A recorded length
+            above ``max_sequence_length`` logs a warning and still builds.
         """
         if "input_shape" in config and config["input_shape"] is not None:
-            self.build(tuple(config["input_shape"]))
+            shape = tuple(config["input_shape"])
+            if shape[-1] is not None and shape[-1] > self.max_sequence_length:
+                logger.warning(
+                    self._SEQUENCE_LENGTH_MESSAGE.format(
+                        seq_len=shape[-1], limit=self.max_sequence_length
+                    ) + " Building anyway because this shape came from a stored "
+                    "config; the model will fail at call time on an input this long."
+                )
+            # DECISION plan-2026-10-11T170958-dc4d2202/D-006: warn and build, do NOT refuse
+            # (see `PositionalEmbedding.build_from_config`); an archive that recorded an
+            # over-long shape must stay loadable, and the sub-layers' position tables
+            # need the same escape hatch. See decisions.md.
+            tables = [
+                layer for layer in self._flatten_layers()
+                if hasattr(layer, "_loading_recorded_build_shape")
+            ]
+            for layer in tables:
+                layer._loading_recorded_build_shape = True
+            try:
+                self.build(shape)
+            finally:
+                for layer in tables:
+                    layer._loading_recorded_build_shape = False
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'ByteLatentTransformer':

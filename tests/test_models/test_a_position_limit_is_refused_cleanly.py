@@ -42,6 +42,21 @@ every arm runs the same configuration on any machine;
 resolved value, so neither can go vacuous.
 
 Adding a subject is one ``Subject(...)`` row in ``SUBJECTS``.
+
+Two more groups sit below the subject arms:
+
+``NO_LIMIT`` (``test_a_model_without_a_position_limit_serves_any_length``)
+    Models with no position limit must NOT be guarded: Mamba, Mamba2, Zamba2
+    with no ``g`` position (the shared attention, the only RoPE table, is never
+    run) and HNet whose attention is only in an inner stage or absent (inner
+    stages see at most ``max_chunks`` positions; the cap truncates silently,
+    which is out of scope). Each serves a length 2.5x or more over the
+    constructor's ``max_seq_len``, finite, eagerly and under ``jit_compile=True``.
+    This is also the arm that goes RED if a guard is wired unconditionally.
+``test_blt_warns_and_loads_an_archive_with_an_over_long_recorded_shape``
+    BLT rebuilds from the shape recorded in the archive. An old archive whose
+    recorded shape is over-long must log a warning and load, never refuse
+    (precedent: ``PositionalEmbedding.build_from_config``).
 """
 
 import importlib
@@ -53,6 +68,11 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.hnet.config import (
+    AttnSpec,
+    HNetArchConfig,
+    SSMSpec,
+)
 from dl_techniques.utils import sequence_length_guard as guard
 from dl_techniques.models.language.bert import create_bert
 
@@ -81,8 +101,11 @@ class Subject:
         must match.
     :param single_length: True when the model can serve only the ONE length it
         was first built at (FNet: its DFT matrix is ``(S, S)`` for the first
-        ``S`` seen, and any other length raises ``Incompatible shapes``). Its
-        only legal length is then the limit itself, and the relaxed retrace is
+        ``S`` seen, and any other length raises ``Incompatible shapes``; BLT
+        under XLA: a second length retraces with a relaxed axis and
+        ``LocalDecoder`` fails ``BroadcastArgs must be a compile-time
+        constant``, with or without the guard, measured at HEAD). Its only
+        legal length is then the limit itself, and the relaxed retrace is
         reached by one legal call followed by the over-long one.
     :param variables_at_init: True when the model creates every variable in
         ``__init__`` (WaveFieldLLM builds at ``max_seq_len`` there), so a
@@ -135,12 +158,42 @@ def _ids_only_feed(model: keras.Model, seq_len: int) -> Dict[str, np.ndarray]:
     return {"input_ids": _ids(seq_len)}
 
 
+def _array_feed(model: keras.Model, seq_len: int) -> np.ndarray:
+    """For a model whose ``call`` takes the id tensor itself, not a dict."""
+    return _ids(seq_len)
+
+
 def _tiny(module: str, cls: str, **kwargs: Any) -> Callable[[], keras.Model]:
     """A factory for a tiny, unbuilt ``cls`` from ``module`` (vocab 64)."""
 
     def factory() -> keras.Model:
         klass = getattr(importlib.import_module(module), cls)
         return klass(vocab_size=64, **kwargs)
+
+    return factory
+
+
+def _hnet(layout: list, max_seq_len: int = 16) -> Callable[[], keras.Model]:
+    """A factory for a tiny two-stage HNet with the given ``arch_layout``.
+
+    ``max_chunks`` is pinned to 8, so inner stages never see more than 8
+    positions whatever the input length (the cap truncates silently).
+    """
+
+    def factory() -> keras.Model:
+        from dl_techniques.models.language.hnet.model import HNet
+
+        config = HNetArchConfig(
+            arch_layout=layout,
+            d_model=[16, 16],
+            d_intermediate=[0, 0],
+            vocab_size=64,
+            ssm_cfg=SSMSpec(d_conv=4, expand=2, d_state=8),
+            attn_cfg=AttnSpec(
+                num_heads=(2, 2), rotary_emb_dim=(4, 4), window_size=(-1, -1)
+            ),
+        )
+        return HNet(config, max_chunks=(8,), max_seq_len=max_seq_len, headdim=8)
 
     return factory
 
@@ -280,6 +333,42 @@ SUBJECTS = [
         ),
         feed=_mask_feed,
         message_regex=_SEQ_LEN,
+    ),
+    Subject(
+        name="zamba2",
+        module=_LANG + "zamba2.model",
+        limit_name="max_seq_len",
+        factory=_tiny(
+            _LANG + "zamba2.model", "Zamba2Model", hidden_size=32,
+            layer_mapping=["m", "g"], num_mem_blocks=1, num_heads=2,
+            max_seq_len=16, d_state=8, headdim=8,
+        ),
+        feed=_array_feed,
+        message_regex=_SEQ_LEN,
+    ),
+    # Stage 0 has an attention block (the encoder's `T1`): that is the only
+    # layout shape with a position limit, see the no-limit arm below.
+    Subject(
+        name="hnet_stage0_attention",
+        module=_LANG + "hnet.model",
+        limit_name="max_seq_len",
+        factory=_hnet(["T1", ["m1"], "m1"]),
+        feed=_array_feed,
+        message_regex=_SEQ_LEN,
+    ),
+    Subject(
+        name="blt",
+        module=_LANG + "blt.model",
+        limit_name="max_sequence_length",
+        factory=_tiny(
+            _LANG + "blt.model", "ByteLatentTransformer", local_dim=32,
+            global_dim=48, num_local_layers=1, num_global_layers=1,
+            num_heads_local=2, num_heads_global=2, max_sequence_length=16,
+            max_patches=4, dropout_rate=0.0,
+        ),
+        feed=_array_feed,
+        message_regex=r"exceeds max_sequence_length={limit}(?![0-9])",
+        single_length=True,
     ),
 ]
 
@@ -439,3 +528,100 @@ def test_the_model_reaches_the_shared_guard(monkeypatch, subject):
         with pytest.raises(Exception):
             model.predict(subject.feed(model, limit + OVER_BY), verbose=0)
     assert calls["gate"] >= 1, calls
+
+
+# ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NoLimit:
+    """A model with no position limit: ``lengths`` are all served, finite."""
+
+    name: str
+    factory: Callable[[], keras.Model]
+    lengths: tuple
+
+
+NO_LIMIT = [
+    NoLimit("mamba", _tiny(
+        _LANG + "mamba.mamba_v1", "Mamba", d_model=32, num_layers=1,
+        d_state=8,
+    ), (8, 32)),
+    NoLimit("mamba2", _tiny(
+        _LANG + "mamba.mamba_v2", "Mamba2", d_model=32, num_layers=1,
+        d_state=16, headdim=8,
+    ), (8, 32)),
+    NoLimit("zamba2_without_attention", _tiny(
+        _LANG + "zamba2.model", "Zamba2Model", hidden_size=32,
+        layer_mapping=["m", "m"], num_mem_blocks=1, num_heads=2,
+        max_seq_len=16, d_state=8, headdim=8,
+    ), (8, 40)),
+    NoLimit("hnet_attention_in_inner_stage_only",
+            _hnet(["m1", ["T1"], "m1"]), (8, 40)),
+    NoLimit("hnet_without_attention",
+            _hnet(["m1", ["m1"], "m1"]), (8, 40)),
+]
+
+
+@pytest.mark.parametrize("jit_compile", (False, True), ids=("eager", "jit"))
+@pytest.mark.parametrize("case", NO_LIMIT, ids=[c.name for c in NO_LIMIT])
+def test_a_model_without_a_position_limit_serves_any_length(case, jit_compile):
+    model = case.factory()
+    model.jit_compile = jit_compile
+    for seq_len in case.lengths:
+        out = model.predict(_ids(seq_len), verbose=0)
+        assert _finite(out)
+        # Mamba returns a dict of tensors; some leaf is per input position.
+        assert any(
+            np.asarray(leaf).shape[:2] == (BATCH, seq_len)
+            for leaf in keras.tree.flatten(out)
+        ), seq_len
+    assert model.jit_compile is jit_compile
+
+
+# ---------------------------------------------------------------------
+
+
+def test_blt_warns_and_loads_an_archive_with_an_over_long_recorded_shape(
+    tmp_path, caplog
+):
+    import json
+    import logging
+    import zipfile
+
+    subject = next(s for s in SUBJECTS if s.name == "blt")
+    model = subject.factory()
+    limit = _limit(subject, model)
+    legal = subject.feed(model, limit)
+    expected = model.predict(legal, verbose=0)
+    legal_path = tmp_path / "legal.keras"
+    model.save(legal_path)
+
+    # Rewrite the archive so its recorded build shape is over-long.
+    old_path = tmp_path / "old.keras"
+    with zipfile.ZipFile(legal_path) as src, zipfile.ZipFile(old_path, "w") as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "config.json":
+                config = json.loads(data)
+                recorded = config["build_config"]["input_shape"]
+                assert recorded[-1] == limit, recorded
+                recorded[-1] = limit + OVER_BY
+                data = json.dumps(config).encode()
+            dst.writestr(item, data)
+
+    with caplog.at_level(logging.WARNING):
+        loaded = keras.saving.load_model(old_path)
+    warned = [
+        r.getMessage() for r in caplog.records
+        if r.levelno >= logging.WARNING
+        and f"exceeds max_sequence_length={limit}" in r.getMessage()
+    ]
+    assert warned, "an over-long recorded shape must log a warning"
+    np.testing.assert_array_equal(loaded.predict(legal, verbose=0), expected)
+    # The model still refuses an over-long input at call time.
+    with pytest.raises(ValueError, match="max_sequence_length"):
+        loaded(subject.feed(loaded, limit + OVER_BY))
+    # And the strict path is unchanged: a fresh model's own build refuses.
+    with pytest.raises(ValueError, match="max_sequence_length"):
+        subject.factory().build((None, limit + OVER_BY))

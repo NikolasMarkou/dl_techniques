@@ -33,6 +33,7 @@ import keras
 
 from dl_techniques.models.language.hnet.config import (
     MODEL_VARIANTS,
+    MIXER_ATTENTION,
     HNetArchConfig,
     get_variant_config,
     n_residuals_by_stage,
@@ -43,6 +44,10 @@ from dl_techniques.models.language.hnet.losses import (
 )
 from dl_techniques.models.language.hnet.stage import HNetStage
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.sequence_length_guard import (
+    check_sequence_length,
+    refuse_static_sequence_length,
+)
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 
 # ---------------------------------------------------------------------
@@ -225,6 +230,13 @@ class HNet(keras.Model):
     #: :data:`~dl_techniques.models.language.hnet.config.MODEL_VARIANTS`, aliased onto
     #: the class so ``from_variant`` and the API tests reach the table through the class.
     MODEL_VARIANTS: Dict[str, HNetArchConfig] = MODEL_VARIANTS
+
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_seq_len={limit}. HNet's stage-0 attention "
+        "precomputes its RoPE tables for {limit} positions, so there is no "
+        "rotation for position {limit}. Truncate the input to {limit} bytes, "
+        "or build the model with max_seq_len>={seq_len}."
+    )
 
     def __init__(
             self,
@@ -425,6 +437,14 @@ class HNet(keras.Model):
                 f"{input_shape}"
             )
 
+        # First, so the cached step functions are dropped and no variable exists.
+        if self._stage0_has_attention:
+            refuse_static_sequence_length(
+                self, input_shape[1], self.max_seq_len,
+                self._SEQUENCE_LENGTH_MESSAGE.format(
+                    seq_len=input_shape[1], limit=self.max_seq_len
+                ),
+            )
         self.embeddings.build(input_shape)
         hidden_shape = (input_shape[0], input_shape[1], self.d_embed)
         self.backbone.build(hidden_shape)
@@ -450,6 +470,11 @@ class HNet(keras.Model):
         :returns: ``(B, L, vocab_size)`` logits.
         :rtype: Any
         """
+        if self._stage0_has_attention:
+            inputs = check_sequence_length(
+                self, inputs, self.max_seq_len, "max_seq_len",
+                self._SEQUENCE_LENGTH_MESSAGE,
+            )
         hidden = self.embeddings(inputs)
 
         hidden, routing_records = self.backbone(
@@ -467,6 +492,13 @@ class HNet(keras.Model):
             embedding_weights = self.embeddings.embeddings
             return tied_embedding_logits(hidden, embedding_weights)
         return self.lm_head(hidden)
+
+    @property
+    def _stage0_has_attention(self) -> bool:
+        """Whether the outermost stage has an attention block: the only RoPE limit."""
+        top = self.arch_config.stage_spec
+        stacks = (top.main,) if top.is_innermost else (top.encoder, top.decoder)
+        return any(b.mixer == MIXER_ATTENTION for s in stacks for b in s.blocks)
 
     def compute_output_shape(
             self, input_shape: Tuple[Optional[int], ...]

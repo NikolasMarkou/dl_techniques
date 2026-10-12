@@ -147,6 +147,10 @@ MODEL_VARIANTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
+from dl_techniques.utils.sequence_length_guard import (
+    check_sequence_length,
+    refuse_static_sequence_length,
+)
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.models.language.zamba2.layers import (
     Zamba2MambaBlock,
@@ -381,6 +385,13 @@ class Zamba2Model(keras.Model):
         Pre-Mortem names: "the stack reads only the last block."
     """
 
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_seq_len={limit}. Zamba2's shared "
+        "attention precomputes its RoPE tables for {limit} positions, so "
+        "there is no rotation for position {limit}. Truncate the input to "
+        "{limit} tokens, or build the model with max_seq_len>={seq_len}."
+    )
+
     def __init__(
         self,
         vocab_size: int,
@@ -614,6 +625,14 @@ class Zamba2Model(keras.Model):
             return
 
         ids_shape = tuple(input_shape)
+        # First, so the cached step functions are dropped and no variable exists.
+        if "g" in self.layer_mapping:
+            refuse_static_sequence_length(
+                self, ids_shape[-1], self.max_seq_len,
+                self._SEQUENCE_LENGTH_MESSAGE.format(
+                    seq_len=ids_shape[-1], limit=self.max_seq_len
+                ),
+            )
         self.embedding.build(ids_shape)
 
         hidden_shape = ids_shape + (self.hidden_size,)
@@ -644,6 +663,11 @@ class Zamba2Model(keras.Model):
         :return: Next-token logits, shape ``(batch_size, seq_len, vocab_size)``.
         :rtype: keras.KerasTensor
         """
+        if "g" in self.layer_mapping:  # only the shared attention has RoPE tables
+            input_ids = check_sequence_length(
+                self, input_ids, self.max_seq_len, "max_seq_len",
+                self._SEQUENCE_LENGTH_MESSAGE,
+            )
         original_embedding = self.embedding(input_ids)
         hidden_states = original_embedding
 
