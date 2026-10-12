@@ -525,6 +525,88 @@ class TestClusterSpread:
                 f"frame (cosine {worst:.8f}); its seed collided"
             )
 
+    @pytest.mark.parametrize(
+        'spread,bound', [(0.05, 2.866), (0.25, 14.478), (1.0, 90.0)]
+    )
+    def test_the_aperture_follows_the_exact_law_not_atan(self, spread, bound):
+        """`angle(C,V) = arccos((1+s*c)/sqrt(1+2*s*c+s^2))`, max `arcsin(s)`.
+
+        The bundle is isotropic -- the displacement is drawn over the whole
+        sphere, not tangential to the centroid -- so `cluster_spread` is a
+        perturbation magnitude, not an angular aperture. The exact maximum
+        over all `<C,S>` is `arcsin(s)`, attained at `<C,S> = -s`; the
+        realized maxima sit just under it. Asserted with half a degree of
+        slack (measured maxima at `input_dim=4, seed=0`: 2.863, 14.477,
+        75.264). A `atan(s)` bound -- the old docstring's reading -- is
+        already violated at `s=0.25` (14.477 against 14.036).
+        """
+        layer = _layer(3, 5, cluster_spread=spread, seed=0)
+        layer(_sample_input(input_dim=4))
+
+        macro = ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
+        micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+        macro /= np.linalg.norm(macro, axis=0, keepdims=True)
+        micro /= np.linalg.norm(micro, axis=0, keepdims=True)
+
+        cosines = np.sum(
+            micro.reshape(4, 3, 5) * macro[:, :, None], axis=0
+        )
+        aperture = np.degrees(np.arccos(np.clip(cosines, -1.0, 1.0)))
+
+        assert float(aperture.max()) <= bound + 0.5, (
+            f"spread={spread}: a leaf sits {float(aperture.max()):.3f} degrees "
+            f"from its centroid, past arcsin({spread}) = {bound:.3f}"
+        )
+
+    def test_a_large_spread_is_not_a_cap_around_the_centroid(self):
+        """At `s=1` leaves sit up to ~75 degrees off their centroid.
+
+        Under the old "angular aperture" reading `s=1` would cap the bundle at
+        `atan(1) = 45` degrees. Measured maximum at `input_dim=4, seed=0`:
+        75.264 degrees -- and at `s=3` leaves pass 130. The bundle fans out
+        isotropically; only the exact law in the module docstring bounds it.
+        """
+        layer = _layer(3, 5, cluster_spread=1.0, seed=0)
+        layer(_sample_input(input_dim=4))
+
+        macro = ops.convert_to_numpy(layer.macro_weights).astype(np.float64)
+        micro = ops.convert_to_numpy(layer.micro_weights).astype(np.float64)
+        macro /= np.linalg.norm(macro, axis=0, keepdims=True)
+        micro /= np.linalg.norm(micro, axis=0, keepdims=True)
+
+        cosines = np.sum(
+            micro.reshape(4, 3, 5) * macro[:, :, None], axis=0
+        )
+        aperture = np.degrees(np.arccos(np.clip(cosines, -1.0, 1.0)))
+
+        assert float(aperture.max()) > 60.0, (
+            f"spread=1.0 should leave the 45-degree cap far behind, but the "
+            f"widest leaf sits at only {float(aperture.max()):.3f} degrees"
+        )
+
+    def test_the_zero_norm_floor_yields_a_zero_column_not_nan(self):
+        """The `np.maximum(norms, 1e-12)` floor is load-bearing.
+
+        At `cluster_spread=1` a leaf displaced exactly opposite its centroid
+        has a bundle norm of exactly 0. Without the floor that leaf is NaN and
+        poisons every downstream loss; with it the leaf is an all-zero column
+        that scores a permanent zero -- finite, and visible. The configuration
+        stays legal (the collapse is measure-zero), but the finiteness is
+        pinned so a future edit cannot drop the floor as decoration.
+        """
+        layer = _layer(3, 5, cluster_spread=1.0, return_hierarchy=True, seed=0)
+        outputs = layer(_sample_input(input_dim=4))
+
+        for key, value in outputs.items():
+            values = ops.convert_to_numpy(value)
+            assert np.all(np.isfinite(values)), (
+                f"{key} went non-finite at cluster_spread=1.0"
+            )
+
+        assert np.all(np.isfinite(ops.convert_to_numpy(layer.micro_weights))), (
+            "a zero-norm leaf must land as a finite zero column, not NaN"
+        )
+
 
 class TestHierarchicalCrystalLayerComputeOutputShape:
     """Both branches of the mode flag, from stored config, unbuilt."""

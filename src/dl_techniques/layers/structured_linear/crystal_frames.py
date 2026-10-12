@@ -26,17 +26,18 @@ matrix is not a codebook; every duplicated column receives an identical logit.
 **Build cost.** Packing is quadratic in ``dimensions`` and linear in the total
 placed vertices, because each candidate trial multiplies an
 ``(N + 1) x placed`` matrix. Measured on CPU (2026-10-12, ``candidate_trials``
-at its default of 5):
+at its default of 5, median of 3 runs -- timings vary run to run, so read
+these as orders of magnitude, not benchmarks):
 
 ============  ==========  ===========
 ``dimensions`` ``width``   milliseconds
 ============  ==========  ===========
-32            64          1.5
-64            128         2.5
-128           512         43.7
-256           1024        169.3
-512           2048        639.7
-1024          4096        3024.9
+32            64          1.1
+64            128         2.4
+128           512         50
+256           1024        187
+512           2048        650
+1024          4096        3286
 ============  ==========  ===========
 
 This runs once, inside a weight initializer, at layer construction. It is not
@@ -47,15 +48,20 @@ should expect a build measured in seconds and not be surprised by it.
 Lowering ``candidate_trials`` to 1 removes the search and most of the cost,
 at the price of the separation measured above.
 
-**The ceiling, stated honestly.** Packing yields ``width`` distinct columns
-*up to a limit set by the sphere itself*: ``S^(N-1)`` contains only ``2N``
-points, so no frame can have more than ``2 * dimensions`` distinct columns, and
-below that the simplex count binds first at ``dimensions + 1``. Past the
-ceiling the duplicates are unavoidable rather than a defect -- at
-``dimensions=1`` the sphere is ``S^0 = {-1, +1}``, so a width-3 frame of 3
-distinct directions does not exist and the caller gets 2 distinct plus one
-repeat. Every configuration the layers actually use sits well inside the limit;
-the degenerate corner is documented rather than silently produced.
+**The honest limit is separation, not distinctness.** Packing yields
+``width`` distinct columns at every width measured -- up to 50,000 in 2
+dimensions, against a ``2 * dimensions`` ceiling of 4 that an earlier revision
+of this docstring wrongly stated (that reading treats ``S^(N-1)`` as holding
+only ``2N`` points; it is a continuum). Only ``dimensions=1`` forces exact
+repeats, because ``S^0 = {-1, +1}`` is two points. What does degrade with
+width is the minimum angular separation between columns: at ``dimensions=8``
+the widest pair moves from 97.2 degrees apart at width 8 to 44.4 degrees at
+width 16 to 25.5 degrees at width 256, and at ``dimensions=2`` a width-64
+frame has a pair at inner product 0.9992 -- near-identical logits from
+near-identical columns. Past the simplex count the frame is a dense spherical
+code, not an equiangular set; the first ``dimensions + 1`` columns are
+equiangular at ``-1/dimensions``, the rest are packed as best the greedy
+search manages.
 
 Pure NumPy by design. These run once per layer, inside a weight initializer,
 where a ``keras.ops`` call would be tracing-time work for no benefit. The
@@ -228,7 +234,13 @@ def crystal_frame(
     :type width: int
     :param candidate_trials: Rotations sampled per simplex, from which the
         least-conflicting one is kept. Values below 2 fall back to a single
-        random rotation, i.e. no search. Defaults to 5.
+        random rotation, i.e. no search. Defaults to 5. The default is where
+        the value is: going 1 -> 5 is the real step (maximum pairwise inner
+        product at ``dimensions=32, width=128, seed=0``: 0.7596 -> 0.5282),
+        while 5 -> 20 is marginal (-> 0.5177), and even 1 still yields
+        ``width`` distinct columns. Cost is roughly linear in this knob (at
+        ``dimensions=1024, width=4096``: ~1.0 s at 1 trial against ~3.3 s at
+        5), so lowering it to 1 is the lever when build time matters.
     :type candidate_trials: int
     :param seed: Anything ``np.random.default_rng`` accepts -- an integer, a
         sequence of integers, or a ``SeedSequence``. ``None`` (the default)

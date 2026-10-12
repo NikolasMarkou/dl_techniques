@@ -219,18 +219,33 @@ class TestCrystalMultiHeadProjectionForwardPass:
 
         assert output.shape == tuple(inputs.shape[:-1]) + (32,)
 
-    def test_the_head_split_is_flattened_correctly_at_rank_two(self):
+    def test_the_head_split_is_flattened_correctly_at_rank_two(
+            self, golden_reference_device
+    ):
         """The rank where the old reshape disagreed, checked on VALUES.
 
         Recomputed by hand from the layer's own weights -- head split, both
         normalizations, the per-head einsum, GELU, then the Dense -- so the
         assertion is on the arithmetic rather than on a second call through the
-        same code path. MEASURED delta 4.8e-07 at float32 against this oracle.
-        """
-        layer = CrystalMultiHeadProjection(num_heads=4, output_dim=16, seed=0)
-        x = np.random.default_rng(7).standard_normal((4, 32)).astype(np.float32)
+        same code path.
 
-        output = ops.convert_to_numpy(layer(x)).astype(np.float64)
+        Pinned to ``golden_reference_device`` (CPU) on BOTH the layer and the
+        probe. Keras auto-places ops on the GPU when one is visible, where the
+        output projection's matmul runs in TF32: MEASURED delta ``5.3e-07`` on
+        CPU (``atol=1e-5`` passes) against ``1.05e-03`` on GPU (a committed
+        RED, ~105x over ``atol``). The discriminator is the DEVICE, not the
+        TF32 flag -- toggling ``enable_tensor_float_32_execution(False)`` on
+        the same GPU path changes nothing. ``atol`` is therefore not the lever
+        (see ``tests/conftest.py`` on why a golden-value failure is pinned
+        rather than relaxed); the TF32 error scales with reduction length, and
+        this ``(H*V=36) -> 16`` post-GELU matmul is the one matmul in the
+        crystal family long enough for it to show.
+        """
+        with keras.device(golden_reference_device):
+            layer = CrystalMultiHeadProjection(num_heads=4, output_dim=16, seed=0)
+            x = np.random.default_rng(7).standard_normal((4, 32)).astype(np.float32)
+
+            output = ops.convert_to_numpy(layer(x)).astype(np.float64)
 
         num_heads, head_dim = 4, 8
         vertices = head_dim + 1

@@ -19,11 +19,14 @@ receiving an identical logit -- the frame is packed from several *rotated*
 simplexes by a greedy minimax-angular-separation search. See
 :mod:`dl_techniques.layers.structured_linear.crystal_frames`.
 
-The packing gives `num_classes` distinct columns up to the sphere's own ceiling
-of `2 * input_dim` points; beyond that, and only beyond that, a repeat is
-unavoidable rather than a defect -- at `input_dim=1` the sphere is
-`S^0 = {-1, +1}`, so a 3-class head over a 1-D feature has only two distinct
-directions available. Every realistic width sits well inside the limit.
+The packing gives `num_classes` distinct columns at every width measured
+(up to 50,000 in 2 dimensions). Only `input_dim=1` forces a repeat, because
+`S^0 = {-1, +1}` is two points -- at `input_dim=1` a 3-class head over a 1-D
+feature has only two distinct directions available. What degrades with width is
+the angular separation between columns, not their distinctness: the frame is a
+dense spherical code past the simplex count, and at low dimension a wide frame
+holds near-identical columns (measured at `input_dim=2, num_classes=64`: a
+pair at inner product 0.9992, i.e. near-identical logits).
 
 Setting ``trainable_crystal=True`` releases the frame so the network may leave
 the collapsed configuration it was handed. Weights are re-normalized inside

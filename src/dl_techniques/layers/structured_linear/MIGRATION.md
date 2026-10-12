@@ -90,6 +90,12 @@ be lower by that term. Training behaviour is unchanged.
 
 Additive. No existing configuration, key or checkpoint is affected.
 
+No model, trainer or application under `src/` consumes any of the six crystal
+symbols (`crystal_frame`, `hyperspherical_simplex`, `haar_orthogonal`,
+`tiled_simplex_frame`, and the three layers) -- the family is exercised by its
+test suite alone. Stated plainly so a future reader does not go looking for
+the consumer that would constrain a change.
+
 Registered as `dl_techniques.layers.structured_linear.<module>><Class>`, each
 with its own module-level registration string, following the one-class-per-module
 precedent set by `complex/` and `conv_blocks/`.
@@ -123,7 +129,8 @@ Two behaviours worth knowing before composing them:
 
 ## `compute_output_shape` accepts a shape that arrives as a list (2026-10-12)
 
-All five layers in this package. A single shape is a legal Keras argument form
+The three crystal layers (`CrystalLayer`, `HierarchicalCrystalLayer`,
+`CrystalMultiHeadProjection`). A single shape is a legal Keras argument form
 and can arrive wrapped in a list — `[[None, 8]]`, `[(None, 8)]` or
 `[None, 8]` — notably after deserialization.
 
@@ -136,12 +143,33 @@ rewriting its last element replaces the *batch* axis:
 | `[(None, 8)]` | `(units,)` | `(None, units)` |
 | `[None, 8]` | `(units,)` | `(None, units)` |
 
-This affected the tuple return of every layer and the per-key dict of
+This affected the tuple return of every crystal layer and the per-key dict of
 `HierarchicalCrystalLayer`. Fixed by routing the argument through the shared
 `dl_techniques.utils.tensors.canonical_binary_input_shape`, which already
 exists for exactly this and whose docstring names `compute_output_shape` as a
 caller. No shipped behaviour changes for the tuple form, which was already
 correct.
+
+## Known-open gap: the other eight layers in this package (2026-10-12)
+
+The package holds ELEVEN layer classes, all eleven defining
+`compute_output_shape`, and only the three crystal layers above route through
+`canonical_binary_input_shape`. The other eight still use the
+un-canonicalized `list(input_shape)` / `tuple(input_shape[:-1])` spelling, and
+two of them still return the wrong shape for a list-wrapped input (measured):
+
+```
+OrthoBlock   cos([[None, 8]]) = (4,)     # (None, 4) expected
+BitLinear    cos([(None, 8)]) = (4,)     # (None, 4) expected
+```
+
+Plus `orthogonal_butterfly.py`, `kanvolution.py`, `hierarchical_harmonic.py`,
+`harmonic_dense.py`, `mps_layer.py` and `random_fourier_features.py`. An
+earlier revision of the section above claimed the fix covered "all five
+layers in this package"; that count was wrong in both directions and is
+corrected here. The eight are deliberately left alone -- routing them through
+the helper is a separate change with its own blast radius outside the crystal
+family.
 
 ## `cluster_spread=0` is degenerate, and is now documented as such (2026-10-12)
 
@@ -161,16 +189,32 @@ The collapse is exact at zero rather than approximate near it, so no value below
 which it is avoided exists; a caller wanting leaf discrimination must use a
 strictly positive `cluster_spread`.
 
-## Packing's distinctness ceiling is now stated (2026-10-12)
+## RETRACTED (2026-10-12): the `2 * dimensions` distinctness ceiling
 
-`crystal_frame`'s docstring, and `CrystalLayer`'s, claimed `width` distinct
-columns without qualification. That holds up to the sphere's own ceiling of
-`2 * dimensions` points, and below that the simplex count binds first at
-`dimensions + 1`. Past the ceiling a repeat is unavoidable rather than a
-defect: at `dimensions=1` the sphere is `S^0 = {-1, +1}`, so a 3-column frame
-has 2 distinct columns and one repeat no matter how it is built. The claim is
-now bounded in the docstring and pinned by a parametrized test that checks
-both sides of the ceiling.
+The section below claimed ``S^(N-1)`` holds only ``2N`` points, capping any
+frame at ``2 * dimensions`` distinct columns. That claim is false: ``S^(N-1)``
+is a continuum. Measured distinct columns equal ``width`` at every width
+tested -- 50 distinct of 50 at ``dimensions=3``, 256 of 256 at
+``dimensions=8``, 1024 of 1024 at ``dimensions=32``, 50,000 of 50,000 at
+``dimensions=2`` (stated ceiling: 4). Only ``dimensions=1`` forces exact
+repeats, because ``S^0 = {-1, +1}`` is two points. The original section is kept
+so the retraction, and the reason for it, stay on the record.
+
+The real limit the ceiling was standing in for is SEPARATION, which does
+degrade with width: at ``dimensions=8`` the closest pair moves from 97.2
+degrees at width 8 to 44.4 degrees at width 16 to 25.5 degrees at width 256,
+and at ``dimensions=2, width=64`` a pair sits at inner product 0.9992 --
+near-identical logits from near-identical columns. Past the simplex count the
+frame is a dense spherical code, not an equiangular set;
+
+> ~~`crystal_frame`'s docstring, and `CrystalLayer`'s, claimed `width` distinct
+> columns without qualification. That holds up to the sphere's own ceiling of
+> `2 * dimensions` points, and below that the simplex count binds first at
+> `dimensions + 1`. Past the ceiling a repeat is unavoidable rather than a
+> defect: at `dimensions=1` the sphere is `S^0 = {-1, +1}`, so a 3-column frame
+> has 2 distinct columns and one repeat no matter how it is built. The claim is
+> now bounded in the docstring and pinned by a parametrized test that checks
+> both sides of the ceiling.~~
 
 ## `CrystalMultiHeadProjection` — the rank-2 reshape (2026-10-12)
 

@@ -9,13 +9,45 @@ away. This layer keeps it, in two tiers of the same geometric construction:
   same packed-simplex procedure, so the coarse groups are as far apart as the
   dimension allows.
 - **Micro tier.** For each macro centroid ``C_m``, ``num_micro_per_macro`` leaf
-  vertices sit in a conical bundle around it::
+  vertices sit in an isotropic bundle around it::
 
       V_{m,k} = normalize(C_m + cluster_spread * S_{m,k})
 
-  where ``S_{m,k}`` is itself a packed frame. ``cluster_spread`` is the angular
-  aperture: as it grows the leaves fan out around their centroid, and as it
-  shrinks toward 0 they collapse onto it.
+  where ``S_{m,k}`` is itself a packed frame. The displacement is drawn over
+  the whole sphere, not tangential to ``C_m``, so the bundle is isotropic
+  rather than a cone. With ``|C| = |S| = 1`` and ``c = <C, S>`` in ``[-1, 1]``,
+  the leaf's angle to its own centroid is exactly
+
+      angle(C, V) = arccos((1 + s*c) / sqrt(1 + 2*s*c + s*s))
+
+  so ``cluster_spread`` is a perturbation magnitude, not an angular aperture:
+  past ``s ~= 0.3`` the leaves leave any cap around their centroid and can pass
+  its antipode. The exact maximum over all ``c`` is ``arcsin(s)``, attained at
+  ``<C, S> = -s``; the realized maxima below sit just under it. Measured
+  leaf-to-own-centroid aperture ranges (``input_dim=32``, 4 groups of 6,
+  ``seed=0``):
+
+  ============  =======================  ==============
+  ``s``         measured aperture        ``arcsin(s)``
+  ============  =======================  ==============
+  0.05          [2.55, 2.87] degrees     2.87
+  0.25          [12.58, 14.48] degrees   14.48
+  1.0           [36.60, 59.83] degrees   90.00
+  3.0           [56.98, 100.53] degrees  unbounded
+  10.0          [67.89, 114.44] degrees  unbounded
+  ============  =======================  ==============
+
+  As ``s`` shrinks toward 0 the leaves collapse onto their centroid exactly.
+
+**``cluster_spread`` near 1 can zero a leaf.** The bundle norm
+``sqrt(1 + 2*s*c + s*s)`` vanishes at ``s = 1, c = -1`` -- a leaf displaced
+exactly opposite its centroid -- and near that point it is small enough that
+the leaf direction is numerical garbage rather than a direction. The
+initializer floors the norm at ``1e-12``, so the degenerate leaf is an
+all-zero column, and the cosine logits downstream normalize it to a
+permanently-zero score. This is a measure-zero configuration, not a working
+aperture; it stays legal for the same reason ``spread=0`` does, and is pinned
+by the test suite so it cannot be mistaken for one.
 
 **``cluster_spread=0`` is degenerate, and is allowed deliberately.** At exactly
 zero the bundle collapses: all ``num_micro_per_macro`` leaves of a group become
@@ -163,14 +195,24 @@ class HierarchicalCrystalLayer(keras.layers.Layer):
         be positive, and may exceed ``input_dim + 1`` -- the micro frame is
         packed from several simplexes rather than being capped at one.
     :type num_micro_per_macro: int
-    :param cluster_spread: Angular aperture of each leaf bundle around its macro
-        centroid. Must be non-negative. Defaults to 0.25.
+    :param cluster_spread: Perturbation magnitude of each leaf bundle around
+        its macro centroid. Must be non-negative. Defaults to 0.25. See the
+        module docstring for the exact aperture law: this is NOT an angular
+        aperture past ``s ~= 0.3``.
 
         .. warning::
            ``0.0`` is degenerate, though legal. Every leaf of a group collapses
            onto its centroid, giving that group identical logits and a uniform
            conditional softmax. Use a strictly positive value whenever the leaf
            tier must discriminate. See the module docstring for measurements.
+
+        .. warning::
+           A bundle norm of ``sqrt(1 + 2*s*c + s*s)`` vanishes at ``s = 1``
+           with ``c = -1`` (a leaf displaced exactly opposite its centroid),
+           leaving an all-zero column that scores a permanent zero. The
+           configuration stays legal -- the collapse is measure-zero, not a
+           rounding artifact near some threshold -- but ``s = 1.0`` is not a
+           working aperture.
     :type cluster_spread: float
     :param scale: Inverse-temperature multiplier on the cosine logits.
         Defaults to 10.0.
@@ -183,6 +225,14 @@ class HierarchicalCrystalLayer(keras.layers.Layer):
     :type trainable_crystal: bool
     :param seed: Seed for the frame rotation sampling. ``None`` (the default)
         draws fresh frames per build; pass an integer for reproducible ones.
+        Note ``seed`` is a no-op on the MACRO frame whenever
+        ``num_macro_classes <= input_dim + 1``: one sliced simplex has pairwise
+        inner product ``-1/input_dim`` under ANY rotation, so the centroids
+        are the same equiangular set whatever the seed draws (measured maximum
+        off-diagonal macro inner product ``-0.0312 = -1/32`` at
+        ``input_dim=32``, identical at ``seed=None/0/1/2``). The seed still
+        governs the leaf-bundle displacements, which is where distinct frames
+        come from at these widths.
     :type seed: Optional[int]
     :param eps: Added inside the square root of each norm computation.
     :type eps: float
@@ -323,11 +373,17 @@ class HierarchicalCrystalLayer(keras.layers.Layer):
 
     def _micro_initializer(self, shape: Tuple[int, ...], dtype=None) -> np.ndarray:
         """
-        Build the leaf vertices as conical bundles around the macro centroids.
+        Build the leaf vertices as isotropic bundles around the macro centroids.
 
         Each group draws its own frame from its own spawned stream, so two
         groups never receive the same displacement directions and collapse onto
         identical bundles.
+
+        The centroids are re-derived here with a second packing pass rather
+        than read from ``macro_weights``: this initializer runs inside
+        ``add_weight``, where ``macro_weights`` may not exist yet, and sharing
+        one frame object between two weights would alias them. The doubling is
+        deliberate -- do not "simplify" it into a read of the sibling weight.
 
         :param shape: Target weight shape ``(input_dim, total_classes)``.
         :type shape: Tuple[int, ...]
@@ -362,9 +418,13 @@ class HierarchicalCrystalLayer(keras.layers.Layer):
 
             centroid = centroids[:, group:group + 1]  # (input_dim, 1)
 
-            # Conical bundle: offset from the centroid, then renormalized back
+            # Isotropic bundle: offset from the centroid, then renormalized back
             # onto the sphere. The renormalization is what keeps the leaves unit
-            # vectors, which the cosine logits downstream assume.
+            # vectors, which the cosine logits downstream assume. The 1e-12
+            # floor is load-bearing, not decoration: at cluster_spread=1 a leaf
+            # displaced exactly opposite its centroid has a bundle norm of
+            # exactly 0, and without the floor that leaf is NaN rather than an
+            # all-zero column (see the module docstring).
             bundle = centroid + self.cluster_spread * frame
             norms = np.linalg.norm(bundle, axis=0, keepdims=True)
             bundles.append(bundle / np.maximum(norms, 1e-12))

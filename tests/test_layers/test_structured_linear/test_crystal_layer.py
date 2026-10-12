@@ -151,34 +151,87 @@ class TestCrystalLayerFrame:
             f"expected 30 distinct frame columns, got {len(distinct)}"
         )
 
-    @pytest.mark.parametrize('num_classes,expected', [(9, 9), (16, 16), (30, 30)])
-    def test_the_distinct_column_claim_holds_across_the_sphere_ceiling(
-            self, num_classes, expected
+    @pytest.mark.parametrize('dimensions,width', [(2, 4), (2, 500), (3, 50), (8, 50), (8, 500)])
+    def test_packing_yields_width_distinct_columns_with_no_sphere_ceiling(
+            self, dimensions, width
     ):
-        """`num_classes` distinct columns is a claim with a stated limit.
+        """Distinctness holds at every width measured -- the old `2N` ceiling was false.
 
-        ``S^(N-1)`` holds ``2N`` points, so a frame can never exceed that many
-        distinct columns. At ``input_dim=8`` the ceiling is 16, so the claim is
-        checked on both sides of it rather than only comfortably inside.
+        An earlier revision of the docs claimed ``S^(N-1)`` holds only ``2N``
+        points, capping any frame at ``2 * dimensions`` distinct columns. It is
+        a continuum: 500 distinct of 500 at ``dimensions=2`` (stated ceiling:
+        4). Only ``dimensions=1`` forces exact repeats, and that corner has its
+        own test below.
         """
-        layer = CrystalLayer(num_classes=num_classes, seed=0)
-        layer(_sample_input(input_dim=8))
+        layer = CrystalLayer(num_classes=width, seed=0)
+        layer(_sample_input(input_dim=dimensions))
 
         frame = ops.convert_to_numpy(layer.crystal_weights)
         distinct = len({tuple(np.round(column, 6)) for column in frame.T})
 
-        assert distinct == expected, (
-            f"input_dim=8, num_classes={num_classes}: expected {expected} "
+        assert distinct == width, (
+            f"input_dim={dimensions}, num_classes={width}: expected {width} "
             f"distinct columns, got {distinct}"
         )
 
-    def test_beyond_the_sphere_ceiling_a_repeat_is_mathematical_not_a_defect(self):
+    def test_separation_degrades_with_width_while_distinctness_holds(self):
+        """The honest limit is the minimum angular SEPARATION, not distinctness.
+
+        Past the simplex count the frame is a dense spherical code, not an
+        equiangular set: the columns stay distinct but crowd together. Pinned
+        at ``input_dim=8, seed=0``: the closest pair sits at inner product
+        ~0.71 at width 16 and ~0.90 at width 256 (measured 0.714291 and
+        0.902903; asserted with slack). A future packing change must keep the
+        degradation smooth -- a width-256 frame whose closest pair is at 1.0
+        is a tiling regression, and one at ~0.71 is a claim to beat the
+        measured greedy search by magic.
+        """
+        def _max_inner(width):
+            layer = CrystalLayer(num_classes=width, seed=0)
+            layer(_sample_input(input_dim=8))
+            frame = ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
+            gram = frame.T @ frame
+            np.fill_diagonal(gram, -1.0)
+            return float(gram.max())
+
+        narrow = _max_inner(16)
+        wide = _max_inner(256)
+
+        assert narrow < 0.80, f"width-16 packing regressed: {narrow:.6f}"
+        assert wide > narrow, (
+            f"separation must degrade with width: {wide:.6f} at 256 vs "
+            f"{narrow:.6f} at 16"
+        )
+        assert wide < 0.97, f"width-256 packing regressed: {wide:.6f}"
+
+    def test_a_wide_low_dimensional_frame_holds_near_identical_columns(self):
+        """At low dimension a wide frame crowds to near-duplicate logits.
+
+        Distinctness holds -- 64 distinct of 64 -- but the closest pair sits at
+        inner product 0.9992 (measured at ``input_dim=2, width=64, seed=0``),
+        i.e. two classes receiving near-identical logits. This is the hazard
+        the old ceiling story was standing in for, stated as it actually is.
+        """
+        layer = CrystalLayer(num_classes=64, seed=0)
+        layer(_sample_input(input_dim=2))
+
+        frame = ops.convert_to_numpy(layer.crystal_weights).astype(np.float64)
+        gram = frame.T @ frame
+        np.fill_diagonal(gram, -1.0)
+
+        assert float(gram.max()) > 0.99, (
+            "expected a near-identical column pair at input_dim=2, width=64; "
+            f"measured a maximum inner product of {float(gram.max()):.6f}"
+        )
+
+    def test_only_the_one_dimensional_sphere_forces_a_repeat(self):
         """Documents the one place the distinctness claim cannot hold.
 
         At ``input_dim=1`` the sphere is ``S^0 = {-1, +1}``: exactly two points,
-        so a 3-column frame has one repeat no matter how it is built. Pinned so
-        the ceiling is a measured fact rather than an assumption, and so a future
-        change cannot silently claim otherwise.
+        so a 3-column frame has one repeat no matter how it is built. This is
+        the ONLY configuration where a repeat is mathematical rather than a
+        defect -- the old ``2N`` ceiling story wrongly generalized it. Pinned
+        so a future change cannot silently claim otherwise.
         """
         layer = CrystalLayer(num_classes=3, seed=0)
         layer(_sample_input(input_dim=1))
