@@ -227,10 +227,11 @@ from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.models.language.topolm import create_topolm
 
 sst2 = NLPTaskConfig(name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2)
-clf = create_topolm("tiny", vocab_size=512, include_top=True, task_config=sst2)
+clf = create_topolm("tiny", vocab_size=512, include_top=True, task_config=sst2,
+                    pad_token_id=0)  # the pad id of THIS data; None = no padding
 
 ids = np.random.randint(1, 512, size=(2, 16)).astype("int32")
-ids[1, 10:] = 0                                    # right padding, pad_token_id=0
+ids[1, 10:] = 0                                    # right padding (id 0 is the pad id here)
 print(clf.task_head.pooling_type)                  # 'last'
 print(clf(ids).shape)                              # (2, 2) -- bare logits, no LM logits
 clf(ids, training=True)
@@ -251,8 +252,8 @@ With `include_top=True` and a `task_config` the model owns one head from
 `layers/heads/nlp`, named `task_head`, and returns only its output (a bare tensor, or a dict for
 question answering); no LM logits are computed and an untied `lm_head` is not created. TopoLM is
 causal, so the head pools the **last real token** (`pooling_type='last'`) under the input's
-`attention_mask`, else `input_ids != pad_token_id` (`pad_token_id=0` by default, a real
-`cl100k_base` token: pass your pad id or a mask); `head_config_overrides={"pooling_type": ...}`
+`attention_mask`, else `input_ids != pad_token_id` (`pad_token_id=None` by default: no padding, the
+head sees every position, because id 0 is a real `cl100k_base` token; pass your pad id or a mask); `head_config_overrides={"pooling_type": ...}`
 replaces the default. The blocks never see that derived mask, run unchanged, and keep adding the
 smoothness terms through `add_loss`, so a fine-tune under `fit` still pays the spatial penalty
 unless `alpha=0.0`. The backbone's weight paths are the same with or without a head.

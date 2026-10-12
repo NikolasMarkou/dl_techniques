@@ -229,10 +229,11 @@ class TopoLM(keras.Model):
     :type seed: Optional[int]
     :param pad_token_id: Id treated as padding by the task head when the input
         carries no ``attention_mask``. Read only with ``include_top=True``; the
-        blocks never derive a mask from it. Default 0, which is a real token in
-        ``cl100k_base``: with right-padded batches pass the tokenizer's pad id or
-        an ``attention_mask``.
-    :type pad_token_id: int
+        blocks never derive a mask from it. Default None, which derives no
+        padding (the head sees every position): id 0 is a real token in
+        ``cl100k_base``, so with right-padded batches pass the tokenizer's pad id
+        or an ``attention_mask``. An explicit int is stored and serialized as given.
+    :type pad_token_id: Optional[int]
     :param include_top: Whether the model owns a task head (and no LM head).
         Default False: no head layer and no head weight exist. With a head the
         blocks and their taps run unchanged, so ``add_loss`` still fires.
@@ -290,7 +291,7 @@ class TopoLM(keras.Model):
         activation: Union[str, Any] = gelu_tanh,
         tie_word_embeddings: bool = True,
         seed: Optional[int] = None,
-        pad_token_id: int = 0,
+        pad_token_id: Optional[int] = None,
         include_top: bool = False,
         task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
         head_config_overrides: Optional[Dict[str, Any]] = None,
@@ -338,7 +339,7 @@ class TopoLM(keras.Model):
         self.activation = activation
         self.tie_word_embeddings = bool(tie_word_embeddings)
         self.seed = seed
-        self.pad_token_id = int(pad_token_id)
+        self.pad_token_id = None if pad_token_id is None else int(pad_token_id)
         self.include_top = bool(include_top)
         self.task_config = (
             task_config_to_dict(task_config) if task_config is not None else None

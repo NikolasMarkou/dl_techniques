@@ -97,7 +97,7 @@ class Gemma3(keras.Model):
     ``include_top=True`` the projection is replaced by one NLP task head, fed
     ``{"hidden_states": <final-normed states>, "attention_mask": <mask>}``,
     where the mask is the input's ``attention_mask`` or, without one,
-    ``input_ids != pad_token_id``, cast to the hidden-state dtype; ``call``
+    ``input_ids != pad_token_id`` (all ones when it is None), cast to the hidden-state dtype; ``call``
     returns what the head returns, reduced by
     :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`.
 
@@ -158,8 +158,11 @@ class Gemma3(keras.Model):
     :type initializer_range: float
     :param pad_token_id: Id treated as padding by the task head when the input
         carries no ``attention_mask``. Read only with ``include_top=True``; the
-        blocks never derive a mask from it. Default: 0.
-    :type pad_token_id: int
+        blocks never derive a mask from it. Default: None, which derives no
+        padding (the head sees every position): id 0 is a real token, so with
+        right-padded batches pass the tokenizer's pad id or an ``attention_mask``.
+        An explicit int is stored and serialized as given.
+    :type pad_token_id: Optional[int]
     :param include_top: Whether the model owns a task head (and no LM head).
         Default: False: no head layer and no head weight exist.
     :type include_top: bool
@@ -275,7 +278,7 @@ class Gemma3(keras.Model):
         dropout_rate: float = 0.0,
         use_bias: bool = False,
         initializer_range: float = 0.02,
-        pad_token_id: int = 0,
+        pad_token_id: Optional[int] = None,
         include_top: bool = False,
         task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
         head_config_overrides: Optional[Dict[str, Any]] = None,
@@ -537,7 +540,7 @@ class Gemma3(keras.Model):
 
         if self.include_top:
             # The blocks saw only the caller's mask; the head pools under it,
-            # else under input_ids != pad_token_id.
+            # else under input_ids != pad_token_id (all ones if None).
             return finalize_head_outputs(self.task_head(
                 {
                     "hidden_states": hidden_states,

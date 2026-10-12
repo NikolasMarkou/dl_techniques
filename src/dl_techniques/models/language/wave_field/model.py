@@ -440,9 +440,11 @@ class WaveFieldLLM(keras.Model):
         (DECISION ``D-003``). Default True, which builds no ``lm_head``.
     :param pad_token_id: Id treated as padding by the task head when the input
         carries no ``attention_mask``. Read only with ``include_top=True``; the
-        blocks never derive a mask from it. Default 0, which is a real token in
-        the ``gpt2`` encoding: with right-padded batches pass the tokenizer's
-        pad id or an ``attention_mask``.
+        blocks never derive a mask from it. Default None, which derives no
+        padding (the head sees every position): id 0 is a real token in the
+        ``gpt2`` encoding, so with right-padded batches pass the tokenizer's pad
+        id or an ``attention_mask``. An explicit int is stored and serialized as
+        given.
     :param include_top: Whether the model owns a task head (and no LM head).
         Default False: no head layer and no head weight exist.
     :param task_config: The head's task, as an ``NLPTaskConfig`` or a dict of
@@ -536,7 +538,7 @@ class WaveFieldLLM(keras.Model):
         initializer_range: float = DEFAULT_INITIALIZER_RANGE,
         layer_norm_eps: float = DEFAULT_LAYER_NORM_EPS,
         tie_word_embeddings: bool = True,
-        pad_token_id: int = 0,
+        pad_token_id: Optional[int] = None,
         include_top: bool = False,
         task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
         head_config_overrides: Optional[Dict[str, Any]] = None,

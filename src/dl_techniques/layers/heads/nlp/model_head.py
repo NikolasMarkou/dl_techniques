@@ -19,7 +19,8 @@ Functions
 * :func:`finalize_head_outputs` -- drop the outputs derived from ``logits`` and
   unwrap a single-key dict to a bare tensor.
 * :func:`head_attention_mask` -- the mask a head pools under: the caller's
-  ``attention_mask``, else ``input_ids != pad_token_id``, in a given dtype.
+  ``attention_mask``, else ``input_ids != pad_token_id``, else all ones, in a
+  given dtype.
 * :func:`task_model_name` -- the name of a model wrapping a headed backbone:
   ``<model>_for_<task>``, one name per task whichever factory built it.
 
@@ -303,7 +304,7 @@ def finalize_head_outputs(
 def head_attention_mask(
         input_ids: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor],
-        pad_token_id: int,
+        pad_token_id: Optional[int],
         dtype: str,
 ) -> keras.KerasTensor:
     """
@@ -313,15 +314,20 @@ def head_attention_mask(
     decoder needs none), the head still must not pool padding: under
     ``'last'`` pooling an unmasked head reads the final position, which is
     padding for every row shorter than the batch. The caller's mask wins;
-    without one, padding is every ``pad_token_id`` position.
+    without one, padding is every ``pad_token_id`` position. With neither a
+    mask nor a pad id nothing is padding and the mask is all ones: id 0 is a
+    real token in most vocabularies, so no id is assumed to be padding. A
+    padded batch must then pass ``attention_mask`` (or the model be built with
+    the tokenizer's ``pad_token_id``), else the head pools the padding.
 
     :param input_ids: Token ids ``(batch, seq_len)``.
     :type input_ids: keras.KerasTensor
     :param attention_mask: The caller's mask ``(batch, seq_len)``, 1 = keep,
         or None.
     :type attention_mask: Optional[keras.KerasTensor]
-    :param pad_token_id: Id treated as padding when no mask is given.
-    :type pad_token_id: int
+    :param pad_token_id: Id treated as padding when no mask is given, or None
+        for no padding id.
+    :type pad_token_id: Optional[int]
     :param dtype: Dtype of the result, normally the hidden states' dtype, so a
         float16 hidden state never meets an int mask inside the head.
     :type dtype: str
@@ -329,7 +335,10 @@ def head_attention_mask(
     :rtype: keras.KerasTensor
     """
     if attention_mask is None:
-        attention_mask = keras.ops.not_equal(input_ids, pad_token_id)
+        if pad_token_id is None:
+            attention_mask = keras.ops.ones_like(input_ids)
+        else:
+            attention_mask = keras.ops.not_equal(input_ids, pad_token_id)
     return keras.ops.cast(attention_mask, dtype)
 
 # ---------------------------------------------------------------------

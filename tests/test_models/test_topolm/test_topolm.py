@@ -1453,8 +1453,10 @@ class TestTopoLMIncludeTop:
                              ids=["attention_mask", "pad_derived"])
     def test_appended_padding_does_not_change_the_head_output(self, with_mask):
         """Padding after the last real token is invisible to the head; without
-        an ``attention_mask`` the mask is ``input_ids != pad_token_id`` (0)."""
-        model = TopoLM(**_HEAD_KW, include_top=True, task_config=_CLF)
+        an ``attention_mask`` the mask is ``input_ids != pad_token_id`` (0, passed
+        explicitly: the default None pools every position)."""
+        model = TopoLM(**_HEAD_KW, pad_token_id=0, include_top=True,
+                       task_config=_CLF)
         ids = np.random.default_rng(3).integers(1, 64, (2, 5)).astype("int32")
         padded = np.concatenate([ids, np.zeros((2, 4), "int32")], axis=1)
 
@@ -1515,7 +1517,7 @@ class TestTopoLMIncludeTop:
             config.pop(key)
         model = TopoLM.from_config(config)
         assert model.include_top is False and model.task_head is None
-        assert model.pad_token_id == 0
+        assert model.pad_token_id is None
 
     def test_keras_round_trip_restores_the_head_by_value(self, tmp_path):
         """Weights compared BEFORE the first call on the loaded model (guide 8.4)."""

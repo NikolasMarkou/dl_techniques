@@ -94,12 +94,17 @@ own attention is unchanged):
 |---|---|---|
 | BERT, DistilBERT, ModernBERT, FNet (bidirectional encoders) | all ones, the same mask the encoder returns: padding is pooled under `mean` / `max` / `attention` | `cls` |
 | TreeTransformer | `input_ids != pad_token_id` | `cls` |
-| GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3 (causal decoders) | `input_ids != pad_token_id` | `last` |
+| GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3 (causal decoders) | `input_ids != pad_token_id` if a pad id was given, else all ones | `last` |
 
-A caller's `attention_mask` always wins. `pad_token_id` defaults to 0, and id 0
-is a real token in the GPT2 and Qwen vocabularies (cl100k and Qwen BPE): pass
-your tokenizer's pad id or an explicit mask, or a sequence whose last real
-token is id 0 pools the token before it under `last`.
+A caller's `attention_mask` always wins. The decoders' `pad_token_id` defaults to
+`None`, which means no padding (the all-ones mask): id 0 is a real token in the
+GPT2 and Qwen vocabularies (cl100k and Qwen BPE; `!` in both tiktoken encodings),
+and the old default 0 dropped it from the pooled positions. A headed decoder fed a
+padded batch must therefore pass `attention_mask` or be built with the tokenizer's
+pad id, else the head pools the padding (under `last`, it reads a pad position).
+An explicit int in an old archive's config is preserved. Headless decoders never
+read the value. `tests/test_models/test_a_decoder_assumes_no_padding_token.py`
+pins the default and the all-ones behaviour for these eight classes.
 
 Reusing a backbone under a new head:
 

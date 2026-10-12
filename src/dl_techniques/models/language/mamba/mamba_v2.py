@@ -15,7 +15,7 @@ chunked-matmul algorithm, so this is a correctness reference and not a speed
 benchmark. By default the model returns only ``{'last_hidden_state'}``; with
 ``include_top=True`` and a ``task_config`` it owns ONE task head from
 ``layers/heads/nlp``, named ``task_head``, which pools the last real token under the
-input's ``attention_mask``, else ``input_ids != pad_token_id``, and returns only that
+input's ``attention_mask``, else ``input_ids != pad_token_id`` (all ones when it is None), and returns only that
 head's output (as :class:`~dl_techniques.models.language.mamba.mamba_v1.Mamba`
 does). :func:`create_mamba2` is the variant factory. ``rmsnorm`` governs the
 in-block SSM-output norm while the final norm is always ``LayerNormalization``; and
@@ -66,7 +66,7 @@ class Mamba2(keras.Model):
     the blocks, which forward it to their ``Mamba2Layer``. By default the encoder has
     no task head. With ``include_top=True`` it owns one, fed ``{"hidden_states":
     last_hidden_state, "attention_mask": <mask>}``, where the mask is the input dict's
-    ``attention_mask`` or, without one, ``input_ids != pad_token_id``, cast to the
+    ``attention_mask`` or, without one, ``input_ids != pad_token_id`` (all ones when it is None), cast to the
     hidden-state dtype, and ``call`` returns the head's output reduced by
     :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`. The blocks never
     see the mask, so the hidden states do not depend on the head.
@@ -155,6 +155,9 @@ class Mamba2(keras.Model):
     :param norm_epsilon: Epsilon for all normalization layers.
     :param pad_token_id: Id treated as padding by the task head when the input
         carries no ``attention_mask``. Read only with ``include_top=True``.
+        Defaults to None, which derives no padding (the head sees every
+        position): id 0 is a real token, so with right-padded batches pass the
+        tokenizer's pad id or an ``attention_mask``.
     :param rmsnorm: If True, the in-block SSM-output norm is an RMSNorm. The model's
         final norm is a ``LayerNormalization`` either way.
     :param d_ssm: Dimensionality of the SSM. Defaults to ``d_model * expand``. A
@@ -231,7 +234,7 @@ class Mamba2(keras.Model):
             expand: int = 2,
             headdim: int = 64,
             norm_epsilon: float = 1e-5,
-            pad_token_id: int = 0,
+            pad_token_id: Optional[int] = None,
             rmsnorm: bool = True,
             d_ssm: Optional[int] = None,
             norm_before_gate: bool = False,

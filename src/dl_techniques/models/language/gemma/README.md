@@ -314,7 +314,9 @@ model = create_gemma3(custom_config, task_type="generation")
 `Gemma3(include_top=True, task_config=...)` replaces `lm_head` with ONE task head from
 `dl_techniques.layers.heads.nlp`, named `task_head` (no `lm_head` is created and no
 vocabulary logits are computed). It is fed the final-normed hidden states and pools `"last"`
-by default under the input's `attention_mask`, or `input_ids != pad_token_id` without one;
+by default under the input's `attention_mask`, or `input_ids != pad_token_id` without one when
+a `pad_token_id` was given (default `None`: every position, so a padded batch must pass
+`attention_mask` or the tokenizer's pad id);
 `head_config_overrides={"pooling_type": ...}` overrides that. `call` returns the head's
 logits (a dict only for multi-output heads such as QA). The backbone's weight paths are the
 same with or without a head, so a backbone trained under one head moves to another, weights

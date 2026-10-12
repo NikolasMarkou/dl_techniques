@@ -144,7 +144,10 @@ class Qwen3Next(keras.Model):
     :param stochastic_depth_rate: Drop path rate for stochastic depth. Defaults to 0.1.
     :param pad_token_id: Id treated as padding by the task head when the input
         carries no `attention_mask`. Read only with `include_top=True`; the
-        blocks never derive a mask from it. Defaults to 0.
+        blocks never derive a mask from it. Defaults to None, which derives no
+        padding (the head sees every position): id 0 is a real token, so with
+        right-padded batches pass the tokenizer's pad id or an `attention_mask`.
+        An explicit int is stored and serialized as given.
     :param include_top: Whether the model owns a task head (and no LM head).
         Defaults to False: no head layer and no head weight exist.
     :param task_config: The head's task, as an `NLPTaskConfig` or a dict of its
@@ -242,7 +245,7 @@ class Qwen3Next(keras.Model):
             ffn_type: str = "swiglu",
             use_stochastic_depth: bool = False,
             stochastic_depth_rate: float = 0.1,
-            pad_token_id: int = 0,
+            pad_token_id: Optional[int] = None,
             include_top: bool = False,
             task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
             head_config_overrides: Optional[Dict[str, Any]] = None,
@@ -517,7 +520,7 @@ class Qwen3Next(keras.Model):
 
         if self.include_top:
             # The blocks saw only the caller's mask; the head pools under it,
-            # else under input_ids != pad_token_id.
+            # else under input_ids != pad_token_id (all ones if None).
             outputs = finalize_head_outputs(self.task_head(
                 {
                     "hidden_states": hidden_states,

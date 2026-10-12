@@ -213,7 +213,7 @@ Constructor arguments not covered by a variant:
 | `head_type` | `"linear"` | `"harmonic"` scores tokens by `-(n/2) log(||h-E_t||^2+eps)` (harmonic max, arXiv:2502.01628); tied embeddings only; no extra parameters. Train with `HarmonicCausalLMLoss` (`train.gpt2.pretrain_harmonic`). |
 | `harmonic_exponent` | `None` | The paper's `n` in `p ~ d^-n`; `None` resolves to `2 * embed_dim`. |
 | `harmonic_eps` | `1e-6` | Floor added to the squared distance. |
-| `pad_token_id` | `0` | Padding id for the task head's mask when the input has no `attention_mask`. Read only with `include_top=True`. `0` is a real `cl100k_base` token: pass your tokenizer's pad id or a mask. |
+| `pad_token_id` | `None` | Padding id for the task head's mask when the input has no `attention_mask`. Read only with `include_top=True`. `None` means no padding: the head sees every position, so a padded batch must pass `attention_mask` or the tokenizer's pad id (`0` is a real `cl100k_base` token). |
 | `include_top` | `False` | Own one task head instead of the LM head (Example 4). |
 | `task_config` | `None` | `NLPTaskConfig` or dict; required with `include_top=True`, refused without it. |
 | `head_config_overrides` | `None` | Head constructor kwargs, e.g. `{"pooling_type": "mean"}`; only with `include_top=True`. |
@@ -307,10 +307,11 @@ from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.models.language.gpt2 import create_gpt2
 
 sst2 = NLPTaskConfig(name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2)
-clf = create_gpt2("tiny", vocab_size=512, include_top=True, task_config=sst2)
+clf = create_gpt2("tiny", vocab_size=512, include_top=True, task_config=sst2,
+                  pad_token_id=0)  # the pad id of THIS data; None = no padding
 
 ids = np.random.randint(1, 512, size=(2, 16)).astype("int32")
-ids[1, 10:] = 0                                    # right padding, pad_token_id=0
+ids[1, 10:] = 0                                    # right padding (id 0 is the pad id here)
 print(clf.task_head.pooling_type)                  # 'last'
 print(clf(ids).shape)                              # (2, 2) -- bare logits, no LM logits
 
@@ -329,7 +330,8 @@ ner.compile(optimizer="adam",
 
 GPT-2 is causal, so position 0 has seen only itself: the head pools the **last real token**
 (`pooling_type='last'`) under a mask, unlike BERT's `'cls'` default. The mask is the input's
-`attention_mask`, else `input_ids != pad_token_id`; the decoder itself sees only the caller's mask,
+`attention_mask`, else `input_ids != pad_token_id` when a pad id was given, else every position; the
+decoder itself sees only the caller's mask,
 so its hidden states are the same with or without a head. `head_config_overrides={"pooling_type":
 ...}` replaces the default. With a head, no LM logits are computed and an untied `lm_head` is not
 created; the weights under `decoder/` have the same paths either way.

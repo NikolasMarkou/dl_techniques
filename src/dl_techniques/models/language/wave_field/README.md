@@ -254,7 +254,7 @@ the stride and therefore the causality behaviour** (§3). Other constructor argu
 | `initializer_range` | `0.02` | `TruncatedNormal` stddev. |
 | `layer_norm_eps` | `1e-5` | |
 | `tie_word_embeddings` | `True` | Untied builds a `Dense(vocab, use_bias=False)`. |
-| `pad_token_id` | `0` | Padding id for the task head's mask when the input has no `attention_mask`. Read only with `include_top=True`. `0` is a real `gpt2` token: pass your tokenizer's pad id or a mask. |
+| `pad_token_id` | `None` | Padding id for the task head's mask when the input has no `attention_mask`. Read only with `include_top=True`. `None` means no padding: the head sees every position, so a padded batch must pass `attention_mask` or the tokenizer's pad id (`0` is a real `gpt2` token). |
 | `include_top` | `False` | Own one task head instead of the LM head (Example 3). |
 | `task_config` | `None` | `NLPTaskConfig` or dict; required with `include_top=True`, refused without it. |
 | `head_config_overrides` | `None` | Head constructor kwargs, e.g. `{"pooling_type": "mean"}`; only with `include_top=True`. |
@@ -319,10 +319,11 @@ from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.models.language.wave_field import create_wave_field_llm
 
 sst2 = NLPTaskConfig(name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2)
-clf = create_wave_field_llm("tiny", vocab_size=512, include_top=True, task_config=sst2)
+clf = create_wave_field_llm("tiny", vocab_size=512, include_top=True, task_config=sst2,
+                            pad_token_id=0)  # the pad id of THIS data; None = no padding
 
 ids = np.random.randint(1, 512, size=(2, 16)).astype("int32")
-ids[1, 10:] = 0                                    # right padding, pad_token_id=0
+ids[1, 10:] = 0                                    # right padding (id 0 is the pad id here)
 print(clf.task_head.pooling_type)                  # 'last'
 print(clf(ids).shape)                              # (2, 2) -- bare logits, no LM logits
 
@@ -342,8 +343,8 @@ ner.compile(optimizer="adam",
 The head is built in the constructor with the rest of the model, after the backbone, so the
 backbone's weight paths (§15) are the same with or without one; its own weights sit under
 `task_head/`. The model is causal only as measured (§3), and the head pools the **last real token**
-(`pooling_type='last'`) under the input's `attention_mask`, else `input_ids != pad_token_id`; the
-blocks see only the caller's mask either way. `head_config_overrides={"pooling_type": ...}`
+(`pooling_type='last'`) under the input's `attention_mask`, else `input_ids != pad_token_id` when a pad id was given, else
+every position; the blocks see only the caller's mask either way. `head_config_overrides={"pooling_type": ...}`
 replaces the default. With a head, no LM logits are computed and an untied `lm_head` is not created.
 
 `pretrained=<path>` must be a `.keras` file, headed or headless. It copies the backbone (and an

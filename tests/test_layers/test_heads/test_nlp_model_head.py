@@ -14,7 +14,8 @@ Covers:
 * The returned head round-trips through ``get_config`` / ``from_config`` by
   value.
 * ``head_attention_mask`` returns the caller's mask when given, else
-  ``input_ids != pad_token_id``, in the requested dtype.
+  ``input_ids != pad_token_id``, else (no pad id either) all ones, in the
+  requested dtype.
 """
 
 import json
@@ -340,3 +341,24 @@ class TestHeadAttentionMask:
             head_attention_mask(ids, given, pad_token_id=0, dtype="float16"))
         np.testing.assert_array_equal(mask, given)
         assert mask.dtype == np.float16
+
+    def test_no_mask_and_no_pad_id_is_all_ones(self) -> None:
+        # Id 0 is a real token; with no pad id nothing is padding.
+        ids = np.array([[5, 0, 3, 0], [0, 0, 0, 0]], dtype="int32")
+        mask = keras.ops.convert_to_numpy(
+            head_attention_mask(ids, None, pad_token_id=None, dtype="float32"))
+        np.testing.assert_array_equal(mask, np.ones((2, 4)))
+        assert mask.dtype == np.float32
+
+    def test_a_given_mask_wins_when_there_is_no_pad_id(self) -> None:
+        ids = np.zeros((2, 4), dtype="int32")
+        given = np.array([[1, 1, 1, 0], [1, 0, 0, 0]], dtype="int32")
+        mask = keras.ops.convert_to_numpy(
+            head_attention_mask(ids, given, pad_token_id=None, dtype="float16"))
+        np.testing.assert_array_equal(mask, given)
+        assert mask.dtype == np.float16
+
+    def test_the_all_ones_mask_has_the_input_shape_under_symbolic_ids(self) -> None:
+        ids = keras.Input(shape=(7,), dtype="int32")
+        mask = head_attention_mask(ids, None, None, "float32")
+        assert tuple(mask.shape) == (None, 7)

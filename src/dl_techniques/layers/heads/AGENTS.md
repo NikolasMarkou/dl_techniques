@@ -75,7 +75,8 @@ still load.
   `finalize_head_outputs(...)` (drop `probabilities`/`predictions` beside
   `logits`, unwrap a single-key dict to a bare tensor), and
   `head_attention_mask(input_ids, attention_mask, pad_token_id, dtype)` (the
-  caller's mask, else `input_ids != pad_token_id`, cast to `dtype`; for causal
+  caller's mask, else `input_ids != pad_token_id`, else all ones when `pad_token_id` is `None`,
+  cast to `dtype`; for causal
   backbones that run without a mask but pool `'last'`).
 - `vision/factory.py` — `create_vision_head(task_type, ...)`,
   `create_enhancement_head(...)`, `create_multi_task_head(...)`,

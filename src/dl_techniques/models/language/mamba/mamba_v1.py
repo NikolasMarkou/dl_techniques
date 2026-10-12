@@ -15,7 +15,7 @@ than a fast one. ``pretrained=True`` raises ``NotImplementedError``; pass a loca
 see a mask. With ``include_top=True`` and a ``task_config`` the model owns ONE task
 head from ``layers/heads/nlp``, named ``task_head``, which pools the last real token
 (the only position of a causal model that has seen the whole sequence) under the
-input's ``attention_mask``, else ``input_ids != pad_token_id``, and ``call`` returns
+input's ``attention_mask``, else ``input_ids != pad_token_id`` (all ones when it is None), and ``call`` returns
 only that head's output. The model is causal, so right-padding leaves the valid prefix
 intact and left-padding does not.
 
@@ -66,7 +66,7 @@ class Mamba(keras.Model):
     By default the encoder carries no task head and returns hidden states. With
     ``include_top=True`` it owns one NLP task head, fed ``{"hidden_states":
     last_hidden_state, "attention_mask": <mask>}``, where the mask is the input
-    dict's ``attention_mask`` or, without one, ``input_ids != pad_token_id``, cast
+    dict's ``attention_mask`` or, without one, ``input_ids != pad_token_id`` (all ones when it is None), cast
     to the hidden-state dtype; ``call`` then returns what the head returns, reduced
     by :func:`~dl_techniques.layers.heads.nlp.finalize_head_outputs`. The blocks
     never see the mask, so the hidden states do not depend on the head. Cost is linear in sequence length rather than quadratic, because the
@@ -167,8 +167,10 @@ class Mamba(keras.Model):
     :type norm_epsilon: float
     :param pad_token_id: Id treated as padding by the task head when the input
         carries no ``attention_mask``. Read only with ``include_top=True``.
-        Defaults to 0.
-    :type pad_token_id: int
+        Defaults to None, which derives no padding (the head sees every
+        position): id 0 is a real token, so with right-padded batches pass the
+        tokenizer's pad id or an ``attention_mask``.
+    :type pad_token_id: Optional[int]
     :param include_top: Whether the model owns a task head. Defaults to False: no
         head layer and no head weight exist.
     :type include_top: bool
@@ -293,7 +295,7 @@ class Mamba(keras.Model):
         expand: int = 2,
         dt_rank: Union[str, int] = "auto",
         norm_epsilon: float = 1e-5,
-        pad_token_id: int = 0,
+        pad_token_id: Optional[int] = None,
         include_top: bool = False,
         task_config: Optional[Union[NLPTaskConfig, Dict[str, Any]]] = None,
         head_config_overrides: Optional[Dict[str, Any]] = None,

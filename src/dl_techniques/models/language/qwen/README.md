@@ -153,12 +153,13 @@ restored = keras.models.load_model("qwen3.keras")
 ### The task head inside the model (`include_top`)
 
 `Qwen3` and `Qwen3Next` take `include_top=False`, `task_config=None`,
-`head_config_overrides=None` and `pad_token_id=0`. With `include_top=True` and a
+`head_config_overrides=None` and `pad_token_id=None`. With `include_top=True` and a
 `task_config` (an `NLPTaskConfig` or a dict of its fields) the model replaces `lm_head` with
 ONE task head from `dl_techniques.layers.heads.nlp`, named `task_head`: no `lm_head` is
 created and no vocabulary logits are computed. The head is fed the final-normed hidden
 states and pools `"last"` by default, under the input's `attention_mask` or, without one,
-`input_ids != pad_token_id`. `call` returns the head's logits (a dict only for multi-output
+`input_ids != pad_token_id` when a pad id was given, else every position (id 0 is a real
+token: a padded batch must pass `attention_mask` or the tokenizer's pad id). `call` returns the head's logits (a dict only for multi-output
 heads such as QA); with `return_dict=True` a bare output comes back as `{"logits": ...}`.
 The classification factories are this model behind a functional wrapper taking
 `[input_ids, attention_mask]`; `pooling_strategy` and `classifier_dropout_rate` reach the

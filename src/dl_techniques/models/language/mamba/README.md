@@ -339,7 +339,9 @@ Both `Mamba` and `Mamba2` take `include_top`, `task_config` and
 logits tensor (dict only for multi-output heads such as QA), so a plain loss compiles.
 The head pools `'last'` by default, the only position of a causal model that has seen
 the whole sequence (an explicit `pooling_type` in `head_config_overrides` wins), under
-the input dict's `attention_mask`, else `input_ids != pad_token_id`. The vocabulary is
+the input dict's `attention_mask`, else `input_ids != pad_token_id` when a pad id was given (default
+`pad_token_id=None`: every position, so a padded batch must pass `attention_mask` or the tokenizer's
+pad id). The vocabulary is
 the model's own `vocab_size`; the task config needs no `vocabulary_size`.
 `create_mamba` and `create_mamba2` are the variant factories; both keep
 `from_variant`'s required `vocab_size`.
