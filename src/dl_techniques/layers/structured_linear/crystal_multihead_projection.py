@@ -46,7 +46,10 @@ from dl_techniques.layers.structured_linear.crystal_frames import (
     hyperspherical_simplex
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.tensors import canonical_binary_input_shape
+from dl_techniques.utils.tensors import (
+    canonical_binary_input_shape,
+    l2_normalize
+)
 
 # ---------------------------------------------------------------------
 
@@ -281,17 +284,13 @@ class CrystalMultiHeadProjection(keras.layers.Layer):
         split_shape = keras.ops.shape(inputs)[:-1] + (self.num_heads, self._head_dim)
         heads = keras.ops.reshape(inputs, split_shape)
 
-        head_norms = keras.ops.sqrt(
-            keras.ops.sum(keras.ops.square(heads), axis=-1, keepdims=True) + self.eps
+        # The shared helper rescales before squaring, so a head whose features
+        # are large does not normalize to exact zeros and a head whose features
+        # are small does not lose its norm to eps.
+        normalized_heads = l2_normalize(heads, axis=-1, eps=self.eps)
+        normalized_prisms = l2_normalize(
+            self.crystal_prisms, axis=1, eps=self.eps
         )
-        normalized_heads = heads / head_norms
-
-        prism_norms = keras.ops.sqrt(
-            keras.ops.sum(
-                keras.ops.square(self.crystal_prisms), axis=1, keepdims=True
-            ) + self.eps
-        )
-        normalized_prisms = self.crystal_prisms / prism_norms
 
         # "h" in both operands makes this a per-head batched contraction, not a
         # wide matmul across heads.

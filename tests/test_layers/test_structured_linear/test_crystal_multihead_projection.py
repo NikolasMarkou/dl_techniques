@@ -603,20 +603,40 @@ class TestCrystalMultiHeadProjectionSerialization:
 
 @pytest.mark.usefixtures('dtype_policy')
 class TestCrystalMultiHeadProjectionDtypes:
-    """float32 / mixed_float16 / float64 arms."""
+    """float32 / mixed_float16 / float64 arms, each genuinely in its own dtype.
+
+    The input is cast to the policy's COMPUTE dtype; without it a float64
+    policy still receives float32 and the arm measures nothing it claims.
+    """
 
     def test_construction_and_forward_survive(self, dtype_policy):
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+        inputs = _sample_input().astype(compute_dtype)
+
         layer = CrystalMultiHeadProjection(num_heads=4, seed=0)
-        output = layer(_sample_input())
+        output = layer(inputs)
 
         assert output.shape == (2, 6, 32)
         assert bool(ops.all(ops.isfinite(output))), \
             f"{dtype_policy} produced a non-finite output"
 
+    def test_the_arm_really_computes_in_the_policy_dtype(self, dtype_policy):
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+        inputs = _sample_input().astype(compute_dtype)
+
+        output = CrystalMultiHeadProjection(num_heads=4, seed=0)(inputs)
+
+        assert ops.convert_to_numpy(output).dtype == compute_dtype, (
+            f"under {dtype_policy} the output came back as "
+            f"{ops.convert_to_numpy(output).dtype}, not {compute_dtype}"
+        )
+
     def test_a_zero_input_is_finite_in_every_policy(self, dtype_policy):
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
         layer = CrystalMultiHeadProjection(num_heads=4, seed=0)
+
         output = ops.convert_to_numpy(
-            layer(np.zeros((2, 6, 32), dtype=np.float32))
+            layer(np.zeros((2, 6, 32), dtype=compute_dtype))
         )
 
         assert np.all(np.isfinite(output)), f"{dtype_policy} turned a zero input into {output}"

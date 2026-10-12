@@ -292,7 +292,15 @@ class TestHierarchicalCrystalLayerForwardPass:
         assert outputs['joint_probabilities'].shape == base + (15,)
 
     def test_the_joint_probabilities_sum_to_one(self):
-        """The Bayesian identity the layer is built to satisfy."""
+        """The Bayesian identity the layer is built to satisfy.
+
+        MEASURED max deviation ``1.19e-07`` at float32 (2026-10-12, CPU), and
+        ``2.4e-07`` at rank 4 over the parametrised ranks. ``BAYES_ATOL`` is
+        ``1e-05``, ~42x above the measurement, against a float32 unit roundoff
+        of ``6.0e-08``. The identity is exact in algebra -- two softmaxes
+        multiplied -- so the residual is pure float32 accumulation and cannot
+        grow with the class count beyond a few ulps.
+        """
         layer = _layer(3, 12, return_hierarchy=True, seed=0)
         joint = ops.convert_to_numpy(layer(_sample_input(input_dim=4))['joint_probabilities'])
 
@@ -819,22 +827,42 @@ class TestHierarchicalCrystalLayerSerialization:
 
 @pytest.mark.usefixtures('dtype_policy')
 class TestHierarchicalCrystalLayerDtypes:
-    """float32 / mixed_float16 / float64 arms."""
+    """float32 / mixed_float16 / float64 arms, each genuinely in its own dtype.
+
+    The input is cast to the policy's COMPUTE dtype. Without that cast a
+    float64 policy still receives float32 and the arm computes in float32
+    while reporting itself as a float64 test.
+    """
 
     def test_construction_and_forward_survive(self, dtype_policy):
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+        inputs = _sample_input(input_dim=4).astype(compute_dtype)
+
         layer = _layer(3, 5, seed=0)
-        output = layer(_sample_input(input_dim=4))
+        output = layer(inputs)
 
         assert output.shape == (4, 15)
         assert bool(ops.all(ops.isfinite(output))), \
             f"{dtype_policy} produced a non-finite leaf logit"
 
+    def test_the_arm_really_computes_in_the_policy_dtype(self, dtype_policy):
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+        inputs = _sample_input(input_dim=4).astype(compute_dtype)
+
+        output = _layer(3, 5, seed=0)(inputs)
+
+        assert ops.convert_to_numpy(output).dtype == compute_dtype, (
+            f"under {dtype_policy} the output came back as "
+            f"{ops.convert_to_numpy(output).dtype}, not {compute_dtype}"
+        )
+
     def test_the_bayes_identity_survives_every_policy(self, dtype_policy):
         """A mixed-precision softmax must not break the normalization."""
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+        inputs = _sample_input(input_dim=4).astype(compute_dtype)
+
         layer = _layer(3, 5, return_hierarchy=True, seed=0)
-        joint = ops.convert_to_numpy(
-            layer(_sample_input(input_dim=4))['joint_probabilities']
-        )
+        joint = ops.convert_to_numpy(layer(inputs)['joint_probabilities'])
 
         # float16 accumulates coarser than float32, so the bound is widened
         # to the dtype's own resolution rather than left at the float32 value.

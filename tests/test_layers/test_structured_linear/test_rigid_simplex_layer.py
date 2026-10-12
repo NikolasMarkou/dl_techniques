@@ -253,6 +253,13 @@ class TestRigidSimplexLayerForwardPass:
         This is an algebraic identity, not an approximation, so it is pinned at
         a float32 tolerance rather than the loose 1e-2 this test previously used
         -- a bound that loose cannot see a rotation kernel that is wrong.
+
+        MEASURED delta ``4.8e-07`` at float32 (2026-10-12, CPU). The asserted
+        ``atol=1e-06`` is ~2.1x above it, which is tight by design: the identity
+        is exact, so the whole residual is the float32 rounding of two matmuls
+        and a wrong rotation would move the answer by O(1). At 2x headroom this
+        bound would redden on a backend whose matmul rounds differently, which
+        is the intended signal rather than a flaky threshold.
         """
         layer = RigidSimplexLayer(units=64, rotation_initializer='identity')
         inputs = np.random.randn(4, 32).astype(np.float32)

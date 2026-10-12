@@ -23,6 +23,30 @@ construction at ``dimensions=16, width=100``: **17** distinct columns out of
 matrix is not a codebook; every duplicated column receives an identical logit.
 :func:`crystal_frame` fills the same width with rotated simplexes instead.
 
+**Build cost.** Packing is quadratic in ``dimensions`` and linear in the total
+placed vertices, because each candidate trial multiplies an
+``(N + 1) x placed`` matrix. Measured on CPU (2026-10-12, ``candidate_trials``
+at its default of 5):
+
+============  ==========  ===========
+``dimensions`` ``width``   milliseconds
+============  ==========  ===========
+32            64          1.5
+64            128         2.5
+128           512         43.7
+256           1024        169.3
+512           2048        639.7
+1024          4096        3024.9
+============  ==========  ===========
+
+This runs once, inside a weight initializer, at layer construction. It is not
+worth warning about -- a warning that fires on a legitimate configuration is
+noise, and every width these layers are used at is far below the large end.
+It is recorded here because a caller embedding one at ``dimensions >= 512``
+should expect a build measured in seconds and not be surprised by it.
+Lowering ``candidate_trials`` to 1 removes the search and most of the cost,
+at the price of the separation measured above.
+
 **The ceiling, stated honestly.** Packing yields ``width`` distinct columns
 *up to a limit set by the sphere itself*: ``S^(N-1)`` contains only ``2N``
 points, so no frame can have more than ``2 * dimensions`` distinct columns, and

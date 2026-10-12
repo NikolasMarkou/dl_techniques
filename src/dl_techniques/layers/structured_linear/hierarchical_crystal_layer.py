@@ -66,7 +66,10 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.layers.structured_linear.crystal_frames import crystal_frame
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.tensors import canonical_binary_input_shape
+from dl_techniques.utils.tensors import (
+    canonical_binary_input_shape,
+    l2_normalize
+)
 
 # ---------------------------------------------------------------------
 
@@ -407,7 +410,11 @@ class HierarchicalCrystalLayer(keras.layers.Layer):
 
     def _normalize(self, tensor: keras.KerasTensor, axis: int) -> keras.KerasTensor:
         """
-        L2-normalize ``tensor`` along ``axis`` with an epsilon-guarded norm.
+        L2-normalize ``tensor`` along ``axis``.
+
+        Delegates to the shared helper, which rescales before squaring. The
+        naive form returns exact zeros above ~1.8e19 and loses the norm entirely
+        near 1e-8, where ``eps`` dominates it -- both silently.
 
         :param tensor: Tensor to normalize.
         :type tensor: keras.KerasTensor
@@ -417,11 +424,7 @@ class HierarchicalCrystalLayer(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
 
-        norms = keras.ops.sqrt(
-            keras.ops.sum(keras.ops.square(tensor), axis=axis, keepdims=True) + self.eps
-        )
-
-        return tensor / norms
+        return l2_normalize(tensor, axis=axis, eps=self.eps)
 
     def call(
             self,

@@ -234,6 +234,13 @@ class TestCrystalLayerForwardPass:
         Pinned against a from-scratch NumPy cosine, so it fails if either the
         input or the weight normalization is dropped rather than merely
         becoming inaccurate.
+
+        MEASURED delta ``3.1e-07`` at float32 (2026-10-12, CPU, dtype policy
+        float32). The asserted ``atol=1e-05`` sits ~32x above it, and the
+        float32 unit roundoff is ``6.0e-08`` -- ~52x below. The defect this
+        must catch is a dropped normalization, which moves the answer by O(1),
+        so the bound has roughly eight decades of headroom on the side that
+        matters and is not a tolerance that can be satisfied by noise.
         """
         inputs = _sample_input()
         layer = CrystalLayer(num_classes=9, scale=3.0, seed=0)
@@ -393,7 +400,15 @@ class TestCrystalLayerKnobSensitivity:
         )
 
     def test_scale_multiplies_the_logits_linearly(self):
-        """The relationship is exact, not merely monotonic."""
+        """The relationship is exact, not merely monotonic.
+
+        MEASURED delta ``0.0`` exactly (2026-10-12, CPU, float32): `scale` is
+        a constant multiplied in after the normalized matmul, so it factors out
+        bit-exactly. The asserted ``atol=1e-04`` is therefore slack the
+        assertion does not need; it is kept rather than tightened to zero
+        because a future implementation that folded the scale into the
+        matmul would still be correct up to accumulation.
+        """
         inputs = _sample_input()
         one = ops.convert_to_numpy(CrystalLayer(num_classes=9, scale=1.0, seed=0)(inputs))
         four = ops.convert_to_numpy(CrystalLayer(num_classes=9, scale=4.0, seed=0)(inputs))
@@ -415,6 +430,13 @@ class TestCrystalLayerKnobSensitivity:
 
         Scaling every input by a constant may only change the output if the
         normalization is broken.
+
+        MEASURED delta ``1.5e-07`` at float32 (2026-10-12, CPU), from a 5x
+        scale factor; ``atol=1e-05`` is ~67x above it. The property is exact in
+        algebra and holds to accumulation error here because
+        :func:`~dl_techniques.utils.tensors.l2_normalize` divides by the
+        vector's own peak before squaring -- so a uniform rescale cancels
+        inside the normalization rather than surviving into the norm.
         """
         layer = CrystalLayer(num_classes=9, scale=2.0, seed=0)
         inputs = _sample_input()
@@ -546,18 +568,54 @@ class TestCrystalLayerSerialization:
 
 @pytest.mark.usefixtures('dtype_policy')
 class TestCrystalLayerDtypes:
-    """float32 / mixed_float16 / float64 arms, each against a float32 control."""
+    """float32 / mixed_float16 / float64 arms, each genuinely in its own dtype.
+
+    The input is cast to the policy's COMPUTE dtype before it reaches the
+    layer. That cast is load-bearing: passing a float32 array while the global
+    policy says float64 leaves the layer computing in float32, so the arm
+    passes while measuring nothing it claimed to. Measured before this cast was
+    added: input float64 / weight float32 / output float32 under the float64
+    policy.
+    """
 
     def test_construction_and_forward_survive(self, dtype_policy):
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+        inputs = _sample_input().astype(compute_dtype)
+
         layer = CrystalLayer(num_classes=9, scale=3.0, seed=0)
-        output = layer(_sample_input())
+        output = layer(inputs)
 
         assert output.shape == (4, 9)
         assert bool(ops.all(ops.isfinite(output))), \
             f"{dtype_policy} produced a non-finite output"
 
+    def test_the_arm_really_computes_in_the_policy_dtype(self, dtype_policy):
+        """Guards the cast above -- an arm that does not run in its dtype is
+        a test named after a property it never exercised.
+
+        Asserted on the OUTPUT dtype, not the weight. Under ``mixed_float16``
+        Keras keeps variables in float32 and computes in float16, which is
+        correct and standard; the weight dtype is therefore deliberately not
+        pinned to the compute dtype here.
+        """
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+        inputs = _sample_input().astype(compute_dtype)
+
+        layer = CrystalLayer(num_classes=9, scale=3.0, seed=0)
+        output = layer(inputs)
+
+        assert ops.convert_to_numpy(output).dtype == compute_dtype, (
+            f"under {dtype_policy} the output came back as "
+            f"{ops.convert_to_numpy(output).dtype}, not the policy's compute "
+            f"dtype {compute_dtype}; this arm did not exercise what it claims"
+        )
+
     def test_a_zero_input_is_finite_in_every_policy(self, dtype_policy):
+        compute_dtype = keras.mixed_precision.global_policy().compute_dtype
         layer = CrystalLayer(num_classes=9, seed=0)
-        output = ops.convert_to_numpy(layer(np.zeros((3, 8), dtype=np.float32)))
+
+        output = ops.convert_to_numpy(
+            layer(np.zeros((3, 8), dtype=compute_dtype))
+        )
 
         assert np.all(np.isfinite(output)), f"{dtype_policy} turned a zero input into {output}"

@@ -51,7 +51,10 @@ from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.layers.structured_linear.crystal_frames import crystal_frame
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.tensors import canonical_binary_input_shape
+from dl_techniques.utils.tensors import (
+    canonical_binary_input_shape,
+    l2_normalize
+)
 
 # ---------------------------------------------------------------------
 
@@ -221,24 +224,19 @@ class CrystalLayer(keras.layers.Layer):
                 f"but received input_dim={inputs.shape[-1]}"
             )
 
-        # keras.ops has no l2_normalize in keras 3.8, and eps sits inside the
-        # sqrt rather than outside it: an all-zero input then normalizes to a
-        # zero vector instead of producing 0/0.
-        input_norms = keras.ops.sqrt(
-            keras.ops.sum(keras.ops.square(inputs), axis=-1, keepdims=True) + self.eps
-        )
-        normalized_inputs = inputs / input_norms
+        # keras.ops has no l2_normalize in keras 3.8, so this routes through the
+        # shared utils helper, which rescales before squaring. The naive form
+        # returns exact zeros for inputs above ~1.8e19 (x/inf == 0) and loses
+        # the norm entirely for inputs around 1e-8, where eps dominates it.
+        normalized_inputs = l2_normalize(inputs, axis=-1, eps=self.eps)
 
         # Applied in both modes. The frozen frame is already unit-norm, so the
         # frozen path is numerically unchanged by this; running it in both
         # keeps one branch and makes a drifted trainable frame still yield
         # true cosines.
-        weight_norms = keras.ops.sqrt(
-            keras.ops.sum(
-                keras.ops.square(self.crystal_weights), axis=0, keepdims=True
-            ) + self.eps
+        normalized_weights = l2_normalize(
+            self.crystal_weights, axis=0, eps=self.eps
         )
-        normalized_weights = self.crystal_weights / weight_norms
 
         return keras.ops.matmul(normalized_inputs, normalized_weights) * self.scale
 
