@@ -85,6 +85,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
 )
+from dl_techniques.utils.sequence_length_guard import (
+    check_sequence_length,
+    refuse_static_sequence_length,
+)
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.activation_serialization import (
@@ -256,6 +260,12 @@ class TopoLM(keras.Model):
     """
 
     MODEL_VARIANTS = MODEL_VARIANTS
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_seq_len={limit}. TopoLM's position "
+        "embeddings are a learned table of {limit} rows, so there is no "
+        "embedding for position {limit}. Truncate the input to {limit} "
+        "tokens, or build the model with max_seq_len>={seq_len}."
+    )
 
     def __init__(
         self,
@@ -598,6 +608,13 @@ class TopoLM(keras.Model):
                 f"TopoLM expects (batch, seq_len) token ids of rank 2, got "
                 f"shape {shape}"
             )
+        # First, so the cached step functions are dropped and no variable exists.
+        refuse_static_sequence_length(
+            self, shape[1], self.max_seq_len,
+            self._SEQUENCE_LENGTH_MESSAGE.format(
+                seq_len=shape[1], limit=self.max_seq_len
+            ),
+        )
         if shape[1] is not None and int(shape[1]) > self.max_seq_len:
             raise ValueError(
                 f"sequence length {int(shape[1])} exceeds max_seq_len "
@@ -702,6 +719,11 @@ class TopoLM(keras.Model):
             attention_mask = inputs.get("attention_mask", attention_mask)
         else:
             input_ids = inputs
+
+        input_ids = check_sequence_length(
+            self, input_ids, self.max_seq_len, "max_seq_len",
+            self._SEQUENCE_LENGTH_MESSAGE,
+        )
 
         if taps is not None and len(taps) != len(self.tap_layers):
             raise ValueError(

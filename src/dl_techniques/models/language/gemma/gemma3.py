@@ -80,6 +80,7 @@ from dl_techniques.layers.heads.nlp import (
     validate_task_head_knobs,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.sequence_length_guard import check_sequence_length
 from dl_techniques.layers.transformers.gemma3_transformer import Gemma3TransformerBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -251,6 +252,13 @@ class Gemma3(keras.Model):
             ),
         },
     }
+
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_seq_len={limit}. Gemma3 "
+        "precomputes its RoPE tables for {limit} positions, so there is no "
+        "rotation for position {limit}. Truncate the input to {limit} "
+        "tokens, or build the model with max_seq_len>={seq_len}."
+    )
 
     def __init__(
         self,
@@ -512,6 +520,11 @@ class Gemma3(keras.Model):
             attention_mask = inputs.get("attention_mask", attention_mask)
         else:
             input_ids = inputs
+
+        input_ids = check_sequence_length(
+            self, input_ids, self.max_seq_len, "max_seq_len",
+            self._SEQUENCE_LENGTH_MESSAGE,
+        )
 
         hidden_states = self.embeddings(input_ids) * self.emb_scale
 

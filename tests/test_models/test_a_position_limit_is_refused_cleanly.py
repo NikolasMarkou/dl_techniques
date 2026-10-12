@@ -84,6 +84,10 @@ class Subject:
         ``S`` seen, and any other length raises ``Incompatible shapes``). Its
         only legal length is then the limit itself, and the relaxed retrace is
         reached by one legal call followed by the over-long one.
+    :param variables_at_init: True when the model creates every variable in
+        ``__init__`` (WaveFieldLLM builds at ``max_seq_len`` there), so a
+        refusal cannot precede variable creation; the static arm then asserts
+        the variable set is unchanged by the refusal instead of empty.
     """
 
     name: str
@@ -93,6 +97,7 @@ class Subject:
     feed: Callable[[keras.Model, int], Any]
     message_regex: str
     single_length: bool = False
+    variables_at_init: bool = False
 
 
 def _bert_factory() -> keras.Model:
@@ -142,6 +147,7 @@ def _tiny(module: str, cls: str, **kwargs: Any) -> Callable[[], keras.Model]:
 
 _LANG = "dl_techniques.models.language."
 _POSITION_TABLE = r"exceeds max_position_embeddings={limit}(?![0-9])"
+_SEQ_LEN = r"exceeds max_seq_len={limit}(?![0-9])"
 
 SUBJECTS = [
     Subject(
@@ -202,6 +208,79 @@ SUBJECTS = [
         feed=_mask_feed,
         message_regex=r"exceeds max_len={limit}(?![0-9])",
     ),
+    Subject(
+        name="gpt2",
+        module=_LANG + "gpt2.gpt2",
+        limit_name="max_seq_len",
+        factory=_tiny(
+            _LANG + "gpt2.gpt2", "GPT2", embed_dim=32, depth=1, num_heads=2,
+            max_seq_len=16,
+        ),
+        feed=_mask_feed,
+        message_regex=_SEQ_LEN,
+    ),
+    Subject(
+        name="topolm",
+        module=_LANG + "topolm.model",
+        limit_name="max_seq_len",
+        factory=_tiny(
+            _LANG + "topolm.model", "TopoLM", embed_dim=64, depth=1,
+            num_heads=2, max_seq_len=16, radius=2,
+        ),
+        feed=_mask_feed,
+        message_regex=_SEQ_LEN,
+    ),
+    Subject(
+        name="wave_field",
+        module=_LANG + "wave_field.model",
+        limit_name="max_seq_len",
+        factory=_tiny(
+            _LANG + "wave_field.model", "WaveFieldLLM", embed_dim=32, depth=1,
+            num_heads=2, max_seq_len=16, field_size=32, dropout_rate=0.0,
+            attention_dropout_rate=0.0,
+        ),
+        feed=_mask_feed,
+        message_regex=_SEQ_LEN,
+        variables_at_init=True,
+    ),
+    Subject(
+        name="qwen3",
+        module=_LANG + "qwen.qwen3",
+        limit_name="max_seq_len",
+        factory=_tiny(
+            _LANG + "qwen.qwen3", "Qwen3", hidden_size=32, num_layers=1,
+            num_attention_heads=2, num_key_value_heads=1, max_seq_len=16,
+            moe_layers=[], num_experts=1, num_experts_per_tok=1,
+            dropout_rate=0.0,
+        ),
+        feed=_mask_feed,
+        message_regex=_SEQ_LEN,
+    ),
+    Subject(
+        name="qwen3_next",
+        module=_LANG + "qwen.qwen3_next",
+        limit_name="max_seq_len",
+        factory=_tiny(
+            _LANG + "qwen.qwen3_next", "Qwen3Next", hidden_size=32,
+            num_layers=1, num_attention_heads=2, num_key_value_heads=1,
+            max_seq_len=16, num_experts=2, num_experts_per_tok=1,
+            moe_intermediate_size=32,
+        ),
+        feed=_mask_feed,
+        message_regex=_SEQ_LEN,
+    ),
+    Subject(
+        name="gemma3",
+        module=_LANG + "gemma.gemma3",
+        limit_name="max_seq_len",
+        factory=_tiny(
+            _LANG + "gemma.gemma3", "Gemma3", hidden_size=32, num_layers=1,
+            num_attention_heads=2, num_key_value_heads=1, ffn_hidden_size=64,
+            max_seq_len=16, sliding_window_size=8,
+        ),
+        feed=_mask_feed,
+        message_regex=_SEQ_LEN,
+    ),
 ]
 
 SUBJECT_IDS = [s.name for s in SUBJECTS]
@@ -256,9 +335,14 @@ def _resolve_jit(monkeypatch: pytest.MonkeyPatch, config: str) -> bool:
 def test_a_static_over_long_first_call_is_refused_before_any_variable_exists(subject):
     model = subject.factory()
     limit = _limit(subject, model)
+    before = [w.path for w in model.weights]
     with pytest.raises(ValueError, match=subject.limit_name):
         model(subject.feed(model, limit + OVER_BY))
-    assert model.weights == [], [w.path for w in model.weights]
+    after = [w.path for w in model.weights]
+    if subject.variables_at_init:
+        assert before and after == before, (before, after)
+    else:
+        assert before == [] and after == [], (before, after)
 
 
 @pytest.mark.parametrize("subject", SUBJECTS, ids=SUBJECT_IDS)

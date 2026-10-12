@@ -59,6 +59,7 @@ from dl_techniques.utils.weight_transfer import (
 )
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.sequence_length_guard import check_sequence_length
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
@@ -265,6 +266,12 @@ class GPT2(keras.Model):
     DEFAULT_VOCAB_SIZE = 100277  # Tiktoken cl100k_base
     DEFAULT_INITIALIZER_RANGE = 0.02
     DEFAULT_LAYER_NORM_EPS = 1e-5
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_seq_len={limit}. GPT2's position "
+        "embeddings are a learned table of {limit} rows, so there is no "
+        "embedding for position {limit}. Truncate the input to {limit} "
+        "tokens, or build the model with max_seq_len>={seq_len}."
+    )
 
     def __init__(
         self,
@@ -488,6 +495,11 @@ class GPT2(keras.Model):
             attention_mask = inputs.get("attention_mask", attention_mask)
         else:
             input_ids = inputs
+
+        input_ids = check_sequence_length(
+            self, input_ids, self.max_seq_len, "max_seq_len",
+            self._SEQUENCE_LENGTH_MESSAGE,
+        )
 
         # Transformer decoder: embeddings → causal attention blocks → final norm
         hidden_states = self.decoder(

@@ -56,6 +56,7 @@ from dl_techniques.utils.weight_transfer import (
     load_weights_or_raise,
 )
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
+from dl_techniques.utils.sequence_length_guard import check_sequence_length
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.attention.wave_field_attention import (
     WaveFieldAttention,
@@ -515,6 +516,12 @@ class WaveFieldLLM(keras.Model):
     DEFAULT_VOCAB_SIZE = 50261
     DEFAULT_INITIALIZER_RANGE = 0.02
     DEFAULT_LAYER_NORM_EPS = 1e-5
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_seq_len={limit}. WaveFieldLLM's position "
+        "embeddings are a learned table of {limit} rows, so there is no "
+        "embedding for position {limit}. Truncate the input to {limit} "
+        "tokens, or build the model with max_seq_len>={seq_len}."
+    )
 
     def __init__(
         self,
@@ -766,6 +773,11 @@ class WaveFieldLLM(keras.Model):
             attention_mask = inputs.get("attention_mask", attention_mask)
         else:
             input_ids = inputs
+
+        input_ids = check_sequence_length(
+            self, input_ids, self.max_seq_len, "max_seq_len",
+            self._SEQUENCE_LENGTH_MESSAGE,
+        )
 
         # The position layer slices its table to the incoming seq_len and adds
         # it to the token embeddings; its own dropout is off, see D-006.

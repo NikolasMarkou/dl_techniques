@@ -66,6 +66,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
+from dl_techniques.utils.sequence_length_guard import check_sequence_length
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.nlp.model_head import task_model_name
@@ -212,6 +213,13 @@ class Qwen3(keras.Model):
             "description": "Qwen3 Tiny: 6L dense transformer for mobile/edge deployment"
         },
     }
+
+    _SEQUENCE_LENGTH_MESSAGE = (
+        "seq_len={seq_len} exceeds max_seq_len={limit}. Qwen3 "
+        "precomputes its RoPE tables for {limit} positions, so there is no "
+        "rotation for position {limit}. Truncate the input to {limit} "
+        "tokens, or build the model with max_seq_len>={seq_len}."
+    )
 
     def __init__(
         self,
@@ -513,6 +521,11 @@ class Qwen3(keras.Model):
             attention_mask = inputs.get("attention_mask", attention_mask)
         else:
             input_ids = inputs
+
+        input_ids = check_sequence_length(
+            self, input_ids, self.max_seq_len, "max_seq_len",
+            self._SEQUENCE_LENGTH_MESSAGE,
+        )
 
         # Token embeddings
         hidden_states = self.embeddings(input_ids)
