@@ -157,6 +157,7 @@ image-patch input modality now matches its filing.)
 | `deepar/` | DeepAR probabilistic forecasting |
 | `ets/` | Pure additive exponential smoothing (the one recursive forecaster) |
 | `mdn/` | Mixture Density Networks |
+| `neural_hmm/` | Differentiable Neural Hidden Markov Model (this package) |
 | `nbeats/` | N-BEATS, plus the exogenous `nbeatsx` variant |
 | `prism/` | PRISM forecasting |
 | `tirex/` | TiReX |

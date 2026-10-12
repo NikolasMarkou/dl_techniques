@@ -1,13 +1,14 @@
 """Time-series models — public API re-exports.
 
 A family of independent forecasting architectures, one subpackage each:
-`deepar/` (autoregressive probabilistic), `nbeats/` (basis expansion, plus the
-exogenous `nbeatsx` variant), `prism/`, `tirex/`, `mdn/` (mixture density
-heads), `xlstm/` (extended LSTM, with a dedicated forecaster wrapper) and
 `adaptive_ema/` and `ets/` (pure additive exponential smoothing -- the one
-RECURSIVE forecaster here, with trainable smoothing parameters). They share the
-`ForecastMixin` in `forecast.py` but no backbone, so there is no single variant
-table across the family.
+RECURSIVE forecaster here, with trainable smoothing parameters),
+`deepar/` (autoregressive probabilistic), `mdn/` (mixture density heads),
+`neural_hmm/` (differentiable Neural Hidden Markov Model, this package),
+`nbeats/` (basis expansion, plus the exogenous `nbeatsx` variant),
+`prism/`, `tirex/` and `xlstm/` (extended LSTM, with a dedicated forecaster
+wrapper). They share the `ForecastMixin` in `forecast.py` but no backbone, so
+there is no single variant table across the family.
 """
 from .adaptive_ema.model import (
     AdaptiveEMASlopeFilterModel,
@@ -16,6 +17,7 @@ from .adaptive_ema.model import (
 from .deepar.model import DeepAR, create_deepar
 from .ets.model import ETSModel, create_ets
 from .mdn.model import MDNModel, create_mdn_model
+from .neural_hmm.model import NeuralHMM, from_variant, MODEL_VARIANTS
 from .nbeats.nbeats import NBeatsNet, create_nbeats_model
 from .nbeats.nbeatsx import NBeatsXNet, create_nbeatsx_model
 from .prism.model import PRISMModel, create_prism_model
@@ -28,6 +30,9 @@ __all__ = [
     "DeepAR",
     "ETSModel",
     "MDNModel",
+    "NeuralHMM",
+    "from_variant",
+    "MODEL_VARIANTS",
     "NBeatsNet",
     "NBeatsXNet",
     "PRISMModel",
