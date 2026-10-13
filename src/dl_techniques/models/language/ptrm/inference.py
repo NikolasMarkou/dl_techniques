@@ -2,8 +2,8 @@
 
 Implements the Probabilistic Tiny Recursive Model (PTRM) inference procedure
 from Sghaier et al. (2026). PTRM runs K parallel stochastic rollouts by
-injecting Gaussian noise into the latent state at each supervision step, and
-selects the final answer using the model's Q-head.
+injecting Gaussian noise into the reasoning latent ``z_L`` at each supervision
+step, and selects the final answer by the Q head's halting logit ``q_halt``.
 
 References:
     - Sghaier et al., 2026. Probabilistic Tiny Recursive Model.
@@ -39,20 +39,31 @@ class PTRMInference:
     of the TRM model, which internally performs `n` latent recursions).
 
     :param model: Trained PTRM or TRM instance.
-    :param noise_scale: Standard deviation σ of Gaussian noise injected at each
-        supervision step. Default 0.2 (matches paper's PPBench setting).
-    :param use_q_continue: If True, use q_continue logit for selection (higher
-        = more confident correct). If False, use q_halt. The paper selects by
-        ``q̂ = f_Q(y_D)``, the halting logit TRM trains against answer
-        correctness (Sec. 2), which is ``q_halt`` here; the default
-        ``q_continue`` is this implementation's choice, not the paper's.
+    Paper names to code names: ``z`` (reasoning latent) is ``z_L`` and ``y``
+    (answer state, read by ``f_O`` = ``lm_head`` and ``f_Q`` = ``q_head``) is
+    ``z_H``, as in the reference TRM (``trm.py``: ``z_L`` is updated from
+    ``z_H + input_embeddings``, ``z_H`` from ``z_L``, both heads read ``z_H``).
+    Line 6 perturbs ``z_L`` only (:meth:`_inject_noise`), and line 12 selects by
+    ``q_halt`` (:meth:`_selection_q`).
+
+    :param model: Trained PTRM or TRM instance.
+    :param noise_scale: Standard deviation σ of Gaussian noise injected into
+        ``z_L`` at each supervision step. Default 0.2 (matches paper's PPBench
+        setting).
+    :param use_q_continue: Default False: select by ``q_halt``, as the paper
+        does. The paper's ``q̂ = f_Q(y_D)`` is the halting logit TRM trains
+        against answer correctness (Sec. 2; Figure 4 left, lines 10 and 12).
+        True selects by ``q_continue`` instead, an opt-in that only makes sense
+        for a model trained with Q-learning halting (``no_act_continue=False``);
+        under ``no_act_continue=True`` (the PTRM default) ``q_continue`` is never
+        trained.
     """
 
     def __init__(
         self,
         model: keras.Model,
         noise_scale: float = 0.2,
-        use_q_continue: bool = True,
+        use_q_continue: bool = False,
     ) -> None:
         self.model = model
         self.noise_scale = noise_scale
@@ -176,40 +187,43 @@ class PTRMInference:
     def _selection_q(
         self, outputs: Dict[str, keras.KerasTensor]
     ) -> keras.KerasTensor:
-        """The Q value a rollout is selected by, as set by ``use_q_continue``.
+        """The Q value a rollout is selected by: ``q_halt`` unless opted out.
 
         :param outputs: Model outputs of a rollout's last step.
         :return: Q values, shape (B,).
         """
+        # DECISION plan-2026-10-13T035756-5dd4d94d/D-018: WHAT NOT TO DO: do not
+        # make q_continue the default again. The paper selects by q_hat =
+        # f_Q(y_D), the halting logit (arXiv:2605.19943 Fig. 4 left, lines 10
+        # and 12; Sec. 2), which is q_halt; under no_act_continue=True (the PTRM
+        # default) q_continue is never trained, so the old default selected by
+        # an untrained logit. See decisions.md D-018.
         if self.use_q_continue:
             return outputs["q_continue_logits"]
         return outputs["q_halt_logits"]
 
     def _inject_noise(self, carry: Dict[str, Any]) -> Dict[str, Any]:
-        """Inject Gaussian noise into latent states z_H and z_L.
+        """Inject Gaussian noise into the reasoning latent ``z_L`` only.
 
-        The paper adds noise at each deep recursion step to the latent state
-        input. In TRM, the latent states are in carry["inner_carry"]["z_H"] and
-        carry["inner_carry"]["z_L"], each of shape (B, seq_len + puzzle_emb_len, hidden_size).
-        The paper's line 6 perturbs ``z`` only, the reasoning latent, which is
-        ``z_L`` in TRM's code (``z_H`` is the answer state ``y`` that ``lm_head``
-        reads); this implementation perturbs both.
+        The paper's line 6 is ``z_{t-1} += ε, ε ∼ 𝒩(0, σ²I)`` (Sghaier et al.
+        2026, arXiv:2605.19943, Figure 4 left; Sec. 4: "we add Gaussian noise
+        (scaled by σ) to the latent state input"). ``z`` is the reasoning
+        latent, ``z_L`` in TRM's code; the answer state ``y`` is ``z_H``, which
+        ``lm_head`` and ``q_head`` read, and it is left as is. Both live in
+        ``carry["inner_carry"]`` with shape (B, seq_len + puzzle_emb_len,
+        hidden_size).
 
         :param carry: Current carry state.
-        :return: Updated carry with noise added to latent states.
+        :return: Updated carry: ``z_L`` plus noise, ``z_H`` the same tensor.
         """
         inner_carry = carry["inner_carry"]
-        z_H = inner_carry["z_H"]
         z_L = inner_carry["z_L"]
 
-        # Generate noise with same shape as latent states
-        # ε ∼ 𝒩(0, σ²I)
-        noise_H = keras.random.normal(
-            keras.ops.shape(z_H),
-            mean=0.0,
-            stddev=self.noise_scale,
-            dtype=z_H.dtype,
-        )
+        # DECISION plan-2026-10-13T035756-5dd4d94d/D-018: WHAT NOT TO DO: do not
+        # add noise to z_H as well. The paper perturbs z (line 6), which is z_L
+        # (reference trm.py: z_L <- L_level(z_L, z_H + x), z_H <- L_level(z_H,
+        # z_L), both heads read z_H). Noise on z_H perturbs the answer state y
+        # directly, which the procedure does not do. See decisions.md D-018.
         noise_L = keras.random.normal(
             keras.ops.shape(z_L),
             mean=0.0,
@@ -217,15 +231,10 @@ class PTRMInference:
             dtype=z_L.dtype,
         )
 
-        # Add noise to latent states
-        new_z_H = z_H + noise_H
-        new_z_L = z_L + noise_L
-
-        # Return updated carry
         new_carry = dict(carry)
         new_carry["inner_carry"] = {
-            "z_H": new_z_H,
-            "z_L": new_z_L,
+            "z_H": inner_carry["z_H"],
+            "z_L": z_L + noise_L,
         }
         return new_carry
 
@@ -348,7 +357,7 @@ def run_ptrm_inference(
     num_rollouts: int = 100,
     supervision_steps: int = 48,
     noise_scale: float = 0.2,
-    use_q_continue: bool = True,
+    use_q_continue: bool = False,
     training: bool = False,
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
     """Convenience function for PTRM inference.
@@ -357,8 +366,9 @@ def run_ptrm_inference(
     :param batch: Input batch.
     :param num_rollouts: Number of rollouts K.
     :param supervision_steps: Number of supervision steps D.
-    :param noise_scale: Gaussian noise scale σ.
-    :param use_q_continue: Use q_continue for selection.
+    :param noise_scale: Gaussian noise scale σ (into ``z_L``).
+    :param use_q_continue: Default False selects by ``q_halt``, as the paper
+        does; True selects by ``q_continue`` (see :class:`PTRMInference`).
     :param training: Training mode flag.
     :return: Tuple of (best_logits, best_q_values).
     """

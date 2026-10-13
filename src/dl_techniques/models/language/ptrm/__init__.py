@@ -3,8 +3,9 @@ Probabilistic Tiny Recursive Model (PTRM)
 
 A Tiny Recursive Model (TRM) equipped with a stochastic inference procedure
 for test-time compute scaling. PTRM runs K parallel stochastic rollouts by
-injecting Gaussian noise into the latent state at each supervision step, and
-selects the final answer using the model's Q-head.
+injecting Gaussian noise into the reasoning latent ``z_L`` at each supervision
+step, and selects the final answer by the Q-head's halting logit ``q_halt``
+(arXiv:2605.19943, Fig. 4 left).
 
 References:
     - Sghaier et al., 2026. Probabilistic Tiny Recursive Model.

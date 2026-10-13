@@ -5,8 +5,9 @@ PTRM shares the exact same architecture as TRM: a single small network applied
 recursively under Adaptive Computation Time (ACT), with a hierarchical latent
 state (z_H, z_L) and a Q-head for learned halting. The innovation of PTRM is
 purely at inference time: instead of a single deterministic rollout, PTRM runs
-K parallel stochastic rollouts by injecting Gaussian noise into the latent state
-at each supervision step, and selects the final answer using the model's Q-head.
+K parallel stochastic rollouts by injecting Gaussian noise into the reasoning
+latent ``z_L`` at each supervision step, and selects the final answer by the
+Q-head's halting logit ``q_halt`` (arXiv:2605.19943, Fig. 4 left).
 
 This allows PTRM to escape bad basins in the latent space where deterministic
 TRM gets stuck, without any retraining or task-specific augmentations.

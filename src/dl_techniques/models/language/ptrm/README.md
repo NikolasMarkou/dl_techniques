@@ -15,7 +15,7 @@ This adapts the method from "[Probabilistic Tiny Recursive Model](https://arxiv.
 **PTRM** is not a new model architecture — it is an **inference procedure** applied to a pretrained TRM backbone. The innovation is purely at inference time:
 
 1.  **Stochastic exploration.** Instead of a single deterministic rollout, PTRM runs `K` parallel rollouts, injecting Gaussian noise into the latent state at each supervision step.
-2.  **Q-head selection.** Each rollout produces a candidate answer scored by the model's existing Q-head (trained as a correctness predictor for ACT halting). The highest-Q answer is selected.
+2.  **Q-head selection.** Each rollout produces a candidate answer scored by the model's existing Q-head halting logit `q_halt` (trained as a correctness predictor for ACT halting). The highest-`q_halt` answer is selected.
 3.  **No retraining required.** PTRM works with any pretrained TRM checkpoint — no fine-tuning, no task-specific augmentations.
 
 This simple mechanism allows PTRM to escape bad basins in the latent space where deterministic TRM gets stuck, yielding substantial accuracy gains across reasoning benchmarks.
@@ -78,13 +78,22 @@ state the reference resets a fresh carry to), adds noise before each of the `D`
 steps and clears the model's `halted` flag after each one, so the ACT reset never
 discards the injected noise.
 
-How this implementation maps the paper, and where it differs:
+How this implementation maps the paper. The noise target and the selection
+logit both follow the paper by default:
 
 | Paper | Here |
 |---|---|
-| `y` (answer state), `z` (reasoning latent) | `z_H`, `z_L` (TRM code names; `lm_head` reads `z_H`) |
-| noise on `z` only (line 6) | noise on BOTH `z_H` and `z_L` (`_inject_noise`) |
-| `q̂ = f_Q(y_D)`, the halting logit trained against answer correctness (Sec. 2) | `q_continue` by default; `use_q_continue=False` selects by `q_halt` |
+| `y` (answer state), `z` (reasoning latent) | `z_H`, `z_L` (TRM code names). In the reference [trm.py](https://github.com/SamsungSAILMontreal/TinyRecursiveModels/blob/main/models/recursive_reasoning/trm.py), `z_L` is updated from `z_H + input_embeddings` (Sec. 2: `z ← f(x + y + z)`), `z_H` from `z_L` (`y ← f(y + z)`), and `lm_head` (`f_O`) and `q_head` (`f_Q`) both read `z_H` |
+| noise on `z` only (Fig. 4 left, line 6; Sec. 4 "to the latent state input") | noise on `z_L` only (`_inject_noise`); `z_H` is passed through unchanged |
+| `k* = argmax_k q̂_k`, `q̂ = f_Q(y_D)`, the halting logit trained against answer correctness (Fig. 4 left, lines 10 and 12; Sec. 2) | `q_halt` by default (`use_q_continue=False`); `use_q_continue=True` is an opt-in that selects by `q_continue` |
+
+`use_q_continue=True` only makes sense for a backbone trained with Q-learning
+halting (`no_act_continue=False`). With `no_act_continue=True`, the PTRM and
+`train_ptrm.py` default, `q_continue` is never trained.
+
+Before 2026-10-13 the defaults were noise on both `z_H` and `z_L` and selection
+by `q_continue`. A `pass@k` or `best-Q@k` measured with those defaults is not
+comparable with one measured now.
 
 **Two complementary benefits:**
 1. **Escape bad basins** — Noise allows rollouts to explore diverse solution basins; some escape traps where deterministic TRM fails.
@@ -120,6 +129,7 @@ model = create_ptrm(
 )
 
 # 3. Run PTRM inference
+# Noise into z_L, selection by q_halt (the paper's rule; see Section 2)
 inference = PTRMInference(model, noise_scale=0.2)
 
 batch = {"inputs": np.random.randint(0, 294, size=(4, 100))}
@@ -163,7 +173,7 @@ model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
 | **`PTRM`** | `...ptrm.model` | The `keras.Model` (thin TRM subclass). Identical architecture. |
-| **`PTRMInference`** | `...ptrm.inference` | Stochastic rollout engine with Q-head selection. |
+| **`PTRMInference`** | `...ptrm.inference` | Stochastic rollout engine: `PTRMInference(model, noise_scale=0.2, use_q_continue=False)`, noise into `z_L`, selection by `q_halt`. |
 | **`run_ptrm_inference`** | `...ptrm.inference` | Convenience function for one-off inference. |
 | **`create_ptrm`** | `...ptrm.model` | `create_ptrm(variant, vocab_size, seq_len, puzzle_emb_len=16, pretrained=False, **kwargs)`: delegates to `PTRM.from_variant`, returns a built model. A fully custom architecture is the `PTRM` constructor. (`create_ptrm_from_variant` was folded into it.) |
 | **`PRESET_CONFIGS`** | `...ptrm.factory` | Paper-matched configurations. |
@@ -204,7 +214,7 @@ All variants use: `expansion=2.0`, `attention_type='group_query'`, `ffn_type='sw
 |-----------|----------------------|---------------------|-------------------|------------------|-------------|
 | `num_rollouts` (K) | 100 | 100 | 100 | 25 | Parallel stochastic rollouts |
 | `supervision_steps` (D) | 48 | 64 | 16 | 16 | Deep recursion steps |
-| `noise_scale` (σ) | 0.2 | 0.3 | 1.0 | 0.2 | Gaussian noise std dev |
+| `noise_scale` (σ) | 0.2 | 0.3 | 1.0 | 0.2 | Gaussian noise std dev, added to `z_L` |
 
 **Guidance:**
 - Higher K → better accuracy, linear compute cost (parallelizable)

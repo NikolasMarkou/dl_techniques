@@ -5865,6 +5865,9 @@ def _sweep_step_overrides(roots=None, src_root=None):
 
 #: The frozen population: 32 ``(path, class, method)`` keys, measured 2026-08-24
 #: (34 at 2026-08-20; two keys dropped with their deleted packages -- see D-003).
+#: 34 keys since 2026-10-13: ``PTRMTrainer.train_step`` (in the tree since commit
+#: 46567264f, never frozen) was added beside its HRM/TRM siblings, see
+#: plan-2026-10-13T035756-5dd4d94d D-018.
 #:
 #: The house rule is "do not GROW this set". Additions FAIL; removals PASS the
 #: growth predicate -- but they fail the liveness test below, which is
@@ -5911,6 +5914,16 @@ _FROZEN_STEP_OVERRIDES = {
     ("src/train/cliffordnet/train_clip.py", "ContrastiveCliffordCLIP", "train_step"),
     ("src/train/clip/train_clip.py", "CLIPTrainer", "train_step"),
     ("src/train/hrm/train_hrm.py", "HRMTrainer", "train_step"),
+    # DECISION plan-2026-10-13T035756-5dd4d94d/D-018
+    # WHAT NOT TO DO: do not convert this step to stock fit() as a drive-by. The
+    # ACT carry loop (up to halt_max_steps supervision steps per batch, a loss
+    # per step, early exit once every item halts) IS the algorithm, the same
+    # loop as the frozen HRMTrainer and TRMTrainer rows. It cannot be traced
+    # (measured: AutoGraph rejects its Python-int-then-tensor loop condition),
+    # so its execution proof is eager, at the mode train_epoch calls it in:
+    # tests/test_train/test_ptrm/test_the_train_step_runs.py. See decisions.md
+    # D-018.
+    ("src/train/ptrm/train_ptrm.py", "PTRMTrainer", "train_step"),
     ("src/train/nano_vlm/train_nano_vlm.py", "NanoVLMTrainer", "train_step"),
     ("src/train/sd3_mmdit/train_sd3_mmdit.py", "SD3FlowTrainer", "train_step"),
     ("src/train/superpoint/train_superpoint.py", "SuperPointJointModel", "train_step"),
@@ -6034,20 +6047,20 @@ class TestCustomStepOverridePopulationIsFrozen:
         )
 
     def test_the_frozen_population_is_the_measured_one(self):
-        """Anti-vacuity: the frozen set is exactly the 32 keys measured.
+        """Anti-vacuity: the frozen set is exactly the 34 keys measured.
 
         No 0.8 floor here -- a freeze is an equality, and a floor would let the
         set decay to 27 unnoticed.
         """
         _rows, counts = _sweep_step_overrides()
-        assert len(_FROZEN_STEP_OVERRIDES) == 33
+        assert len(_FROZEN_STEP_OVERRIDES) == 34
         assert counts["n_overrides"] >= 1, "the AST walk found no step override at all"
         assert (counts["n_train_step"], counts["n_test_step"], counts["n_predict_step"]) == (
-            20,
+            21,
             12,
             1,
         ), (
-            "the step-override mix moved off the measured 20/12/1; reconcile "
+            "the step-override mix moved off the measured 21/12/1; reconcile "
             f"_FROZEN_STEP_OVERRIDES with decisions.md before editing it ({counts})"
         )
 

@@ -56,13 +56,14 @@ class TestPTRMInferenceBasic:
         inference = PTRMInference(tiny_model, noise_scale=0.2)
         assert inference.model is tiny_model
         assert inference.noise_scale == 0.2
-        assert inference.use_q_continue is True
+        # The paper selects by the halting logit q_halt (D-018).
+        assert inference.use_q_continue is False
 
     def test_inference_initialization_custom_params(self, tiny_model):
         """Test PTRMInference with custom parameters."""
-        inference = PTRMInference(tiny_model, noise_scale=0.5, use_q_continue=False)
+        inference = PTRMInference(tiny_model, noise_scale=0.5, use_q_continue=True)
         assert inference.noise_scale == 0.5
-        assert inference.use_q_continue is False
+        assert inference.use_q_continue is True
 
     def test_inference_invalid_model_raises(self):
         """Test that invalid model raises ValueError."""
@@ -169,45 +170,56 @@ class TestPTRMInferenceBasic:
 class TestPTRMInferenceNoiseInjection:
     """Test noise injection mechanism."""
 
-    def test_noise_injection_changes_latent_states(self, tiny_model, sample_batch):
-        """Test that _inject_noise actually modifies z_H and z_L."""
+    def test_one_injection_moves_z_L_and_leaves_z_H_bit_identical(
+        self, tiny_model, sample_batch
+    ):
+        """The paper perturbs the reasoning latent ``z`` only (D-018).
+
+        Sghaier et al. 2026, arXiv:2605.19943, Figure 4 left, line 6:
+        ``z_{t-1} += eps``. ``z`` is ``z_L`` in TRM's code and ``z_H`` is the
+        answer state ``y``. This test used to assert that ``z_H`` moves too;
+        the expectation changed with the semantics.
+        """
         inference = PTRMInference(tiny_model, noise_scale=1.0)
-        
+
+        # A non-zero state, so "unchanged" is not "still zero".
         carry = tiny_model.initial_carry(sample_batch)
-        z_H_before = carry["inner_carry"]["z_H"]
-        z_L_before = carry["inner_carry"]["z_L"]
-        
+        rng = np.random.default_rng(0)
+        carry["inner_carry"] = {
+            name: keras.ops.convert_to_tensor(
+                rng.normal(size=tuple(state.shape)).astype("float32")
+            )
+            for name, state in carry["inner_carry"].items()
+        }
+        z_H_before = keras.ops.convert_to_numpy(carry["inner_carry"]["z_H"])
+        z_L_before = keras.ops.convert_to_numpy(carry["inner_carry"]["z_L"])
+
         noisy_carry = inference._inject_noise(carry)
-        z_H_after = noisy_carry["inner_carry"]["z_H"]
-        z_L_after = noisy_carry["inner_carry"]["z_L"]
-        
-        # Noise should change the states
-        diff_H = keras.ops.convert_to_numpy(z_H_after - z_H_before)
-        diff_L = keras.ops.convert_to_numpy(z_L_after - z_L_before)
-        
-        assert np.std(diff_H) > 0.1, "z_H should change with noise"
+        z_H_after = keras.ops.convert_to_numpy(noisy_carry["inner_carry"]["z_H"])
+        z_L_after = keras.ops.convert_to_numpy(noisy_carry["inner_carry"]["z_L"])
+
+        assert np.array_equal(z_H_after, z_H_before), "z_H must not be perturbed"
+        diff_L = z_L_after - z_L_before
         assert np.std(diff_L) > 0.1, "z_L should change with noise"
-        
         # Mean should be close to zero (zero-mean noise)
-        assert abs(np.mean(diff_H)) < 0.1, "Noise should be zero-mean"
         assert abs(np.mean(diff_L)) < 0.1, "Noise should be zero-mean"
 
     def test_noise_scale_parameter(self, tiny_model, sample_batch):
         """Test that noise_scale parameter controls noise magnitude."""
         carry = tiny_model.initial_carry(sample_batch)
         
-        # Small noise
+        # Small noise (measured on z_L, the latent the noise goes into)
         inference_small = PTRMInference(tiny_model, noise_scale=0.01)
         carry_small = inference_small._inject_noise(carry)
         diff_small = keras.ops.convert_to_numpy(
-            carry_small["inner_carry"]["z_H"] - carry["inner_carry"]["z_H"]
+            carry_small["inner_carry"]["z_L"] - carry["inner_carry"]["z_L"]
         )
         
         # Large noise
         inference_large = PTRMInference(tiny_model, noise_scale=2.0)
         carry_large = inference_large._inject_noise(carry)
         diff_large = keras.ops.convert_to_numpy(
-            carry_large["inner_carry"]["z_H"] - carry["inner_carry"]["z_H"]
+            carry_large["inner_carry"]["z_L"] - carry["inner_carry"]["z_L"]
         )
         
         # Large noise should have larger variance
@@ -270,6 +282,85 @@ class TestEveryRolloutStepKeepsItsNoise:
 
         spread = self._spread(model, sample_batch, supervision_steps=3)
         assert np.all(spread > 1e-3), spread
+
+
+class TestTheDefaultSelectionIsByQHalt:
+    """Rollouts are selected by the halting logit ``q_halt`` unless asked (D-018).
+
+    The paper selects ``k* = argmax_k q_hat_k`` with ``q_hat = f_Q(y_D)``
+    (Sghaier et al. 2026, arXiv:2605.19943, Figure 4 left, lines 10 and 12),
+    and ``q_hat`` is the halting logit TRM trains against answer correctness
+    (Sec. 2). That is ``q_halt`` here. With ``no_act_continue=True`` (the PTRM
+    default) ``q_continue`` is never trained, so a ``q_continue`` default read
+    an untrained logit. The crafted Q head makes ``q_continue == -q_halt``, so
+    the two selections disagree on every item.
+    """
+
+    K = 4
+    D = 2
+
+    @pytest.fixture(scope="class")
+    def disagreeing_model(self, tiny_config):
+        assert tiny_config["no_act_continue"] is True
+        model = PTRM(**tiny_config)
+        batch = {"inputs": keras.ops.zeros((2, tiny_config["seq_len"]), dtype="int32")}
+        model(model.initial_carry(batch), batch, training=False)
+        kernel = keras.ops.convert_to_numpy(model.inner.q_head.kernel)
+        kernel[:, 1] = -kernel[:, 0]
+        model.inner.q_head.kernel.assign(kernel)
+        model.inner.q_head.bias.assign(np.zeros(2, dtype="float32"))
+        return model
+
+    def _last_steps(self, recorder):
+        last = [recorder.step_outputs[(k + 1) * self.D - 1] for k in range(self.K)]
+        return {
+            key: np.stack([keras.ops.convert_to_numpy(o[key]) for o in last])
+            for key in ("logits", "q_halt_logits", "q_continue_logits")
+        }
+
+    @pytest.mark.parametrize(
+        "kwargs, selected_by",
+        [({}, "q_halt_logits"), ({"use_q_continue": True}, "q_continue_logits")],
+        ids=["default", "opt_in_q_continue"],
+    )
+    def test_the_class_selects_by_the_documented_logit(
+        self, disagreeing_model, sample_batch, kwargs, selected_by
+    ):
+        recorder = _RecordingModel(disagreeing_model)
+        best_logits, best_q, all_q = PTRMInference(
+            recorder, noise_scale=1.0, **kwargs
+        )(sample_batch, num_rollouts=self.K, supervision_steps=self.D)
+        steps = self._last_steps(recorder)
+
+        by_halt = np.argmax(steps["q_halt_logits"], axis=0)
+        by_continue = np.argmax(steps["q_continue_logits"], axis=0)
+        assert np.all(by_halt != by_continue), (
+            "anti-vacuity: the crafted Q head must make the two selections "
+            f"disagree on every item ({by_halt} vs {by_continue})"
+        )
+
+        chosen = np.argmax(steps[selected_by], axis=0)
+        items = np.arange(chosen.shape[0])
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(all_q), steps[selected_by])
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(best_q), steps[selected_by][chosen, items]
+        )
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(best_logits), steps["logits"][chosen, items]
+        )
+
+    def test_the_convenience_function_defaults_to_q_halt(
+        self, disagreeing_model, sample_batch
+    ):
+        recorder = _RecordingModel(disagreeing_model)
+        _, best_q = run_ptrm_inference(
+            recorder, sample_batch, num_rollouts=self.K, supervision_steps=self.D,
+            noise_scale=1.0,
+        )
+        steps = self._last_steps(recorder)
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(best_q), np.max(steps["q_halt_logits"], axis=0)
+        )
 
 
 class TestPTRMInferenceConvenienceFunction:
@@ -573,7 +664,8 @@ class TestPTRMInferenceDeterministicBaseline:
             "z_L": keras.ops.repeat(inner.L_init, batch_size, axis=0),
         }
         for _ in range(3):
-            z, det_logits, (_, det_q) = inner(z, sample_batch, training=False)
+            # The default selection reads q_halt (D-018), so compare against it.
+            z, det_logits, (det_q, _) = inner(z, sample_batch, training=False)
         
         # Run PTRM with zero noise, K=1
         inference = PTRMInference(tiny_model, noise_scale=0.0)
