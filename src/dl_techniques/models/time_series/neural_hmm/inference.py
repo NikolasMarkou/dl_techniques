@@ -1,365 +1,300 @@
-"""Inference for the Neural HMM: Viterbi decoding and forward-backward posteriors.
+"""
+Exact HMM inference in log space for the Neural HMM: the forward algorithm, the score of
+a given state path, Viterbi decoding, and forward-backward state posteriors. Every
+function takes the model's three outputs on one uniform, batched shape and a padding
+mask, and has no weights and no state, so the training loss, the decoding helpers and
+the trainer's evaluation all run the same code.
 
-All functions use `keras.ops` (backend-agnostic) rather than `scipy` or raw NumPy,
-so they work inside `tf.function` / `jit_compile` graphs and are callable from
-within the model's forward pass. The recipe's numpy-only `viterbi`/`posteriors`
-are replaced by Keras-op equivalents; the recipe's `decode` convenience that
-materialises to NumPy after `model.predict` still works because the ops convert
-to numpy automatically.
+Shapes (``B`` batch, ``T`` time, ``K`` states):
 
-Two functions are exported:
+- ``log_pi``: ``(B, K)``, initial-state log-potentials.
+- ``log_A``: ``(B, T, K, K)``. ``log_A[:, t, i, j]`` scores the transition from state
+  ``i`` at step ``t - 1`` INTO state ``j`` at step ``t``: the row axis is the source and
+  the column axis the destination. The ``t = 0`` slot is never read.
+- ``log_emit``: ``(B, T, K)``, the emission log-potential of each state at each step.
+- ``mask``: ``(B, T)``, nonzero at valid steps. It must be a contiguous valid PREFIX
+  (right padding). A padded step contributes no emission and no transition, so the
+  result for a padded sequence equals the result for the truncated sequence. Interior
+  gaps are not supported and are not checked.
 
-- `viterbi`: returns the most-likely state path and its log-probability.
-- `posteriors`: returns the marginal state-occupancy probabilities ``γ_t(k)``
-  for every timestep.
+The recursions run as ``keras.ops.while_loop`` over time, so the time axis may be unknown
+at trace time (Keras retraces ``predict`` and ``evaluate`` with an unknown length from the
+second sequence length on), and the forward pass can be differentiated under XLA. All
+arithmetic runs in float32, or float64 when an input is float64; float16 and bfloat16
+inputs are promoted, because a log-space recursion accumulates.
 
-Both are pure functions of the model's own forward outputs ``(log_pi, log_A,
-log_emit)``; they take no model state and have no trainable parameters.
+References:
+    - Rabiner, 1989. A Tutorial on Hidden Markov Models and Selected Applications in
+      Speech Recognition. Proceedings of the IEEE 77(2), pp. 257-286.
 """
 
-import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Tuple
 
 import keras
-from keras import ops
+
+# ---------------------------------------------------------------------
+# Local Imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.dtype_policy import accumulation_dtype
+
+# ---------------------------------------------------------------------
 
 
-def shift_right(x):
-    """Shift a sequence right by one timestep, prepending zeros.
+def _prepare(log_pi, log_A, log_emit, mask):
+    """Check ranks, promote to the accumulation dtype and build the validity mask.
 
-    For generative mode, the encoder should only see x_{<t}, so we shift
-    the input right by one timestep.
-
-    :param x: Input tensor of shape ``(B, T, D)`` or ``(B, T)``.
-    :type x: keras.KerasTensor
-    :return: Shifted tensor of same shape, with zeros at t=0.
-    :rtype: keras.KerasTensor
+    :param log_pi: ``(B, K)`` initial log-potentials.
+    :param log_A: ``(B, T, K, K)`` transition log-potentials.
+    :param log_emit: ``(B, T, K)`` emission log-potentials.
+    :param mask: ``(B, T)`` padding mask, nonzero at valid steps.
+    :return: ``(log_pi, log_A, log_emit, valid)`` with the three float inputs cast to
+        one accumulation dtype and ``valid`` a boolean ``(B, T)`` tensor.
+    :rtype: tuple
+    :raises ValueError: If an input does not have the documented rank.
     """
-    # Prepend zeros along the time dimension
-    zero_shape = list(x.shape)
-    zero_shape[1] = 1  # time dimension
-    zeros = ops.zeros(zero_shape, dtype=x.dtype)
-    return ops.concatenate([zeros, x[:, :-1]], axis=1)
+    expected = (("log_pi", log_pi, 2), ("log_A", log_A, 4), ("log_emit", log_emit, 3), ("mask", mask, 2))
+    for name, tensor, rank in expected:
+        if len(tensor.shape) != rank:
+            raise ValueError(f"{name} must have rank {rank}, got shape {tuple(tensor.shape)}.")
+    widths = {accumulation_dtype(t.dtype) for t in (log_pi, log_A, log_emit)}
+    accum = "float64" if "float64" in widths else "float32"
+    valid = keras.ops.greater(keras.ops.cast(mask, accum), 0)
+    return (
+        keras.ops.cast(log_pi, accum),
+        keras.ops.cast(log_A, accum),
+        keras.ops.cast(log_emit, accum),
+        valid,
+    )
 
 
-def _forward_logprob_static(log_pi, log_A, log_emit, mask):
-    """Static-transition forward algorithm in log-space, unrolled.
+def _time_loop(body, carry, num_steps, reverse=False):
+    """Apply ``carry = body(t, carry)`` for every transition step ``t = 1, ..., T - 1``.
 
-    :param log_pi: ``(K,)`` initial log-probs.
-    :type log_pi: keras.KerasTensor
-    :param log_A: ``(K, K)`` transition log-probs.
-    :type log_A: keras.KerasTensor
-    :param log_emit: ``(B, T, K)`` emission log-densities.
-    :type log_emit: keras.KerasTensor
-    :param mask: ``(B, T)`` float padding mask (1 = valid).
-    :type mask: keras.KerasTensor
-    :return: Log-likelihood per sample ``(B,)``.
-    :rtype: keras.KerasTensor
+    With ``reverse=True`` the steps run ``t = T - 1, ..., 1`` instead. ``num_steps`` is
+    ``T`` and may be a Python int or a scalar tensor (an unknown time axis); ``T = 1``
+    runs no step.
+
+    :param body: Callable ``(t, carry) -> carry`` preserving the carry's structure.
+    :param carry: Initial loop state (a tensor or a tuple of tensors).
+    :param num_steps: Length of the time axis ``T``.
+    :param reverse: Whether to count down instead of up.
+    :return: The final carry.
     """
-    from scipy.special import logsumexp  # imported at function level to avoid a
-        # top-level dependency; the recipe uses scipy in inference only.
 
-    B = keras.ops.shape(log_emit)[0]
-    T = keras.ops.shape(log_emit)[1]
-    K = keras.ops.shape(log_emit)[2]
+    # DECISION plan-2026-10-13T192257-1bb3bf1f/D-014: keras.ops.while_loop WITH
+    # maximum_iterations. Do NOT use a Python loop over ``x.shape[1]``: Keras retraces
+    # predict/evaluate with T = None from the second sequence length on (measured), and
+    # range(None) raises. Do NOT use keras.ops.scan: its TensorArray has no fixed size,
+    # so differentiating it under XLA raises "XLA compilation requires a fixed tensor
+    # list size" (measured, CPU jit_compile=True); maximum_iterations sizes the
+    # gradient accumulators.
+    def cond(t, _):
+        return keras.ops.greater_equal(t, 1) if reverse else keras.ops.less(t, num_steps)
 
-    # alpha_0
-    alpha = log_pi[None] + log_emit[:, 0]  # (B, K)
+    def step(t, state):
+        return (t - 1 if reverse else t + 1), body(t, state)
 
-    # Unrolled forward pass over t = 1 .. T-1
-    for t in range(1, T):
-        # logsumexp(alpha[:, None] + log_A, axis=1) -> (B, K)
-        new_alpha = keras.ops.logsumexp(alpha[:, None] + log_A[None], axis=1) + log_emit[:, t]
-
-        # Freeze on padding: where mask[b, t] == 0 keep the old alpha
-        alpha = keras.ops.where(mask[:, t][:, None] > 0, new_alpha, alpha)
-
-    # Log-likelihood per sample: logsumexp over the final alpha
-    return keras.ops.logsumexp(alpha, axis=-1)
+    first = num_steps - 1 if reverse else 1
+    _, carry = keras.ops.while_loop(cond, step, (first, carry), maximum_iterations=num_steps)
+    return carry
 
 
-def _forward_logprob_dynamic(log_pi, log_A, log_emit, mask):
-    """Dynamic-transition forward algorithm (B,T,K,K), unrolled.
+def _write(history, t, value):
+    """Return ``history`` with ``history[:, t] = value``, without a scatter.
 
-    :param log_pi: ``(K,)`` initial log-probs.
-    :type log_pi: keras.KerasTensor
-    :param log_A: ``(T, K, K)`` transition log-probs per timestep.
-    :type log_A: keras.KerasTensor
-    :param log_emit: ``(B, T, K)`` emission log-densities.
-    :type log_emit: keras.KerasTensor
-    :param mask: ``(B, T)`` float padding mask (1 = valid).
-    :type mask: keras.KerasTensor
-    :return: Log-likelihood per sample ``(B,)``.
-    :rtype: keras.KerasTensor
+    :param history: ``(B, T, ...)`` tensor.
+    :param t: Scalar int step index.
+    :param value: ``(B, ...)`` tensor of ``history``'s dtype.
+    :return: The updated ``(B, T, ...)`` tensor.
     """
-    from scipy.special import logsumexp  # imported at function level to avoid a
-        # top-level dependency; the recipe uses scipy in inference only.
-
-    B = keras.ops.shape(log_emit)[0]
-    T = keras.ops.shape(log_emit)[1]
-    K = keras.ops.shape(log_emit)[2]
-
-    # alpha_0
-    alpha = log_pi[None] + log_emit[:, 0]  # (B, K)
-
-    # Unrolled forward pass over t = 1 .. T-1
-    for t in range(1, T):
-        # log_A[t] is (K, K) at timestep t
-        log_A_t = log_A[t]  # (K, K)
-        # logsumexp(alpha[:, None] + log_A[t], axis=1) -> (B, K)
-        new_alpha = keras.ops.logsumexp(alpha[:, None] + log_A_t[None], axis=1) + log_emit[:, t]
-
-        # Freeze on padding: where mask[b, t] == 0 keep the old alpha
-        alpha = keras.ops.where(mask[:, t][:, None] > 0, new_alpha, alpha)
-
-    # Log-likelihood per sample: logsumexp over the final alpha
-    return keras.ops.logsumexp(alpha, axis=-1)
+    steps = keras.ops.arange(keras.ops.shape(history)[1], dtype="int32")
+    at_t = keras.ops.equal(steps, keras.ops.cast(t, "int32"))
+    at_t = keras.ops.reshape(at_t, (1, -1) + (1,) * (len(history.shape) - 2))
+    return keras.ops.where(at_t, keras.ops.expand_dims(value, 1), history)
 
 
-def _path_score(log_pi, log_A, log_emit, y, mask):
-    """Gold-path (Viterbi / forward-backward) score for discriminative mode.
+def _select(values, index, n_states):
+    """Return ``values[b, index[b]]`` per row by a one-hot select (no take_along_axis).
 
-    :param log_pi: ``(K,)`` initial log-probs.
-    :type log_pi: keras.KerasTensor
-    :param log_A: ``(K, K)`` or ``(B, T, K, K)`` transition log-probs.
-    :type log_A: keras.KerasTensor
-    :param log_emit: ``(B, T, K)`` emission log-densities.
-    :type log_emit: keras.KerasTensor
-    :param y: Integer state-path targets ``(B, T)``; each entry in [0, K).
-    :type y: keras.KerasTensor
-    :param mask: ``(B, T)`` float padding mask (1 = valid).
-    :type mask: keras.KerasTensor
-    :return: Per-sample log-probability of the gold path ``(B,)``.
-    :rtype: keras.KerasTensor
+    :param values: ``(B, K)`` tensor.
+    :param index: ``(B,)`` int tensor in ``[0, K)``.
+    :param n_states: ``K``.
+    :return: ``(B,)`` tensor.
     """
-    Y = keras.ops.one_hot(y, log_emit.shape[-1])  # (B, T, K)
-    # Initial score: sum over initial states weighted by Y[:,0]
-    s0 = keras.ops.sum(log_pi * Y[:, 0], axis=-1)  # (B,)
-
-    # Emission score: sum over timesteps of (log_emit * Y) * mask
-    # log_emit is (B,T,K), Y is (B,T,K) -> elementwise product, then sum over K
-    se = keras.ops.sum(keras.ops.sum(log_emit * Y, axis=-1) * mask, axis=-1)  # (B,)
-
-    # Transition score: einsum over consecutive Y pairs
-    if len(log_A.shape) == 2:
-        # Static A: (K,K)
-        tr = keras.ops.einsum("bti,ij,btj->bt", Y[:, :-1], log_A, Y[:, 1:])
-    else:
-        # Dynamic A: (B,T,K,K)
-        tr = keras.ops.einsum("bti,btij,btj->bt", Y[:, :-1], log_A[:, 1:], Y[:, 1:])
-
-    # Apply mask to the transition part (skip first timestep)
-    tr_masked = tr * mask[:, 1:]
-
-    return s0 + se + keras.ops.sum(tr_masked, axis=-1)
+    chosen = keras.ops.one_hot(index, n_states) > 0
+    return keras.ops.sum(keras.ops.where(chosen, values, keras.ops.zeros_like(values)), axis=-1)
 
 
-# ---------------------------------------------------------------------
-# Viterbi — max-probability state path
-# ---------------------------------------------------------------------
+def _forward_alphas(log_pi, log_A, log_emit, valid):
+    """Run the forward recursion and return every step's alpha.
 
-
-def viterbi(log_pi, log_A, log_emit) -> Tuple:
-    """Viterbi decoding: most-likely state path and its log-probability.
-
-    Finds ``argmax_path sum_{t} log_emit[t, path[t]] + log_pi[path[0]] +
-    sum_{t>0} log_A[t-1, path[t-1], path[t]]``.
-
-    :param log_pi: Initial log-probs ``(K,)``.
-    :type log_pi: keras.KerasTensor
-    :param log_A: Transition log-probs ``(K, K)`` (static) or ``(T, K, K)``
-        (first timestep only; the function assumes static A and drops the batch/time
-        dims if present). The function accepts ``(K, K)`` and will broadcast
-        correctly if a single timestep of dynamic A is passed.
-    :type log_A: keras.KerasTensor
-    :param log_emit: Emission log-densities ``(T, K)`` (static, no batch dim).
-    :type log_emit: keras.KerasTensor
-    :return: ``(path, log_probability)`` where ``path`` is ``(T,)`` int tensor
-        and ``log_probability`` is a scalar.
-    :rtype: Tuple of (keras.KerasTensor, keras.KerasTensor)
+    :param log_pi: ``(B, K)`` accumulation-dtype initial log-potentials.
+    :param log_A: ``(B, T, K, K)`` accumulation-dtype transition log-potentials.
+    :param log_emit: ``(B, T, K)`` accumulation-dtype emission log-potentials.
+    :param valid: ``(B, T)`` boolean validity mask.
+    :return: ``(alpha_last, alphas)``: ``(B, K)`` alpha after the last valid step and
+        ``(B, T, K)`` alpha at every step (frozen across padding).
     """
-    # Handle possible batch/time dims by squeezing to static shape
-    # log_A may be (K,K) or (1,K,K) or (T,K,K); keep only the last two dims
-    if log_A.ndim == 3:
-        log_A = log_A[0]  # take first timestep if dynamic
+    # DECISION plan-2026-10-13T192257-1bb3bf1f/D-009: a padded step FREEZES alpha
+    # (no emission, no transition), so a padded sequence's logZ equals the truncated
+    # sequence's exactly. Do NOT zero the emission and keep the transition instead.
+    alpha = log_pi + keras.ops.where(valid[:, 0, None], log_emit[:, 0], keras.ops.zeros_like(log_pi))
+    alphas = _write(keras.ops.zeros_like(log_emit), 0, alpha)
 
-    if log_emit.ndim == 3:
-        log_emit = log_emit[0]  # drop batch dim if present
+    def body(t, carry):
+        alpha, alphas = carry
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-003: alpha sits on the SOURCE axis
+        # (``alpha[:, :, None] + log_A[:, t]``, logsumexp over axis 1). Do NOT
+        # broadcast it on the destination axis (``alpha[:, None, :]``): that is the
+        # measured defect of the old package (logZ [1.331, 0.750] against the true
+        # [0.636, 2.153]).
+        moved = keras.ops.logsumexp(alpha[:, :, None] + log_A[:, t], axis=1) + log_emit[:, t]
+        alpha = keras.ops.where(valid[:, t, None], moved, alpha)
+        return alpha, _write(alphas, t, alpha)
 
-    T_K = log_emit.shape
-    if len(T_K) == 2:
-        T, K = T_K
-    elif len(T_K) == 1:
-        K = T_K[0]
-        T = 1
-    else:
-        raise ValueError(f"log_emit must be (T,K) or (K,), got shape {T_K}")
-
-    if log_A.shape != (K, K):
-        raise ValueError(f"log_A must be (K,K) after squeezing, got {log_A.shape}")
-
-    # Initialization
-    delta = log_pi + log_emit[0]  # (K,)
-    back_list = [ops.zeros(K, dtype="int32")]
-
-    # Recursion
-    for t in range(1, T):
-        # delta[:, None] + log_A: (K, 1) + (K, K) = (K, K)
-        s = delta[:, None] + log_A  # (K, K)
-        back_list.append(ops.argmax(s, axis=0))  # (K,) — argmax over previous states
-        delta = ops.max(s, axis=0) + log_emit[t]  # (K,)
-
-    # Termination
-    path_list = [ops.argmax(delta)]  # scalar, last state
-
-    # Backtrack
-    for t in range(T - 1, 0, -1):
-        path_list.append(back_list[t][path_list[-1]])
-
-    # Reverse to get forward path
-    path_list.reverse()
-    path = ops.stack(path_list, axis=0)  # (T,)
-
-    # Log-probability of the found path
-    lp = log_pi[path[0]]
-    for t in range(1, T):
-        lp = lp + log_A[path[t - 1], path[t]] + log_emit[t, path[t]]
-
-    return path, lp
+    num_steps = keras.ops.shape(log_emit)[1]
+    return _time_loop(body, (alpha, alphas), num_steps)
 
 
-# ---------------------------------------------------------------------
-# Forward-backward posteriors — marginal γ_t(k) = p(z_t = k | x_{1:T})
-# ---------------------------------------------------------------------
+def _empty_to_zero(values, valid):
+    """Return ``values`` with the entries of sequences that have no valid step set to 0.
 
-
-def posteriors(log_pi, log_A, log_emit):
-    """Posterior marginals γ_t(k) = p(z_t = k | x_{1:T}) in log-space.
-
-    Uses the standard forward-backward algorithm, returning probabilities
-    (not log-probs) ``(T, K)`` that sum to 1 over k at each timestep.
-
-    :param log_pi: Initial log-probs ``(K,)``.
-    :type log_pi: keras.KerasTensor
-    :param log_A: Transition log-probs ``(K, K)`` (static).
-    :type log_A: keras.KerasTensor
-    :param log_emit: Emission log-densities ``(T, K)``.
-    :type log_emit: keras.KerasTensor
-    :return: Posterior matrix ``(T, K)``; ``γ_t(k) >= 0`` and ``sum_k γ_t(k) = 1``
-        (up to floating point) for each t.
+    :param values: ``(B,)`` tensor.
+    :param valid: ``(B, T)`` boolean validity mask.
+    :return: ``(B,)`` tensor.
     """
-    T_K = log_emit.shape
-    if len(T_K) == 2:
-        T, K = T_K
-    else:
-        raise ValueError(f"log_emit must be (T,K), got shape {T_K}")
-
-    if log_A.shape != (K, K):
-        raise ValueError(f"log_A must be (K,K), got {log_A.shape}")
-
-    # Forward alphas: α_t(k) = p(z_{1:t}, z_t = k | x_{1:t})
-    # Use list-based accumulation to avoid tensor item assignment issues
-    la_list = [log_pi + log_emit[0]]  # (K,)
-
-    for t in range(1, T):
-        # α_t = logsumexp(α_{t-1}[:, None] + log_A, axis=1) + log_emit[t]
-        # logsumexp over axis=1 of (K, K) -> (K,)
-        la_t = ops.logsumexp(la_list[t - 1][:, None] + log_A[None], axis=1) + log_emit[t]
-        la_list.append(la_t)
-
-    # Stack requires all tensors to have same shape; ensure (1, K) for all
-    la_list_2d = [x[None] if x.ndim == 1 else x for x in la_list]
-    la = ops.concatenate(la_list_2d, axis=0)  # (T, K)
-
-    # Backward betas: β_{t-1}(k) = p(z_{t+1:T} | z_{t-1} = k, x_{1:T})
-    lb_list = [ops.zeros(K)]  # beta at T is 0 (log 1)
-
-    for t in range(T - 2, -1, -1):
-        # β_t(k) = logsumexp(A[t+1] + (log_emit[t+1] + β_{t+1})[None], axis=1)
-        # A[t+1] is (K,K); we need the transition at time t+1 for static A
-        # which is just log_A
-        lb_t = ops.logsumexp(
-            log_A[None] + (log_emit[t + 1] + lb_list[0])[None], axis=1
-        )
-        lb_list.insert(0, lb_t)
-
-    lb_list_2d = [x[None] if x.ndim == 1 else x for x in lb_list]
-    lb = ops.concatenate(lb_list_2d, axis=0)  # (T, K)
-
-    # Joint gamma in log-space: g_t(k) = α_t(k) + β_t(k)
-    g = la + lb
-
-    # Normalise per timestep: exp(g - logsumexp(g, axis=1, keepdims=True))
-    # This yields probabilities that sum to 1 over k at each t.
-    # keras.ops.logsumexp with keepdims:
-    logZ = ops.logsumexp(g, axis=1, keepdims=True)  # (T, 1)
-    g = g - logZ  # (T, K)
-    probs = ops.exp(g)  # (T, K)
-
-    return probs
+    return keras.ops.where(keras.ops.any(valid, axis=1), values, keras.ops.zeros_like(values))
 
 
-# ---------------------------------------------------------------------
-# Convenience: decode a model output to numpy (for one-sample inference)
-# ---------------------------------------------------------------------
+def forward_log_likelihood(log_pi, log_A, log_emit, mask):
+    """Return the log partition function of every sequence, by the forward algorithm.
 
+    ``logZ = log sum_z exp(log_pi[z_0] + log_emit[0, z_0]
+    + sum_{t>=1} (log_A[t, z_{t-1}, z_t] + log_emit[t, z_t]))`` over all state paths of
+    the sequence's valid length. With normalized ``log_pi``/``log_A`` and emission
+    log-densities this is ``log p(x)``. A sequence with no valid step has ``logZ = 0``
+    (the empty path), whatever ``log_pi`` holds.
 
-def decode(log_pi_np: np.ndarray,
-           log_A_np: np.ndarray,
-           log_emit_np: np.ndarray) -> Tuple[np.ndarray, float]:
-    """Decode a single sample's forward outputs to a Viterbi path.
-
-    This is the numpy / scipy port of the recipe's ``viterbi``; it exists so
-    callers that need a pure-Numpy path (e.g. evaluation scripts outside tf)
-    can import it without pulling in keras.ops inside a graph.
-
-    :param log_pi_np: Initial log-probs ``(K,)``.
-    :type log_pi_np: np.ndarray
-    :param log_A_np: Transition log-probs ``(K, K)``.
-    :type log_A_np: np.ndarray
-    :param log_emit_np: Emission log-densities ``(T, K)``.
-    :type log_emit_np: np.ndarray
-    :return: ``(path, log_probability)`` where ``path`` is ``(T,)`` int and
-        ``log_probability`` is a float.
-    :rtype: Tuple of (np.ndarray, float)
+    :param log_pi: ``(B, K)`` initial log-potentials.
+    :param log_A: ``(B, T, K, K)`` transition log-potentials, source row to destination
+        column; ``log_A[:, 0]`` is ignored.
+    :param log_emit: ``(B, T, K)`` emission log-potentials.
+    :param mask: ``(B, T)`` right-padding mask, nonzero at valid steps.
+    :return: ``(B,)`` log partition function, in float32 (float64 for float64 input).
+    :raises ValueError: If an input does not have the documented rank.
     """
-    from scipy.special import logsumexp
-
-    K = log_pi_np.shape[0]
-    T = log_emit_np.shape[0]
-
-    # Viterbi recursion (numpy)
-    delta = log_pi_np + log_emit_np[0]  # (K,)
-    back = np.zeros((T, K), dtype=int)
-
-    for t in range(1, T):
-        s = delta[:, None] + log_A_np  # (K, K)
-        back[t] = np.argmax(s, axis=0)  # (K,)
-        delta = np.max(s, axis=0) + log_emit_np[t]  # (K,)
-
-    path = np.empty(T, dtype=int)
-    path[T - 1] = np.argmax(delta)
-
-    for t in range(T - 1, 0, -1):
-        path[t - 1] = back[t, path[t]]
-
-    # Log probability of the found path
-    lp = log_pi_np[path[0]]
-    for t in range(1, T):
-        lp = lp + log_A_np[path[t - 1], path[t]] + log_emit_np[t, path[t]]
-
-    return path, lp
+    log_pi, log_A, log_emit, valid = _prepare(log_pi, log_A, log_emit, mask)
+    alpha_last, _ = _forward_alphas(log_pi, log_A, log_emit, valid)
+    return _empty_to_zero(keras.ops.logsumexp(alpha_last, axis=-1), valid)
 
 
-# ---------------------------------------------------------------------
-# Gradient-flow note
-# ---------------------------------------------------------------------
+def path_log_score(log_pi, log_A, log_emit, states, mask):
+    """Return the unnormalized log score of a given state path for every sequence.
 
-# Both `viterbi` and `posteriors` are pure functions of the forward outputs.
-# They contain no trainable variables, no `add_weight`, no `self.call`, and no
-# Keras layer state. They are safe to call inside a `tf.function` or with
-# `jit_compile=True` because they use only `keras.ops` (which compile to
-# backend-agnostic graphs) and plain Python loops over the sequence length T,
-# which is a concrete integer at graph-construction time (or a dynamic size
-# that the while-loop / scan handles). The `posteriors` function's softmax and
-# exp are all `keras.ops`‑wrapped and compile without issue.
+    ``log_pi[z_0] + log_emit[0, z_0] + sum_{t>=1} (log_A[t, z_{t-1}, z_t]
+    + log_emit[t, z_t])`` summed over valid steps only, so state values at padded steps
+    are ignored and may hold anything, including ``-1``. A sequence with no valid step
+    scores 0, matching :func:`forward_log_likelihood`, so ``logZ - score`` is the
+    path's negative log-probability and is 0 for an empty sequence.
+
+    :param log_pi: ``(B, K)`` initial log-potentials.
+    :param log_A: ``(B, T, K, K)`` transition log-potentials; ``log_A[:, 0]`` is ignored.
+    :param log_emit: ``(B, T, K)`` emission log-potentials.
+    :param states: ``(B, T)`` integer states in ``[0, K)`` at valid steps.
+    :param mask: ``(B, T)`` right-padding mask, nonzero at valid steps.
+    :return: ``(B,)`` path score, in the accumulation dtype.
+    :raises ValueError: If an input does not have the documented rank.
+    """
+    log_pi, log_A, log_emit, valid = _prepare(log_pi, log_A, log_emit, mask)
+    n_states = log_emit.shape[-1]
+    picked = keras.ops.one_hot(keras.ops.cast(states, "int32"), n_states) > 0  # (B,T,K)
+
+    # Select with where, never by multiplying a one-hot: 0 * -inf is NaN.
+    start = keras.ops.sum(keras.ops.where(picked[:, 0], log_pi, keras.ops.zeros_like(log_pi)), axis=-1)
+    emit = keras.ops.sum(keras.ops.where(picked, log_emit, keras.ops.zeros_like(log_emit)), axis=-1)
+    pair = keras.ops.logical_and(picked[:, :-1, :, None], picked[:, 1:, None, :])
+    into = log_A[:, 1:]
+    trans = keras.ops.sum(keras.ops.where(pair, into, keras.ops.zeros_like(into)), axis=(2, 3))
+
+    # DECISION plan-2026-10-13T192257-1bb3bf1f/D-009: the start term, each emission
+    # and each transition INTO a padded step are dropped, matching the forward freeze.
+    emit = keras.ops.where(valid, emit, keras.ops.zeros_like(emit))
+    trans = keras.ops.where(valid[:, 1:], trans, keras.ops.zeros_like(trans))
+    start = keras.ops.where(valid[:, 0], start, keras.ops.zeros_like(start))
+    return start + keras.ops.sum(emit, axis=1) + keras.ops.sum(trans, axis=1)
+
+
+def viterbi_decode(log_pi, log_A, log_emit, mask) -> Tuple:
+    """Return the highest-scoring state path of every sequence and its score.
+
+    :param log_pi: ``(B, K)`` initial log-potentials.
+    :param log_A: ``(B, T, K, K)`` transition log-potentials; ``log_A[:, 0]`` is ignored.
+    :param log_emit: ``(B, T, K)`` emission log-potentials.
+    :param mask: ``(B, T)`` right-padding mask, nonzero at valid steps.
+    :return: ``(path, score)``: ``path`` is ``(B, T)`` int32 with ``-1`` at padded steps;
+        ``score`` is ``(B,)``, equal to :func:`path_log_score` of ``path`` (0 for a
+        sequence with no valid step). Ties resolve to the lowest state index.
+    :raises ValueError: If an input does not have the documented rank.
+    """
+    log_pi, log_A, log_emit, valid = _prepare(log_pi, log_A, log_emit, mask)
+    n_states = log_emit.shape[-1]
+    num_steps = keras.ops.shape(log_emit)[1]
+    identity = keras.ops.zeros_like(log_emit, dtype="int32") + keras.ops.arange(n_states, dtype="int32")
+
+    delta = log_pi + keras.ops.where(valid[:, 0, None], log_emit[:, 0], keras.ops.zeros_like(log_pi))
+
+    def forward(t, carry):
+        delta, backpointers = carry
+        scores = delta[:, :, None] + log_A[:, t]  # (B, K_source, K_destination)
+        moved = keras.ops.max(scores, axis=1) + log_emit[:, t]
+        pointer = keras.ops.cast(keras.ops.argmax(scores, axis=1), "int32")
+        # D-009: a padded step freezes delta and keeps the identity backpointer.
+        delta = keras.ops.where(valid[:, t, None], moved, delta)
+        pointer = keras.ops.where(valid[:, t, None], pointer, identity[:, 0])
+        return delta, _write(backpointers, t, pointer)
+
+    delta, backpointers = _time_loop(forward, (delta, identity), num_steps)
+
+    last = keras.ops.cast(keras.ops.argmax(delta, axis=-1), "int32")
+    path = _write(keras.ops.zeros_like(identity[:, :, 0]), num_steps - 1, last)
+
+    def backward(t, carry):
+        state, path = carry
+        previous = _select(backpointers[:, t], state, n_states)
+        return previous, _write(path, t - 1, previous)
+
+    _, path = _time_loop(backward, (last, path), num_steps, reverse=True)
+    path = keras.ops.where(valid, path, keras.ops.full_like(path, -1))
+    return path, _empty_to_zero(keras.ops.max(delta, axis=-1), valid)
+
+
+def state_posteriors(log_pi, log_A, log_emit, mask):
+    """Return the posterior state marginals ``p(z_t = k | x)`` by forward-backward.
+
+    :param log_pi: ``(B, K)`` initial log-potentials.
+    :param log_A: ``(B, T, K, K)`` transition log-potentials; ``log_A[:, 0]`` is ignored.
+    :param log_emit: ``(B, T, K)`` emission log-potentials.
+    :param mask: ``(B, T)`` right-padding mask, nonzero at valid steps.
+    :return: ``(B, T, K)`` probabilities summing to 1 over ``K`` at every valid step,
+        and exactly 0 at padded steps.
+    :raises ValueError: If an input does not have the documented rank.
+    """
+    log_pi, log_A, log_emit, valid = _prepare(log_pi, log_A, log_emit, mask)
+    alpha_last, alphas = _forward_alphas(log_pi, log_A, log_emit, valid)
+    log_z = keras.ops.logsumexp(alpha_last, axis=-1)
+    num_steps = keras.ops.shape(log_emit)[1]
+
+    def body(t, carry):
+        beta, betas = carry
+        # beta_{t-1}[i] = logsumexp_j(log_A[t, i, j] + log_emit[t, j] + beta_t[j]): the
+        # reduction runs over the DESTINATION axis (2). A padded step t freezes beta.
+        moved = keras.ops.logsumexp(log_A[:, t] + (log_emit[:, t] + beta)[:, None, :], axis=2)
+        beta = keras.ops.where(valid[:, t, None], moved, beta)
+        return beta, _write(betas, t - 1, beta)
+
+    beta = keras.ops.zeros_like(log_pi)
+    _, betas = _time_loop(body, (beta, keras.ops.zeros_like(log_emit)), num_steps, reverse=True)
+
+    gamma = keras.ops.exp(alphas + betas - log_z[:, None, None])
+    return keras.ops.where(valid[:, :, None], gamma, keras.ops.zeros_like(gamma))
