@@ -453,6 +453,11 @@ def test_gemma3_serialization_cycle():
     3.  Reduce `max_seq_len` if possible.
     4.  Use a smaller variant (e.g., `tiny` instead of `small`).
 
+**Issue 2: `ValueError: seq_len=... exceeds max_seq_len=...`.**
+
+-   **Cause**: The batch is longer than the `max_seq_len` the model precomputed its RoPE tables for. The model refuses it on every path (eager, `predict`/`fit` retraces, and XLA, which Keras selects by default whenever a GPU is visible, where an unguarded gather would return finite garbage) and stays usable afterwards (`utils/sequence_length_guard.py`).
+-   **Solution**: Truncate the input to `max_seq_len` tokens, or build the model with a larger `max_seq_len`.
+
 ### Frequently Asked Questions
 
 **Q: How is this different from a standard Transformer or Llama?**

@@ -136,6 +136,13 @@ the hidden states equal the same row run alone, and the padded token values chan
 Interior or left padding is not supported: the Mamba-2 mixer takes no mask, so every position
 after a masked token depends on that token's value.
 
+**Sequence length.** When stage 0 (the outer encoder/decoder, or the single stack of a one-stage
+layout) holds an attention block, its RoPE tables cover `max_seq_len` positions and a longer
+input is refused with `ValueError: seq_len=... exceeds max_seq_len=...` on every path (eager,
+`predict`/`fit` retraces, XLA), the model staying usable afterwards. A layout whose attention is
+only in inner stages, or none, has no input-length limit: the inner stages see at most
+`max_chunks` positions and chunks beyond that cap are truncated silently (§5.3).
+
 The **ratio (load-balancing) loss** is contributed through `self.add_loss` with coefficient
 `RATIO_LOSS_ALPHA = 0.03`, so stock `model.fit()` picks it up. There is no custom `train_step`
 anywhere in this package, deliberately: a hand-written one silently discards Keras' own

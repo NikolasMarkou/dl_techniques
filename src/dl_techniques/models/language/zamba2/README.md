@@ -130,6 +130,16 @@ print(classifier({"input_ids": input_ids}).shape)  # (2, 2)
 
 ---
 
+### Sequence length
+
+A model with a `'g'` position in `layer_mapping` precomputes the shared attention's RoPE tables for
+`max_seq_len` positions and refuses a longer sequence with `ValueError: seq_len=... exceeds
+max_seq_len=...` on every path (eager, `predict`/`fit` retraces, XLA), staying usable afterwards.
+A layout with only `'m'` positions has no position limit and serves any length. Truncate the input
+or build with a larger `max_seq_len`.
+
+---
+
 ## 4. Variants
 
 `Zamba2Model.MODEL_VARIANTS` (repo-scale `mini`/`small`/`base`, **not** the Zamba2 paper's own

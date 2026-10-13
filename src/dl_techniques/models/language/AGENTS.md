@@ -100,11 +100,13 @@ WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
 Which mask the head pools under, when the caller passes none (the backbone's
 own attention is unchanged):
 
-| Classes | Head mask without a caller mask | Default pooling |
-|---|---|---|
-| BERT, DistilBERT, ModernBERT, FNet (bidirectional encoders) | all ones, the same mask the encoder returns: padding is pooled under `mean` / `max` / `attention` | `cls` |
-| TreeTransformer | `input_ids != pad_token_id` | `cls` |
-| GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3, Zamba2, HNet (causal decoders) | `input_ids != pad_token_id` if a pad id was given, else all ones | `last` |
+| Classes | Head mask without a caller mask | Where a caller's mask goes | Default pooling |
+|---|---|---|---|
+| BERT, DistilBERT, ModernBERT, FNet (bidirectional encoders) | all ones, the same mask the encoder returns: padding is pooled under `mean` / `max` / `attention` | `attention_mask`: the encoder's attention and the head | `cls` |
+| TreeTransformer | `input_ids != pad_token_id` | `attention_mask`: the encoder's attention and the head | `cls` |
+| GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3 (causal decoders) | `input_ids != pad_token_id` if a pad id was given, else all ones | the head only; the decoder's own attention sees just the mask passed to it | `last` |
+| Zamba2 | `input_ids != pad_token_id` if a pad id was given, else all ones | `attention_mask` (dict input) reaches the head only: neither the Mamba-2 mixer nor the shared attention takes a padding mask | `last` |
+| HNet | same rule | `padding_mask` (or the dict's `attention_mask`) reaches the backbone AND the head. RIGHT padding only: right-padded rows match the unpadded row to 1e-7 (measured), interior or left padding changes later positions because the Mamba-2 mixer takes no mask | `last` |
 
 A caller's `attention_mask` always wins. The decoders' `pad_token_id` defaults to
 `None`, which means no padding (the all-ones mask): id 0 is a real token in the
@@ -177,6 +179,47 @@ Reusing a backbone under a new head:
   a headless one (`allow_unloaded=("lm_head",)`) or a `create_qwen3_generation`
   model with the same backbone weights.
 
+## Sequence-length guard (`utils/sequence_length_guard.py`)
+
+A model with a real position limit refuses an over-long sequence cleanly on every
+path: a statically known length raises `ValueError` from `build` before any
+variable exists; a length known only at run time (`predict` after two lengths,
+`jit_compile=True`) fails a graph assertion plus a zero-sum term that survives
+XLA, where a gather-based position table would otherwise return finite garbage;
+and the refusal drops Keras's cached `predict`/`train`/`test` step functions so
+the next legal call still works. Usage and the three functions:
+`utils/AGENTS.md`. Pinned per class by
+`tests/test_models/test_a_position_limit_is_refused_cleanly.py` (one `Subject`
+row per class; each row goes RED when its guard line is removed).
+
+| Status | Classes |
+|---|---|
+| Guarded (limit attribute) | BERT, DistilBERT, FNet (`max_position_embeddings`), TreeTransformer (`max_len`), GPT2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3 (`max_seq_len`) |
+| Guarded only for some configurations | ModernBERT (only when a global-attention layer exists: `num_layers >= global_attention_interval`), Zamba2 (only with a `g` entry in `layer_mapping`, the one RoPE table), HNet (only when stage 0 holds an attention block; inner stages see at most `max_chunks` positions and truncate silently, which is out of scope) |
+| Guarded, warns on load | BLT (`max_sequence_length`): `build_from_config` of an old archive whose recorded shape is over-long logs a warning and builds, never refuses |
+| No position limit, not guarded | Mamba, Mamba2 (and the unguarded configurations above): they serve any length, finite, eagerly and under `jit_compile=True`; the test's `NO_LIMIT` arm goes RED if a guard is wired unconditionally |
+
+A model that builds its sub-layers by hand (BERT, TopoLM, Zamba2, HNet, BLT) also
+calls `refuse_static_sequence_length` first in `build`; one whose `build` traces
+`call` through `materialize_sublayers` needs only the `call` line.
+
+## Packages that do not own a task head
+
+Not every member is a token model a task head applies to. These keep their own
+contract, on purpose; none was changed by the head work.
+
+| Package | Why it has no `include_top` / `task_config` |
+|---|---|
+| `hrm`, `trm`, `ptrm` | Carry-based ACT puzzle solvers: the `lm_head` IS the task (per-cell prediction) and is trained jointly with the Q-halting head; the state is a recurrence, not a backbone a classification head would read. Their trainers use bespoke carry loops |
+| `mini_vec2vec` | Not a sequence model: embeddings in, one fitted matrix `W` (numpy `align()`), nothing to put a head on |
+| `colbert` | Output is per-token masked L2-normalised embeddings scored by MaxSim; every `layers/heads/nlp` head pools to one vector, which would destroy late interaction. Its encoder is a `BERT` (so the backbone side of reuse is already met) |
+| `blt` | Byte LM with its own entropy model, patcher, `train_step` and `generate`; logits come from an untied `Dense` inside `LocalDecoder` and there is no per-byte hidden state to read. A head would need a layer change |
+
+The 15 task-head classes (BERT, DistilBERT, ModernBERT, FNet, TreeTransformer,
+GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3, Zamba2,
+HNet) are the ones that hold the same-weights head-swap contract; the exempt
+table above is the complete list of the rest of `language/`.
+
 ## Trainer wiring (Pattern 3)
 
 `src/train/*/{pretrain,finetune}.py` + `train.common.nlp`: `create_tokenizer`,
@@ -185,6 +228,17 @@ Reusing a backbone under a new head:
 local estimator), `create_warmup_lr_schedule`. Byte-level models (`vocab_size=256`)
 cannot use the tiktoken pipeline — use `dl_techniques.datasets.byte_lm`.
 `train_step` uses `tf.GradientTape` directly: TF backend only.
+
+Fine-tuning a headless encoder checkpoint under a sentiment head (`src/train/{bert,
+fnet,tree_transformer}/finetune.py`, `src/train/bert/wikipedia/finetune.py`) goes
+through `train.common.nlp.build_sentiment_model_from_encoder(model_cls,
+encoder_path, num_classes)`: it reads the archive's own config, rebuilds the class
+with `include_top=True` and restores the backbone through the shared load rule, so
+a missing, unreadable or incompatible checkpoint RAISES (there is no random-weights
+fallback). `set_backbone_trainable(model, False)` leaves only `task_head` trainable
+(stage 1); `set_backbone_trainable(model, True)` unfreezes every layer (stage 2),
+by loop, because `model.trainable = True` after a per-layer freeze is a no-op. The
+saved artifact is the model class itself with a head named `task_head`.
 
 ## Backbones that cannot use the shared transformer stack
 

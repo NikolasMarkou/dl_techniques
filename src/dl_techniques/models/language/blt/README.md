@@ -434,6 +434,9 @@ test_blt_forward()
 **Q: Can I use `layer_norm` instead of `zero_centered_rms_norm`?**
 *   **A:** Yes, by changing the config `normalization_type`. However, `zero_centered_rms_norm` provides superior stability for deep architectures.
 
+**Q: `ValueError: seq_len=... exceeds max_sequence_length=...`?**
+*   **A:** The byte sequence is longer than the position limit of the local encoder/decoder; truncate it to `max_sequence_length` bytes or build with a larger one. The refusal holds on every path (eager, `predict`/`fit` retraces, XLA). An old `.keras` archive whose recorded input shape exceeds the limit loads with a warning rather than being refused.
+
 **Q: My loss is NaN.**
 *   **A:** Check if `gradient_clipping_by_norm` is enabled in your `optimizer_builder` config. It is required for BLT.
 

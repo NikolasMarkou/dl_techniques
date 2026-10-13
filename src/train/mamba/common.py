@@ -46,29 +46,19 @@ wrapper wraps every label tensor as ``{"logits": y}`` because its four
 DICT-output callers (GPT-2, wave_field, cliffordnet) already bake an LM
 head into their own ``call()`` and return ``{"logits": ...}`` directly.
 ``Mamba2.call`` returns a dict too, but only ``{"last_hidden_state":
-...}`` -- the package ships no CLM head at all (unlike ``mamba_v1``'s
-``create_mamba_with_head``, which has no v2 counterpart). Wrapping THAT
-dict as ``{"logits": y}`` would still leave the model with no head to
-produce a "logits" output in the first place; ``CausalLanguageModel``
-supplies that head now instead.
+...}`` -- the package ships no CLM head at all. Wrapping THAT dict as
+``{"logits": y}`` would leave the model with no head to produce a "logits"
+output in the first place; ``CausalLanguageModel`` supplies that head now
+instead.
 
-ADDENDUM 2026-09-13, plan-2026-09-13T073704-245ab5d5/D-012: the
-"``create_mamba_with_head``, which has no v2 counterpart" aside above is
-still accurate as written (``create_mamba_with_head`` remains v1-only, and
-this module still does not route through it for the reason given above) --
-but ``mamba_v1`` now DOES have its own CLM trainer, in ``common_v1.py`` +
-``train_mamba_v1.py`` in this same package, built the same way this module
-is (a bare ``Mamba`` backbone wrapped in ``CausalLanguageModel``, NOT
-through ``create_mamba_with_head``). See ``common_v1.py``'s module docstring
-and this plan's ``decisions.md`` D-012.
-
-SUPERSEDED 2026-10-11 (plan-2026-10-11T004932-b83935e1 step 9): both
-``create_mamba_with_head`` and the later ``create_mamba2_with_head`` are
-deleted. ``Mamba`` and ``Mamba2`` take ``include_top=True`` plus a
-``task_config`` for a POOLED task head instead (``create_mamba`` /
-``create_mamba2`` are the variant factories). Neither is a CLM head, so the
-reasoning above is unchanged: this module still wraps the headless backbone in
-``CausalLanguageModel``.
+``Mamba`` and ``Mamba2`` take ``include_top=True`` plus a ``task_config`` for a
+POOLED task head (``create_mamba`` / ``create_mamba2`` are the variant
+factories). Neither is a CLM head, so this module wraps the headless backbone
+in ``CausalLanguageModel``. ``mamba_v1`` has its own CLM trainer, in
+``common_v1.py`` + ``train_mamba_v1.py`` in this same package, built the same
+way (a bare ``Mamba`` backbone wrapped in ``CausalLanguageModel``); see
+``common_v1.py``'s module docstring and
+``plan-2026-09-13T073704-245ab5d5/decisions.md`` D-012.
 
 Public surface:
     * :data:`VARIANT_NAMES` -- the shipped :data:`Mamba2.MODEL_VARIANTS` keys

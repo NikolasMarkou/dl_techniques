@@ -117,7 +117,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `gemma/` | Gemma LLM |
 | `gpt2/` | GPT-2 architecture |
 | `hrm/` | HRM |
-| `hnet/` | H-Net — tokenizer-free byte LM whose chunk boundaries are learned; a recursive encoder/chunk/inner/dechunk/decoder hierarchy over `layers/dynamic_chunking/`. No pretrained weights; the divergences from the reference are enumerated in its own README (`grep -c '^### 5\.'` re-derives the count there, rather than restating it here) |
+| `hnet/` | H-Net — tokenizer-free byte LM whose chunk boundaries are learned; a recursive encoder/chunk/inner/dechunk/decoder hierarchy over `layers/dynamic_chunking/`. Owns an optional task head (`include_top=True`, `task_config`). No pretrained weights; the divergences from the reference are enumerated in its own README (`grep -c '^### 5\.'` re-derives the count there, rather than restating it here) |
 | `mamba/` | Mamba, selective state space |
 | `mini_vec2vec/` | Mini Vec2Vec |
 | `modern_bert/` | ModernBERT |
@@ -126,7 +126,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `topolm/` | TopoLM — GPT-2-shaped decoder whose every attention and feed-forward branch output carries a spatial-smoothness penalty over a `h x w` unit grid (`h * w == embed_dim`). Only the `paper` variant is quoted data (784 units, 28x28 grid, 12 blocks); `small`/`tiny` are repo-authored scales and are deliberately unpinned. No pretrained weights |
 | `tree_transformer/` | Tree Transformer |
 | `wave_field/` | wave-field LLM |
-| `zamba2/` | Zamba2 — hybrid Mamba2 + shared-attention SSM/Transformer LM; per-depth `mamba/` Mamba2 blocks interleave with a small number of **shared** attention+MLP mem-blocks reused at multiple depths, each reuse carrying its own per-occurrence LoRA delta. No pretrained weights |
+| `zamba2/` | Zamba2 — hybrid Mamba2 + shared-attention SSM/Transformer LM; per-depth `mamba/` Mamba2 blocks interleave with a small number of **shared** attention+MLP mem-blocks reused at multiple depths, each reuse carrying its own per-occurrence LoRA delta. Owns an optional task head (`include_top=True`, `task_config`). No pretrained weights |
 
 Packages here are filed by input modality — token sequences — which is not a claim that
 `mamba` or `fnet` is only a language model. (`fftnet` was filed here for the same

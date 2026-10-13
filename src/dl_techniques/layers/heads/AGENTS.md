@@ -68,16 +68,29 @@ still load.
 - `nlp/model_head.py` — helpers for a language model that owns its task head
   (`include_top=True`): `validate_task_head_knobs(include_top, task_config,
   head_config_overrides)` (the two knob `ValueError`s, one source),
-  `build_model_task_head(task_config, input_dim, ...)`
+  `build_model_task_head(task_config, input_dim, ..., vocab_size=None)`
   (dict or `NLPTaskConfig`; refuses `MULTIPLE_CHOICE`; `default_pooling` only
-  when the overrides set no `pooling_type`; head named `task_head`),
-  `task_config_to_dict(...)` for the model's `get_config`, and
+  when the overrides set no `pooling_type`; head named `task_head`;
+  `vocab_size` is the model's own vocabulary: a generation-type head
+  (`TEXT_GENERATION`, `MASKED_LANGUAGE_MODELING`, `TEXT_COMPLETION`,
+  `TEXT_SUMMARIZATION`) fills an unset `vocabulary_size` of a dict config from
+  it and raises `ValueError` on a different explicit value, an `NLPTaskConfig`
+  that leaves the 32000 default unset on a model of another vocabulary raises
+  too, other task types ignore it, `None` checks nothing; every language model
+  passes it),
+  `task_config_to_dict(task_config, vocab_size=None)` for the model's
+  `get_config`, and
   `finalize_head_outputs(...)` (drop `probabilities`/`predictions` beside
   `logits`, unwrap a single-key dict to a bare tensor), and
   `head_attention_mask(input_ids, attention_mask, pad_token_id, dtype)` (the
   caller's mask, else `input_ids != pad_token_id`, else all ones when `pad_token_id` is `None`,
   cast to `dtype`; for causal
-  backbones that run without a mask but pool `'last'`).
+  backbones that run without a mask but pool `'last'`), and
+  `head_output_shape(task_head, input_shape, hidden_size)` plus
+  `ids_shape_of(input_shape)` (the shapes `finalize_head_outputs` would give,
+  from shapes alone, so a headed model's `compute_output_shape` reports what
+  `call` returns). Both shape helpers are shared by the 15 language models but
+  not exported from `nlp/__init__.py`; import them from `nlp.model_head`.
 - `vision/factory.py` — `create_vision_head(task_type, ...)`,
   `create_enhancement_head(...)`, `create_multi_task_head(...)`,
   `HeadConfiguration`.

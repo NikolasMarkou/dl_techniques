@@ -439,7 +439,8 @@ The `Mamba`, `Mamba2`, and all their custom layers are fully serializable using 
 ```python
 import keras
 # Import all custom classes used by the model you are loading
-from dl_techniques.models.language.mamba.mamba_v2 import Mamba2, Mamba2Layer, Mamba2ResidualBlock
+from dl_techniques.models.language.mamba.mamba_v2 import Mamba2
+from dl_techniques.layers.ssm.mamba2 import Mamba2Layer, Mamba2ResidualBlock
 
 model = Mamba2.from_variant("130m", vocab_size=1000)
 # ... train the model ...

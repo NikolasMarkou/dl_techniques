@@ -3,14 +3,12 @@
 Mamba-1 (``dl_techniques.models.language.mamba.mamba_v1.Mamba``) is
 architecturally identical in shape to Mamba-2 for this purpose: a headless
 encoder whose ``call()`` returns ``{"last_hidden_state": ...}`` only, storing
-its embedding under ``self.embedding``. It has NO separate CLM-head
-counterpart to route through -- ``create_mamba_with_head`` (also in
-``mamba_v1.py``) bakes a POOLED task head (classification/regression via
-``pooling_type='last'``), which is architecturally wrong for next-token CLM
-pretraining (every position needs to be scored, not just the last); it is
-irrelevant here. (SUPERSEDED 2026-10-11: that function is deleted; the same
-pooled head is now ``Mamba(include_top=True, task_config=...)``, equally
-irrelevant to CLM pretraining.) So this module is a near-verbatim clone of
+its embedding under ``self.embedding``. The pooled task head it can own
+(``Mamba(include_top=True, task_config=...)``: classification/regression via
+``pooling_type='last'``) is architecturally wrong for next-token CLM
+pretraining (every position needs to be scored, not just the last), so this
+trainer builds the headless model and ``CausalLanguageModel`` supplies the
+LM head. So this module is a near-verbatim clone of
 ``train.mamba.common`` (the Mamba-2 trainer), substituting ``Mamba`` for
 ``Mamba2`` throughout -- see
 ``plans/plan-2026-09-13T073704-245ab5d5/decisions.md`` D-002/D-012.
