@@ -685,9 +685,9 @@ def build_sentiment_model_from_encoder(
         raise FileNotFoundError(f"Pretrained encoder not found: {encoder_path}")
     archive = read_checkpoint_config(encoder_path)
     config = archive.get("config")
-    if not isinstance(config, dict) or not str(
-        archive.get("class_name", "")
-    ).endswith(model_cls.__name__):
+    # Exact, not a suffix: "DistilBERT" and "ModernBERT" end with "BERT". The
+    # archive's class_name is the bare name in new and legacy archives alike.
+    if not isinstance(config, dict) or archive.get("class_name") != model_cls.__name__:
         raise ValueError(
             f"{encoder_path!r} is not a readable {model_cls.__name__} archive "
             f"(class_name={archive.get('class_name')!r})."
@@ -702,6 +702,8 @@ def build_sentiment_model_from_encoder(
         **{key: value for key, value in config.items() if key != "name"},
         "include_top": True,
         "task_config": task_config_to_dict(task_config),
+        # The archive's head overrides belong to its old head, not the new one.
+        "head_config_overrides": None,
     })
     model.load_pretrained_weights(encoder_path)
     logger.info(

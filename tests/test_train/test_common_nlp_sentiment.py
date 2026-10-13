@@ -17,6 +17,10 @@ What each group pins, and why it is not satisfied by construction:
     * a load that fails RAISES (a checkpoint without its weights file is a real
       failure the loader reports; a builder that swallowed it would hand back a
       random-init model that trains from scratch and reports success).
+``TestBuilderTakesOnlyTheArchitecture``
+    * the archive's ``head_config_overrides`` never reach the new head (a
+      mean-pooled archive head still gives CLS pooling);
+    * the class match is exact: a ``DistilBERT`` archive is refused for ``BERT``.
 ``TestSetBackboneTrainable``
     * head-only means the trainable set IS the head's variables (by identity)
       and one optimizer step moves no backbone value;
@@ -37,6 +41,7 @@ import pytest
 
 from dl_techniques.layers.heads.nlp import NLPTaskType
 from dl_techniques.models.language.bert import BERT
+from dl_techniques.models.language.distilbert import DistilBERT
 from dl_techniques.models.language.fnet import FNet
 from dl_techniques.models.language.tree_transformer import TreeTransformer
 from train.common.nlp import build_sentiment_model_from_encoder, set_backbone_trainable
@@ -218,6 +223,58 @@ class TestBuilder:
             build_sentiment_model_from_encoder(cls, broken, 2)
         assert not isinstance(caught.value, (FileNotFoundError, KeyboardInterrupt))
         assert "weights" in str(caught.value).lower() or "archive" in str(caught.value).lower()
+
+
+class TestBuilderTakesOnlyTheArchitecture:
+    """The archive gives the architecture; nothing of its head, nor another class.
+
+    Plan plan-2026-10-13T035756-5dd4d94d, step 7 (review item W4).
+    """
+
+    def test_the_archive_head_overrides_are_not_carried_into_the_new_head(
+        self, tmp_path
+    ):
+        """A head saved with ``pooling_type="mean"`` gives a CLS-pooled new head.
+
+        The docstring promises "a fresh ``task_head`` (CLS pooling, bare
+        logits)". A rebuild that copied every archive config key carried
+        ``head_config_overrides`` along, so the new head pooled by mean.
+        """
+        _, geometry = CLASSES["bert"]
+        source = BERT.from_variant(
+            "tiny",
+            include_top=True,
+            task_config=_sentiment_task(),
+            head_config_overrides={"pooling_type": "mean"},
+            **geometry,
+        )
+        source(_inputs(1), training=False)
+        # Non-vacuous: the archive really records a mean-pooled head.
+        assert source.task_head.pooling_type == "mean"
+        path = str(tmp_path / "bert_mean_head.keras")
+        source.save(path)
+
+        model = build_sentiment_model_from_encoder(BERT, path, num_classes=2)
+        assert not model.get_config()["head_config_overrides"]
+        assert model.task_head.pooling_type == "cls"
+
+    def test_an_archive_whose_class_name_only_ends_with_the_class_is_refused(
+        self, tmp_path
+    ):
+        """``DistilBERT`` ends with ``BERT``: the class match must be exact.
+
+        A suffix match let a DistilBERT archive through for ``BERT``; it then
+        died inside ``from_config`` on DistilBERT's own keyword arguments
+        instead of the builder's refusal.
+        """
+        encoder = DistilBERT.from_variant(
+            "tiny", vocab_size=VOCAB, max_position_embeddings=LENGTH
+        )
+        encoder(_inputs(1), training=False)
+        path = str(tmp_path / "distilbert.keras")
+        encoder.save(path)
+        with pytest.raises(ValueError, match="not a readable BERT archive"):
+            build_sentiment_model_from_encoder(BERT, path, 2)
 
 
 @ALL
