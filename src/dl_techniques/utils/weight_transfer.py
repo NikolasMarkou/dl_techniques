@@ -569,6 +569,8 @@ def _backbone_config(ckpt_path: str) -> Dict[str, Any]:
     # require the checkpoint to be the bare class -- the dispatching factories return the wrapper,
     # so that is what users save, and without this a headed wrapper cannot warm-start a headless
     # model and a vocabulary change is a shape mismatch. See decisions.md.
+    # Superseded 2026-10-13: the factories return the class, so the wrapper case applies only
+    # to old archives.
     config = read_checkpoint_config(ckpt_path).get("config") or {}
     layers = config.get("layers")
     if "vocab_size" in config or not isinstance(layers, list):
@@ -609,6 +611,11 @@ def vocab_change(
     """
     config = _backbone_config(ckpt_path)
     recorded = config.get("vocab_size")
+    # DECISION plan-2026-10-13T035756-5dd4d94d/D-007: HNet records its vocabulary only in
+    # arch_config.vocab_size (origin: plan-2026-10-11T170958-dc4d2202 D-017). Do NOT drop this
+    # fallback or replace it with a top-level key or a class default: HNet's top-level config has no
+    # vocab_size, so a vocabulary change would read as "no change" and raise as a shape mismatch
+    # instead of keeping only the token table fresh.
     if recorded is None and isinstance(config.get("arch_config"), dict):
         recorded = config["arch_config"].get("vocab_size")
     if recorded is None or recorded == vocab_size:

@@ -55,10 +55,12 @@ Two more groups sit below the subject arms:
 ``NO_LIMIT`` (``test_a_model_without_a_position_limit_serves_any_length``)
     Models with no position limit must NOT be guarded: Mamba, Mamba2, Zamba2
     with no ``g`` position (the shared attention, the only RoPE table, is never
-    run) and HNet whose attention is only in an inner stage or absent (inner
-    stages see at most ``max_chunks`` positions; the cap truncates silently,
-    which is out of scope). Each serves a length 2.5x or more over the
-    constructor's ``max_seq_len``, finite, eagerly and under ``jit_compile=True``.
+    run), ModernBERT with fewer layers than ``global_attention_interval`` (no
+    global layer, so no RoPE table) and HNet whose attention is only in an
+    inner stage or absent (inner stages see at most ``max_chunks`` positions;
+    the cap truncates silently, which is out of scope). Each serves a length
+    2.5x or more over the constructor's ``max_seq_len``, finite, eagerly and
+    under ``jit_compile=True``.
     This is also the arm that goes RED if a guard is wired unconditionally.
 ``test_an_archive_with_an_over_long_recorded_shape_loads_every_weight``
     Every subject rebuilds from the shape recorded in its ``.keras`` archive.
@@ -621,6 +623,13 @@ NO_LIMIT = [
             _hnet(["m1", ["T1"], "m1"]), (8, 40)),
     NoLimit("hnet_without_attention",
             _hnet(["m1", ["m1"], "m1"]), (8, 40)),
+    # Two layers under the default global_attention_interval of 3: no global
+    # layer, so no RoPE table and no limit (the guarded subject has three).
+    NoLimit("modern_bert_without_global_layer", _tiny(
+        _LANG + "modern_bert.model", "ModernBERT", hidden_size=32,
+        num_layers=2, num_heads=2, intermediate_size=64,
+        max_position_embeddings=16, local_attention_window_size=8,
+    ), (8, 40)),
 ]
 
 

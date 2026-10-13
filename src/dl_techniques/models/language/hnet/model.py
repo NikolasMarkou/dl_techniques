@@ -718,6 +718,11 @@ class HNet(RecordedBuildShapeMixin, keras.Model):
             # success), drop TASK_HEAD_NAME (a head of equal shape would be copied) or drop the
             # `lm_head` top (a tied headless checkpoint would then fill an untied model with
             # nothing, and an untied one would be dropped into a tied model). See decisions.md.
+            # DECISION plan-2026-10-13T035756-5dd4d94d/D-007: HNet goes through the shared load rule,
+            # which reads the checkpoint's vocabulary from its arch_config.vocab_size (origin:
+            # plan-2026-10-11T170958-dc4d2202 D-017). Do NOT give HNet its own loader or take its
+            # vocabulary from a top-level key or a class default: a vocabulary change would then
+            # raise as a shape mismatch instead of keeping only the embeddings/lm_head tables fresh.
             load_backbone_from_checkpoint(
                 model,
                 weights_path,

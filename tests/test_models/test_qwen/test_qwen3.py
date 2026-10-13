@@ -834,11 +834,16 @@ class TestQwen3ModelErrorHandling:
                     num_attention_heads=4, num_key_value_heads=2,
                     max_seq_len=16, moe_layers=[])
 
-        # A negative class count cannot build its head
-        model = create_qwen3("tiny", **tiny, include_top=True, task_config=NLPTaskConfig(
-            name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=-1))
-        with pytest.raises(ValueError, match="Negative dimensions"):
-            model(batch)
+        # A class count below 1 is refused at construction, in the config
+        # itself or in a dict task_config the model converts
+        for count in (0, -1):
+            with pytest.raises(ValueError, match="positive integer"):
+                NLPTaskConfig(name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                              num_classes=count)
+            with pytest.raises(ValueError, match="positive integer"):
+                create_qwen3("tiny", **tiny, include_top=True, task_config={
+                    "name": "clf", "task_type": "text_classification",
+                    "num_classes": count})
 
         # An unknown pooling type is refused by the head
         model = create_qwen3("tiny", **tiny, include_top=True, task_config=_CLF,

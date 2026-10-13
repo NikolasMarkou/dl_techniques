@@ -16,6 +16,7 @@ The types name tasks, not models, so heads on BERT, GPT and T5 all take the
 same config.
 """
 
+import numbers
 from enum import Enum, unique
 from dataclasses import dataclass
 from typing import List, Set, Dict, Optional, Any
@@ -469,7 +470,7 @@ class NLPTaskConfig:
                        ▼
         ┌──────────────────────────────┐        ┌────────────┐
         │ classification task without  │─ yes ─►│ ValueError │
-        │ num_classes?                 │        └────────────┘
+        │ a positive int num_classes?  │        └────────────┘
         └──────────────┬───────────────┘
                        │ no
                        ▼
@@ -531,14 +532,15 @@ class NLPTaskConfig:
         Reconcile the label fields, then validate and fill defaults.
 
         ``num_classes`` and ``num_labels`` end up equal when either was given.
-        Classification tasks must carry a class count. Generation tasks get a
+        Classification tasks must carry a class count that is a positive
+        integer (numpy integers count; a bool does not). Generation tasks get a
         default vocabulary size when none was supplied.
 
         :return: Nothing. The instance is modified in place.
         :rtype: None
         :raises ValueError: If the task type is a classification task and
             ``num_classes`` is still None after the label fields are
-            reconciled.
+            reconciled, or is not a positive integer.
         """
         # Handle num_classes/num_labels ambiguity
         if self.num_labels is not None and self.num_classes is None:
@@ -555,8 +557,21 @@ class NLPTaskConfig:
             NLPTaskType.PART_OF_SPEECH_TAGGING,
         ]
 
-        if self.task_type in classification_tasks and self.num_classes is None:
-            raise ValueError(f"{self.task_type} requires num_classes to be specified")
+        if self.task_type in classification_tasks:
+            if self.num_classes is None:
+                raise ValueError(f"{self.task_type} requires num_classes to be specified")
+            # bool is an int subclass, so True would pass as one class; numpy
+            # integers are numbers.Integral and pass. 0 used to build an
+            # (N, 0) head silently and -1 failed only on the first call.
+            if (
+                    isinstance(self.num_classes, bool)
+                    or not isinstance(self.num_classes, numbers.Integral)
+                    or self.num_classes < 1
+            ):
+                raise ValueError(
+                    f"{self.task_type} requires num_classes (or num_labels) "
+                    f"to be a positive integer, got {self.num_classes!r}."
+                )
 
         # Set vocabulary size for generation tasks.
         #

@@ -16,6 +16,9 @@ Covers:
 * ``head_attention_mask`` returns the caller's mask when given, else
   ``input_ids != pad_token_id``, else (no pad id either) all ones, in the
   requested dtype.
+* ``NLPTaskConfig`` refuses a classification class count that is not a
+  positive integer (0, -1, a bool, a float), on the config and through a
+  model's ``task_config`` dict; numpy integers are accepted.
 """
 
 import json
@@ -37,6 +40,7 @@ from dl_techniques.layers.heads.nlp import (
     task_config_to_dict,
     validate_task_head_knobs,
 )
+from dl_techniques.models.language.bert.model import create_bert
 
 # ---------------------------------------------------------------------
 
@@ -362,6 +366,51 @@ def test_a_task_that_is_not_generation_ignores_the_model_vocabulary() -> None:
         _classification_config(), input_dim=D, vocab_size=_MODEL_VOCAB)
     out = head(_head_inputs(), training=False)
     assert tuple(out["logits"].shape) == (B, 3)
+
+
+# ---------------------------------------------------------------------
+# a classification class count must be a positive integer
+# ---------------------------------------------------------------------
+
+_BAD_CLASS_COUNTS = [0, -1, True, False, 3.0]
+_BAD_IDS = ["zero", "minus_one", "true", "false", "float"]
+
+
+class TestClassificationClassCount:
+    """A count of 0 built an ``(N, 0)`` head silently; -1 failed only on the
+    first call ("Negative dimensions"). The removed per-task Qwen/Gemma
+    factories refused both; the config now refuses them for every model."""
+
+    @pytest.mark.parametrize("count", _BAD_CLASS_COUNTS, ids=_BAD_IDS)
+    @pytest.mark.parametrize("field", ["num_classes", "num_labels"])
+    def test_the_config_refuses_it(self, count, field) -> None:
+        with pytest.raises(ValueError, match="positive integer"):
+            NLPTaskConfig(
+                name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                **{field: count})
+
+    @pytest.mark.parametrize("count", [0, -1], ids=["zero", "minus_one"])
+    def test_a_model_refuses_it_at_construction(self, count) -> None:
+        task_config = {
+            "name": "clf", "task_type": "text_classification",
+            "num_classes": count,
+        }
+        with pytest.raises(ValueError, match="positive integer"):
+            create_bert("tiny", include_top=True, task_config=task_config)
+
+    @pytest.mark.parametrize(
+        "count", [1, 3, np.int32(3), np.int64(3)],
+        ids=["one", "three", "np_int32", "np_int64"])
+    def test_a_positive_integer_is_accepted(self, count) -> None:
+        cfg = NLPTaskConfig(
+            name="clf", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
+            num_classes=count)
+        assert cfg.num_classes == cfg.num_labels == count
+
+    def test_a_task_that_is_not_classification_is_not_checked(self) -> None:
+        cfg = NLPTaskConfig(
+            name="qa", task_type=NLPTaskType.QUESTION_ANSWERING, num_classes=0)
+        assert cfg.num_classes == 0
 
 
 # ---------------------------------------------------------------------

@@ -359,20 +359,22 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # 2026-10-13; pre-existing drift, already missing from this set at
         # 240f07513).
         "alexnet",
-        # gemma: README:464 names `pretrained=True` only to say it raises
+        # gemma: README:467 names `pretrained=True` only to say it raises
         # beside the working `pretrained="<path>.keras"` form;
-        # `pretrained_path_or_raise` (called from gemma3.py:754) really does
+        # `pretrained_path_or_raise` (called from gemma3.py:639) really does
         # `raise NotImplementedError`, verified by EXECUTING
         # `create_gemma3("270m", pretrained=True)`. Both halves checked (new
         # in plan-2026-10-11T170958-dc4d2202 step 8b, re-derived 2026-10-13).
         "gemma",
-        # qwen: README:176 names `pretrained=True` only to say it raises;
-        # `pretrained_path_or_raise` (called from qwen3.py:891 and
-        # qwen3_next.py:867) really does `raise NotImplementedError`, verified
-        # by EXECUTING `create_qwen3("0.6b", pretrained=True)` and
-        # `create_qwen3_next("tiny", pretrained=True)`. Both halves checked
+        # qwen: README:183 names `pretrained=True` only to say it raises;
+        # `pretrained_path_or_raise` (called from qwen3.py:665 and
+        # qwen3_next.py:630) really does `raise NotImplementedError`, verified
+        # by EXECUTING `create_qwen3("tiny", pretrained=True)` and
+        # `create_qwen3_next("tiny", pretrained=True)` (Qwen3 has no "0.6b"
+        # variant: `create_qwen3("0.6b", ...)` raises "Unknown variant"; its
+        # variants are 30b-coder, medium, small, tiny). Both halves checked
         # (new in plan-2026-10-11T170958-dc4d2202 step 8b, re-derived
-        # 2026-10-13).
+        # 2026-10-13 after the factory normalization).
         "qwen",
         # topographic_vae: README:101 names `pretrained=True` only to say it
         # raises; model.py:1285 really does `raise NotImplementedError`,

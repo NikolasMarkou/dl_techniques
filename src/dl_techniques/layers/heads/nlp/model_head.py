@@ -451,6 +451,10 @@ def head_attention_mask(
     :rtype: keras.KerasTensor
     """
     if attention_mask is None:
+        # DECISION plan-2026-10-13T035756-5dd4d94d/D-006: with neither a mask nor a pad id nothing
+        # is padding (origin: plan-2026-10-11T170958-dc4d2202 D-008). Do NOT restore a 0 default
+        # for pad_token_id here or in the decoders: id 0 is a real token in the GPT2 and Qwen
+        # vocabularies, so a 0 default silently drops it from the pooled positions.
         if pad_token_id is None:
             attention_mask = keras.ops.ones_like(input_ids)
         else:

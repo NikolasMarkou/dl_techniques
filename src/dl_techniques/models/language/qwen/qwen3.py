@@ -672,6 +672,8 @@ class Qwen3(RecordedBuildShapeMixin, keras.Model):
             # wrapper's core, never `model.load_weights` (it restores nothing on a
             # name or shape mismatch and reports success); do NOT drop TASK_HEAD_NAME
             # (a head of equal shape would be copied). See decisions.md.
+            # Superseded 2026-10-13: the factories return the class, not a wrapper; the
+            # wrapper case applies only to old archives, which the shared rule unwraps.
             load_backbone_from_checkpoint(
                 model,
                 weights_path,
