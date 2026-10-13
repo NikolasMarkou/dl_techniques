@@ -79,6 +79,16 @@ Inside model.call() (ONE thought step)
 3.  **Output generation.** `logits = lm_head(z_H_new)`, and `(q_halt, q_continue) = q_head(z_H_new[:, 0])`.
 4.  **Halting and state update.** Increment `steps`, update the `halted` mask from `q_halt`, `q_continue` and `halt_max_steps`, then apply `keras.ops.stop_gradient` to `z_H_new` and `z_L_new` before storing them in the new carry, which prevents backpropagation through time.
 
+### How this differs from the paper's recursion
+
+The update above is this repository's, and it is not the published one. The published recursion, as Sghaier et al. (2026, arXiv:2605.19943, Sec. 2) state it for TRM, uses one shared 2-layer network `f`: `z ← f(x + y + z)` `n` times, then `y ← f(y + z)`. The reference [trm.py](https://github.com/SamsungSAILMontreal/TinyRecursiveModels/blob/main/models/recursive_reasoning/trm.py) runs `z_L ← L_level(z_L, z_H + x)` `L_cycles` times, then `z_H ← L_level(z_H, z_L)` with the same `L_level`, and repeats that `H_cycles` times (all but the last without gradient). Here:
+
+- `z_L`'s update never reads `z_H`: `L_level` adds only the token embeddings;
+- `L_level` and `H_level` are separate networks, so the same width has about twice the weights of the reference;
+- each step makes one `z_L` and one `z_H` update, with no inner `n`-step recursion.
+
+The roles match: the heads read `z_H` (the paper's answer state `y`), and `z_H` is computed from the updated `z_L` (the reasoning latent `z`).
+
 ---
 
 ## 4. Architecture Deep Dive

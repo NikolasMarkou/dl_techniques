@@ -15,6 +15,13 @@ before any dataset, device or config was involved. `_create_model` now calls
 `model.build()`, which `HierarchicalReasoningModel` implements as an
 input_shape-ignoring materialisation of its reasoning core.
 
+Since 2026-10-13 `_create_model` no longer calls the factory: it calls the
+`HierarchicalReasoningModel` constructor with the config's explicit
+hyperparameters and then `build()`, because the factory now takes a variant
+and leaves the compile to the caller (decisions.md D-015,
+plan-2026-10-13T035756-5dd4d94d). The test still guards the same failure:
+`__init__` must complete on the real constructor path.
+
 Note on the earlier test coverage of this class: the existing suite constructs
 `HRMTrainer` via `object.__new__` plus a lambda, so NEITHER the real `__init__`
 NOR the real `train_step` ever ran, which is why 12 of 34 step-override sites

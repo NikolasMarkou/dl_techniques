@@ -24,6 +24,7 @@ import tensorflow as tf
 
 from dl_techniques.models.language.ptrm import (
     PTRM,
+    create_ptrm,
     get_ppbench_config,
     get_sudoku_extreme_config,
     get_maze_hard_config,
@@ -73,33 +74,28 @@ class PTRMTrainer:
         logger.info(f"Initialized PTRM Trainer with {self.model.count_params():,} parameters")
 
     def _create_model(self) -> PTRM:
-        model_config = self.config.get("model", {})
-        # Every hyperparameter is explicit here, so this is the constructor and
-        # not the variant factory (`create_ptrm(variant, ...)`).
-        model = PTRM(
-            vocab_size=model_config["vocab_size"],
-            seq_len=model_config["seq_len"],
-            hidden_size=model_config.get("hidden_size", 512),
-            num_heads=model_config.get("num_heads", 8),
-            expansion=model_config.get("expansion", 2.0),
-            puzzle_emb_len=model_config.get("puzzle_emb_len", 16),
-            h_layers=model_config.get("h_layers", 2),
-            l_layers=model_config.get("l_layers", 2),
-            halt_max_steps=model_config.get("halt_max_steps", 16),
-            halt_exploration_prob=model_config.get("halt_exploration_prob", 0.1),
-            no_act_continue=model_config.get("no_act_continue", True),
-            dropout_rate=model_config.get("dropout_rate", 0.0),
-            attention_type=model_config.get("attention_type", "group_query"),
-            ffn_type=model_config.get("ffn_type", "swiglu"),
-            normalization_type=model_config.get("normalization_type", "rms_norm"),
-            normalization_position=model_config.get("normalization_position", "post"),
-            attention_dropout_rate=model_config.get("attention_dropout_rate", 0.0),
-        )
+        """Build the model ``config["model"]`` describes.
 
-        # Build eagerly so count_params works in __init__ log
-        if not model.built:
-            model.build()
+        A config that names a ``variant`` (every ``--preset``) is built by
+        ``create_ptrm(variant, ...)``; its other keys are explicit overrides
+        laid over the variant. A config without one (``--preset quick``, the
+        bare CLI) states its whole architecture and goes to the constructor.
+        ``batch_size`` sizes the dataset in ``main()`` and is not a model
+        argument.
+        """
+        model_config = dict(self.config.get("model", {}))
+        model_config.pop("batch_size", None)
+        variant = model_config.pop("variant", None)
+        # DECISION plan-2026-10-13T035756-5dd4d94d/D-019: WHAT NOT TO DO: do not
+        # go back to the constructor with .get() defaults for a preset. That
+        # path dropped the preset's `variant`, and the result matched it only
+        # because the defaults happened to equal att_base. See decisions.md D-019.
+        if variant is not None:
+            return create_ptrm(variant, **model_config)
 
+        model = PTRM(**model_config)
+        # Built so count_params works in the __init__ log line.
+        model.build()
         return model
 
     def _create_optimizer(self) -> Tuple[keras.optimizers.Optimizer, Any]:

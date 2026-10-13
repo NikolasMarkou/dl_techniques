@@ -29,7 +29,7 @@ This simple mechanism allows PTRM to escape bad basins in the latent space where
 | Maze-Hard | 83.8% | 86.7% | +2.9 pp |
 | ARC-AGI-2 (pass@1) | 7.36% | 8.47% | +1.1 pp |
 
-PTRM achieves nearly **double the accuracy of frontier LLMs** on PPBench (91.2% vs 55.1%) at **less than 0.0001x the cost**, using only 7M parameters.
+PTRM achieves nearly **double the accuracy of frontier LLMs** on PPBench (91.2% vs 55.1%) at **less than 0.0001x the cost**, using only 7M parameters (the paper's model; this repository's TRM builds about twice that at the same width, see Section 5).
 
 ---
 
@@ -37,14 +37,22 @@ PTRM achieves nearly **double the accuracy of frontier LLMs** on PPBench (91.2% 
 
 ### The TRM Backbone
 
-TRM performs reasoning by recursively refining a latent state through a small shared network:
+TRM performs reasoning by recursively refining a latent state. One supervision step of this repository's TRM (`TRMInner.call`, `models/language/trm/components.py`) is:
 
 ```
-z_L ← L_level(z_L, input_emb)   # Low-level state (fast)
-z_H ← H_level(z_H, z_L)         # High-level state (slow)
+z_L ← L_level(z_L + input_emb)   # L_level adds its two inputs on entry
+z_H ← H_level(z_H + z_L)         # a SEPARATE network
 logits = lm_head(z_H)
 q_halt, q_continue = q_head(z_H[:, 0])
 ```
+
+That is not the paper's recursion. The paper (Sec. 2) uses one shared 2-layer network `f`: `z ← f(x + y + z)` `n` times, then `y ← f(y + z)`. The reference [trm.py](https://github.com/SamsungSAILMontreal/TinyRecursiveModels/blob/main/models/recursive_reasoning/trm.py) runs `z_L ← L_level(z_L, z_H + x)` `L_cycles` times, then `z_H ← L_level(z_H, z_L)` with the same `L_level`, and repeats that `H_cycles` times (all but the last without gradient). Here:
+
+- `z_L`'s update never reads `z_H`;
+- `L_level` and `H_level` are separate networks (about twice the weights at the same width, Section 5);
+- there is one `z_L` and one `z_H` update per supervision step, with no inner `n`-step recursion.
+
+The roles are the same: both heads read `z_H` (the paper's `y`), and `z_H` is computed from the updated `z_L` (the paper's `z`).
 
 The Q-head (`q_halt`, `q_continue`) is trained jointly as a correctness classifier for Adaptive Computation Time (ACT) halting. During standard TRM inference, the Q-head is **not used** — the model runs for a fixed number of steps.
 
@@ -84,6 +92,7 @@ logit both follow the paper by default:
 | Paper | Here |
 |---|---|
 | `y` (answer state), `z` (reasoning latent) | `z_H`, `z_L` (TRM code names). In the reference [trm.py](https://github.com/SamsungSAILMontreal/TinyRecursiveModels/blob/main/models/recursive_reasoning/trm.py), `z_L` is updated from `z_H + input_embeddings` (Sec. 2: `z ← f(x + y + z)`), `z_H` from `z_L` (`y ← f(y + z)`), and `lm_head` (`f_O`) and `q_head` (`f_Q`) both read `z_H` |
+| `z ← f(x + y + z)` `n` times, then `y ← f(y + z)`, one shared network (Sec. 2) | `z_L ← L_level(z_L + x)` once, then `z_H ← H_level(z_H + z_L)` once, two separate networks; `z_L` never reads `z_H` (see "The TRM Backbone") |
 | noise on `z` only (Fig. 4 left, line 6; Sec. 4 "to the latent state input") | noise on `z_L` only (`_inject_noise`); `z_H` is passed through unchanged |
 | `k* = argmax_k q̂_k`, `q̂ = f_Q(y_D)`, the halting logit trained against answer correctness (Fig. 4 left, lines 10 and 12; Sec. 2) | `q_halt` by default (`use_q_continue=False`); `use_q_continue=True` is an opt-in that selects by `q_continue` |
 
@@ -149,19 +158,19 @@ print(f"Selected rollout Q values: {best_q.numpy()}")
 ```python
 from dl_techniques.models.language.ptrm import PRESET_CONFIGS
 
-# Sudoku-Extreme (5M params, MLP variant)
+# Sudoku-Extreme: att_base, 13,764,610 trainable weights (attention; see Section 5)
 config = PRESET_CONFIGS["sudoku_extreme"]()
 model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 
-# PPBench puzzles (7M params, Attention variant)
+# PPBench puzzles: att_base, 14,064,642 trainable weights
 config = PRESET_CONFIGS["ppbench"]()
 model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 
-# Maze-Hard
+# Maze-Hard: att_base, 14,586,882 trainable weights
 config = PRESET_CONFIGS["maze_hard"]()
 model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 
-# ARC-AGI-2
+# ARC-AGI-2: att_base, 14,593,026 trainable weights
 config = PRESET_CONFIGS["arc_agi"]()
 model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 ```
@@ -184,20 +193,24 @@ model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 
 ## 5. Configuration & Model Variants
 
-PTRM uses the **exact same architecture variants as TRM**. The paper evaluates two main families:
+PTRM uses the TRM backbone. The paper evaluates two families, TRM-MLP (Sudoku-Extreme) and TRM-Att (PPBench, Maze-Hard, ARC-AGI-2). Only the attention family exists here:
 
-| Variant | Params | Attention | Use Case |
+| Variant | Trainable weights (Sudoku shape) | Mixer | Presets |
 |---------|--------|-----------|----------|
-| `mlp_base` | ~5M | Group-query (MLP-style) | Sudoku-Extreme |
-| `att_base` | ~7M | Group-query + RoPE | PPBench, Maze-Hard, ARC-AGI-2 |
+| `att_small` | 7,177,730 | Group-query attention + RoPE | none |
+| `att_base` | 13,764,610 | Group-query attention + RoPE | all four (Sudoku-Extreme, PPBench, Maze-Hard, ARC-AGI-2) |
+| `att_large` | 28,511,234 | Group-query attention + RoPE | none |
+
+Counts are `sum(prod(w.shape) for w in model.trainable_weights)` of a built model at `vocab_size=20, seq_len=81, puzzle_emb_len=16`. The non-trainable RoPE buffers are excluded. The embedding, `lm_head` and `H_init`/`L_init` grow with `vocab_size` and `seq_len`, so each preset's own count is in its helper's docstring and the Quick Start above.
+
+**These are not the paper's "5M"/"7M".** The reference TRM reuses one 2-layer network for both updates (`trm.py` ignores `H_layers`). This TRM has separate 2-layer `H_level` and `L_level` stacks (6,821,888 weights each in `att_base`), so the same width builds about twice the weights.
+
+**No `mlp_*` variants.** The paper's TRM-MLP replaces attention with an MLP over the sequence axis (`trm.py`'s `mlp_t`). `TRMReasoningModule` always builds `TransformerLayer` blocks and has no such mode. The `mlp_tiny`/`mlp_small`/`mlp_base` entries that used to be here were attention models under an MLP name (`mlp_base` was identical to `att_base`), so they were removed on 2026-10-13. The Sudoku-Extreme preset now names `att_base`, which builds the same model `mlp_base` did. For a smaller model, pass overrides: `create_ptrm("att_small", ..., hidden_size=256, num_heads=4)`.
 
 ### Variant Details
 
 ```python
 MODEL_VARIANTS = {
-    "mlp_tiny":    {"hidden_size": 256, "num_heads": 4,  "h_layers": 2, "l_layers": 2, "halt_max_steps": 8},
-    "mlp_small":   {"hidden_size": 384, "num_heads": 6,  "h_layers": 2, "l_layers": 2, "halt_max_steps": 10},
-    "mlp_base":    {"hidden_size": 512, "num_heads": 8,  "h_layers": 2, "l_layers": 2, "halt_max_steps": 16},
     "att_small":   {"hidden_size": 384, "num_heads": 6,  "h_layers": 2, "l_layers": 2, "halt_max_steps": 16},
     "att_base":    {"hidden_size": 512, "num_heads": 8,  "h_layers": 2, "l_layers": 2, "halt_max_steps": 16},
     "att_large":   {"hidden_size": 768, "num_heads": 12, "h_layers": 2, "l_layers": 2, "halt_max_steps": 16},

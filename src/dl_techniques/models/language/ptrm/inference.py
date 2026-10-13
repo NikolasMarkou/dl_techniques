@@ -35,16 +35,22 @@ class PTRMInference:
     end for
     return ŷ⁽ᵏ*⁾, k* = argmax_k q̂⁽ᵏ⁾
 
-    The `rec()` function refers to a deep recursion step (one supervision step
-    of the TRM model, which internally performs `n` latent recursions).
+    The `rec()` function is one deep recursion step, one supervision step of
+    the model. In the paper (Sec. 2) and the reference ``trm.py`` it is one
+    shared 2-layer network ``f`` run as ``z <- f(x + y + z)`` ``n`` times, then
+    ``y <- f(y + z)`` (``trm.py``: ``z_L <- L_level(z_L, z_H + x)``,
+    ``z_H <- L_level(z_H, z_L)``, with ``H_cycles - 1`` extra no-grad cycles).
+    This repository's TRM (``TRMInner.call``) computes, per supervision step,
+    ``z_L <- L_level(z_L + x)`` then ``z_H <- H_level(z_H + z_L)``: two separate
+    networks, one update each, no inner ``n``-step recursion, and ``z_L``
+    never reads ``z_H``.
 
-    :param model: Trained PTRM or TRM instance.
     Paper names to code names: ``z`` (reasoning latent) is ``z_L`` and ``y``
     (answer state, read by ``f_O`` = ``lm_head`` and ``f_Q`` = ``q_head``) is
-    ``z_H``, as in the reference TRM (``trm.py``: ``z_L`` is updated from
-    ``z_H + input_embeddings``, ``z_H`` from ``z_L``, both heads read ``z_H``).
-    Line 6 perturbs ``z_L`` only (:meth:`_inject_noise`), and line 12 selects by
-    ``q_halt`` (:meth:`_selection_q`).
+    ``z_H``. The roles match the reference despite the different update: the
+    heads read ``z_H`` only, and ``z_H`` is computed from the updated ``z_L``.
+    Line 6 perturbs ``z_L`` only (:meth:`_inject_noise`), and line 12
+    selects by ``q_halt`` (:meth:`_selection_q`).
 
     :param model: Trained PTRM or TRM instance.
     :param noise_scale: Standard deviation σ of Gaussian noise injected into
@@ -213,6 +219,16 @@ class PTRMInference:
         ``carry["inner_carry"]`` with shape (B, seq_len + puzzle_emb_len,
         hidden_size).
 
+        What the noisy ``z_L`` feeds differs from the paper. The paper's next
+        step is ``z <- f(x + y + z)`` (Sec. 2; reference ``trm.py``:
+        ``z_L <- L_level(z_L, z_H + x)``, one network shared with the ``y``
+        update). This repository's ``TRMInner.call`` computes
+        ``z_L <- L_level(z_L + x)`` and then ``z_H <- H_level(z_H + z_L)``, with
+        separate ``L_level`` and ``H_level`` networks and one update of each per
+        supervision step. Here the noise therefore reaches ``z_H`` only through
+        the updated ``z_L``, as in the paper, but ``z_L``'s own update never
+        sees ``z_H``.
+
         :param carry: Current carry state.
         :return: Updated carry: ``z_L`` plus noise, ``z_H`` the same tensor.
         """
@@ -221,8 +237,10 @@ class PTRMInference:
 
         # DECISION plan-2026-10-13T035756-5dd4d94d/D-018: WHAT NOT TO DO: do not
         # add noise to z_H as well. The paper perturbs z (line 6), which is z_L
-        # (reference trm.py: z_L <- L_level(z_L, z_H + x), z_H <- L_level(z_H,
-        # z_L), both heads read z_H). Noise on z_H perturbs the answer state y
+        # by role: in the REFERENCE trm.py z_L <- L_level(z_L, z_H + x) and
+        # z_H <- L_level(z_H, z_L), and both heads read z_H. (This repo's
+        # TRMInner differs: z_L <- L_level(z_L + x), z_H <- H_level(z_H + z_L);
+        # the roles are the same.) Noise on z_H perturbs the answer state y
         # directly, which the procedure does not do. See decisions.md D-018.
         noise_L = keras.random.normal(
             keras.ops.shape(z_L),

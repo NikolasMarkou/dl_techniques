@@ -18,6 +18,8 @@ EXECUTING it, so the last test here does.
 variant, purely for build cost.
 """
 
+import re
+
 import keras
 import numpy as np
 import pytest
@@ -81,7 +83,13 @@ class TestThePretrainedArgument:
     def test_a_checkpoint_of_another_width_is_refused(self, tmp_path) -> None:
         path = str(tmp_path / "hrm.weights.h5")
         create_hierarchical_reasoning_model("micro", **self._SMALL).save_weights(path)
-        with pytest.raises(ValueError):
+        # The loader's own refusal, not any ValueError: Keras cannot place the
+        # 32-wide kernels into the 64-wide model.
+        with pytest.raises(
+            ValueError,
+            match=(rf"Failed to load weights from {re.escape(path)}: "
+                   r"A total of \d+ objects could not be loaded"),
+        ):
             create_hierarchical_reasoning_model(
                 "micro", pretrained=path, **dict(self._SMALL, embed_dim=64))
 

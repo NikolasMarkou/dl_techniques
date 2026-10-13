@@ -761,6 +761,11 @@ class HierarchicalReasoningModel(keras.Model):
         # pass. A forward pass advances the ACT carry and drops variables under a StatelessScope.
         model.build()
 
+        # DECISION plan-2026-10-13T035756-5dd4d94d/D-015: WHAT NOT TO DO: do not
+        # compile here. from_variant returns the model built and UNCOMPILED; the
+        # optimizer and loss belong to the caller (train_hrm.py's ACT loop owns
+        # its optimizer; a fit() caller compiles itself). See decisions.md D-015.
+
         if weights_path is not None:
             load_weights_or_raise(model, weights_path)
         return model
@@ -923,6 +928,12 @@ def create_hierarchical_reasoning_model(
         ...     halt_exploration_prob=0.2
         ... )
     """
+    # DECISION plan-2026-10-13T035756-5dd4d94d/D-015: WHAT NOT TO DO: do not
+    # build an optimizer or compile here, and do not add a variant=None branch.
+    # Every language create_* delegates to from_variant with no logic, like
+    # create_resnet; the caller owns the compile (train_hrm.py's ACT loop, or
+    # loss={"logits": StableMaxCrossEntropy()} for fit()). The api-contract
+    # delegation sweep judges this body. See decisions.md D-015.
     return HierarchicalReasoningModel.from_variant(
         variant,
         vocab_size=vocab_size,

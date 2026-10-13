@@ -4,6 +4,8 @@ Tests cover model creation, forward pass, serialization, and PTRM-specific
 inference functionality.
 """
 
+import re
+
 import pytest
 import numpy as np
 from typing import Dict, Any
@@ -13,7 +15,7 @@ import tensorflow as tf
 
 from dl_techniques.models.language.ptrm import (
     PTRM, PTRMInference, create_ptrm,
-    get_ppbench_config, get_sudoku_extreme_config
+    get_ppbench_config, get_sudoku_extreme_config, PRESET_CONFIGS
 )
 
 from ..knob_sensitivity_oracle import (
@@ -142,17 +144,20 @@ class TestPTRMModelBasic:
 class TestPTRMModelConfigurations:
     """Test various model configurations and variants."""
 
-    def test_mlp_variants(self):
-        """Test MLP variant configurations."""
-        variants = ["mlp_tiny", "mlp_small", "mlp_base"]
-        for variant in variants:
-            model = create_ptrm(
-                variant=variant,
-                vocab_size=100,
-                seq_len=50,
-            )
-            assert isinstance(model, PTRM)
-            assert model.built
+    def test_there_are_no_mlp_variants(self):
+        """The ``mlp_*`` variants are gone: they built attention models.
+
+        Every ``mlp_*`` entry set ``attention_type="group_query"`` and
+        ``mlp_base`` equalled ``att_base``, while the paper's TRM-MLP replaces
+        attention with an MLP over the sequence axis (reference ``trm.py``,
+        ``mlp_t``). ``TRMReasoningModule`` always builds ``TransformerLayer``
+        blocks, so no such mode exists here to wire them to. See decisions.md
+        D-019 (plan-2026-10-13T035756-5dd4d94d).
+        """
+        assert set(PTRM.MODEL_VARIANTS) == {"att_small", "att_base", "att_large"}
+        for variant in ("mlp_tiny", "mlp_small", "mlp_base"):
+            with pytest.raises(ValueError, match=f"Unknown variant '{variant}'"):
+                create_ptrm(variant, vocab_size=100, seq_len=50)
 
     def test_att_variants(self):
         """Test Attention variant configurations."""
@@ -174,18 +179,18 @@ class TestPTRMModelConfigurations:
     def test_pretrained_true_raises(self):
         """No PTRM weights are distributed; a random model must not come back."""
         with pytest.raises(NotImplementedError):
-            create_ptrm("mlp_tiny", vocab_size=100, seq_len=16, pretrained=True)
+            create_ptrm("att_small", vocab_size=100, seq_len=16, pretrained=True)
 
     def test_a_local_checkpoint_is_restored(self, tmp_path):
         """``pretrained=<path>`` restores every variable of a same-shape model."""
         small = dict(vocab_size=100, seq_len=16, puzzle_emb_len=4,
                      hidden_size=32, num_heads=4, h_layers=1, l_layers=1)
         keras.utils.set_random_seed(1)
-        source = create_ptrm("mlp_tiny", **small)
+        source = create_ptrm("att_small", **small)
         path = str(tmp_path / "ptrm.weights.h5")
         source.save_weights(path)
         keras.utils.set_random_seed(2)
-        target = create_ptrm("mlp_tiny", pretrained=path, **small)
+        target = create_ptrm("att_small", pretrained=path, **small)
         assert len(target.weights) == len(source.weights)
         for a, b in zip(source.weights, target.weights):
             np.testing.assert_array_equal(
@@ -195,9 +200,15 @@ class TestPTRMModelConfigurations:
         small = dict(vocab_size=100, seq_len=16, puzzle_emb_len=4,
                      num_heads=4, h_layers=1, l_layers=1)
         path = str(tmp_path / "ptrm.weights.h5")
-        create_ptrm("mlp_tiny", hidden_size=32, **small).save_weights(path)
-        with pytest.raises(ValueError):
-            create_ptrm("mlp_tiny", pretrained=path, hidden_size=64, **small)
+        create_ptrm("att_small", hidden_size=32, **small).save_weights(path)
+        # The loader's own refusal, not any ValueError: Keras cannot place the
+        # 32-wide kernels into the 64-wide model.
+        with pytest.raises(
+            ValueError,
+            match=(rf"Failed to load weights from {re.escape(path)}: "
+                   r"A total of \d+ objects could not be loaded"),
+        ):
+            create_ptrm("att_small", pretrained=path, hidden_size=64, **small)
 
     def test_different_layer_configs(self):
         """Test that h_layers/l_layers build the requested layer stacks."""
@@ -414,7 +425,7 @@ class TestPTRMPresets:
     def test_sudoku_config(self):
         """Test Sudoku-Extreme preset configuration."""
         config = get_sudoku_extreme_config()
-        assert config["variant"] == "mlp_base"
+        assert config["variant"] == "att_base"
         assert config["vocab_size"] == 20
         assert config["seq_len"] == 81
         assert config["inference"]["num_rollouts"] == 100
@@ -429,6 +440,27 @@ class TestPTRMPresets:
             model = create_ptrm(**model_config)
             assert isinstance(model, PTRM)
             assert model.built
+
+
+class TestThePresetParameterCountsAreMeasured:
+    """Each preset helper's docstring states the trainable-weight count of the
+    model its keys build.
+
+    The labels were the paper's "5M"/"7M", which describe the reference TRM
+    (one 2-layer network reused for both updates). This repository has separate
+    2-layer ``H_level`` and ``L_level`` stacks, so the same width builds about
+    twice the weights. See decisions.md D-019 (plan-2026-10-13T035756-5dd4d94d).
+    """
+
+    @pytest.mark.parametrize("name", sorted(PRESET_CONFIGS))
+    def test_the_docstring_count_is_the_built_count(self, name):
+        preset_fn = PRESET_CONFIGS[name]
+        stated = re.search(r"([\d,]+) trainable weights", preset_fn.__doc__)
+        assert stated, f"{preset_fn.__name__} states no trainable-weight count"
+        config = preset_fn()
+        model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
+        built = sum(int(np.prod(w.shape)) for w in model.trainable_weights)
+        assert int(stated.group(1).replace(",", "")) == built
 
 
 if __name__ == "__main__":

@@ -57,9 +57,9 @@ class PTRM(TRM):
              │
              ▼
         ┌──────────────────────────┐
-        │ TRMInner                 │  n latent recursions of z_L, z_H
-        │ (rope attention)         │  updates; all but last under
-        └──────────────────────────┘  stop_gradient
+        │ TRMInner                 │  one z_L update, then one z_H
+        │ (rope attention)         │  update; the new carry leaves
+        └──────────────────────────┘  through stop_gradient
              │
              ▼  z_H
              │
@@ -97,40 +97,21 @@ class PTRM(TRM):
         `halt_max_steps` is below 1, or if `halt_exploration_prob` is outside [0, 1].
     """
 
-    # Same variant configurations as TRM (paper uses identical backbone)
+    # DECISION plan-2026-10-13T035756-5dd4d94d/D-019: WHAT NOT TO DO: do not
+    # re-add "mlp_*" variants that build attention models. The paper's TRM-MLP
+    # replaces attention with an MLP over the sequence axis (reference trm.py
+    # `mlp_t`); TRMReasoningModule always builds TransformerLayer blocks, so the
+    # old mlp_* entries were attention models under an MLP name (mlp_base ==
+    # att_base). See decisions.md D-019.
+    #
+    # Trainable weights, measured from built models at vocab_size=20,
+    # seq_len=81, puzzle_emb_len=16 (Sudoku-Extreme's shape): att_small
+    # 7,177,730; att_base 13,764,610; att_large 28,511,234. The paper's "7M"
+    # TRM-Att reuses ONE 2-layer network for both updates (trm.py: H_layers
+    # is ignored); this TRM has separate 2-layer H_level and L_level stacks
+    # (6,821,888 weights each in att_base), so the same width builds about
+    # twice the weights.
     MODEL_VARIANTS = {
-        "mlp_tiny": {
-            "hidden_size": 256,
-            "num_heads": 4,
-            "expansion": 2.0,
-            "h_layers": 2,
-            "l_layers": 2,
-            "halt_max_steps": 8,
-            "attention_type": "group_query",
-            "ffn_type": "swiglu",
-        },
-        "mlp_small": {
-            "hidden_size": 384,
-            "num_heads": 6,
-            "expansion": 2.0,
-            "h_layers": 2,
-            "l_layers": 2,
-            "halt_max_steps": 10,
-            "attention_type": "group_query",
-            "ffn_type": "swiglu",
-        },
-        # Paper's TRM-MLP for Sudoku-Extreme: 5M params
-        "mlp_base": {
-            "hidden_size": 512,
-            "num_heads": 8,
-            "expansion": 2.0,
-            "h_layers": 2,
-            "l_layers": 2,
-            "halt_max_steps": 16,
-            "attention_type": "group_query",
-            "ffn_type": "swiglu",
-        },
-        # Paper's TRM-Att for PPBench/Maze/ARC: 7M params
         "att_small": {
             "hidden_size": 384,
             "num_heads": 6,
@@ -223,8 +204,7 @@ class PTRM(TRM):
         Built, so ``H_init`` / ``L_init`` exist before the first ``call`` and
         before :class:`PTRMInference` reads them.
 
-        :param variant: String, one of "mlp_tiny", "mlp_small", "mlp_base",
-            "att_small", "att_base", "att_large".
+        :param variant: String, one of "att_small", "att_base", "att_large".
         :param vocab_size: Integer, size of vocabulary.
         :param seq_len: Integer, maximum sequence length.
         :param puzzle_emb_len: Integer, puzzle embedding length. Default 16.
@@ -294,8 +274,7 @@ def create_ptrm(
     :mod:`dl_techniques.models.language.ptrm.factory`; a fully custom
     architecture is the :class:`PTRM` constructor (then call ``build()``).
 
-    :param variant: One of "mlp_tiny", "mlp_small", "mlp_base", "att_small",
-        "att_base", "att_large".
+    :param variant: One of "att_small", "att_base", "att_large".
     :param vocab_size: Size of the vocabulary for token embeddings.
     :param seq_len: Length of the input sequence (excluding puzzle embedding).
     :param puzzle_emb_len: Length of the puzzle embedding prefix. Default 16.
@@ -317,6 +296,11 @@ def create_ptrm(
             seq_len=config["seq_len"], puzzle_emb_len=config["puzzle_emb_len"],
         )
     """
+    # DECISION plan-2026-10-13T035756-5dd4d94d/D-015: WHAT NOT TO DO: do not
+    # put logic here (no hyperparameter defaults, no compile, no second variant
+    # factory). Every language create_* delegates to from_variant, like
+    # create_resnet; a fully custom architecture is the PTRM constructor. The
+    # api-contract delegation sweep judges this body. See decisions.md D-015.
     return PTRM.from_variant(
         variant,
         vocab_size=vocab_size,

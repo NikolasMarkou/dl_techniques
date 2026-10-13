@@ -6,6 +6,15 @@ Build the model with :func:`dl_techniques.models.language.ptrm.create_ptrm`
 from the ``variant``, ``vocab_size``, ``seq_len`` and ``puzzle_emb_len`` keys,
 and pass the ``"inference"`` entry to
 :class:`dl_techniques.models.language.ptrm.PTRMInference`.
+
+Each docstring states the trainable-weight count of the model its keys build,
+measured from the built model (``tests/test_models/test_ptrm/test_model.py``
+re-measures it). These are not the paper's "5M"/"7M": the reference TRM reuses
+one 2-layer network for both latent updates, while this TRM has separate
+2-layer ``H_level`` and ``L_level`` stacks, about twice the weights at the same
+width. Every preset uses ``att_base``: the paper's Sudoku model is TRM-MLP (an
+MLP over the sequence axis instead of attention), and this TRM has no such
+mode, so the Sudoku preset is the attention model.
 """
 
 from typing import Dict, Any
@@ -14,12 +23,15 @@ from typing import Dict, Any
 # Preset configurations matching paper experiments
 
 def get_sudoku_extreme_config() -> Dict[str, Any]:
-    """Configuration for Sudoku-Extreme (TRM-MLP, 5M params).
+    """Configuration for Sudoku-Extreme: ``att_base``, 13,764,610 trainable weights.
+
+    The paper uses TRM-MLP here; this TRM has no MLP mode, so the preset is the
+    attention variant ``att_base`` (the removed ``mlp_base`` was the same model).
 
     Paper settings: K=100, D=64, σ=0.3
     """
     return {
-        "variant": "mlp_base",
+        "variant": "att_base",
         "vocab_size": 20,  # 0-9 digits + special tokens
         "seq_len": 81,     # 9x9 grid flattened
         "puzzle_emb_len": 16,
@@ -32,7 +44,7 @@ def get_sudoku_extreme_config() -> Dict[str, Any]:
 
 
 def get_ppbench_config() -> Dict[str, Any]:
-    """Configuration for PPBench puzzles (TRM-Att, 7M params).
+    """Configuration for PPBench puzzles: ``att_base``, 14,064,642 trainable weights.
 
     Paper settings: K=100, D=48, σ=0.2
     """
@@ -50,7 +62,7 @@ def get_ppbench_config() -> Dict[str, Any]:
 
 
 def get_maze_hard_config() -> Dict[str, Any]:
-    """Configuration for Maze-Hard (TRM-Att, 7M params).
+    """Configuration for Maze-Hard: ``att_base``, 14,586,882 trainable weights.
 
     Paper settings: K=100, D=16, σ=1.0
     """
@@ -68,7 +80,7 @@ def get_maze_hard_config() -> Dict[str, Any]:
 
 
 def get_arc_agi_config() -> Dict[str, Any]:
-    """Configuration for ARC-AGI-2 (TRM-Att, 7M params).
+    """Configuration for ARC-AGI-2: ``att_base``, 14,593,026 trainable weights.
 
     Paper settings: K=25, D=16, σ=0.2
     """
