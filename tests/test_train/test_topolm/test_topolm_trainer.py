@@ -29,7 +29,6 @@ import pytest
 import tensorflow as tf
 
 import keras
-from keras import ops
 
 from train.topolm import (
     SMOKE_STIMULI,
@@ -298,7 +297,7 @@ class TestModelWiring:
         head, _ = create_topolm_model(_config())
         output = head(np.zeros((1, LENGTH - 1), dtype="int32"), training=False)
         assert isinstance(output, (keras.KerasTensor, tf.Tensor))
-        assert len(ops.shape(output)) == 3
+        assert len(keras.ops.shape(output)) == 3
 
 
 class TestOptimizerRecipe:
@@ -548,10 +547,10 @@ class TestActivationExtraction:
         tokens = np.random.default_rng(0).integers(
             0, VOCAB, size=(2, 8)
         ).astype("int32")
-        plain = ops.convert_to_numpy(
+        plain = keras.ops.convert_to_numpy(
             backbone(tokens, training=False)["last_hidden_state"]
         )
-        observed = ops.convert_to_numpy(
+        observed = keras.ops.convert_to_numpy(
             backbone(
                 tokens,
                 training=False,
@@ -576,7 +575,7 @@ class TestActivationExtraction:
         captures = [TapCapture() for _ in backbone.tap_layers]
         tokens = tokenizer(prompts)["input_ids"]
         backbone(tokens, training=False, taps=tuple(captures))
-        raw = ops.convert_to_numpy(captures[0].value)
+        raw = keras.ops.convert_to_numpy(captures[0].value)
 
         np.testing.assert_allclose(
             pooled[0], raw[0].mean(axis=0), rtol=1e-5, atol=1e-6

@@ -95,7 +95,6 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 import keras
 import numpy as np
-from keras import ops
 
 # ---------------------------------------------------------------------
 # local imports
@@ -488,30 +487,30 @@ def spatial_smoothness_loss(
         distance prior exactly.
     :rtype: keras.KerasTensor
     """
-    gathered = ops.take(activations, patch_indices, axis=1)
-    gathered = ops.transpose(gathered, (1, 2, 0))
+    gathered = keras.ops.take(activations, patch_indices, axis=1)
+    gathered = keras.ops.transpose(gathered, (1, 2, 0))
 
-    gathered = gathered - ops.mean(gathered, axis=2, keepdims=True)
-    gathered = gathered / (ops.std(gathered, axis=2, keepdims=True) + eps)
+    gathered = gathered - keras.ops.mean(gathered, axis=2, keepdims=True)
+    gathered = gathered / (keras.ops.std(gathered, axis=2, keepdims=True) + eps)
 
-    num_samples = ops.cast(ops.shape(gathered)[2], gathered.dtype)
-    correlations = ops.matmul(gathered, ops.transpose(gathered, (0, 2, 1)))
+    num_samples = keras.ops.cast(keras.ops.shape(gathered)[2], gathered.dtype)
+    correlations = keras.ops.matmul(gathered, keras.ops.transpose(gathered, (0, 2, 1)))
     correlations = correlations / num_samples
 
-    num_patches = ops.shape(correlations)[0]
-    flat = ops.reshape(correlations, (num_patches, -1))
-    pairs = ops.take(flat, triu_flat, axis=1)
-    pairs = pairs - ops.mean(pairs, axis=1, keepdims=True)
+    num_patches = keras.ops.shape(correlations)[0]
+    flat = keras.ops.reshape(correlations, (num_patches, -1))
+    pairs = keras.ops.take(flat, triu_flat, axis=1)
+    pairs = pairs - keras.ops.mean(pairs, axis=1, keepdims=True)
 
     # Read the prior through the SAME working dtype as the correlations. Under
     # `mixed_float16`, reading the float32 `d_unit` variable inside an autocast
     # scope yields a float16 tensor, and multiplying a float32 norm by it raises a
     # dtype error -- the variable's dtype and the value's dtype are different
     # things, and only the cast reconciles them.
-    prior = ops.cast(d_unit, pairs.dtype)
-    numerator = ops.sum(pairs * prior, axis=1)
-    denominator = ops.norm(pairs, axis=1) * ops.norm(prior) + eps
-    return ops.mean(0.5 * (1.0 - numerator / denominator))
+    prior = keras.ops.cast(d_unit, pairs.dtype)
+    numerator = keras.ops.sum(pairs * prior, axis=1)
+    denominator = keras.ops.norm(pairs, axis=1) * keras.ops.norm(prior) + eps
+    return keras.ops.mean(0.5 * (1.0 - numerator / denominator))
 
 
 @register_dl_technique(
@@ -783,12 +782,12 @@ class SpatialSmoothness(keras.layers.Layer):
             # with a `KerasTensor` in that model's lifecycle. MEASURED: 0 tap
             # calls after `TopoLM.build(...)`, 4 eager calls and 4 losses after the
             # first `training=True` step.
-            flat = ops.reshape(
-                ops.cast(inputs, _promoted_dtype(inputs.dtype)),
+            flat = keras.ops.reshape(
+                keras.ops.cast(inputs, _promoted_dtype(inputs.dtype)),
                 (-1, self._num_units),
             )
 
-            num_samples = ops.shape(flat)[0]
+            num_samples = keras.ops.shape(flat)[0]
             if self.max_samples is not None:
                 rows = keras.random.randint(
                     (self.max_samples,),
@@ -796,7 +795,7 @@ class SpatialSmoothness(keras.layers.Layer):
                     num_samples,
                     seed=self.seed_generator,
                 )
-                flat = ops.take(flat, rows, axis=0)
+                flat = keras.ops.take(flat, rows, axis=0)
 
             centers = keras.random.randint(
                 (self.num_neighborhoods,),
@@ -804,7 +803,7 @@ class SpatialSmoothness(keras.layers.Layer):
                 self._num_centers,
                 seed=self.seed_generator,
             )
-            patches = ops.take(self.patch_table, centers, axis=0)
+            patches = keras.ops.take(self.patch_table, centers, axis=0)
 
             penalty = spatial_smoothness_loss(
                 flat, patches, self.triu_flat, self.d_unit, self.eps
@@ -869,7 +868,7 @@ def _table_initializer(values: np.ndarray) -> Any:
     """Build an ``add_weight`` initializer that returns a NumPy constant.
 
     The table is materialised in NumPy and handed to Keras, which converts it.
-    Wrapping it in ``ops.convert_to_tensor`` and closing over the result would
+    Wrapping it in ``keras.ops.convert_to_tensor`` and closing over the result would
     bind the tensor to whichever graph happened to be tracing. The value is cast
     to the weight's dtype here, so an int32 NumPy table lands in an int64
     weight without a conversion inside Keras.

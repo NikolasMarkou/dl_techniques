@@ -27,7 +27,6 @@ import pytest
 import tensorflow as tf
 
 import keras
-from keras import ops
 
 from dl_techniques.layers.regularization import (
     spatial_smoothness as spatial_smoothness_module,
@@ -297,7 +296,7 @@ class TestForward:
         assert outputs["logits"].shape == (2, 12, VOCAB)
         assert outputs["last_hidden_state"].shape == (2, 12, 256)
         for value in outputs.values():
-            assert np.all(np.isfinite(ops.convert_to_numpy(value)))
+            assert np.all(np.isfinite(keras.ops.convert_to_numpy(value)))
 
     def test_a_dict_input_is_accepted(self):
         model = _build()
@@ -329,14 +328,14 @@ class TestForward:
         mask = np.ones_like(tokens, dtype="float32")
         mask[:, 8:] = 0.0
 
-        # `ops.convert_to_numpy` wraps the KEY lookup, not the dict: applied to
+        # `keras.ops.convert_to_numpy` wraps the KEY lookup, not the dict: applied to
         # the whole output it converts a dict of arrays into a single NumPy
         # OBJECT array, and indexing that with a string raises IndexError.
-        padded = ops.convert_to_numpy(
+        padded = keras.ops.convert_to_numpy(
             model({"input_ids": tokens, "attention_mask": mask},
                   training=False)["last_hidden_state"]
         )
-        full = ops.convert_to_numpy(
+        full = keras.ops.convert_to_numpy(
             model({"input_ids": tokens}, training=False)["last_hidden_state"]
         )
 
@@ -424,7 +423,7 @@ class TestTapInventory:
         model = _build(depth=3, seed=11)
         model(_tokens())
         permutations = [
-            ops.convert_to_numpy(tap.perm).tolist() for tap in model.tap_layers
+            keras.ops.convert_to_numpy(tap.perm).tolist() for tap in model.tap_layers
         ]
         assert len({tuple(p) for p in permutations}) == len(permutations)
 
@@ -435,7 +434,7 @@ class TestTapInventory:
         right(_tokens())
         for a, b in zip(left.tap_layers, right.tap_layers):
             np.testing.assert_array_equal(
-                ops.convert_to_numpy(a.perm), ops.convert_to_numpy(b.perm)
+                keras.ops.convert_to_numpy(a.perm), keras.ops.convert_to_numpy(b.perm)
             )
 
     def test_a_different_seed_gives_different_layouts(self):
@@ -444,8 +443,8 @@ class TestTapInventory:
         right = _build(seed=12)
         right(_tokens())
         assert not np.array_equal(
-            ops.convert_to_numpy(left.tap_layers[0].perm),
-            ops.convert_to_numpy(right.tap_layers[0].perm),
+            keras.ops.convert_to_numpy(left.tap_layers[0].perm),
+            keras.ops.convert_to_numpy(right.tap_layers[0].perm),
         )
 
     def test_the_permutation_ablation_reaches_the_layout(self):
@@ -456,7 +455,7 @@ class TestTapInventory:
         """
         model = _build(permute=False)
         model(_tokens())
-        perm = ops.convert_to_numpy(model.tap_layers[0].perm)
+        perm = keras.ops.convert_to_numpy(model.tap_layers[0].perm)
         np.testing.assert_array_equal(perm, np.arange(256))
 
     def test_permuted_and_identity_layouts_differ(self):
@@ -465,8 +464,8 @@ class TestTapInventory:
         identity = _build(permute=False)
         identity(_tokens())
         assert not np.array_equal(
-            ops.convert_to_numpy(permuted.tap_layers[0].perm),
-            ops.convert_to_numpy(identity.tap_layers[0].perm),
+            keras.ops.convert_to_numpy(permuted.tap_layers[0].perm),
+            keras.ops.convert_to_numpy(identity.tap_layers[0].perm),
         )
 
 
@@ -488,7 +487,7 @@ class TestTheAlphaControl:
         control(_tokens())
         for a, b in zip(live.tap_layers, control.tap_layers):
             np.testing.assert_array_equal(
-                ops.convert_to_numpy(a.perm), ops.convert_to_numpy(b.perm)
+                keras.ops.convert_to_numpy(a.perm), keras.ops.convert_to_numpy(b.perm)
             )
 
     def test_alpha_zero_adds_no_loss(self):
@@ -512,7 +511,7 @@ class TestTheAlphaControl:
             # tracking order, which does NOT match `tap_layers` order, so a zip
             # pairs block 0's attention loss with block 0's mlp value.
             added = float(tap.losses[-1])
-            recorded = float(ops.convert_to_numpy(tap.last_spatial_loss))
+            recorded = float(keras.ops.convert_to_numpy(tap.last_spatial_loss))
             assert added == pytest.approx(1.0 * recorded, rel=1e-4), (
                 tap.name, added, recorded
             )
@@ -590,7 +589,7 @@ class TestTheFutureLeakProbe:
         return model, tokens
 
     def _logits(self, model, tokens):
-        return ops.convert_to_numpy(
+        return keras.ops.convert_to_numpy(
             model(tokens, training=False)["logits"]
         )
 
@@ -635,11 +634,11 @@ class TestTheFutureLeakProbe:
         grouped-query attention, and arm 1 would then pass for the wrong reason."""
         from dl_techniques.utils.masking import create_causal_attend_mask
 
-        hidden = ops.convert_to_tensor(
+        hidden = keras.ops.convert_to_tensor(
             np.zeros((2, 5, 8), dtype="float32")
         )
         mask = create_causal_attend_mask(hidden)
-        assert len(ops.shape(mask)) == 3
+        assert len(keras.ops.shape(mask)) == 3
 
 
 class TestPositionsMatter:
@@ -657,8 +656,8 @@ class TestPositionsMatter:
 
         delta = float(
             np.abs(
-                ops.convert_to_numpy(model(tokens, training=False)["last_hidden_state"])
-                - ops.convert_to_numpy(
+                keras.ops.convert_to_numpy(model(tokens, training=False)["last_hidden_state"])
+                - keras.ops.convert_to_numpy(
                     model(swapped, training=False)["last_hidden_state"]
                 )
             ).max()
@@ -675,10 +674,10 @@ class TestPositionsMatter:
         )
         delta = float(
             np.abs(
-                ops.convert_to_numpy(
+                keras.ops.convert_to_numpy(
                     model(short, training=False)["last_hidden_state"]
                 )
-                - ops.convert_to_numpy(
+                - keras.ops.convert_to_numpy(
                     model(padded, training=False)["last_hidden_state"][:, 6:]
                 )
             ).max()
@@ -699,10 +698,10 @@ class TestComposition:
         hidden = np.random.default_rng(4).normal(
             size=(2, 6, 256)
         ).astype("float32")
-        tensor = ops.convert_to_tensor(hidden)
+        tensor = keras.ops.convert_to_tensor(hidden)
         for block in model.blocks:
             tensor = block(tensor, training=False)
-        ratio = float(ops.std(tensor)) / float(ops.std(tensor * 0 + hidden))
+        ratio = float(keras.ops.std(tensor)) / float(keras.ops.std(tensor * 0 + hidden))
         assert 0.5 < ratio < 2.0, ratio
 
     @pytest.mark.parametrize("position", ["pre", "post"])
@@ -714,7 +713,7 @@ class TestComposition:
         """
         model = _build(normalization_position=position)
         outputs = model(_tokens(), training=False)
-        assert np.all(np.isfinite(ops.convert_to_numpy(outputs["logits"])))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(outputs["logits"])))
 
     def test_the_normalization_position_reaches_the_block(self):
         pre = _build(normalization_position="pre")
@@ -773,8 +772,8 @@ class TestKnobSensitivity:
         assert left == right, "the head count changed the weight shapes"
 
         difference = np.abs(
-            ops.convert_to_numpy(four(tokens, training=False)["logits"])
-            - ops.convert_to_numpy(eight(tokens, training=False)["logits"])
+            keras.ops.convert_to_numpy(four(tokens, training=False)["logits"])
+            - keras.ops.convert_to_numpy(eight(tokens, training=False)["logits"])
         )
         assert float(difference.max()) > 1e-6
 
@@ -787,8 +786,8 @@ class TestKnobSensitivity:
         assert left == right, "a value knob changed the weight shapes"
 
         difference = np.abs(
-            ops.convert_to_numpy(narrow(tokens, training=False)["logits"])
-            - ops.convert_to_numpy(wide(tokens, training=False)["logits"])
+            keras.ops.convert_to_numpy(narrow(tokens, training=False)["logits"])
+            - keras.ops.convert_to_numpy(wide(tokens, training=False)["logits"])
         )
         assert float(difference.max()) > 1e-6, difference.max()
 
@@ -809,7 +808,7 @@ class TestKnobSensitivity:
             # marker is `_tap/`, not `tap/` -- the latter matches nothing and the
             # probe would compare two EMPTY dictionaries and pass.
             return {
-                weight.path.split("/", 1)[-1]: ops.convert_to_numpy(weight)
+                weight.path.split("/", 1)[-1]: keras.ops.convert_to_numpy(weight)
                 for weight in model.weights
                 if "_tap/" in weight.path and weight.name == "perm"
             }
@@ -822,7 +821,7 @@ class TestKnobSensitivity:
 
         def outside_taps(model):
             return {
-                weight.path.split("/", 1)[-1]: ops.convert_to_numpy(weight)
+                weight.path.split("/", 1)[-1]: keras.ops.convert_to_numpy(weight)
                 for weight in model.weights
                 if "_tap/" not in weight.path
             }
@@ -861,7 +860,7 @@ class TestKnobSensitivity:
 
         def prior(model):
             return {
-                weight.name: ops.convert_to_numpy(weight)
+                weight.name: keras.ops.convert_to_numpy(weight)
                 for weight in model.weights
                 if weight.name == "d_unit"
             }
@@ -887,7 +886,7 @@ class TestKnobSensitivity:
 
         def table(model):
             return [
-                ops.convert_to_numpy(weight)
+                keras.ops.convert_to_numpy(weight)
                 for weight in model.weights
                 if weight.name == "patch_table"
             ][0]
@@ -930,7 +929,7 @@ class TestGradients:
         """
         model = _build()
         tokens = _tokens(batch=2, length=12, seed=6)
-        target = ops.convert_to_tensor(
+        target = keras.ops.convert_to_tensor(
             np.random.default_rng(11).normal(
                 size=(2, 12, VOCAB)
             ).astype("float32")
@@ -947,7 +946,7 @@ class TestGradients:
         for variable, gradient in zip(model.trainable_variables, gradients):
             if gradient is None:
                 missing.append(variable.path)
-            elif not np.any(ops.convert_to_numpy(gradient) != 0.0):
+            elif not np.any(keras.ops.convert_to_numpy(gradient) != 0.0):
                 zero.append(variable.path)
         assert not missing, f"no gradient for {missing}"
         assert not zero, f"all-zero gradient for {zero}"
@@ -966,13 +965,13 @@ class TestGradients:
 
         head(np.zeros((1, 12), dtype="int32"), training=False)
         before = {
-            variable.path: ops.convert_to_numpy(variable).copy()
+            variable.path: keras.ops.convert_to_numpy(variable).copy()
             for variable in model.trainable_variables
         }
         head.fit(dataset, epochs=1, verbose=0)
 
         after = {
-            variable.path: ops.convert_to_numpy(variable)
+            variable.path: keras.ops.convert_to_numpy(variable)
             for variable in model.trainable_variables
         }
         moved = {
@@ -1059,9 +1058,9 @@ class TestSpatialLossReachesTheObjective:
 
 class TestSerialization:
     def _round_trip(self, model, tokens):
-        original = ops.convert_to_numpy(model(tokens, training=False)["logits"])
+        original = keras.ops.convert_to_numpy(model(tokens, training=False)["logits"])
         saved = {
-            weight.name: ops.convert_to_numpy(weight).copy()
+            weight.name: keras.ops.convert_to_numpy(weight).copy()
             for weight in model.weights
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -1069,7 +1068,7 @@ class TestSerialization:
             model.save(path)
             loaded = keras.models.load_model(path)
             restored = {
-                weight.name: ops.convert_to_numpy(weight)
+                weight.name: keras.ops.convert_to_numpy(weight)
                 for weight in loaded.weights
             }
             assert sorted(saved) == sorted(restored), (
@@ -1081,7 +1080,7 @@ class TestSerialization:
                 np.testing.assert_array_equal(
                     values, restored[name], err_msg=f"{name} was not restored"
                 )
-            replayed = ops.convert_to_numpy(
+            replayed = keras.ops.convert_to_numpy(
                 loaded(tokens, training=False)["logits"]
             )
         return original, replayed
@@ -1122,8 +1121,8 @@ class TestSerialization:
         """A callable activation would be handed back raw on some backends."""
         model = _build()
         rebuilt = TopoLM.from_config(model.get_config())
-        assert ops.convert_to_tensor(
-            rebuilt.activation(ops.convert_to_tensor([1.0]))
+        assert keras.ops.convert_to_tensor(
+            rebuilt.activation(keras.ops.convert_to_tensor([1.0]))
         ) is not None
 
     def test_the_taps_do_not_appear_in_the_config(self):
@@ -1147,7 +1146,7 @@ class TestPrecision:
             keras.mixed_precision.set_global_policy(policy)
             model = _build()
             outputs = model(_tokens(), training=True)
-            logits = ops.convert_to_numpy(outputs["logits"])
+            logits = keras.ops.convert_to_numpy(outputs["logits"])
             assert np.all(np.isfinite(logits))
             assert all(
                 np.isfinite(float(value)) for value in model.losses
@@ -1166,8 +1165,8 @@ class TestPrecision:
             return model(ids, training=False)["logits"]
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(traced(tokens)),
-            ops.convert_to_numpy(model(tokens, training=False)["logits"]),
+            keras.ops.convert_to_numpy(traced(tokens)),
+            keras.ops.convert_to_numpy(model(tokens, training=False)["logits"]),
             atol=1e-5, rtol=0,
         )
 
@@ -1180,7 +1179,7 @@ class TestPrecision:
         )
         head(np.zeros((1, 12), dtype="int32"), training=False)
         before = {
-            variable.path: ops.convert_to_numpy(variable).copy()
+            variable.path: keras.ops.convert_to_numpy(variable).copy()
             for variable in model.trainable_variables
         }
         history = head.fit(_dataset(), epochs=2, verbose=0)
@@ -1188,7 +1187,7 @@ class TestPrecision:
         assert np.isfinite(history.history["loss"][-1])
         assert history.history["loss"][-1] < history.history["loss"][0]
         after = {
-            variable.path: ops.convert_to_numpy(variable)
+            variable.path: keras.ops.convert_to_numpy(variable)
             for variable in model.trainable_variables
         }
         moved = {
@@ -1254,8 +1253,8 @@ class TestTheTapTablesWorkUnderXLAOnAGPU:
 
         assert int32_variables(new) == []
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(new(tokens, training=False)["logits"]),
-            ops.convert_to_numpy(old(tokens, training=False)["logits"]),
+            keras.ops.convert_to_numpy(new(tokens, training=False)["logits"]),
+            keras.ops.convert_to_numpy(old(tokens, training=False)["logits"]),
         )
         for old_tap, new_tap in zip(old.tap_layers, new.tap_layers):
             new_tap.seed_generator.state.assign(old_tap.seed_generator.state)
@@ -1323,8 +1322,8 @@ class TestTheSmokeContract:
         tokens = _tokens()
 
         def contract(outputs):
-            logits = ops.convert_to_numpy(outputs["logits"])
-            hidden = ops.convert_to_numpy(outputs["last_hidden_state"])
+            logits = keras.ops.convert_to_numpy(outputs["logits"])
+            hidden = keras.ops.convert_to_numpy(outputs["last_hidden_state"])
             assert logits.shape == (2, 12, VOCAB)
             assert hidden.shape == (2, 12, 256)
             assert np.all(np.isfinite(logits))
@@ -1335,11 +1334,11 @@ class TestTheSmokeContract:
             """A dict-output model needs a dict-aware breaker.
 
             The shared oracle's default breakers collapse the whole output, which
-            on a dict is a ``TypeError`` from ``ops.mean`` -- the contract
+            on a dict is a ``TypeError`` from ``keras.ops.mean`` -- the contract
             CRASHING rather than judging, which the oracle correctly refuses to
             accept as a pass.
             """
-            return {**outputs, "logits": ops.mean(outputs["logits"])}
+            return {**outputs, "logits": keras.ops.mean(outputs["logits"])}
 
         def slice_logits(outputs):
             return {**outputs, "logits": outputs["logits"][:1]}
@@ -1376,7 +1375,7 @@ _SPAM = NLPTaskConfig(
 
 
 def _np(tensor) -> np.ndarray:
-    return np.asarray(ops.convert_to_numpy(tensor))
+    return np.asarray(keras.ops.convert_to_numpy(tensor))
 
 
 def _head_batch() -> Dict[str, np.ndarray]:

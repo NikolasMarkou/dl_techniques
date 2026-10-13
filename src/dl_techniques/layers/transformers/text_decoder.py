@@ -19,7 +19,6 @@ References:
 
 import math
 import keras
-from keras import ops, layers, initializers
 from typing import Optional, Dict, Any, Literal, Tuple, Union, Callable
 
 # ---------------------------------------------------------------------
@@ -231,7 +230,7 @@ class TextDecoder(keras.layers.Layer):
         self._create_positional_embeddings()
 
         # Embedding processing layers
-        self.embed_dropout_layer = layers.Dropout(rate=self.dropout_rate, name="embed_dropout")
+        self.embed_dropout_layer = keras.layers.Dropout(rate=self.dropout_rate, name="embed_dropout")
         self.embed_norm = create_normalization_layer(
             self.normalization_type, epsilon=self.layer_norm_eps, name="embed_norm"
         )
@@ -245,7 +244,7 @@ class TextDecoder(keras.layers.Layer):
         # matching upstream GPT-2's _init_weights. See decisions.md.
         residual_output_kernel_initializer = None
         if self.scale_residual_initializer_by_depth:
-            residual_output_kernel_initializer = initializers.TruncatedNormal(
+            residual_output_kernel_initializer = keras.initializers.TruncatedNormal(
                 stddev=self.initializer_range / math.sqrt(2.0 * self.depth)
             )
 
@@ -271,7 +270,7 @@ class TextDecoder(keras.layers.Layer):
                 attention_dropout_rate=self.attention_dropout_rate,
                 use_stochastic_depth=self.stochastic_depth_rate > 0.0,
                 stochastic_depth_rate=layer_drop_rate,
-                kernel_initializer=initializers.TruncatedNormal(
+                kernel_initializer=keras.initializers.TruncatedNormal(
                     stddev=self.initializer_range
                 ),
                 residual_output_kernel_initializer=residual_output_kernel_initializer,
@@ -286,10 +285,10 @@ class TextDecoder(keras.layers.Layer):
 
     def _create_word_embeddings(self) -> None:
         """Create word embedding layers based on the specified strategy."""
-        initializer = initializers.TruncatedNormal(stddev=self.initializer_range)
+        initializer = keras.initializers.TruncatedNormal(stddev=self.initializer_range)
 
         if self.embedding_type == 'learned':
-            self.word_embeddings = layers.Embedding(
+            self.word_embeddings = keras.layers.Embedding(
                 input_dim=self.vocab_size,
                 output_dim=self.embed_dim,
                 embeddings_initializer=initializer,
@@ -298,13 +297,13 @@ class TextDecoder(keras.layers.Layer):
         elif self.embedding_type == 'factorized':
             # Use factorized embeddings for memory efficiency
             factorized_dim = min(self.embed_dim, 128)
-            self.factorized_embed_layer = layers.Embedding(
+            self.factorized_embed_layer = keras.layers.Embedding(
                 input_dim=self.vocab_size,
                 output_dim=factorized_dim,
                 embeddings_initializer=initializer,
                 name='factorized_embed'
             )
-            self.embed_projection_layer = layers.Dense(
+            self.embed_projection_layer = keras.layers.Dense(
                 units=self.embed_dim,
                 use_bias=False,
                 kernel_initializer=initializer,
@@ -314,10 +313,10 @@ class TextDecoder(keras.layers.Layer):
     def _create_positional_embeddings(self) -> None:
         """Create positional embedding layer based on the specified strategy."""
         if self.positional_type == 'learned':
-            self.positional_embeddings = layers.Embedding(
+            self.positional_embeddings = keras.layers.Embedding(
                 input_dim=self.max_seq_len,
                 output_dim=self.embed_dim,
-                embeddings_initializer=initializers.TruncatedNormal(stddev=self.initializer_range),
+                embeddings_initializer=keras.initializers.TruncatedNormal(stddev=self.initializer_range),
                 name="positional_embeddings"
             )
         elif self.positional_type == 'sincos':
@@ -423,8 +422,8 @@ class TextDecoder(keras.layers.Layer):
         :return: Contextualized representations ``(B, seq_len, embed_dim)``.
         :rtype: keras.KerasTensor
         """
-        seq_len = ops.shape(input_ids)[1]
-        batch_size = ops.shape(input_ids)[0]
+        seq_len = keras.ops.shape(input_ids)[1]
+        batch_size = keras.ops.shape(input_ids)[0]
 
         # 1. Word Embeddings
         if self.embedding_type == 'factorized':
@@ -434,20 +433,20 @@ class TextDecoder(keras.layers.Layer):
             x = self.word_embeddings(input_ids)
 
         # 2. Positional Embeddings
-        positions = ops.arange(start=0, stop=seq_len)
+        positions = keras.ops.arange(start=0, stop=seq_len)
         if self.positional_type == 'learned':
             pos_embed = self.positional_embeddings(positions)
-            x = ops.add(x, pos_embed)
+            x = keras.ops.add(x, pos_embed)
         elif self.positional_type == 'sincos':
             # Cast to this layer's compute dtype; measured bit-identical under
             # float32. Does not fix sincos under mixed_float16/float64
             # that cast lives inside continuous_sin_cos_embedding.py.
-            pos_coords = ops.cast(positions, self.compute_dtype)
-            pos_coords = ops.expand_dims(pos_coords, axis=-1)
-            pos_coords = ops.expand_dims(pos_coords, axis=0)
-            pos_coords = ops.broadcast_to(pos_coords, (batch_size, seq_len, 1))
+            pos_coords = keras.ops.cast(positions, self.compute_dtype)
+            pos_coords = keras.ops.expand_dims(pos_coords, axis=-1)
+            pos_coords = keras.ops.expand_dims(pos_coords, axis=0)
+            pos_coords = keras.ops.broadcast_to(pos_coords, (batch_size, seq_len, 1))
             pos_embed = self.positional_embeddings(pos_coords)
-            x = ops.add(x, pos_embed)
+            x = keras.ops.add(x, pos_embed)
 
         # 3. Embedding normalization and dropout
         x = self.embed_norm(x, training=training)

@@ -69,7 +69,6 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 import keras
-from keras import ops
 
 # ---------------------------------------------------------------------
 # local imports
@@ -668,7 +667,7 @@ def extract_tap_activations(
                     f"{chunk.shape[0]}-prompt batch"
                 )
             pooled = np.mean(
-                ops.convert_to_numpy(capture.value).astype("float64"),
+                keras.ops.convert_to_numpy(capture.value).astype("float64"),
                 axis=1,
             )
             captured[tap.path].append(pooled)
@@ -1074,9 +1073,9 @@ def _apply_readout(
     smoothed: Dict[str, np.ndarray] = {}
     for name, values in activations.items():
         readout = readouts[name]
-        smoothed[name] = ops.convert_to_numpy(
+        smoothed[name] = keras.ops.convert_to_numpy(
             readout(
-                ops.convert_to_tensor(np.asarray(values, "float32")),
+                keras.ops.convert_to_tensor(np.asarray(values, "float32")),
                 training=False,
             )
         ).astype("float64")
@@ -1118,7 +1117,7 @@ def build_callbacks(
         # subscripting `["logits"]` here would raise. What the probe wants is a
         # single row of vocabulary logits for the LAST position of the context,
         # and this closure owns that decision, as it does for every other trainer.
-        logits_fn=lambda ctx: ops.convert_to_numpy(
+        logits_fn=lambda ctx: keras.ops.convert_to_numpy(
             model(ctx, training=False)
         )[0, -1, :],
         probe_every_steps=config.checkpoint_every_steps,

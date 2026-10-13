@@ -3,7 +3,6 @@ import tempfile
 import os
 import numpy as np
 import keras
-from keras import ops
 from typing import Any, Dict
 
 from dl_techniques.layers.reasoning import (
@@ -37,7 +36,7 @@ class TestSparsePuzzleEmbedding:
     @pytest.fixture
     def sample_input(self) -> keras.KerasTensor:
         """Sample puzzle IDs input."""
-        return ops.convert_to_tensor(np.array([0, 5, 3, 9], dtype=np.int32))
+        return keras.ops.convert_to_tensor(np.array([0, 5, 3, 9], dtype=np.int32))
 
     def test_initialization(self, layer_config):
         """Test layer initialization."""
@@ -65,21 +64,21 @@ class TestSparsePuzzleEmbedding:
 
         assert output.shape == (4, 32)
         # Verify local caches were updated
-        cached_ids = ops.convert_to_numpy(layer.local_ids)
+        cached_ids = keras.ops.convert_to_numpy(layer.local_ids)
         np.testing.assert_array_equal(cached_ids, [0, 5, 3, 9])
 
     def test_embedding_lookup_correctness(self, minimal_config):
         """Test that embedding lookup returns correct vectors."""
         layer = SparsePuzzleEmbedding(**minimal_config)
 
-        ids = ops.convert_to_tensor(np.array([0, 1], dtype=np.int32))
+        ids = keras.ops.convert_to_tensor(np.array([0, 1], dtype=np.int32))
         output = layer(ids, training=False)
 
         # Manual lookup should match
-        expected = ops.take(layer.embeddings, ids, axis=0)
+        expected = keras.ops.take(layer.embeddings, ids, axis=0)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(output),
-            ops.convert_to_numpy(expected),
+            keras.ops.convert_to_numpy(output),
+            keras.ops.convert_to_numpy(expected),
             atol=1e-7
         )
 
@@ -111,8 +110,8 @@ class TestSparsePuzzleEmbedding:
             loaded_pred = loaded_model(sample_input)
 
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_pred),
-                ops.convert_to_numpy(loaded_pred),
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
                 rtol=1e-6, atol=1e-6,
                 err_msg="SparsePuzzleEmbedding predictions differ after serialization"
             )
@@ -153,7 +152,7 @@ class TestSparsePuzzleEmbedding:
 
         with tf.GradientTape() as tape:
             output = layer(sample_input, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
 
         gradients = tape.gradient(loss, layer.trainable_variables)
         assert len(gradients) > 0
@@ -182,7 +181,7 @@ class TestSparsePuzzleEmbedding:
     def test_training_modes(self, minimal_config, training):
         """Test behavior in different training modes."""
         layer = SparsePuzzleEmbedding(**minimal_config)
-        ids = ops.convert_to_tensor(np.array([0, 1], dtype=np.int32))
+        ids = keras.ops.convert_to_tensor(np.array([0, 1], dtype=np.int32))
 
         output = layer(ids, training=training)
         assert output.shape == (2, 8)
@@ -201,7 +200,7 @@ class TestTheIdCacheIsWritableUnderXLAOnAGPU:
     def test_the_id_cache_is_not_an_int32_variable(self):
         """Device-independent arm: the dtype that decides the placement."""
         layer = SparsePuzzleEmbedding(num_embeddings=100, embedding_dim=8, batch_size=4)
-        layer(ops.convert_to_tensor(self.IDS), training=True)
+        layer(keras.ops.convert_to_tensor(self.IDS), training=True)
         assert int32_variables(layer) == []
         assert layer.local_ids.dtype == "int64"
 
@@ -210,7 +209,7 @@ class TestTheIdCacheIsWritableUnderXLAOnAGPU:
         import tensorflow as tf
 
         layer = SparsePuzzleEmbedding(num_embeddings=100, embedding_dim=8, batch_size=4)
-        layer(ops.convert_to_tensor(self.IDS), training=False)
+        layer(keras.ops.convert_to_tensor(self.IDS), training=False)
 
         @tf.function(jit_compile=True)
         def step(ids):
@@ -218,12 +217,12 @@ class TestTheIdCacheIsWritableUnderXLAOnAGPU:
 
         step(tf.constant(self.IDS))
 
-        np.testing.assert_array_equal(ops.convert_to_numpy(layer.local_ids), self.IDS)
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(layer.local_ids), self.IDS)
         assert "GPU" in layer.local_ids.value.device, layer.local_ids.value.device
 
     def test_an_archive_with_an_int32_cache_loads_with_identical_values(self, tmp_path):
         """An archive written before the fix restores bit-exactly into int64."""
-        ids = ops.convert_to_tensor(self.IDS)
+        ids = keras.ops.convert_to_tensor(self.IDS)
         with built_as_int32(sparse_puzzle_embedding_module):
             inputs = keras.Input(shape=(), dtype="int32", batch_size=4)
             old = keras.Model(
@@ -243,9 +242,9 @@ class TestTheIdCacheIsWritableUnderXLAOnAGPU:
 
         assert int32_variables(new) == []
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(new.get_layer("puzzle").local_ids), self.IDS
+            keras.ops.convert_to_numpy(new.get_layer("puzzle").local_ids), self.IDS
         )
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(new(ids, training=False)),
-            ops.convert_to_numpy(old(ids, training=False)),
+            keras.ops.convert_to_numpy(new(ids, training=False)),
+            keras.ops.convert_to_numpy(old(ids, training=False)),
         )

@@ -53,7 +53,6 @@ References:
 """
 
 import keras
-from keras import ops
 import tensorflow as tf
 from typing import Dict, Any, Optional, Union, Tuple
 
@@ -635,7 +634,7 @@ class CausalLanguageModel(keras.Model):
             ids = keras.random.randint(
                 (batch_size, seq_len), minval=0, maxval=self.vocab_size, seed=0
             )
-            perturbed = ops.concatenate(
+            perturbed = keras.ops.concatenate(
                 [
                     ids[:, :split],
                     (ids[:, split:split + 1] + 1) % self.vocab_size,
@@ -647,7 +646,7 @@ class CausalLanguageModel(keras.Model):
                 base = self._backbone_forward(ids, training=False)
                 moved = self._backbone_forward(perturbed, training=False)
             else:
-                mask = ops.ones((batch_size, seq_len), dtype="int32")
+                mask = keras.ops.ones((batch_size, seq_len), dtype="int32")
                 base = self._backbone_forward(
                     {"input_ids": ids, "attention_mask": mask}, training=False
                 )
@@ -663,8 +662,8 @@ class CausalLanguageModel(keras.Model):
             return
 
         leak = float(
-            ops.convert_to_numpy(
-                ops.max(ops.abs(base[:, :split] - moved[:, :split]))
+            keras.ops.convert_to_numpy(
+                keras.ops.max(keras.ops.abs(base[:, :split] - moved[:, :split]))
             )
         )
         if leak > self.causality_tolerance:
@@ -819,7 +818,7 @@ class CausalLanguageModel(keras.Model):
             # self.backbone.losses truthiness, not just the flag, so a
             # backbone with no add_loss call is a true no-op. See decisions.md D-002.
             if self.aggregate_backbone_losses and self.backbone.losses:
-                loss = loss + ops.sum(self.backbone.losses)
+                loss = loss + keras.ops.sum(self.backbone.losses)
             # DECISION plan-2026-08-19T163559-499b6f0e/D-036: scale_loss runs inside
             # the tape; skipping it shrinks every mixed_float16 update. See decisions.md.
             scaled_loss = self.optimizer.scale_loss(loss)
@@ -830,7 +829,7 @@ class CausalLanguageModel(keras.Model):
 
         self.loss_tracker.update_state(loss)
         self.acc_metric.update_state(y_true=y_labels, y_pred=logits, sample_weight=loss_weights)
-        self.perplexity_metric.update_state(ops.exp(loss))
+        self.perplexity_metric.update_state(keras.ops.exp(loss))
 
         return {m.name: m.result() for m in self.metrics}
 
@@ -852,11 +851,11 @@ class CausalLanguageModel(keras.Model):
         # train_step, applied here so the reported test/eval loss also
         # reflects the backbone's own add_loss contribution. See decisions.md D-002.
         if self.aggregate_backbone_losses and self.backbone.losses:
-            loss = loss + ops.sum(self.backbone.losses)
+            loss = loss + keras.ops.sum(self.backbone.losses)
 
         self.loss_tracker.update_state(loss)
         self.acc_metric.update_state(y_true=y_labels, y_pred=logits, sample_weight=loss_weights)
-        self.perplexity_metric.update_state(ops.exp(loss))
+        self.perplexity_metric.update_state(keras.ops.exp(loss))
 
         return {m.name: m.result() for m in self.metrics}
 
@@ -894,12 +893,12 @@ class CausalLanguageModel(keras.Model):
         loss = default_loss_fn(y, y_pred)
 
         if sample_weight is not None:
-            sample_weight = ops.cast(sample_weight, dtype=loss.dtype)
+            sample_weight = keras.ops.cast(sample_weight, dtype=loss.dtype)
             loss = loss * sample_weight
-            num_valid_tokens = ops.maximum(ops.sum(sample_weight), 1.0)
-            return ops.sum(loss) / num_valid_tokens
+            num_valid_tokens = keras.ops.maximum(keras.ops.sum(sample_weight), 1.0)
+            return keras.ops.sum(loss) / num_valid_tokens
         else:
-            return ops.mean(loss)
+            return keras.ops.mean(loss)
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the configuration of the model for serialization.

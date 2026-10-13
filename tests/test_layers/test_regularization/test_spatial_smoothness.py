@@ -23,7 +23,6 @@ import pytest
 import tensorflow as tf
 
 import keras
-from keras import ops
 
 from dl_techniques.layers.regularization.spatial_smoothness import (
     DISTANCE_METRICS,
@@ -104,10 +103,10 @@ def _loss_of(activations, tables, num_neighborhoods=5, seed=1):
     )
     return float(
         spatial_smoothness_loss(
-            ops.convert_to_tensor(activations),
-            ops.convert_to_tensor(tables.patch_table[rows]),
-            ops.convert_to_tensor(tables.triu_flat),
-            ops.convert_to_tensor(tables.d_unit),
+            keras.ops.convert_to_tensor(activations),
+            keras.ops.convert_to_tensor(tables.patch_table[rows]),
+            keras.ops.convert_to_tensor(tables.triu_flat),
+            keras.ops.convert_to_tensor(tables.d_unit),
         )
     )
 
@@ -418,16 +417,16 @@ class TestSpatialSmoothnessLoss:
         forward = _loss_of(activations, tables)
         backward = float(
             spatial_smoothness_loss(
-                ops.convert_to_tensor(activations.astype("float32")),
-                ops.convert_to_tensor(
+                keras.ops.convert_to_tensor(activations.astype("float32")),
+                keras.ops.convert_to_tensor(
                     tables.patch_table[
                         np.random.default_rng(1).integers(
                             0, tables.num_centers, size=5
                         )
                     ]
                 ),
-                ops.convert_to_tensor(tables.triu_flat),
-                ops.convert_to_tensor(-tables.d_unit),
+                keras.ops.convert_to_tensor(tables.triu_flat),
+                keras.ops.convert_to_tensor(-tables.d_unit),
             )
         )
         assert forward < 0.30, forward
@@ -446,10 +445,10 @@ class TestSpatialSmoothnessLoss:
         rows = [7, 101, 260]
         vectorised = float(
             spatial_smoothness_loss(
-                ops.convert_to_tensor(activations.astype("float32")),
-                ops.convert_to_tensor(tables.patch_table[rows]),
-                ops.convert_to_tensor(tables.triu_flat),
-                ops.convert_to_tensor(tables.d_unit),
+                keras.ops.convert_to_tensor(activations.astype("float32")),
+                keras.ops.convert_to_tensor(tables.patch_table[rows]),
+                keras.ops.convert_to_tensor(tables.triu_flat),
+                keras.ops.convert_to_tensor(tables.d_unit),
             )
         )
         # The oracle is called on the SAME three centres, or the two numbers
@@ -555,10 +554,10 @@ class TestSpatialSmoothnessForward:
         layer = SpatialSmoothness(alpha=2.5, radius=RADIUS, seed=0)
         inputs = _sample_input()
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(layer(inputs, training=False)), inputs
+            keras.ops.convert_to_numpy(layer(inputs, training=False)), inputs
         )
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(layer(inputs, training=True)), inputs
+            keras.ops.convert_to_numpy(layer(inputs, training=True)), inputs
         )
 
     def test_no_loss_is_added_at_inference(self):
@@ -583,7 +582,7 @@ class TestSpatialSmoothnessForward:
         alpha = 2.5
         layer = SpatialSmoothness(alpha=alpha, radius=RADIUS, seed=0)
         layer(_sample_input(), training=True)
-        recorded = float(ops.convert_to_numpy(layer.last_spatial_loss))
+        recorded = float(keras.ops.convert_to_numpy(layer.last_spatial_loss))
         added = float(layer.losses[0])
         assert added == pytest.approx(alpha * recorded, rel=1e-5)
         assert 0.0 < recorded <= 1.0
@@ -599,15 +598,15 @@ class TestSpatialSmoothnessForward:
         assert isinstance(layer.layout, SpatialLayout)
         assert layer.layout.grid_shape == (28, 28)
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(layer.perm), layer.layout.perm
+            keras.ops.convert_to_numpy(layer.perm), layer.layout.perm
         )
 
     def test_reset_statistics_zeroes_the_recorded_loss(self):
         layer = SpatialSmoothness(alpha=1.0, radius=RADIUS, seed=0)
         layer(_sample_input(), training=True)
-        assert float(ops.convert_to_numpy(layer.last_spatial_loss)) != 0.0
+        assert float(keras.ops.convert_to_numpy(layer.last_spatial_loss)) != 0.0
         layer.reset_statistics()
-        assert float(ops.convert_to_numpy(layer.last_spatial_loss)) == 0.0
+        assert float(keras.ops.convert_to_numpy(layer.last_spatial_loss)) == 0.0
 
     def test_max_samples_caps_the_correlation_rows(self):
         capped = SpatialSmoothness(alpha=1.0, radius=2, seed=0, max_samples=8)
@@ -636,7 +635,7 @@ class TestStatelessBuild:
         layer = _build_through_parent(
             SpatialSmoothness(alpha=2.5, radius=RADIUS, seed=0)
         )
-        perm = ops.convert_to_numpy(layer.perm)
+        perm = keras.ops.convert_to_numpy(layer.perm)
         assert not np.all(perm == 0), "perm is all zeros -- the table was discarded"
         np.testing.assert_array_equal(perm, SpatialLayout(784, seed=0).perm)
 
@@ -644,12 +643,12 @@ class TestStatelessBuild:
         layer = _build_through_parent(
             SpatialSmoothness(alpha=2.5, radius=RADIUS, seed=0)
         )
-        patch_table = ops.convert_to_numpy(layer.patch_table)
+        patch_table = keras.ops.convert_to_numpy(layer.patch_table)
         assert patch_table.shape == (324, 121)
         assert not np.all(patch_table == 0)
-        d_unit = ops.convert_to_numpy(layer.d_unit)
+        d_unit = keras.ops.convert_to_numpy(layer.d_unit)
         np.testing.assert_allclose(float(np.linalg.norm(d_unit)), 1.0, atol=1e-6, rtol=0)
-        assert ops.convert_to_numpy(layer.triu_flat).max() < 121 * 121
+        assert keras.ops.convert_to_numpy(layer.triu_flat).max() < 121 * 121
 
 
 class TestGradients:
@@ -664,14 +663,14 @@ class TestGradients:
         dense = keras.layers.Dense(NUM_UNITS, kernel_initializer="ones")
         model = _DenseThenTap(dense, SpatialSmoothness(alpha=2.5, radius=RADIUS, seed=0))
         with tf.GradientTape() as tape:
-            loss = ops.sum(ops.square(model(_sample_input(batch=4, length=16), training=True)))
+            loss = keras.ops.sum(keras.ops.square(model(_sample_input(batch=4, length=16), training=True)))
         gradients = tape.gradient(loss, dense.trainable_variables)
 
         assert len(dense.trainable_variables) > 0
         for variable, gradient in zip(dense.trainable_variables, gradients):
             assert gradient is not None, f"no gradient for {variable.path}"
             assert np.any(
-                ops.convert_to_numpy(gradient) != 0.0
+                keras.ops.convert_to_numpy(gradient) != 0.0
             ), f"all-zero gradient for {variable.path}"
 
     def test_the_penalty_contributes_a_measurable_gradient_delta(self):
@@ -701,19 +700,19 @@ class TestGradients:
             with tf.GradientTape() as tape:
                 model(inputs, training=True)
                 if model.losses:
-                    spatial_only = ops.cast(model.losses[-1], "float32")
+                    spatial_only = keras.ops.cast(model.losses[-1], "float32")
                 else:
                     # alpha=0 contributes nothing. The forward still has to be on
                     # the tape, or `tape.gradient` has no path to differentiate.
-                    spatial_only = ops.cast(
-                        ops.sum(model(inputs, training=False)), "float32"
+                    spatial_only = keras.ops.cast(
+                        keras.ops.sum(model(inputs, training=False)), "float32"
                     ) * 0.0
             gradients = tape.gradient(spatial_only, dense.trainable_variables)
 
             assert len(model.losses) == (1 if alpha > 0 else 0)
             measured[alpha] = float(
                 sum(
-                    float(ops.convert_to_numpy(gradient).sum())
+                    float(keras.ops.convert_to_numpy(gradient).sum())
                     for gradient in gradients
                     if gradient is not None
                 )
@@ -791,7 +790,7 @@ class TestBuildParity:
         control_paths = sorted(w.path for w in control.weights)
         assert live_paths == control_paths
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(live.perm), ops.convert_to_numpy(control.perm)
+            keras.ops.convert_to_numpy(live.perm), keras.ops.convert_to_numpy(control.perm)
         )
         assert control.trainable_variables == []
 
@@ -831,7 +830,7 @@ class TestSerialization:
         model(inputs, training=True)
 
         saved = {
-            weight.name: ops.convert_to_numpy(weight).copy()
+            weight.name: keras.ops.convert_to_numpy(weight).copy()
             for weight in model.weights
         }
         assert saved, "the model has no weights to compare"
@@ -849,7 +848,7 @@ class TestSerialization:
             # `project/kernel` prefix exists only on the donor. Leaf names are
             # unique here -- a Dense's kernel and the tap's tables cannot collide.
             restored = {
-                weight.name: ops.convert_to_numpy(weight)
+                weight.name: keras.ops.convert_to_numpy(weight)
                 for weight in loaded.weights
             }
             assert sorted(saved) == sorted(restored), (
@@ -869,7 +868,7 @@ class TestSerialization:
             [keras.layers.Dense(NUM_UNITS, name="project"), tap], name="model"
         )
         inputs = _sample_input()
-        original = ops.convert_to_numpy(model(inputs, training=False))
+        original = keras.ops.convert_to_numpy(model(inputs, training=False))
 
         import tempfile
         import os
@@ -878,7 +877,7 @@ class TestSerialization:
             path = os.path.join(directory, "layer.keras")
             model.save(path)
             loaded = keras.models.load_model(path)
-            restored = ops.convert_to_numpy(loaded(inputs, training=False))
+            restored = keras.ops.convert_to_numpy(loaded(inputs, training=False))
 
         np.testing.assert_allclose(restored, original, atol=1e-6, rtol=0)
 
@@ -908,7 +907,7 @@ class TestSerialization:
         first(_sample_input())
         second(_sample_input())
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(first.perm), ops.convert_to_numpy(second.perm)
+            keras.ops.convert_to_numpy(first.perm), keras.ops.convert_to_numpy(second.perm)
         )
 
 
@@ -925,9 +924,9 @@ class TestPrecision:
             layer = SpatialSmoothness(alpha=2.5, radius=RADIUS, seed=0)
             raw = np.random.default_rng(9).normal(size=(2, 8, NUM_UNITS))
             if policy == "float64":
-                inputs = ops.convert_to_tensor(raw.astype("float64"))
+                inputs = keras.ops.convert_to_tensor(raw.astype("float64"))
             else:
-                inputs = ops.convert_to_tensor(raw.astype("float32"))
+                inputs = keras.ops.convert_to_tensor(raw.astype("float32"))
             layer(inputs, training=True)
 
             value = float(layer.losses[0])
@@ -950,7 +949,7 @@ class TestPrecision:
         differently-rounded arrays, and the defect could hide inside that.
         """
         raw = np.random.default_rng(21).normal(size=(2, 8, NUM_UNITS))
-        inputs = ops.convert_to_tensor(raw.astype("float64"))
+        inputs = keras.ops.convert_to_tensor(raw.astype("float64"))
         assert inputs.dtype == "float64", (
             "the float64 arm is a fake reading: the input did not arrive as "
             f"float64 but as {inputs.dtype}"
@@ -994,11 +993,11 @@ class TestGraphSafety:
         # The graph arm runs first: `traced` traces and executes, and any stale
         # value in `last_spatial_loss` at that point can only have come from it.
         traced(inputs)
-        graph = float(ops.convert_to_numpy(layer.last_spatial_loss))
+        graph = float(keras.ops.convert_to_numpy(layer.last_spatial_loss))
 
         layer.reset_statistics()
         layer(inputs, training=True)
-        eager = float(ops.convert_to_numpy(layer.last_spatial_loss))
+        eager = float(keras.ops.convert_to_numpy(layer.last_spatial_loss))
 
         assert np.isfinite(graph)
         assert eager != 0.0, "the eager arm ran at 0.0 and compares as a pass"
@@ -1092,8 +1091,8 @@ class TestTheTablesAreReadableUnderXLAOnAGPU:
         assert int32_variables(new) == []
         for name in ("perm", "patch_table", "triu_flat"):
             np.testing.assert_array_equal(
-                ops.convert_to_numpy(getattr(new_tap, name)),
-                ops.convert_to_numpy(getattr(old_tap, name)),
+                keras.ops.convert_to_numpy(getattr(new_tap, name)),
+                keras.ops.convert_to_numpy(getattr(old_tap, name)),
                 err_msg=f"{name} was not restored",
             )
 
@@ -1102,6 +1101,6 @@ class TestTheTablesAreReadableUnderXLAOnAGPU:
         new_tap.seed_generator.state.assign(old_tap.seed_generator.state)
         old(inputs, training=True)
         new(inputs, training=True)
-        old_loss = float(ops.convert_to_numpy(old_tap.last_spatial_loss))
+        old_loss = float(keras.ops.convert_to_numpy(old_tap.last_spatial_loss))
         assert old_loss > 0.0, "the old arm computed no penalty"
-        assert float(ops.convert_to_numpy(new_tap.last_spatial_loss)) == old_loss
+        assert float(keras.ops.convert_to_numpy(new_tap.last_spatial_loss)) == old_loss

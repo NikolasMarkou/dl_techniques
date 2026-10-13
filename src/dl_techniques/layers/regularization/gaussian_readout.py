@@ -34,7 +34,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import keras
 import numpy as np
-from keras import ops
 
 # ---------------------------------------------------------------------
 # local imports
@@ -312,18 +311,18 @@ class GaussianReadout(keras.layers.Layer):
         del training
 
         height, width = self._grid_shape
-        lead_shape = ops.shape(inputs)[:-1]
-        num_units = ops.shape(inputs)[-1]
+        lead_shape = keras.ops.shape(inputs)[:-1]
+        num_units = keras.ops.shape(inputs)[-1]
 
-        grid = ops.reshape(
-            ops.take(inputs, self.cell_to_unit_flat, axis=-1),
+        grid = keras.ops.reshape(
+            keras.ops.take(inputs, self.cell_to_unit_flat, axis=-1),
             (-1, height, width, 1),
         )
         if self.padding_mode == "nearest":
             grid = _replicate_pad(grid, self._half_pad)
         smoothed = self.blur(grid)
-        return ops.take(
-            ops.reshape(smoothed, (*lead_shape, num_units)),
+        return keras.ops.take(
+            keras.ops.reshape(smoothed, (*lead_shape, num_units)),
             self.perm,
             axis=-1,
         )
@@ -357,7 +356,7 @@ class GaussianReadout(keras.layers.Layer):
 def _replicate_pad(grid: keras.KerasTensor, pad: int) -> keras.KerasTensor:
     """Extend a ``(B, H, W, C)`` grid by repeating its edge rows and columns.
 
-    Written out rather than delegated to ``ops.pad`` because none of its modes
+    Written out rather than delegated to ``keras.ops.pad`` because none of its modes
     is edge replication. ``mode="SYMMETRIC"`` mirrors -- a left pad of three over
     ``[a, b, c]`` produces ``[a, b, c]``, where replication needs
     ``[a, a, a]`` -- and the difference is invisible in the interior and largest
@@ -374,10 +373,10 @@ def _replicate_pad(grid: keras.KerasTensor, pad: int) -> keras.KerasTensor:
     # the bottom-right region of the output.
     top = [grid[:, :1, :, :]] * pad
     bottom = [grid[:, -1:, :, :]] * pad
-    rows = ops.concatenate(top + [grid] + bottom, axis=1)
+    rows = keras.ops.concatenate(top + [grid] + bottom, axis=1)
     left = [rows[:, :, :1, :]] * pad
     right = [rows[:, :, -1:, :]] * pad
-    return ops.concatenate(left + [rows] + right, axis=2)
+    return keras.ops.concatenate(left + [rows] + right, axis=2)
 
 
 def _index_initializer(values: np.ndarray) -> Any:

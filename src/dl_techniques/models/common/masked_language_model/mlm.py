@@ -25,7 +25,6 @@ References:
 
 import keras
 import tensorflow as tf
-from keras import ops
 from typing import Dict, Any, Optional, Union, List, Tuple
 
 # ---------------------------------------------------------------------
@@ -586,12 +585,12 @@ class MaskedLanguageModel(keras.Model):
         if sample_weight is not None:
             # DECISION plan-2026-08-19T163559-499b6f0e/D-083: `keras.ops` on the traced
             # path; the GradientTape in train_step is the exception. See decisions.md.
-            sample_weight = ops.cast(sample_weight, dtype=loss.dtype)
+            sample_weight = keras.ops.cast(sample_weight, dtype=loss.dtype)
             loss = loss * sample_weight
-            num_masked = ops.maximum(ops.sum(sample_weight), 1.0)
-            return ops.sum(loss) / num_masked
+            num_masked = keras.ops.maximum(keras.ops.sum(sample_weight), 1.0)
+            return keras.ops.sum(loss) / num_masked
         else:
-            return ops.mean(loss)
+            return keras.ops.mean(loss)
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the configuration of the model for serialization.

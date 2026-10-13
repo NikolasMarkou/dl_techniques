@@ -19,7 +19,6 @@ import pytest
 import tensorflow as tf
 
 import keras
-from keras import ops
 
 from dl_techniques.layers.regularization.gaussian_readout import (
     DEFAULT_FWHM,
@@ -202,7 +201,7 @@ class TestGaussianReadoutForward:
     def test_the_shape_is_preserved_and_the_output_is_finite(self):
         layer = GaussianReadout(seed=0)
         inputs = self._input()
-        output = ops.convert_to_numpy(layer(inputs, training=False))
+        output = keras.ops.convert_to_numpy(layer(inputs, training=False))
         assert output.shape == inputs.shape
         assert np.all(np.isfinite(output))
 
@@ -218,7 +217,7 @@ class TestGaussianReadoutForward:
         layer = GaussianReadout(seed=0)
         inputs = np.full((1, 4, NUM_UNITS), 2.5, dtype="float32")
         np.testing.assert_allclose(
-            ops.convert_to_numpy(layer(inputs, training=False)), inputs,
+            keras.ops.convert_to_numpy(layer(inputs, training=False)), inputs,
             atol=1e-4, rtol=0,
         )
 
@@ -239,7 +238,7 @@ class TestGaussianReadoutForward:
         unit = 300
         inputs = _delta(NUM_UNITS, unit)
 
-        output = ops.convert_to_numpy(layer(inputs, training=False))[0, 0]
+        output = keras.ops.convert_to_numpy(layer(inputs, training=False))[0, 0]
         assert 0.0 < output[unit] < 1.0
 
         grid = layout.to_grid(output)
@@ -265,7 +264,7 @@ class TestGaussianReadoutForward:
         centre_unit = int(layout.cell_to_unit[14, 14])
         inputs = _delta(NUM_UNITS, centre_unit)
 
-        output = ops.convert_to_numpy(layer(inputs, training=False))[0, 0]
+        output = keras.ops.convert_to_numpy(layer(inputs, training=False))[0, 0]
         grid = layout.to_grid(output)
         profile = grid[14, 14 - 5:14 + 6]
 
@@ -285,8 +284,8 @@ class TestGaussianReadoutForward:
         narrow = GaussianReadout(fwhm=1.0, seed=0)
         wide = GaussianReadout(fwhm=4.0, seed=0)
         difference = np.abs(
-            ops.convert_to_numpy(narrow(inputs, training=False))
-            - ops.convert_to_numpy(wide(inputs, training=False))
+            keras.ops.convert_to_numpy(narrow(inputs, training=False))
+            - keras.ops.convert_to_numpy(wide(inputs, training=False))
         )
         assert float(difference.max()) > 1e-3
 
@@ -302,7 +301,7 @@ class TestGaussianReadoutForward:
         layer = GaussianReadout(fwhm=2.0, unit_spacing=1.0, permute=True, seed=0)
         activations = smooth_field_activations(layout, num_samples=8, seed=0)
 
-        in_graph = ops.convert_to_numpy(
+        in_graph = keras.ops.convert_to_numpy(
             layer(activations.astype("float32")[None, ...], training=False)
         )[0]
         reference = _numpy_blur(activations, layout, layer.sigma)
@@ -330,8 +329,8 @@ class TestGaussianReadoutForward:
 
         column_delta = float(
             np.abs(
-                ops.convert_to_numpy(layer(blended, training=False))
-                - ops.convert_to_numpy(layer(base, training=False))
+                keras.ops.convert_to_numpy(layer(blended, training=False))
+                - keras.ops.convert_to_numpy(layer(base, training=False))
             ).max()
         )
         assert column_delta > 1e-4, (
@@ -349,10 +348,10 @@ class TestGaussianReadoutForward:
         layout = SpatialLayout(NUM_UNITS, seed=0)
         inputs = _delta(NUM_UNITS, int(layout.cell_to_unit[0, 0]))
 
-        nearest = ops.convert_to_numpy(
+        nearest = keras.ops.convert_to_numpy(
             GaussianReadout(padding_mode="nearest", seed=0)(inputs, training=False)
         )
-        zeros = ops.convert_to_numpy(
+        zeros = keras.ops.convert_to_numpy(
             GaussianReadout(padding_mode="zeros", seed=0)(inputs, training=False)
         )
         assert float(np.abs(nearest - zeros).max()) > 1e-6
@@ -372,10 +371,10 @@ class TestGaussianReadoutForward:
         from the config.
         """
         inputs = np.full((1, 1, NUM_UNITS), 1.0, dtype="float32")
-        nearest = ops.convert_to_numpy(
+        nearest = keras.ops.convert_to_numpy(
             GaussianReadout(padding_mode="nearest", seed=0)(inputs, training=False)
         )
-        zeros = ops.convert_to_numpy(
+        zeros = keras.ops.convert_to_numpy(
             GaussianReadout(padding_mode="zeros", seed=0)(inputs, training=False)
         )
         assert float(nearest.min()) == pytest.approx(1.0, abs=1e-4)
@@ -400,8 +399,8 @@ class TestGaussianReadoutForward:
 
         grid_delta = float(
             np.abs(
-                ops.convert_to_numpy(layer(blended, training=False))
-                - ops.convert_to_numpy(layer(base, training=False))
+                keras.ops.convert_to_numpy(layer(blended, training=False))
+                - keras.ops.convert_to_numpy(layer(base, training=False))
             ).max()
         )
         assert grid_delta > 1e-4, (
@@ -422,8 +421,8 @@ class TestGaussianReadoutForward:
 
         permuted = GaussianReadout(permute=True, seed=0)
         identity = GaussianReadout(permute=False)
-        first = ops.convert_to_numpy(permuted(blended, training=False))
-        second = ops.convert_to_numpy(identity(blended, training=False))
+        first = keras.ops.convert_to_numpy(permuted(blended, training=False))
+        second = keras.ops.convert_to_numpy(identity(blended, training=False))
         assert float(np.abs(first - second).max()) > 1e-6
 
     def test_a_dynamic_last_axis_is_refused_at_build(self):
@@ -439,7 +438,7 @@ class TestGaussianReadoutBuild:
         parent = keras.Sequential([child], name="model")
         parent.build((None, 4, NUM_UNITS))
 
-        kernel = ops.convert_to_numpy(child.blur.kernel)[:, :, 0, 0]
+        kernel = keras.ops.convert_to_numpy(child.blur.kernel)[:, :, 0, 0]
         assert not np.all(kernel == 0), "the kernel is all zeros"
         np.testing.assert_allclose(
             float(kernel.sum()), 1.0, atol=1e-5, rtol=0
@@ -472,7 +471,7 @@ class TestGaussianReadoutPrecision:
             inputs = np.random.default_rng(0).normal(
                 size=(1, 4, NUM_UNITS)
             ).astype("float32")
-            output = ops.convert_to_numpy(layer(inputs, training=False))
+            output = keras.ops.convert_to_numpy(layer(inputs, training=False))
             assert np.all(np.isfinite(output))
         finally:
             keras.mixed_precision.set_global_policy(previous)
@@ -483,7 +482,7 @@ class TestGaussianReadoutPrecision:
             size=(1, 4, NUM_UNITS)
         ).astype("float32")
 
-        eager = ops.convert_to_numpy(layer(inputs, training=False))
+        eager = keras.ops.convert_to_numpy(layer(inputs, training=False))
 
         @tf.function(
             input_signature=[tf.TensorSpec([None, None, NUM_UNITS], tf.float32)]
@@ -492,7 +491,7 @@ class TestGaussianReadoutPrecision:
             return layer(x, training=False)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(traced(inputs)), eager, atol=1e-5, rtol=0
+            keras.ops.convert_to_numpy(traced(inputs)), eager, atol=1e-5, rtol=0
         )
 
 
@@ -507,7 +506,7 @@ class TestGaussianReadoutSerialization:
         model(inputs, training=False)
 
         saved = {
-            weight.name: ops.convert_to_numpy(weight).copy()
+            weight.name: keras.ops.convert_to_numpy(weight).copy()
             for weight in model.weights
         }
         assert saved
@@ -520,7 +519,7 @@ class TestGaussianReadoutSerialization:
             model.save(path)
             loaded = keras.models.load_model(path)
             restored = {
-                weight.name: ops.convert_to_numpy(weight)
+                weight.name: keras.ops.convert_to_numpy(weight)
                 for weight in loaded.weights
             }
             assert sorted(saved) == sorted(restored)
@@ -533,7 +532,7 @@ class TestGaussianReadoutSerialization:
         inputs = np.random.default_rng(0).normal(
             size=(1, 4, NUM_UNITS)
         ).astype("float32")
-        original = ops.convert_to_numpy(model(inputs, training=False))
+        original = keras.ops.convert_to_numpy(model(inputs, training=False))
 
         import os
         import tempfile
@@ -542,7 +541,7 @@ class TestGaussianReadoutSerialization:
             path = os.path.join(directory, "readout.keras")
             model.save(path)
             loaded = keras.models.load_model(path)
-            restored = ops.convert_to_numpy(loaded(inputs, training=False))
+            restored = keras.ops.convert_to_numpy(loaded(inputs, training=False))
 
         np.testing.assert_allclose(restored, original, atol=1e-6, rtol=0)
 
@@ -586,7 +585,7 @@ class TestTheIndexTablesAreReadableUnderXLAOnAGPU:
             old = keras.Sequential(
                 [GaussianReadout(seed=4, name="readout")], name="model"
             )
-            expected = ops.convert_to_numpy(old(inputs, training=False))
+            expected = keras.ops.convert_to_numpy(old(inputs, training=False))
         assert int32_variables(old) == [
             "model/readout/cell_to_unit_flat", "model/readout/perm"
         ]
@@ -597,7 +596,7 @@ class TestTheIndexTablesAreReadableUnderXLAOnAGPU:
 
         assert int32_variables(new) == []
         np.testing.assert_array_equal(
-            ops.convert_to_numpy(new(inputs, training=False)), expected
+            keras.ops.convert_to_numpy(new(inputs, training=False)), expected
         )
 
 
