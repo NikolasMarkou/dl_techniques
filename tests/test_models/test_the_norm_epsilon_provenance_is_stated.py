@@ -35,7 +35,7 @@ package               MEASURED census                      ruling
 ``vit_hmlp``          25x ``1e-06`` + 3x ``1e-03``         is factory-vs-bare
 ``fastvlm``           34x ``1e-03`` + 12x ``1e-06``        construction, not a
                                                            per-site choice
-``qwen``              9x ``1e-05`` + 8x ``1e-06``          STATED
+``qwen``              6x ``1e-05`` + 11x ``1e-06``         STATED
 ``accunet``           119 sites, all ``1e-03``             STATED (port;
                                                            reference is
                                                            ``1e-5``, no
@@ -184,7 +184,14 @@ CENSUS = {
     "mobilenet": (_mobilenet, {"1e-03": 53}),
     "vit_hmlp": (_vit_hmlp, {"1e-06": 25, "1e-03": 3}),
     "fastvlm": (_fastvlm, {"1e-03": 34, "1e-06": 12}),
-    "qwen": (_qwen, {"1e-05": 9, "1e-06": 8}),
+    # RE-MEASURED 2026-10-13: {"1e-05": 6, "1e-06": 11}, not {"1e-05": 9,
+    # "1e-06": 8}. The three moved sites are the `v_norm` layers of the
+    # Qwen3Next delta blocks. Provenance: user commit 2c2694d91 set
+    # `GatedLinearAttentionBlock`'s `v_norm` default epsilon to 1e-6, because
+    # that norm runs over the whole v_dim tensor (2 * num_heads * head_dim)
+    # rather than per head, as the Q/K norms do. Ruling:
+    # plan-2026-10-13T035756-5dd4d94d/D-011.
+    "qwen": (_qwen, {"1e-05": 6, "1e-06": 11}),
     "accunet": (_accunet, {"1e-03": 119}),
     "masked_autoencoder": (_masked_autoencoder, {"1e-03": 4}),
     "cbam": (_cbam, {"1e-03": 2}),
