@@ -102,12 +102,19 @@ def test_exactly_one_subject_is_documented_as_not_compiling():
     ``^_sub("`` set against ``452d663d2``: 53 -> 52 registered, and
     ``memory_bank`` is the only name that left. No model stopped compiling --
     the raising set is still exactly ``["superpoint"]``, unchanged.
+
+    Re-pinned 2026-10-13, 51 -> 54: the population GAINED three subjects,
+    ``zamba2``, ``hnet`` and ``topolm`` (``_sub(...)`` in
+    ``precision_arm_subjects.py``, plan-2026-10-11T170958-dc4d2202 step 13),
+    and all three compile and agree with eager under ``jit_compile=True``
+    (their ``test_the_package_computes_the_same_function_under_xla`` rows
+    pass). The raising set is still exactly ``["superpoint"]``.
     """
     raising = sorted(n for n in subject_names()
                      if xla_subject(n)[2].get("expect") == "raises")
     assert raising == ["superpoint"], (
         f"the not-XLA-compilable set changed: {raising}")
-    assert len(subject_names()) - len(raising) == 51, (
+    assert len(subject_names()) - len(raising) == 54, (
         "the compiling-subject count moved; re-measure before editing this")
 
 

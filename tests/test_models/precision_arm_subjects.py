@@ -57,13 +57,13 @@ CHARGED_PACKAGES: Tuple[str, ...] = (
     "SAM", "accunet", "beit", "bert", "bias_free_denoisers",
     "blt", "capsnet", "cbam", "cliffordnet", "convnext",
     "convunext", "depth_anything", "fastvit", "fnet", "fractalnet", "gemma",
-    "gpt2", "hrm", "ideogram4", "lewm",
+    "gpt2", "hnet", "hrm", "ideogram4", "lewm",
     "masked_autoencoder", "masked_language_model", "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "ntm",
     "pft_sr", "power_mlp", "qwen", "relgt", "resnet", "scunet", "sd3_mmdit",
     "shgcn", "som", "squeezenet", "superpoint", "swin_transformer", "tabm",
-    "time_series", "trm", "vae", "video_jepa", "vit",
+    "time_series", "topolm", "trm", "vae", "video_jepa", "vit",
     "vit_hmlp", "vit_siglip", "vq_vae", "vq_vae_rotation", "wave_field",
-    "yolo12",
+    "yolo12", "zamba2",
 )
 
 
@@ -429,6 +429,62 @@ def _b_wave_field(**head):
 # decisions.md D-006.
 _sub("wave_field", _b_wave_field, lambda: _ids(64, 2, 16),
      dtype_exempt_outputs=(0,))
+
+
+def _tiny(name: str):
+    """The :data:`~.tiny_language_models.TINY` row ``name``, imported late.
+
+    ``tiny_language_models`` imports model code at module level and this module
+    must not, so the import happens inside the builder. One row per class lives
+    there (shared with the contract tests); a second copy here would be a
+    hand-kept invariant.
+    """
+    from .tiny_language_models import TINY
+    return TINY[name]
+
+
+# ``zamba2``, ``hnet`` and ``topolm`` joined the family on 2026-10-13
+# (plan-2026-10-11T170958-dc4d2202 step 13), once Zamba2 and HNet gained
+# ``include_top`` / ``task_config``. Their builders take the head kwargs, so
+# ``HEADED_SUBJECTS`` below derives the headed build from the SAME row; the
+# headed round trip, the head-absent sibling and the headed fp16 arm read one
+# row, not a second hand-written constructor.
+def _b_zamba2(**head):
+    tiny = _tiny("zamba2")
+    return tiny.cls()(**dict(tiny.kwargs, **head))
+
+
+def _b_hnet(**head):
+    tiny = _tiny("hnet")
+    return tiny.cls()(**dict(tiny.kwargs, **head))
+
+
+def _b_topolm(**head):
+    tiny = _tiny("topolm")
+    return tiny.cls()(**dict(tiny.kwargs, **head))
+
+
+# ``expected_compute_dtype="float32"``: MEASURED 2026-10-13 -- the headless
+# output is ONE tensor, the tied-embedding logits, which go through
+# `dl_techniques.utils.tied_embeddings.tied_embedding_logits` (the float32 floor
+# documented for ``gpt2`` above); the arm reads ['float32'] under
+# mixed_float16. Same shape as ``nano_vlm``. The backbone's own float16 is
+# charged by the headed build (``test_the_in_model_task_head_runs_under_mixed_float16``).
+_sub("zamba2", _b_zamba2, lambda: _ids(64, 2, 16),
+     expected_compute_dtype="float32")
+
+# No deviation: the shipped layout is untied (`tie_word_embeddings` defaults to
+# False for the two-stage layout), so the logits come from `lm_head` and the
+# arm reads ['float16'] -- MEASURED 2026-10-13. The tied branch's float32 floor
+# is asserted by ``test_tied_embeddings.py::TestRealModelForwardPass``.
+_sub("hnet", _b_hnet, lambda: _ids(64, 2, 16))
+
+# ``dtype_exempt_outputs=(0,)``: same reason and shape as ``gpt2`` -- MEASURED
+# 2026-10-13, ``call()`` returns ``{"logits": float32, "last_hidden_state":
+# float16}`` under mixed_float16 (tied logits through `tied_embedding_logits`),
+# so only ``logits`` (index 0) is exempted and ``last_hidden_state`` stays
+# charged at the float16 default.
+_sub("topolm", _b_topolm, lambda: _ids(64, 2, 16), dtype_exempt_outputs=(0,))
 
 
 def _b_masked_language_model():
@@ -1288,6 +1344,19 @@ def _thera_inputs():
 _extra("thera", _b_thera, _thera_inputs)
 
 
+def _b_ptrm():
+    from dl_techniques.models.language.ptrm import create_ptrm
+    return create_ptrm(vocab_size=64, hidden_size=32, num_heads=2,
+                       expansion=2.0, seq_len=16, puzzle_emb_len=4,
+                       h_layers=1, l_layers=1, halt_max_steps=2)
+
+
+# Same ``(carry, batch, training)`` contract as ``trm`` (``PTRM`` subclasses
+# ``TRM``), so the batch and the call adapter are ``trm``'s. Round-trip family
+# only, like ``nam``: the precision arm for the recursive family is ``trm``'s.
+_extra("ptrm", _b_ptrm, _trm_batch, call_fn=_trm_call)
+
+
 def _b_tree_transformer(**head):
     from dl_techniques.models.language.tree_transformer.model import TreeTransformer
     # ``max_len``, not ``max_position_embeddings``: the constructor rejects the
@@ -1490,10 +1559,10 @@ def roundtrip_subject(name: str) -> Tuple[Callable[[], Any], Callable[[], Any], 
 #
 # The subject set is not chosen by taste. It is every package whose model class
 # accepts ``include_top``, derived mechanically by
-# ``inspect.signature(type(model).__init__)`` -- 29 of the 81 subjects,
-# re-derived 2026-10-11 (the comment read "13 of the 72" when written) -- and
+# ``inspect.signature(type(model).__init__)`` -- 32 of the 85 subjects,
+# re-derived 2026-10-13 (the comment read "13 of the 72" when written) -- and
 # ``test_the_no_head_sibling_set_is_the_include_top_set`` re-derives it, so a
-# package that GAINS the knob cannot stay out of the arm. 23 of the 29 have a
+# package that GAINS the knob cannot stay out of the arm. 26 of the 32 have a
 # sibling; that test names the 6 that do not (beit, darkir, depth_anything,
 # fftnet, pft_sr, scunet).
 
@@ -1531,8 +1600,9 @@ def _headed(build: Callable[..., Any]) -> Callable[[], Any]:
 # ``gpt2``/``wave_field`` (plan-2026-09-12T123331-28fd855f/D-006). The headed
 # build gets its own fp16 arm instead (``test_precision_arm_family.py``). See
 # decisions.md D-016.
-for _name in ("bert", "distilbert", "fnet", "gemma", "gpt2", "mamba",
-              "modern_bert", "qwen", "tree_transformer", "wave_field"):
+for _name in ("bert", "distilbert", "fnet", "gemma", "gpt2", "hnet", "mamba",
+              "modern_bert", "qwen", "topolm", "tree_transformer",
+              "wave_field", "zamba2"):
     _build = (SUBJECTS[_name] if _name in SUBJECTS else EXTRA_SUBJECTS[_name])[0]
     HEADED_SUBJECTS[_name] = _headed(_build)
     NO_HEAD_SIBLINGS[_name] = _build

@@ -176,11 +176,14 @@ NO_HEAD_MARKERS = {
     "fnet": "task_head/",
     "gemma": "task_head/",
     "gpt2": "task_head/",
+    "hnet": "task_head/",
     "mamba": "task_head/",
     "modern_bert": "task_head/",
     "qwen": "task_head/",
+    "topolm": "task_head/",
     "tree_transformer": "task_head/",
     "wave_field": "task_head/",
+    "zamba2": "task_head/",
 }
 
 
