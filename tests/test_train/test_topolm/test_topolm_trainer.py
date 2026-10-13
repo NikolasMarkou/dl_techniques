@@ -1035,7 +1035,19 @@ class TestEvaluation:
             ]
 
         raw, readout = panels("t_maps_raw.png"), panels("t_maps_readout.png")
-        assert raw.shape == readout.shape
+        # The figures are saved with ``bbox_inches="tight"`` (plotting.py), so
+        # their pixel extents follow the tick and colorbar labels, which follow
+        # the data -- and the backbone is not seeded, so a few rows more or
+        # fewer per run is normal (MEASURED: 493 vs 497 rows on 2 of 10 seeds;
+        # an earlier `assert raw.shape == readout.shape` failed on those). The
+        # claim here is that the two arms are DRAWN from different arrays, not
+        # that their canvases are the same size, so compare on the common
+        # extent. Identical arrays give identical layouts, hence identical
+        # shapes and a zero difference: the assertion below still fails for the
+        # defect this test exists for.
+        height = min(raw.shape[0], readout.shape[0])
+        width = min(raw.shape[1], readout.shape[1])
+        raw, readout = raw[:height, :width], readout[:height, :width]
         difference = np.abs(raw.astype(int) - readout.astype(int)).max()
         assert difference > 0, (
             "the raw and readout t-map figures are pixel-identical; one arm's "
