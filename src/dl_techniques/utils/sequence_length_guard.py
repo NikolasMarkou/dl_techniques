@@ -251,7 +251,7 @@ def gate_dynamic_sequence_length(
     # DECISION plan-2026-10-11T170958-dc4d2202/D-006: one shared mechanism for every class with a
     # position limit; do NOT copy this back into a model file or gate only the shared embedding
     # layers (that leaves a refused first call unusable). See decisions.md.
-    if keras.backend.backend() != "tensorflow" or isinstance(
+    if keras.config.backend() != "tensorflow" or isinstance(
         input_ids, keras.KerasTensor
     ):
         return input_ids
