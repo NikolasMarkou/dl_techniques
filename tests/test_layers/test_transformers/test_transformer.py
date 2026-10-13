@@ -2,7 +2,6 @@ import pytest
 import numpy as np
 import tensorflow as tf
 import keras
-from keras import ops, layers, models
 import tempfile
 import os
 import warnings
@@ -100,8 +99,13 @@ class TestTransformerLayer:
         assert layer.moe_config.num_experts == 4
         assert layer.moe_config.expert_config.ffn_config['type'] == 'swiglu'
 
-    def test_moe_overrides_ffn_params_with_warning(self, layer_config, moe_config):
-        """Tests that MoE config overrides FFN parameters and issues warning."""
+    def test_moe_overrides_ffn_params_without_warning_when_the_width_is_set(
+            self, layer_config, moe_config):
+        """MoE config overrides FFN parameters; an expert that states its width is silent.
+
+        The advisory fires only when the expert's hidden width falls back to
+        ``intermediate_size`` (see ``test_moe_intermediate_size_inheritance``).
+        """
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             layer = TransformerLayer(
@@ -112,9 +116,8 @@ class TestTransformerLayer:
                 ffn_type='swiglu',
                 ffn_args={'some_arg': 'value'},
             )
-            assert any("moe_config is provided" in str(warn.message) for warn in w)
-            assert any("`ffn_type`" in str(warn.message) for warn in w)
-            assert any("`ffn_args`" in str(warn.message) for warn in w)
+        assert not [warn for warn in w if "moe_config is provided" in str(warn.message)]
+        assert layer.moe_config.expert_config.ffn_config['hidden_dim'] == 256
 
     def test_moe_hidden_dim_synchronization(self, layer_config, moe_config):
         """Tests that MoE expert output_dim is synchronized with transformer hidden_size."""
@@ -131,7 +134,8 @@ class TestTransformerLayer:
             num_experts=4,
             expert_config=ExpertConfig(ffn_config={"type": "mlp", "output_dim": 64})
         )
-        layer = TransformerLayer(**layer_config, moe_config=moe_config_no_intermediate)
+        with pytest.warns(UserWarning, match=r"moe_config is provided.*falls back"):
+            layer = TransformerLayer(**layer_config, moe_config=moe_config_no_intermediate)
         assert 'hidden_dim' in layer.moe_config.expert_config.ffn_config
         assert layer.moe_config.expert_config.ffn_config['hidden_dim'] == layer.intermediate_size
 
@@ -176,7 +180,7 @@ class TestTransformerLayer:
         layer = TransformerLayer(hidden_size=64, num_heads=4, intermediate_size=256, moe_config=moe_config)
         output = layer(sample_input, training=False)
         assert output.shape == sample_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(output)))
 
     def test_moe_forward_pass_training_vs_inference(self, layer_config, moe_config, sample_input):
         """Tests that MoE behaves differently in training vs inference mode."""
@@ -184,8 +188,8 @@ class TestTransformerLayer:
         output_train = layer(sample_input, training=True)
         output_infer = layer(sample_input, training=False)
         assert output_train.shape == output_infer.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output_train)))
-        assert not np.any(np.isnan(ops.convert_to_numpy(output_infer)))
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(output_train)))
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(output_infer)))
 
     # ===============================================
     # 3. Serialization Test (The Gold Standard)
@@ -238,25 +242,25 @@ class TestTransformerLayer:
         }
 
         # --- 2. Model Creation and Forward Pass ---
-        inputs = layers.Input(shape=sample_input.shape[1:])
+        inputs = keras.layers.Input(shape=sample_input.shape[1:])
         outputs = TransformerLayer(**full_config)(inputs)
-        model = models.Model(inputs, outputs)
+        model = keras.models.Model(inputs, outputs)
 
         original_prediction = model(sample_input, training=False)
         assert original_prediction.shape == sample_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(original_prediction)))
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(original_prediction)))
 
         # --- 3. Serialization and Deserialization ---
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, "test_combo_model.keras")
             model.save(filepath)
-            loaded_model = models.load_model(filepath)
+            loaded_model = keras.models.load_model(filepath)
 
             # --- 4. Verification ---
             loaded_prediction = loaded_model(sample_input, training=False)
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg=f"Mismatch for combo: {full_config}"
             )
@@ -267,18 +271,18 @@ class TestTransformerLayer:
             'hidden_size': 64, 'num_heads': 4, 'intermediate_size': 256,
             'moe_config': moe_config, 'normalization_position': 'pre', 'use_stochastic_depth': True,
         }
-        inputs = layers.Input(shape=sample_input.shape[1:])
+        inputs = keras.layers.Input(shape=sample_input.shape[1:])
         outputs = TransformerLayer(**layer_config)(inputs)
-        model = models.Model(inputs, outputs)
+        model = keras.models.Model(inputs, outputs)
         original_prediction = model(sample_input, training=False)
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, "test_moe_model.keras")
             model.save(filepath)
-            loaded_model = models.load_model(filepath)
+            loaded_model = keras.models.load_model(filepath)
             loaded_prediction = loaded_model(sample_input, training=False)
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6
             )
 
@@ -288,18 +292,18 @@ class TestTransformerLayer:
             'hidden_size': 64, 'num_heads': 4, 'intermediate_size': 256,
             'moe_config': moe_config_dict, 'normalization_position': 'post',
         }
-        inputs = layers.Input(shape=sample_input.shape[1:])
+        inputs = keras.layers.Input(shape=sample_input.shape[1:])
         outputs = TransformerLayer(**layer_config)(inputs)
-        model = models.Model(inputs, outputs)
+        model = keras.models.Model(inputs, outputs)
         original_prediction = model(sample_input, training=False)
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, "test_moe_dict_model.keras")
             model.save(filepath)
-            loaded_model = models.load_model(filepath)
+            loaded_model = keras.models.load_model(filepath)
             loaded_prediction = loaded_model(sample_input, training=False)
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6
             )
 
@@ -312,18 +316,18 @@ class TestTransformerLayer:
         x_var = tf.Variable(sample_input)
         with tf.GradientTape() as tape:
             output = layer(x_var, training=True)
-            loss = ops.mean(ops.square(output))
+            loss = keras.ops.mean(keras.ops.square(output))
         gradients = tape.gradient(loss, layer.trainable_variables)
         assert len(gradients) > 0, "No gradients were computed for MoE."
         assert all(g is not None for g in gradients), "A gradient is None in MoE."
 
     def test_model_training_loop_integration_with_moe(self, layer_config, moe_config):
         """Ensures MoE layer can be used in a standard training loop."""
-        model = models.Sequential([
-            layers.InputLayer(shape=(16, 64)),
+        model = keras.models.Sequential([
+            keras.layers.InputLayer(shape=(16, 64)),
             TransformerLayer(**layer_config, moe_config=moe_config),
-            layers.GlobalAveragePooling1D(),
-            layers.Dense(10)
+            keras.layers.GlobalAveragePooling1D(),
+            keras.layers.Dense(10)
         ])
         model.compile("adam", keras.losses.SparseCategoricalCrossentropy(from_logits=True))
         x_train = tf.random.normal((32, 16, 64))
@@ -336,14 +340,14 @@ class TestTransformerLayer:
         """Tests stacking TransformerLayers with mixed standard and MoE FFNs."""
         config_standard = {'hidden_size': 64, 'num_heads': 4, 'intermediate_size': 256}
         config_moe = {'hidden_size': 64, 'num_heads': 4, 'intermediate_size': 256, 'moe_config': moe_config}
-        inputs = layers.Input(shape=sample_input.shape[1:])
+        inputs = keras.layers.Input(shape=sample_input.shape[1:])
         x = TransformerLayer(**config_standard)(inputs)
         x = TransformerLayer(**config_moe)(x)
-        outputs = layers.GlobalAveragePooling1D()(x)
-        model = models.Model(inputs, outputs)
+        outputs = keras.layers.GlobalAveragePooling1D()(x)
+        model = keras.models.Model(inputs, outputs)
         prediction = model(sample_input, training=False)
         assert prediction.shape == (sample_input.shape[0], 64)
-        assert not np.any(np.isnan(ops.convert_to_numpy(prediction)))
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(prediction)))
 
     # ===============================================
     # 5. MoE-Specific Tests
@@ -382,7 +386,7 @@ class TestTransformerLayer:
         layer = TransformerLayer(hidden_size=64, num_heads=4, intermediate_size=256, moe_config=moe_config)
         output = layer(sample_input, training=False)
         assert output.shape == sample_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(output)))
 
 
 # ===================================================================
@@ -432,7 +436,7 @@ class TestTransformerLayerExtendedAttention:
         layer = self._make(attention_type, attention_args, normalization_position)
         out = layer(sample_input, training=False)
         assert out.shape == sample_input.shape
-        assert not np.any(np.isnan(ops.convert_to_numpy(out)))
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(out)))
 
     @pytest.mark.parametrize("attention_type, attention_args", [
         ('multi_head_latent', {'kv_latent_dim': 8}),
@@ -442,18 +446,18 @@ class TestTransformerLayerExtendedAttention:
     ])
     def test_serialization_round_trip(self, sample_input, attention_type, attention_args):
         """`.keras` save/load is numerically identical at atol=1e-6."""
-        inputs = layers.Input(shape=sample_input.shape[1:])
+        inputs = keras.layers.Input(shape=sample_input.shape[1:])
         outputs = self._make(attention_type, attention_args)(inputs)
-        model = models.Model(inputs, outputs)
+        model = keras.models.Model(inputs, outputs)
         original = model(sample_input, training=False)
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, "extattn.keras")
             model.save(filepath)
-            loaded = models.load_model(filepath)
+            loaded = keras.models.load_model(filepath)
             reloaded = loaded(sample_input, training=False)
         np.testing.assert_allclose(
-            ops.convert_to_numpy(original),
-            ops.convert_to_numpy(reloaded),
+            keras.ops.convert_to_numpy(original),
+            keras.ops.convert_to_numpy(reloaded),
             rtol=1e-6, atol=1e-6,
             err_msg=f"round-trip mismatch for {attention_type} {attention_args}",
         )
@@ -497,8 +501,8 @@ class TestTransformerLayerExtendedAttention:
         out_with_mask = layer(sample_input, attention_mask=mask, training=False)
         # Mask is ignored for fnet -> identical output.
         np.testing.assert_allclose(
-            ops.convert_to_numpy(out_no_mask),
-            ops.convert_to_numpy(out_with_mask),
+            keras.ops.convert_to_numpy(out_no_mask),
+            keras.ops.convert_to_numpy(out_with_mask),
             rtol=1e-6, atol=1e-6,
         )
 
@@ -969,7 +973,7 @@ def _f18_seeded_layer(**kwargs: Any) -> TransformerLayer:
 
 
 def _f18_inputs() -> Any:
-    return ops.convert_to_tensor(
+    return keras.ops.convert_to_tensor(
         np.random.RandomState(_F18_SEED).normal(size=(2, 5, _F18_HIDDEN)
                                                 ).astype('float32')
     )

@@ -19,17 +19,27 @@ The arms:
   slots, and zeroing it changes the output;
 - Qwen3's dense layers do not read `moe_intermediate_size` (their width comes
   from the SwiGLU 4x rule, unchanged by D-014);
-- an archive of the old shapes is refused by `from_variant(pretrained=path)`,
-  never half-loaded;
+- an archive of the old shapes is refused by `from_variant(pretrained=path)`
+  and by `keras.models.load_model`, never half-loaded, with Keras's own
+  "could not be loaded" message naming exactly the FFN kernels; the same route
+  loads an archive of the new shapes;
+- Qwen3's MoE layers state their expert width, so `TransformerLayer`'s
+  fallback advisory stays silent for them (this module runs with no
+  `UserWarning` filter), and it still fires for an expert config with no width;
 - `Qwen3NextBlock`'s new `ffn_config` round-trips through `get_config`, and a
   block given neither config still builds no feed-forward (old block archives).
 
 The old-shape archives are built with today's code at the widths the old code
-built (an expert of 256 for `hidden_size=32`; a dense block with no
-feed-forward). Their weight paths and shapes were checked equal to archives
-built at the pre-D-014 commit 25a55bcf7.
+built (an expert of 256 for `hidden_size=32`, with the recorded
+`moe_intermediate_size` rewritten to 48 as the old code recorded it; a dense
+block with no feed-forward). Their configs, weight paths and shapes, and both
+loaders' refusal messages, were checked equal to archives built at the
+pre-D-014 commit 25a55bcf7.
 """
 
+import json
+import warnings
+import zipfile
 from typing import Any, Dict, List, Set, Tuple
 
 import keras
@@ -42,18 +52,13 @@ from dl_techniques.layers.moe import (
     MixtureOfExperts,
     MoEConfig,
 )
+from dl_techniques.layers.transformers.transformer import TransformerLayer
 from dl_techniques.models.language.qwen import qwen3_next as qwen3_next_module
 from dl_techniques.models.language.qwen.components import Qwen3NextBlock
 from dl_techniques.models.language.qwen.qwen3 import Qwen3
 from dl_techniques.models.language.qwen.qwen3_next import Qwen3Next
 
 from ..test_sam.dead_component_oracle import zeroed_variables
-
-# Qwen3's MoE layers go through TransformerLayer, whose own advisory says that
-# `moe_config` supersedes `ffn_type` / `ffn_args` (see test_qwen3.py).
-pytestmark = [
-    pytest.mark.filterwarnings("ignore:moe_config is provided:UserWarning"),
-]
 
 _SMALL = dict(vocab_size=64)
 _IDS = np.random.default_rng(0).integers(1, 64, (2, 8)).astype("int32")
@@ -175,60 +180,110 @@ _Q3 = dict(vocab_size=64, hidden_size=32, num_layers=2, num_attention_heads=2,
 #: The expert width the pre-D-014 code built for hidden_size=32 and any
 #: moe_intermediate_size below 64: factor 1, 2/3 rule, rounded up to 256.
 _OLD_EXPERT_WIDTH = 256
+#: The width every archive below records in its config, as a pre-D-014 archive
+#: of these models did.
+_WIDTH = 48
+
+#: route -> (class, the variant `from_variant` starts from, the overrides, the
+#: number of FFN kernels an old-shape archive cannot supply). The count is the
+#: refusal's own: Keras names every layer it could not load, and these are
+#: exactly the FFN projections (gate, up, down) of 4 dense slots, of 4 slots x 2
+#: experts, and of 1 MoE layer x 2 experts. A refusal for any other reason
+#: names another count or another message.
+_ROUTES: Dict[str, Tuple[type, str, Dict[str, Any], int]] = {
+    "qwen3_next_dense": (Qwen3Next, "80b",
+                         dict(_Q3N, num_experts=1, num_experts_per_tok=1), 12),
+    "qwen3_next_moe": (Qwen3Next, "tiny",
+                       dict(_Q3N, num_experts=2, num_experts_per_tok=1), 24),
+    "qwen3_moe": (Qwen3, "small",
+                  dict(_Q3, num_experts=2, num_experts_per_tok=1), 6),
+}
+
+
+def _save(model: keras.Model, path) -> str:
+    model.build((None, None))
+    model.save(str(path))
+    return str(path)
+
+
+def _set_config_width(src: str, dst, width: int) -> str:
+    """Copy archive ``src`` to ``dst`` with ``moe_intermediate_size`` -> ``width``."""
+    with zipfile.ZipFile(src) as source, zipfile.ZipFile(dst, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename == "config.json":
+                config = json.loads(data)
+                config["config"]["moe_intermediate_size"] = width
+                data = json.dumps(config).encode()
+            target.writestr(item, data)
+    return str(dst)
+
+
+def _old_archive(route: str, tmp_path, monkeypatch) -> str:
+    """An archive of the shapes the pre-D-014 code built, config included.
+
+    Dense Qwen3Next: today's model with the block given no ``ffn_config`` (the
+    old block built no FFN). MoE routes: today's model at the old expert width,
+    then the recorded ``moe_intermediate_size`` rewritten to the configured one,
+    as the old code recorded it. Config, weight paths and shapes, and both
+    loaders' refusal messages, were checked equal to archives built at the
+    pre-D-014 commit 25a55bcf7.
+    """
+    cls, _, kwargs, _ = _ROUTES[route]
+    if route == "qwen3_next_dense":
+        real_block = qwen3_next_module.Qwen3NextBlock
+
+        def old_block(**block_kwargs):
+            block_kwargs.pop("ffn_config", None)
+            return real_block(**block_kwargs)
+
+        monkeypatch.setattr(qwen3_next_module, "Qwen3NextBlock", old_block)
+        path = _save(cls(**kwargs, moe_intermediate_size=_WIDTH), tmp_path / "old.keras")
+        monkeypatch.setattr(qwen3_next_module, "Qwen3NextBlock", real_block)
+        return path
+    wide = _save(cls(**kwargs, moe_intermediate_size=_OLD_EXPERT_WIDTH),
+                 tmp_path / "wide.keras")
+    return _set_config_width(wide, tmp_path / "old.keras", _WIDTH)
+
+
+def _refusal(route: str) -> str:
+    return rf"A total of {_ROUTES[route][3]} objects could not be loaded"
+
+
+def _assert_same_weights(a: keras.Model, b: keras.Model) -> None:
+    assert len(a.weights) == len(b.weights)
+    for x, y in zip(a.weights, b.weights):
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(x), keras.ops.convert_to_numpy(y))
 
 
 class TestAnOldShapeArchiveIsRefused:
+    """Both loaders refuse an old-shape archive; the same route loads a new one."""
 
-    def _save(self, model: keras.Model, tmp_path, name: str) -> str:
-        model.build((None, None))
-        path = str(tmp_path / f"{name}.keras")
-        model.save(path)
-        return path
+    @pytest.mark.parametrize("route", sorted(_ROUTES))
+    def test_from_variant_refuses_it(self, route, tmp_path, monkeypatch):
+        cls, variant, kwargs, _ = _ROUTES[route]
+        path = _old_archive(route, tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match=_refusal(route)):
+            cls.from_variant(variant, pretrained=path, **kwargs,
+                             moe_intermediate_size=_WIDTH)
 
-    def test_a_dense_qwen3_next_archive_without_ffn(self, tmp_path, monkeypatch):
-        real_block = qwen3_next_module.Qwen3NextBlock
+    @pytest.mark.parametrize("route", sorted(_ROUTES))
+    def test_load_model_refuses_it(self, route, tmp_path, monkeypatch):
+        path = _old_archive(route, tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match=_refusal(route)):
+            keras.models.load_model(path)
 
-        def old_block(**kwargs):
-            kwargs.pop("ffn_config", None)
-            return real_block(**kwargs)
-
-        monkeypatch.setattr(qwen3_next_module, "Qwen3NextBlock", old_block)
-        old = Qwen3Next(**_Q3N, num_experts=1, num_experts_per_tok=1,
-                        moe_intermediate_size=48)
-        path = self._save(old, tmp_path, "q3n_dense_old")
-        monkeypatch.setattr(qwen3_next_module, "Qwen3NextBlock", real_block)
-        with pytest.raises(ValueError):
-            Qwen3Next.from_variant("80b", pretrained=path, **_Q3N,
-                                   moe_intermediate_size=48)
-
-    def test_a_qwen3_next_archive_with_old_expert_width(self, tmp_path):
-        old = Qwen3Next(**_Q3N, num_experts=2, num_experts_per_tok=1,
-                        moe_intermediate_size=_OLD_EXPERT_WIDTH)
-        path = self._save(old, tmp_path, "q3n_moe_old")
-        with pytest.raises(ValueError):
-            Qwen3Next.from_variant("tiny", pretrained=path, **_Q3N,
-                                   num_experts=2, num_experts_per_tok=1,
-                                   moe_intermediate_size=48)
-
-    def test_a_qwen3_archive_with_old_expert_width(self, tmp_path):
-        old = Qwen3(**_Q3, num_experts=2, num_experts_per_tok=1,
-                    moe_intermediate_size=_OLD_EXPERT_WIDTH)
-        path = self._save(old, tmp_path, "q3_moe_old")
-        with pytest.raises(ValueError):
-            Qwen3.from_variant("small", pretrained=path, **_Q3,
-                               num_experts=2, num_experts_per_tok=1,
-                               moe_intermediate_size=48)
-
-    def test_the_new_shapes_load(self, tmp_path):
-        """Control: the same route loads an archive of the current shapes."""
-        new = Qwen3Next(**_Q3N, num_experts=1, num_experts_per_tok=1,
-                        moe_intermediate_size=48)
-        path = self._save(new, tmp_path, "q3n_dense_new")
-        loaded = Qwen3Next.from_variant("80b", pretrained=path, **_Q3N,
-                                        moe_intermediate_size=48)
-        for a, b in zip(new.weights, loaded.weights):
-            np.testing.assert_array_equal(
-                keras.ops.convert_to_numpy(a), keras.ops.convert_to_numpy(b))
+    @pytest.mark.parametrize("route", sorted(_ROUTES))
+    def test_the_same_route_loads_a_new_shape_archive(self, route, tmp_path):
+        """Control: neither loader refuses everything on this route."""
+        cls, variant, kwargs, _ = _ROUTES[route]
+        keras.utils.set_random_seed(11)
+        new = cls(**kwargs, moe_intermediate_size=_WIDTH)
+        path = _save(new, tmp_path / "new.keras")
+        _assert_same_weights(new, cls.from_variant(
+            variant, pretrained=path, **kwargs, moe_intermediate_size=_WIDTH))
+        _assert_same_weights(new, keras.models.load_model(path))
 
 
 _FFN = {"type": "swiglu", "output_dim": 32, "hidden_dim": 48}
@@ -271,3 +326,29 @@ class TestTheBlockFfnConfig:
         with pytest.raises(ValueError, match="not both"):
             Qwen3NextBlock(dim=32, num_heads=2, max_seq_len=32,
                            moe_config=moe, ffn_config=_FFN)
+
+
+class TestTheExpertWidthAdvisory:
+    """`TransformerLayer` warns only when an expert's width falls back.
+
+    The advisory text starts with "moe_config is provided"; the filters that
+    still suppress it key on that prefix.
+    """
+
+    @pytest.mark.parametrize("variant", sorted(
+        v for v, c in Qwen3.MODEL_VARIANTS.items() if c["moe_layers"]))
+    def test_qwen3_moe_construction_and_load_are_silent(self, variant, tmp_path):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            model = Qwen3.from_variant(variant, **_qwen3_moe_kwargs(variant))
+            path = _save(model, tmp_path / "q3.keras")
+            keras.models.load_model(path)
+
+    def test_an_expert_config_without_a_width_still_warns(self):
+        moe = MoEConfig(num_experts=2,
+                        expert_config=ExpertConfig(ffn_config={"type": "mlp"}),
+                        gating_config=GatingConfig(top_k=1))
+        with pytest.warns(UserWarning, match=r"moe_config is provided.*falls back"):
+            layer = TransformerLayer(hidden_size=8, num_heads=2,
+                                     intermediate_size=24, moe_config=moe)
+        assert layer.moe_config.expert_config.ffn_config["hidden_dim"] == 24

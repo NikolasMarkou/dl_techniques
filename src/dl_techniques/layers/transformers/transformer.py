@@ -25,7 +25,6 @@ References:
 
 import keras
 import warnings
-from keras import layers, initializers, regularizers
 from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 
 # ---------------------------------------------------------------------
@@ -81,8 +80,8 @@ def build_transformer_ffn_config(
         bias_initializer: Any,
         use_bias: bool,
         output_kernel_initializer: Any = None,
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         ffn_args: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the FFN factory config for a transformer encoder/decoder block.
@@ -207,7 +206,8 @@ _DEFAULT_ATTENTION_LAMBDA_INIT: float = 0.8
 
 #: MoE expert FFN types whose ``hidden_dim`` falls back to
 #: ``TransformerLayer.intermediate_size`` when the caller's
-#: ``moe_config.expert_config.ffn_config`` omits it. Read by both the fallback and the warning text below, so they cannot drift apart.
+#: ``moe_config.expert_config.ffn_config`` omits it. Read by the fallback in
+#: ``TransformerLayer.__init__``, which is also the only place its advisory fires.
 _MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE: Tuple[str, ...] = (
     'mlp', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp',
 )
@@ -336,7 +336,8 @@ class TransformerLayer(keras.layers.Layer):
         type is one of ``{'mlp', 'differential', 'glu', 'geglu', 'residual',
         'swin_mlp'}``. It is only genuinely unused when ``moe_config`` is set
         and the expert config already carries its own ``hidden_dim`` (or the
-        expert type is not one of those six).
+        expert type is not one of those six). A ``UserWarning`` fires exactly
+        when the fallback is taken.
     :type intermediate_size: int
     :param attention_type: Attention mechanism type. Default: ``'multi_head'``.
 
@@ -406,7 +407,7 @@ class TransformerLayer(keras.layers.Layer):
     :param use_bias: Whether linear layers use bias. Default: True.
     :type use_bias: bool
     :param kernel_initializer: Kernel weight initializer.
-    :type kernel_initializer: Union[str, initializers.Initializer]
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param residual_output_kernel_initializer: Optional initializer applied
         only to the block's two residual-path output projections — the
         attention output projection and the FFN's contracting projection —
@@ -418,13 +419,13 @@ class TransformerLayer(keras.layers.Layer):
         ``attention_type`` is ``'multi_head'``/``'multi_head_cross'`` and
         ``ffn_type == 'mlp'`` — any other combination raises from the
         respective factory rather than ignoring it.
-    :type residual_output_kernel_initializer: Optional[Union[str, initializers.Initializer]]
+    :type residual_output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]]
     :param bias_initializer: Bias weight initializer.
-    :type bias_initializer: Union[str, initializers.Initializer]
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Kernel weight regularizer.
-    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Bias weight regularizer.
-    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param window_size: Window size for ``attention_type='window'`` (the spatial
         window edge length) and for ``attention_type='beit'`` (the ``(Wh, Ww)``
         patch grid, an ``int`` meaning the square grid ``(W, W)``; the block's
@@ -468,11 +469,11 @@ class TransformerLayer(keras.layers.Layer):
             stochastic_depth_rate: float = 0.1,
             activation: Union[str, Callable] = 'gelu',
             use_bias: bool = True,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            residual_output_kernel_initializer: Optional[Union[str, initializers.Initializer]] = None,
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            residual_output_kernel_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             window_size: Union[int, Tuple[int, int]] = _DEFAULT_ATTENTION_WINDOW_SIZE,
             n_kv_head: Optional[int] = None,
             lambda_init: float = _DEFAULT_ATTENTION_LAMBDA_INIT,
@@ -519,14 +520,14 @@ class TransformerLayer(keras.layers.Layer):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.activation = resolve_activation(activation)
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.residual_output_kernel_initializer = (
-            initializers.get(residual_output_kernel_initializer)
+            keras.initializers.get(residual_output_kernel_initializer)
             if residual_output_kernel_initializer is not None else None
         )
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.window_size = window_size
         self.n_kv_head = n_kv_head if n_kv_head is not None else num_heads
         self.lambda_init = lambda_init
@@ -541,17 +542,6 @@ class TransformerLayer(keras.layers.Layer):
             self.moe_config = MoEConfig.from_dict(self.moe_config)
 
         if self.moe_config is not None:
-            if self.ffn_type != 'mlp' or self.ffn_args:
-                warnings.warn(
-                    "moe_config is provided, so the `ffn_type` and `ffn_args` parameters "
-                    "of TransformerLayer are ignored. The FFN will be a MixtureOfExperts "
-                    "layer configured by `moe_config`. NOTE: `intermediate_size` is NOT "
-                    "ignored -- it is still used as the fallback for the expert FFN's "
-                    "`hidden_dim` when `moe_config.expert_config.ffn_config` omits it and "
-                    "the expert type is one of "
-                    f"{set(_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE)}."
-                )
-
             ffn_config = self.moe_config.expert_config.ffn_config
 
             # Ensure expert output_dim matches transformer's hidden_size
@@ -565,11 +555,22 @@ class TransformerLayer(keras.layers.Layer):
             elif 'output_dim' not in ffn_config:
                 ffn_config['output_dim'] = self.hidden_size
 
-            # This block runs unconditionally, not gated by the warning's own
-            # `if` above; the type list lives in one place, `_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE`, which the warning text also reads.
+            # The advisory fires only when the fallback below actually happens: an
+            # expert type in `_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE` with no
+            # explicit `hidden_dim`. An expert config that states its width (Qwen3)
+            # is silent, whatever `ffn_type` / `ffn_args` say.
             ffn_type = ffn_config.get('type')
             if ffn_type in _MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE:
                 if 'hidden_dim' not in ffn_config:
+                    warnings.warn(
+                        f"moe_config is provided and its expert ffn_config "
+                        f"(type {ffn_type!r}) has no `hidden_dim`, so the expert "
+                        f"FFN's hidden width falls back to TransformerLayer's "
+                        f"`intermediate_size` ({self.intermediate_size}). Set "
+                        f"`hidden_dim` in moe_config.expert_config.ffn_config to "
+                        f"choose it. (`ffn_type` and `ffn_args` are not used under "
+                        f"moe_config.)"
+                    )
                     ffn_config['hidden_dim'] = self.intermediate_size
 
         # Per Keras best practices, all sub-layers are created in __init__.
@@ -586,7 +587,7 @@ class TransformerLayer(keras.layers.Layer):
         self.ffn_layer = self._create_ffn_layer('ffn')
 
         # Dropout layers
-        self.dropout = layers.Dropout(self.dropout_rate, name='dropout')
+        self.dropout = keras.layers.Dropout(self.dropout_rate, name='dropout')
 
         # Stochastic depth layers (if enabled)
         self.attention_stochastic_depth = None
@@ -1064,14 +1065,14 @@ class TransformerLayer(keras.layers.Layer):
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'residual_output_kernel_initializer': (
-                initializers.serialize(self.residual_output_kernel_initializer)
+                keras.initializers.serialize(self.residual_output_kernel_initializer)
                 if self.residual_output_kernel_initializer is not None else None
             ),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'window_size': self.window_size,
             'n_kv_head': self.n_kv_head,
             'lambda_init': self.lambda_init,

@@ -16,7 +16,6 @@ from unittest.mock import patch
 
 import numpy as np
 import keras
-from keras import ops
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import (
@@ -398,7 +397,7 @@ class TestFFNFactory:
             with tf.GradientTape() as tape:
                 tape.watch(test_input)
                 output = layer(test_input)
-                loss = ops.mean(ops.square(output))
+                loss = keras.ops.mean(keras.ops.square(output))
 
             gradients = tape.gradient(loss, layer.trainable_variables)
 
@@ -643,14 +642,14 @@ class TestFFNFactory:
         # Test with very small values
         small_input = keras.random.normal(shape=(2, 16, 256)) * 1e-6
         output_small = layer(small_input)
-        assert not ops.any(ops.isnan(output_small))
-        assert not ops.any(ops.isinf(output_small))
+        assert not keras.ops.any(keras.ops.isnan(output_small))
+        assert not keras.ops.any(keras.ops.isinf(output_small))
 
         # Test with large values
         large_input = keras.random.normal(shape=(2, 16, 256)) * 1e3
         output_large = layer(large_input)
-        assert not ops.any(ops.isnan(output_large))
-        assert not ops.any(ops.isinf(output_large))
+        assert not keras.ops.any(keras.ops.isnan(output_large))
+        assert not keras.ops.any(keras.ops.isinf(output_large))
 
     def test_memory_efficiency(self):
         """Test memory usage with large layers."""
@@ -782,8 +781,8 @@ class LayerSerializationTest:
 
             # Verify identical predictions
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_prediction),
-                ops.convert_to_numpy(loaded_prediction),
+                keras.ops.convert_to_numpy(original_prediction),
+                keras.ops.convert_to_numpy(loaded_prediction),
                 rtol=1e-6, atol=1e-6,
                 err_msg=f"Serialization failed for {self.ffn_type}"
             )
@@ -868,8 +867,8 @@ class TestSpecializedFFNLayers:
             loaded_output = loaded_model(sample_input)
 
             np.testing.assert_allclose(
-                ops.convert_to_numpy(original_output),
-                ops.convert_to_numpy(loaded_output),
+                keras.ops.convert_to_numpy(original_output),
+                keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
                 err_msg="LogicFFN serialization failed"
             )
@@ -1622,16 +1621,6 @@ from pathlib import Path as _SweepPath
 # is pinned live (message text included) by
 # `tests/test_the_deliberate_advisories_still_fire.py`.
 
-# R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
-# Our own advisory at `layers/transformers/transformer.py:620`: `moe_config`
-# supersedes `ffn_type` / `ffn_args`. This module drives exactly that
-# combination on purpose. Pinned live by
-# `tests/test_the_deliberate_advisories_still_fire.py`.
-pytestmark = [
-    pytest.mark.filterwarnings(
-        "ignore:moe_config is provided:UserWarning"),
-]
-
 _SWEEP_SRC_ROOT = _SweepPath(__file__).resolve().parents[3] / "src" / "dl_techniques"
 _SWEEP_CALL_NAMES = frozenset({"create_ffn_layer", "create_ffn_from_config"})
 
@@ -2001,6 +1990,17 @@ def _b_models_tree_transformer():
     return b.ffn
 
 
+def _b_models_qwen_components():
+    from dl_techniques.models.language.qwen.components import Qwen3NextBlock
+    # The dense-FFN branch D-014 added (`ffn_config`, no MoE), as the dense
+    # Qwen3Next builds it: one FFN at each of the block's four slots.
+    b = Qwen3NextBlock(dim=16, num_heads=2, max_seq_len=8,
+                       ffn_config={'type': 'swiglu', 'output_dim': 16,
+                                   'hidden_dim': 24})
+    b.build((None, 8, 16))
+    return b.attention_ffn
+
+
 _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "layers/fnet_encoder_block.py": _b_fnet_encoder_block,
     "layers/fusion/multimodal_fusion.py": _b_multimodal_fusion,
@@ -2036,6 +2036,7 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/time_series/prism/model.py": _b_models_prism,
     "models/language/tree_transformer/components.py": _b_models_tree_transformer,
     "models/language/hnet/components.py": _b_models_hnet_components,
+    "models/language/qwen/components.py": _b_models_qwen_components,
 }
 
 
@@ -2588,10 +2589,24 @@ def _derive_self_built_ffn_kwarg_sites() -> List[Dict[str, Any]]:
                     kind, dict_node = _KIND_RAW, value
                 elif isinstance(value, _sweep_ast.Name):
                     candidates = assigns.get(value.id, [])
-                    if any(isinstance(c, _sweep_ast.Call)
-                           and _call_name(c) == _PREFILTER_NAME
-                           for c in candidates):
+                    prefilters = [c for c in candidates
+                                  if isinstance(c, _sweep_ast.Call)
+                                  and _call_name(c) == _PREFILTER_NAME]
+                    if prefilters:
                         kind = _KIND_FILTERED
+                        # The same rule as the direct call above, for a local
+                        # bound to the pre-filter (`ffn_config =
+                        # assemble_ffn_config(self.ffn_type, ...)` then
+                        # `ExpertConfig(ffn_config=ffn_config)`). MEASURED: without
+                        # it `models/language/qwen/qwen3_next.py` dropped out of
+                        # the sweep again when D-014 named its one config.
+                        first_args = [c.args[0] for c in prefilters if c.args]
+                        if first_args:
+                            prefiltered_type = (
+                                first_args[0].value
+                                if isinstance(first_args[0], _sweep_ast.Constant)
+                                else _DYNAMIC
+                            )
                     else:
                         literals = [c for c in candidates
                                     if isinstance(c, _sweep_ast.Dict)]

@@ -22,7 +22,8 @@ So each advisory gets two arms here:
 
 Coverage: **6 of 6** suppressed families, over 30 ``pytestmark`` sites -- zero
 suppressions in this tree are unpaired. Two families are emitted by this repo's
-own ``src/`` (W-03, W-14). The other four are emitted by Keras and are reached
+own ``src/`` (W-03, retired; W-14, which no module suppresses any more: it fires
+only on a real MoE expert-width fallback). The other four are emitted by Keras and are reached
 here through the public API: softmax-over-a-size-1-axis (22 sites),
 input-ran-out-of-data (6 sites), model-not-yet-built-on-save (1 site) and
 input-structure-mismatch (1 site).
@@ -55,7 +56,6 @@ import warnings
 import keras
 import numpy as np
 import pytest
-from keras import ops
 
 from dl_techniques.initializers.hypersphere_orthogonal_initializer import (
     OrthogonalHypersphereInitializer,
@@ -125,35 +125,41 @@ class TestTheOrthogonalityFallbackAdvisoryIsRetired:
 
 
 # ---------------------------------------------------------------------
-# W-14 -- MoE supersedes ffn_type / ffn_args
+# W-14 -- an MoE expert's hidden width falls back to intermediate_size
 # `src/dl_techniques/layers/transformers/transformer.py`
 # ---------------------------------------------------------------------
 
 
-def _moe_config():
+def _moe_config(**ffn_config):
     return {
         "num_experts": 2,
-        "expert_config": {"ffn_config": {"type": "mlp", "hidden_dim": 8}},
+        "expert_config": {"ffn_config": {"type": "mlp", **ffn_config}},
     }
 
 
-class TestTheMoeSupersessionAdvisory:
-    """``moe_config`` wins over ``ffn_type``/``ffn_args``, and says so."""
+class TestTheMoeExpertWidthAdvisory:
+    """An expert config with no ``hidden_dim`` takes ``intermediate_size``, and says so.
 
-    def test_a_conflicting_ffn_type_warns(self):
+    Narrowed in plan-2026-10-13T035756-5dd4d94d (D-017): the advisory used to
+    fire whenever ``ffn_type``/``ffn_args`` were set beside ``moe_config``, which
+    every Qwen3 MoE construction did although its experts state their width.
+    """
+
+    def test_an_expert_config_without_a_width_warns(self):
         with pytest.warns(UserWarning, match=r"moe_config is provided"):
             TransformerLayer(
                 hidden_size=8, num_heads=2, intermediate_size=8,
-                ffn_type="swiglu", moe_config=_moe_config(),
+                moe_config=_moe_config(),
             )
 
-    def test_the_default_ffn_type_does_not_warn(self):
-        """The control: ``ffn_type='mlp'`` with no ``ffn_args`` is not a conflict."""
+    def test_an_expert_config_with_a_width_does_not_warn(self):
+        """The control: a stated width is silent, even beside a conflicting ``ffn_type``."""
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
             TransformerLayer(
                 hidden_size=8, num_heads=2, intermediate_size=8,
-                moe_config=_moe_config(),
+                ffn_type="swiglu", ffn_args={"dropout_rate": 0.0},
+                moe_config=_moe_config(hidden_dim=8),
             )
 
     def test_no_moe_config_does_not_warn(self):
@@ -189,7 +195,7 @@ class TestTheSoftmaxOverASizeOneAxisAdvisory:
 
     def test_a_size_one_axis_warns(self):
         with pytest.warns(UserWarning, match=r"You are using a softmax over axis"):
-            out = ops.softmax(np.zeros((4, 1), dtype="float32"), axis=-1)
+            out = keras.ops.softmax(np.zeros((4, 1), dtype="float32"), axis=-1)
         # The advisory's own claim: the result is identically 1.0. If that ever
         # stops being true the advisory is wrong, not merely reworded.
         assert float(np.max(np.abs(np.asarray(out) - 1.0))) == 0.0
@@ -197,7 +203,7 @@ class TestTheSoftmaxOverASizeOneAxisAdvisory:
     def test_the_message_names_the_axis_and_the_shape(self):
         """The `ignore:` filters key on the prefix; the axis is the payload."""
         with pytest.warns(UserWarning) as rec:
-            ops.softmax(np.zeros((2, 1, 5), dtype="float32"), axis=1)
+            keras.ops.softmax(np.zeros((2, 1, 5), dtype="float32"), axis=1)
         text = str(rec[0].message)
         assert "softmax over axis 1" in text, text
         assert "(2, 1, 5)" in text, text
@@ -207,7 +213,7 @@ class TestTheSoftmaxOverASizeOneAxisAdvisory:
         """The control: the advisory is conditional on `x.shape[axis] == 1`."""
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            out = ops.softmax(np.zeros((4, 3), dtype="float32"), axis=axis)
+            out = keras.ops.softmax(np.zeros((4, 3), dtype="float32"), axis=axis)
         assert np.all(np.isfinite(np.asarray(out)))
 
 

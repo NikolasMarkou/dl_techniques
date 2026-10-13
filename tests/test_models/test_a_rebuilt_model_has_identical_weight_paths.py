@@ -18,10 +18,6 @@ import keras
 import numpy as np
 import pytest
 
-# Qwen3's MoE layers warn that the dense `ffn_type` is ignored; this repo's pytest
-# config escalates UserWarning, and the warning is not what is measured here.
-pytestmark = [pytest.mark.filterwarnings("ignore:moe_config is provided:UserWarning")]
-
 _VOCAB = 64
 
 
