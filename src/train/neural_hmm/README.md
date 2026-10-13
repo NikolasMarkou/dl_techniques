@@ -117,12 +117,105 @@ not stop the run.
 
 On a GPU, Keras compiles `fit` with XLA by default (`jit_compile="auto"`), except for a
 model holding an `lstm`/`gru` encoder (the model package README, §10). The summary's
-`jit_compile` records what the run used. A tiny `neural-hmm` run on GPU 1 resolved
-`jit_compile` to `true`.
+`jit_compile` records what the run used. The three runs of §7 (no encoder, a `conv`
+encoder and a `transformer` encoder) all resolved it to `true` on GPU 1.
 
 ## 7. Measured runs
 
-None yet.
+Three runs on 2026-10-14, one at a time on GPU 1 (RTX 4070), from the repository root:
+
+```bash
+# Run A: unsupervised, gaussian, K=4, well separated
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.train_neural_hmm \
+    --variant neural-hmm --obs-type gaussian --n-states 4 --obs-dim 2 --separation 4.0 \
+    --stay-prob 0.9 --seq-len 50 --min-seq-len 25 --num-train 2000 --num-val 200 \
+    --num-test 500 --epochs 60 --batch-size 64 --learning-rate 3e-3 --seed 0 \
+    --experiment-name neural_hmm_runA_gaussian_k4_sep4_seed0_20261014
+# Run B: unsupervised, categorical, K=3, 8 symbols, every other flag at its default
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.train_neural_hmm \
+    --variant io-hmm --obs-type categorical --n-states 3 --vocab-size 8 --stay-prob 0.9 \
+    --seq-len 50 --min-seq-len 25 --num-train 2000 --num-val 200 --num-test 500 \
+    --epochs 60 --seed 0 --experiment-name neural_hmm_runB_categorical_k3_v8_seed0_20261014
+# Run C: supervised, gaussian, K=4, half the separation of run A
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.train_neural_hmm \
+    --variant neural-crf-tagger --obs-type gaussian --n-states 4 --obs-dim 2 --separation 2.0 \
+    --stay-prob 0.9 --seq-len 50 --min-seq-len 25 --num-train 2000 --num-val 200 \
+    --num-test 500 --epochs 30 --batch-size 64 --learning-rate 3e-3 --seed 0 \
+    --experiment-name neural_hmm_runC_crf_gaussian_k4_sep2_seed0_20261014
+```
+
+Run directories (under the repository's `results/`, which git does not track):
+
+- Run A: `results/neural_hmm_runA_gaussian_k4_sep4_seed0_20261014/`
+- Run B: `results/neural_hmm_runB_categorical_k3_v8_seed0_20261014/`
+- Run C: `results/neural_hmm_runC_crf_gaussian_k4_sep2_seed0_20261014/`
+
+Every number below was copied by a script from those runs' `results_summary.json`, then
+compared back against them. Values are rounded to 4 decimals; the JSON holds them in
+full. One seed per configuration, so there is no seed-noise estimate.
+
+| Summary key | Run A | Run B | Run C |
+|---|---|---|---|
+| `variant` | `neural-hmm` | `io-hmm` | `neural-crf-tagger` |
+| `obs_type` | gaussian | categorical | gaussian |
+| `n_states` | 4 | 3 | 4 |
+| `encoder_type` | none | `conv` | `transformer` |
+| `params` | 760 | 8740 | 27320 |
+| `jit_compile` | true | true | true |
+| `epochs_run` | 27 | 19 | 22 |
+| `best_checkpoint.epoch` | 17 | 9 | 12 |
+| `best_checkpoint.reload_exact` | true | true | true |
+| `nll_kind` | marginal | marginal | conditional |
+| `test_nll_per_step` | 3.2735 | 1.8340 | 0.1016 |
+| `true_nll_per_step` | 3.2675 | 1.8329 | 0.0964 |
+| `nll_gap` | 0.0060 | 0.0010 | 0.0052 |
+| `viterbi_acc` | n/a | n/a | 0.9414 |
+| `viterbi_acc_matched` | 0.9952 | 0.8871 | 0.9414 |
+| `true_viterbi_acc` | 0.9952 | 0.9068 | 0.9452 |
+| `majority_rate` | 0.2592 | 0.3573 | 0.2592 |
+| `fit_seconds` | 22.2 | 29.1 | 45.7 |
+
+The criteria were fixed before the runs (plan `plan-2026-10-13T192257-1bb3bf1f`, decision
+D-012). They were not adjusted afterwards:
+
+| Run | Criterion | Result |
+|---|---|---|
+| A | `nll_gap <= 0.05` | pass |
+| A | `viterbi_acc_matched >= max(0.80, majority_rate + 0.30)` | pass |
+| A | `viterbi_acc_matched >= true_viterbi_acc - 0.05` | pass |
+| A | `best_checkpoint.reload_exact` | pass |
+| B | `nll_gap <= 0.05` | pass |
+| B | `viterbi_acc_matched >= majority_rate + 0.20` | pass |
+| B | `viterbi_acc_matched >= true_viterbi_acc - 0.05` | pass |
+| C | `viterbi_acc >= true_viterbi_acc - 0.03` | pass |
+| C | `viterbi_acc >= majority_rate + 0.30` | pass |
+
+All three runs ended by early stopping (patience 10) before reaching `--epochs`.
+
+The figures show the following:
+
+- **Run A.** The learned transition matrix matches the true one to within 0.005 on every
+  entry, after relabelling with `state_mapping`, so all four states are separate and none
+  are merged. The
+  decoded strips follow the true states except for a one-step boundary shift.
+- **Run B.** `val_loss` is flat from epoch 2 and rises slightly after its minimum at
+  epoch 9, while the training loss keeps falling. The learned transition diagonal is
+  0.74 to 0.81 against the true 0.90. The `io-hmm` transitions depend on the input, so
+  this heatmap is an average of per-step matrices, not one static matrix. The decoded
+  strips lag the true state changes by 1 to 3 steps.
+- **Run C.** `val_loss` reaches its minimum at epoch 12 and then rises while the
+  training loss keeps falling. The learned transition potentials have a 0.86 to 0.87
+  diagonal.
+
+**Sequence length on the GPU.** Each run's `best_model.keras` was reloaded on GPU 1 and
+called with `predict` at three lengths in one process: T=50, 30 and 70 for runs A and B,
+and T=50, 30 and 40 for run C, whose `transformer` position table has 50 rows. Every call
+returned the expected shapes and finite outputs.
+
+**TF32.** In that same probe, `predict` (XLA) and an eager call on the same batch differed
+by up to 0.035 in run A's `log_emit`. That difference comes from TensorFlow's default
+TF32 matmuls: with `tf.config.experimental.enable_tensor_float_32_execution(False)` it fell
+to 1.6e-5. The runs above used the default (TF32 on).
 
 ## 8. Tests
 
