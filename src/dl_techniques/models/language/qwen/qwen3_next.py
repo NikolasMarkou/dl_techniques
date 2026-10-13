@@ -1,7 +1,8 @@
 """
 Qwen3-Next hybrid decoder: blocks of three gated linear-attention sublayers
 followed by one full gated-attention sublayer, each with its own
-normalization and optional mixture-of-experts feed-forward.
+normalization and its own feed-forward (a mixture of experts, or one dense
+FFN when `num_experts=1`).
 
 Softmax attention can retrieve any earlier token exactly but its compute
 and cache both grow with sequence length. A gated linear-attention layer
@@ -17,7 +18,14 @@ the same effective depth. `num_layers` counts blocks, not sublayers — the
 Mixture-of-experts, when configured, replaces the FFN with `num_experts`
 experts of which `num_experts_per_tok` are routed, decoupling parameter
 count from per-token arithmetic; the `80b` variant sets `num_experts=1` to
-express a dense configuration instead of using a separate flag.
+express a dense configuration instead of using a separate flag. Either way
+every feed-forward is `moe_intermediate_size` wide: each expert, as in the
+Hugging Face Qwen3-Next config, and with one expert the dense FFN at each of
+the block's four slots. Before 2026-10-13 an expert was a SwiGLU sized by
+`max(1, moe_intermediate_size // hidden_size)` through the 2/3 rule (an
+`80b_a3b` expert was 1536 wide, not 512) and the dense variant built no
+feed-forward at all; archives of either shape are refused by
+`from_variant(pretrained=...)`.
 
 `call` builds a combined causal-plus-padding mask once and passes it only
 to the gated-attention sublayer. The three linear-attention sublayers get
@@ -126,6 +134,7 @@ class Qwen3Next(RecordedBuildShapeMixin, keras.Model):
         Qwen3NextBlock x num_layers:
             3x [Zero-Centered RMSNorm → GatedLinearAttentionBlock → MoE → Residual]
             1x [Zero-Centered RMSNorm → GatedAttention → MoE → Residual]
+            (num_experts=1: one dense FFN in each MoE's place)
                │
                ▼
         Final Zero-Centered RMSNorm
@@ -147,12 +156,16 @@ class Qwen3Next(RecordedBuildShapeMixin, keras.Model):
     :param max_seq_len: Maximum sequence length. Defaults to 8192.
     :param num_experts: Total number of experts in MoE layers. Defaults to 64.
     :param num_experts_per_tok: Number of experts activated per token. Defaults to 8.
-    :param moe_intermediate_size: Individual expert intermediate size. Defaults to 1408.
+    :param moe_intermediate_size: Hidden (intermediate) width of each expert's
+        FFN, used verbatim as the FFN's `hidden_dim`; with `num_experts=1`, the
+        width of the dense FFN at each of a block's four slots. Defaults to 1408.
     :param norm_eps: Epsilon for normalization layers. Defaults to 1e-6.
     :param dropout_rate: Dropout rate for regularization. Defaults to 0.0.
     :param initializer_range: Standard deviation for weight initialization. Defaults to 0.02.
     :param normalization_type: Type of normalization layer. Defaults to "zero_centered_rms_norm".
-    :param ffn_type: Type of feed-forward network in experts. Defaults to "swiglu".
+    :param ffn_type: Type of feed-forward network in the experts (or the dense
+        FFN). Must be a type with a `hidden_dim` argument, which receives
+        `moe_intermediate_size`. Defaults to "swiglu".
     :param use_stochastic_depth: Whether to enable stochastic depth. Defaults to False.
     :param stochastic_depth_rate: Drop path rate for stochastic depth. Defaults to 0.1.
     :param pad_token_id: Id treated as padding by the task head when the input
@@ -397,26 +410,34 @@ class Qwen3Next(RecordedBuildShapeMixin, keras.Model):
         # CRITICAL FIX: Removed unused `self.rope_embedding`.
         # RoPE is handled within each `GatedAttention` layer, not at the model level.
 
-        # Create MoE configuration
+        # One FFN config, for each expert or (one expert) the dense FFN.
+        # DECISION plan-2026-07-30T140922-8af1028f/D-037: pre-filter
+        # against ffn_type — the factory raises on an unaccepted key.
+        # Full reasoning at the twin anchor in qwen3.py. See decisions.md.
+        ffn_config = assemble_ffn_config(self.ffn_type, {
+            "type": self.ffn_type,
+            "output_dim": self.hidden_size,
+            # DECISION plan-2026-10-13T035756-5dd4d94d/D-014: the explicit width,
+            # never ffn_expansion_factor = moe_intermediate_size // hidden_size
+            # (SwiGLU's 2/3 rule and 256 rounding built 1536 for a configured 512).
+            # See decisions.md.
+            "hidden_dim": self.moe_intermediate_size,
+        })
+
+        # Create MoE configuration; with one expert the blocks get a dense FFN.
         moe_config = None
+        dense_ffn_config = None
         if self.num_experts > 1:
             moe_config = MoEConfig(
                 num_experts=self.num_experts,
-                expert_config=ExpertConfig(
-                    # DECISION plan-2026-07-30T140922-8af1028f/D-037: pre-filter
-                    # against ffn_type — the factory raises on an unaccepted key.
-                    # Full reasoning at the twin anchor in qwen3.py. See decisions.md.
-                    ffn_config=assemble_ffn_config(self.ffn_type, {
-                        "type": self.ffn_type,
-                        "output_dim": self.hidden_size,
-                        "ffn_expansion_factor": max(1, self.moe_intermediate_size // self.hidden_size)
-                    })
-                ),
+                expert_config=ExpertConfig(ffn_config=ffn_config),
                 gating_config=GatingConfig(
                     top_k=self.num_experts_per_tok,
                     gating_type="linear"
                 )
             )
+        else:
+            dense_ffn_config = ffn_config
 
         # Create a linear schedule for the drop path rate
         dpr = linear_drop_path_rates(self.num_layers, self.stochastic_depth_rate)
@@ -434,6 +455,7 @@ class Qwen3Next(RecordedBuildShapeMixin, keras.Model):
                 head_dim=self.head_dim,
                 max_seq_len=self.max_seq_len,
                 moe_config=moe_config,
+                ffn_config=dense_ffn_config,
                 normalization_type=self.normalization_type,
                 norm_eps=self.norm_eps,
                 dropout_rate=self.dropout_rate,

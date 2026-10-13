@@ -10,6 +10,11 @@ per token, so parameters scale with `num_experts` while arithmetic scales
 with `num_experts_per_tok`. `moe_layers` names which block indices get this
 treatment — the variants interleave dense and sparse blocks rather than
 making every layer sparse, so a stable dense pathway exists at every depth.
+Each expert's FFN is `moe_intermediate_size` wide, as in the Hugging Face
+Qwen3-MoE config. Before 2026-10-13 it was a SwiGLU sized by
+`max(1, moe_intermediate_size // hidden_size)` through the 2/3 rule, so an
+MoE archive saved earlier no longer fits and `from_variant(pretrained=...)`
+refuses it; dense layers are unchanged.
 
 Attention is grouped-query with RoPE: GQA shares each key/value head across
 several query heads, shrinking the KV cache by that ratio, which is what
@@ -140,7 +145,12 @@ class Qwen3(RecordedBuildShapeMixin, keras.Model):
     :param moe_layers: Layer indices that use MoE. Defaults to empty list.
     :param num_experts: Total number of experts in MoE layers. Defaults to 64.
     :param num_experts_per_tok: Number of experts activated per token. Defaults to 8.
-    :param moe_intermediate_size: Individual expert intermediate size. Defaults to 1408.
+    :param moe_intermediate_size: Hidden (intermediate) width of each expert's
+        FFN, used verbatim as the FFN's `hidden_dim`, as in the Hugging Face
+        Qwen3-MoE config. Read only by the `moe_layers`: a dense layer's FFN
+        is sized from `4 * hidden_size` (for SwiGLU, its 2/3 rule rounded up
+        to a multiple of 256: 1536 wide at `hidden_size=512`), whatever this
+        value is. Defaults to 1408.
     :param norm_eps: Epsilon for normalization layers. Defaults to 1e-6.
         Applies to `final_norm` and to every one of the `2 * num_layers`
         in-block norms (decisions.md D-007). Weight shapes are unchanged, so
@@ -148,7 +158,9 @@ class Qwen3(RecordedBuildShapeMixin, keras.Model):
     :param dropout_rate: Dropout rate for regularization. Defaults to 0.0.
     :param initializer_range: Standard deviation for weight initialization. Defaults to 0.02.
     :param normalization_type: Type of normalization layer. Defaults to "rms_norm".
-    :param ffn_type: Type of feed-forward network in experts. Defaults to "swiglu".
+    :param ffn_type: Type of feed-forward network, dense and in experts. An
+        expert gets `hidden_dim=moe_intermediate_size`, so in MoE layers it
+        must be a type with a `hidden_dim` argument. Defaults to "swiglu".
     :param use_stochastic_depth: Whether to enable stochastic depth. Defaults to False.
     :param stochastic_depth_rate: Drop path rate for stochastic depth. Defaults to 0.1.
     :param pad_token_id: Id treated as padding by the task head when the input
@@ -410,7 +422,11 @@ class Qwen3(RecordedBuildShapeMixin, keras.Model):
                     ffn_config=assemble_ffn_config(self.ffn_type, {
                         "type": self.ffn_type,
                         "output_dim": self.hidden_size,
-                        "ffn_expansion_factor": max(1, self.moe_intermediate_size // self.hidden_size)
+                        # DECISION plan-2026-10-13T035756-5dd4d94d/D-014: the explicit
+                        # width, never ffn_expansion_factor = moe_intermediate_size //
+                        # hidden_size (SwiGLU's 2/3 rule and 256 rounding ignore the
+                        # configured value). See decisions.md.
+                        "hidden_dim": self.moe_intermediate_size,
                     })
                 ),
                 gating_config=GatingConfig(

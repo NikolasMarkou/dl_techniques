@@ -19,12 +19,12 @@ negative test.
 
 `Qwen3NextBlock` is four residual updates, not one: three gated linear-attention
 sublayers followed by one gated softmax-attention sublayer, each with its own
-pre-normalization, its own optional mixture-of-experts FFN, and its own optional
-stochastic-depth gate. The linear sublayers summarize the past into a
-fixed-size recurrent state at `O(L)` cost, and the single attention sublayer
-supplies the exact global lookup a bounded summary cannot. Only that
-sublayer holds a KV cache, so the 3:1 ratio is what caps cache memory at roughly a
-quarter of a uniformly attentive stack.
+pre-normalization, its own optional feed-forward (a mixture of experts, or one
+dense FFN), and its own optional stochastic-depth gate. The linear sublayers
+summarize the past into a fixed-size recurrent state at `O(L)` cost, and the
+single attention sublayer supplies the exact global lookup a bounded summary
+cannot. Only that sublayer holds a KV cache, so the 3:1 ratio is what caps
+cache memory at roughly a quarter of a uniformly attentive stack.
 
 The mask reaches only the attention sublayer. The three linear-attention sublayers
 are called without it, and that is not an omission to be repaired: a gated linear
@@ -58,6 +58,7 @@ from typing import Optional, List, Any, Dict, Tuple
 
 from dl_techniques.layers.moe import MoEConfig
 from dl_techniques.layers.moe import MixtureOfExperts
+from dl_techniques.layers.ffn import create_ffn_from_config
 from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.norms import create_normalization_layer
@@ -73,8 +74,9 @@ class Qwen3NextBlock(keras.layers.Layer):
     Qwen3 Next transformer block implementing the exact architectural pattern.
 
     This block cascades 3 gated DeltaNet sublayers with 1 gated attention
-    sublayer. Each is preceded by zero-centered RMSNorm and followed by
-    optional MoE processing, with residual connections throughout. The
+    sublayer. Each is preceded by zero-centered RMSNorm and followed by an
+    optional feed-forward, a mixture of experts (`moe_config`) or one dense
+    FFN (`ffn_config`), with residual connections throughout. The
     DeltaNet sublayers summarize the sequence into a fixed-size recurrent
     state cheaply; the attention sublayer supplies the exact global lookup
     that summary cannot.
@@ -86,10 +88,10 @@ class Qwen3NextBlock(keras.layers.Layer):
         Input [B, L, D]
                │
                ▼
-        RMSNorm → Gated DeltaNet → MoE → Residual   (x3)
+        RMSNorm → Gated DeltaNet → MoE or FFN → Residual   (x3)
                │
                ▼
-        RMSNorm → Gated Attention → MoE → Residual
+        RMSNorm → Gated Attention → MoE or FFN → Residual
                │
                ▼
         Output [B, L, D]
@@ -108,6 +110,15 @@ class Qwen3NextBlock(keras.layers.Layer):
         attention layer. Defaults to 4096.
     :param moe_config: Optional MoEConfig for Mixture of Experts layers, or
         a dict converted to one. Defaults to None (no MoE).
+    :param ffn_config: Optional dense FFN config, a dict for
+        `create_ffn_from_config` (`type` plus that type's parameters, e.g.
+        `{"type": "swiglu", "output_dim": dim, "hidden_dim": 5632}`). With it,
+        each of the four slots a `moe_config` would fill holds one dense FFN
+        at the same place (after the sublayer, before stochastic depth and the
+        residual add). Defaults to None. With neither config the block has no
+        feed-forward at all, as before this argument existed, so a block
+        archive saved without one still loads. Passing both raises
+        `ValueError`.
     :param normalization_type: Type of normalization layer to use, e.g.
         'zero_centered_rms_norm', 'layer_norm', 'rms_norm', 'band_rms'.
         Defaults to 'zero_centered_rms_norm'.
@@ -130,9 +141,11 @@ class Qwen3NextBlock(keras.layers.Layer):
     :ivar delta_norms: Normalization layers for the DeltaNet sublayers.
     :ivar delta_layers: GatedLinearAttentionBlock sublayers.
     :ivar delta_moe_layers: Optional MoE layers for the DeltaNet sublayers.
+    :ivar delta_ffn_layers: Optional dense FFNs for the DeltaNet sublayers.
     :ivar attention_norm: Normalization layer for the attention sublayer.
     :ivar attention_layer: The GatedAttention sublayer.
     :ivar attention_moe: Optional MoE layer for the attention sublayer.
+    :ivar attention_ffn: Optional dense FFN for the attention sublayer.
     :ivar stochastic_depth_layers: StochasticDepth layers, if enabled.
 
     Example:
@@ -186,6 +199,7 @@ class Qwen3NextBlock(keras.layers.Layer):
             head_dim: Optional[int] = None,
             max_seq_len: int = 4096,
             moe_config: Optional[Any] = None,  # MoEConfig or dict
+            ffn_config: Optional[Dict[str, Any]] = None,
             normalization_type: str = "zero_centered_rms_norm",
             norm_eps: float = 1e-6,
             dropout_rate: float = 0.0,
@@ -210,6 +224,11 @@ class Qwen3NextBlock(keras.layers.Layer):
             raise ValueError(f"stochastic_depth_rate must be in [0, 1], got {stochastic_depth_rate}")
         if norm_eps <= 0:
             raise ValueError(f"norm_eps must be positive, got {norm_eps}")
+        if moe_config is not None and ffn_config is not None:
+            raise ValueError(
+                "Pass moe_config or ffn_config, not both: each fills the same "
+                "four feed-forward slots."
+            )
 
         # Store configuration
         self.dim = dim
@@ -234,12 +253,18 @@ class Qwen3NextBlock(keras.layers.Layer):
         else:
             self.moe_config = None
 
+        # DECISION plan-2026-10-13T035756-5dd4d94d/D-014: a dense model passes
+        # ffn_config; do NOT default to a dense FFN when neither config is given
+        # (a block archive saved without one would no longer load). See decisions.md.
+        self.ffn_config = dict(ffn_config) if ffn_config is not None else None
+
         # CREATE all sub-layers in __init__ (they are unbuilt)
 
         # 3x Gated DeltaNet layers with their normalization and MoE
         self.delta_norms = []
         self.delta_layers = []
         self.delta_moe_layers = []
+        self.delta_ffn_layers = []
 
         for i in range(3):
             # Pre-layer normalization
@@ -270,6 +295,9 @@ class Qwen3NextBlock(keras.layers.Layer):
             else:
                 self.delta_moe_layers.append(None)
 
+            # Dense FFN after DeltaNet, in the MoE layer's place
+            self.delta_ffn_layers.append(self._create_dense_ffn(f"delta_ffn_{i}"))
+
         # 1x Gated Attention layer with its normalization and MoE
         self.attention_norm = create_normalization_layer(
             self.normalization_type,
@@ -296,6 +324,9 @@ class Qwen3NextBlock(keras.layers.Layer):
         else:
             self.attention_moe = None
 
+        # Dense FFN after attention, in the MoE layer's place
+        self.attention_ffn = self._create_dense_ffn("attention_ffn")
+
         # Stochastic depth for regularization
         self.stochastic_depth_layers: List[Optional[Any]] = []
         if use_stochastic_depth and stochastic_depth_rate > 0.0:
@@ -308,6 +339,17 @@ class Qwen3NextBlock(keras.layers.Layer):
         else:
             # Fill with None for consistent indexing
             self.stochastic_depth_layers = [None] * 4
+
+    def _create_dense_ffn(self, name: str) -> Optional[keras.layers.Layer]:
+        """
+        Create one dense FFN from `ffn_config`, or None without one.
+
+        :param name: Name of the FFN layer.
+        :return: An unbuilt FFN layer, or None.
+        """
+        if self.ffn_config is None:
+            return None
+        return create_ffn_from_config({**self.ffn_config, "name": name})
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -324,6 +366,9 @@ class Qwen3NextBlock(keras.layers.Layer):
             if self.delta_moe_layers[i] is not None:
                 self.delta_moe_layers[i].build(input_shape)
 
+            if self.delta_ffn_layers[i] is not None:
+                self.delta_ffn_layers[i].build(input_shape)
+
             if self.stochastic_depth_layers[i] is not None:
                 self.stochastic_depth_layers[i].build(input_shape)
 
@@ -333,6 +378,9 @@ class Qwen3NextBlock(keras.layers.Layer):
 
         if self.attention_moe is not None:
             self.attention_moe.build(input_shape)
+
+        if self.attention_ffn is not None:
+            self.attention_ffn.build(input_shape)
 
         if self.stochastic_depth_layers[3] is not None:
             self.stochastic_depth_layers[3].build(input_shape)
@@ -364,9 +412,11 @@ class Qwen3NextBlock(keras.layers.Layer):
             # Gated DeltaNet
             delta_out = self.delta_layers[i](x_norm, training=training)
 
-            # MoE if configured
+            # MoE or dense FFN if configured
             if self.delta_moe_layers[i] is not None:
                 delta_out = self.delta_moe_layers[i](delta_out, training=training)
+            elif self.delta_ffn_layers[i] is not None:
+                delta_out = self.delta_ffn_layers[i](delta_out, training=training)
 
             # Apply stochastic depth if configured
             if self.stochastic_depth_layers[i] is not None:
@@ -388,9 +438,11 @@ class Qwen3NextBlock(keras.layers.Layer):
             training=training
         )
 
-        # MoE if configured
+        # MoE or dense FFN if configured
         if self.attention_moe is not None:
             attention_out = self.attention_moe(attention_out, training=training)
+        elif self.attention_ffn is not None:
+            attention_out = self.attention_ffn(attention_out, training=training)
 
         # Apply stochastic depth if configured
         if self.stochastic_depth_layers[3] is not None:
@@ -417,6 +469,7 @@ class Qwen3NextBlock(keras.layers.Layer):
             "head_dim": self.head_dim,
             "max_seq_len": self.max_seq_len,
             "moe_config": self.moe_config.to_dict() if self.moe_config else None,
+            "ffn_config": dict(self.ffn_config) if self.ffn_config is not None else None,
             "normalization_type": self.normalization_type,
             "norm_eps": self.norm_eps,
             "dropout_rate": self.dropout_rate,

@@ -372,8 +372,10 @@ class TestQwen3NextModelConfigurations:
         }
 
         moe_configs = [
-            # No MoE
-            {'num_experts': 1, 'num_experts_per_tok': 1},
+            # No MoE: one dense FFN of width moe_intermediate_size per slot
+            # (D-014). Before D-014 a dense block built no FFN, so the default
+            # width (1408) went unread; it now has to be set for the order.
+            {'num_experts': 1, 'num_experts_per_tok': 1, 'moe_intermediate_size': 64},
             # Small MoE
             {'num_experts': 4, 'num_experts_per_tok': 2, 'moe_intermediate_size': 64},
             # Larger MoE
@@ -854,8 +856,10 @@ class TestQwen3NextModelPerformance:
             'max_seq_len': 256,
         }
 
-        # Model without MoE
-        config_no_moe = {**base_config, 'num_experts': 1, 'num_experts_per_tok': 1}
+        # Model without MoE: one dense FFN per slot, as wide as one expert
+        # (D-014; before it the dense block had no FFN and the width was unread).
+        config_no_moe = {**base_config, 'num_experts': 1, 'num_experts_per_tok': 1,
+                         'moe_intermediate_size': 64}
         model_no_moe = Qwen3Next(**config_no_moe)
 
         # Model with MoE
@@ -1182,14 +1186,17 @@ class TestQwen3NextCausalMasking:
 
 
 class TestQwen3NextIncludeTop(QwenIncludeTopCases):
-    """``Qwen3Next`` with ``include_top`` (1 block: 64 backbone weights, measured).
+    """``Qwen3Next`` with ``include_top`` (1 block: 76 backbone weights, measured).
 
     The cases are shared with ``Qwen3`` (``test_qwen3.IncludeTopCases``).
     ``num_experts=1``: under sparse top-k routing (2 experts, top 1) a padded
     token moves the real positions' states by about 1e-7, float32 rounding
     from the experts' changed gather sizes, not a leak (measured; see
     ``QWEN3_NEXT_CONFIG`` in ``test_causal_classification_pooling.py``), which
-    would blur the exact padding cases here. One expert routes densely.
+    would blur the exact padding cases here. One expert routes densely: since
+    D-014 (plan-2026-10-13T035756-5dd4d94d) it is one dense SwiGLU FFN of width
+    ``moe_intermediate_size`` at each of the block's 4 slots, 3 kernels each,
+    so the backbone went from 64 weights (no feed-forward at all) to 76.
     """
 
     CLS = Qwen3Next
@@ -1199,7 +1206,7 @@ class TestQwen3NextIncludeTop(QwenIncludeTopCases):
               dropout_rate=0.0)
     FACTORY = staticmethod(create_qwen3_next)
     WRAPPED_NAME = "qwen3_next_backbone"
-    N_BACKBONE = 64
+    N_BACKBONE = 76
 
 
 if __name__ == "__main__":
