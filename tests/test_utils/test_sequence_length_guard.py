@@ -7,7 +7,10 @@ pins the module's own promises, which no model test isolates:
 
 * ``refuse_static_sequence_length`` is a no-op for ``None`` and for the limit
   itself, and does NOT touch the cached step functions then; above the limit it
-  nulls all three BEFORE raising, with the caller's message verbatim.
+  raises with the caller's message verbatim, nulling all three first on an
+  UNBUILT model only. A built model keeps them: a refusal caught inside a
+  running ``fit`` (a callback probing an over-long call) would otherwise leave
+  the fit loop calling a ``None`` ``train_function``.
 * ``gate_dynamic_sequence_length`` returns a symbolic ``KerasTensor`` unchanged,
   returns the VALUES of a legal input bit for bit, and names the XLA guard node
   after the caller's limit name.
@@ -31,9 +34,10 @@ from dl_techniques.utils.sequence_length_guard import (
 
 
 class _Holder:
-    """Stands in for a model: only the three cached step functions matter."""
+    """Stands in for a model: its ``built`` flag and three cached step functions."""
 
-    def __init__(self):
+    def __init__(self, built: bool = False):
+        self.built = built
         self.predict_function = object()
         self.train_function = object()
         self.test_function = object()
@@ -50,12 +54,21 @@ def test_a_legal_or_unknown_length_is_a_no_op_and_keeps_the_cached_functions(seq
     assert holder.cached() == before
 
 
-def test_an_over_long_length_drops_all_three_functions_and_raises_the_message():
-    holder = _Holder()
+def test_an_over_long_length_on_an_unbuilt_model_drops_all_three_functions_and_raises():
+    holder = _Holder(built=False)
     with pytest.raises(ValueError) as excinfo:
         refuse_static_sequence_length(holder, 17, 16, "the exact message")
     assert str(excinfo.value) == "the exact message"
     assert holder.cached() == [None, None, None]
+
+
+def test_an_over_long_length_on_a_built_model_keeps_all_three_functions_and_raises():
+    holder = _Holder(built=True)
+    before = holder.cached()
+    with pytest.raises(ValueError) as excinfo:
+        refuse_static_sequence_length(holder, 17, 16, "the exact message")
+    assert str(excinfo.value) == "the exact message"
+    assert holder.cached() == before
 
 
 def test_a_symbolic_tensor_is_returned_unchanged():

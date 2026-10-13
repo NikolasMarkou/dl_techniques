@@ -15,6 +15,13 @@ somewhere on its own:
     ``predict_function`` leaves that function broken for every later call
     (measured in 9 of 13 classes before the guard). The refusal must drop the
     cached step functions, so the next legal ``predict`` works and is finite.
+``test_a_refusal_caught_inside_fit_does_not_kill_the_fit``
+    The other side of that drop: a BUILT model must keep its step functions.
+    ``fit`` makes ``train_function`` once, before its epoch loop, so a refusal
+    caught by a callback mid-fit that nulled it left the loop calling ``None``
+    (``TypeError``) on the next epoch. Run on BERT, GPT2 and Qwen3 (a learned
+    table, a ``TextDecoder`` table, a RoPE decoder), headed so ``fit`` has a
+    loss; the fit must finish all three epochs and the model still predict.
 ``test_the_declared_limit_itself_is_legal``
     Anti-vacuity: a ``<`` where ``<=`` belongs passes both raise arms while
     breaking every model run at exactly its declared maximum.
@@ -75,6 +82,9 @@ from dl_techniques.models.language.hnet.config import (
 )
 from dl_techniques.utils import sequence_length_guard as guard
 from dl_techniques.models.language.bert import create_bert
+
+from .headed_logit_decoder_cases import CLF
+from .tiny_language_models import TINY
 
 # ---------------------------------------------------------------------
 
@@ -443,6 +453,44 @@ def test_a_refused_first_predict_leaves_the_model_usable(subject):
     for seq_len in _legal_lengths(subject, limit):
         out = model.predict(subject.feed(model, seq_len), verbose=0)
         assert _finite(out)
+
+
+#: One learned position table, one ``TextDecoder`` table, one RoPE decoder.
+MID_FIT = ("bert", "gpt2", "qwen3")
+
+
+@pytest.mark.parametrize("name", MID_FIT)
+def test_a_refusal_caught_inside_fit_does_not_kill_the_fit(name):
+    subject = next(s for s in SUBJECTS if s.name == name)
+    tiny = TINY[name]
+    model = tiny.cls()(**tiny.kwargs, include_top=True, task_config=CLF)
+    limit = _limit(subject, model)
+    refused_at = []
+
+    class RefuseAnOverLongCallAtEpochEnd(keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            # The model is built here (the first train step built it).
+            with pytest.raises(ValueError, match=subject.limit_name):
+                self.model(subject.feed(self.model, limit + OVER_BY))
+            refused_at.append(epoch)
+
+    model.compile(
+        optimizer="adam",
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    )
+    history = model.fit(
+        subject.feed(model, LEGAL_LENGTHS[0]),
+        np.zeros((BATCH,), dtype="int32"),
+        epochs=3,
+        batch_size=BATCH,
+        callbacks=[RefuseAnOverLongCallAtEpochEnd()],
+        verbose=0,
+    )
+    assert refused_at == [0, 1, 2]
+    assert len(history.history["loss"]) == 3
+    assert np.isfinite(history.history["loss"]).all(), history.history
+    for seq_len in LEGAL_LENGTHS:
+        assert _finite(model.predict(subject.feed(model, seq_len), verbose=0))
 
 
 @pytest.mark.parametrize("subject", SUBJECTS, ids=SUBJECT_IDS)

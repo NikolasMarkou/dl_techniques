@@ -72,13 +72,19 @@ def refuse_static_sequence_length(
     Interface contract (call sites: the ``build`` and ``call`` of every model
     with a position limit, starting with ``BERT``). A no-op when ``seq_len`` is
     ``None`` (length unknown, see :func:`gate_dynamic_sequence_length`) or
-    ``seq_len <= limit`` (the limit itself is legal). Otherwise it first sets
+    ``seq_len <= limit`` (the limit itself is legal). Otherwise it raises,
+    and on a model that is not yet built it first sets
     ``model.predict_function``, ``model.train_function`` and
     ``model.test_function`` to ``None`` so Keras builds fresh ones on the next
-    call, then raises. Call it BEFORE any variable is created: variables made
+    call. A built model keeps its step functions: a refusal there fires
+    outside any first trace that creates variables, and ``fit`` makes
+    ``train_function`` once before its epoch loop, so a refusal caught by a
+    callback mid-fit that dropped it would kill the running fit (``None`` is
+    not callable). Call it BEFORE any variable is created: variables made
     inside a step-function trace that then fails are left unusable.
 
-    :param model: The model whose cached step functions are dropped.
+    :param model: The model whose cached step functions are dropped when it
+        is not yet built.
     :param seq_len: The static sequence length, or ``None`` when unknown.
     :param limit: The largest legal sequence length.
     :param message: The text of the raised error; the caller owns the wording.
@@ -89,10 +95,13 @@ def refuse_static_sequence_length(
     # A refusal during the FIRST trace of a cached Keras step function leaves
     # that function unusable for every later call ("Structures don't have the
     # same nested structure", or "Creating variables on a non-first call");
-    # drop them so the next call builds fresh ones.
-    model.predict_function = None
-    model.train_function = None
-    model.test_function = None
+    # drop them so the next call builds fresh ones. Only while unbuilt: the
+    # refusal inside `build` sees built=False, and a built model's functions
+    # may belong to a running `fit` loop.
+    if not getattr(model, "built", False):
+        model.predict_function = None
+        model.train_function = None
+        model.test_function = None
     raise ValueError(message)
 
 # ---------------------------------------------------------------------
