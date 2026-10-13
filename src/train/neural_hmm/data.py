@@ -1,396 +1,465 @@
-"""Synthetic time-series generators for the Neural HMM trainer.
+"""
+Synthetic HMM data and ground-truth references for the Neural HMM trainer
+====================================================================
 
-Unlike the existing ``src/dl_techniques/datasets/time_series/generator.py``'s
-``_generate_regime_switching`` (which uses a deterministic cyclic advance
-``(regime + 1) % regimes`` and discards the latent path), these generators:
+Sequences are sampled from a known hidden Markov model, so that a trained model can be
+scored against the truth on both of its jobs: the likelihood of the observations and
+the recovery of the hidden states.
 
-1. Sample the state path from a *proper* transition matrix (row-stochastic,
-   configurable per regime).
-2. Return ``(x, states)`` so the trainer has ground-truth states for
-   state-occupancy / segmentation metrics.
-3. Support Gaussian observation models (the HMM's default ``obs_type='gaussian'``).
+The ground truth (:class:`TrueHMM`, built by :func:`make_true_hmm`) has no free random
+parameter; the seed only drives the sampling:
 
-The design follows ``transform_sequences.py``'s contract of returning the ground-truth
-latent alongside the sequence, so metrics can compute state-occupancy entropy,
-Viterbi accuracy, etc.
+- ``pi`` is uniform over the ``K`` states.
+- The transition matrix is sticky: ``stay_prob`` on the diagonal and
+  ``(1 - stay_prob) / (K - 1)`` everywhere else.
+- **Gaussian** observations: state ``k`` emits ``N(mu_k, I)`` in ``obs_dim`` dimensions.
+  The means lie on one line along the all-ones direction, consecutive states
+  ``separation`` apart (in units of the standard deviation) and centred on 0, so the
+  closest pair of states is exactly ``separation`` apart.
+- **Categorical** observations: symbol ``v`` belongs to state ``v mod K``. Each state
+  puts :data:`OWN_SYMBOL_MASS` of its probability uniformly on its own symbols and the
+  rest uniformly on the others. ``separation`` is not read.
+
+:func:`sample_hmm_dataset` draws ``N`` right-padded sequences whose valid lengths are
+uniform on ``[min_seq_len, seq_len]``. :func:`sample_splits` draws the train,
+validation and test splits from three disjoint random streams of one seed.
+
+The references are plain numpy and share no code with the model package:
+
+- :func:`true_log_likelihood` / :func:`true_nll_per_step`: ``log p(x)`` under the true
+  HMM by the scaled forward algorithm (Rabiner 1989, Section V-A).
+- :func:`true_path_log_prob` / :func:`true_conditional_nll_per_step`: ``log p(x, z)``
+  and ``-log p(z | x)`` under the true HMM, the reference of a supervised model.
+- :func:`true_log_potentials`: the true parameters in the model's output shapes, for
+  decoding with the model package's own ``inference.viterbi_decode``.
+- :func:`majority_rate`, :func:`accuracy`, :func:`hungarian_mapping` and
+  :func:`matched_accuracy`: state accuracy, where an unsupervised model's state labels
+  are first matched to the true labels by the assignment that maximizes agreement
+  (``scipy.optimize.linear_sum_assignment`` on the confusion matrix).
+
+Padding convention, shared with the model: ``mask`` is ``(N, T)`` float32, 1.0 on a
+contiguous valid prefix; padded ``states`` are ``-1`` and padded observations 0.
+
+References:
+    - Rabiner, 1989. A Tutorial on Hidden Markov Models and Selected Applications in
+      Speech Recognition. Proceedings of the IEEE 77(2), pp. 257-286.
 """
 
-from __future__ import annotations
+from dataclasses import dataclass
+from typing import Dict, NamedTuple, Optional, Sequence, Union
 
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
+from scipy.optimize import linear_sum_assignment
 
 # ---------------------------------------------------------------------
-# Transition matrix samplers
+
+#: Observation types the generator supports.
+OBS_TYPES = ("gaussian", "categorical")
+
+#: Probability a categorical state puts on the symbols it owns.
+OWN_SYMBOL_MASS = 0.8
+
+#: Last entry of each split's seed list (the ASCII bytes of TRN, VAL, TST): one
+#: independent random stream per split from one user seed.
+SPLIT_TAGS: Dict[str, int] = {"train": 0x54524E, "val": 0x56414C, "test": 0x545354}
+
 # ---------------------------------------------------------------------
 
 
-def _row_stochastic(rng: np.random.RandomState, dim: int) -> np.ndarray:
-    """Return a row-stochastic matrix of shape ``(dim, dim)``.
+@dataclass(frozen=True)
+class TrueHMM:
+    """The parameters of the ground-truth HMM, as float64 numpy arrays.
 
-    Each row sums to 1.0. The last row is set to a one-hot vector at the
-    ``last`` index so the chain is irreducible (the last state cannot be
-    left; this mirrors the recipe's ``self_loop_init`` / sticky-state
-    convention).
-
-    :param rng: Random state.
-    :type rng: np.random.RandomState
-    :param dim: Dimension of the square matrix.
-    :type dim: int
-    :return: Row-stochastic ``(dim, dim)`` float32 array.
-    :rtype: np.ndarray
+    :param pi: ``(K,)`` initial state distribution.
+    :param transition: ``(K, K)`` transition matrix, row = source, column = destination.
+    :param obs_type: ``gaussian`` or ``categorical``.
+    :param means: ``(K, D)`` Gaussian means (unit standard deviation), or ``None``.
+    :param emission_probs: ``(K, V)`` categorical emission probabilities, or ``None``.
     """
-    # Draw a Dirichlet row for each row except the last
-    M = rng.dirichlet(np.ones(dim), size=dim - 1).astype("float32")
-    # The last row is a one-hot at the last state (stickiness)
-    last_row = np.zeros(dim, dtype="float32")
-    last_row[-1] = 1.0
-    M = np.vstack([M, last_row])
-    return M
+
+    pi: np.ndarray
+    transition: np.ndarray
+    obs_type: str
+    means: Optional[np.ndarray] = None
+    emission_probs: Optional[np.ndarray] = None
+
+    @property
+    def n_states(self) -> int:
+        """Number of hidden states ``K``."""
+        return int(self.pi.shape[0])
+
+
+class HMMDataset(NamedTuple):
+    """One split of sampled sequences and the HMM it came from.
+
+    :param obs: ``(N, T, D)`` float32 (gaussian) or ``(N, T)`` int32 (categorical).
+    :param mask: ``(N, T)`` float32, 1.0 on the valid prefix.
+    :param states: ``(N, T)`` int32 true states, ``-1`` at padded steps.
+    :param true_hmm: The generating :class:`TrueHMM`.
+    """
+
+    obs: np.ndarray
+    mask: np.ndarray
+    states: np.ndarray
+    true_hmm: TrueHMM
 
 
 # ---------------------------------------------------------------------
-# Observation models (matching the HMM's emission types)
-# ---------------------------------------------------------------------
 
 
-def _gaussian_observation(
-    rng: np.random.RandomState,
-    states: np.ndarray,          # (T,) int state indices
-    means: np.ndarray,           # (K,) per-state mean
-    stds: np.ndarray,            # (K,) per-state std dev
-) -> np.ndarray:
-    """Emit a Gaussian observation per timestep.
+def make_true_hmm(
+        n_states: int,
+        obs_type: str,
+        obs_dim: Optional[int] = None,
+        vocab_size: Optional[int] = None,
+        separation: float = 4.0,
+        stay_prob: float = 0.9,
+) -> TrueHMM:
+    """Build the ground-truth HMM described in the module docstring.
 
-    :param rng: Random state for noise draw.
-    :type rng: np.random.RandomState
-    :param states: Timestep state indices ``(T,)``.
-    :type states: np.ndarray
-    :param means: Per-state mean ``(K,)``.
-    :type means: np.ndarray
-    :param stds: Per-state standard dev ``(K,)``.
-    :type stds: np.ndarray
-    :return: Observations ``(T,)`` float32.
-    :rtype: np.ndarray
+    :param n_states: ``K >= 1``.
+    :param obs_type: ``gaussian`` or ``categorical``.
+    :param obs_dim: ``D >= 1``; required for ``gaussian``.
+    :param vocab_size: ``V >= K``; required for ``categorical``.
+    :param separation: Distance between consecutive Gaussian means, in standard
+        deviations; finite and ``>= 0``. Not read for ``categorical``.
+    :param stay_prob: Diagonal of the transition matrix, in ``(0, 1)``. Not read when
+        ``K = 1``.
+    :return: The parameters.
+    :raises ValueError: If an argument is out of range or missing for ``obs_type``.
     """
-    T = states.shape[0]
-    noise = rng.normal(0.0, 1.0, size=T).astype("float32")
-    # Map each timestep to its state's mean+std
-    obs = means[states] + stds[states] * noise
-    return obs
-
-
-def _categorical_observation(
-    rng: np.random.RandomState,
-    states: np.ndarray,          # (T,) int state indices
-    vocab_size: int,
-    probs_per_state: Optional[np.ndarray] = None,  # (K, vocab_size) or None
-) -> np.ndarray:
-    """Emit a categorical observation per timestep.
-
-    :param rng: Random state.
-    :type rng: np.random.RandomState
-    :param states: Timestep state indices ``(T,)``.
-    :type states: np.ndarray
-    :param vocab_size: Size of the observation vocabulary.
-    :type vocab_size: int
-    :param probs_per_state: Per-state categorical probabilities ``(K, V)``;
-        if ``None`` uniform probs are used.
-    :type probs_per_state: Optional[np.ndarray]
-    :return: Integer observations ``(T,)`` in ``[0, vocab_size)``.
-    :rtype: np.ndarray
-    """
-    T = states.shape[0]
-    if probs_per_state is None:
-        # Uniform over vocabulary for every state
-        probs = np.full((T, vocab_size), 1.0 / vocab_size, dtype="float32")
+    if obs_type not in OBS_TYPES:
+        raise ValueError(f"Unknown obs_type '{obs_type}'. Available: {list(OBS_TYPES)}.")
+    if n_states < 1:
+        raise ValueError(f"n_states must be >= 1, got {n_states}.")
+    if n_states > 1 and not 0.0 < stay_prob < 1.0:
+        raise ValueError(f"stay_prob must lie in (0, 1), got {stay_prob}.")
+    k = n_states
+    pi = np.full(k, 1.0 / k)
+    if k == 1:
+        transition = np.ones((1, 1))
     else:
-        # Use the per-state probabilities; index by the state at each timestep
-        probs = probs_per_state[states]  # (T, V)
-        # Normalise each row
-        probs = probs / probs.sum(axis=1, keepdims=True)
-    # Sample categorical
-    obs = rng.multinomial(1, probs, size=1).reshape(-1).astype("int32")
-    return obs
+        transition = np.full((k, k), (1.0 - stay_prob) / (k - 1))
+        np.fill_diagonal(transition, stay_prob)
 
+    if obs_type == "gaussian":
+        if obs_dim is None or obs_dim < 1:
+            raise ValueError(f"obs_type='gaussian' needs obs_dim >= 1, got {obs_dim}.")
+        if not (np.isfinite(separation) and separation >= 0):
+            raise ValueError(f"separation must be finite and >= 0, got {separation}.")
+        direction = np.ones(obs_dim) / np.sqrt(obs_dim)
+        offsets = (np.arange(k) - (k - 1) / 2.0) * separation
+        return TrueHMM(pi, transition, obs_type, means=offsets[:, None] * direction[None, :])
 
-# ---------------------------------------------------------------------
-# Generator functions returned by the task table
-# ---------------------------------------------------------------------
-
-
-def _generate_gaussian_hmm(
-    rng: np.random.RandomState,
-    n_samples: int,
-    n_states: int,
-    transition_params: Dict[str, Any],
-    emission_params: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Generate a Gaussian-HMM synthetic sequence with ground-truth states.
-
-    The state path is sampled from a row-stochastic transition matrix; the
-    observations are Gaussian with per-state mean/std.
-
-    :param rng: Random state.
-    :type rng: np.random.RandomState
-    :param n_samples: Number of timesteps ``T``.
-    :type n_samples: int
-    :param n_states: Number of hidden states ``K``.
-    :type n_states: int
-    :param transition_params: Dict with keys ``type`` transition matrix and
-        optional ``switch_prob``. If ``type`` is ``'static'`` the matrix
-        is constant; if ``'input_dependent'`` a simple two-regime switch is
-        applied (the first half uses one matrix, the second half another).
-    :type transition_params: Dict[str, Any]
-    :param emission_params: Dict with keys ``means`` and ``stds``,
-        each ``(K,)``.
-    :type emission_params: Dict[str, Any]
-    :return: Dict with keys ``x`` (observations ``(T,)``), ``states``
-        (latent state path ``(T,)``), and ``transition_matrix``
-        (``(K, K)`` if static, or ``(2, K, K)`` if input-dependent).
-    :rtype: Dict[str, Any]
-    """
-    T = n_samples
-    K = n_states
-
-    # Build transition matrix
-    trans_type = transition_params.get("type", "static")
-    if trans_type == "static":
-        transition_matrix = _row_stochastic(rng, K)
-        # Apply self-loop bias: overwrite the diagonal to be sticky.
-        # The recipe's ``self_loop_init`` of 2-3 means diagonal logits of 2-3,
-        # which after log_softmax give ~0.9 probability to stay. We approximate
-        # this by setting diagonal entries to 0.9 and renormalising.
-        for k in range(K):
-            transition_matrix[k, k] = 0.9
-            transition_matrix[k, :] = transition_matrix[k, :] / transition_matrix[k, :].sum()
-    elif trans_type == "input_dependent":
-        # Two-regime switch at T//2
-        transition_matrix_1 = _row_stochastic(rng, K)
-        transition_matrix_2 = _row_stochastic(rng, K)
-        for k in range(K):
-            transition_matrix_1[k, k] = 0.9
-            transition_matrix_1[k, :] = transition_matrix_1[k, :] / transition_matrix_1[k, :].sum()
-            transition_matrix_2[k, k] = 0.9
-            transition_matrix_2[k, :] = transition_matrix_2[k, :] / transition_matrix_2[k, :].sum()
-        transition_matrix = np.tile(transition_matrix_1, (T // 2 + 1, 1))[:T]
-        # Second regime overrides the back half
-        if T > T // 2:
-            transition_matrix[T // 2:] = np.tile(transition_matrix_2, (T - T // 2 + 1, 1))[: T - T // 2]
-    else:
-        raise ValueError(f"Unknown transition type '{trans_type}'.")
-
-    # Sample the state path
-    states = np.zeros(T, dtype="int32")
-    # Initial state: sample from the first row of the transition matrix
-    current = rng.randint(0, K)
-    states[0] = current
-    for t in range(1, T):
-        # Transition probabilities from current state
-        probs = transition_matrix[current]
-        current = rng.choice(K, p=probs)
-        states[t] = current
-
-    # Emission parameters
-    means = np.array(emission_params["means"], dtype="float32")  # (K,)
-    stds = np.array(emission_params["stds"], dtype="float32")    # (K,)
-
-    # Generate observations
-    x = _gaussian_observation(rng, states, means, stds)
-
-    # Pack result
-    result: Dict[str, Any] = {
-        "x": x,
-        "states": states,
-    }
-
-    if trans_type == "static":
-        result["transition_matrix"] = transition_matrix
-    else:
-        result["transition_matrix_1"] = transition_matrix_1
-        result["transition_matrix_2"] = transition_matrix_2
-
-    return result
-
-
-def _generate_categorical_hmm(
-    rng: np.random.RandomState,
-    n_samples: int,
-    n_states: int,
-    transition_params: Dict[str, Any],
-    emission_params: Dict[str, Any],
-    vocab_size: int,
-) -> Dict[str, Any]:
-    """Generate a categorical-HMM synthetic sequence with ground-truth states.
-
-    Same structure as ``_generate_gaussian_hmm`` but with discrete
-    observations.
-
-    :param rng: Random state.
-    :type rng: np.random.RandomState
-    :param n_samples: Number of timesteps ``T``.
-    :type n_samples: int
-    :param n_states: Number of hidden states ``K``.
-    :type n_states: int
-    :param transition_params: Same format as ``_generate_gaussian_hmm``.
-    :type transition_params: Dict[str, Any]
-    :param emission_params: Per-state categorical probabilities ``(K, V)``.
-    :type emission_params: Dict[str, Any]
-    :param vocab_size: Size of the observation vocabulary ``V``.
-    :type vocab_size: int
-    :return: Dict with keys ``x`` (integer observations ``(T,)``),
-        ``states`` (latent path ``(T,)``), and transition matrices.
-    :rtype: Dict[str, Any]
-    """
-    T = n_samples
-    K = n_states
-
-    # Build transition matrix (same logic as Gaussian version)
-    trans_type = transition_params.get("type", "static")
-    if trans_type == "static":
-        transition_matrix = _row_stochastic(rng, K)
-        for k in range(K):
-            transition_matrix[k, k] = 0.9
-            transition_matrix[k, :] = transition_matrix[k, :] / transition_matrix[k, :].sum()
-    elif trans_type == "input_dependent":
-        transition_matrix_1 = _row_stochastic(rng, K)
-        transition_matrix_2 = _row_stochastic(rng, K)
-        for k in range(K):
-            transition_matrix_1[k, k] = 0.9
-            transition_matrix_1[k, :] = transition_matrix_1[k, :] / transition_matrix_1[k, :].sum()
-            transition_matrix_2[k, k] = 0.9
-            transition_matrix_2[k, :] = transition_matrix_2[k, :] / transition_matrix_2[k, :].sum()
-        transition_matrix = np.tile(transition_matrix_1, (T // 2 + 1, 1))[:T]
-        if T > T // 2:
-            transition_matrix[T // 2:] = np.tile(transition_matrix_2, (T - T // 2 + 1, 1))[: T - T // 2]
-    else:
-        raise ValueError(f"Unknown transition type '{trans_type}'.")
-
-    # Sample the state path
-    states = np.zeros(T, dtype="int32")
-    current = rng.randint(0, K)
-    states[0] = current
-    for t in range(1, T):
-        probs = transition_matrix[current]
-        current = rng.choice(K, p=probs)
-        states[t] = current
-
-    # Per-state categorical probabilities (K, V)
-    K_val = emission_params.get("probs_per_state", None)
-    if K_val is None:
-        # Uniform per state; we'll just note it
-        probs_per_state = np.full((K, vocab_size), 1.0 / vocab_size, dtype="float32")
-    else:
-        probs_per_state = np.array(K_val, dtype="float32")
-
-    # Generate observations
-    x = _categorical_observation(rng, states, vocab_size, probs_per_state)
-
-    result: Dict[str, Any] = {
-        "x": x,
-        "states": states,
-    }
-
-    if trans_type == "static":
-        result["transition_matrix"] = transition_matrix
-    else:
-        result["transition_matrix_1"] = transition_matrix_1
-        result["transition_matrix_2"] = transition_matrix_2
-
-    return result
-
-
-# ---------------------------------------------------------------------
-# Trainer-visible task table (mirrors the TimeSeriesGenerator pattern)
-# ---------------------------------------------------------------------
-
-# These are the generator functions the trainer can dispatch by name.
-# The trainer's data loader reads these by string key.
-
-_GENERATORS: Dict[str, Any] = {
-    "gaussian_hmm": _generate_gaussian_hmm,
-    "categorical_hmm": _generate_categorical_hmm,
-}
-
-
-def available_generators() -> List[str]:
-    """Return the names of available synthetic generators.
-
-    :return: List of generator names.
-    :rtype: List[str]
-    """
-    return sorted(_GENERATORS.keys())
-
-
-def generate_dataset(
-    generator_name: str,
-    cfg: Dict[str, Any],
-    **generator_kwargs: Any,
-) -> Dict[str, Any]:
-    """Dispatch to a registered synthetic generator.
-
-    :param generator_name: Name from ``available_generators()``.
-    :type generator_name: str
-    :param cfg: Configuration dict passed to the generator (contains
-        ``n_samples``, ``n_states``, emission/transition params).
-    :type cfg: Dict[str, Any]
-    :param generator_kwargs: Additional keyword args forwarded to the
-        generator function.
-    :type generator_kwargs: Any
-    :return: Generator output dict (observations + states + optionally matrices).
-    :rtype: Dict[str, Any]
-    :raises ValueError: If ``generator_name`` is unrecognised.
-    """
-    gen = _GENERATORS.get(generator_name)
-    if gen is None:
+    if vocab_size is None or vocab_size < k:
         raise ValueError(
-            f"Unknown generator '{generator_name}'. "
-            f"Available: {available_generators()}"
+            f"obs_type='categorical' needs vocab_size >= n_states ({k}) so that every state "
+            f"owns a symbol, got {vocab_size}."
         )
-    return gen(cfg["rng"], **cfg, **generator_kwargs)
+    owner = np.arange(vocab_size) % k
+    probs = np.zeros((k, vocab_size))
+    for state in range(k):
+        own = owner == state
+        n_own, n_other = int(own.sum()), int((~own).sum())
+        if n_other == 0:
+            probs[state] = 1.0 / vocab_size
+        else:
+            probs[state, own] = OWN_SYMBOL_MASS / n_own
+            probs[state, ~own] = (1.0 - OWN_SYMBOL_MASS) / n_other
+    return TrueHMM(pi, transition, obs_type, emission_probs=probs)
 
 
-# ---------------------------------------------------------------------
-# Convenience: seed the RNG for a reproducible run
-# ---------------------------------------------------------------------
+def _draw(rng: np.random.Generator, probs: np.ndarray) -> np.ndarray:
+    """Draw one index per row of ``probs`` (``(N, K)`` rows summing to 1) by inverse CDF."""
+    cdf = np.cumsum(probs, axis=1)
+    draws = (rng.random(probs.shape[0])[:, None] > cdf).sum(axis=1)
+    return np.minimum(draws, probs.shape[1] - 1)
 
 
-def set_global_seed(seed: int) -> None:
-    """Seed numpy's random state globally (called once per run).
+def sample_hmm_dataset(
+        n_sequences: int,
+        seq_len: int,
+        min_seq_len: int,
+        n_states: int,
+        obs_type: str,
+        obs_dim: Optional[int] = None,
+        vocab_size: Optional[int] = None,
+        separation: float = 4.0,
+        stay_prob: float = 0.9,
+        seed: Union[int, Sequence[int]] = 0,
+) -> HMMDataset:
+    """Sample ``n_sequences`` right-padded sequences from :func:`make_true_hmm`'s HMM.
 
-    This is the same convention used by the other time-series trainers
-    (nbeats, deepar, etc.) so that a run's data is reproducible.
+    The draws come in a fixed order from one ``numpy.random.default_rng(seed)``: the
+    valid lengths, the state paths, then the observations.
 
-    :param seed: Integer seed.
-    :type seed: int
+    :param n_sequences: ``N >= 1``.
+    :param seq_len: Padded length ``T >= 1``.
+    :param min_seq_len: Shortest valid length, ``1 <= min_seq_len <= seq_len``.
+    :param n_states: ``K``.
+    :param obs_type: ``gaussian`` or ``categorical``.
+    :param obs_dim: ``D`` of a ``gaussian`` observation.
+    :param vocab_size: ``V`` of a ``categorical`` observation.
+    :param separation: See :func:`make_true_hmm`.
+    :param stay_prob: See :func:`make_true_hmm`.
+    :param seed: Seed (or seed list) of the generator.
+    :return: The split and its true HMM.
+    :raises ValueError: If a size is out of range, or :func:`make_true_hmm` refuses.
     """
-    np.random.seed(seed)
+    if n_sequences < 1 or seq_len < 1 or not 1 <= min_seq_len <= seq_len:
+        raise ValueError(
+            f"Need n_sequences >= 1 and 1 <= min_seq_len <= seq_len, got n_sequences="
+            f"{n_sequences}, min_seq_len={min_seq_len}, seq_len={seq_len}."
+        )
+    hmm = make_true_hmm(n_states, obs_type, obs_dim, vocab_size, separation, stay_prob)
+    rng = np.random.default_rng(seed)
+    lengths = rng.integers(min_seq_len, seq_len + 1, size=n_sequences)
+    valid = np.arange(seq_len)[None, :] < lengths[:, None]
 
+    states = np.empty((n_sequences, seq_len), dtype=np.int64)
+    states[:, 0] = _draw(rng, np.broadcast_to(hmm.pi, (n_sequences, n_states)))
+    for t in range(1, seq_len):
+        states[:, t] = _draw(rng, hmm.transition[states[:, t - 1]])
 
-# ---------------------------------------------------------------------
-# CLI / one-shot sanity check
-# ---------------------------------------------------------------------
-
-if __name__ == "__main__":
-    # Quick sanity: generate a gaussian HMM sequence and print shapes.
-    import sys
-    from dl_techniques.train.neural_hmm.data import (
-        generate_dataset, available_generators, set_global_seed,
+    if obs_type == "gaussian":
+        obs = hmm.means[states] + rng.standard_normal((n_sequences, seq_len, obs_dim))
+        obs = np.where(valid[:, :, None], obs, 0.0).astype(np.float32)
+    else:
+        flat = _draw(rng, hmm.emission_probs[states.reshape(-1)])
+        obs = np.where(valid, flat.reshape(n_sequences, seq_len), 0).astype(np.int32)
+    return HMMDataset(
+        obs=obs,
+        mask=valid.astype(np.float32),
+        states=np.where(valid, states, -1).astype(np.int32),
+        true_hmm=hmm,
     )
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--list":
-        print("Available generators:", available_generators())
-    else:
-        set_global_seed(42)
-        cfg = dict(
-            n_samples=100,
-            n_states=5,
-            means=[0.0, 1.0, -1.0, 2.0, -2.0],
-            stds=[1.0, 1.0, 1.0, 1.0, 1.0],
-            transition={"type": "static"},
-        )
-        data = generate_dataset("gaussian_hmm", cfg)
-        print(f"x shape: {data['x'].shape}  states shape: {data['states'].shape}")
-        print(f"x dtype: {data['x'].dtype}  states dtype: {data['states'].dtype}")
-        # Verify states are within range
-        print(f"states min/max: {data['states'].min()} / {data['states'].max()}")
+
+def split_seed(seed: int, split: str) -> list:
+    """Return the seed list of one split: ``[seed, SPLIT_TAGS[split]]``.
+
+    :param seed: The user seed.
+    :param split: A key of :data:`SPLIT_TAGS`.
+    :return: A seed list for ``numpy.random.default_rng``.
+    """
+    return [int(seed), SPLIT_TAGS[split]]
+
+
+def sample_splits(sizes: Dict[str, int], seed: int, **kwargs) -> Dict[str, HMMDataset]:
+    """Sample every split of ``sizes`` from its own stream of ``seed``.
+
+    :param sizes: Split name (a key of :data:`SPLIT_TAGS`) to sequence count.
+    :param seed: The user seed.
+    :param kwargs: Every other argument of :func:`sample_hmm_dataset`.
+    :return: Split name to :class:`HMMDataset`; the splits share one :class:`TrueHMM`.
+    """
+    return {
+        name: sample_hmm_dataset(n_sequences=count, seed=split_seed(seed, name), **kwargs)
+        for name, count in sizes.items()
+    }
+
+# ---------------------------------------------------------------------
+
+
+def true_log_emissions(hmm: TrueHMM, obs: np.ndarray) -> np.ndarray:
+    """Return ``log p(x_t | z_t = k)`` under the true HMM, ``(N, T, K)`` float64.
+
+    :param hmm: The true HMM.
+    :param obs: Observations as :func:`sample_hmm_dataset` returns them.
+    :return: Emission log-probabilities; padded steps hold the value of their padded
+        observation and must be masked by the caller.
+    """
+    if hmm.obs_type == "gaussian":
+        x = np.asarray(obs, dtype=np.float64)
+        squared = np.sum(np.square(x[:, :, None, :] - hmm.means[None, None]), axis=-1)
+        return -0.5 * squared - 0.5 * x.shape[-1] * np.log(2.0 * np.pi)
+    log_probs = np.log(hmm.emission_probs)
+    return np.moveaxis(log_probs[:, np.asarray(obs, dtype=np.int64)], 0, -1)
+
+
+def true_log_likelihood(hmm: TrueHMM, obs: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Return ``log p(x)`` of every sequence under the true HMM, by the scaled forward.
+
+    Each step's forward vector is normalized to sum to 1 and the log of the normalizer
+    accumulated; emissions are shifted by their per-step maximum before ``exp``. A
+    length-0 sequence has ``log p(x) = 0``.
+
+    :param hmm: The true HMM.
+    :param obs: Observations.
+    :param mask: ``(N, T)`` right-padding mask.
+    :return: ``(N,)`` float64 log-likelihoods.
+    """
+    log_b = true_log_emissions(hmm, obs)
+    shift = log_b.max(axis=-1)
+    b = np.exp(log_b - shift[:, :, None])
+    lengths = (np.asarray(mask) > 0).sum(axis=1)
+    log_lik = np.zeros(len(lengths))
+    alpha = np.zeros((len(lengths), hmm.n_states))
+    for t in range(log_b.shape[1]):
+        rows = lengths > t
+        if not rows.any():
+            break
+        if t == 0:
+            step = hmm.pi[None, :] * b[rows, 0]
+        else:
+            step = (alpha[rows] @ hmm.transition) * b[rows, t]
+        norm = step.sum(axis=1)
+        alpha[rows] = step / norm[:, None]
+        log_lik[rows] += np.log(norm) + shift[rows, t]
+    return log_lik
+
+
+def true_path_log_prob(
+        hmm: TrueHMM, obs: np.ndarray, states: np.ndarray, mask: np.ndarray
+) -> np.ndarray:
+    """Return ``log p(x, z)`` of every sequence and its state path under the true HMM.
+
+    :param hmm: The true HMM.
+    :param obs: Observations.
+    :param states: ``(N, T)`` states; padded entries are ignored.
+    :param mask: ``(N, T)`` right-padding mask.
+    :return: ``(N,)`` float64 joint log-probabilities (0 for a length-0 sequence).
+    """
+    valid = np.asarray(mask) > 0
+    z = np.where(valid, states, 0).astype(np.int64)
+    log_b = np.take_along_axis(true_log_emissions(hmm, obs), z[:, :, None], axis=-1)[:, :, 0]
+    log_pi, log_a = np.log(hmm.pi), np.log(hmm.transition)
+    terms = log_b.copy()
+    terms[:, 0] += log_pi[z[:, 0]]
+    terms[:, 1:] += log_a[z[:, :-1], z[:, 1:]]
+    return np.sum(np.where(valid, terms, 0.0), axis=1)
+
+
+def _per_step(total_log_prob: np.ndarray, mask: np.ndarray) -> float:
+    """``-sum(total_log_prob) / number of valid steps``; raises on an all-padding split."""
+    steps = float((np.asarray(mask) > 0).sum())
+    if steps == 0:
+        raise ValueError("The split has no valid step.")
+    return float(-np.sum(total_log_prob) / steps)
+
+
+def true_nll_per_step(hmm: TrueHMM, obs: np.ndarray, mask: np.ndarray) -> float:
+    """Return ``-log p(x)`` per valid step under the true HMM, summed over the split.
+
+    The same reduction as the model's training loss (total NLL over total valid
+    steps), so the two are directly comparable.
+
+    :param hmm: The true HMM.
+    :param obs: Observations.
+    :param mask: ``(N, T)`` right-padding mask.
+    :return: Nats per valid step.
+    :raises ValueError: If the split has no valid step.
+    """
+    return _per_step(true_log_likelihood(hmm, obs, mask), mask)
+
+
+def true_conditional_nll_per_step(
+        hmm: TrueHMM, obs: np.ndarray, states: np.ndarray, mask: np.ndarray
+) -> float:
+    """Return ``-log p(z | x)`` per valid step under the true HMM.
+
+    The reference of a supervised (discriminative) model, whose training loss is the
+    same quantity under its own parameters.
+
+    :param hmm: The true HMM.
+    :param obs: Observations.
+    :param states: ``(N, T)`` true states.
+    :param mask: ``(N, T)`` right-padding mask.
+    :return: Nats per valid step.
+    :raises ValueError: If the split has no valid step.
+    """
+    conditional = true_path_log_prob(hmm, obs, states, mask) - true_log_likelihood(hmm, obs, mask)
+    return _per_step(conditional, mask)
+
+
+def true_log_potentials(hmm: TrueHMM, obs: np.ndarray) -> Dict[str, np.ndarray]:
+    """Return the true parameters in the model's output shapes, float64.
+
+    :param hmm: The true HMM.
+    :param obs: Observations, ``N`` sequences of length ``T``.
+    :return: ``{"log_pi": (N, K), "log_A": (N, T, K, K), "log_emit": (N, T, K)}``, the
+        input of the model package's ``inference`` functions.
+    """
+    log_emit = true_log_emissions(hmm, obs)
+    n, steps, k = log_emit.shape
+    log_pi, log_a = np.log(hmm.pi), np.log(hmm.transition)
+    return {
+        "log_pi": np.broadcast_to(log_pi, (n, k)).copy(),
+        "log_A": np.broadcast_to(log_a, (n, steps, k, k)).copy(),
+        "log_emit": log_emit,
+    }
+
+# ---------------------------------------------------------------------
+
+
+def majority_rate(states: np.ndarray) -> float:
+    """Return the share of valid steps that hold the most frequent state.
+
+    The accuracy of the best constant predictor; ``states < 0`` are padding.
+
+    :param states: ``(N, T)`` states.
+    :return: A rate in ``(0, 1]``.
+    :raises ValueError: If no step is valid.
+    """
+    valid = np.asarray(states)[np.asarray(states) >= 0]
+    if valid.size == 0:
+        raise ValueError("No valid step.")
+    return float(np.bincount(valid).max() / valid.size)
+
+
+def accuracy(predicted: np.ndarray, states: np.ndarray) -> float:
+    """Return the share of valid steps (``states >= 0``) where ``predicted == states``.
+
+    :param predicted: ``(N, T)`` predicted states.
+    :param states: ``(N, T)`` true states, ``-1`` at padding.
+    :return: A rate in ``[0, 1]``.
+    :raises ValueError: If no step is valid.
+    """
+    valid = np.asarray(states) >= 0
+    if not valid.any():
+        raise ValueError("No valid step.")
+    return float(np.mean(np.asarray(predicted)[valid] == np.asarray(states)[valid]))
+
+
+def hungarian_mapping(predicted: np.ndarray, states: np.ndarray, n_states: int) -> np.ndarray:
+    """Return the label map that makes ``predicted`` agree most with ``states``.
+
+    ``mapping[p]`` is the true state assigned to predicted label ``p``: the one-to-one
+    assignment maximizing the number of valid steps where they agree
+    (``scipy.optimize.linear_sum_assignment`` on the confusion matrix).
+
+    :param predicted: ``(N, T)`` predicted labels in ``[0, n_states)`` at valid steps.
+    :param states: ``(N, T)`` true states, ``-1`` at padding.
+    :param n_states: ``K``.
+    :return: ``(K,)`` int64 permutation.
+    :raises ValueError: If a predicted label at a valid step is outside ``[0, K)``.
+    """
+    valid = np.asarray(states) >= 0
+    pred, true = np.asarray(predicted)[valid], np.asarray(states)[valid]
+    if pred.size and (pred.min() < 0 or pred.max() >= n_states):
+        raise ValueError(f"Predicted labels must lie in [0, {n_states}) at valid steps.")
+    confusion = np.zeros((n_states, n_states), dtype=np.int64)
+    np.add.at(confusion, (pred, true), 1)
+    rows, cols = linear_sum_assignment(confusion, maximize=True)
+    mapping = np.empty(n_states, dtype=np.int64)
+    mapping[rows] = cols
+    return mapping
+
+
+def matched_accuracy(predicted: np.ndarray, states: np.ndarray, n_states: int) -> float:
+    """Return the state accuracy after the :func:`hungarian_mapping` of the labels.
+
+    The score of an unsupervised model, whose state labels are an arbitrary
+    permutation of the true ones. A constant predictor scores :func:`majority_rate`.
+
+    :param predicted: ``(N, T)`` predicted labels.
+    :param states: ``(N, T)`` true states, ``-1`` at padding.
+    :param n_states: ``K``.
+    :return: A rate in ``[0, 1]``.
+    """
+    mapping = hungarian_mapping(predicted, states, n_states)
+    valid = np.asarray(states) >= 0
+    relabelled = np.where(valid, mapping[np.where(valid, predicted, 0)], -1)
+    return accuracy(relabelled, states)
+
+# ---------------------------------------------------------------------
