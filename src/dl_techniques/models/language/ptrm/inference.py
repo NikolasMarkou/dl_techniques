@@ -89,17 +89,7 @@ class PTRMInference:
         all_q_values = []
 
         for k in range(num_rollouts):
-            # Initialize carry for this rollout
-            carry = self.model.initial_carry(batch)
-
-            # Run D supervision steps with noise injection
-            for step in range(supervision_steps):
-                # Inject Gaussian noise into latent states before the step
-                # Noise added to both z_H and z_L as per paper
-                carry = self._inject_noise(carry)
-
-                # Run one supervision step (deep recursion)
-                carry, outputs = self.model(carry, batch, training=training)
+            outputs = self._rollout(batch, supervision_steps, training)
 
             # Get final logits and Q value for this rollout
             logits = outputs["logits"]  # (B, seq_len, vocab_size)
@@ -126,6 +116,58 @@ class PTRMInference:
         best_q_values = self._gather_best_q(all_q_values, best_rollout_indices)
 
         return best_logits, best_q_values, all_q_values
+
+    def _rollout(
+        self,
+        batch: Dict[str, keras.KerasTensor],
+        supervision_steps: int,
+        training: bool,
+    ) -> Dict[str, keras.KerasTensor]:
+        """Run one noisy rollout of exactly ``supervision_steps`` deep recursions.
+
+        Algorithm 1 has no halting: every rollout runs all ``D`` steps from the
+        learned init states, with noise added before each step. The model's own
+        ACT logic would get in the way twice. ``initial_carry`` marks every item
+        halted, so the first call resets it to ``H_init``/``L_init`` and discards
+        noise added to the zero carry. And at inference the model halts an item
+        whose ``q_halt > 0``, so the next call resets it again, discarding that
+        step's noise and the chain so far. An item whose init state halts then
+        returns the same Q value in every rollout (measured: spread exactly 0.0).
+        The rollout therefore starts from the init states with ``halted`` False,
+        and clears ``halted`` after every step.
+
+        :param batch: Input batch with key ``"inputs"``.
+        :param supervision_steps: Number of deep recursion steps ``D``.
+        :param training: Training-mode flag passed to the model.
+        :return: The model outputs of the last step.
+        """
+        carry = self.model.initial_carry(batch)
+        not_halted = keras.ops.zeros_like(carry["halted"])
+        zeros = carry["inner_carry"]["z_H"]
+        carry = dict(
+            carry,
+            inner_carry={
+                name: keras.ops.broadcast_to(
+                    keras.ops.cast(init, zeros.dtype), keras.ops.shape(zeros)
+                )
+                for name, init in (
+                    ("z_H", self.model.inner.H_init),
+                    ("z_L", self.model.inner.L_init),
+                )
+            },
+            halted=not_halted,
+            current_data=dict(batch),
+        )
+        outputs = None
+        # DECISION plan-2026-10-13T035756-5dd4d94d/D-010: WHAT NOT TO DO: do not
+        # start from `initial_carry` as is, and do not keep the `halted` the model
+        # returns. Either one hands the reset back to the ACT logic, which discards
+        # the injected noise (see the docstring above).
+        for _ in range(supervision_steps):
+            carry = self._inject_noise(carry)
+            carry, outputs = self.model(carry, batch, training=training)
+            carry = dict(carry, halted=not_halted)
+        return outputs
 
     def _inject_noise(self, carry: Dict[str, Any]) -> Dict[str, Any]:
         """Inject Gaussian noise into latent states z_H and z_L.
@@ -241,10 +283,7 @@ class PTRMInference:
         all_predictions = []
 
         for k in range(num_rollouts):
-            carry = self.model.initial_carry(batch)
-            for step in range(supervision_steps):
-                carry = self._inject_noise(carry)
-                carry, outputs = self.model(carry, batch, training=False)
+            outputs = self._rollout(batch, supervision_steps, training=False)
 
             logits = outputs["logits"]  # (B, seq_len, vocab_size)
             predictions = keras.ops.argmax(logits, axis=-1)  # (B, seq_len)

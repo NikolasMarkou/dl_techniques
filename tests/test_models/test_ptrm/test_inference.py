@@ -118,15 +118,16 @@ class TestPTRMInferenceBasic:
             training=False,
         )
         
-        # With high noise, rollouts should differ
-        all_q_np = keras.ops.convert_to_numpy(all_q)
-        # At least some batch items should have variation across rollouts
-        has_variation = False
-        for b in range(all_q_np.shape[1]):
-            if np.max(all_q_np[:, b]) - np.min(all_q_np[:, b]) > 1e-3:
-                has_variation = True
-                break
-        assert has_variation, "Expected variation in Q values with noise injection"
+        # With high noise, the rollouts of EVERY batch item should differ. An
+        # item the model halts on its learned signal used to be reset to the init
+        # states on the next step, which threw its noise away and gave it the
+        # same Q value in every rollout; with all four items halting (about one
+        # model init in sixteen) "at least one item varies" failed too.
+        spread = np.ptp(keras.ops.convert_to_numpy(all_q), axis=0)
+        assert np.all(spread > 1e-3), (
+            f"Expected variation in Q values with noise injection for every "
+            f"item, got per-item spread {spread}"
+        )
 
     def test_inference_selects_best_q(self, tiny_model, sample_batch):
         """Test that inference selects rollout with highest Q value."""
@@ -231,6 +232,42 @@ class TestPTRMInferenceNoiseInjection:
         assert noisy_carry["steps"] is carry["steps"]
         assert noisy_carry["halted"] is carry["halted"]
         assert noisy_carry["current_data"] is carry["current_data"]
+
+
+class TestEveryRolloutStepKeepsItsNoise:
+    """A rollout runs all D steps from the init states, as Algorithm 1 says.
+
+    Both arms are deterministic in the defect: they do not depend on which
+    items a randomly initialised Q head happens to halt.
+    """
+
+    @staticmethod
+    def _spread(model, batch, supervision_steps):
+        _, _, all_q = PTRMInference(model, noise_scale=1.0)(
+            batch, num_rollouts=4, supervision_steps=supervision_steps
+        )
+        return np.ptp(keras.ops.convert_to_numpy(all_q), axis=0)
+
+    def test_the_first_steps_noise_reaches_the_model(self, tiny_model, sample_batch):
+        """The first step's noise used to land on the zero carry and be reset away."""
+        spread = self._spread(tiny_model, sample_batch, supervision_steps=1)
+        assert np.all(spread > 1e-3), spread
+
+    def test_an_item_that_halts_on_the_learned_signal_keeps_its_noise(
+        self, tiny_config, sample_batch
+    ):
+        """Every item halts after one step here, and every item must still vary."""
+        model = PTRM(**tiny_config)
+        carry = model.initial_carry(sample_batch)
+        model(carry, sample_batch, training=False)
+        model.inner.q_head.bias.assign(np.array([10.0, 0.0], dtype="float32"))
+        carry, _ = model(model.initial_carry(sample_batch), sample_batch, training=False)
+        assert bool(np.all(keras.ops.convert_to_numpy(carry["halted"]))), (
+            "anti-vacuity: the q_halt bias did not make every item halt"
+        )
+
+        spread = self._spread(model, sample_batch, supervision_steps=3)
+        assert np.all(spread > 1e-3), spread
 
 
 class TestPTRMInferenceConvenienceFunction:
@@ -371,13 +408,22 @@ class TestPTRMInferenceDeterministicBaseline:
     """Test that PTRM with zero noise matches deterministic TRM."""
 
     def test_zero_noise_matches_deterministic(self, tiny_model, sample_batch):
-        """PTRM with σ=0 should match standard TRM inference."""
-        # Run deterministic TRM
-        carry = tiny_model.initial_carry(sample_batch)
+        """PTRM with σ=0 should match D deep recursions from the init states.
+
+        The reference drives the inner module directly, so it carries none of
+        the outer ACT loop's halting: Algorithm 1 runs every rollout for all D
+        steps. Driving ``tiny_model(carry, ...)`` instead would restart any item
+        that halts on its learned signal, which is the behaviour PTRM must not
+        have.
+        """
+        inner = tiny_model.inner
+        batch_size = sample_batch["inputs"].shape[0]
+        z = {
+            "z_H": keras.ops.repeat(inner.H_init, batch_size, axis=0),
+            "z_L": keras.ops.repeat(inner.L_init, batch_size, axis=0),
+        }
         for _ in range(3):
-            carry, outputs = tiny_model(carry, sample_batch, training=False)
-        det_logits = outputs["logits"]
-        det_q = outputs["q_continue_logits"]
+            z, det_logits, (_, det_q) = inner(z, sample_batch, training=False)
         
         # Run PTRM with zero noise, K=1
         inference = PTRMInference(tiny_model, noise_scale=0.0)
