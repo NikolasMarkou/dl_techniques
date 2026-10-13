@@ -303,10 +303,13 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # behavioural arm of test_package_api_contract.py, not by grepping for
         # the word. Both halves checked.
         "doc_scanner", "fnet",
-        # hnet: README:14 and :147 both name `pretrained=True` only to say it
-        # raises; model.py:517 really does `raise NotImplementedError`, verified
+        # hnet: README:14 and :185 both name `pretrained=True` only to say it
+        # raises; model.py:702 really does `raise NotImplementedError`, verified
         # by EXECUTING `HNet.from_variant('hnet_1stage_L', pretrained=True)` and
-        # reading the raise, not by grepping for the word. Both halves checked.
+        # `create_hnet('hnet_1stage_L', pretrained=True)` and reading the raise,
+        # not by grepping for the word. Both halves checked (line numbers and
+        # execution re-derived 2026-10-13; `pretrained='<path>'` now restores
+        # the backbone and is the README's working form).
         "hnet",
         "gpt2", "kan", "masked_autoencoder", "mobile_clip", "mobilenet",
         "modern_bert",
@@ -342,10 +345,49 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # (tests/test_models/test_deepsort/test_deepsort.py). Both halves
         # checked.
         "deepsort",
-        # zamba2: README:9-10/148/153 name `pretrained=True` only to say it
-        # raises; model.py:435 really does `raise NotImplementedError`. Both
-        # halves checked (re-derived 2026-10-04; pre-existing drift).
+        # zamba2: README:9-10/170/175 name `pretrained=True` only to say it
+        # raises; `pretrained_path_or_raise` (utils/weight_transfer.py, called
+        # from model.py:932) really does `raise NotImplementedError`, verified
+        # by EXECUTING `create_zamba2('zamba2_mini', pretrained=True)` and
+        # `Zamba2Model.from_variant('zamba2_mini', pretrained=True)`. Both
+        # halves checked (re-derived 2026-10-13).
         "zamba2",
+        # alexnet: README:254 names `pretrained=True` only to say it raises
+        # ("None ship with this port"); model.py:556 really does
+        # `raise NotImplementedError`, verified by EXECUTING
+        # `create_alexnet(pretrained=True)`. Both halves checked (re-derived
+        # 2026-10-13; pre-existing drift, already missing from this set at
+        # 240f07513).
+        "alexnet",
+        # gemma: README:464 names `pretrained=True` only to say it raises
+        # beside the working `pretrained="<path>.keras"` form;
+        # `pretrained_path_or_raise` (called from gemma3.py:754) really does
+        # `raise NotImplementedError`, verified by EXECUTING
+        # `create_gemma3("270m", pretrained=True)`. Both halves checked (new
+        # in plan-2026-10-11T170958-dc4d2202 step 8b, re-derived 2026-10-13).
+        "gemma",
+        # qwen: README:176 names `pretrained=True` only to say it raises;
+        # `pretrained_path_or_raise` (called from qwen3.py:891 and
+        # qwen3_next.py:867) really does `raise NotImplementedError`, verified
+        # by EXECUTING `create_qwen3("0.6b", pretrained=True)` and
+        # `create_qwen3_next("tiny", pretrained=True)`. Both halves checked
+        # (new in plan-2026-10-11T170958-dc4d2202 step 8b, re-derived
+        # 2026-10-13).
+        "qwen",
+        # topographic_vae: README:101 names `pretrained=True` only to say it
+        # raises; model.py:1285 really does `raise NotImplementedError`,
+        # verified by EXECUTING `create_topographic_vae("mnist",
+        # pretrained=True)` and `TopographicVAE.from_variant("mnist",
+        # pretrained=True)`. Both halves checked (re-derived 2026-10-13;
+        # pre-existing drift, already missing from this set at 240f07513).
+        "topographic_vae",
+        # topolm: README:32 names `pretrained=True` only to say it raises;
+        # model.py:881 really does `raise NotImplementedError`, verified by
+        # EXECUTING `create_topolm("small", pretrained=True)` and
+        # `TopoLM.from_variant("small", pretrained=True)`. Both halves checked
+        # (re-derived 2026-10-13; pre-existing drift, already missing from
+        # this set at 240f07513).
+        "topolm",
     }, sorted(p.parent.name for p in with_pretrained_true)
 
 
