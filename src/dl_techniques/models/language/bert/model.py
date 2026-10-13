@@ -30,6 +30,7 @@ References:
 """
 
 
+import numbers
 import os
 import keras
 from typing import Optional, Union, Any, Dict, List
@@ -472,7 +473,7 @@ class BERT(RecordedBuildShapeMixin, keras.Model):
         validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
         # Store all configuration parameters
-        self.vocab_size = vocab_size
+        self.vocab_size = int(vocab_size)
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -553,8 +554,15 @@ class BERT(RecordedBuildShapeMixin, keras.Model):
         :type attention_probs_dropout_rate: float
         :raises ValueError: If any configuration value is invalid.
         """
-        if vocab_size <= 0:
-            raise ValueError(f"vocab_size must be positive, got {vocab_size}")
+        # A bool is an int, and None / a float / a str would fail the <= with a
+        # TypeError that names no argument; a NumPy integer is accepted and
+        # stored as int.
+        if (isinstance(vocab_size, bool)
+                or not isinstance(vocab_size, numbers.Integral)
+                or vocab_size <= 0):
+            raise ValueError(
+                f"vocab_size must be positive and an integer, got {vocab_size!r}"
+            )
         if hidden_size <= 0:
             raise ValueError(
                 f"hidden_size must be positive, got {hidden_size}"

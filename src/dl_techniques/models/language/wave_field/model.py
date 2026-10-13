@@ -43,6 +43,7 @@ References:
       Fourier Series. Mathematics of Computation 19(90).
 """
 
+import numbers
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -561,7 +562,7 @@ class WaveFieldLLM(RecordedBuildShapeMixin, keras.Model):
         )
         validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
-        self.vocab_size = vocab_size
+        self.vocab_size = int(vocab_size)
         self.embed_dim = embed_dim
         self.depth = depth
         self.num_heads = num_heads
@@ -631,8 +632,15 @@ class WaveFieldLLM(RecordedBuildShapeMixin, keras.Model):
         :rtype: None
         :raises ValueError: As listed in the class docstring.
         """
-        if vocab_size <= 0:
-            raise ValueError(f"vocab_size must be positive, got {vocab_size}")
+        # A bool is an int, and None / a float / a str would fail the <= with a
+        # TypeError that names no argument; a NumPy integer is accepted and
+        # stored as int.
+        if (isinstance(vocab_size, bool)
+                or not isinstance(vocab_size, numbers.Integral)
+                or vocab_size <= 0):
+            raise ValueError(
+                f"vocab_size must be positive and an integer, got {vocab_size!r}"
+            )
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
         if depth <= 0:

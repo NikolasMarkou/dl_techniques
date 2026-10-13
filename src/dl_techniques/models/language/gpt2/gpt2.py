@@ -44,6 +44,7 @@ References:
       (https://arxiv.org/abs/2001.08361)
 """
 
+import numbers
 import os
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
@@ -323,7 +324,7 @@ class GPT2(RecordedBuildShapeMixin, keras.Model):
             raise ValueError(f"harmonic_eps must be positive, got {harmonic_eps}")
         validate_task_head_knobs(include_top, task_config, head_config_overrides)
 
-        self.vocab_size = vocab_size
+        self.vocab_size = int(vocab_size)
         self.embed_dim = embed_dim
         self.depth = depth
         self.num_heads = num_heads
@@ -390,8 +391,15 @@ class GPT2(RecordedBuildShapeMixin, keras.Model):
 
         :raises ValueError: If any configuration value is invalid.
         """
-        if vocab_size <= 0:
-            raise ValueError(f"vocab_size must be positive, got {vocab_size}")
+        # A bool is an int, and None / a float / a str would fail the <= with a
+        # TypeError that names no argument; a NumPy integer is accepted and
+        # stored as int.
+        if (isinstance(vocab_size, bool)
+                or not isinstance(vocab_size, numbers.Integral)
+                or vocab_size <= 0):
+            raise ValueError(
+                f"vocab_size must be positive and an integer, got {vocab_size!r}"
+            )
         if embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {embed_dim}")
         if depth <= 0:

@@ -573,6 +573,44 @@ class TestBuild:
             block.build((None, 4, 128))
 
 
+
+def _unregistered_tanh(x):
+    """An activation that is not registered with Keras."""
+    return keras.ops.tanh(x)
+
+
+class TestTheBlockActivationRoundTrips:
+    """``TopoLMBlock.get_config`` -> ``from_config`` keeps a callable activation.
+
+    The block stored its ``activation`` raw and serialized a callable with
+    ``serialize_keras_object``, so ``from_config`` handed the constructor a dict
+    and the rebuilt block held that dict, not a function (the raw-activation
+    family closed by D-400, ``tests/test_the_raw_activation_config_population_is_closed.py``).
+    The function is unregistered, so it resolves through a custom-object scope,
+    the one ``keras.models.load_model(..., custom_objects=...)`` installs.
+    """
+
+    def test_a_callable_activation_survives_get_config_and_from_config(self):
+        import json
+
+        block = TopoLMBlock(
+            hidden_size=16, num_heads=2, intermediate_size=32, radius=1,
+            activation=_unregistered_tanh, seed=0,
+        )
+        x = np.random.default_rng(0).standard_normal((2, 4, 16)).astype("float32")
+        expected = keras.ops.convert_to_numpy(block(x, training=False))
+
+        config = block.get_config()
+        json.dumps(config)
+        with keras.saving.custom_object_scope({"_unregistered_tanh": _unregistered_tanh}):
+            rebuilt = TopoLMBlock.from_config(config)
+        assert callable(rebuilt.activation) and not isinstance(rebuilt.activation, dict)
+        rebuilt.build(x.shape)
+        rebuilt.set_weights(block.get_weights())
+        actual = keras.ops.convert_to_numpy(rebuilt(x, training=False))
+        np.testing.assert_array_equal(actual, expected)
+
+
 # ---------------------------------------------------------------------
 # causality, composition, positions
 # ---------------------------------------------------------------------

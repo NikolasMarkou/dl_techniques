@@ -23,7 +23,8 @@ So each advisory gets two arms here:
 Coverage: **6 of 6** suppressed families, over 30 ``pytestmark`` sites -- zero
 suppressions in this tree are unpaired. Two families are emitted by this repo's
 own ``src/`` (W-03, retired; W-14, which no module suppresses any more: it fires
-only on a real MoE expert-width fallback). The other four are emitted by Keras and are reached
+only on a real MoE expert-width fallback or on ``ffn_type``/``ffn_args`` that
+``moe_config`` makes unused). The other four are emitted by Keras and are reached
 here through the public API: softmax-over-a-size-1-axis (22 sites),
 input-ran-out-of-data (6 sites), model-not-yet-built-on-save (1 site) and
 input-structure-mismatch (1 site).
@@ -138,27 +139,53 @@ def _moe_config(**ffn_config):
 
 
 class TestTheMoeExpertWidthAdvisory:
-    """An expert config with no ``hidden_dim`` takes ``intermediate_size``, and says so.
+    """Under ``moe_config`` the layer says what it does not use, and only that.
 
-    Narrowed in plan-2026-10-13T035756-5dd4d94d (D-017): the advisory used to
-    fire whenever ``ffn_type``/``ffn_args`` were set beside ``moe_config``, which
-    every Qwen3 MoE construction did although its experts state their width.
+    Two advisories, both starting "moe_config is provided" (plan-2026-10-13T035756-5dd4d94d,
+    D-017 and D-019):
+
+    * an expert config with no ``hidden_dim`` takes ``intermediate_size`` as its
+      width ("falls back");
+    * a caller's non-default ``ffn_type`` or non-empty ``ffn_args`` is never read,
+      because the FFN is the ``MixtureOfExperts`` ("are ignored").
+
+    Qwen3 states its expert width and passes ``ffn_type``/``ffn_args`` only to
+    dense layers, so its MoE construction is silent
+    (``test_qwen/test_the_feed_forward_width_is_the_configured_one.py``).
     """
 
     def test_an_expert_config_without_a_width_warns(self):
-        with pytest.warns(UserWarning, match=r"moe_config is provided"):
+        with pytest.warns(UserWarning, match=r"moe_config is provided.*falls back"):
             TransformerLayer(
                 hidden_size=8, num_heads=2, intermediate_size=8,
                 moe_config=_moe_config(),
             )
 
-    def test_an_expert_config_with_a_width_does_not_warn(self):
-        """The control: a stated width is silent, even beside a conflicting ``ffn_type``."""
+    @pytest.mark.parametrize("ignored", [
+        {"ffn_type": "swiglu"},
+        {"ffn_args": {"dropout_rate": 0.0}},
+        {"ffn_type": "swiglu", "ffn_args": {"dropout_rate": 0.0}},
+    ], ids=["ffn_type", "ffn_args", "both"])
+    def test_an_ignored_ffn_type_or_ffn_args_warns(self, ignored):
+        """A stated width beside a caller's FFN settings: the settings are dropped, loudly."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            TransformerLayer(
+                hidden_size=8, num_heads=2, intermediate_size=8,
+                moe_config=_moe_config(hidden_dim=8), **ignored,
+            )
+        messages = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+        assert [m for m in messages if m.startswith("moe_config is provided")
+                and "are ignored" in m], messages
+        # The width is stated, so only the "ignored" advisory fires.
+        assert not [m for m in messages if "falls back" in m], messages
+
+    def test_an_expert_config_with_a_width_and_no_ffn_settings_does_not_warn(self):
+        """The control: a stated width with the default ``ffn_type`` and no ``ffn_args``."""
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
             TransformerLayer(
                 hidden_size=8, num_heads=2, intermediate_size=8,
-                ffn_type="swiglu", ffn_args={"dropout_rate": 0.0},
                 moe_config=_moe_config(hidden_dim=8),
             )
 

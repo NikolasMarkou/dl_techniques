@@ -204,6 +204,10 @@ _DEFAULT_ATTENTION_WINDOW_SIZE: int = 8
 #: readers as ``_DEFAULT_ATTENTION_WINDOW_SIZE`` above.
 _DEFAULT_ATTENTION_LAMBDA_INIT: float = 0.8
 
+#: Default ``ffn_type`` of ``TransformerLayer``. Also read by the ``moe_config``
+#: advisory, which treats any other value as a caller choice that goes unused.
+_DEFAULT_FFN_TYPE: str = 'mlp'
+
 #: MoE expert FFN types whose ``hidden_dim`` falls back to
 #: ``TransformerLayer.intermediate_size`` when the caller's
 #: ``moe_config.expert_config.ffn_config`` omits it. Read by the fallback in
@@ -387,6 +391,8 @@ class TransformerLayer(keras.layers.Layer):
         which the factory reports rather than this layer swallowing it.
     :type ffn_args: Optional[Dict[str, Any]]
     :param moe_config: Mixture-of-Experts configuration replacing the FFN.
+        When set, ``ffn_type`` and ``ffn_args`` are not read, and a
+        ``UserWarning`` names them if they differ from their defaults.
     :type moe_config: Optional[Union[MoEConfig, Dict[str, Any]]]
     :param dropout_rate: FFN output dropout rate. This is the only dropout
         this layer applies itself, applied to the FFN sub-block only — never
@@ -460,7 +466,7 @@ class TransformerLayer(keras.layers.Layer):
             normalization_position: NormalizationPositionType = 'post',
             attention_norm_args: Optional[Dict[str, Any]] = None,
             ffn_norm_args: Optional[Dict[str, Any]] = None,
-            ffn_type: FFNType = 'mlp',
+            ffn_type: FFNType = _DEFAULT_FFN_TYPE,
             ffn_args: Optional[Dict[str, Any]] = None,
             moe_config: Optional[Union[MoEConfig, Dict[str, Any]]] = None,
             dropout_rate: float = 0.1,
@@ -555,10 +561,22 @@ class TransformerLayer(keras.layers.Layer):
             elif 'output_dim' not in ffn_config:
                 ffn_config['output_dim'] = self.hidden_size
 
-            # The advisory fires only when the fallback below actually happens: an
-            # expert type in `_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE` with no
-            # explicit `hidden_dim`. An expert config that states its width (Qwen3)
-            # is silent, whatever `ffn_type` / `ffn_args` say.
+            # DECISION plan-2026-10-13T035756-5dd4d94d/D-017: two advisories, not
+            # one. The width one fires only when the fallback below happens (an
+            # expert config that states its width, as Qwen3's does, is silent);
+            # do not make it unconditional on moe_config again. The "ignored" one
+            # fires whenever the caller passed a non-default ffn_type or any
+            # ffn_args, which _create_ffn_layer never reads under moe_config; do
+            # not drop it to quiet a caller, fix the caller (Qwen3 passes them to
+            # dense layers only). See decisions.md D-017 and D-019.
+            if self.ffn_type != _DEFAULT_FFN_TYPE or self.ffn_args:
+                warnings.warn(
+                    f"moe_config is provided, so ffn_type={self.ffn_type!r} and "
+                    f"ffn_args keys {sorted(self.ffn_args)} are ignored: the FFN "
+                    f"is a MixtureOfExperts built from "
+                    f"moe_config.expert_config.ffn_config. Set the expert FFN "
+                    f"there, and drop ffn_type/ffn_args from this layer."
+                )
             ffn_type = ffn_config.get('type')
             if ffn_type in _MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE:
                 if 'hidden_dim' not in ffn_config:

@@ -113,12 +113,14 @@ moe_block = TransformerLayer(
 )
 ```
 
-`ffn_type` and `ffn_args` are ignored under `moe_config`, but **`intermediate_size` is not**: it is
+`ffn_type` and `ffn_args` are ignored under `moe_config`, and a non-default `ffn_type` or any
+`ffn_args` passed beside it raises a `UserWarning` that names them. **`intermediate_size` is not
+ignored**: it is
 the fallback for the expert FFN's `hidden_dim` whenever `moe_config.expert_config.ffn_config` omits
 that key **and** the expert type is one of `_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE` in
 `transformer.py` (`mlp`, `differential`, `glu`, `geglu`, `residual`, `swin_mlp`). With the `swiglu`
 expert above it genuinely goes unused; switch the expert to `mlp` without a `hidden_dim` and the
-`2048` becomes load-bearing.
+`2048` becomes load-bearing, and a second `UserWarning` says so.
 
 ## The complete stacks
 

@@ -452,15 +452,24 @@ class Qwen3(RecordedBuildShapeMixin, keras.Model):
                 'rope_theta': self.rope_theta
             }
 
-            # DECISION plan-2026-07-30T140922-8af1028f/D-037: pre-filter through
-            # assemble_ffn_config — a bare dict literal fails Qwen3(ffn_type=...)
-            # for 11 of 12 previously-working types. See decisions.md.
-            ffn_args = assemble_ffn_config(self.ffn_type, {
-                'output_dim': self.hidden_size,
-                'ffn_expansion_factor': 4,  # Standard 4x expansion
-                'dropout_rate': self.dropout_rate,
-                'use_bias': False
-            })
+            # An MoE layer gets moe_config only: TransformerLayer never reads
+            # ffn_type/ffn_args beside it, and warns when they are passed.
+            if is_moe_layer:
+                ffn_kwargs = {'moe_config': moe_config}
+            else:
+                # DECISION plan-2026-07-30T140922-8af1028f/D-037: pre-filter through
+                # assemble_ffn_config — a bare dict literal fails Qwen3(ffn_type=...)
+                # for 11 of 12 previously-working types. See decisions.md.
+                ffn_args = assemble_ffn_config(self.ffn_type, {
+                    'output_dim': self.hidden_size,
+                    'ffn_expansion_factor': 4,  # Standard 4x expansion
+                    'dropout_rate': self.dropout_rate,
+                    'use_bias': False
+                })
+                # Keyword form, not a dict literal: the FFN kwarg sweep in
+                # tests/test_layers/test_ffn/test_factory.py finds this site by
+                # its `ffn_args=` keyword.
+                ffn_kwargs = dict(ffn_type=self.ffn_type, ffn_args=ffn_args)
 
             # DECISION plan-2026-08-19T070627-a616f581/D-007: norm_eps must reach
             # the block norms via attention_norm_args/ffn_norm_args, not just
@@ -476,9 +485,7 @@ class Qwen3(RecordedBuildShapeMixin, keras.Model):
                 attention_norm_args={'epsilon': self.norm_eps},
                 ffn_norm_args={'epsilon': self.norm_eps},
                 normalization_position='pre',
-                moe_config=moe_config if is_moe_layer else None,
-                ffn_type=self.ffn_type,
-                ffn_args=ffn_args,
+                **ffn_kwargs,
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.dropout_rate,
                 use_stochastic_depth=self.use_stochastic_depth,

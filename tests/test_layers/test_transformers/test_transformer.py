@@ -99,12 +99,14 @@ class TestTransformerLayer:
         assert layer.moe_config.num_experts == 4
         assert layer.moe_config.expert_config.ffn_config['type'] == 'swiglu'
 
-    def test_moe_overrides_ffn_params_without_warning_when_the_width_is_set(
+    def test_moe_overrides_ffn_params_and_says_they_are_ignored(
             self, layer_config, moe_config):
-        """MoE config overrides FFN parameters; an expert that states its width is silent.
+        """MoE config overrides FFN parameters, and the dropped ones are named.
 
-        The advisory fires only when the expert's hidden width falls back to
-        ``intermediate_size`` (see ``test_moe_intermediate_size_inheritance``).
+        The expert states its width, so the fallback advisory stays silent
+        (see ``test_moe_intermediate_size_inheritance``); the caller's
+        ``ffn_type``/``ffn_args`` are never read under ``moe_config``, and that
+        warns.
         """
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -116,7 +118,11 @@ class TestTransformerLayer:
                 ffn_type='swiglu',
                 ffn_args={'some_arg': 'value'},
             )
-        assert not [warn for warn in w if "moe_config is provided" in str(warn.message)]
+        messages = [str(warn.message) for warn in w]
+        ignored = [m for m in messages if m.startswith("moe_config is provided") and "are ignored" in m]
+        assert len(ignored) == 1, messages
+        assert "'swiglu'" in ignored[0] and "some_arg" in ignored[0]
+        assert not [m for m in messages if "falls back" in m], messages
         assert layer.moe_config.expert_config.ffn_config['hidden_dim'] == 256
 
     def test_moe_hidden_dim_synchronization(self, layer_config, moe_config):

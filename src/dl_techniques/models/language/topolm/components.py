@@ -59,6 +59,10 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.activation_serialization import (
+    deserialize_activation,
+    serialize_activation,
+)
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.norms import create_normalization_layer
@@ -185,7 +189,7 @@ class TopoLMBlock(keras.layers.Layer):
         )
         self.tap_sites = tap_sites
         self.normalization_position = normalization_position
-        self.activation = activation
+        self.activation = deserialize_activation(activation)
         self.dropout_rate = float(dropout_rate)
         self.attention_dropout_rate = float(attention_dropout_rate)
         self.initializer_range = float(initializer_range)
@@ -449,9 +453,7 @@ class TopoLMBlock(keras.layers.Layer):
             "grid_shape": self.grid_shape,
             "tap_sites": tuple(self.tap_sites),
             "normalization_position": self.normalization_position,
-            "activation": keras.saving.serialize_keras_object(self.activation)
-            if callable(self.activation) and not isinstance(self.activation, str)
-            else self.activation,
+            "activation": serialize_activation(self.activation),
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
             "initializer_range": self.initializer_range,
