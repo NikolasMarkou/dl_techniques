@@ -107,8 +107,24 @@ GOLDEN = {
         "signature": "f267a2824bab5afa14b9f436cd1d6061997099346ef7cb788420870950dbaf41",
     },
     ("BeitForImageClassification", "tiny"): {
+        # Re-derived 2026-10-13, and ONLY this row. The five rows above are
+        # still the untouched historical capture and still verify against it
+        # (all five report SAME); a re-baseline of those would have quietly
+        # turned the file into the self-comparison its own docstring forbids.
+        #
+        # The cause is commit aaccdf2c2, which gave the classifier the shared
+        # `layers/heads/vision` factory. Its bespoke top (head_pool -> head_norm
+        # -> head_dropout -> head_classifier, sitting flat on the model) is now
+        # `_MeanPoolingHead`, the same structure one level deeper, and the
+        # `count` is unchanged at 224 because the pooling and dropout layers
+        # never carried weights -- only the four norm/classifier tensors moved
+        # from the model's own namespace under `mean_pooling_classification_head/`.
+        #
+        # The row is re-pinned rather than deleted because the tree it asserts
+        # is still a real external claim about the current source; what changed
+        # is which tree that is.
         "count": 224,
-        "signature": "4a037dff2f32e1284bb97dded44f7aa8aef0e8efb258e6e84bbe692c1e80635f",
+        "signature": "daa3a2a28171f42c681fb7e531120466308ed141fb6692bc2b4628fa3de862ee",
     },
 }
 

@@ -1891,19 +1891,30 @@ class ClassificationHead(BaseVisionHead):
                 self.pooling = layers.GlobalMaxPooling2D()
         # For 'cls_token', no pooling layer is built; extraction happens in call()
 
-        # Dense layers for classification
+        # Dense layers for classification.
+        #
+        # Named explicitly. `DenseBlock` builds a `Dense` (plus a norm) inside
+        # itself, so an unnamed pair takes Keras' auto suffixes -- and those
+        # suffixes depend on how many same-named layers the PROCESS has already
+        # created. A `.keras` round trip re-enters the counter, so the reloaded
+        # model's blocks came back as `dense_block_2` against the original's
+        # `dense_block`, and every weight path under them differed. Naming them
+        # makes the path stable across a save/load, which is what by-name weight
+        # transfer and any weight-path-keyed comparison rely on.
         self.dense_blocks = [
             DenseBlock(
                 units=self.hidden_dim,
                 normalization_type=self.normalization_type,
                 activation_type=self.activation_type,
-                dropout_rate=self.dropout_rate
+                dropout_rate=self.dropout_rate,
+                name='dense_block'
             ),
             DenseBlock(
                 units=self.hidden_dim // 2,
                 normalization_type=self.normalization_type,
                 activation_type=self.activation_type,
-                dropout_rate=self.dropout_rate
+                dropout_rate=self.dropout_rate,
+                name='dense_block_1'
             )
         ]
 

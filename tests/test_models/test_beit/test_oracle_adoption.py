@@ -223,13 +223,15 @@ class TestBeitSmokeContract:
         x = _images()
 
         def contract(out):
-            assert not isinstance(out, (dict, list, tuple)), (
-                f"the classifier returns one tensor, got {type(out)}"
+            # The factory ClassificationHead's documented output is a dict.
+            logits = out["logits"] if isinstance(out, dict) else out
+            assert not isinstance(logits, (dict, list, tuple)), (
+                f"the classifier returns one tensor, got {type(logits)}"
             )
-            assert tuple(out.shape) == (x.shape[0], NUM_CLASSES), (
-                f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(out.shape)}"
+            assert tuple(logits.shape) == (x.shape[0], NUM_CLASSES), (
+                f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(logits.shape)}"
             )
-            assert_finite(out)
+            assert_finite(logits)
 
         rejections = assert_contract_rejects_a_broken_forward(model, x, contract)
         assert set(rejections) == {

@@ -39,13 +39,17 @@ class TestBeitUnbuiltFit:
     while that was true, so nothing below may call ``build()`` first.
     """
 
+    #: The classifier's output is the factory ClassificationHead's dict, so the
+    #: loss must name the key it applies to. ``mean_pooling_classification_head``
+    #: emits LINEAR logits (its ``Dense`` has no activation), which is why
+    #: ``from_logits=True`` is the right loss here -- and why the mean-pooling
+    #: branch of ``test_output_is_logits_not_probabilities`` still holds.
+    _CLF_LOSS = {'logits': keras.losses.SparseCategoricalCrossentropy(from_logits=True)}
+
     def test_classifier_fit_without_an_explicit_build(self):
         model = _classifier('tiny', num_classes=4)
         assert not model.built
-        model.compile(
-            optimizer='adam',
-            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        )
+        model.compile(optimizer='adam', loss=self._CLF_LOSS)
         y = np.random.default_rng(1).integers(0, 4, size=(4,)).astype('int32')
         model.fit(_images(batch=4), y, batch_size=2, epochs=1, verbose=0)
         assert model.built
@@ -78,10 +82,7 @@ class TestBeitUnbuiltFit:
         raise, so the assertion is on weight MOVEMENT of the table itself.
         """
         model = _classifier('tiny', num_classes=4)
-        model.compile(
-            optimizer='adam',
-            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        )
+        model.compile(optimizer='adam', loss=self._CLF_LOSS)
         y = np.random.default_rng(3).integers(0, 4, size=(4,)).astype('int32')
         model.fit(_images(batch=4), y, batch_size=2, epochs=1, verbose=0)
 

@@ -378,6 +378,10 @@ class FractalNet(keras.Model):
                 'use_ffn': True,
                 'ffn_type': 'mlp',
                 'ffn_expansion_factor': 4,
+                # Deterministic layer name: an unnamed head takes Keras'
+                # auto suffix in process-creation order, which breaks the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
             })
             if self._head_config_overrides:
                 head_config.update(self._head_config_overrides)
@@ -385,7 +389,10 @@ class FractalNet(keras.Model):
             self.head = create_vision_head(
                 VisionTaskType.CLASSIFICATION, **head_config
             )
-            x = self.head(x)
+            # The factory ClassificationHead returns {'logits', 'probabilities'};
+            # the model's own output is the probability tensor, as it was when
+            # the top was the bespoke GAP + Dense.
+            x = self.head(x)['probabilities']
         return x
 
     @classmethod

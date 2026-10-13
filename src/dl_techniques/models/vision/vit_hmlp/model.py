@@ -527,6 +527,10 @@ class ViTHMLP(keras.Model):
                 'use_global_pooling': True,
                 'pooling_type': 'cls_token',  # Extract CLS token from sequence
                 'use_attention': False,  # ViT transformer already applies attention
+                # Deterministic layer name: an unnamed head takes Keras'
+                # auto suffix in process-creation order, which breaks the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
             })
             if self._head_config_overrides:
                 head_config.update(self._head_config_overrides)

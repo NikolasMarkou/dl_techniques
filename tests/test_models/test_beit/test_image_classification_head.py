@@ -30,32 +30,54 @@ from tests.test_models.test_beit.beit_test_geometry import (
     _classifier,
 )
 
+def _head(model):
+    """The classification head, whichever of the two the model built.
+
+    ``use_mean_pooling=True`` gets ``_MeanPoolingHead`` (SequencePooling ->
+    norm -> dropout -> Dense); the CLS-token path gets the shared
+    ``ClassificationHead``. Both live one level down now, so nothing is
+    reachable as ``model.head_classifier`` any more.
+    """
+    return model.classification_head
+
+
+def _logits(model, x):
+    """The model's own output, unwrapped from the head's dict."""
+    out = model(x, training=False)
+    return ops.convert_to_numpy(out["logits"] if isinstance(out, dict) else out)
+
+
 class TestBeitForImageClassification:
 
     @pytest.mark.parametrize("variant", ['tiny', 'small'])
     def test_output_shape(self, variant):
         model = _classifier(variant)
         out = model(_images(), training=False)
-        assert tuple(out.shape) == (2, 7)
+        # The factory ClassificationHead returns {'logits', 'probabilities'}.
+        assert set(out) == {"logits", "probabilities"}
+        assert tuple(out["logits"].shape) == (2, 7)
+        assert tuple(out["probabilities"].shape) == (2, 7)
         assert model.compute_output_shape((2,) + IMG) == (2, 7)
 
     def test_output_is_logits_not_probabilities(self):
         model = _classifier()
         model.build((None,) + IMG)
+        head = _head(model)
+        classifier = head.classifier
         # Same reasoning as the MIM head: `head_norm` is zero-mean over the feature
         # axis, so a constant kernel produces ~0.0 and the [0,1] check becomes a coin
         # flip. Zero the kernel and pin the bias instead.
         pinned = np.linspace(-5.0, 5.0, 7).astype('float32')
-        model.head_classifier.set_weights([
-            np.zeros_like(ops.convert_to_numpy(model.head_classifier.kernel)),
+        classifier.set_weights([
+            np.zeros_like(ops.convert_to_numpy(classifier.kernel)),
             pinned,
         ])
-        out = ops.convert_to_numpy(model(_images(), training=False))
+        out = _logits(model, _images())
         np.testing.assert_allclose(
             out, np.broadcast_to(pinned, out.shape), atol=1e-5, rtol=0
         )
         assert out.min() < 0.0 and out.max() > 1.0, "head does not emit logits"
-        assert model.head_classifier.activation is keras.activations.linear
+        assert classifier.activation is keras.activations.linear
         for layer in model._flatten_layers(include_self=False):
             assert not isinstance(layer, keras.layers.Softmax), layer.name
             act = getattr(layer, 'activation', None)
@@ -72,47 +94,66 @@ class TestBeitForImageClassification:
         """
         model = _classifier(dropout_rate=0.0)
         model.build((None,) + IMG)
-        assert model.head_pool.exclude_positions == [0]
-        assert model.head_pool.strategy == ['mean']
+        pool = _head(model).pool
+        assert pool.exclude_positions == [0]
+        assert pool.strategy == ['mean']
 
         x = _images()
         # Pool the trunk output directly: perturbing position 0 must be invisible.
         tokens = ops.convert_to_numpy(model.backbone(x, training=False))
-        pooled_a = ops.convert_to_numpy(model.head_pool(tokens))
+        pooled_a = ops.convert_to_numpy(pool(tokens))
         tokens_b = tokens.copy()
         tokens_b[:, 0, :] += 100.0
-        pooled_b = ops.convert_to_numpy(model.head_pool(tokens_b))
+        pooled_b = ops.convert_to_numpy(pool(tokens_b))
         np.testing.assert_allclose(pooled_a, pooled_b, atol=1e-5, rtol=0)
         # Control: perturbing a PATCH position must move it.
         tokens_c = tokens.copy()
         tokens_c[:, 1, :] += 100.0
         assert not np.allclose(
-            pooled_a, ops.convert_to_numpy(model.head_pool(tokens_c)), atol=1e-3
+            pooled_a, ops.convert_to_numpy(pool(tokens_c)), atol=1e-3
         )
 
     def test_cls_pooling_mode_has_no_head_norm(self):
         """D-007's other branch: use_mean_pooling=False -> the trunk norms, not us."""
         model = _classifier(use_mean_pooling=False)
         model.build((None,) + IMG)
-        assert model.head_pool is None
-        assert model.head_norm is None
+        head = _head(model)
+        # The CLS branch builds the shared ClassificationHead, which pools
+        # position 0 directly and has no SequencePooling of its own.
+        assert not hasattr(head, "pool")
+        assert head.norm is None or not head.norm.built, (
+            "the CLS branch must not apply a head norm of its own"
+        )
         assert model.backbone.final_norm is not None
-        assert tuple(model(_images(), training=False).shape) == (2, 7)
-        names = {l.name for l in model.layers}
-        assert "head_norm" not in names
-        assert "head_pool" not in names
+        out = model(_images(), training=False)
+        assert tuple(out["logits"].shape) == (2, 7)
+        names = {w.path.split("/", 1)[-1] for w in model.weights}
+        assert not any("head_norm" in n for n in names), names
+        assert not any("head_pool" in n for n in names), names
 
     def test_head_layers_all_carry_the_head_prefix(self):
         model = _classifier()
         model.build((None,) + IMG)
-        head_names = {l.name for l in model.layers} - {BACKBONE_NAME}
-        assert head_names == {
+        head = _head(model)
+        # The head's own layers keep the `head_` prefix; they now live under the
+        # head rather than flat on the model. `build()` is what creates them --
+        # `_MeanPoolingHead` builds its sub-layers there, so an unbuilt head has
+        # no `.layers` at all.
+        # `_MeanPoolingHead` builds its sub-layers in `build()`, so it has no
+        # `.layers` to enumerate -- Keras never tracked them as children. Assert
+        # on the four it owns, by name.
+        owned = [head.pool, head.norm, head.dropout, head.classifier]
+        assert {l.name for l in owned} == {
             "head_pool", "head_norm", "head_dropout", "head_classifier"
         }
-        assert all(n.startswith("head_") for n in head_names)
+        assert all(l.name.startswith("head_") for l in owned)
+        # And the head itself is the only non-backbone layer on the model.
+        assert {l.name for l in model.layers} == {BACKBONE_NAME, head.name}
 
     def test_head_norm_uses_the_backbone_epsilon(self):
-        assert _classifier().head_norm.epsilon == EPS
+        model = _classifier()
+        model.build((None,) + IMG)
+        assert _head(model).norm.epsilon == EPS
 
     def test_gradients_reach_everything_except_the_dead_mask_token(self):
         """The mask token is the ONE weight with no gradient here -- by design.
@@ -126,7 +167,9 @@ class TestBeitForImageClassification:
         model.build((None,) + IMG)
         x = tf.constant(_images())
         with tf.GradientTape() as tape:
-            loss = tf.reduce_mean(tf.square(model(x, training=True)))
+            out = model(x, training=True)
+            logits = out["logits"] if isinstance(out, dict) else out
+            loss = tf.reduce_mean(tf.square(logits))
         grads = tape.gradient(loss, model.trainable_variables)
         dead = [v.path for g, v in zip(grads, model.trainable_variables) if g is None]
         assert len(dead) == 1, f"unexpected dead weights: {dead}"
@@ -147,12 +190,17 @@ class TestBeitForImageClassification:
         model = _classifier()
         model.build((None,) + IMG)
         x = _images()
-        before = ops.convert_to_numpy(model(x, training=False))
+        before = model(x, training=False)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "beit_classifier.keras")
             model.save(path)
             restored = keras.models.load_model(path)
-            after = ops.convert_to_numpy(restored(x, training=False))
-        np.testing.assert_allclose(before, after, atol=1e-6, rtol=0)
+            after = restored(x, training=False)
+        assert set(after) == set(before)
+        for key in before:
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(before[key]), ops.convert_to_numpy(after[key]),
+                atol=1e-6, rtol=0, err_msg=key,
+            )
         assert restored.num_classes == 7
         assert restored.backbone.name == BACKBONE_NAME

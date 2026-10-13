@@ -50,9 +50,13 @@ from ..smoke_contract_oracle import (
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 10
 
-#: Measured 2026-08-21 at depths=[1,2,2], filters=[32,64,128].
-GF_N_TRAINABLE = 30
-GF_N_TOTAL_WEIGHTS = 44
+#: Measured 2026-08-21 at depths=[1,2,2], filters=[32,64,128], re-derived
+#: 2026-10-13 after the factory ClassificationHead replaced the bespoke top. The
+#: head adds 8 weights to both counts: two DenseBlocks at 4 each (kernel, bias,
+#: norm gamma, norm beta) plus the classifier's kernel and bias. Backbone is
+#: unchanged at 28 trainable / 42 total.
+GF_N_TRAINABLE = 38
+GF_N_TOTAL_WEIGHTS = 52
 
 
 def _images(batch: int = 2) -> np.ndarray:

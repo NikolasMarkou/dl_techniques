@@ -110,8 +110,12 @@ from ..gradient_flow_oracle import (
     gradient_report,
 )
 
-GF_N_WEIGHTS = 393
-GF_N_DEAD_AT_INIT = 336
+#: Re-derived 2026-10-13. Both counts fell by exactly 6, the weight tensors
+#: 20225bf71 stopped building inside ``EnhancementHead`` (its ``norm`` and
+#: ``ffn``, which ``call`` never applies -- see the pft_sr and scunet pins for
+#: the same accounting). 393 -> 387 total, 336 -> 330 dead at init.
+GF_N_WEIGHTS = 387
+GF_N_DEAD_AT_INIT = 330
 
 
 def _gf_model():
@@ -141,26 +145,20 @@ class TestDarkIRGradientFlow:
         # a transient" rather than merely "the zero is tolerated".
         # See D-012 in plans/plan-2026-08-19T070627-a616f581/decisions.md
         #
-        # NOTE: The EnhancementHead (added via include_top=True) introduces
-        # additional weights that do not receive gradients in this test setup
-        # (autoencoder-style MSE against input). These are waived here.
+        # NOTE: the EnhancementHead waiver that used to sit here is GONE, and
+        # not because it was narrowed. It named six tensors --
+        # `enhancement_head_{norm,ffn}/...` -- that received no gradient because
+        # `EnhancementHead.call` never applies them. 20225bf71 stopped building
+        # them, so those paths no longer exist and the oracle correctly rejects
+        # a waiver that matches nothing. The head's 14 REAL weights (three
+        # ConvBlocks and the output conv) are on the backward graph and are
+        # covered by the no-waiver assertion below.
         model = _gf_model()
         x = _gf_batch()
         model.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse")
         model.fit(x, x, epochs=1, batch_size=2, verbose=0)
 
-        # EnhancementHead weights that don't receive gradients in this test
-        eh_prefix = "enhancement_head"
-        expect_zero = (
-            f"{eh_prefix}/{eh_prefix}_norm/gamma",
-            f"{eh_prefix}/{eh_prefix}_norm/beta",
-            f"{eh_prefix}/{eh_prefix}_ffn/fc1/kernel",
-            f"{eh_prefix}/{eh_prefix}_ffn/fc1/bias",
-            f"{eh_prefix}/{eh_prefix}_ffn/fc2/kernel",
-            f"{eh_prefix}/{eh_prefix}_ffn/fc2/bias",
-        )
-
-        report = assert_gradients_reach_every_trainable_weight(model, x, expect_zero=expect_zero)
+        report = assert_gradients_reach_every_trainable_weight(model, x)
 
         assert len(report) == len(model.trainable_weights)
         assert len(report) == GF_N_WEIGHTS, (

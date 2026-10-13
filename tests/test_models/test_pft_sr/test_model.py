@@ -242,11 +242,24 @@ class TestPFTSRGradientFlow:
 #   light  52-wide, [2,4,6,6,6], 4 heads, mlp 1.0, window 32 -> 537_059 trainable
 #   base   240-wide, [4,4,4,6,6,6], 6 heads, mlp 2.0, window 32 -> 16_526_883 trainable
 #   repo_medium  unchanged in every field from the old `large` -> 2_508_323 trainable
+#
+# 2026-10-13: every count dropped, and the drop is accounted for rather than
+# re-baselined. Commit 20225bf71 made `EnhancementHead.build` call
+# `keras.layers.Layer.build` directly instead of `super().build`, so the head's
+# `norm` and `ffn` are constructed but never built. `EnhancementHead.call` runs
+# only `enhance_blocks` then `upsample`/`output_conv` and never applies either,
+# so six weight tensors that no gradient ever reached are gone. Confirmed by
+# diffing the full weight inventory at 3b281907a against HEAD: the ONLY
+# difference is those six, per variant. The parameter deltas match the head
+# widths exactly:
+#   light       537_059 - 515_063 =  21_996 = ffn(52->208->52) + norm(52)
+#   base      16_526_883 - 16_064_403 = 462_480 = ffn(240->960->240) + norm(240)
+#   repo_medium 2_508_323 - 2_456_563 =  51_760 = ffn(80->320->80) + norm(80)
 # ---------------------------------------------------------------------------
 _PFT_VARIANT_PARAMS = {
-    "light": 537_059,
-    "base": 16_526_883,
-    "repo_medium": 2_508_323,
+    "light": 515_063,
+    "base": 16_064_403,
+    "repo_medium": 2_456_563,
 }
 
 

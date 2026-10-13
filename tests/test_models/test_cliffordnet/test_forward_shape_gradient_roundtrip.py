@@ -71,7 +71,21 @@ def _x(seed: int = 0) -> np.ndarray:
     ).astype("float32")
 
 
+def _logits(model, x, training=False):
+    """The forward pass's ``'logits'``.
+
+    ``CliffordNet.call`` returns the factory ``ClassificationHead``'s dict
+    unchanged -- ``{'logits', 'probabilities'}`` -- so every claim in this file
+    that is about the classifier's OUTPUT goes through here rather than
+    treating the model as returning a bare tensor.
+    """
+    out = model(x, training=training)
+    return out["logits"] if isinstance(out, dict) else out
+
+
 def _np(t) -> np.ndarray:
+    if isinstance(t, dict):
+        t = t["logits"] if "logits" in t else next(iter(t.values()))
     return keras.ops.convert_to_numpy(t)
 
 
@@ -89,8 +103,9 @@ class TestCliffordNetForward:
 
     def test_output_shape(self):
         model = _tiny()
-        y = _np(model(_x(2), training=False))
-        assert y.shape == (BATCH, NUM_CLASSES)
+        out = model(_x(2), training=False)
+        assert set(out) == {"logits", "probabilities"}
+        assert _np(out).shape == (BATCH, NUM_CLASSES)
         assert model.compute_output_shape((BATCH,) + IMG) == (BATCH, NUM_CLASSES)
 
     def test_training_and_inference_paths_both_run(self):
@@ -108,11 +123,13 @@ class TestCliffordNetGradientFlow:
         labels = tf.one_hot([0, 1], NUM_CLASSES)
 
         with tf.GradientTape() as tape:
-            logits = model(x, training=True)
+            # `from_logits=False`: the factory ClassificationHead's classifier
+            # applies softmax, so its 'logits' entry is already a probability
+            # vector. Passing True made Keras raise a UserWarning about exactly
+            # that, which this suite turns into an error.
+            probs = _logits(model, x, training=True)
             loss = tf.reduce_mean(
-                keras.losses.categorical_crossentropy(
-                    labels, logits, from_logits=True
-                )
+                keras.losses.categorical_crossentropy(labels, probs)
             )
         grads = tape.gradient(loss, model.trainable_weights)
 
@@ -130,7 +147,7 @@ class TestCliffordNetGradientFlow:
         x = tf.convert_to_tensor(_x(5))
 
         with tf.GradientTape() as tape:
-            loss = tf.reduce_mean(model(x, training=True) ** 2)
+            loss = tf.reduce_mean(_logits(model, x, training=True) ** 2)
 
         block_weights = [
             w

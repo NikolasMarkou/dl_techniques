@@ -107,27 +107,48 @@ WEIGHT_SCALE = 0.05
 # spread-out probes plus the four whole-array statistics below cannot miss it,
 # and the file stays readable.
 GOLDEN_INDICES = (0, 1117, 2234, 3351, 4468, 5585, 6702, 7819, 8936, 10053, 11170, 12287)
+#: Re-derived 2026-10-13, and the cause is identified rather than assumed.
+#: The pinned values were correct at 3b281907a (verified by running this probe
+#: in a worktree at that commit: it reproduces them to ~1e-8). What changed
+#: since is 20225bf71, which gave ``EnhancementHead.build`` the same
+#: "skip the base's common layers" treatment the other heads got: it now calls
+#: ``keras.layers.Layer.build`` directly instead of ``super().build``, so the
+#: head's ``norm`` and ``ffn`` are constructed but never BUILT. Measured at
+#: window_size=8, the head goes from 20 weight tensors to 14, and the model from
+#: 307 tensors / 627,919 params to 301 / 625,759 -- the 6 lost tensors are
+#: exactly ``enhancement_head_ffn/fc{1,2}/{kernel,bias}`` plus
+#: ``enhancement_head_norm/{gamma,beta}``.
+#:
+#: Those layers were dead weight: ``EnhancementHead.call`` runs only
+#: ``enhance_blocks`` then ``upsample``/``output_conv``, and never applies
+#: ``norm``, ``ffn``, ``attention`` or ``dropout``. Stopping them being built
+#: removes six tensors that no gradient ever reached. The FORWARD pass is
+#: therefore unchanged in structure, but the values move because the probe
+#: assigns seeded values by walking ``model.weights`` -- with six fewer tensors
+#: in that list, every subsequent draw lands on a different variable.
+#:
+#: Reproducible: bit-identical across separate processes on CPU.
 GOLDEN_VALUES = (
-    -0.10771378874778748,
-    0.046597860753536224,
-    0.03653588145971298,
-    -0.07941792160272598,
-    0.04664032161235809,
-    0.03609182685613632,
-    -0.07944902777671814,
-    0.04666019603610039,
-    0.03682631999254227,
-    -0.07993555068969727,
-    0.04653261601924896,
-    0.05669887736439705,
+    0.028037281706929207,
+    0.01876763068139553,
+    -0.04149823635816574,
+    0.021648656576871872,
+    0.019159644842147827,
+    -0.04193928837776184,
+    0.021442148834466934,
+    0.0187247134745121,
+    -0.0418277308344841,
+    0.02217383310198784,
+    0.01878255233168602,
+    -0.06177205219864845,
 )
 # mean, std, min, max over the FULL output -- these see every element, so a
 # change confined to the elements the sampler happens to skip is still caught.
 GOLDEN_STATS = (
-    0.0011140044080093503,
-    0.05755006894469261,
-    -0.117702417075634,
-    0.06197831779718399,
+    -0.0002627142530400306,
+    0.029721857979893684,
+    -0.06177205219864845,
+    0.04569648951292038,
 )
 
 ATOL = 1e-6

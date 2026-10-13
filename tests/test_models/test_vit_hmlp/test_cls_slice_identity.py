@@ -36,6 +36,15 @@ def _x(seed: int = 0) -> np.ndarray:
 
 
 def _np(t) -> np.ndarray:
+    """`convert_to_numpy`, unwrapping the head's output dict.
+
+    With ``return_dict=True`` (the default) the model returns
+    ``{'logits', 'probabilities'}``, and ``convert_to_numpy`` on a dict yields
+    a 0-d OBJECT array -- which then fails subscripting with an ``IndexError``
+    about integer indices. Callers in this file want the probability tensor.
+    """
+    if isinstance(t, dict):
+        t = t["probabilities"] if "probabilities" in t else next(iter(t.values()))
     return keras.ops.convert_to_numpy(t)
 
 
@@ -95,7 +104,7 @@ class TestViTHmlpClsSliceIdentity:
         model.build((None,) + INPUT_SHAPE)
         x = _x(5)
 
-        logits = _np(model(x, training=False))['probabilities']
+        logits = _np(model(x, training=False))
         model.include_top = False
         sequence = _np(model(x, training=False))
         model.include_top = True

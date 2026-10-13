@@ -491,6 +491,10 @@ class ConvNeXtV2(keras.Model):
                 'use_ffn': True,
                 'ffn_type': 'mlp',
                 'ffn_expansion_factor': 4,
+                # See convnext_v1._build_head: an unnamed head takes a
+                # process-order-dependent suffix, which silently defeats the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
             })
             if self._head_config_overrides:
                 head_config.update(self._head_config_overrides)

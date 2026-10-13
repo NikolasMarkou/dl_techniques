@@ -415,6 +415,13 @@ class CliffordNet(keras.Model):
             'use_ffn': True,
             'ffn_type': 'mlp',
             'ffn_expansion_factor': 4,
+            # An unnamed head is `classification_head` in whichever process
+            # builds it first and `classification_head_1`, `_2`, ... after.
+            # A `.keras` round trip re-enters the naming counter, so the loaded
+            # model came back as `classification_head_2` against the
+            # original's `classification_head_1` -- every weight path under the
+            # head differed, and by-name weight transfer could not match it.
+            'name': 'classification_head',
         })
         if self._head_config_overrides:
             head_config.update(self._head_config_overrides)

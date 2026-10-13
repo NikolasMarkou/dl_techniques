@@ -1311,6 +1311,10 @@ class BeitForImageClassification(keras.Model):
                 'ffn_type': 'mlp',
                 'ffn_expansion_factor': 4,
                 'hidden_dim': self.hidden_size,
+                # Deterministic layer name: an unnamed head takes Keras'
+                # auto suffix in process-creation order, which breaks the
+                # by-name matching that weight transfer relies on.
+                'name': 'classification_head',
             })
 
             self.classification_head = create_vision_head(

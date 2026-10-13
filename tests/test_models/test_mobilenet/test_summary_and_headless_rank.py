@@ -76,10 +76,15 @@ class TestHeadlessReturnsAFeatureMap:
         )
 
     def test_v1_top_still_returns_class_probabilities(self):
-        """Anti-vacuity: gating the pool must not disturb the classifier path."""
+        """Anti-vacuity: gating the pool must not disturb the classifier path.
+
+        ``return_dict`` defaults to True, so the probabilities are the dict's
+        ``'probabilities'`` entry.
+        """
         model = MobileNetV1(num_classes=7, input_shape=SMALL_SHAPE)
+        result = model(np.random.rand(3, *SMALL_SHAPE).astype("float32"))
         out = keras.ops.convert_to_numpy(
-            model(np.random.rand(3, *SMALL_SHAPE).astype("float32"))
+            result["probabilities"] if isinstance(result, dict) else result
         )
         assert out.shape == (3, 7)
         np.testing.assert_allclose(out.sum(axis=-1), np.ones(3), rtol=1e-5, atol=1e-5)

@@ -92,8 +92,13 @@ SMALL = (32, 32, 3)
 #: MobileNetV2 runs here instead -- see the module docstring's second trap.
 V2_SHAPE = (64, 64, 3)
 
-#: Measured 2026-08-21, one Adam step, ramp loss.
-GF_WEIGHTS = {"v1": 83, "v2": 161, "v3": 127, "v4": 37}
+#: Measured 2026-08-21, one Adam step, ramp loss. Re-derived 2026-10-13 after
+#: the factory ``ClassificationHead`` replaced the bespoke top: each variant's
+#: head now contributes exactly 10 trainable weights (two ``DenseBlock``s at
+#: 4 each -- kernel, bias, norm gamma, norm beta -- plus the classifier's
+#: kernel and bias), which the old ``GlobalAveragePooling2D`` + ``Dense`` pair
+#: did not. Backbone counts are unchanged at 81 / 159 / 123 / 33.
+GF_WEIGHTS = {"v1": 91, "v2": 169, "v3": 133, "v4": 43}
 
 #: The four MobileNetV2 weights that read EXACTLY 0.0 at a 32x32 input, and the
 #: only ones. Each names a block whose output is 1x1 at that input size.
@@ -440,15 +445,19 @@ class TestMobileNetSmokeContract:
         x = _images(shape)
 
         def contract(out):
-            assert not isinstance(out, (dict, list, tuple)), (
-                f"a MobileNet with include_top=True returns one tensor, got "
-                f"{type(out)}"
+            # `return_dict=True` is the default, and the factory
+            # ClassificationHead's dict is that model's documented output. The
+            # probabilities row is what the sum-to-one claim is about.
+            probs = out["probabilities"] if isinstance(out, dict) else out
+            assert not isinstance(probs, (dict, list, tuple)), (
+                f"a MobileNet with include_top=True returns one probability "
+                f"tensor, got {type(probs)}"
             )
-            assert tuple(out.shape) == (x.shape[0], NUM_CLASSES), (
-                f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(out.shape)}"
+            assert tuple(probs.shape) == (x.shape[0], NUM_CLASSES), (
+                f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(probs.shape)}"
             )
-            assert_finite(out)
-            rows = keras.ops.convert_to_numpy(keras.ops.sum(out, axis=-1))
+            assert_finite(probs)
+            rows = keras.ops.convert_to_numpy(keras.ops.sum(probs, axis=-1))
             np.testing.assert_allclose(rows, np.ones_like(rows), atol=1e-5)
 
         rejections = assert_contract_rejects_a_broken_forward(model, x, contract)

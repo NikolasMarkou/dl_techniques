@@ -400,6 +400,10 @@ class AlexNet(keras.Model):
             'ffn_type': 'mlp',
             'ffn_expansion_factor': 1,  # 4096 -> 4096 (no expansion)
             'hidden_dim': 4096,  # fc6/fc7 width
+            # Deterministic layer name: an unnamed head takes Keras'
+            # auto suffix in process-creation order, which breaks the
+            # by-name matching that weight transfer relies on.
+            'name': 'classification_head',
         })
 
         self.classification_head = create_vision_head(

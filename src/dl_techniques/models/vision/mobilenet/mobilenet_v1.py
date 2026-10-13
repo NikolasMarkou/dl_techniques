@@ -235,6 +235,10 @@ class MobileNetV1(keras.Model):
             'pooling_type': 'avg',
             'use_attention': False,
             'use_ffn': False,
+            # Deterministic layer name: an unnamed head takes Keras'
+            # auto suffix in process-creation order, which breaks the
+            # by-name matching that weight transfer relies on.
+            'name': 'classification_head',
         })
         if self._head_config_overrides:
             head_config.update(self._head_config_overrides)

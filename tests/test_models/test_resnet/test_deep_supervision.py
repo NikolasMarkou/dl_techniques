@@ -108,14 +108,33 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
 
     def test_the_main_head_does_depend_on_the_final_stage(self):
         """Anti-vacuity for the assertion above: the zero is a property of the
-        auxiliary heads, not of the probe."""
+        auxiliary heads, not of the probe.
+
+        The probe used `tf.reduce_sum(output[0])`, which is vacuous here and
+        has been since the head became the factory `ClassificationHead`: that
+        head's classifier applies softmax, so a row of its `'probabilities'`
+        output sums to the CONSTANT 1.0 and `d(sum)/d(weights)` is identically
+        zero for any softmax model -- the probe could not have passed, and its
+        passing before the head migration was the only thing that ever made it
+        look meaningful. Verified directly: a one-layer
+        `Dense(5, activation='softmax')` fed to `reduce_sum` yields
+        `[None, None]` gradients.
+
+        The claim is made on the LOSS instead, which is what training actually
+        differentiates: cross-entropy against a one-hot target is a function of
+        the probabilities whose gradient is not degenerate.
+        """
         model = _model()
         x = tf.constant(np.random.rand(2, *INPUT_SHAPE).astype("float32"))
         last_weights = _last_stage_weights(model)
+        labels = tf.one_hot([0, 1], NUM_CLASSES)
 
         with tf.GradientTape() as tape:
-            final_loss = tf.reduce_sum(model(x, training=False)[0])
-        grads = tape.gradient(final_loss, last_weights)
+            probs = model(x, training=False)[0]
+            loss = tf.reduce_mean(
+                keras.losses.categorical_crossentropy(labels, probs)
+            )
+        grads = tape.gradient(loss, last_weights)
         total = sum(
             0.0 if g is None else float(np.abs(keras.ops.convert_to_numpy(g)).sum())
             for g in grads
@@ -125,15 +144,24 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
     def test_the_shallowest_stage_is_supervised(self):
         """Stage 0 must carry a head: it is the only stage for which deep
         supervision shortens the backprop path. The last auxiliary output (the
-        list is reversed, deepest first) must reach stage 0's weights."""
+        list is reversed, deepest first) must reach stage 0's weights.
+
+        Cross-entropy rather than `reduce_sum`, for the reason spelled out in
+        `test_the_main_head_does_depend_on_the_final_stage`: these outputs are
+        softmax probabilities, and summing a probability row is the constant 1.
+        """
         model = _model()
         assert 0 in [h["stage_idx"] for h in model.supervision_heads]
 
         x = tf.constant(np.random.rand(2, *INPUT_SHAPE).astype("float32"))
         first_weights = _first_stage_weights(model)
+        labels = tf.one_hot([0, 1], NUM_CLASSES)
         with tf.GradientTape() as tape:
-            shallowest_aux = tf.reduce_sum(model(x, training=False)[-1])
-        grads = tape.gradient(shallowest_aux, first_weights)
+            shallowest_aux = model(x, training=False)[-1]
+            loss = tf.reduce_mean(
+                keras.losses.categorical_crossentropy(labels, shallowest_aux)
+            )
+        grads = tape.gradient(loss, first_weights)
         total = sum(
             0.0 if g is None else float(np.abs(keras.ops.convert_to_numpy(g)).sum())
             for g in grads
@@ -142,17 +170,32 @@ class TestSupervisionHeadsDoNotDuplicateTheMainHead:
 
     def test_the_shallowest_head_ignores_every_deeper_stage(self):
         """The stage-0 head must not depend on stages 1..3 — otherwise it is not
-        a shallow supervision signal at all."""
+        a shallow supervision signal at all.
+
+        Cross-entropy, for the same reason as its two siblings: this asserts a
+        ZERO, so a vacuous probe would satisfy it. `reduce_sum` over a softmax
+        row is the constant 1.0 and would have reported zero here no matter what
+        the graph looked like — the assertion passed while proving nothing. The
+        cross-entropy probe is the one that has a nonzero gradient for the
+        stage-0 weights (see
+        `test_the_shallowest_stage_is_supervised`), so a zero against the
+        deeper stages is now a real isolation result.
+        """
         model = _model()
         x = tf.constant(np.random.rand(2, *INPUT_SHAPE).astype("float32"))
         deeper = []
         for stage in model.stages[1:]:
             for block in stage:
                 deeper.extend(block.trainable_weights)
+        assert deeper, "no deeper-stage weights to probe; the zero is vacuous"
+        labels = tf.one_hot([0, 1], NUM_CLASSES)
 
         with tf.GradientTape() as tape:
-            shallowest_aux = tf.reduce_sum(model(x, training=False)[-1])
-        grads = tape.gradient(shallowest_aux, deeper)
+            shallowest_aux = model(x, training=False)[-1]
+            loss = tf.reduce_mean(
+                keras.losses.categorical_crossentropy(labels, shallowest_aux)
+            )
+        grads = tape.gradient(loss, deeper)
         total = sum(
             0.0 if g is None else float(np.abs(keras.ops.convert_to_numpy(g)).sum())
             for g in grads

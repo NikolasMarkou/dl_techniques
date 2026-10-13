@@ -439,6 +439,10 @@ class ResNet(keras.Model):
             'use_ffn': True,
             'ffn_type': 'mlp',
             'ffn_expansion_factor': 4,
+            # Deterministic layer name: an unnamed head takes Keras'
+            # auto suffix in process-creation order, which breaks the
+            # by-name matching that weight transfer relies on.
+            'name': 'classification_head',
         })
         if self._head_config_overrides:
             head_config.update(self._head_config_overrides)
@@ -469,6 +473,11 @@ class ResNet(keras.Model):
                 'use_ffn': True,
                 'ffn_type': 'mlp',
                 'ffn_expansion_factor': 4,
+                # Per-stage suffix: this model builds N heads, so they need
+                # distinct names. Deterministic, because an unnamed head takes
+                # Keras' auto suffix in process-creation order, which breaks
+                # the by-name matching that weight transfer relies on.
+                'name': f'supervision_head_{stage_idx}',
             })
             if self._head_config_overrides:
                 head_config.update(self._head_config_overrides)

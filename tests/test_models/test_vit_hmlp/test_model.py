@@ -1562,23 +1562,21 @@ class TestViTHMLPGradientFlow:
         x = np.random.default_rng(0).random((2, 64, 64, 3)).astype("float32")
         model(x, training=False)  # subclassed model: unbuilt until first call
 
-        # Waive gamma/beta of the unused norm layer and FFN in ClassificationHead
-        report = assert_gradients_reach_every_trainable_weight(
-            model, x,
-            expect_zero=(
-                "classification_head/classification_head_norm/gamma",
-                "classification_head/classification_head_norm/beta",
-                "classification_head/classification_head_ffn/fc1/kernel",
-                "classification_head/classification_head_ffn/fc1/bias",
-                "classification_head/classification_head_ffn/fc2/kernel",
-                "classification_head/classification_head_ffn/fc2/bias",
-            )
-        )
+        # No `expect_zero`. The waiver that used to sit here named six tensors
+        # under `classification_head_{norm,ffn}/...`, which
+        # `ClassificationHead` builds but never applies. 20225bf71 stopped
+        # building them, so the paths no longer exist and the oracle correctly
+        # rejects a waiver matching nothing ("a stale waiver silently widens
+        # this oracle"). The head's 10 REAL weights -- two DenseBlocks and the
+        # classifier -- are on the backward graph and are covered below.
+        report = assert_gradients_reach_every_trainable_weight(model, x)
 
         assert len(report) == len(model.trainable_weights)
-        assert len(report) == 176, (
+        assert len(report) == 170, (
             "the tiny variant's weight set changed shape; re-measure before "
-            "editing this number"
+            "editing this number. 176 -> 170 is the six EnhancementHead-style "
+            "tensors 20225bf71 stopped building (norm gamma/beta, FFN "
+            "fc1/fc2 kernel+bias)."
         )
         assert max(v for v in report.values() if v is not None) > 0.0
 

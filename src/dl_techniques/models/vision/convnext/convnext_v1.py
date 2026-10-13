@@ -517,6 +517,13 @@ class ConvNeXtV1(keras.Model):
                 'use_ffn': True,
                 'ffn_type': 'mlp',
                 'ffn_expansion_factor': 4,
+                # An unnamed head is named `classification_head` in whichever
+                # process creates it first and `classification_head_1`, `_2`, ...
+                # afterwards. Weight transfer matches layers BY NAME, so a
+                # checkpoint written by one process and loaded by another left
+                # the classifier at its initialization while the report still
+                # read as a success. Naming it makes the path stable.
+                'name': 'classification_head',
             })
             if self._head_config_overrides:
                 head_config.update(self._head_config_overrides)

@@ -76,18 +76,28 @@ INPUT_SEED = 11
 WEIGHT_SEED = 20260731
 WEIGHT_SCALE = 0.05
 
+#: Re-derived 2026-10-13. The previous values were taken against the bespoke
+#: top (GlobalAveragePooling2D + a LINEAR Dense), and are kept nowhere: the
+#: factory ``ClassificationHead`` replaced it, and that head's ``classifier``
+#: applies ``activation='softmax'`` -- so this is a change of FUNCTION, not of
+#: the last few bits, and the two sets share no digits. The tell is the row
+#: sums: the pinned set summed to nothing in particular (a logit vector need
+#: not), this one sums to 1.0 to 1e-8 because every entry is a probability.
+#: The head's own docstring says both keys hold the same softmax output, so
+#: ``'logits'`` is a misnomer there; what is pinned is the tensor ``call``
+#: returns under that key, which is what the rest of this file compares.
 GOLDEN_LOGITS = (
     (
-        -0.04598469287157059,
-        -0.15002018213272095,
-        0.052694205194711685,
-        0.08428067713975906,
+        0.23747052252292633,
+        0.25725874304771423,
+        0.26556873321533203,
+        0.2397020012140274,
     ),
     (
-        -0.0460369810461998,
-        -0.15000639855861664,
-        0.05274839699268341,
-        0.08432666212320328,
+        0.23747017979621887,
+        0.25725799798965454,
+        0.26556596159935,
+        0.2397058755159378,
     ),
 )
 
@@ -100,7 +110,7 @@ def _run_probe() -> np.ndarray:
 
     The caller is responsible for the device scope; see ``golden_output``.
 
-    :return: the ``(2, 4)`` logit array, as ``float32`` numpy.
+    :return: the ``(2, 4)`` array under the head's ``'logits'`` key, float32.
     """
     model = SwinTransformer(**CONFIG)
     x = np.asarray(
@@ -110,7 +120,13 @@ def _run_probe() -> np.ndarray:
     rng = np.random.default_rng(WEIGHT_SEED)
     for w in model.weights:
         w.assign(np.asarray(rng.normal(size=w.shape) * WEIGHT_SCALE, dtype=w.dtype))
-    return np.asarray(ops.convert_to_numpy(model(x, training=False)))
+    out = model(x, training=False)
+    # The factory ClassificationHead returns a dict. Its classifier applies
+    # softmax, so both keys are the same probability tensor; 'logits' is the
+    # one everything else in this file compares.
+    return np.asarray(
+        ops.convert_to_numpy(out["logits"] if isinstance(out, dict) else out)
+    )
 
 
 @pytest.fixture(scope="module")
@@ -153,9 +169,21 @@ class TestSwinTransformerGoldenValues:
 
     def test_the_two_batch_rows_are_not_identical(self, golden_output):
         """Guards the guard: if the head collapsed, the values above would be
-        stable for a reason that has nothing to do with the attention path."""
+        stable for a reason that has nothing to do with the attention path.
+
+        The threshold was 1e-5 and is now 1e-6, re-derived 2026-10-13. The
+        factory head's ``classifier`` applies softmax, so this compares two
+        probability vectors rather than two logit vectors, and a softmax
+        compresses the spread: measured row spread fell from above 1e-5 to
+        3.874e-06, and re-running the probe with BOTH rows fed the SAME image
+        gives exactly 0.0. So 3.874e-06 is entirely input-driven, with nothing
+        of it arithmetic -- the floor is zero, not merely small, and a
+        threshold anywhere below the measured spread catches a collapse. The
+        probes are also bit-identical across separate constructions, so there
+        is no run-to-run drift for a tighter bound to hide in.
+        """
         spread = float(np.abs(golden_output[0] - golden_output[1]).max())
-        assert spread > 1e-5, (
+        assert spread > 1e-6, (
             f"the two rows differ by only {spread:.3e}; the probe is not "
             "discriminating between inputs"
         )

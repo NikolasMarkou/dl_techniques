@@ -197,11 +197,19 @@ class TestSCUNetKnobSensitivity:
         It was written as a value knob first -- the Swin window decides WHICH
         pixels attend to which, which sounds like pure routing. The value
         instrument rejected it, and the numbers are the point: ``window_size=4``
-        and ``window_size=8`` both hold **148 weight tensors** and differ at
-        **348,918 vs 352,790 parameters**, because the relative-position-bias
+        and ``window_size=8`` both hold **161 weight tensors** and differ at
+        **355,977 vs 359,849 parameters**, because the relative-position-bias
         table is sized by the window. *"The counts may match while the shapes do
         not"* is the oracle's own error text, and a hand-written sweep asserting
         ``len(model.weights)`` would have seen nothing at all.
+
+        Both numbers re-derived 2026-10-13. They moved by exactly the six dead
+        weight tensors 20225bf71 stopped building inside ``EnhancementHead``
+        (its ``norm`` and ``ffn``, which ``call`` never applies): 167 -> 161
+        tensors, and 358,137 -> 355,977 / 362,009 -> 359,849 parameters. The
+        head's 14 live tensors are counted here, since ``include_top=True`` is
+        the default and the head is part of the parameterisation the knob is
+        measured against.
         """
         builders = {
             w: (lambda w=w: _built(lambda: _scunet(window_size=w)))
@@ -214,8 +222,8 @@ class TestSCUNetKnobSensitivity:
             k: sum(int(np.prod(shape)) for shape in v)
             for k, v in signatures.items()
         }
-        assert counts[4] == counts[8] == 167, counts
-        assert params[4] == 358137 and params[8] == 362009, params
+        assert counts[4] == counts[8] == 161, counts
+        assert params[4] == 355977 and params[8] == 359849, params
 
     def test_the_value_instrument_convicts_input_resolution_as_inert(self):
         """The VALUE instrument's adoption, and its RED proof in one.

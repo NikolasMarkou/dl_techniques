@@ -38,8 +38,12 @@ from ..smoke_contract_oracle import (
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 10
 
-#: Measured 2026-08-21 at channels=16, depth=2.
-GF_N_WEIGHTS = 34
+#: Measured 2026-08-21 at channels=16, depth=2; re-derived 2026-10-13 at 40
+#: after the factory ClassificationHead replaced the bespoke top. The head
+#: contributes 10 trainable weights (two DenseBlocks at 4 each -- kernel, bias,
+#: norm gamma, norm beta -- plus the classifier's kernel and bias); the trunk's
+#: own 30 are unchanged.
+GF_N_WEIGHTS = 40
 
 
 def _images(batch: int = 2) -> np.ndarray:
@@ -60,7 +64,10 @@ def _one_adam_step(model, inputs) -> None:
     variables = list(model.trainable_variables)
     optimizer.build(variables)
     with tf.GradientTape() as tape:
-        loss = default_loss(model(inputs, training=True))
+        out = model(inputs, training=True)
+        # `call` returns the ClassificationHead's dict, so `default_loss`
+        # (which reduces over a tensor) needs the logits.
+        loss = default_loss(out["logits"] if isinstance(out, dict) else out)
     optimizer.apply_gradients(zip(tape.gradient(loss, variables), variables))
 
 
@@ -116,13 +123,16 @@ class TestCliffordNetSmokeContract:
         x = _images()
 
         def contract(out):
-            assert not isinstance(out, (dict, list, tuple)), (
-                f"CliffordNet returns one tensor, got {type(out)}"
+            # The factory ClassificationHead's documented output is a dict;
+            # `call` returns it unchanged.
+            logits = out["logits"] if isinstance(out, dict) else out
+            assert not isinstance(logits, (dict, list, tuple)), (
+                f"CliffordNet returns one tensor, got {type(logits)}"
             )
-            assert tuple(out.shape) == (x.shape[0], NUM_CLASSES), (
-                f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(out.shape)}"
+            assert tuple(logits.shape) == (x.shape[0], NUM_CLASSES), (
+                f"expected {(x.shape[0], NUM_CLASSES)}, got {tuple(logits.shape)}"
             )
-            assert_finite(out)
+            assert_finite(logits)
 
         rejections = assert_contract_rejects_a_broken_forward(model, x, contract)
         assert set(rejections) == {

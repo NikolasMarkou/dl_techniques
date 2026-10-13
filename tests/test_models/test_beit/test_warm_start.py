@@ -112,7 +112,7 @@ class TestBeitWarmStart:
         mim.build((None,) + IMG)
         clf = _classifier()
         clf.build((None,) + IMG)
-        head_before = ops.convert_to_numpy(clf.head_classifier.kernel)
+        head_before = ops.convert_to_numpy(clf.classification_head.classifier.kernel)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "beit_mim.keras")
@@ -121,7 +121,8 @@ class TestBeitWarmStart:
                 target=clf, ckpt_path=path, skip_prefixes=("decoder_", "head_")
             )
         np.testing.assert_array_equal(
-            head_before, ops.convert_to_numpy(clf.head_classifier.kernel)
+            head_before,
+            ops.convert_to_numpy(clf.classification_head.classifier.kernel),
         )
 
     def test_a_mismatched_backbone_config_is_reported_not_silently_loaded(self):
