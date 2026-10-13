@@ -1,140 +1,109 @@
-"""Configurable transition modules for the Neural HMM.
+"""
+Transition layers of the Neural HMM: the initial-state distribution ``log pi`` and the
+transition matrices ``log A``, on the uniform batched shapes the inference module reads.
 
-The transition holds the initial distribution ``log pi`` and either a static
-transition matrix ``log A`` of shape ``(states, states)`` or an
-input-dependent one of shape ``(batch, time, states, states)``. The type is
-chosen through :data:`TRANSITION_REGISTRY`; the topology (which transitions
-are allowed at all) is orthogonal to the type and is enforced by additive
-masks of ``0`` / ``-1e9`` applied before the log-softmax, so forbidden
-transitions carry exactly zero probability rather than a small one.
+Both layers return ``(log_pi, log_A)`` with ``log_pi`` of shape ``(B, K)`` and ``log_A`` of
+shape ``(B, T, K, K)``. ``log_A[:, t, i, j]`` is the log-probability of moving from state
+``i`` at step ``t - 1`` INTO state ``j`` at step ``t``: rows are the source, columns the
+destination, every row of ``exp(log_A)`` sums to 1, and the ``t = 0`` slot is never read.
 
-An input-dependent transition starts from a plain HMM: its context projection
-is zero-initialized, so training begins at the static solution and only moves
-away when the gradient pays for it.
+- :class:`StaticTransition` is a plain HMM: one learned matrix, broadcast over the batch and
+  time axes of whatever ``(B, T, ...)`` tensor it is called on.
+- :class:`InputDependentTransition` is an input-output HMM (Bengio and Frasconi, 1995): the
+  static logits plus a per-step offset projected from a ``(B, T, H)`` context. The
+  projection is zero-initialized, so training starts at the static solution.
+
+The topology says which transitions exist at all, independently of the layer type:
+
+- ``ergodic``: every transition;
+- ``left_to_right``: only to the same or a later state, and the chain starts in state 0;
+- ``banded``: like ``left_to_right``, skipping at most ``band_width`` states forward.
+
+A forbidden transition (or start state) has probability exactly 0. It is masked by
+selection (``keras.ops.where`` with :func:`dl_techniques.utils.dtype_policy.mask_sentinel`),
+never by adding a large negative number, which overflows float16.
 
 References:
-    - Rabiner, 1989. A Tutorial on Hidden Markov Models and Selected
-      Applications in Speech Recognition. Proceedings of the IEEE.
-      (https://doi.org/10.1109/5.18626)
-    - Bengio and Frasconi, 1995. An Input Output HMM Architecture.
-      NeurIPS. (https://proceedings.neurips.cc/paper/1994/hash/)
+    - Rabiner, 1989. A Tutorial on Hidden Markov Models and Selected Applications in
+      Speech Recognition. Proceedings of the IEEE 77(2), pp. 257-286.
+    - Bengio and Frasconi, 1995. An Input Output HMM Architecture. Advances in Neural
+      Information Processing Systems 7, pp. 427-434.
 """
 
-import copy
-from typing import Any, Dict, Literal, Mapping, Optional, Sequence
+from typing import Any, Optional, Tuple
 
 import keras
 import numpy as np
 
 # ---------------------------------------------------------------------
-# local imports
+# Local Imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.dtype_policy import accumulation_dtype, mask_sentinel
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
-#: Transition types accepted by :func:`create_transition_layer`.
-TransitionType = Literal["static", "input_dependent"]
-
-#: Topologies accepted by the transition layers.
-TopologyType = Literal["ergodic", "left_to_right", "banded"]
-
-#: Additive logit for a forbidden transition: zero probability after softmax.
-NEGATIVE_LOGIT: float = -1e9
-
-#: Marker text for the strict unknown-keyword error, matching the FFN factory.
-STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
-
-#: Config keys that pass through :func:`assemble_transition_config` untouched.
-_TRANSITION_CONFIG_PASSTHROUGH_KEYS = ("type", "name")
-
+from .inference import LogSpaceOutputSpec
 
 # ---------------------------------------------------------------------
-# topology masks
+
+#: Topologies the transition layers accept.
+TOPOLOGIES: Tuple[str, ...] = ("ergodic", "left_to_right", "banded")
+
 # ---------------------------------------------------------------------
 
 
-def transition_mask(n_states: int, topology: str, band_width: int = 1) -> np.ndarray:
-    """Build the ``(states, states)`` additive mask for a topology.
+def topology_masks(n_states: int, topology: str, band_width: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Return which start states and which transitions a topology allows.
 
-    Allowed transitions carry ``0``; forbidden ones carry
-    :data:`NEGATIVE_LOGIT`.
-
-    :param n_states: Number of hidden states.
-    :type n_states: int
-    :param topology: ``ergodic`` (all transitions), ``left_to_right``
-        (upper-triangular, no returns) or ``banded`` (upper-triangular with at
-        most ``band_width`` forward skips).
-    :type topology: str
-    :param band_width: Maximum forward skip for ``banded``.
-    :type band_width: int
-    :return: Float32 ``(states, states)`` additive mask.
-    :rtype: np.ndarray
-    :raises ValueError: If the topology is unknown or ``band_width`` is
-        negative.
+    :param n_states: Number of hidden states ``K``.
+    :param topology: One of :data:`TOPOLOGIES`.
+    :param band_width: Largest forward skip allowed by ``banded``; ignored otherwise.
+    :return: ``(start_keep, transition_keep)``: boolean numpy arrays of shape ``(K,)``
+        and ``(K, K)``, True where allowed. Rows of ``transition_keep`` are the source.
+    :raises ValueError: If ``topology`` is unknown.
     """
+    ones = np.ones((n_states, n_states), dtype=bool)
     if topology == "ergodic":
-        allowed = np.ones((n_states, n_states))
-    elif topology == "left_to_right":
-        allowed = np.triu(np.ones((n_states, n_states)))
+        return np.ones(n_states, dtype=bool), ones
+    if topology == "left_to_right":
+        transition_keep = np.triu(ones)
     elif topology == "banded":
-        if band_width < 0:
-            raise ValueError(f"band_width must be non-negative, got {band_width}")
-        allowed = np.triu(np.ones((n_states, n_states))) - np.triu(
-            np.ones((n_states, n_states)), k=band_width + 1
-        )
+        transition_keep = np.triu(ones) & ~np.triu(ones, k=band_width + 1)
     else:
-        raise ValueError(
-            f"Unknown topology '{topology}'. "
-            f"Available: ['ergodic', 'left_to_right', 'banded']."
-        )
-    return np.where(allowed > 0, 0.0, NEGATIVE_LOGIT).astype("float32")
+        raise ValueError(f"Unknown topology '{topology}'. Available: {list(TOPOLOGIES)}.")
+    start_keep = np.zeros(n_states, dtype=bool)
+    start_keep[0] = True
+    return start_keep, transition_keep
 
 
-def initial_mask(n_states: int, topology: str) -> np.ndarray:
-    """Build the ``(states,)`` additive mask for the initial distribution.
+def _batch_time_zeros(inputs: keras.KerasTensor, dtype: str) -> keras.KerasTensor:
+    """Return zeros of shape ``(B, T)`` for a ``(B, T, ...)`` tensor, read from its shape only.
 
-    Non-ergodic topologies must start in state 0; ergodic ones may start
-    anywhere.
-
-    :param n_states: Number of hidden states.
-    :type n_states: int
-    :param topology: One of ``ergodic``, ``left_to_right``, ``banded``.
-    :type topology: str
-    :return: Float32 ``(states,)`` additive mask.
-    :rtype: np.ndarray
-    :raises ValueError: If the topology is unknown.
+    :param inputs: Any tensor of rank 2 or more.
+    :param dtype: Dtype of the zeros.
+    :return: ``(B, T)`` zeros; works with unknown ``B`` and ``T``.
     """
-    if topology not in ("ergodic", "left_to_right", "banded"):
-        raise ValueError(
-            f"Unknown topology '{topology}'. "
-            f"Available: ['ergodic', 'left_to_right', 'banded']."
-        )
-    mask = np.zeros(n_states, dtype="float32")
-    if topology != "ergodic":
-        mask[1:] = NEGATIVE_LOGIT
-    return mask
-
-
-# ---------------------------------------------------------------------
-# transition layers
-# ---------------------------------------------------------------------
+    leading = inputs[(slice(None), slice(None)) + (0,) * (len(inputs.shape) - 2)]
+    return keras.ops.zeros_like(leading, dtype=dtype)
 
 
 @register_dl_technique("dl_techniques.models.neural_hmm.transitions")
-class StaticTransition(keras.layers.Layer):
-    """A time-invariant transition matrix with a topology mask.
+class StaticTransition(LogSpaceOutputSpec, keras.layers.Layer):
+    """A time-invariant transition matrix and initial distribution, with a topology.
 
-    :param n_states: Number of hidden states.
-    :type n_states: int
-    :param topology: Allowed-transition topology.
-    :type topology: str
-    :param band_width: Maximum forward skip for ``banded``.
-    :type band_width: int
-    :param self_loop_init: Diagonal bias of the transition logits at
-        initialization; 1 to 3 keeps states sticky early and avoids flicker.
-    :type self_loop_init: float
+    ``log_pi = log_softmax(where(start_keep, pi_logits, sentinel))`` and
+    ``log_A = log_softmax(where(transition_keep, transition_logits, sentinel), axis=-1)``,
+    broadcast to ``(B, K)`` and ``(B, T, K, K)``. Both outputs are in the accumulation dtype
+    (float32 under a float16 policy).
+
+    :param n_states: Number of hidden states ``K``; positive.
+    :param topology: One of ``ergodic``, ``left_to_right``, ``banded``.
+    :param band_width: Largest forward skip under ``banded``; non-negative.
+    :param self_loop_init: Initial diagonal of the transition logits. A positive value
+        makes states sticky at the start of training, which keeps early decoding from
+        flickering between states.
+    :param kwargs: Base ``keras.layers.Layer`` arguments.
+    :raises ValueError: If an argument is out of range or ``topology`` is unknown.
     """
 
     def __init__(
@@ -147,81 +116,82 @@ class StaticTransition(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
         if n_states <= 0:
-            raise ValueError(f"n_states must be positive, got {n_states}")
+            raise ValueError(f"n_states must be positive, got {n_states}.")
         if band_width < 0:
-            raise ValueError(f"band_width must be non-negative, got {band_width}")
+            raise ValueError(f"band_width must be non-negative, got {band_width}.")
         self.n_states = n_states
         self.topology = topology
         self.band_width = band_width
         self.self_loop_init = self_loop_init
+        # Config-derived constants: held as numpy, converted in call(), never weights.
+        self._start_keep, self._transition_keep = topology_masks(n_states, topology, band_width)
+        self.pi_logits = None
+        self.transition_logits = None
 
-        # Deterministic functions of the config: plain tensors, rebuilt from
-        # the config by from_config, never serialized as weights.
-        self.pi_mask = keras.ops.convert_to_tensor(
-            initial_mask(n_states, topology)
-        )
-        self.transition_mask = keras.ops.convert_to_tensor(
-            transition_mask(n_states, topology, band_width)
-        )
-        self.pi_logits = self.add_weight(
-            shape=(n_states,), initializer="zeros", name="pi_logits"
-        )
-        self.transition_logits = self.add_weight(
-            shape=(n_states, n_states),
-            initializer=keras.initializers.Constant(
-                np.eye(n_states, dtype="float32") * self_loop_init
-            ),
-            name="transition_logits",
-        )
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Create the initial-state and transition logits.
 
-    def build(self, input_shape: Any) -> None:
-        """Mark the layer built; weights already exist from ``__init__``.
-
-        :param input_shape: ``(batch, time, hidden_dim)``; unused beyond the
-            built flag, since the parameters do not depend on it.
-        :type input_shape: Any
+        :param input_shape: Shape of the tensor the layer is called on, ``(B, T, ...)``.
+        :raises ValueError: If the input has rank below 2.
         """
-        if self.built:
-            return
+        if len(input_shape) < 2:
+            raise ValueError(f"Expected an input of shape (batch, time, ...), got {tuple(input_shape)}.")
+        self.pi_logits = self.add_weight(name="pi_logits", shape=(self.n_states,), initializer="zeros")
+        self.transition_logits = self.add_weight(
+            name="transition_logits",
+            shape=(self.n_states, self.n_states),
+            initializer=keras.initializers.Identity(gain=self.self_loop_init),
+        )
         super().build(input_shape)
 
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None,
-    ) -> Any:
-        """Return the log initial distribution and log transition matrix.
+    def _normalize(self, pi_logits: keras.KerasTensor, transition_logits: keras.KerasTensor) -> Tuple:
+        """Mask forbidden entries, then log-normalize in the accumulation dtype.
 
-        :param inputs: Context features ``(batch, time, hidden_dim)``; ignored
-            by the static transition, accepted for a uniform call signature.
-        :type inputs: keras.KerasTensor
-        :param training: Unused.
-        :type training: Optional[bool]
-        :return: ``(log_pi, log_transition)`` with shapes ``(states,)`` and
-            ``(states, states)``.
-        :rtype: Any
+        :param pi_logits: ``(K,)`` logits in the compute dtype.
+        :param transition_logits: ``(..., K, K)`` logits in the compute dtype.
+        :return: ``(log_pi (K,), log_A (..., K, K))`` in the accumulation dtype.
         """
-        log_pi = keras.ops.log_softmax(self.pi_logits + self.pi_mask)
-        log_transition = keras.ops.log_softmax(
-            self.transition_logits + self.transition_mask, axis=-1
+        sentinel = mask_sentinel(self.compute_dtype)
+        start_keep = keras.ops.convert_to_tensor(self._start_keep)
+        transition_keep = keras.ops.convert_to_tensor(self._transition_keep)
+        pi_logits = keras.ops.where(start_keep, pi_logits, keras.ops.full_like(pi_logits, sentinel))
+        transition_logits = keras.ops.where(
+            transition_keep, transition_logits, keras.ops.full_like(transition_logits, sentinel)
         )
-        return log_pi, log_transition
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-010: mask in the compute dtype with
+        # mask_sentinel (finite there), THEN cast to the accumulation dtype and normalize.
+        # Do NOT write ``logits + (1 - keep) * -1e9``: under mixed_float16 the -1e9 is -inf
+        # and 0 * -inf turns every allowed entry into NaN. Do NOT log_softmax in float16:
+        # the log-probabilities feed a log-space recursion that accumulates.
+        accum = accumulation_dtype(self.compute_dtype)
+        log_pi = keras.ops.log_softmax(keras.ops.cast(pi_logits, accum), axis=-1)
+        log_A = keras.ops.log_softmax(keras.ops.cast(transition_logits, accum), axis=-1)
+        return log_pi, log_A
 
-    def compute_output_shape(self, input_shape: Any) -> Any:
-        """Return the ``(log_pi, log_transition)`` shapes.
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> Tuple:
+        """Return the initial and transition log-probabilities, batched.
 
-        :param input_shape: ``(batch, time, hidden_dim)``.
-        :type input_shape: Any
-        :return: ``((states,), (states, states))``.
-        :rtype: Any
+        :param inputs: Any ``(B, T, ...)`` tensor; only its batch and time axes are read.
+        :param training: Unused; accepted for a uniform call signature.
+        :return: ``(log_pi (B, K), log_A (B, T, K, K))`` in the accumulation dtype.
         """
-        return ((self.n_states,), (self.n_states, self.n_states))
+        log_pi, log_A = self._normalize(self.pi_logits, self.transition_logits)
+        zeros = _batch_time_zeros(inputs, log_A.dtype)
+        return zeros[:, 0, None] + log_pi, zeros[:, :, None, None] + log_A
 
-    def get_config(self) -> Dict[str, Any]:
-        """Return the constructor configuration.
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple:
+        """Return ``((B, K), (B, T, K, K))`` from the stored config.
 
-        :return: Configuration dictionary.
-        :rtype: Dict[str, Any]
+        :param input_shape: ``(B, T, ...)``.
+        :return: The two output shapes.
+        """
+        batch, steps = input_shape[0], input_shape[1]
+        return (batch, self.n_states), (batch, steps, self.n_states, self.n_states)
+
+    def get_config(self) -> dict:
+        """Return every constructor argument.
+
+        :return: The layer config.
         """
         config = super().get_config()
         config.update(
@@ -236,327 +206,57 @@ class StaticTransition(keras.layers.Layer):
 
 
 @register_dl_technique("dl_techniques.models.neural_hmm.transitions")
-class InputDependentTransition(keras.layers.Layer):
-    """A transition matrix modulated by the context at each timestep.
+class InputDependentTransition(StaticTransition):
+    """Per-step transition matrices driven by a context: an input-output HMM.
 
-    Adds a zero-initialized context offset to the static logits, so training
-    starts from a plain HMM and the dependence only appears when the gradient
-    pays for it. This is the IOHMM / regime-switching regime.
+    ``log_A[:, t] = log_softmax(where(keep, transition_logits + W h_t, sentinel))``, where
+    ``W`` is a zero-initialized, bias-free projection of the ``(B, T, H)`` context to
+    ``K * K`` offsets (the static logits already carry the constant term). At
+    initialization every step equals the static matrix; the context only matters once the
+    gradient moves ``W``. ``log_pi`` does not depend on the context.
 
-    :param n_states: Number of hidden states.
-    :type n_states: int
-    :param hidden_dim: Width of the context features.
-    :type hidden_dim: int
-    :param topology: Allowed-transition topology.
-    :type topology: str
-    :param band_width: Maximum forward skip for ``banded``.
-    :type band_width: int
-    :param self_loop_init: Diagonal bias of the static logits at
-        initialization.
-    :type self_loop_init: float
-    :param use_bias: Whether the context projection uses bias.
-    :type use_bias: bool
+    :param n_states: Number of hidden states ``K``; positive.
+    :param topology: One of ``ergodic``, ``left_to_right``, ``banded``.
+    :param band_width: Largest forward skip under ``banded``; non-negative.
+    :param self_loop_init: Initial diagonal of the static transition logits.
+    :param kwargs: Base ``keras.layers.Layer`` arguments.
+    :raises ValueError: If an argument is out of range or ``topology`` is unknown.
     """
 
     def __init__(
         self,
         n_states: int,
-        hidden_dim: int,
         topology: str = "ergodic",
         band_width: int = 1,
         self_loop_init: float = 2.0,
-        use_bias: bool = True,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
-        if n_states <= 0:
-            raise ValueError(f"n_states must be positive, got {n_states}")
-        if hidden_dim <= 0:
-            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
-        if band_width < 0:
-            raise ValueError(f"band_width must be non-negative, got {band_width}")
-        self.n_states = n_states
-        self.hidden_dim = hidden_dim
-        self.topology = topology
-        self.band_width = band_width
-        self.self_loop_init = self_loop_init
-        self.use_bias = use_bias
-
-        self.pi_mask = keras.ops.convert_to_tensor(
-            initial_mask(n_states, topology)
-        )
-        self.transition_mask = keras.ops.convert_to_tensor(
-            transition_mask(n_states, topology, band_width)
-        )
-        self.pi_logits = self.add_weight(
-            shape=(n_states,), initializer="zeros", name="pi_logits"
-        )
-        self.transition_logits = self.add_weight(
-            shape=(n_states, n_states),
-            initializer=keras.initializers.Constant(
-                np.eye(n_states, dtype="float32") * self_loop_init
-            ),
-            name="transition_logits",
-        )
-        # Zero-initialized: the model starts as a plain HMM.
+        super().__init__(n_states, topology, band_width, self_loop_init, **kwargs)
         self.context_projection = keras.layers.Dense(
-            n_states * n_states,
-            kernel_initializer="zeros",
-            bias_initializer="zeros",
-            use_bias=use_bias,
-            name="context_projection",
+            n_states * n_states, use_bias=False, kernel_initializer="zeros", name="context_projection"
         )
 
-    def build(self, input_shape: Any) -> None:
-        """Build the context projection against the context width.
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Create the static logits and build the context projection.
 
-        :param input_shape: ``(batch, time, hidden_dim)``.
-        :type input_shape: Any
-        :raises ValueError: If the last axis does not match ``hidden_dim``.
+        :param input_shape: Context shape ``(B, T, H)``.
+        :raises ValueError: If the context is not rank 3.
         """
-        if self.built:
-            return
-        shape = tuple(input_shape)
-        if shape[-1] != self.hidden_dim:
-            raise ValueError(
-                f"Context width ({shape[-1]}) must match hidden_dim "
-                f"({self.hidden_dim})"
-            )
+        if len(input_shape) != 3:
+            raise ValueError(f"Expected a context of shape (batch, time, features), got {tuple(input_shape)}.")
         self.context_projection.build(input_shape)
         super().build(input_shape)
 
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None,
-    ) -> Any:
-        """Return the log initial distribution and per-step log transitions.
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> Tuple:
+        """Return the initial and the per-step transition log-probabilities.
 
-        :param inputs: Context features ``(batch, time, hidden_dim)``.
-        :type inputs: keras.KerasTensor
+        :param inputs: Context ``(B, T, H)``.
         :param training: Forwarded to the context projection.
-        :type training: Optional[bool]
-        :return: ``(log_pi, log_transition)`` with shapes ``(states,)`` and
-            ``(batch, time, states, states)``.
-        :rtype: Any
+        :return: ``(log_pi (B, K), log_A (B, T, K, K))`` in the accumulation dtype.
         """
-        log_pi = keras.ops.log_softmax(self.pi_logits + self.pi_mask)
         offset = self.context_projection(inputs, training=training)
-        batch = keras.ops.shape(offset)[0]
-        time = keras.ops.shape(offset)[1]
-        offset = keras.ops.reshape(
-            offset, (batch, time, self.n_states, self.n_states)
-        )
-        logits = self.transition_logits + self.transition_mask + offset
-        return log_pi, keras.ops.log_softmax(logits, axis=-1)
-
-    def compute_output_shape(self, input_shape: Any) -> Any:
-        """Return the ``(log_pi, log_transition)`` shapes.
-
-        :param input_shape: ``(batch, time, hidden_dim)``.
-        :type input_shape: Any
-        :return: ``((states,), (batch, time, states, states))``.
-        :rtype: Any
-        """
-        shape = tuple(input_shape)
-        batch, time = shape[0], shape[1]
-        return (
-            (self.n_states,),
-            (batch, time, self.n_states, self.n_states),
-        )
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return the constructor configuration.
-
-        :return: Configuration dictionary.
-        :rtype: Dict[str, Any]
-        """
-        config = super().get_config()
-        config.update(
-            {
-                "n_states": self.n_states,
-                "hidden_dim": self.hidden_dim,
-                "topology": self.topology,
-                "band_width": self.band_width,
-                "self_loop_init": self.self_loop_init,
-                "use_bias": self.use_bias,
-            }
-        )
-        return config
-
-
-# ---------------------------------------------------------------------
-# registry
-# ---------------------------------------------------------------------
-
-#: Registry of transition types. Every entry carries ``class``,
-#: ``description``, ``required_params``, ``optional_params`` and ``use_case``,
-#: mirroring the FFN factory.
-TRANSITION_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "static": {
-        "class": StaticTransition,
-        "description": "Time-invariant transition matrix: a plain HMM. "
-        "Declares no hidden_dim: the model routes its wrapper config through "
-        "assemble_transition_config, which drops the context width for this "
-        "type before it reaches the constructor.",
-        "required_params": ["n_states"],
-        "optional_params": {
-            "topology": "ergodic",
-            "band_width": 1,
-            "self_loop_init": 2.0,
-        },
-        "use_case": "Stationary dynamics; the default.",
-    },
-    "input_dependent": {
-        "class": InputDependentTransition,
-        "description": "Per-timestep transition matrix modulated by a "
-        "zero-initialized context projection (IOHMM / regime switching).",
-        "required_params": ["n_states", "hidden_dim"],
-        "optional_params": {
-            "topology": "ergodic",
-            "band_width": 1,
-            "self_loop_init": 2.0,
-            "use_bias": True,
-        },
-        "use_case": "Non-stationary dynamics driven by the context.",
-    },
-}
-
-
-def get_transition_info() -> Dict[str, Dict[str, Any]]:
-    """Return a deep copy of the transition registry.
-
-    :return: The registry, safe to mutate.
-    :rtype: Dict[str, Dict[str, Any]]
-    """
-    return copy.deepcopy(TRANSITION_REGISTRY)
-
-
-def validate_transition_config(transition_type: str, **kwargs: Any) -> None:
-    """Validate a transition type and its keyword arguments.
-
-    :param transition_type: A :data:`TRANSITION_REGISTRY` key.
-    :type transition_type: str
-    :param kwargs: Candidate constructor arguments.
-    :type kwargs: Any
-    :raises ValueError: If the type is unknown or a required parameter is
-        missing.
-    """
-    info = TRANSITION_REGISTRY.get(transition_type)
-    if info is None:
-        raise ValueError(
-            f"Unknown transition_type '{transition_type}'. "
-            f"Available: {sorted(TRANSITION_REGISTRY)}."
-        )
-    missing = [p for p in info["required_params"] if p not in kwargs]
-    if missing:
-        raise ValueError(
-            f"create_transition_layer('{transition_type}') is missing required "
-            f"parameter(s) {missing}."
-        )
-
-
-def assemble_transition_config(
-    transition_type: str,
-    wrapper_config: Mapping[str, Any],
-    caller_args: Optional[Mapping[str, Any]] = None,
-    *,
-    passthrough: Sequence[str] = _TRANSITION_CONFIG_PASSTHROUGH_KEYS,
-) -> Dict[str, Any]:
-    """Filter a wrapper's generic transition defaults, then merge the caller's.
-
-    :param transition_type: A :data:`TRANSITION_REGISTRY` key.
-    :type transition_type: str
-    :param wrapper_config: The wrapper's own generic config; filtered.
-    :type wrapper_config: Mapping[str, Any]
-    :param caller_args: The caller's explicit args; never filtered.
-    :type caller_args: Optional[Mapping[str, Any]]
-    :param passthrough: Keys kept regardless of the registry intersection.
-    :type passthrough: Sequence[str]
-    :return: The assembled config dict for :func:`create_transition_layer`.
-    :rtype: Dict[str, Any]
-    :raises ValueError: If ``transition_type`` is not registered.
-    """
-    info = TRANSITION_REGISTRY.get(transition_type)
-    if info is None:
-        raise ValueError(
-            f"Unknown transition_type '{transition_type}'. "
-            f"Available: {sorted(TRANSITION_REGISTRY)}."
-        )
-    accepted = (
-        set(info["required_params"])
-        | set(info["optional_params"])
-        | set(passthrough)
-    )
-    config = {k: v for k, v in wrapper_config.items() if k in accepted}
-    if caller_args:
-        config.update(caller_args)
-    return config
-
-
-def create_transition_layer(
-    transition_type: TransitionType,
-    name: Optional[str] = None,
-    **kwargs: Any,
-) -> keras.layers.Layer:
-    """Create a transition layer by type name.
-
-    :param transition_type: A :data:`TRANSITION_REGISTRY` key.
-    :type transition_type: TransitionType
-    :param name: Optional layer name.
-    :type name: Optional[str]
-    :param kwargs: Constructor arguments for the transition class.
-    :type kwargs: Any
-    :return: An unbuilt transition layer.
-    :rtype: keras.layers.Layer
-    :raises ValueError: If the type is unknown, a required parameter is
-        missing, or an undeclared keyword is passed. Undeclared keywords
-        raise; they are never silently dropped.
-    """
-    info = TRANSITION_REGISTRY.get(transition_type)
-    if info is None:
-        raise ValueError(
-            f"Unknown transition_type '{transition_type}'. "
-            f"Available: {sorted(TRANSITION_REGISTRY)}."
-        )
-    valid = set(info["required_params"]) | set(info["optional_params"])
-    dropped = sorted(set(kwargs) - valid)
-    if dropped:
-        raise ValueError(
-            f"create_transition_layer('{transition_type}'): "
-            f"{len(dropped)} {STRICT_DROPPED_KEY_MARKER} {dropped}. "
-            f"'{transition_type}' ({info['class'].__name__}) accepts only "
-            f"{sorted(valid)}. Pre-filter wrapper defaults with "
-            f"assemble_transition_config() instead of passing them here."
-        )
-    validate_transition_config(transition_type, **kwargs)
-    # The static transition ignores the context width; it is accepted in the
-    # registry so one wrapper config serves both types, and dropped here
-    # rather than forwarded into a constructor that does not declare it.
-    if transition_type == "static":
-        kwargs.pop("hidden_dim", None)
-    try:
-        return info["class"](name=name, **kwargs)
-    except (TypeError, ValueError) as e:
-        raise ValueError(
-            f"Failed to create {transition_type} transition "
-            f"({info['class'].__name__}). Original error: {e}"
-        ) from e
-
-
-def create_transition_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
-    """Create a transition layer from a config dict carrying ``type``.
-
-    :param config: Config dict with a ``type`` key; ``name`` flows through.
-    :type config: Dict[str, Any]
-    :return: An unbuilt transition layer.
-    :rtype: keras.layers.Layer
-    :raises ValueError: If ``config`` is not a dict or lacks ``type``.
-    """
-    if not isinstance(config, dict):
-        raise ValueError(f"config must be a dictionary, got {type(config)}")
-    if "type" not in config:
-        raise ValueError("Configuration must include 'type' key")
-    config_copy = config.copy()
-    transition_type = config_copy.pop("type")
-    return create_transition_layer(transition_type, **config_copy)
+        shape = keras.ops.shape(offset)
+        offset = keras.ops.reshape(offset, (shape[0], shape[1], self.n_states, self.n_states))
+        log_pi, log_A = self._normalize(self.pi_logits, self.transition_logits + offset)
+        zeros = _batch_time_zeros(inputs, log_pi.dtype)
+        return zeros[:, 0, None] + log_pi, log_A

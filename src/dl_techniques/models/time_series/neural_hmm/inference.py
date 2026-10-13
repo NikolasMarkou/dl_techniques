@@ -23,6 +23,10 @@ second sequence length on), and the forward pass can be differentiated under XLA
 arithmetic runs in float32, or float64 when an input is float64; float16 and bfloat16
 inputs are promoted, because a log-space recursion accumulates.
 
+:class:`LogSpaceOutputSpec` is the one piece of this module that is not a function: the
+mixin every neural_hmm layer that emits a log-space output uses, so that its symbolic
+output dtype matches the accumulation dtype its ``call()`` really returns.
+
 References:
     - Rabiner, 1989. A Tutorial on Hidden Markov Models and Selected Applications in
       Speech Recognition. Proceedings of the IEEE 77(2), pp. 257-286.
@@ -37,6 +41,39 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.dtype_policy import accumulation_dtype
+
+# ---------------------------------------------------------------------
+
+
+class LogSpaceOutputSpec:
+    """Mixin: declare a layer's symbolic outputs in its accumulation dtype.
+
+    Interface contract (shared by the transition, emission and model classes):
+
+    - **Use**: list it BEFORE ``keras.layers.Layer`` (or ``keras.Model``) in the bases.
+      The host implements ``compute_output_shape``, and its ``call()`` returns every
+      output in ``accumulation_dtype(self.compute_dtype)``: float32 under a float16 or
+      bfloat16 policy, the policy's own dtype otherwise.
+    - **Returns**: Keras' own spec (shapes from ``compute_output_shape``, any nesting)
+      with every ``KerasTensor`` re-stamped in that dtype.
+    - **Failure mode**: raises whatever ``compute_output_shape`` raises.
+
+    Keras' default ``compute_output_spec`` stamps every output with
+    ``self.compute_dtype``, so under ``mixed_float16`` a symbolic trace would claim
+    float16 for log-probabilities that ``call()`` returns in float32 (D-010).
+    """
+
+    def compute_output_spec(self, *args, **kwargs):
+        """Return Keras' output spec with each tensor in the accumulation dtype.
+
+        :param args: The layer's call arguments (symbolic tensors).
+        :param kwargs: The layer's call keyword arguments.
+        :return: The spec structure, every ``KerasTensor`` re-stamped.
+        """
+        spec = super().compute_output_spec(*args, **kwargs)
+        dtype = accumulation_dtype(self.compute_dtype)
+        return keras.tree.map_structure(lambda s: keras.KerasTensor(s.shape, dtype=dtype), spec)
+
 
 # ---------------------------------------------------------------------
 

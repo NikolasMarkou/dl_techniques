@@ -1,568 +1,329 @@
-"""Configurable emission modules for the Neural HMM.
+"""
+Emission layers of the Neural HMM: the per-state log-potential ``log_emit`` of every
+observation, of shape ``(B, T, K)``.
 
-The emission module maps the observation and the state-context features to a
-per-state log-density. Two shapes are supported, driven by the ``obs_type``
-config key:
+- :class:`GenerativeEmission` scores ``log p(x_t | z_t = k)``, a normalized density. Each
+  state ``k`` owns a learned embedding ``e_k``; a feed-forward head built by
+  :func:`dl_techniques.layers.ffn.factory.create_ffn_layer` maps it, optionally
+  concatenated with a per-step context ``h_t``, to the parameters of the state's
+  distribution (Tran et al., 2016):
 
-- ``gaussian``: each state emits a Gaussian density :math:`\mathcal{N}(\mu_k,
-  \sigma_k^2)`. The per-state parameters ``(\mu_k, \sigma_k)` are derived from a
-  learned ``(K, E)`` state embedding, optionally conditioned on the encoder
-  context ``h_t`` when ``emission_context`` is ``autoregressive``.
+  - ``gaussian``: a diagonal Gaussian over ``obs_dim`` features, mean ``mu`` and scale
+    ``softplus(raw) + min_scale``;
+  - ``categorical``: a categorical over ``vocab_size`` symbols, ``log_softmax`` of the
+    head's logits;
+  - ``poisson``: independent Poisson counts over ``obs_dim`` features, rate
+    ``softplus(raw) + min_scale``, including the ``-log x!`` term, so the density is
+    normalized.
 
-- ``categorical``: each state emits a categorical over a vocabulary of
-  ``vocab_size`` tokens. The per-state logits are produced from the same state
-  embedding, again optionally conditioned on context.
+  Without a context the head runs once on the ``(K, E)`` embedding table and every step
+  shares the parameters; with one it runs on a ``(B, T, K, E + H)`` tensor.
+- :class:`DiscriminativeEmission` scores each state from a ``(B, T, H)`` context with one
+  ``Dense(K)``: unnormalized potentials for a linear-chain CRF (Lample et al., 2016).
 
-- ``poisson``: each state emits a Poisson distribution :math:`\text{Pois}(\lambda_k)`
-  with rate ``\lambda_k > 0``. The rate is obtained from a softplus of the
-  params output; stable training requires ``min_scale`` > 0.
-
-All three share the ``state_emb`` / ``head`` pair; the only branch is the
-mapping from params to a per-state log-density. The emission_context
-``autoregressive`` mode was originally designed for the generative regime so
-the encoder ``h_t`` only ever sees the past; when used discriminatively the
-context is supplied directly from the (possibly bidirectional) encoder output.
+Every output is in the accumulation dtype (float32 under a float16 policy): the head runs in
+the compute dtype, and the density math runs after a cast, because a Gaussian log-density
+``-0.5 * ((x - mu) / sd) ** 2`` overflows float16 once ``|x - mu| / sd`` exceeds about 362.
 
 References:
-    - Bishop, 1994. Mixture Density Networks. Aston University Technical Report NCRG/94/004.
-    - Tang et al., 2020. Neural HMMs for regime-switching time-series.
-      (https://arxiv.org/abs/2006.00694)
-    - Chen and Saad, 2016. Gaussian HMM with learnable state emission densities.
-      Signal Processing.
+    - Tran, Bisk, Vaswani, Marcu and Knight, 2016. Unsupervised Neural Hidden Markov
+      Models. Proceedings of the Workshop on Structured Prediction for NLP.
+      arXiv:1609.09007.
+    - Lample, Ballesteros, Subramanian, Kawakami and Dyer, 2016. Neural Architectures for
+      Named Entity Recognition. NAACL-HLT. arXiv:1603.01360.
 """
 
-import copy
-from typing import Any, Dict, Literal, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import keras
 import numpy as np
 
 # ---------------------------------------------------------------------
-# local imports
+# Local Imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.ffn.factory import assemble_ffn_config, create_ffn_layer
+from dl_techniques.utils.dtype_policy import accumulation_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.layers.ffn.factory import create_ffn_layer, assemble_ffn_config
+from dl_techniques.utils.tensors import log_gamma
+
+from .inference import LogSpaceOutputSpec
 
 # ---------------------------------------------------------------------
 
-#: Emission types accepted by :func:`create_emission_layer`.
-EmissionType = Literal["gaussian", "categorical", "poisson"]
+#: Observation types :class:`GenerativeEmission` accepts.
+OBS_TYPES: Tuple[str, ...] = ("gaussian", "categorical", "poisson")
 
-#: Additive logit for a forbidden transition: zero probability after softmax.
-NEGATIVE_LOGIT: float = -1e9
+#: ``0.5 * log(2 * pi)``, the Gaussian normalizer per feature.
+_HALF_LOG_TWO_PI: float = 0.5 * float(np.log(2.0 * np.pi))
 
-#: Minimum scale clamp for Gaussian and Poisson emissions; avoids degenerate
-#  densities where ``sigma`` or ``lambda`` collapse to zero.
-MIN_SCALE: float = 1e-3
-
-#: Marker text for the strict unknown-keyword error, matching the FFN factory.
-STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
-
-#: Config keys that pass through :func:`assemble_emission_config` untouched.
-_EMISSION_CONFIG_PASSTHROUGH_KEYS = ("type", "name")
-
-
-# ---------------------------------------------------------------------
-# per-state log-density helpers
-# ---------------------------------------------------------------------
-
-
-def _gaussian_logprob(x: keras.KerasTensor, mu: keras.KerasTensor,
-                       raw_sd: keras.KerasTensor) -> keras.KerasTensor:
-    """Gaussian log-density per observation, summed over the feature dim.
-
-    :math:`-\frac{1}{2}\Bigl(\frac{x-\mu}{\sigma}\Bigr)^2 - \log\sigma
-    - \frac{1}{2}\log(2\pi)`
-
-    :param x: Observation tensor ``(B, T, D)``.
-    :type x: keras.KerasTensor
-    :param mu: Mean per state ``(B, T, K, D)``.
-    :type mu: keras.KerasTensor
-    :param raw_sd: Raw scale before softplus ``(B, T, K, D)``.
-    :type raw_sd: keras.KerasTensor
-    :return: Log-probability per observation ``(B, T, K)``, summed over D.
-    :rtype: keras.KerasTensor
-    """
-    sd = keras.ops.softplus(raw_sd) + MIN_SCALE
-    z = (x[:, :, None] - mu) / sd
-    logprob = -0.5 * keras.ops.square(z) - keras.ops.log(sd) - 0.5 * np.log(2 * np.pi)
-    return keras.ops.sum(logprob, axis=-1)
-
-
-def _categorical_logprob(x: keras.KerasTensor, logits: keras.KerasTensor,
-                          vocab_size: int) -> keras.KerasTensor:
-    """Categorical log-density per observation, summed over the vocab dim.
-
-    :math:`\log p(x_t \mid z_t = k) = \log\text{softmax}(logits)_k` at
-    the index ``x_t``.
-
-    :param x: Integer observation tensor ``(B, T)``; each entry ``in [0,
-        vocab_size)``.
-    :type x: keras.KerasTensor
-    :param logits: Per-state logits ``(B, T, K, vocab_size)``.
-    :type logits: keras.KerasTensor
-    :param vocab_size: Size of the observation vocabulary.
-    :type vocab_size: int
-    :return: Log-probability per observation ``(B, T, K)``, un-reduced.
-    :rtype: keras.KerasTensor
-    """
-    logp = keras.ops.log_softmax(logits, axis=-1)
-    onehot = keras.ops.one_hot(x, vocab_size)[:, :, None]  # (B,T,1,V)
-    # logp is (B,T,K,V) after broadcasting; select the token class and sum over V=1
-    return keras.ops.sum(logp * onehot, axis=-1)
-
-
-def _poisson_logprob(x: keras.KerasTensor, rate: keras.KerasTensor) -> keras.KerasTensor:
-    """Poisson log-density per observation, un-reduced.
-
-    :math:`-\lambda + x \log\lambda - \log(x!)`.  The ``\log(x!)`` term is
-    constant w.r.t. the model parameters, so it is omitted (it does not affect
-    the gradient) and the return is the *unnormalized* log-probability that
-    ``forward_logprob`` (below) adds into.
-
-    :param x: Observation tensor ``(B, T)``, non-negative integers.
-    :type x: keras.KerasTensor
-    :param rate: Rate per state ``(B, T, K)``, strictly positive.
-    :type rate: keras.KerasTensor
-    :return: Un-normalized log-probability per observation ``(B, T, K)``.
-    :rtype: keras.KerasTensor
-    """
-    return -rate + x[:, :, None] * keras.ops.log(rate)
-
-
-# ---------------------------------------------------------------------
-# emission layers
 # ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.neural_hmm.emissions")
-class GenerativeEmission(keras.layers.Layer):
-    """Generative emission: ``log p(x_t | z_t = k)`` in the forward pass.
+class GenerativeEmission(LogSpaceOutputSpec, keras.layers.Layer):
+    """Per-state observation log-densities ``log p(x_t | z_t = k)``.
 
-    Each state ``k`` emits a density over the observation. The density type
-    (Gaussian / categorical / Poisson) is chosen at construction time through
-    the ``obs_type`` config key; all three share the same ``state_emb`` /
-    ``head`` backbone.
-
-    When ``emission_context`` is ``autoregressive`` the encoder context
-    ``h_t`` (causal, past-only) is broadcast and concatenated with the state
-    embedding before the head, so each timestep sees a different context. When
-    ``emission_context`` is ``none`` the same parameters are used for every
-    timestep (the embedding alone sets the per-state density).
-
-    The ``state_emb`` is a ``(K, E``) embedding looked up by state index; it is
-    linearly projected by ``head`` to the parameter vector whose meaning depends
-    on ``obs_type``:
-
-    - ``gaussian``: ``head`` outputs ``2 * obs_dim``, split into ``mu`` and
-      ``raw_sd``; ``sigma = softplus(raw_sd) + min_scale``.
-    - ``categorical``: ``head`` outputs ``vocab_size`` logits per state.
-    - ``poisson``: ``head`` outputs 1 value per state, the Poisson rate.
-
-    In the discriminative regime the ``x`` argument is still supplied but only
-    needed for the Gaussian branch (computes the log-likelihood). The ``h``
-    argument carries the encoder context from the (possibly bidirectional)
-    encoder.
-
-    :param n_states: Number of hidden states ``K``.
-    :type n_states: int
-    :param hidden_dim: Dimensionality of the encoder context ``H``.
-    :type hidden_dim: int
-    :param state_emb_dim: Dimensionality of the state embedding ``E``.
-    :type state_emb_dim: int
-    :param obs_type: Observation type (``gaussian``, ``categorical``, ``poisson``).
-    :type obs_type: str
-    :param obs_dim: Observation dimension for Gaussian emissions.
-    :type obs_dim: Optional[int]
-    :param vocab_size: Vocabulary size for categorical emissions.
-    :type vocab_size: Optional[int]
-    :param emission_context: Whether to condition on autoregressive context (``none`` or ``autoregressive``).
-    :type emission_context: str
-    :param min_scale: Minimum scale for Gaussian/Poisson emissions.
-    :type min_scale: float
+    :param n_states: Number of hidden states ``K``; positive.
+    :param obs_type: One of ``gaussian``, ``categorical``, ``poisson``.
+    :param obs_dim: Feature count ``D`` of a ``gaussian`` or ``poisson`` observation;
+        required for those types and must be ``None`` for ``categorical``.
+    :param vocab_size: Symbol count ``V`` of a ``categorical`` observation; required for
+        that type and must be ``None`` otherwise.
+    :param state_emb_dim: Width ``E`` of the learned state embeddings; positive.
+    :param hidden_dim: Hidden width of the head; positive.
+    :param context_dim: Width ``H`` of the per-step context the head also reads; 0 (the
+        default) for no context.
+    :param ffn_type: Any :func:`create_ffn_layer` type that maps ``(..., in)`` to
+        ``(..., out)`` and accepts ``hidden_dim``/``output_dim``.
+    :param ffn_args: Extra keyword arguments for the head, merged over the defaults by
+        :func:`assemble_ffn_config`.
+    :param min_scale: Floor added to the Gaussian scale and the Poisson rate; positive.
+        Unused by ``categorical``.
+    :param kwargs: Base ``keras.layers.Layer`` arguments.
+    :raises ValueError: If an argument is out of range, missing for the ``obs_type``, or
+        set where the ``obs_type`` does not read it.
     """
 
     def __init__(
         self,
         n_states: int,
-        hidden_dim: int,
-        state_emb_dim: int,
         obs_type: str,
         obs_dim: Optional[int] = None,
         vocab_size: Optional[int] = None,
-        emission_context: str = "none",
-        min_scale: float = MIN_SCALE,
+        state_emb_dim: int = 16,
+        hidden_dim: int = 64,
+        context_dim: int = 0,
+        ffn_type: str = "mlp",
+        ffn_args: Optional[Dict[str, Any]] = None,
+        min_scale: float = 1e-3,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        if obs_type not in OBS_TYPES:
+            raise ValueError(f"Unknown obs_type '{obs_type}'. Available: {list(OBS_TYPES)}.")
+        if obs_type == "categorical":
+            if vocab_size is None or vocab_size <= 0 or obs_dim is not None:
+                raise ValueError(
+                    f"obs_type='categorical' needs a positive vocab_size and obs_dim=None, "
+                    f"got vocab_size={vocab_size}, obs_dim={obs_dim}."
+                )
+        elif obs_dim is None or obs_dim <= 0 or vocab_size is not None:
+            raise ValueError(
+                f"obs_type='{obs_type}' needs a positive obs_dim and vocab_size=None, "
+                f"got obs_dim={obs_dim}, vocab_size={vocab_size}."
+            )
+        for name, value in (("n_states", n_states), ("state_emb_dim", state_emb_dim), ("hidden_dim", hidden_dim)):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive, got {value}.")
+        if context_dim < 0:
+            raise ValueError(f"context_dim must be non-negative, got {context_dim}.")
+        if min_scale <= 0:
+            raise ValueError(f"min_scale must be positive, got {min_scale}.")
+
         self.n_states = n_states
-        self.hidden_dim = hidden_dim
-        self.state_emb_dim = state_emb_dim
         self.obs_type = obs_type
         self.obs_dim = obs_dim
         self.vocab_size = vocab_size
-        self.emission_context = emission_context
+        self.state_emb_dim = state_emb_dim
+        self.hidden_dim = hidden_dim
+        self.context_dim = context_dim
+        self.ffn_type = ffn_type
+        self.ffn_args = ffn_args
         self.min_scale = min_scale
 
-        # State embedding lookup table: (K, E)
-        self.state_emb = self.add_weight(
-            shape=(self.n_states, self.state_emb_dim),
-            initializer="random_normal",
-            name="state_emb",
+        n_params = {"gaussian": 2 * (obs_dim or 0), "categorical": vocab_size, "poisson": obs_dim}[obs_type]
+        self.head = create_ffn_layer(
+            ffn_type,
+            name="head",
+            **assemble_ffn_config(ffn_type, {"hidden_dim": hidden_dim, "output_dim": n_params}, ffn_args),
         )
+        self.state_embedding = None
 
-        # Parameter head: maps state embedding + optional context -> params
-        P = {
-            "gaussian": 2 * (self.obs_dim or 1),
-            "categorical": self.vocab_size or 1,
-            "poisson": 1,
-        }[self.obs_type]
+    def build(
+        self,
+        obs_shape: Tuple[Optional[int], ...],
+        context_shape: Optional[Tuple[Optional[int], ...]] = None,
+    ) -> None:
+        """Create the state embedding table and build the head.
 
-        self.head = keras.Sequential(
-            [keras.layers.Dense(self.hidden_dim, activation="gelu"),
-             keras.layers.Dense(P)],
-            name="emission_head",
-        )
-
-    def call(self, x: keras.KerasTensor, h: keras.KerasTensor) -> keras.KerasTensor:
-        """Compute the per-state log-probability ``log p(x_t | z_t = k)``.
-
-        :param x: Observation tensor ``(batch, time)`` of ints (gaussian: float
-            ``(B, T, D)``, categorical: int, poisson: int).
-        :type x: keras.KerasTensor
-        :param h: Encoder context ``(batch, time, hidden_dim)``; ignored when
-            ``emission_context`` is ``none``.
-        :type h: keras.KerasTensor
-        :return: Per-state log-probability ``(batch, time, K)``; each column k
-            is ``log p(x_t | z_t = k)``.
-        :rtype: keras.KerasTensor
+        :param obs_shape: ``(B, T)`` for ``categorical``, ``(B, T, D)`` otherwise.
+        :param context_shape: ``(B, T, H)`` when ``context_dim > 0``, else ``None``.
+        :raises ValueError: If a shape disagrees with the config.
         """
-        K, E = self.n_states, self.state_emb_dim
-        H = self.hidden_dim
-        emb = keras.ops.broadcast_to(
-            self.state_emb[None, None], (keras.ops.shape(x)[0], keras.ops.shape(x)[1], K, E)
-        )
-        if self.emission_context == "autoregressive" and h is not None:
-            # causal context broadcast over states and time
-            ctx = keras.ops.broadcast_to(
-                h[:, :, None], (keras.ops.shape(x)[0], keras.ops.shape(x)[1], K, H)
+        expected_rank = 2 if self.obs_type == "categorical" else 3
+        if len(obs_shape) != expected_rank or (expected_rank == 3 and obs_shape[-1] not in (None, self.obs_dim)):
+            raise ValueError(
+                f"obs_type='{self.obs_type}' expects observations of rank {expected_rank}"
+                f"{'' if expected_rank == 2 else f' with {self.obs_dim} features'}, got {tuple(obs_shape)}."
             )
-            params = self.head(keras.ops.concatenate([emb, ctx], axis=-1))
-        else:
-            params = self.head(emb)  # [1,1,K,P]
+        if self.context_dim:
+            if context_shape is None or len(context_shape) != 3 or context_shape[-1] not in (None, self.context_dim):
+                raise ValueError(
+                    f"context_dim={self.context_dim} expects a (batch, time, {self.context_dim}) "
+                    f"context, got {context_shape}."
+                )
+        self.state_embedding = self.add_weight(
+            name="state_embedding",
+            shape=(self.n_states, self.state_emb_dim),
+            # Unit scale, not Keras' 0.05: states must start distinguishable, or every
+            # state emits the same density and the gradient cannot tell them apart.
+            initializer=keras.initializers.RandomNormal(stddev=1.0),
+        )
+        width = self.state_emb_dim + self.context_dim
+        self.head.build((None, None, self.n_states, width) if self.context_dim else (self.n_states, width))
+        super().build(obs_shape)
 
+    def _head_features(self, context: Optional[keras.KerasTensor]) -> keras.KerasTensor:
+        """Return the head's input: ``(K, E)`` alone, or ``(B, T, K, E + H)`` with a context.
+
+        :param context: ``(B, T, H)`` context, or ``None`` when ``context_dim == 0``.
+        :return: The feature tensor in the compute dtype.
+        :raises ValueError: If a context is required but missing.
+        """
+        embedding = keras.ops.convert_to_tensor(self.state_embedding)
+        if not self.context_dim:
+            return embedding
+        if context is None:
+            raise ValueError(f"context_dim={self.context_dim}: call(obs, context) needs a context.")
+        context = keras.ops.cast(context, embedding.dtype)
+        per_state = keras.ops.zeros((self.n_states, 1), dtype=embedding.dtype)
+        embedding = keras.ops.zeros_like(context[:, :, None, :1]) + embedding  # (B, T, K, E)
+        context = context[:, :, None, :] + per_state  # (B, T, K, H)
+        return keras.ops.concatenate([embedding, context], axis=-1)
+
+    def call(
+        self,
+        obs: keras.KerasTensor,
+        context: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Return ``log p(x_t | z_t = k)`` for every step and state.
+
+        :param obs: ``(B, T)`` integer symbols in ``[0, V)`` for ``categorical`` (any other
+            value scores 0, e.g. ``-1`` padding); ``(B, T, D)`` reals for ``gaussian``;
+            ``(B, T, D)`` non-negative counts for ``poisson``.
+        :param context: ``(B, T, H)`` per-step context when ``context_dim > 0``.
+        :param training: Forwarded to the head.
+        :return: ``(B, T, K)`` log-densities in the accumulation dtype.
+        """
+        params = self.head(self._head_features(context), training=training)
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-010: the head runs in the compute
+        # dtype, the density math in the accumulation dtype (float32 under mixed_float16).
+        # Do NOT move this cast below the density: ((x - mu) / sd) ** 2 overflows float16
+        # (max 65504) once |x - mu| / sd > 362, which sd = min_scale = 1e-3 reaches at
+        # |x - mu| > 0.362, and the forward recursion then sums an inf.
+        accum = accumulation_dtype(self.compute_dtype)
+        params = keras.ops.cast(params, accum)
+        if not self.context_dim:
+            params = params[None, None]  # (1, 1, K, P): broadcasts over batch and time
+
+        if self.obs_type == "categorical":
+            log_probs = keras.ops.log_softmax(params, axis=-1)  # (.., K, V)
+            chosen = keras.ops.one_hot(keras.ops.cast(obs, "int32"), self.vocab_size)[:, :, None, :] > 0
+            # Select, never multiply by the one-hot: 0 * -inf is NaN.
+            return keras.ops.sum(keras.ops.where(chosen, log_probs, keras.ops.zeros_like(log_probs)), axis=-1)
+
+        x = keras.ops.cast(obs, accum)[:, :, None, :]  # (B, T, 1, D)
         if self.obs_type == "gaussian":
-            mu, raw = keras.ops.split(params, 2, axis=-1)
-            sd = keras.ops.softplus(raw) + self.min_scale
-            # x may be (B,T,D) float or squeezed; unify to (B,T,D) if needed
-            if x.shape.rank == 2:
-                x_expanded = x[:, :, None]
-            else:
-                x_expanded = x
-            return _gaussian_logprob(x_expanded, mu, raw)
-
-        elif self.obs_type == "categorical":
-            logits = params
-            return _categorical_logprob(x, logits, self.vocab_size)
-
-        elif self.obs_type == "poisson":
-            rate = keras.ops.exp(params)
-            rate = keras.ops.maximum(rate, MIN_SCALE)
-            return _poisson_logprob(x, rate)
-
+            mean, raw_scale = keras.ops.split(params, 2, axis=-1)
+            scale = keras.ops.softplus(raw_scale) + self.min_scale
+            z = (x - mean) / scale
+            log_density = -0.5 * keras.ops.square(z) - keras.ops.log(scale) - _HALF_LOG_TWO_PI
         else:
-            raise ValueError(f"Unknown obs_type '{self.obs_type}'. "
-                             f"Available: ['gaussian', 'categorical', 'poisson'].")
+            rate = keras.ops.softplus(params) + self.min_scale
+            log_density = x * keras.ops.log(rate) - rate - log_gamma(x + 1.0)
+        return keras.ops.sum(log_density, axis=-1)
 
-    def compute_output_shape(self, input_shape: Any) -> Any:
-        """Return ``(batch, time, K)``.
+    def compute_output_shape(
+        self,
+        obs_shape: Tuple[Optional[int], ...],
+        context_shape: Optional[Tuple[Optional[int], ...]] = None,
+    ) -> Tuple[Optional[int], ...]:
+        """Return ``(B, T, K)`` from the stored config.
 
-        :param input_shape: ``(batch, time)`` for int observations; ``(batch,
-            time, D)`` for gaussian floats.
-        :type input_shape: Any
-        :return: ``(batch, time, K)``.
-        :rtype: Any
+        :param obs_shape: Observation shape ``(B, T, ...)``.
+        :param context_shape: Context shape; does not change the output shape.
+        :return: ``(B, T, K)``.
         """
-        shape = tuple(input_shape)
-        return (shape[0], shape[1], self.n_states)
+        return obs_shape[0], obs_shape[1], self.n_states
 
-    def get_config(self) -> Dict[str, Any]:
-        """Return the constructor configuration.
+    def get_config(self) -> dict:
+        """Return every constructor argument.
 
-        :return: Configuration dictionary.
-        :rtype: Dict[str, Any]
+        :return: The layer config.
         """
-        config = {
-            "type": "generative_emission",
-            "n_states": self.n_states,
-            "obs_type": self.obs_type,
-            "obs_dim": self.obs_dim,
-            "vocab_size": self.vocab_size,
-            "emission_context": self.emission_context,
-            "min_scale": self.min_scale,
-            "hidden_dim": self.hidden_dim,
-            "state_emb_dim": self.state_emb_dim,
-        }
-        base = super().get_config()
-        return {**base, **config}
+        config = super().get_config()
+        config.update(
+            {
+                "n_states": self.n_states,
+                "obs_type": self.obs_type,
+                "obs_dim": self.obs_dim,
+                "vocab_size": self.vocab_size,
+                "state_emb_dim": self.state_emb_dim,
+                "hidden_dim": self.hidden_dim,
+                "context_dim": self.context_dim,
+                "ffn_type": self.ffn_type,
+                "ffn_args": self.ffn_args,
+                "min_scale": self.min_scale,
+            }
+        )
+        return config
 
 
 @register_dl_technique("dl_techniques.models.neural_hmm.emissions")
-class DiscriminativeEmission(keras.layers.Layer):
-    """Discriminative emission: state scores ``Dense(K)`` from ``h_t``.
+class DiscriminativeEmission(LogSpaceOutputSpec, keras.layers.Layer):
+    """Per-state potentials from a context, for a discriminative (CRF) Neural HMM.
 
-    In the discriminative / CRF-style mode the model maximizes
-    ``log p(y_{1:T} | x_{1:T})``. The emission does not produce a density over
-    the observations; instead it emits a vector of logits (one per state) from
-    the current encoder context ``h_t``.
+    ``log_emit = Dense(K)(h)``: unnormalized scores, not densities; the CRF partition
+    function normalizes over whole paths. The output is in the accumulation dtype.
 
-    The emission layer is simply ``Dense(n_states)`` with no activation; the
-    caller applies ``log_softmax`` per timestep when computing the forward
-    algorithm score or the Viterbi score.
-
-    :param n_states: Number of hidden states ``K``.
-    :type n_states: int
-    :param hidden_dim: Dimensionality of the encoder context ``H``.
-    :type hidden_dim: int
+    :param n_states: Number of hidden states ``K``; positive.
+    :param kwargs: Base ``keras.layers.Layer`` arguments.
+    :raises ValueError: If ``n_states`` is not positive.
     """
 
-    def __init__(
-        self,
-        n_states: int,
-        hidden_dim: int,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, n_states: int, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        if n_states <= 0:
+            raise ValueError(f"n_states must be positive, got {n_states}.")
         self.n_states = n_states
-        self.hidden_dim = hidden_dim
+        self.state_scores = keras.layers.Dense(n_states, name="state_scores")
 
-        self.dense = keras.layers.Dense(
-            self.n_states,
-            use_bias=True,
-            kernel_initializer="glorot_uniform",
-            name="state_scores",
-        )
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the scoring projection.
 
-    def call(self, h: keras.KerasTensor) -> keras.KerasTensor:
-        """Emit state scores from the encoder context.
-
-        :param h: Encoder context ``(batch, time, hidden_dim)``.
-        :type h: keras.KerasTensor
-        :return: State scores ``(batch, time, n_states)``, unactivated.
-        :rtype: keras.KerasTensor
+        :param input_shape: Context shape ``(B, T, H)``.
+        :raises ValueError: If the context is not rank 3.
         """
-        return self.dense(h)
+        if len(input_shape) != 3:
+            raise ValueError(f"Expected a context of shape (batch, time, features), got {tuple(input_shape)}.")
+        self.state_scores.build(input_shape)
+        super().build(input_shape)
 
-    def compute_output_shape(self, input_shape: Any) -> Any:
-        """Return ``(batch, time, n_states)``.
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+        """Return the ``(B, T, K)`` state potentials.
 
-        :param input_shape: ``(batch, time, hidden_dim)``.
-        :type input_shape: Any
-        :return: ``(batch, time, n_states)``.
-        :rtype: Any
+        :param inputs: Context ``(B, T, H)``.
+        :param training: Forwarded to the projection.
+        :return: ``(B, T, K)`` potentials in the accumulation dtype.
         """
-        shape = tuple(input_shape)
-        return (shape[0], shape[1], self.n_states)
+        scores = self.state_scores(inputs, training=training)
+        return keras.ops.cast(scores, accumulation_dtype(self.compute_dtype))
 
-    def get_config(self) -> Dict[str, Any]:
-        """Return the constructor configuration.
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Return ``(B, T, K)`` from the stored config.
 
-        :return: Configuration dictionary.
-        :rtype: Dict[str, Any]
+        :param input_shape: Context shape ``(B, T, H)``.
+        :return: ``(B, T, K)``.
         """
-        config = {"type": "discriminative_emission", "n_states": self.n_states}
-        base = super().get_config()
-        return {**base, **config}
+        return input_shape[0], input_shape[1], self.n_states
 
+    def get_config(self) -> dict:
+        """Return every constructor argument.
 
-# ---------------------------------------------------------------------
-# registry
-# ---------------------------------------------------------------------
-
-#: Registry of emission types. Every entry carries ``class``,
-#: ``description``, ``required_params``, ``optional_params`` and ``use_case``,
-#: mirroring the FFN factory. The key set, the :data:`EmissionType` alias and
-#: each entry's parameter lists are public API.
-EMISSION_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "gaussian": {
-        "class": GenerativeEmission,
-        "description": "Per-state Gaussian density with optional "
-        "autoregressive context conditioning (generative mode).",
-        "required_params": ["n_states", "hidden_dim", "state_emb_dim",
-                           "obs_dim"],
-        "optional_params": {
-            "emission_context": "none",
-            "min_scale": 1e-3,
-        },
-        "use_case": "Generative HMM: each state emits a Gaussian density.",
-    },
-    "categorical": {
-        "class": GenerativeEmission,
-        "description": "Per-state categorical over a vocabulary, optional "
-        "autoregressive context conditioning.",
-        "required_params": ["n_states", "hidden_dim", "state_emb_dim",
-                           "vocab_size"],
-        "optional_params": {
-            "emission_context": "none",
-        },
-        "use_case": "Generative HMM with discrete emissions (e.g. text).",
-    },
-    "poisson": {
-        "class": GenerativeEmission,
-        "description": "Per-state Poisson rate with optional "
-        "autoregressive context conditioning.",
-        "required_params": ["n_states", "hidden_dim", "state_emb_dim"],
-        "optional_params": {
-            "emission_context": "none",
-            "min_scale": 1e-3,
-        },
-        "use_case": "Generative HMM with count data.",
-    },
-    "discriminative": {
-        "class": DiscriminativeEmission,
-        "description": "State scores from encoder context, no observation "
-        "density (CRF-style tagger). The caller applies log_softmax per timestep.",
-        "required_params": ["n_states", "hidden_dim"],
-        "optional_params": {},
-        "use_case": "Discriminative HMM / neural CRF: maximize "
-        "log p(y | x).",
-    },
-}
-
-
-def get_emission_info() -> Dict[str, Dict[str, Any]]:
-    """Return a deep copy of the emission registry.
-
-    :return: The registry, safe to mutate.
-    :rtype: Dict[str, Dict[str, Any]]
-    """
-    return copy.deepcopy(EMISSION_REGISTRY)
-
-
-def validate_emission_config(emission_type: str, **kwargs: Any) -> None:
-    """Validate an emission type and its keyword arguments.
-
-    :param emission_type: A :data:`EMISSION_REGISTRY` key.
-    :type emission_type: str
-    :param kwargs: Candidate constructor arguments.
-    :type kwargs: Any
-    :raises ValueError: If the type is unknown or a required parameter is
-        missing.
-    """
-    info = EMISSION_REGISTRY.get(emission_type)
-    if info is None:
-        raise ValueError(
-            f"Unknown emission_type '{emission_type}'. "
-            f"Available: {sorted(EMISSION_REGISTRY)}."
-        )
-    missing = [p for p in info["required_params"] if p not in kwargs]
-    if missing:
-        raise ValueError(
-            f"create_emission_layer('{emission_type}') is missing required "
-            f"parameter(s) {missing}."
-        )
-
-
-def assemble_emission_config(
-    emission_type: str,
-    wrapper_config: Mapping[str, Any],
-    caller_args: Optional[Mapping[str, Any]] = None,
-    *,
-    passthrough: Sequence[str] = _EMISSION_CONFIG_PASSTHROUGH_KEYS,
-) -> Dict[str, Any]:
-    """Filter a wrapper's generic emission defaults, then merge the caller's.
-
-    :param emission_type: A :data:`EMISSION_REGISTRY` key.
-    :type emission_type: str
-    :param wrapper_config: The wrapper's own generic config; filtered.
-    :type wrapper_config: Mapping[str, Any]
-    :param caller_args: The caller's explicit args; never filtered.
-    :type caller_args: Optional[Mapping[str, Any]]
-    :param passthrough: Keys kept regardless of the registry intersection.
-    :type passthrough: Sequence[str]
-    :return: The assembled config dict for :func:`create_emission_layer`.
-    :rtype: Dict[str, Any]
-    :raises ValueError: If ``emission_type`` is not registered.
-    """
-    info = EMISSION_REGISTRY.get(emission_type)
-    if info is None:
-        raise ValueError(
-            f"Unknown emission_type '{emission_type}'. "
-            f"Available: {sorted(EMISSION_REGISTRY)}."
-        )
-    accepted = (
-        set(info["required_params"])
-        | set(info["optional_params"])
-        | set(passthrough)
-    )
-    config = {k: v for k, v in wrapper_config.items() if k in accepted}
-    if caller_args:
-        config.update(caller_args)
-    return config
-
-
-def create_emission_layer(
-    emission_type: EmissionType,
-    name: Optional[str] = None,
-    **kwargs: Any,
-) -> keras.layers.Layer:
-    """Create an emission layer by type name.
-
-    :param emission_type: A :data:`EMISSION_REGISTRY` key.
-    :type emission_type: EmissionType
-    :param name: Optional layer name.
-    :type name: Optional[str]
-    :param kwargs: Constructor arguments for the emission class.
-    :type kwargs: Any
-    :return: An unbuilt emission layer.
-    :rtype: keras.layers.Layer
-    :raises ValueError: If the type is unknown, a required parameter is
-        missing, or an undeclared keyword is passed. Undeclared keywords
-        raise; they are never silently dropped.
-    """
-    info = EMISSION_REGISTRY.get(emission_type)
-    if info is None:
-        raise ValueError(
-            f"Unknown emission_type '{emission_type}'. "
-            f"Available: {sorted(EMISSION_REGISTRY)}."
-        )
-    valid = set(info["required_params"]) | set(info["optional_params"])
-    dropped = sorted(set(kwargs) - valid)
-    if dropped:
-        raise ValueError(
-            f"create_emission_layer('{emission_type}'): "
-            f"{len(dropped)} {STRICT_DROPPED_KEY_MARKER} {dropped}. "
-            f"'{emission_type}' ({info['class'].__name__}) accepts only "
-            f"{sorted(valid)}. Pre-filter wrapper defaults with "
-            f"assemble_emission_config() instead of passing them here."
-        )
-    validate_emission_config(emission_type, **kwargs)
-    # Add obs_type to kwargs so the class knows which emission type it is
-    kwargs_with_type = dict(kwargs)
-    kwargs_with_type["obs_type"] = emission_type
-    try:
-        return info["class"](name=name, **kwargs_with_type)
-    except (TypeError, ValueError) as e:
-        raise ValueError(
-            f"Failed to create {emission_type} emission "
-            f"({info['class'].__name__}). Original error: {e}"
-        ) from e
-
-
-def create_emission_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
-    """Create an emission layer from a config dict carrying ``type``.
-
-    :param config: Config dict with a ``type`` key; ``name`` flows through.
-    :type config: Dict[str, Any]
-    :return: An unbuilt emission layer.
-    :rtype: keras.layers.Layer
-    :raises ValueError: If ``config`` is not a dict or lacks ``type``.
-    """
-    if not isinstance(config, dict):
-        raise ValueError(f"config must be a dictionary, got {type(config)}")
-    if "type" not in config:
-        raise ValueError("Configuration must include 'type' key")
-    config_copy = config.copy()
-    emission_type = config_copy.pop("type")
-    return create_emission_layer(emission_type, **config_copy)
+        :return: The layer config.
+        """
+        config = super().get_config()
+        config["n_states"] = self.n_states
+        return config
