@@ -62,7 +62,10 @@ from typing import Optional, Union, Any, Dict, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_build import materialize_sublayers
-from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
+    check_sequence_length,
+)
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
 )
@@ -86,7 +89,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 @register_dl_technique("dl_techniques.models.modern_bert.model")
-class ModernBERT(keras.Model):
+class ModernBERT(RecordedBuildShapeMixin, keras.Model):
     """ModernBERT (A Modern Bidirectional Encoder) foundation model.
 
     This model refactors the original BERT architecture to include modern

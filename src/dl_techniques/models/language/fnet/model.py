@@ -88,14 +88,17 @@ from dl_techniques.layers.heads.nlp.model_head import (
 )
 from dl_techniques.layers.transformers import FFNType, NormalizationPositionType, NormalizationType
 from dl_techniques.utils.model_build import materialize_sublayers
-from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
+    check_sequence_length,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.fnet.model")
-class FNet(keras.Model):
+class FNet(RecordedBuildShapeMixin, keras.Model):
     """FNet: a transformer encoder whose token mixer is a Fourier transform.
 
     A pure encoder in which the entire self-attention sublayer is replaced by an

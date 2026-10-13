@@ -193,6 +193,13 @@ around a guarded backbone caches step functions of its own: its `build` catches
 stays unbuilt and its next legal call works too (any other backbone build error
 keeps the CLM's logged-warning path); pinned by
 `tests/test_models/test_masked_language_model/test_a_refused_backbone_leaves_the_wrapper_usable.py`.
+An old `.keras` archive whose recorded build shape is over-long (saved before
+the guard) still loads, with every weight and a logged warning, and the loaded
+model refuses an over-long call: Keras rebuilds from the recorded shape inside a
+bare `try/except` and marks the model built anyway, so a refusal there used to
+load it with no weights. Every guarded class except BLT lists
+`RecordedBuildShapeMixin` first among its bases (one line); BLT has its own
+`build_from_config`. `TextDecoder` (GPT2) honours the same load flag.
 Usage and the functions: `utils/AGENTS.md`. Pinned per class by
 `tests/test_models/test_a_position_limit_is_refused_cleanly.py` (one `Subject`
 row per class; each row goes RED when its guard line is removed).
@@ -201,7 +208,7 @@ row per class; each row goes RED when its guard line is removed).
 |---|---|
 | Guarded (limit attribute) | BERT, DistilBERT, FNet (`max_position_embeddings`), TreeTransformer (`max_len`), GPT2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3 (`max_seq_len`) |
 | Guarded only for some configurations | ModernBERT (only when a global-attention layer exists: `num_layers >= global_attention_interval`), Zamba2 (only with a `g` entry in `layer_mapping`, the one RoPE table), HNet (only when stage 0 holds an attention block; inner stages see at most `max_chunks` positions and truncate silently, which is out of scope) |
-| Guarded, warns on load | BLT (`max_sequence_length`): `build_from_config` of an old archive whose recorded shape is over-long logs a warning and builds, never refuses |
+| Guarded, own load override | BLT (`max_sequence_length`): its own `build_from_config` of an old archive whose recorded shape is over-long logs a warning and builds, never refuses (every other guarded class does the same through `RecordedBuildShapeMixin`) |
 | No position limit, not guarded | Mamba, Mamba2 (and the unguarded configurations above): they serve any length, finite, eagerly and under `jit_compile=True`; the test's `NO_LIMIT` arm goes RED if a guard is wired unconditionally |
 
 A model that builds its sub-layers by hand (BERT, TopoLM, Zamba2, HNet, BLT) also

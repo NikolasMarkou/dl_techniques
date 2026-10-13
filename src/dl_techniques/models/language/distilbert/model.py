@@ -64,14 +64,17 @@ from dl_techniques.layers.heads.nlp.model_head import (
     ids_shape_of,
 )
 from dl_techniques.utils.model_build import materialize_sublayers
-from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
+    check_sequence_length,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.distilbert.model")
-class DistilBERT(keras.Model):
+class DistilBERT(RecordedBuildShapeMixin, keras.Model):
     """DistilBERT (Distilled BERT) model.
 
     DistilBERT is a smaller, faster, and lighter transformer model, obtained in

@@ -60,14 +60,27 @@ Two more groups sit below the subject arms:
     which is out of scope). Each serves a length 2.5x or more over the
     constructor's ``max_seq_len``, finite, eagerly and under ``jit_compile=True``.
     This is also the arm that goes RED if a guard is wired unconditionally.
+``test_an_archive_with_an_over_long_recorded_shape_loads_every_weight``
+    Every subject rebuilds from the shape recorded in its ``.keras`` archive.
+    Keras 3.8 runs that rebuild inside a bare ``try/except`` and then marks the
+    model built anyway, so a refusal there loaded an old archive whose recorded
+    shape is over-long with ZERO weights and only a ``UserWarning`` (12 of 14
+    subjects before ``RecordedBuildShapeMixin``; WaveFieldLLM, whose variables
+    exist from ``__init__``, kept them but still raised the ``UserWarning``,
+    an error under this suite). The load must log a warning, restore every
+    variable, and leave the model refusing an over-long call.
 ``test_blt_warns_and_loads_an_archive_with_an_over_long_recorded_shape``
-    BLT rebuilds from the shape recorded in the archive. An old archive whose
-    recorded shape is over-long must log a warning and load, never refuse
-    (precedent: ``PositionalEmbedding.build_from_config``).
+    BLT's own override of the same load (it predates the mixin), with its
+    forward pinned too (precedent: ``PositionalEmbedding.build_from_config``).
 """
 
 import importlib
+import json
+import logging
+import re
+import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict
 
 import keras
@@ -630,13 +643,93 @@ def test_a_model_without_a_position_limit_serves_any_length(case, jit_compile):
 # ---------------------------------------------------------------------
 
 
+def _set_recorded_length(src: Path, dst: Path, old: int, new: int) -> None:
+    """Copy the archive ``src`` to ``dst`` with its recorded length ``old`` -> ``new``.
+
+    The recorded ``build_config.input_shape`` is a list for a model fed one
+    id tensor (Zamba2, HNet, BLT) and a dict of lists for a dict-fed model;
+    the last axis of every recorded shape is the sequence.
+    """
+    with zipfile.ZipFile(src) as source, zipfile.ZipFile(dst, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename == "config.json":
+                config = json.loads(data)
+                recorded = config["build_config"]["input_shape"]
+                shapes = (
+                    recorded.values() if isinstance(recorded, dict) else [recorded]
+                )
+                for shape in shapes:
+                    assert shape[-1] == old, recorded
+                    shape[-1] = new
+                data = json.dumps(config).encode()
+            target.writestr(item, data)
+
+
+#: Subjects with a variable shaped by the recorded length itself. FNet's
+#: ``(S, S)`` DFT matrix is sized by the first length built, so an archive that
+#: recorded ``limit + 1`` holds a ``(limit + 1)``-sized matrix; editing a legal
+#: archive's config would fabricate one that no model ever wrote. Its archive is
+#: built past the limit with the shared refusal bypassed (a pre-guard build).
+_SIZED_BY_RECORDED_LENGTH = ("fnet",)
+
+
+def _over_long_archive(subject, model, limit, tmp_path, monkeypatch) -> Path:
+    """Build ``model`` and save it as an archive that recorded ``limit + OVER_BY``."""
+    old_path = tmp_path / "old.keras"
+    if subject.name in _SIZED_BY_RECORDED_LENGTH:
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                guard, "refuse_static_sequence_length", lambda *a, **k: None
+            )
+            model.build({
+                key: (None, limit + OVER_BY)
+                for key in subject.feed(model, limit)
+            })
+        model.save(old_path)
+        return old_path
+    model.predict(subject.feed(model, limit), verbose=0)
+    legal_path = tmp_path / "legal.keras"
+    model.save(legal_path)
+    _set_recorded_length(legal_path, old_path, limit, limit + OVER_BY)
+    return old_path
+
+
+@pytest.mark.parametrize("subject", SUBJECTS, ids=SUBJECT_IDS)
+def test_an_archive_with_an_over_long_recorded_shape_loads_every_weight(
+    subject, tmp_path, caplog, monkeypatch
+):
+    model = subject.factory()
+    limit = _limit(subject, model)
+    old_path = _over_long_archive(subject, model, limit, tmp_path, monkeypatch)
+    expected = {w.path: keras.ops.convert_to_numpy(w) for w in model.weights}
+
+    with caplog.at_level(logging.WARNING):
+        loaded = keras.saving.load_model(old_path)
+
+    got = {w.path: keras.ops.convert_to_numpy(w) for w in loaded.weights}
+    assert sorted(got) == sorted(expected), (len(got), len(expected))
+    unequal = [p for p in expected if not np.array_equal(got[p], expected[p])]
+    assert not unequal, f"{len(unequal)}/{len(expected)} variables not restored"
+    pattern = subject.message_regex.format(limit=limit)
+    warned = [
+        r.getMessage() for r in caplog.records
+        if r.levelno >= logging.WARNING and re.search(pattern, r.getMessage())
+    ]
+    assert warned, "an over-long recorded shape must log a warning"
+    # The load-only escape hatch is closed again, on the model and every layer.
+    still_open = [
+        layer.name for layer in loaded._flatten_layers()
+        if getattr(layer, "_loading_recorded_build_shape", False)
+    ]
+    assert not still_open, still_open
+    with pytest.raises(ValueError, match=subject.limit_name):
+        loaded(subject.feed(loaded, limit + OVER_BY))
+
+
 def test_blt_warns_and_loads_an_archive_with_an_over_long_recorded_shape(
     tmp_path, caplog
 ):
-    import json
-    import logging
-    import zipfile
-
     subject = next(s for s in SUBJECTS if s.name == "blt")
     model = subject.factory()
     limit = _limit(subject, model)
@@ -647,16 +740,7 @@ def test_blt_warns_and_loads_an_archive_with_an_over_long_recorded_shape(
 
     # Rewrite the archive so its recorded build shape is over-long.
     old_path = tmp_path / "old.keras"
-    with zipfile.ZipFile(legal_path) as src, zipfile.ZipFile(old_path, "w") as dst:
-        for item in src.infolist():
-            data = src.read(item.filename)
-            if item.filename == "config.json":
-                config = json.loads(data)
-                recorded = config["build_config"]["input_shape"]
-                assert recorded[-1] == limit, recorded
-                recorded[-1] = limit + OVER_BY
-                data = json.dumps(config).encode()
-            dst.writestr(item, data)
+    _set_recorded_length(legal_path, old_path, limit, limit + OVER_BY)
 
     with caplog.at_level(logging.WARNING):
         loaded = keras.saving.load_model(old_path)

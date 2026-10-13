@@ -40,6 +40,7 @@ from typing import Optional, Union, Any, Dict, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
     check_sequence_length,
     refuse_static_sequence_length,
 )
@@ -69,7 +70,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 @register_dl_technique("dl_techniques.models.bert.model")
-class BERT(keras.Model):
+class BERT(RecordedBuildShapeMixin, keras.Model):
     """BERT (Bidirectional Encoder Representations from Transformers) model.
 
     An encoder with pretrained weights support, designed to produce contextual

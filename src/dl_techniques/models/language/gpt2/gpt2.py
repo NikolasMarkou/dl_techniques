@@ -59,7 +59,10 @@ from dl_techniques.utils.weight_transfer import (
 )
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.utils.model_build import materialize_sublayers
-from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
+    check_sequence_length,
+)
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.gelu_tanh import gelu_tanh
@@ -77,7 +80,7 @@ from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 
 
 @register_dl_technique("dl_techniques.models.gpt2.gpt2")
-class GPT2(keras.Model):
+class GPT2(RecordedBuildShapeMixin, keras.Model):
     """GPT-2 language model with weight-tied LM head.
 
     Wraps a ``TextDecoder`` to produce contextual representations and projects

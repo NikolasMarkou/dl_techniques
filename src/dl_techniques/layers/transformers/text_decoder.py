@@ -35,6 +35,8 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.logger import logger
+from dl_techniques.utils.sequence_length_guard import SequenceLengthError
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -143,6 +145,11 @@ class TextDecoder(keras.layers.Layer):
     :raises ValueError: If dimension parameters are invalid, or if
         ``embedding_type`` is not one of ``'learned'`` / ``'factorized'``.
     """
+
+    # Set only by a model's `RecordedBuildShapeMixin.build_from_config` (utils/
+    # sequence_length_guard.py): the shape a stored archive recorded is warned
+    # about in `build`, not refused.
+    _loading_recorded_build_shape = False
 
     def __init__(
             self,
@@ -330,7 +337,9 @@ class TextDecoder(keras.layers.Layer):
 
         :param input_shape: Input shape ``(batch, seq_len)``.
         :type input_shape: Tuple[Optional[int], ...]
-        :raises ValueError: If the STATIC sequence length exceeds ``max_seq_len``.
+        :raises SequenceLengthError: If the STATIC sequence length exceeds
+            ``max_seq_len`` (a ``ValueError``); while a model rebuilds from the
+            shape a stored archive recorded, it is logged instead.
         """
         # Build word embedding layers
         if self.built:
@@ -345,7 +354,7 @@ class TextDecoder(keras.layers.Layer):
         if input_shape is not None and len(input_shape) >= 2:
             static_seq_len = input_shape[1]
             if static_seq_len is not None and static_seq_len > self.max_seq_len:
-                raise ValueError(
+                message = (
                     f"seq_len={static_seq_len} exceeds max_seq_len={self.max_seq_len}. "
                     f"This TextDecoder was configured with max_seq_len="
                     f"{self.max_seq_len}, so its positional encoding covers only "
@@ -354,6 +363,12 @@ class TextDecoder(keras.layers.Layer):
                     f"encoding. Construct the layer with max_seq_len >= "
                     f"{static_seq_len}, or truncate the input to at most "
                     f"{self.max_seq_len} tokens."
+                )
+                if not self._loading_recorded_build_shape:
+                    raise SequenceLengthError(message)
+                logger.warning(
+                    f"{message} Building anyway because this shape came from a "
+                    f"stored config; the model refuses an input this long at call time."
                 )
 
         if hasattr(self, 'word_embeddings'):

@@ -44,15 +44,25 @@ sub-layers by hand calls :func:`refuse_static_sequence_length` first in
 
 The model keeps its own message (it names its own attribute and what to do)
 and its own limit attribute; this module owns only the mechanism.
+
+A refusal has one exception: rebuilding from a shape recorded in a stored
+``.keras`` archive. Keras 3.8 runs that rebuild (``Model.build_from_config``)
+inside a bare ``try/except`` and then marks the model built anyway, so a
+refusal there loads the archive with no weights at all. A guarded class lists
+:class:`RecordedBuildShapeMixin` first among its bases; during that rebuild the
+refusal logs a warning and returns instead.
 """
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import keras
+
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
 __all__ = [
+    "RecordedBuildShapeMixin",
     "SequenceLengthError",
     "check_sequence_length",
     "drop_cached_step_functions",
@@ -73,6 +83,51 @@ class SequenceLengthError(ValueError):
     functions (:func:`drop_cached_step_functions`) and re-raise, staying
     unbuilt. ``CausalLanguageModel`` and ``MaskedLanguageModel`` do.
     """
+
+# ---------------------------------------------------------------------
+
+
+class RecordedBuildShapeMixin:
+    """Let a guarded model rebuild from an over-long shape a stored archive recorded.
+
+    Interface contract (13 guarded models list it FIRST among their bases,
+    ``class BERT(RecordedBuildShapeMixin, keras.Model)``; BLT keeps its own
+    override). Overrides only ``build_from_config``: it sets
+    ``_loading_recorded_build_shape = True`` on the model and on every layer
+    of ``model._flatten_layers()`` that declares that attribute
+    (``TextDecoder``, ``PositionalEmbedding``), calls the next
+    ``build_from_config`` in the MRO (Keras's), and sets them all back to
+    ``False`` in ``finally``. While the flag is set,
+    :func:`refuse_static_sequence_length` logs its message and returns. It adds
+    no constructor argument, no config key and no registration, so
+    ``get_config`` and the serialized form are unchanged; returns nothing, and
+    anything Keras's ``build_from_config`` raises propagates.
+
+    Keras 3.8 calls ``build_from_config`` on every ``.keras`` load, with the
+    shape the model recorded when it was saved, inside a bare ``try/except``,
+    and then sets ``built = True`` whatever happened. An archive written
+    before the guard, at a length above the limit, therefore loaded with
+    every weight left at its random initialization and only a ``UserWarning``.
+    """
+
+    _loading_recorded_build_shape = False
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Rebuild from ``config`` with the length refusal turned into a warning.
+
+        :param config: The build config recorded in the archive.
+        """
+        layers = [
+            layer for layer in self._flatten_layers()
+            if hasattr(layer, "_loading_recorded_build_shape")
+        ]
+        for layer in layers:
+            layer._loading_recorded_build_shape = True
+        try:
+            super().build_from_config(config)
+        finally:
+            for layer in layers:
+                layer._loading_recorded_build_shape = False
 
 # ---------------------------------------------------------------------
 
@@ -118,7 +173,10 @@ def refuse_static_sequence_length(
     ``train_function`` once before its epoch loop, so a refusal caught by a
     callback mid-fit that dropped it would kill the running fit (``None`` is
     not callable). Call it BEFORE any variable is created: variables made
-    inside a step-function trace that then fails are left unusable.
+    inside a step-function trace that then fails are left unusable. While
+    ``model._loading_recorded_build_shape`` is true (set only by
+    :meth:`RecordedBuildShapeMixin.build_from_config`) it logs ``message`` as
+    a warning and returns instead.
 
     :param model: The model whose cached step functions are dropped when it
         is not yet built.
@@ -129,6 +187,15 @@ def refuse_static_sequence_length(
         ``ValueError``).
     """
     if seq_len is None or seq_len <= limit:
+        return
+    # DECISION plan-2026-10-13T035756-5dd4d94d/D-004: warn and build while a stored archive's
+    # recorded shape is rebuilt; do NOT raise here -- Keras swallows a build_from_config raise and
+    # marks the model built, so the archive loads with no weights. See decisions.md.
+    if getattr(model, "_loading_recorded_build_shape", False):
+        logger.warning(
+            f"{message} Building anyway because this shape came from a stored "
+            f"config; the model refuses an input this long at call time."
+        )
         return
     # A refusal during the FIRST trace of a cached Keras step function leaves
     # that function unusable for every later call ("Structures don't have the

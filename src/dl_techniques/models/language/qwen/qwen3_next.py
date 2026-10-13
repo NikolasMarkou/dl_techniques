@@ -74,7 +74,10 @@ from typing import Optional, Union, Any, Dict
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
-from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
+    check_sequence_length,
+)
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
     pretrained_path_or_raise,
@@ -105,7 +108,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.qwen.qwen3_next")
-class Qwen3Next(keras.Model):
+class Qwen3Next(RecordedBuildShapeMixin, keras.Model):
     """
     Qwen3-Next model: N hybrid blocks of gated linear attention and gated attention.
 

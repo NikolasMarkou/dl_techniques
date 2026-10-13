@@ -68,7 +68,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.masking import create_causal_attend_mask
 from dl_techniques.utils.model_build import concretize_axes, materialize_sublayers
-from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
+    check_sequence_length,
+)
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
     pretrained_path_or_raise,
@@ -98,7 +101,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.qwen.qwen3")
-class Qwen3(keras.Model):
+class Qwen3(RecordedBuildShapeMixin, keras.Model):
     """
     Qwen3 model with standard transformer architecture and optional MoE layers.
 

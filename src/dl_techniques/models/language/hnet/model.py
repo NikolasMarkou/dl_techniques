@@ -60,6 +60,7 @@ from dl_techniques.layers.heads.nlp.model_head import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
     check_sequence_length,
     refuse_static_sequence_length,
 )
@@ -137,7 +138,7 @@ def default_max_chunks(num_stages: int, max_seq_len: int) -> Tuple[int, ...]:
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.hnet.model")
-class HNet(keras.Model):
+class HNet(RecordedBuildShapeMixin, keras.Model):
     """Byte-level causal language model with hierarchical dynamic chunking.
 
     An embedding feeds the recursive backbone, which returns the hidden states and

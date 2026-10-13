@@ -152,6 +152,7 @@ from dl_techniques.utils.weight_transfer import (
     pretrained_path_or_raise,
 )
 from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
     check_sequence_length,
     refuse_static_sequence_length,
 )
@@ -179,7 +180,7 @@ from dl_techniques.models.language.zamba2.layers import (
 
 
 @register_dl_technique("dl_techniques.models.zamba2.model")
-class Zamba2Model(keras.Model):
+class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
     """
     Zamba2 hybrid Mamba2 + shared-attention causal language model.
 

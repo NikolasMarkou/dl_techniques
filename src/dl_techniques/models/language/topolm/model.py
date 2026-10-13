@@ -86,6 +86,7 @@ from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
 )
 from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
     check_sequence_length,
     refuse_static_sequence_length,
 )
@@ -123,7 +124,7 @@ validate_all_variants(DEFAULT_RADIUS)
 
 
 @register_dl_technique("dl_techniques.models.topolm.model")
-class TopoLM(keras.Model):
+class TopoLM(RecordedBuildShapeMixin, keras.Model):
     """A GPT-2-shaped causal language model with a topographic unit layout.
 
     Architecture:
@@ -612,17 +613,14 @@ class TopoLM(keras.Model):
                 f"shape {shape}"
             )
         # First, so the cached step functions are dropped and no variable exists.
+        # The shared refusal is the only one: a second raise here would refuse
+        # the over-long shape a stored archive recorded, which it lets through.
         refuse_static_sequence_length(
             self, shape[1], self.max_seq_len,
             self._SEQUENCE_LENGTH_MESSAGE.format(
                 seq_len=shape[1], limit=self.max_seq_len
             ),
         )
-        if shape[1] is not None and int(shape[1]) > self.max_seq_len:
-            raise ValueError(
-                f"sequence length {int(shape[1])} exceeds max_seq_len "
-                f"{self.max_seq_len}; the position table has no row for it"
-            )
 
         # `token_shape` is the input's OWN rank-2 shape -- dropping its last axis
         # here would build the embeddings for `(batch,)` and hand every block a

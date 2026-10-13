@@ -61,7 +61,10 @@ from dl_techniques.layers.heads.nlp import (
 )
 from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
 from dl_techniques.utils.model_build import materialize_sublayers
-from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
+    check_sequence_length,
+)
 from dl_techniques.utils.weight_transfer import (
     load_backbone_from_checkpoint,
     load_weights_from_checkpoint,
@@ -79,7 +82,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 @register_dl_technique("dl_techniques.models.tree_transformer.model")
-class TreeTransformer(keras.Model):
+class TreeTransformer(RecordedBuildShapeMixin, keras.Model):
     """Encode tokens and induce break probabilities in the same forward pass.
 
     Headless (``include_top=False``, the default) it is an encoder with no

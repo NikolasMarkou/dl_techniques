@@ -56,7 +56,10 @@ from dl_techniques.utils.weight_transfer import (
     load_weights_or_raise,
 )
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
-from dl_techniques.utils.sequence_length_guard import check_sequence_length
+from dl_techniques.utils.sequence_length_guard import (
+    RecordedBuildShapeMixin,
+    check_sequence_length,
+)
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.attention.wave_field_attention import (
     WaveFieldAttention,
@@ -318,7 +321,7 @@ class WaveFieldDecoderBlock(keras.layers.Layer):
 
 
 @register_dl_technique("dl_techniques.models.wave_field.model")
-class WaveFieldLLM(keras.Model):
+class WaveFieldLLM(RecordedBuildShapeMixin, keras.Model):
     """Predict next-token logits from a stack of ``WaveFieldDecoderBlock`` layers.
 
     Mirrors the public surface of :class:`GPT2` so it slots into the same
