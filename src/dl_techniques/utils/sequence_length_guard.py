@@ -53,10 +53,47 @@ import keras
 # ---------------------------------------------------------------------
 
 __all__ = [
+    "SequenceLengthError",
     "check_sequence_length",
+    "drop_cached_step_functions",
     "gate_dynamic_sequence_length",
     "refuse_static_sequence_length",
 ]
+
+# ---------------------------------------------------------------------
+
+
+class SequenceLengthError(ValueError):
+    """A statically known sequence length above a model's position limit.
+
+    Raised by :func:`refuse_static_sequence_length`. A ``ValueError``, so every
+    caller that catches or expects ``ValueError`` is unchanged; the subclass
+    exists so a WRAPPER whose ``build`` builds a guarded backbone can tell a
+    length refusal from any other build error, drop its own cached step
+    functions (:func:`drop_cached_step_functions`) and re-raise, staying
+    unbuilt. ``CausalLanguageModel`` and ``MaskedLanguageModel`` do.
+    """
+
+# ---------------------------------------------------------------------
+
+
+def drop_cached_step_functions(model: keras.Model) -> None:
+    """Set the model's three cached Keras step functions to ``None``.
+
+    Interface contract (call sites: :func:`refuse_static_sequence_length` for
+    the guarded model, and the ``build`` of a wrapper that catches
+    :class:`SequenceLengthError` from its backbone). Sets
+    ``model.predict_function``, ``model.train_function`` and
+    ``model.test_function`` to ``None`` so Keras builds fresh ones on the next
+    call; returns nothing and never raises. A refusal during the FIRST trace
+    of a cached step function leaves that function unusable for every later
+    call, and each model, a wrapper included, caches its own.
+
+    :param model: The model whose step functions are dropped.
+    """
+    model.predict_function = None
+    model.train_function = None
+    model.test_function = None
 
 # ---------------------------------------------------------------------
 
@@ -88,7 +125,8 @@ def refuse_static_sequence_length(
     :param seq_len: The static sequence length, or ``None`` when unknown.
     :param limit: The largest legal sequence length.
     :param message: The text of the raised error; the caller owns the wording.
-    :raises ValueError: If ``seq_len`` exceeds ``limit``.
+    :raises SequenceLengthError: If ``seq_len`` exceeds ``limit`` (a
+        ``ValueError``).
     """
     if seq_len is None or seq_len <= limit:
         return
@@ -99,10 +137,8 @@ def refuse_static_sequence_length(
     # refusal inside `build` sees built=False, and a built model's functions
     # may belong to a running `fit` loop.
     if not getattr(model, "built", False):
-        model.predict_function = None
-        model.train_function = None
-        model.test_function = None
-    raise ValueError(message)
+        drop_cached_step_functions(model)
+    raise SequenceLengthError(message)
 
 # ---------------------------------------------------------------------
 
@@ -197,7 +233,8 @@ def check_sequence_length(
         ``{seq_len}`` (the offending length, or ``<run-time length>`` when it
         is only known inside a graph) and ``{limit}``.
     :return: ``input_ids``, or ``input_ids`` gated on the length check.
-    :raises ValueError: For a statically known length above ``limit``.
+    :raises SequenceLengthError: For a statically known length above
+        ``limit`` (a ``ValueError``).
     """
     shape = getattr(input_ids, "shape", None)
     if shape is None or len(shape) < 2:

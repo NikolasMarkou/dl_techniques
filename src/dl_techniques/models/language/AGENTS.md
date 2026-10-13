@@ -182,13 +182,18 @@ Reusing a backbone under a new head:
 ## Sequence-length guard (`utils/sequence_length_guard.py`)
 
 A model with a real position limit refuses an over-long sequence cleanly on every
-path: a statically known length raises `ValueError` from `build` before any
-variable exists; a length known only at run time (`predict` after two lengths,
+path: a statically known length raises `SequenceLengthError` (a `ValueError`)
+from `build` before any variable exists; a length known only at run time (`predict` after two lengths,
 `jit_compile=True`) fails a graph assertion plus a zero-sum term that survives
 XLA, where a gather-based position table would otherwise return finite garbage;
 and the refusal drops Keras's cached `predict`/`train`/`test` step functions so
-the next legal call still works. Usage and the three functions:
-`utils/AGENTS.md`. Pinned per class by
+the next legal call still works. A `CausalLanguageModel` or `MaskedLanguageModel`
+around a guarded backbone caches step functions of its own: its `build` catches
+`SequenceLengthError` from the backbone, drops them and re-raises, so the wrapper
+stays unbuilt and its next legal call works too (any other backbone build error
+keeps the CLM's logged-warning path); pinned by
+`tests/test_models/test_masked_language_model/test_a_refused_backbone_leaves_the_wrapper_usable.py`.
+Usage and the functions: `utils/AGENTS.md`. Pinned per class by
 `tests/test_models/test_a_position_limit_is_refused_cleanly.py` (one `Subject`
 row per class; each row goes RED when its guard line is removed).
 

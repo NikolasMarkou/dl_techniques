@@ -10,7 +10,10 @@ pins the module's own promises, which no model test isolates:
   raises with the caller's message verbatim, nulling all three first on an
   UNBUILT model only. A built model keeps them: a refusal caught inside a
   running ``fit`` (a callback probing an over-long call) would otherwise leave
-  the fit loop calling a ``None`` ``train_function``.
+  the fit loop calling a ``None`` ``train_function``. The error is a
+  ``SequenceLengthError``, a ``ValueError`` subclass: a wrapper model catches
+  exactly that type from its backbone's build, drops its OWN cached functions
+  with ``drop_cached_step_functions`` and re-raises.
 * ``gate_dynamic_sequence_length`` returns a symbolic ``KerasTensor`` unchanged,
   returns the VALUES of a legal input bit for bit, and names the XLA guard node
   after the caller's limit name.
@@ -27,7 +30,9 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.utils.sequence_length_guard import (
+    SequenceLengthError,
     check_sequence_length,
+    drop_cached_step_functions,
     gate_dynamic_sequence_length,
     refuse_static_sequence_length,
 )
@@ -69,6 +74,19 @@ def test_an_over_long_length_on_a_built_model_keeps_all_three_functions_and_rais
         refuse_static_sequence_length(holder, 17, 16, "the exact message")
     assert str(excinfo.value) == "the exact message"
     assert holder.cached() == before
+
+
+@pytest.mark.parametrize("built", [False, True])
+def test_the_refusal_is_a_sequence_length_error_and_still_a_value_error(built):
+    with pytest.raises(SequenceLengthError) as excinfo:
+        refuse_static_sequence_length(_Holder(built=built), 17, 16, "msg")
+    assert isinstance(excinfo.value, ValueError)
+
+
+def test_drop_cached_step_functions_nulls_all_three_whatever_the_built_flag():
+    holder = _Holder(built=True)
+    drop_cached_step_functions(holder)
+    assert holder.cached() == [None, None, None]
 
 
 def test_a_symbolic_tensor_is_returned_unchanged():

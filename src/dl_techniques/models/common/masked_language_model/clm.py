@@ -63,6 +63,10 @@ from typing import Dict, Any, Optional, Union, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.sequence_length_guard import (
+    SequenceLengthError,
+    drop_cached_step_functions,
+)
 from dl_techniques.utils.tied_embeddings import tied_embedding_logits
 
 # ---------------------------------------------------------------------
@@ -490,6 +494,14 @@ class CausalLanguageModel(keras.Model):
         if not self.backbone.built:
             try:
                 self.backbone.build(input_shape)
+            except SequenceLengthError:
+                # DECISION plan-2026-10-13T035756-5dd4d94d/D-005: a length refusal
+                # escapes; do NOT fold it into the warning below or catch it as
+                # ValueError. Logged, it left this wrapper built with an untied
+                # head and its own failed first-trace step functions, unusable
+                # for every later call. See decisions.md D-005.
+                drop_cached_step_functions(self)
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Could not build the backbone from input_shape "

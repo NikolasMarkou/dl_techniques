@@ -35,6 +35,10 @@ from typing import Dict, Any, Optional, Union, List, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking.strategies import apply_mlm_masking
 from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.sequence_length_guard import (
+    SequenceLengthError,
+    drop_cached_step_functions,
+)
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -401,7 +405,15 @@ class MaskedLanguageModel(keras.Model):
         """
         if self.built:
             return
-        materialize_sublayers(self, input_shape)
+        try:
+            materialize_sublayers(self, input_shape)
+        except SequenceLengthError:
+            # DECISION plan-2026-10-13T035756-5dd4d94d/D-005: drop THIS
+            # model's step functions too; do NOT rely on the guard, which drops
+            # only the encoder's. The failed first trace left this wrapper's
+            # predict_function unusable. See decisions.md D-005.
+            drop_cached_step_functions(self)
+            raise
         super().build(input_shape)
 
     def call(
