@@ -182,8 +182,8 @@ Used to define the high-level properties of the task itself.
 | :--- | :--- |
 | `name` | Unique identifier for the task (e.g., "ner_v2"). |
 | `task_type` | Enum from `NLPTaskType` determining the head architecture. |
-| `num_classes` | Required for all classification tasks. |
-| `vocabulary_size`| Required for generation/MLM tasks. |
+| `num_classes` | Required for all classification tasks; a positive integer (0, -1, a bool or a float raise `ValueError`). |
+| `vocabulary_size`| Required for generation/MLM tasks. Defaults to 32000 when unset. On a language model that owns the head (`include_top=True`) it must equal the model's `vocab_size`, else `ValueError`; a dict `task_config` that leaves it out gets the model's. Migration: a `.keras` archive saved before 2026-10-11 whose stored generation `task_config` kept 32000 on a model of another vocabulary no longer loads; set the stored value to the model's `vocab_size` (or delete the key) in its `config.json`, or rebuild and re-save. |
 | `dropout_rate` | Task-specific dropout override. |
 | `loss_weight` | Useful for multi-task training loops (weight of this task's loss). |
 

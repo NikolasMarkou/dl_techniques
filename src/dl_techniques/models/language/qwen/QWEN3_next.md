@@ -52,14 +52,14 @@ Each Qwen3Next block contains 4 sub-layers, each following this pattern:
 
 ## Model Variants
 
-| Variant | Blocks | Effective Layers | Parameters | Hidden Size | Experts | Active/Token | Context Length | Description |
-|---------|--------|------------------|------------|-------------|---------|-------------|----------------|-------------|
-| `80b_a3b` | 12 | 48 | 80B | 2048 | 64 | 8 | 8192 | Full production model |
-| `80b` | 12 | 48 | 80B | 2048 | 1 | 1 | 8192 | Dense variant without MoE |
-| `small` | 6 | 24 | ~3B | 1024 | 8 | 2 | 2048 | Development/experimentation |
-| `tiny` | 3 | 12 | ~500M | 512 | 4 | 1 | 1024 | Edge/mobile deployment |
+| Variant | Blocks | Effective Layers | Parameters (built) | Hidden Size | Experts | Active Experts/Token | `moe_intermediate_size` | Context Length | Description |
+|---------|--------|------------------|--------------------|-------------|---------|----------------------|-------------------------|----------------|-------------|
+| `80b_a3b` | 12 | 48 | 235.0B | 2048 | 512 | 10 | 512 | 262144 | The released Qwen3-Next-80B-A3B config values |
+| `80b` | 12 | 48 | 1.71B | 2048 | 1 (no MoE) | 1 | 5632 | 8192 | Dense: 12 blocks without MoE |
+| `small` | 6 | 24 | 901M | 1024 | 8 | 2 | 704 | 2048 | 6 blocks for experimentation |
+| `tiny` | 3 | 12 | 211M | 512 | 4 | 1 | 352 | 1024 | 3 blocks |
 
-*Note: "Blocks" refers to Qwen3Next blocks (3 DeltaNet + 1 Attention each). "Effective Layers" is the total number of individual processing layers.*
+*Note: "Blocks" refers to Qwen3Next blocks (3 DeltaNet + 1 Attention each). "Effective Layers" is the total number of individual processing layers. Every value except "Parameters (built)" is read from `Qwen3Next.MODEL_VARIANTS` in `qwen3_next.py`. "Parameters (built)" is `count_params()` of what this implementation builds from those values (vocabulary 151936), measured on CPU: exact for `small` and `tiny`; for the two 80b variants extrapolated from 1- and 2-block builds, a method that reproduces the exact `small` and `tiny` counts. They are not the released models' counts: each expert is a SwiGLU with `ffn_expansion_factor = max(1, moe_intermediate_size // hidden_size)`, so an 80b_a3b expert has hidden width 1536 (factor 1), not 512, and with one expert (`80b`) a block builds no feed-forward at all.*
 
 ## Installation
 
@@ -144,38 +144,51 @@ classifier.compile(
 ### Custom Model Configuration
 
 ```python
+import keras
+import numpy as np
 from dl_techniques.models.language.qwen.qwen3_next import Qwen3Next
+from dl_techniques.models.language.qwen.components import Qwen3NextBlock
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
-# Create custom MoE configuration
+# Qwen3Next takes no MoEConfig: it builds one per block from three arguments,
+# num_experts, num_experts_per_tok (the gating top_k) and
+# moe_intermediate_size (each SwiGLU expert gets
+# ffn_expansion_factor = max(1, moe_intermediate_size // hidden_size)).
+model = Qwen3Next(
+    vocab_size=1000,
+    hidden_size=256,
+    num_layers=2,  # 2 blocks = 8 effective layers
+    num_attention_heads=4,
+    num_key_value_heads=2,
+    max_seq_len=128,
+    num_experts=16,
+    num_experts_per_tok=4,
+    moe_intermediate_size=1024,  # ffn_expansion_factor 1024 // 256 = 4
+    normalization_type="zero_centered_rms_norm",
+    use_stochastic_depth=True,
+    stochastic_depth_rate=0.1,
+)
+logits = model(np.ones((2, 16), dtype="int32"))
+print(logits.shape)  # (2, 16, 1000)
+moe = model.blocks[0].attention_moe
+print(moe.num_experts, moe.gating_config.top_k)  # 16 4
+
+# A custom MoEConfig goes to a Qwen3NextBlock, the model's building block
 moe_config = MoEConfig(
     num_experts=16,
     expert_config=ExpertConfig(
         ffn_config={
             "type": "swiglu",
-            "output_dim": 1024,
-            "ffn_expansion_factor": 4
+            "output_dim": 256,  # must equal the block's dim
+            "ffn_expansion_factor": 4,
         }
     ),
-    gating_config=GatingConfig(
-        top_k=4,
-        gating_type="linear"
-    )
+    gating_config=GatingConfig(top_k=4, gating_type="linear"),
 )
-
-# Create model with custom configuration
-model = Qwen3Next(
-    vocab_size=151936,
-    hidden_size=1024,
-    num_layers=8,  # 8 blocks = 32 effective layers
-    num_attention_heads=16,
-    num_key_value_heads=4,
-    num_experts=16,
-    num_experts_per_tok=4,
-    normalization_type="zero_centered_rms_norm",
-    use_stochastic_depth=True,
-    stochastic_depth_rate=0.1
-)
+block = Qwen3NextBlock(dim=256, num_heads=4, max_seq_len=128, moe_config=moe_config)
+hidden = block(keras.random.normal((2, 16, 256)))
+print(hidden.shape)  # (2, 16, 256)
+print(block.attention_moe.num_experts)  # 16
 ```
 
 ### Manual Configuration
@@ -325,11 +338,12 @@ loaded_model.summary()
 
 ### Model Statistics
 
-| Variant | Total Layers | DeltaNet Layers | Attention Layers | MoE Instances | Sparsity Ratio |
-|---------|--------------|-----------------|------------------|---------------|----------------|
-| `tiny` | 12 | 9 | 3 | 12 | 4:1 |
-| `small` | 24 | 18 | 6 | 24 | 4:1 |
-| `80b_a3b` | 48 | 36 | 12 | 48 | 8:1 |
+| Variant | Total Layers | DeltaNet Layers | Attention Layers | MoE Instances | Experts : Active |
+|---------|--------------|-----------------|------------------|---------------|------------------|
+| `tiny` | 12 | 9 | 3 | 12 | 4 : 1 |
+| `small` | 24 | 18 | 6 | 24 | 8 : 2 |
+| `80b` | 48 | 36 | 12 | 0 | no MoE |
+| `80b_a3b` | 48 | 36 | 12 | 48 | 512 : 10 |
 
 ## Expert Utilization Analysis
 

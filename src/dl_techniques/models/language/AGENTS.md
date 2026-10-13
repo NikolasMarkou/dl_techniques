@@ -63,6 +63,12 @@ WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
 - `include_top=True` needs a `task_config` (`NLPTaskConfig` or its dict);
   `head_config_overrides` go to the head. A `task_config` or overrides without
   `include_top=True` raise `ValueError`, as does `MULTIPLE_CHOICE`.
+- The `task_config` is checked at construction: a classification task's
+  `num_classes` must be a positive integer (0, -1 or a bool raise
+  `ValueError`), and a generation-type head's `vocabulary_size` must equal the
+  model's vocabulary. An archive saved with a stored generation `task_config`
+  that kept `vocabulary_size` 32000 on a model of another vocabulary no longer
+  loads; the migration is in `layers/heads/AGENTS.md`.
 - The head is one `layers/heads/nlp` head named `task_head` (`TASK_HEAD_NAME`
   in `layers/heads/nlp/model_head.py`), fed the final hidden states and the
   padding mask. `call()` returns bare logits for a one-output head, a dict for
@@ -190,8 +196,11 @@ load it with no weights. Every guarded class except BLT lists
 `RecordedBuildShapeMixin` first among its bases (one line); BLT has its own
 `build_from_config`. `TextDecoder` (GPT2) honours the same load flag.
 Usage and the functions: `utils/AGENTS.md`. Pinned per class by
-`tests/test_models/test_a_position_limit_is_refused_cleanly.py` (one `Subject`
-row per class; each row goes RED when its guard line is removed).
+`tests/test_models/test_a_position_limit_is_refused_cleanly.py`: one `Subject`
+row per class, which goes RED when its guard line is removed. For the three
+conditionally guarded classes (ModernBERT, Zamba2, HNet) that row covers only
+the guarded configuration; a `NO_LIMIT` row with the condition false covers the
+other direction and goes RED when the guard is made unconditional.
 
 | Status | Classes |
 |---|---|
@@ -214,7 +223,9 @@ contract, on purpose; none was changed by the head work.
 | `hrm`, `trm`, `ptrm` | Carry-based ACT puzzle solvers: the `lm_head` IS the task (per-cell prediction) and is trained jointly with the Q-halting head; the state is a recurrence, not a backbone a classification head would read. Their trainers use bespoke carry loops |
 | `mini_vec2vec` | Not a sequence model: embeddings in, one fitted matrix `W` (numpy `align()`), nothing to put a head on |
 | `colbert` | Output is per-token masked L2-normalised embeddings scored by MaxSim; every `layers/heads/nlp` head pools to one vector, which would destroy late interaction. Its encoder is a `BERT` (so the backbone side of reuse is already met) |
-| `blt` | Byte LM with its own entropy model, patcher, `train_step` and `generate`; logits come from an untied `Dense` inside `LocalDecoder` and there is no per-byte hidden state to read. A head would need a layer change |
+| `blt` | Byte LM with its own entropy model, patcher, `train_step` and `generate`; logits come from an untied `Dense` inside `LocalDecoder`. The per-byte hidden state exists inside `LocalDecoder`, which the whole-layer load rule compares as one unit, so a head would need a layer change |
+| `qwen` (`Qwen3EmbeddingModel`) | An embedding tower, not a head host: last-non-pad pooling, optional MRL truncation and L2 normalisation ARE the output. Its own `TransformerLayer` trunk, not `Qwen3`; no variant table, no `create_*` factory. No `layers/heads/nlp` head has the truncate/normalise options (`TextSimilarityHead` adds a norm, an intermediate block and a biased `Dense`) |
+| `qwen` (`Qwen3RerankerModel`) | The score is `softmax([no, yes])` over the LM head's last-token logits, so the LM head IS the task; a `TextClassificationHead(2)` would be a different, freshly initialised model |
 
 The 15 task-head classes (BERT, DistilBERT, ModernBERT, FNet, TreeTransformer,
 GPT2, Mamba, Mamba2, TopoLM, WaveFieldLLM, Qwen3, Qwen3Next, Gemma3, Zamba2,

@@ -436,7 +436,6 @@ def test_gemma3_serialization_cycle():
     np.testing.assert_allclose(
         original_prediction, loaded_prediction, rtol=1e-5, atol=1e-5
     )
-    print("✓ Serialization cycle test passed!")
 ```
 
 ---

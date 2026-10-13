@@ -91,6 +91,16 @@ still load.
   from shapes alone, so a headed model's `compute_output_shape` reports what
   `call` returns). Both shape helpers are shared by the 15 language models but
   not exported from `nlp/__init__.py`; import them from `nlp.model_head`.
+  **Migration of stored archives (since 2026-10-11).** The vocabulary check
+  also runs when a language model is rebuilt from its config, so a `.keras`
+  archive saved earlier with a generation-type `task_config` whose stored
+  `vocabulary_size` is 32000 (the `NLPTaskConfig` default) on a model of
+  another vocabulary now fails `load_model` / `from_config` with `ValueError`
+  (`The 'text_generation' head would emit logits over vocabulary_size=32000,
+  but the model's vocabulary is ...`). Fix the archive: set the stored
+  `task_config.vocabulary_size` in its `config.json` to the model's
+  `vocab_size` (or delete the key, and the model's vocabulary fills it), or
+  rebuild the model with a corrected `task_config` and save it again.
 - `vision/factory.py` — `create_vision_head(task_type, ...)`,
   `create_enhancement_head(...)`, `create_multi_task_head(...)`,
   `HeadConfiguration`.
