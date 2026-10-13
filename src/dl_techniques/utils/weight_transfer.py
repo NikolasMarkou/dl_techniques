@@ -690,10 +690,10 @@ def load_backbone_from_checkpoint(
 def pretrained_path_or_raise(pretrained: Any, model_label: str) -> Optional[str]:
     """Resolve a language model factory's ``pretrained`` argument to a path.
 
-    Interface contract (shared by the Qwen3, Qwen3Next and Gemma3 dispatching
-    factories, which follow what ``GPT2.from_variant`` does with it):
+    Interface contract (shared by ``from_variant`` of Qwen3, Qwen3Next, Gemma3,
+    Zamba2 and HNet, which follow what ``GPT2.from_variant`` does with it):
 
-    :param pretrained: The factory's argument. Falsy (``False``, ``None``,
+    :param pretrained: The ``from_variant`` argument. Falsy (``False``, ``None``,
         ``""``) means random initialization. A ``str`` is the path of a local
         ``.keras`` checkpoint. Anything else truthy (``True``) asks for
         released weights.

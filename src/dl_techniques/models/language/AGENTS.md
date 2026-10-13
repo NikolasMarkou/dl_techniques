@@ -68,12 +68,16 @@ WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
   padding mask. `call()` returns bare logits for a one-output head, a dict for
   a multi-output one (QA). Causal backbones pool `"last"` by default;
   `head_config_overrides={"pooling_type": ...}` changes that.
-- Ten factories only forward to `from_variant` and return the class itself:
-  `create_bert`, `create_distilbert`, `create_modern_bert`, `create_fnet`,
-  `create_tree_transformer`, `create_gpt2`, `create_mamba`, `create_mamba2`,
-  `create_topolm`, `create_wave_field_llm`. Build a headed model with
-  `create_<model>(variant, include_top=True, task_config=...)`; the old
-  functional head wrappers are gone.
+- All 15 factories (these 13, `create_zamba2` and `create_hnet`) are uniform:
+  `create_X(variant, pretrained=False, **kwargs)` only delegates to
+  `X.from_variant` and returns the class itself, and the head comes from
+  `include_top` + `task_config` + `head_config_overrides` in `__init__`,
+  never from the factory. Some keep a named argument that is only
+  forwarded: `vocab_size` (BERT, TreeTransformer, GPT2, WaveFieldLLM; required
+  by Mamba and Mamba2) and `weights_dataset` / `cache_dir` (BERT, DistilBERT,
+  ModernBERT, FNet, TreeTransformer). Build a headed model with
+  `create_<model>(variant, include_top=True, task_config=...)`; there is no
+  per-task factory and no functional head wrapper.
 - Zamba2 and HNet own a head too, with one difference: headless, `call()` returns the
   LOGITS tensor (not a hidden-state dict; their CLM wrappers use `skip_head=True`), and
   that does not change. With `include_top=True` the final-norm output (HNet: `hidden`, the
@@ -81,21 +85,7 @@ WaveFieldLLM, Qwen3, Qwen3Next and Gemma3 can own one task head, the ResNet way:
   the logits are not computed; HNet builds no `lm_head` then and keeps its ratio loss
   (`len(model.losses) == 1` in both tops). Input may be the ids or a dict with
   `attention_mask` (HNet: its `padding_mask`, which reaches the backbone too; right
-  padding only, the Mamba-2 mixer takes no mask). `create_zamba2` and `create_hnet` forward
-  to `from_variant`, which takes `pretrained=<path>` through the shared load rule
-  (`pretrained=True` raises).
-- `create_qwen3`, `create_qwen3_next` and `create_gemma3` dispatch instead. Each
-  returns a two-input (`[input_ids, attention_mask]`) functional model whose
-  only layer besides the inputs is the class, named `<model>_backbone`:
-  `<model>_for_generation` by default, `<model>_for_classification` for
-  `task_type="classification"` with `num_labels` (the same model as
-  `create_<model>_classification`), and, for `include_top=True,
-  task_config=...`, a model named for the task type
-  (`<model>_for_token_classification`, ...; one name per task, so a
-  `TEXT_CLASSIFICATION` head is `<model>_for_classification` on both routes,
-  from `task_model_name` in `layers/heads/nlp/model_head.py`). `include_top=True` together with
-  `task_type="classification"` or `num_labels` / `pooling_strategy` /
-  `classifier_dropout_rate` raises `ValueError`.
+  padding only, the Mamba-2 mixer takes no mask).
 
 Which mask the head pools under, when the caller passes none (the backbone's
 own attention is unchanged):
@@ -122,12 +112,12 @@ Reusing a backbone under a new head:
 
 - At construction: `pretrained="<path>.keras"`, headed or headless, restores
   the backbone only; the checkpoint's `task_head` is never copied and a new
-  head keeps its fresh init. Available on all thirteen models above. Qwen3,
-  Qwen3Next and Gemma3 take it on their dispatching `create_<model>(config_or_variant,
-  task_type, pretrained=...)` (they return a functional wrapper; the checkpoint may be the
-  bare class or such a wrapper, both are read through the same rule), and for them
-  `pretrained=True` raises `NotImplementedError`, like GPT2's.
-- The load rule, one for all thirteen classes, headed and headless, enforced in
+  head keeps its fresh init. Available on all 15 classes, through
+  `create_<model>(variant, pretrained=...)` or `from_variant`. For Qwen3,
+  Qwen3Next and Gemma3 `pretrained=True` raises `NotImplementedError`, like
+  GPT2's, and an old archive of the two-input wrapper their factories used to
+  return still loads into the class through the same rule.
+- The load rule, one for all 15 classes, headed and headless, enforced in
   one place (`load_backbone_from_checkpoint` in
   `dl_techniques.utils.weight_transfer`, which every class calls): every
   backbone layer loads, and every backbone layer of the checkpoint finds a
@@ -159,9 +149,10 @@ Reusing a backbone under a new head:
   | HNet | `embeddings` (vocabulary read from `arch_config`) | `lm_head` when untied |
   | TopoLM | `word_embeddings` | `lm_head` when untied |
   | WaveFieldLLM | `token_embeddings` | `lm_head` when untied |
+  | Qwen3, Qwen3Next, Gemma3 | `token_embedding` | `lm_head` (always untied) |
 
   Every route copies by layer name, so it needs a `.keras` file.
-- On a built model of the ten: `load_backbone_from_checkpoint(model, path,
+- On a built model: `load_backbone_from_checkpoint(model, path,
   head_prefixes=(TASK_HEAD_NAME,), vocab_layers=..., tables=..., tops=...)`, with the
   class's row above. `tables` are the variable-path suffixes of the token table
   (`word_embeddings/embeddings`, `embedding/embeddings`, ...) and of an untied
@@ -172,12 +163,10 @@ Reusing a backbone under a new head:
   (add `"lm_head"` to `allow_unloaded` when one side is headed). Without
   `strict=True` and `allow_unloaded`, a backbone that does not fit loads
   nothing and returns normally. Never pass `skip_prefixes=()` across tasks: a head of equal shape
-  is copied silently. The same call works on the Qwen3, Qwen3Next and Gemma3
-  factory models, either side: a functional model whose only layer besides
-  its inputs is a model is compared through that inner model's layers, so a
-  `create_qwen3_classification` checkpoint fills a bare `Qwen3` of any head,
-  a headless one (`allow_unloaded=("lm_head",)`) or a `create_qwen3_generation`
-  model with the same backbone weights.
+  is copied silently. An old archive of the retired Qwen3, Qwen3Next or Gemma3
+  two-input wrapper still loads into the class: a functional model whose only
+  layer besides its inputs is a model is compared through that inner model's
+  layers.
 
 ## Sequence-length guard (`utils/sequence_length_guard.py`)
 

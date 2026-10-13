@@ -196,36 +196,33 @@ import numpy as np
 # Local imports from your project structure
 from dl_techniques.models.language.gemma.gemma3 import create_gemma3
 
-# 1. Create a tiny Gemma 3 model using a pre-configured variant
-# This factory function handles all the setup.
-model = create_gemma3(
-    "tiny",  # Use the 'tiny' variant
-    task_type="generation"
-)
+# 1. Create a tiny Gemma 3 model using a pre-configured variant.
+# The factory forwards to Gemma3.from_variant and returns the Gemma3 itself.
+model = create_gemma3("tiny")
 
-# 2. Compile the model
+# 2. Compile the model (it returns vocabulary logits)
 model.compile(
     optimizer="adamw",
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=[keras.metrics.SparseCategoricalAccuracy()],
 )
-print("✅ Gemma 3 model created and compiled successfully!")
-model.summary()
 
-# 3. Create dummy data for a forward pass
+# 3. Create dummy data
 batch_size = 2
 seq_len = 64
-vocab_size = model.layers[1].vocab_size # Get vocab size from the backbone
+vocab_size = model.vocab_size
 
-dummy_input_ids = np.random.randint(0, vocab_size, (batch_size, seq_len))
-dummy_attention_mask = np.ones((batch_size, seq_len))
+dummy_input_ids = np.random.randint(0, vocab_size, (batch_size, seq_len)).astype("int32")
+dummy_attention_mask = np.ones((batch_size, seq_len), dtype="int32")
 dummy_labels = np.random.randint(0, vocab_size, (batch_size, seq_len))
 
 # 4. Train for one step
 loss, acc = model.train_on_batch(
-    [dummy_input_ids, dummy_attention_mask], dummy_labels
+    {"input_ids": dummy_input_ids, "attention_mask": dummy_attention_mask},
+    dummy_labels,
 )
-print(f"\n✅ Training step complete! Loss: {loss:.4f}, Accuracy: {acc:.4f}")
+print(f"Training step complete. Loss: {loss:.4f}, Accuracy: {acc:.4f}")
+model.summary()
 ```
 
 ---
@@ -234,11 +231,9 @@ print(f"\n✅ Training step complete! Loss: {loss:.4f}, Accuracy: {acc:.4f}")
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`Gemma3`** | `...gemma3.gemma3.Gemma3` | The main Keras `Model` class that assembles the architecture. With `include_top=True` and a `task_config` it owns one `layers/heads/nlp` task head in place of `lm_head` (Example 3). |
-| **`Gemma3TransformerBlock`** | `...gemma3.components.Gemma3TransformerBlock` | The core dual-norm transformer block. |
-| **`create_gemma3`** | `...gemma3.gemma3.create_gemma3` | High-level factory to create models for different tasks. |
-| **`..._generation`** | `...gemma3.gemma3.create_gemma3_generation` | Factory specifically for text generation. |
-| **`..._classification`** | `...gemma3.gemma3.create_gemma3_classification`| Factory specifically for sequence classification: a `Gemma3(include_top=True)` with a `TEXT_CLASSIFICATION` head behind a two-input functional wrapper. |
+| **`Gemma3`** | `...gemma.gemma3.Gemma3` | The main Keras `Model` class that assembles the architecture. With `include_top=True` and a `task_config` it owns one `layers/heads/nlp` task head in place of `lm_head` (Example 3). |
+| **`Gemma3TransformerBlock`** | `dl_techniques.layers.transformers.gemma3_transformer.Gemma3TransformerBlock` | The core dual-norm transformer block. |
+| **`create_gemma3`** | `...gemma.gemma3.create_gemma3` | `create_gemma3(variant, pretrained=False, **kwargs)`: forwards to `Gemma3.from_variant` and returns the `Gemma3` itself, headed or headless. |
 
 ---
 
@@ -258,17 +253,21 @@ This implementation provides several pre-configured variants based on the offici
 
 ### Example 1: Sequence Classification
 
-Use the dedicated factory function to add a classification head on top of the Gemma 3 backbone.
-The head is the model's own task head (`Gemma3(include_top=True)`, Example 3); the factory only
-wraps it in a model that takes `[input_ids, attention_mask]`.
+`create_gemma3` has the shape every language task-head factory in this repository has:
+`create_X(variant, pretrained=False, **kwargs)` forwards to `X.from_variant` and returns the
+class itself, and the head comes only from `include_top`, `task_config` and
+`head_config_overrides` in `__init__` (Example 3). There is no per-task factory.
 
 ```python
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+
 # Create a model for a 3-class classification problem
 model = create_gemma3(
     "tiny",
-    task_type="classification",
-    num_labels=3,
-    pooling_strategy="mean" # Use mean pooling over the sequence
+    include_top=True,
+    task_config=NLPTaskConfig(
+        name="topic", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=3),
+    head_config_overrides={"pooling_type": "mean"},  # Use mean pooling over the sequence
 )
 # The default is "last" (the last position kept by `attention_mask`). Gemma 3's
 # blocks are causally masked, so `"cls"` would pool a position that attended only
@@ -280,6 +279,7 @@ model.compile(
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
+logits = model({"input_ids": dummy_input_ids, "attention_mask": dummy_attention_mask})  # (2, 3)
 model.summary()
 ```
 
@@ -288,6 +288,8 @@ model.summary()
 Instead of using a variant, you can define your own architecture.
 
 ```python
+from dl_techniques.models.language.gemma.gemma3 import Gemma3
+
 custom_config = {
     "vocab_size": 10000,
     "hidden_size": 256,
@@ -303,8 +305,11 @@ custom_config = {
     ],
 }
 
-# Create a generation model with this custom config
-model = create_gemma3(custom_config, task_type="generation")
+# Create a language model with this custom config: the class takes it directly
+model = Gemma3(**custom_config)
+
+# Or start from a variant and override some of its values
+model = create_gemma3("tiny", max_seq_len=1024, dropout_rate=0.1)
 ```
 
 ---
@@ -347,18 +352,12 @@ load_weights_from_checkpoint(ner, "gemma_sst2.keras", skip_prefixes=(TASK_HEAD_N
                              strict=True, allow_unloaded=())
 ```
 
-The same call works on the factory models, either side: a `create_gemma3_classification`
-checkpoint fills a bare `Gemma3` with any head, a headless one
-(`allow_unloaded=("lm_head",)`, since the classifier holds no `lm_head`) or a
-`create_gemma3_generation` model with the same backbone weights, because
-`load_weights_from_checkpoint` compares the layers of the one model a functional wrapper
-holds. The call is complete-or-raise on both sides, so a generation checkpoint's `lm_head`,
-which has no home in a classifier, is named the same way (`allow_unloaded=("lm_head",)`).
-`create_gemma3(..., include_top=True, task_config=...)` returns that task's two-input
-model, named for its task type (`gemma3_for_token_classification`, ...; a
-`TEXT_CLASSIFICATION` head gives `gemma3_for_classification`, as
-`create_gemma3_classification` does); combined with
-`task_type="classification"` or `num_labels` it raises `ValueError`.
+A headed checkpoint fills a headless `Gemma3` too, with `allow_unloaded=("lm_head",)` since
+the headed model holds no `lm_head`. The call is complete-or-raise on both sides, so a headless
+checkpoint's `lm_head`, which has no home in a headed model, is named the same way
+(`allow_unloaded=("lm_head",)`). An old archive of the retired two-input wrapper still loads
+into the class: a functional model whose only layer besides its inputs is a model is compared
+through that inner model's layers.
 
 ## 9. Advanced Usage Patterns
 
@@ -396,7 +395,7 @@ The `Gemma3` model and its custom `Gemma3TransformerBlock` are fully serializabl
 
 ```python
 # Create and train model
-model = create_gemma3("tiny", task_type="generation")
+model = create_gemma3("tiny")
 # ... model.fit(...)
 
 # Save the entire model to a single file
@@ -404,7 +403,7 @@ model.save('my_gemma3_model.keras')
 
 # Load the model, including custom layers, in a new session
 loaded_model = keras.models.load_model('my_gemma3_model.keras')
-print("✅ Gemma 3 model loaded successfully!")
+print("Gemma 3 model loaded.")
 ```
 
 ---
@@ -466,7 +465,7 @@ A: The key differentiators are the **dual normalization** pattern within the tra
 
 **Q: Can I use this for fine-tuning?**
 
-A: Yes. `create_gemma3(..., pretrained="<path>.keras")` restores the backbone of a local checkpoint (of the bare `Gemma3` or of any model the factory returned) into a model with a fresh task head or none; the backbone loads completely or the call raises, and `pretrained=True` raises `NotImplementedError`. By hand, `load_weights_from_checkpoint(..., skip_prefixes=(TASK_HEAD_NAME,))` does the same by layer name (Example 3). You can then train the new head, or the entire model, on a downstream task.
+A: Yes. `create_gemma3(..., pretrained="<path>.keras")` restores the backbone of a local checkpoint (of a `Gemma3`, headed or headless, or an old archive of the retired two-input wrapper) into a model with a fresh task head or none; the backbone loads completely or the call raises, and `pretrained=True` raises `NotImplementedError`. By hand, `load_weights_from_checkpoint(..., skip_prefixes=(TASK_HEAD_NAME,))` does the same by layer name (Example 3). You can then train the new head, or the entire model, on a downstream task.
 
 ---
 

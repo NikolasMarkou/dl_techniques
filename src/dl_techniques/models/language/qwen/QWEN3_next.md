@@ -72,13 +72,14 @@ pip install dl-techniques keras>=3.8.0 tensorflow>=2.18.0
 ### Basic Usage
 
 ```python
+import keras
 from dl_techniques.models.language.qwen.qwen3_next import Qwen3Next
 
-# Create a small model for experimentation
-model = Qwen3Next.from_variant("small")
+# Create the tiny model for experimentation
+model = Qwen3Next.from_variant("tiny")
 
-# Generate text
-input_ids = keras.random.uniform((1, 128), 0, 151936, dtype="int32")
+# Next-token logits
+input_ids = keras.random.randint((1, 128), 0, 151936, dtype="int32")
 logits = model(input_ids)
 print(f"Output shape: {logits.shape}")  # (1, 128, 151936)
 
@@ -88,43 +89,54 @@ model.summary()
 
 ### Text Generation
 
+`create_qwen3_next(variant, pretrained=False, **kwargs)` forwards to
+`Qwen3Next.from_variant` and returns the `Qwen3Next` itself; without a task head it is the
+language model.
+
 ```python
+import keras
 from dl_techniques.models.language.qwen.qwen3_next import create_qwen3_next
 
-# Create optimized generation model
-model = create_qwen3_next("small", task_type="generation")
+# A language model from the 'tiny' variant
+model = create_qwen3_next("tiny")
 
-# Compile for generation
+# Compile for next-token training (the model returns logits)
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
-    loss="sparse_categorical_crossentropy"
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
 )
 
 # Use for inference
-input_ids = keras.random.uniform((2, 64), 0, 151936, dtype="int32")
+input_ids = keras.random.randint((2, 64), 0, 151936, dtype="int32")
 attention_mask = keras.ops.ones((2, 64), dtype="int32")
-logits = model([input_ids, attention_mask])
+logits = model({"input_ids": input_ids, "attention_mask": attention_mask})
 ```
 
 ### Classification Fine-tuning
 
+A classifier is the same class with a task head (`include_top=True` and a `task_config`),
+pooling the last position kept by `attention_mask` by default.
+
 ```python
-# Create classification model
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+
+# Create a 2-class classifier
 classifier = create_qwen3_next(
-    variant="small", 
-    task_type="classification", 
-    num_labels=2
+    "tiny",
+    include_top=True,
+    task_config=NLPTaskConfig(
+        name="sst2", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=2),
 )
 
-# Compile for classification
+# Compile for classification (the head returns logits)
 classifier.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=2e-5),
-    loss="sparse_categorical_crossentropy",
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
 
 # Train on your classification data
-# classifier.fit(train_data, epochs=3, validation_data=val_data)
+# classifier.fit({"input_ids": ids, "attention_mask": mask}, labels, epochs=3)
 ```
 
 ## Advanced Configuration
@@ -178,8 +190,7 @@ model = Qwen3Next(
     num_key_value_heads=4,
     num_experts=8,
     num_experts_per_tok=2,
-    max_position_embeddings=4096,
-    rope_theta=1000000.0,
+    max_seq_len=4096,
     normalization_type="zero_centered_rms_norm",
     dropout_rate=0.1,
     use_stochastic_depth=True,

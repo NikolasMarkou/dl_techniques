@@ -57,8 +57,9 @@ Each Qwen3 block utilizes the pre-normalization residual block structure:
 | `30b-coder` | 48 | 2048 | 32 | 4 | 16 | 128 | 262,144 | Production MoE Coder model |
 | `medium` | 24 | 1024 | 16 | 4 | 5 | 16 | 16,384 | Medium-sized MoE-enabled model |
 | `small` | 12 | 768 | 12 | 4 | 3 | 8 | 4,096 | Small MoE for research/experimentation |
+| `tiny` | 6 | 512 | 8 | 2 | 0 | 1 | 2,048 | Dense, no MoE; tests and examples |
 
-*Note: The number of MoE Layers indicates the indices of the 48/24/12 total transformer layers that use an MoE block instead of a standard FFN block.*
+*Note: The number of MoE Layers counts the indices, out of the 48/24/12/6 transformer layers, that use an MoE block instead of a standard FFN block.*
 
 ## Installation
 
@@ -71,16 +72,16 @@ pip install dl-techniques keras>=3.8.0 tensorflow>=2.18.0
 ### Basic Usage
 
 ```python
+import keras
 from dl_techniques.models.language.qwen.qwen3 import Qwen3
 
-# Create a small MoE-enabled backbone model
-config = Qwen3.MODEL_VARIANTS["small"].copy()
-backbone = Qwen3(**config)
+# Create the small MoE-enabled model (with its LM head)
+backbone = Qwen3.from_variant("small")
 
-# Get hidden states (eager execution)
-input_ids = keras.random.uniform((1, 128), 0, config["vocab_size"], dtype="int32")
-hidden_states = backbone(input_ids)
-print(f"Hidden State shape: {hidden_states.shape}")  # (1, 128, 768)
+# The model returns vocabulary logits (eager execution)
+input_ids = keras.random.randint((1, 128), 0, 32000, dtype="int32")
+logits = backbone(input_ids)
+print(f"Logits shape: {logits.shape}")  # (1, 128, 32000)
 
 # Print detailed model information
 backbone.summary()
@@ -88,47 +89,55 @@ backbone.summary()
 
 ### Text Generation
 
-Use the factory function to create a complete model with a language modeling head.
+`create_qwen3(variant, pretrained=False, **kwargs)` forwards to `Qwen3.from_variant` and
+returns the `Qwen3` itself; without a task head it is the language model.
 
 ```python
+import keras
 from dl_techniques.models.language.qwen.qwen3 import create_qwen3
 
-# Create optimized generation model using the 'medium' variant
-model = create_qwen3("medium", task_type="generation", use_weight_tying=True)
+# A language model from the 'tiny' variant
+model = create_qwen3("tiny")
 
-# Compile for generation
+# Compile for next-token training (the model returns logits)
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
-    loss="sparse_categorical_crossentropy"
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
 )
 
 # Use for inference
 input_ids = keras.ops.ones((2, 64), dtype="int32")
 attention_mask = keras.ops.ones((2, 64), dtype="int32")
-logits = model({"input_ids": input_ids, "attention_mask": attention_mask})
+logits = model({"input_ids": input_ids, "attention_mask": attention_mask})  # (2, 64, 32000)
 ```
 
 ### Classification Fine-tuning
 
+A classifier is the same class with a task head, set through `include_top=True` and a
+`task_config`. The head pools the last position kept by `attention_mask` by default;
+`head_config_overrides={"pooling_type": ...}` changes that.
+
 ```python
+import keras
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.models.language.qwen.qwen3 import create_qwen3
 
-# Create classification model using the 'small' variant
+# Create a 5-class classifier from the 'small' variant
 classifier = create_qwen3(
-    config_or_variant="small", 
-    task_type="classification", 
-    num_labels=5,
-    pooling_strategy="last"  # default; the last token kept by attention_mask
+    "small",
+    include_top=True,
+    task_config=NLPTaskConfig(
+        name="sentiment", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=5),
 )
 
-# Compile for classification
+# Compile for classification (the head returns logits)
 classifier.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=2e-5),
-    loss="sparse_categorical_crossentropy",
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"]
 )
 
-# classifier.fit(train_data, epochs=3, validation_data=val_data)
+# classifier.fit({"input_ids": ids, "attention_mask": mask}, labels, epochs=3)
 ```
 
 ## Advanced Configuration
@@ -145,12 +154,12 @@ model = Qwen3(
     num_layers=16,
     num_attention_heads=8,
     num_key_value_heads=2,  # Uses GQA
-    intermediate_size=1376, # Typical Qwen scaling factor (512 * 2.7)
     max_seq_len=8192,
     moe_layers=[], # Dense model
     dropout_rate=0.05
 )
 
+model.build((None, None))
 model.summary()
 ```
 
@@ -168,11 +177,10 @@ custom_moe_model = Qwen3(
     num_layers=20,
     num_attention_heads=12,
     num_key_value_heads=4,
-    intermediate_size=2048,
     moe_layers=list(range(3, 20, 4)), # Layers 3, 7, 11, 15, 19 use MoE
     num_experts=16,
     num_experts_per_tok=4,
-    moe_intermediate_size=1024, # Smaller expert size than dense FFN size
+    moe_intermediate_size=1024, # Hidden width of each expert's FFN
     rope_theta=10000.0,
 )
 ```
@@ -200,40 +208,45 @@ Qwen3 leverages Grouped Query Attention (GQA) and sparse MoE layers (in specific
 
 ### MoE Loss Integration
 
-When training an MoE-enabled Qwen3 model, the auxiliary expert balancing loss must be included in the total loss function. This implementation automatically registers the expert losses within the Keras `Model.losses` property.
+When training an MoE-enabled Qwen3 model, the auxiliary expert balancing loss must be included in the total loss function. The MoE layers register it through `add_loss`, so after a forward pass it is in the model's `losses` property (`fit()` adds it on its own).
 
 ```python
 # Custom training loop incorporating MoE auxiliary loss
+import numpy as np
 import tensorflow as tf
 import keras
+from dl_techniques.models.language.qwen.qwen3 import Qwen3
 
-@tf.function
 def train_step(batch, model, optimizer):
     with tf.GradientTape() as tape:
-        logits = model(batch, training=True)
-        
+        logits = model(batch["input_ids"], training=True)
+
         # 1. Standard Language Modeling Loss
         lm_loss = keras.losses.sparse_categorical_crossentropy(
             batch["labels"], logits, from_logits=True
         )
         mean_lm_loss = tf.reduce_mean(lm_loss)
-        
-        # 2. MoE Auxiliary Loss (automatically collected from the backbone)
-        backbone = model.get_layer("qwen3_backbone")
-        aux_loss = backbone.get_auxiliary_loss() if backbone.moe_layers else 0.0
-        
-        # Total Loss = LM Loss + Aux Loss * Weight (0.01)
-        # Note: The weight is often pre-applied inside the MoE layer, but can be scaled here.
+
+        # 2. MoE Auxiliary Loss (collected from the MoE layers by the forward pass)
+        aux_loss = tf.add_n(model.losses) if model.losses else 0.0
+
         total_loss = mean_lm_loss + aux_loss
-    
+
     gradients = tape.gradient(total_loss, model.trainable_variables)
     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-    
+
     return {
         "total_loss": total_loss,
         "lm_loss": mean_lm_loss,
         "aux_loss": aux_loss
     }
+
+# One step on a small MoE model
+model = Qwen3(vocab_size=1000, hidden_size=64, num_layers=2, num_attention_heads=4,
+              num_key_value_heads=2, max_seq_len=64, moe_layers=[1], num_experts=4,
+              num_experts_per_tok=2, moe_intermediate_size=64)
+ids = np.random.randint(1, 1000, (2, 16)).astype("int32")
+step = train_step({"input_ids": ids, "labels": ids}, model, keras.optimizers.AdamW(1e-4))
 ```
 
 ## Technical Specifications
