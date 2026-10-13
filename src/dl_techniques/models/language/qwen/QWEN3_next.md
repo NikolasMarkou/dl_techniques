@@ -9,7 +9,7 @@ Qwen3 Next represents an advancement in transformer architecture by incorporatin
 ### Key Architecture Features
 
 - **Hybrid Block Structure**: Each block contains 3x Gated DeltaNet + 1x Gated Attention layers
-- **Sparse Mixture of Experts**: 64 total experts with only 8 activated per token (8:1 sparsity ratio)
+- **Sparse Mixture of Experts**: `80b_a3b` has 512 experts per MoE layer with 10 routed per token (see Model Variants)
 - **Gated DeltaNet**: Linear-complexity attention alternative with delta rule mechanism
 - **Gated Attention**: Enhanced multi-head attention with Zero-Centered RMSNorm and partial RoPE
 - **Individual Layer Processing**: Each layer has its own normalization and MoE
@@ -39,6 +39,8 @@ Each Qwen3Next block contains 4 sub-layers, each following this pattern:
 3. **Mixture of Experts** for specialized processing
 4. **Residual Connection** back to the input
 
+So each sub-layer computes `x + FFN(mixer(norm(x)))`: the MoE, or with `num_experts=1` the dense FFN, sits inside the mixer's residual and has no norm or residual of its own. The upstream Qwen3-Next decoder layer has two residual steps instead, `x + mixer(norm1(x))` and then `x + mlp(norm2(x))`. The dense FFN takes the MoE's place here so that both paths of this implementation have the same placement (D-014).
+
 **Gated DeltaNet Features:**
 - Linear complexity O(L×D²) vs quadratic O(L²×D) attention
 - Delta rule mechanism for targeted memory updates
@@ -52,14 +54,14 @@ Each Qwen3Next block contains 4 sub-layers, each following this pattern:
 
 ## Model Variants
 
-| Variant | Blocks | Effective Layers | Parameters (built) | Hidden Size | Experts | Active Experts/Token | `moe_intermediate_size` | Context Length | Description |
+| Variant | Blocks | Effective Layers | Trainable parameters (built) | Hidden Size | Experts | Active Experts/Token | `moe_intermediate_size` | Context Length | Description |
 |---------|--------|------------------|--------------------|-------------|---------|----------------------|-------------------------|----------------|-------------|
-| `80b_a3b` | 12 | 48 | 80.43B | 2048 | 512 | 10 | 512 | 262144 | The released Qwen3-Next-80B-A3B config values |
-| `80b` | 12 | 48 | 3.38B | 2048 | 1 (no MoE) | 1 | 5632 | 8192 | Dense: 12 blocks, one dense FFN per sublayer |
+| `80b_a3b` | 12 | 48 | 80.03B | 2048 | 512 | 10 | 512 | 262144 | The released Qwen3-Next-80B-A3B config values |
+| `80b` | 12 | 48 | 3.37B | 2048 | 1 (no MoE) | 1 | 5632 | 8192 | Dense: 12 blocks, one dense FFN per sublayer |
 | `small` | 6 | 24 | 863M | 1024 | 8 | 2 | 704 | 2048 | 6 blocks for experimentation |
 | `tiny` | 3 | 12 | 199M | 512 | 4 | 1 | 352 | 1024 | 3 blocks |
 
-*Note: "Blocks" refers to Qwen3Next blocks (3 DeltaNet + 1 Attention each). "Effective Layers" is the total number of individual processing layers. Every value except "Parameters (built)" is read from `Qwen3Next.MODEL_VARIANTS` in `qwen3_next.py`. "Parameters (built)" is `count_params()` of what this implementation builds from those values (vocabulary 151936), measured on CPU: exact for `small` and `tiny`; for the two 80b variants extrapolated from 1- and 2-block builds, a method that reproduces the exact `small` and `tiny` counts (80b_a3b: 2- and 3-expert builds give the per-expert count). Each expert is a SwiGLU of hidden width `moe_intermediate_size`, as in the Hugging Face Qwen3-Next config; with one expert (`80b`) each of a block's four sublayers has one dense SwiGLU FFN of that width instead. Weights per token, counting only the `num_experts_per_tok` routed experts of each MoE layer (router, attention, embeddings and `lm_head` in full): 80b_a3b 4.63B, small 552M, tiny 179M. This implementation has no shared expert and unties `lm_head` from the token table, so it is not the released model's parameterization. Before 2026-10-13 (D-014) the counts were 235.0B, 1.71B, 901M and 211M: each expert was sized by `ffn_expansion_factor = max(1, moe_intermediate_size // hidden_size)` through SwiGLU's 2/3 rule (an 80b_a3b expert was 1536 wide, not 512), and the dense `80b` built no feed-forward at all. Archives of those shapes are refused by `from_variant(pretrained=...)` and by `keras.models.load_model`.*
+*Note: "Blocks" refers to Qwen3Next blocks (3 DeltaNet + 1 Attention each). "Effective Layers" is the total number of individual processing layers. Every value except "Trainable parameters (built)" is read from `Qwen3Next.MODEL_VARIANTS` in `qwen3_next.py`. "Trainable parameters (built)" counts the trainable weights of what this implementation builds from those values (vocabulary 151936), excluding the non-trainable RoPE `cos_cached`/`sin_cached` buffers (403M of `count_params()` for `80b_a3b`, 6.3M for `80b`, under 0.4M for `small` and `tiny`), measured on CPU: exact for `small` and `tiny`; for the two 80b variants extrapolated from 1- and 2-block builds, a method that reproduces the exact `small` and `tiny` counts (80b_a3b: 2- and 3-expert builds give the per-expert count). Each expert is a SwiGLU of hidden width `moe_intermediate_size`, as in the Hugging Face Qwen3-Next config; with one expert (`80b`) each of a block's four sublayers has one dense SwiGLU FFN of that width instead. Trainable weights per token, counting only the `num_experts_per_tok` routed experts of each MoE layer (router, attention, embeddings and `lm_head` in full): 80b_a3b 4.23B, small 552M, tiny 179M. This implementation has no shared expert and unties `lm_head` from the token table, so it is not the released model's parameterization. Before 2026-10-13 (D-014) the trainable counts were 234.6B, 1.71B, 901M and 210M: each expert was sized by `ffn_expansion_factor = max(1, moe_intermediate_size // hidden_size)` through SwiGLU's 2/3 rule (an 80b_a3b expert was 1536 wide, not 512), and the dense `80b` built no feed-forward at all. Archives of those shapes are refused by `from_variant(pretrained=...)` and by `keras.models.load_model`.*
 
 ## Installation
 
@@ -228,7 +230,7 @@ model = Qwen3Next(
 The hybrid MoE architecture provides significant computational savings:
 
 - **Linear Complexity**: Gated DeltaNet provides O(L) scaling vs O(L²) attention
-- **Active Parameters**: the share of built weights used per token is 5.8% for `80b_a3b`, 64% for `small` and 90% for `tiny` (measured, see the variant table note); embeddings and `lm_head` dominate the small variants
+- **Active Parameters**: the share of built trainable weights used per token is 5.3% for `80b_a3b`, 64% for `small` and 90% for `tiny` (measured, see the variant table note); embeddings and `lm_head` dominate the small variants
 - **Memory Usage**: Linear scaling with active parameters, constant memory for sequence length
 - **Throughput**: ~10-30x improvement over dense models of equivalent capacity
 - **Expert Specialization**: Each layer's MoE develops specialized processing capabilities
@@ -416,7 +418,9 @@ analyze_expert_usage(model)
 
 ### Performance Comparison
 
-| Metric | Qwen3 235B-A22B | Qwen3 Next 80B-A3B | Improvement |
+This table describes the released Qwen3-235B-A22B and Qwen3-Next-80B-A3B models, not this implementation. Its parameter rows are the sizes those models' names state. Its speed, memory and cost rows cite no source and were not measured in this repository. This implementation's `80b_a3b` builds 80.03B trainable parameters and uses 4.23B per token (see the Model Variants note): it has no shared expert, and its `lm_head` is not tied to the token table.
+
+| Metric | Released Qwen3 235B-A22B | Released Qwen3 Next 80B-A3B | Improvement |
 |--------|-----------------|---------------------|-------------|
 | **Parameters** | 235B | 80B | 66% reduction |
 | **Active/Token** | ~22B | ~3B | 86% reduction |

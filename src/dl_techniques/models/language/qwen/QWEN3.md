@@ -52,14 +52,14 @@ Each Qwen3 block utilizes the pre-normalization residual block structure:
 
 ## Model Variants
 
-| Variant | Layers | Hidden Size | Attn Heads | KV Heads | MoE Layers | Experts/Layer | `moe_intermediate_size` | Parameters (built) | Context Length | Description |
+| Variant | Layers | Hidden Size | Attn Heads | KV Heads | MoE Layers | Experts/Layer | `moe_intermediate_size` | Trainable parameters (built) | Context Length | Description |
 |---------|--------|-------------|------------|----------|------------|---------------|-------------------------|--------------------|----------------|-------------|
-| `30b-coder` | 48 | 2048 | 32 | 4 | 16 | 128 | 768 | 12.66B | 262,144 | Production MoE Coder model |
-| `medium` | 24 | 1024 | 16 | 4 | 5 | 16 | 2048 | 961M | 16,384 | Medium-sized MoE-enabled model |
-| `small` | 12 | 768 | 12 | 4 | 3 | 8 | 1024 | 170M | 4,096 | Small MoE for research/experimentation |
-| `tiny` | 6 | 512 | 8 | 2 | 0 | 1 | 2048 (unread) | 51.6M | 2,048 | Dense, no MoE; tests and examples |
+| `30b-coder` | 48 | 2048 | 32 | 4 | 16 | 128 | 768 | 11.85B | 262,144 | Production MoE Coder model |
+| `medium` | 24 | 1024 | 16 | 4 | 5 | 16 | 2048 | 936M | 16,384 | Medium-sized MoE-enabled model |
+| `small` | 12 | 768 | 12 | 4 | 3 | 8 | 1024 | 167M | 4,096 | Small MoE for research/experimentation |
+| `tiny` | 6 | 512 | 8 | 2 | 0 | 1 | 2048 (unread) | 50.9M | 2,048 | Dense, no MoE; tests and examples |
 
-*Note: The number of MoE Layers counts the indices, out of the 48/24/12/6 transformer layers, that use an MoE block instead of a standard FFN block. `moe_intermediate_size` is each expert's FFN hidden width, used verbatim (the Hugging Face Qwen3-MoE meaning); dense layers do not read it (their SwiGLU is sized from `4 * hidden_size` by its 2/3 rule, rounded up to a multiple of 256: 1536 at hidden 512, 2048 at 768, 2816 at 1024, 5632 at 2048), so for `tiny` it is unread. "Parameters (built)" is `count_params()` of what this implementation builds, measured on CPU: exact for `medium`, `small` and `tiny`; `30b-coder` extrapolated from 1- and 2-layer dense builds and 2- and 3-expert MoE builds, a method that reproduces the three exact counts. Before 2026-10-13 (D-014) an expert was a SwiGLU sized by `max(1, moe_intermediate_size // hidden_size)` through the 2/3 rule (30b-coder 1536 wide, medium 1536, small 512) and the counts were 22.32B, 835M and 142M; MoE archives of those shapes are refused by `from_variant(pretrained=...)` and by `keras.models.load_model`.*
+*Note: The number of MoE Layers counts the indices, out of the 48/24/12/6 transformer layers, that use an MoE block instead of a standard FFN block. `moe_intermediate_size` is each expert's FFN hidden width, used verbatim (the Hugging Face Qwen3-MoE meaning); dense layers do not read it (their SwiGLU is sized from `4 * hidden_size` by its 2/3 rule, rounded up to a multiple of 256: 1536 at hidden 512, 2048 at 768, 2816 at 1024, 5632 at 2048), so for `tiny` it is unread. "Trainable parameters (built)" counts the trainable weights of what this implementation builds, excluding the non-trainable RoPE `cos_cached`/`sin_cached` buffers (805M of `count_params()` for `30b-coder`, 25.2M for `medium`, 3.1M for `small`, 0.8M for `tiny`). Measured on CPU: exact for `medium`, `small` and `tiny`; `30b-coder` extrapolated from 1- and 2-layer dense builds and 2- and 3-expert MoE builds, a method that reproduces the three exact counts. Before 2026-10-13 (D-014) an expert was a SwiGLU sized by `max(1, moe_intermediate_size // hidden_size)` through the 2/3 rule (30b-coder 1536 wide, medium 1536, small 512) and the trainable counts were 21.52B, 810M and 139M; MoE archives of those shapes are refused by `from_variant(pretrained=...)` and by `keras.models.load_model`.*
 
 ## Installation
 
@@ -198,8 +198,8 @@ Qwen3 leverages Grouped Query Attention (GQA) and sparse MoE layers (in specific
 
 | Metric | Detail |
 |---------|--------------------------------|
-| **Total Parameters** | 12.66B built (16 of the 48 layers are MoE; the released Qwen3-Coder-30B-A3B makes every layer MoE) |
-| **Active Parameters** | 3.60B built per token (8 of 128 experts in each MoE layer; router, attention, dense layers, embeddings and `lm_head` in full) |
+| **Total Parameters** | 11.85B trainable, built (16 of the 48 layers are MoE; the released Qwen3-Coder-30B-A3B makes every layer MoE; RoPE buffers excluded) |
+| **Active Parameters** | 2.80B trainable, built, per token (8 of 128 experts in each MoE layer; router, attention, dense layers, embeddings and `lm_head` in full; RoPE buffers excluded) |
 | **Context Length** | 262,144 tokens |
 | **Inference Speed** | Optimized via GQA |
 | **Training Cost** | Optimized via sparse MoE routing/load balancing |
