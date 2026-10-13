@@ -46,17 +46,17 @@ class TestQwen3FromVariantOverrides:
         assert Qwen3.MODEL_VARIANTS["tiny"]["num_layers"] == 6
 
     def test_the_create_qwen3_docstring_example_runs(self) -> None:
-        """CONTROL -- this arm PASSED before the fix, deliberately kept.
+        """`create_qwen3("tiny", num_layers=2)`, verbatim from its docstring.
 
-        `create_qwen3("tiny", num_layers=2)` is verbatim from `create_qwen3`'s
-        docstring and it worked all along: that function never calls
-        `from_variant`, it reads `MODEL_VARIANTS` itself and already did the
-        `config.update(...)` merge (`qwen3.py:818-839`). It is here to localise
-        the defect to `from_variant` rather than to the qwen3 package, and to
-        stop a future refactor from routing it through the broken path.
+        This arm PASSED before the fix: `create_qwen3` then read
+        `MODEL_VARIANTS` itself and merged the overrides on its own, so it
+        localised the defect to `from_variant`. `create_qwen3` now only
+        forwards to `from_variant`, so the documented call goes through the
+        merge pinned above, and the override must reach the model it returns.
         """
         model = create_qwen3("tiny", num_layers=2)
-        assert model is not None
+        assert type(model) is Qwen3
+        assert model.num_layers == 2
 
 
 class TestQwen3NextFromVariantOverrides:

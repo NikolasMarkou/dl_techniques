@@ -74,12 +74,8 @@ PATHS = [
 SYMBOLS = [
     ("dl_techniques.models.language.qwen.qwen3", "Qwen3"),
     ("dl_techniques.models.language.qwen.qwen3", "create_qwen3"),
-    ("dl_techniques.models.language.qwen.qwen3", "create_qwen3_generation"),
-    ("dl_techniques.models.language.qwen.qwen3", "create_qwen3_classification"),
     ("dl_techniques.models.language.qwen.qwen3_next", "Qwen3Next"),
     ("dl_techniques.models.language.qwen.qwen3_next", "create_qwen3_next"),
-    ("dl_techniques.models.language.qwen.qwen3_next", "create_qwen3_next_generation"),
-    ("dl_techniques.models.language.qwen.qwen3_next", "create_qwen3_next_classification"),
     ("dl_techniques.models.language.qwen.components", "Qwen3NextBlock"),
     ("dl_techniques.models.language.qwen.qwen3_embeddings", "Qwen3EmbeddingLayer"),
     ("dl_techniques.models.language.qwen.qwen3_embeddings", "Qwen3RerankerLayer"),

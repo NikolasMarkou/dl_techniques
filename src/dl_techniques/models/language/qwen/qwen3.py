@@ -31,13 +31,15 @@ With `include_top=True` and a `task_config` the model owns ONE task head from
 `layers/heads/nlp`, named `task_head`, in place of the LM head (no `lm_head`
 is created and no vocabulary logits are computed), fed the final-normed
 hidden states and pooling `'last'` by default, as `models/language/gpt2`
-does. `create_qwen3_classification` is that model behind a two-input
-functional wrapper. Before this, the classifier pooled the vocab_size-wide
-logits (and since c6f5a13f2 could not even be built), so no classifier
-checkpoint written earlier is portable. `from_variant` takes no `pretrained`
-argument; `create_qwen3(..., pretrained=<path>)` restores the backbone of a local
-`.keras` checkpoint, and `pretrained=True` raises `NotImplementedError` (no weights
-are distributed with this package).
+does. `create_qwen3` returns this class itself, headed or headless, and
+takes the head only through `include_top` and `task_config`; there is no
+per-task factory and no functional wrapper. Before this, the classifier pooled
+the vocab_size-wide logits (and since c6f5a13f2 could not even be built), so no
+classifier checkpoint written earlier is portable. `from_variant(...,
+pretrained=<path>)` (and `create_qwen3`, which forwards to it) restores the
+backbone of a local `.keras` checkpoint, including an old two-input wrapper
+archive, and `pretrained=True` raises `NotImplementedError` (no weights are
+distributed with this package).
 
 References:
     - Qwen Team, 2025. Qwen3 Technical Report.
@@ -82,11 +84,9 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.nlp.model_head import (
     head_output_shape,
     ids_shape_of,
-    task_model_name,
 )
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
-    NLPTaskType,
     build_model_task_head,
     finalize_head_outputs,
     head_attention_mask,
@@ -616,16 +616,33 @@ class Qwen3(RecordedBuildShapeMixin, keras.Model):
     def from_variant(
         cls,
         variant: str,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
     ) -> "Qwen3":
         """
         Create a Qwen3 model from a predefined variant.
 
         :param variant: One of "30b-coder", "medium", "small", "tiny".
+        :param pretrained: `False` (default) or any other falsy value: random
+            initialization. A `str`: the path of a local `.keras` checkpoint
+            whose backbone is restored into the model by layer name, headed or
+            headless. The checkpoint may be a `Qwen3` or an old two-input
+            functional wrapper around one; both are read through the same rule.
+            A task head in the checkpoint is never copied, and the model's own
+            head (if any) keeps its fresh initialization. The backbone loads
+            completely or the call raises (another depth or width is refused);
+            on a vocabulary change only the token table and the `lm_head` keep
+            their initialization. To restore a whole model, head included, use
+            `keras.models.load_model`. `True` raises `NotImplementedError`: no
+            weights are distributed with this package.
         :param kwargs: Additional arguments passed to the constructor,
             including `include_top`, `task_config`, `head_config_overrides`
             and `pad_token_id`.
         :return: Qwen3 model instance.
+        :raises ValueError: If `variant` is not a recognized key, or a
+            `pretrained` checkpoint does not fit the backbone.
+        :raises NotImplementedError: If `pretrained` is True.
+        :raises FileNotFoundError: If a `pretrained` path does not exist.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -645,7 +662,25 @@ class Qwen3(RecordedBuildShapeMixin, keras.Model):
         # overridable key is already in the variant dict, so that was every
         # documented use of `**kwargs` here. Copied from `models/language/gpt2/gpt2.py:464`.
         config.update(kwargs)
-        return cls(**config)
+        weights_path = pretrained_path_or_raise(pretrained, "Qwen3")
+        model = cls(**config)
+        if weights_path is not None:
+            # A build, not a forward: no RNG is drawn and no weight is touched.
+            if not model.built:
+                model.build((None, None))
+            # DECISION plan-2026-10-11T170958-dc4d2202/D-015: the shared load rule on the
+            # wrapper's core, never `model.load_weights` (it restores nothing on a
+            # name or shape mismatch and reports success); do NOT drop TASK_HEAD_NAME
+            # (a head of equal shape would be copied). See decisions.md.
+            load_backbone_from_checkpoint(
+                model,
+                weights_path,
+                head_prefixes=(TASK_HEAD_NAME,),
+                vocab_layers=("token_embedding",),
+                tables=("token_embedding/embeddings", "lm_head/kernel"),
+                tops=("lm_head",),
+            )
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
@@ -720,267 +755,51 @@ class Qwen3(RecordedBuildShapeMixin, keras.Model):
 # Factory Functions
 # ---------------------------------------------------------------------
 
-def _two_input_model(core: Qwen3, name: str) -> keras.Model:
-    """
-    Put the `[input_ids, attention_mask]` functional interface around `core`.
-
-    Interface contract (shared by the `create_qwen3*` factories):
-
-    :param core: An unbuilt `Qwen3`, named `qwen3_backbone` by every caller.
-    :param name: Name of the returned model.
-    :return: A functional `keras.Model` with two int32 inputs whose only
-        non-input layer is `core`. `load_weights_from_checkpoint` therefore
-        compares `core`'s layers, so a backbone moves between such a model
-        and a bare `Qwen3` either way.
-    """
-    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
-    attention_mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
-    outputs = core(
-        inputs={"input_ids": input_ids, "attention_mask": attention_mask}
-    )
-    model = keras.Model(
-        inputs=[input_ids, attention_mask], outputs=outputs, name=name
-    )
-    logger.info(f"Created {name} with {model.count_params():,} parameters.")
-    return model
-
-
-def create_qwen3_generation(config: Dict[str, Any]) -> keras.Model:
-    """
-    Create a Qwen3 model optimized for text generation tasks.
-
-    This factory builds a Keras model that takes `input_ids` and an
-    `attention_mask` and returns token logits, suitable for autoregressive
-    text generation.
-
-    :param config: Complete configuration for the `Qwen3` base model.
-    :return: A compiled Keras `Model` ready for generation tasks.
-    """
-    logger.info("Creating Qwen3 model for text generation.")
-    logger.debug(f"Generation model config: {config}")
-    return _two_input_model(
-        Qwen3(**config, name="qwen3_backbone"), "qwen3_for_generation")
-
-# ---------------------------------------------------------------------
-
-def create_qwen3_classification(
-    config: Dict[str, Any],
-    num_labels: int,
-    pooling_strategy: str = "last",
-    classifier_dropout_rate: Optional[float] = None,
-) -> keras.Model:
-    """
-    Create a Qwen3 model for sequence classification tasks.
-
-    The classifier is the model's own task head (`Qwen3(include_top=True)`
-    with a `TEXT_CLASSIFICATION` task), fed the final-normed hidden states;
-    this function only puts the two-input functional interface around it.
-
-    :param config: Complete configuration for the `Qwen3` base model.
-    :param num_labels: Number of output labels for the classification task.
-    :param pooling_strategy: Method to pool the sequence output. "last" uses
-        the output at the last position kept by `attention_mask` — the only
-        position that has attended to the whole sequence under this
-        backbone's causal mask. "mean" averages all token outputs,
-        respecting the attention mask. "cls" uses the first token's output;
-        under a causal mask that position attends only to itself, so the
-        pooled vector is a function of the first token id alone, and this
-        mode is kept only for bidirectional-era checkpoints. Defaults to "last".
-    :param classifier_dropout_rate: Dropout rate for the classification
-        head. If None, defaults to the `dropout_rate` from `config`.
-    :return: A compiled Keras `Model` ready for classification tasks.
-    """
-    if num_labels <= 0:
-        raise ValueError(f"num_labels must be positive, got {num_labels}")
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-029: default is "last", not
-    # "cls" — Qwen3 is causally masked, so "cls" pools only the first token id.
-    # Do not simplify "last" to inputs[:, -1, :]. See decisions.md.
-    if pooling_strategy not in ["last", "cls", "mean"]:
-        raise ValueError(
-            f"pooling_strategy must be 'last', 'cls' or 'mean', got "
-            f"'{pooling_strategy}'"
-        )
-
-    logger.info(f"Creating Qwen3 classification model with {num_labels} labels.")
-    logger.info(f"Using pooling strategy: '{pooling_strategy}'")
-    logger.debug(f"Classification model config: {config}")
-
-    classifier = Qwen3(
-        **config,
-        include_top=True,
-        task_config=NLPTaskConfig(
-            name="classification",
-            task_type=NLPTaskType.TEXT_CLASSIFICATION,
-            num_classes=num_labels,
-            dropout_rate=(
-                classifier_dropout_rate if classifier_dropout_rate is not None
-                else config.get("dropout_rate", 0.1)
-            ),
-        ),
-        head_config_overrides={"pooling_type": pooling_strategy},
-        name="qwen3_backbone",
-    )
-    return _two_input_model(
-        classifier, task_model_name("qwen3", NLPTaskType.TEXT_CLASSIFICATION))
-
-
 def create_qwen3(
-    config_or_variant: Union[str, Dict[str, Any]],
-    task_type: str = "generation",
+    variant: str,
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
-) -> keras.Model:
+) -> Qwen3:
     """
-    High-level factory to create Qwen3 models for common tasks.
+    Create a Qwen3 model from a shipped `MODEL_VARIANTS` name.
 
-    This function provides a single, convenient entry point for creating
-    different types of Qwen3 models. It allows specifying a model by
-    a predefined variant string or a custom configuration dictionary, and
-    supports overriding any parameter via keyword arguments.
+    Delegates to :meth:`Qwen3.from_variant` and holds no logic of its own, as
+    `create_gpt2` and `create_zamba2` do. A task head comes from the
+    constructor (`include_top=True` with a `task_config`), never from a
+    per-task factory.
 
-    Configuration Precedence:
-    1. Predefined variant defaults.
-    2. Overridden by `config_or_variant` if it's a dictionary.
-    3. Finally, overridden by any explicit `**kwargs`.
-
-    :param config_or_variant: Either a variant string (e.g., "tiny", "small")
-        or a dictionary with a custom model configuration.
-    :param task_type: Type of model to create: "generation" for
-        autoregressive language modeling, or "classification" for sequence
-        classification.
-    :param pretrained: `False` (default) or any other falsy value: random
-        initialization. A `str`: the path of a local `.keras` checkpoint (of the
-        `Qwen3` itself or of a model this factory returned, headed or headless)
-        whose backbone is restored into the result by layer name. A task head in
-        the checkpoint is never copied, and the result's own head (if any) keeps
-        its fresh initialization. The backbone loads completely or the call raises
-        (another depth or width is refused); on a vocabulary change only the token
-        table and the `lm_head` keep their initialization. `True` raises
-        `NotImplementedError`: no weights are distributed with this package.
-    :param kwargs: Additional keyword arguments to override configuration
-        parameters (e.g. `hidden_size`, `num_layers`) or provide
-        task-specific settings for classification (`num_labels`,
-        `pooling_strategy`, `classifier_dropout_rate`). `include_top=True`
-        with a `task_config` (and optional `head_config_overrides`) replaces
-        the LM top with that task head: the result is named
-        `qwen3_for_<task_type value>` (e.g. `qwen3_for_token_classification`),
-        except that `TEXT_CLASSIFICATION` gives `qwen3_for_classification`, the
-        name `create_qwen3_classification` gives the same task; combining it with `task_type="classification"` or the
-        classification settings raises `ValueError`.
-    :return: A two-input (`[input_ids, attention_mask]`) Keras `Model`
-        configured for the specified task.
+    :param variant: A key of `Qwen3.MODEL_VARIANTS`: "30b-coder", "medium",
+        "small" or "tiny".
+    :param pretrained: `False` (default) for random initialization; a `str`
+        path of a local `.keras` checkpoint restores the backbone (see
+        :meth:`Qwen3.from_variant`); `True` raises `NotImplementedError`.
+    :param kwargs: Forwarded to :meth:`Qwen3.from_variant`, overriding any
+        variant parameter, including `include_top=True` with a `task_config`
+        (and optional `head_config_overrides`) for a model with a task head.
+    :return: The `Qwen3` model itself, unbuilt unless `pretrained` is a path.
+    :raises ValueError: If `variant` is not a recognized key, or a forwarded
+        argument is invalid.
+    :raises NotImplementedError: If `pretrained` is True.
 
     Example:
         .. code-block:: python
 
-            # Create a standard 'tiny' model for generation
-            gen_model = create_qwen3("tiny")
+            # A 'tiny' language model (returns logits)
+            model = create_qwen3("tiny")
+            logits = model({"input_ids": ids, "attention_mask": mask})
 
-            # Create a 'small' model for classification with 5 labels
-            clf_model = create_qwen3("small", task_type="classification", num_labels=5)
-
-            # Create a custom 'tiny' model with fewer layers for generation
-            custom_gen = create_qwen3("tiny", num_layers=2)
-
-            # Create a custom classification model from a dictionary with mean pooling
-            my_config = {"hidden_size": 128, "num_layers": 2, ...}
-            custom_clf = create_qwen3(
-                my_config,
-                task_type="classification",
-                num_labels=10,
-                pooling_strategy="mean"
+            # A 'small' sequence classifier with 5 labels (pools 'last')
+            clf = create_qwen3(
+                "small",
+                include_top=True,
+                task_config={"name": "sentiment",
+                             "task_type": "text_classification",
+                             "num_classes": 5},
             )
+
+            # Fewer layers than the variant
+            custom = create_qwen3("tiny", num_layers=2)
     """
-    weights_path = pretrained_path_or_raise(pretrained, "Qwen3")
-    model = _dispatch_qwen3(config_or_variant, task_type, dict(kwargs))
-    if weights_path is not None:
-        # DECISION plan-2026-10-11T170958-dc4d2202/D-015: the shared load rule on the
-        # wrapper's core, never `model.load_weights` (it restores nothing on a
-        # name or shape mismatch and reports success); do NOT drop TASK_HEAD_NAME
-        # (a head of equal shape would be copied). See decisions.md.
-        load_backbone_from_checkpoint(
-            model,
-            weights_path,
-            head_prefixes=(TASK_HEAD_NAME,),
-            vocab_layers=("token_embedding",),
-            tables=("token_embedding/embeddings", "lm_head/kernel"),
-            tops=("lm_head",),
-        )
-    return model
-
-
-def _dispatch_qwen3(
-    config_or_variant: Union[str, Dict[str, Any]],
-    task_type: str,
-    kwargs: Dict[str, Any],
-) -> keras.Model:
-    """The task dispatch of :func:`create_qwen3`, without its `pretrained` route.
-
-    :param config_or_variant: As for :func:`create_qwen3`.
-    :param task_type: As for :func:`create_qwen3`.
-    :param kwargs: Overrides and task settings; may be modified.
-    :return: The two-input functional model.
-    """
-    # 1. Determine base configuration from variant or dict
-    if isinstance(config_or_variant, str):
-        variant = config_or_variant
-        if variant not in Qwen3.MODEL_VARIANTS:
-            raise ValueError(
-                f"Unknown variant '{variant}'. Available: {list(Qwen3.MODEL_VARIANTS.keys())}"
-            )
-        config = Qwen3.MODEL_VARIANTS[variant].copy()
-        config.pop("description", None)
-    elif isinstance(config_or_variant, dict):
-        config = config_or_variant.copy()
-    else:
-        raise TypeError(
-            "config_or_variant must be a string (variant name) or a dictionary."
-        )
-
-    # 2. Separate task-specific kwargs from model config kwargs
-    task_kwargs = {}
-    model_kwargs = {}
-    task_specific_keys = ["num_labels", "pooling_strategy", "classifier_dropout_rate"]
-
-    for key, value in kwargs.items():
-        if key in task_specific_keys:
-            task_kwargs[key] = value
-        else:
-            model_kwargs[key] = value
-
-    # 3. Apply overrides to the base model config
-    config.update(model_kwargs)
-
-    # 4. include_top=True replaces the LM top with the task_config's head, so
-    # the model is that task's, named for it, and never "generation".
-    if config.get("include_top"):
-        if task_type != "generation" or task_kwargs:
-            raise ValueError(
-                "include_top=True builds the head named by task_config; it "
-                "cannot be combined with task_type='classification' or with "
-                "num_labels / pooling_strategy / classifier_dropout_rate, "
-                f"which build their own head. Got task_type={task_type!r} "
-                f"and {sorted(task_kwargs)}."
-            )
-        core = Qwen3(**config, name="qwen3_backbone")
-        return _two_input_model(
-            core, task_model_name("qwen3", core.task_config["task_type"]))
-
-    # 5. Build the requested model based on task_type
-    if task_type == "generation":
-        if "num_labels" in task_kwargs:
-            logger.warning("`num_labels` is ignored for 'generation' task type.")
-        return create_qwen3_generation(config)
-
-    elif task_type == "classification":
-        num_labels = task_kwargs.pop("num_labels", None)
-        if num_labels is None:
-            raise ValueError(
-                "`num_labels` must be provided for the 'classification' task."
-            )
-        return create_qwen3_classification(config, num_labels, **task_kwargs)
-
-    else:
-        raise ValueError(f"Unknown task_type '{task_type}'. Supported: 'generation', 'classification'.")
+    return Qwen3.from_variant(variant, pretrained=pretrained, **kwargs)
 
 # ---------------------------------------------------------------------

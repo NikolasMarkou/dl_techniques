@@ -309,8 +309,9 @@ def _unwrap_single_model(model: keras.Model) -> keras.Model:
     """The model whose layers a by-name transfer compares.
 
     A functional model whose only non-input layer is itself a
-    ``keras.Model`` (an input/output wrapper such as
-    ``create_qwen3_classification``'s) holds every weight in that one layer,
+    ``keras.Model`` (an input/output wrapper such as the two-input models the
+    retired ``create_qwen3_classification`` returned) holds every weight in
+    that one layer,
     so its layers are the ones compared. Any other model is returned as is.
     """
     inner = [
@@ -555,8 +556,9 @@ def _backbone_config(ckpt_path: str) -> Dict[str, Any]:
     """The config that records a language model's ``vocab_size`` / ``include_top``.
 
     The archive's own top-level config; for a functional wrapper around ONE
-    model (``create_qwen3``'s two-input interface; the same shape
-    :func:`_unwrap_single_model` compares by), the wrapped model's config
+    model (the two-input interface ``create_qwen3`` used to return, still
+    found in old archives; the same shape :func:`_unwrap_single_model`
+    compares by), the wrapped model's config
     instead, since the wrapper itself records neither.
 
     :param ckpt_path: Path to a ``.keras`` archive.

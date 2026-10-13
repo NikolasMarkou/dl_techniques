@@ -21,11 +21,11 @@ also discarded BERT/DistilBERT/FNet's trained position and token-type tables
 (even of another length), and a tied headless checkpoint left an untied
 ``lm_head`` random (reviewer pass 2, WARNING 2 and NOTEs 3-4).
 
-Qwen3, Qwen3Next and Gemma3 join through their dispatching ``create_<model>``
-factories (plan-2026-10-11T170958-dc4d2202 step 8b, D-015), which return a
-functional wrapper around the class: the checkpoint may be that wrapper or the
-bare class (both are read through the same rule), ``pretrained=True`` raises
-``NotImplementedError`` and a falsy value is ignored.
+Qwen3, Qwen3Next and Gemma3 take ``pretrained`` in ``from_variant`` like the
+others (their ``create_<model>`` returns the class itself): ``pretrained=True``
+raises ``NotImplementedError``, a falsy value is ignored, and an OLD archive
+of the two-input functional wrapper their retired factories returned still
+fills the bare class (plan-2026-10-11T170958-dc4d2202 D-015).
 
 The vocabulary here (64) is NOT any class default, so a same-vocabulary load
 also proves the exception is keyed on the checkpoint, not on a class constant.
@@ -46,7 +46,7 @@ from dl_techniques.models.language.gemma import create_gemma3
 from dl_techniques.models.language.gpt2 import create_gpt2
 from dl_techniques.models.language.mamba import create_mamba, create_mamba2
 from dl_techniques.models.language.modern_bert import create_modern_bert
-from dl_techniques.models.language.qwen import create_qwen3, create_qwen3_next
+from dl_techniques.models.language.qwen import Qwen3, create_qwen3, create_qwen3_next
 from dl_techniques.models.language.topolm import create_topolm
 from dl_techniques.models.language.tree_transformer import create_tree_transformer
 from dl_techniques.models.language.wave_field import create_wave_field_llm
@@ -71,9 +71,9 @@ _VOCAB = 64
 _OTHER_VOCAB = 96
 
 
-# Qwen3, Qwen3Next and Gemma3 return a functional wrapper around the class
-# (``<model>_backbone``), so the layers compared are the wrapped model's.
-_WRAPPED = ("qwen3", "qwen3_next", "gemma3")
+# The three classes whose ``from_variant`` took over the ``pretrained`` route of
+# a retired dispatching factory.
+_NORMALIZED = ("qwen3", "qwen3_next", "gemma3")
 
 
 class _Spec(NamedTuple):
@@ -143,8 +143,8 @@ _MODELS = {
         {"deeper": dict(num_layers=3),
          "wider": dict(hidden_size=64, intermediate_size=128)},
         dict(max_len=32)),
-    # The dispatching factories; no position table, RoPE only. The token table
-    # is `token_embedding`, the untied output projection `lm_head` (no tie knob).
+    # No position table, RoPE only. The token table is `token_embedding`, the
+    # untied output projection `lm_head` (no tie knob).
     "qwen3": _Spec(lambda **k: create_qwen3("tiny", **k),
                    dict(TINY["qwen3"].kwargs, num_layers=2),
                    {"deeper": dict(num_layers=3), "wider": dict(hidden_size=64)},
@@ -230,7 +230,7 @@ def _checkpoint(model, head, tmp_path, **overrides):
 
 
 def _core(model):
-    """The class instance: a wrapper's only non-input layer, else the model."""
+    """The class instance: an old wrapper's only non-input layer, else the model."""
     inner = [layer for layer in model.layers
              if not isinstance(layer, keras.layers.InputLayer)]
     if len(inner) == 1 and len(inner) < len(model.layers) and isinstance(
@@ -431,67 +431,72 @@ def test_a_vocabulary_change_lets_a_tied_checkpoint_fill_an_untied_model(
 
 
 # ---------------------------------------------------------------------
-# the dispatching factories (Qwen3, Qwen3Next, Gemma3)
+# Qwen3, Qwen3Next, Gemma3: the pretrained route moved into from_variant
 # ---------------------------------------------------------------------
 
 
-@pytest.fixture(params=_WRAPPED)
-def wrapped(request):
+@pytest.fixture(params=_NORMALIZED)
+def normalized(request):
     return request.param
 
 
-def test_released_weights_are_refused_not_faked(wrapped):
+def test_released_weights_are_refused_not_faked(normalized):
     """``pretrained=True`` raises: a silent random init would pass for a download."""
     with pytest.raises(NotImplementedError, match="not distributed"):
-        _build(wrapped, "headless", pretrained=True)
+        _build(normalized, "headless", pretrained=True)
 
 
 @pytest.mark.parametrize("falsy", [False, None, ""])
-def test_a_falsy_pretrained_is_ignored(wrapped, falsy):
-    model = _build(wrapped, "headless", pretrained=falsy)
-    assert isinstance(model, keras.Model) and model.weights
+def test_a_falsy_pretrained_is_ignored(normalized, falsy):
+    """No load is attempted: the model comes back unbuilt, as constructed.
 
-
-def test_a_missing_checkpoint_is_refused_before_anything_is_built(wrapped, tmp_path):
-    with pytest.raises(FileNotFoundError, match="Weights file not found"):
-        _build(wrapped, "headless", pretrained=str(tmp_path / "nope.keras"))
-
-
-@pytest.mark.parametrize("target_head", sorted(_HEADS))
-@pytest.mark.parametrize("source_head", sorted(_HEADS))
-def test_a_bare_class_checkpoint_loads_like_a_wrapper_checkpoint(
-        wrapped, source_head, target_head, tmp_path):
-    """The path may name the class itself, not only a model the factory returned.
-
-    A wrapper records neither ``vocab_size`` nor ``include_top`` itself; the
-    class does. Both forms must give the same restore, so a checkpoint saved
-    from ``model.get_layer("<model>_backbone")`` is as good as the whole model.
+    A load builds the model first, so an unbuilt result is the observable
+    "nothing was read"; the first call then builds it as usual.
     """
-    source = _build(wrapped, source_head)
-    source(_batch(), training=False)
-    rng = np.random.default_rng(2)
-    for w in source.weights:
+    model = _build(normalized, "headless", pretrained=falsy)
+    assert isinstance(model, keras.Model) and not model.built
+    model(_batch(), training=False)
+    assert model.weights
+
+
+def test_a_missing_checkpoint_is_refused_before_anything_is_built(
+        normalized, tmp_path):
+    with pytest.raises(FileNotFoundError, match="Weights file not found"):
+        _build(normalized, "headless", pretrained=str(tmp_path / "nope.keras"))
+
+
+@pytest.mark.parametrize("source_head", sorted(_HEADS))
+def test_an_old_two_input_wrapper_archive_loads_into_the_bare_class(
+        source_head, tmp_path):
+    """The archive of a retired ``create_qwen3*`` model fills the class itself.
+
+    Those factories returned ``keras.Model([input_ids, attention_mask],
+    core(...))`` around a ``Qwen3`` named ``qwen3_backbone``
+    (``qwen3_for_generation`` headless, ``qwen3_for_classification`` headed).
+    Built here by hand, randomized and saved, it loads through
+    ``create_qwen3("tiny", pretrained=path)`` into a bare headless ``Qwen3``:
+    every backbone weight equal, the headless archive's ``lm_head`` too. A
+    headed archive has no ``lm_head``, which the load rule allows (the source
+    carries a task head instead); the target's stays its own.
+    """
+    kwargs = dict(_MODELS["qwen3"].kwargs, **_HEADS[source_head])
+    core = Qwen3.from_variant("tiny", **kwargs, name="qwen3_backbone")
+    ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
+    mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
+    wrapper = keras.Model(
+        [ids, mask], core({"input_ids": ids, "attention_mask": mask}),
+        name=f"qwen3_for_{'classification' if source_head == 'headed' else 'generation'}")
+    rng = np.random.default_rng(3)
+    for w in wrapper.weights:
         w.assign(rng.normal(0.0, 0.1, size=tuple(w.shape)).astype(w.dtype))
-    path = str(tmp_path / "bare.keras")
-    _core(source).save(path)
-    assert source is not _core(source)
+    path = str(tmp_path / f"old_wrapper_{source_head}.keras")
+    wrapper.save(path)
+    assert _core(wrapper) is core
 
-    target = _build(wrapped, target_head, pretrained=path)
-    # A headed side has no (or no trained) lm_head to compare.
-    skip = (TASK_HEAD_NAME,) + (
-        ("lm_head",) if "headed" in (source_head, target_head) else ())
-    _assert_layers_equal(source, target, _weighted_names(target, exclude=skip))
-
-
-@pytest.mark.parametrize("head", sorted(_HEADS))
-def test_a_bare_class_checkpoint_survives_a_vocabulary_change(
-        wrapped, head, tmp_path):
-    source = _build(wrapped, head)
-    source(_batch(), training=False)
-    path = str(tmp_path / "bare_vocab.keras")
-    _core(source).save(path)
-    target = _build(wrapped, head, pretrained=path, vocab_size=_OTHER_VOCAB)
-    shared = [n for n in _weighted_names(target, exclude=(TASK_HEAD_NAME,))
-              if n not in ("token_embedding", "lm_head")]
-    assert shared
-    _assert_layers_equal(source, target, shared)
+    target = create_qwen3("tiny", pretrained=path, **_MODELS["qwen3"].kwargs)
+    assert type(target) is Qwen3 and target.include_top is False
+    names = _weighted_names(
+        target, exclude=("lm_head",) if source_head == "headed" else ())
+    assert "lm_head" in names or source_head == "headed"
+    assert len(names) >= 4, names
+    _assert_layers_equal(wrapper, target, names)

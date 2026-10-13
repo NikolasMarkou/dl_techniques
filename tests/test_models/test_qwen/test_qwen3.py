@@ -21,12 +21,7 @@ from typing import Any, Callable, Dict, Optional
 
 import keras
 
-from dl_techniques.models.language.qwen.qwen3 import (
-    Qwen3,
-    create_qwen3,
-    create_qwen3_generation,
-    create_qwen3_classification,
-)
+from dl_techniques.models.language.qwen.qwen3 import Qwen3, create_qwen3
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.layers.heads.nlp.model_head import TASK_HEAD_NAME
@@ -601,87 +596,72 @@ class TestQwen3ModelFactories:
     """Test factory functions and utilities."""
 
     def test_main_factory_functionality(self):
-        """Test the main `create_qwen3` factory's core functionality."""
+        """`create_qwen3` returns the class itself, headless or headed."""
         num_labels = 5
         vocab_size = 1000
+        batch = {
+            "input_ids": keras.ops.convert_to_tensor(
+                np.random.randint(0, 32000, size=(2, 32)), dtype='int32'),
+            "attention_mask": keras.ops.ones((2, 32), dtype='int32'),
+        }
 
-        # 1. Test generation model from variant
-        gen_model = create_qwen3("tiny", task_type="generation")
-        assert gen_model.name == "qwen3_for_generation"
-        assert len(gen_model.inputs) == 2
-        input_ids = keras.ops.convert_to_tensor(np.random.randint(0, 32000, size=(2, 32)), dtype='int32')
-        attention_mask = keras.ops.ones((2, 32), dtype='int32')
-        logits = gen_model([input_ids, attention_mask])
-        assert logits.shape == (2, 32, 32000)
+        # 1. A language model from a variant: the class, returning logits
+        gen_model = create_qwen3("tiny")
+        assert type(gen_model) is Qwen3
+        assert gen_model.include_top is False
+        assert gen_model(batch).shape == (2, 32, 32000)
 
-        # 2. Test classification model from variant
-        clf_model = create_qwen3("tiny", task_type="classification", num_labels=num_labels)
-        assert clf_model.name == "qwen3_for_classification"
-        assert len(clf_model.inputs) == 2
-        class_logits = clf_model([input_ids, attention_mask])
-        assert class_logits.shape == (2, num_labels)
+        # 2. A sequence classifier from the same variant: the class, headed
+        clf_model = create_qwen3(
+            "tiny",
+            include_top=True,
+            task_config=NLPTaskConfig(
+                name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=num_labels),
+        )
+        assert type(clf_model) is Qwen3
+        assert clf_model.lm_head is None
+        assert clf_model(batch).shape == (2, num_labels)
 
-        # 3. Test parameter override with kwargs
+        # 3. Overrides of variant keys reach the model itself
         custom_model = create_qwen3(
             "tiny",
-            task_type="generation",
             hidden_size=256,  # Override
             num_layers=2,     # Override
             vocab_size=vocab_size
         )
-        assert custom_model.name == "qwen3_for_generation"
-        # Access the backbone model to check its config
-        backbone = custom_model.get_layer("qwen3_backbone")
-        assert backbone.hidden_size == 256
-        assert backbone.num_layers == 2
-        assert backbone.vocab_size == vocab_size
+        assert custom_model.hidden_size == 256
+        assert custom_model.num_layers == 2
+        assert custom_model.vocab_size == vocab_size
 
-        # 4. Test creating from a configuration dictionary
-        custom_config = {
-            'vocab_size': vocab_size,
-            'hidden_size': 128,
-            'num_layers': 3,
-            'num_attention_heads': 4,
-            'num_key_value_heads': 2,
-            'max_seq_len': 128,
-            'moe_layers': [1],  # One MoE layer
-            'num_experts': 4,
-            'num_experts_per_tok': 2,
-        }
-        dict_model = create_qwen3(custom_config, task_type="generation")
-        dict_backbone = dict_model.get_layer("qwen3_backbone")
-        assert dict_backbone.hidden_size == 128
-        assert dict_backbone.vocab_size == vocab_size
-        assert dict_backbone.moe_layers == [1]
-
-    def test_classification_factory_advanced_options(self):
-        """Test advanced options of the classification factory."""
+    def test_head_knobs_reach_the_task_head(self):
+        """Pooling and dropout are the head's own knobs, set at construction."""
         num_labels = 3
-        input_ids = keras.ops.convert_to_tensor(np.random.randint(0, 32000, size=(2, 24)), dtype='int32')
-        attention_mask = keras.ops.ones((2, 24), dtype='int32')
+        batch = {
+            "input_ids": keras.ops.convert_to_tensor(
+                np.random.randint(0, 32000, size=(2, 24)), dtype='int32'),
+            "attention_mask": keras.ops.ones((2, 24), dtype='int32'),
+        }
 
-        # Test "mean" pooling strategy
+        # "mean" pooling through `head_config_overrides`
         mean_pool_model = create_qwen3(
             "tiny",
-            task_type="classification",
-            num_labels=num_labels,
-            pooling_strategy="mean"
+            include_top=True,
+            task_config=_CLF,
+            head_config_overrides={"pooling_type": "mean"},
         )
-        assert mean_pool_model.name == "qwen3_for_classification"
-        mean_pool_logits = mean_pool_model([input_ids, attention_mask])
-        assert mean_pool_logits.shape == (2, num_labels)
+        assert mean_pool_model.task_head.pooling_type == "mean"
+        assert mean_pool_model(batch).shape == (2, num_labels)
 
-        # Test custom classifier dropout
+        # The head's dropout is the task config's `dropout_rate`
         dropout_model = create_qwen3(
             "tiny",
-            task_type="classification",
-            num_labels=num_labels,
-            classifier_dropout_rate=0.5
+            include_top=True,
+            task_config=NLPTaskConfig(
+                name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=num_labels, dropout_rate=0.5),
         )
-        # The rate reaches the model's own task head (the hand-rolled
-        # `classifier_dropout` layer no longer exists).
-        head = dropout_model.get_layer("qwen3_backbone").task_head
-        assert head.dropout.rate == 0.5
+        assert dropout_model.task_head.dropout.rate == 0.5
 
     def test_model_variant_configurations(self):
         """Test that MODEL_VARIANTS have correct configurations."""
@@ -718,8 +698,8 @@ class TestQwen3ModelFactories:
             for moe_layer_idx in config['moe_layers']:
                 assert 0 <= moe_layer_idx < config['num_layers']
 
-    def test_direct_factory_functions(self):
-        """Test direct factory functions."""
+    def test_the_class_takes_a_configuration_dictionary(self):
+        """A custom configuration goes to the class: `Qwen3(**config)`."""
         config = {
             'vocab_size': 1000,
             'hidden_size': 64,
@@ -727,20 +707,20 @@ class TestQwen3ModelFactories:
             'num_attention_heads': 4,
             'num_key_value_heads': 2,
             'max_seq_len': 256,
-            'moe_layers': [],
+            'moe_layers': [1],  # One MoE layer
+            'num_experts': 4,
+            'num_experts_per_tok': 2,
         }
+        ids = keras.Input(shape=(None,), dtype="int32")
 
-        # Test generation factory
-        gen_model = create_qwen3_generation(config)
-        assert gen_model.name == "qwen3_for_generation"
-        assert len(gen_model.inputs) == 2
-        assert gen_model.outputs[0].shape[-1] == config['vocab_size']
+        model = Qwen3(**config)
+        assert model.moe_layers == [1]
+        assert model(ids).shape[-1] == config['vocab_size']
 
-        # Test classification factory
-        clf_model = create_qwen3_classification(config, num_labels=10)
-        assert clf_model.name == "qwen3_for_classification"
-        assert len(clf_model.inputs) == 2
-        assert clf_model.outputs[0].shape[-1] == 10
+        clf_model = Qwen3(**config, include_top=True, task_config=NLPTaskConfig(
+            name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+            num_classes=10))
+        assert clf_model(ids).shape[-1] == 10
 
 
 class TestQwen3ModelErrorHandling:
@@ -845,21 +825,26 @@ class TestQwen3ModelErrorHandling:
 
     def test_invalid_factory_parameters(self):
         """Test error handling in the main factory function."""
-        # Missing num_labels for classification
-        with pytest.raises(ValueError, match="`num_labels` must be provided"):
-            create_qwen3("tiny", task_type="classification")
+        # A head without a task
+        with pytest.raises(ValueError, match="include_top=True needs a task_config"):
+            create_qwen3("tiny", include_top=True)
 
-        # Invalid task_type
-        with pytest.raises(ValueError, match="Unknown task_type"):
-            create_qwen3("tiny", task_type="invalid_task")
+        batch = {"input_ids": np.ones((1, 8), dtype="int32")}
+        tiny = dict(vocab_size=64, hidden_size=32, num_layers=1,
+                    num_attention_heads=4, num_key_value_heads=2,
+                    max_seq_len=16, moe_layers=[])
 
-        # Invalid num_labels
-        with pytest.raises(ValueError, match="num_labels must be positive"):
-            create_qwen3("tiny", task_type="classification", num_labels=-1)
+        # A negative class count cannot build its head
+        model = create_qwen3("tiny", **tiny, include_top=True, task_config=NLPTaskConfig(
+            name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=-1))
+        with pytest.raises(ValueError, match="Negative dimensions"):
+            model(batch)
 
-        # Invalid pooling strategy
-        with pytest.raises(ValueError, match="pooling_strategy must be 'last', 'cls' or 'mean'"):
-            create_qwen3("tiny", task_type="classification", num_labels=3, pooling_strategy="max")
+        # An unknown pooling type is refused by the head
+        model = create_qwen3("tiny", **tiny, include_top=True, task_config=_CLF,
+                             head_config_overrides={"pooling_type": "bogus"})
+        with pytest.raises(ValueError, match="Unknown pooling type"):
+            model(batch)
 
 
 class TestQwen3ModelPerformance:
@@ -1048,7 +1033,7 @@ class TestQwen3Integration:
     def test_end_to_end_training_simulation(self):
         """Test complete training simulation on tiny model."""
         # Create very small model for training test
-        model = create_qwen3("tiny", task_type="generation")
+        model = create_qwen3("tiny")
 
         # Compile model
         model.compile(
@@ -1061,13 +1046,13 @@ class TestQwen3Integration:
         batch_size, seq_len = 4, 16
         vocab_size = 32000
 
-        inputs = [
-            keras.ops.convert_to_tensor(
+        inputs = {
+            "input_ids": keras.ops.convert_to_tensor(
                 np.random.randint(0, vocab_size, size=(batch_size, seq_len)),
                 dtype='int32'
             ),
-            keras.ops.ones((batch_size, seq_len), dtype='int32')  # attention_mask
-        ]
+            "attention_mask": keras.ops.ones((batch_size, seq_len), dtype='int32'),
+        }
         targets = keras.ops.convert_to_tensor(
             np.random.randint(0, vocab_size, size=(batch_size, seq_len)),
             dtype='int32'
@@ -1338,21 +1323,18 @@ class IncludeTopCases:
     Not collected itself (no ``Test`` prefix). ``TestQwen3IncludeTop`` below,
     ``TestQwen3NextIncludeTop`` in ``test_qwen3_next.py`` and
     ``TestGemma3IncludeTop`` in ``test_gemma/test_gemma3.py`` bind ``CLS``,
-    ``KW``, the classification factory and the measured backbone weight count.
-    None of the three classes has a ``pretrained`` path, so a backbone moves
-    between tops through ``load_weights_from_checkpoint`` (D-007 route R2 of
-    plan-2026-10-11T004932-b83935e1).
+    ``KW``, the ``create_<model>`` factory and the measured backbone weight
+    count. A backbone moves between tops through
+    ``load_weights_from_checkpoint`` (D-007 route R2 of
+    plan-2026-10-11T004932-b83935e1) and through the factory's
+    ``pretrained=<path>``.
     """
 
     CLS: Any = None
     KW: Dict[str, Any] = {}
-    #: ``create_<model>_classification(config, num_labels, ...)``.
-    CLASSIFICATION_FACTORY: Optional[Callable[..., keras.Model]] = None
-    #: ``create_<model>_generation(config)``.
-    GENERATION_FACTORY: Optional[Callable[..., keras.Model]] = None
-    #: ``create_<model>(config_or_variant, task_type=..., **kwargs)``.
-    DISPATCH_FACTORY: Optional[Callable[..., keras.Model]] = None
-    #: Name of the headed model inside that factory's functional wrapper.
+    #: ``create_<model>(variant, pretrained=False, **kwargs)``.
+    FACTORY: Optional[Callable[..., keras.Model]] = None
+    #: Name the retired functional wrappers gave the class inside them.
     WRAPPED_NAME: str = ""
     #: Backbone weights at ``KW``; ``lm_head`` adds 1, a TEXT_CLASSIFICATION
     #: head 8.
@@ -1360,6 +1342,10 @@ class IncludeTopCases:
 
     def model(self, **kw: Any) -> keras.Model:
         return self.CLS(vocab_size=64, **self.KW, **kw)
+
+    def from_factory(self, **kw: Any) -> keras.Model:
+        """``create_<model>("tiny", ...)`` shrunk to ``KW`` and vocabulary 64."""
+        return self.FACTORY("tiny", **dict(self.KW, vocab_size=64, **kw))
 
     def test_head_output_shapes(self):
         """Bare logits for single-output heads, a dict for QA; nothing else."""
@@ -1602,90 +1588,90 @@ class IncludeTopCases:
         assert not all(np.array_equal(a[0], b[0]) for a, b in
                        zip(reference.values(), _backbone(fresh).values()))
 
-    def test_the_classification_factory_is_the_headed_model(self):
-        """``create_*_classification`` wraps the class and adds no layer of its own.
+    def test_the_factory_returns_the_class_with_its_head(self):
+        """``create_<model>`` adds no layer of its own: it returns the class.
 
-        Its knobs reach the in-model head: ``pooling_strategy`` as the head's
-        ``pooling_type`` and ``classifier_dropout_rate`` as the head's dropout.
+        The head's knobs reach the in-model head: ``head_config_overrides``
+        as the head's ``pooling_type`` and the task's ``dropout_rate`` as the
+        head's dropout.
         """
-        config = dict(self.KW, vocab_size=64)
-        wrapper = self.CLASSIFICATION_FACTORY(
-            config, num_labels=4, pooling_strategy="mean",
-            classifier_dropout_rate=0.25)
-        inner = wrapper.get_layer(self.WRAPPED_NAME)
-        assert isinstance(inner, self.CLS)
-        assert inner.include_top is True and inner.lm_head is None
-        assert inner.task_config["num_classes"] == 4
-        assert inner.task_head.pooling_type == "mean"
-        assert inner.task_head.dropout.rate == 0.25
-        assert sorted(layer.name for layer in wrapper.layers) == sorted([
-            "input_ids", "attention_mask", self.WRAPPED_NAME])
+        model = self.from_factory(
+            include_top=True,
+            task_config=NLPTaskConfig(
+                name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=4, dropout_rate=0.25),
+            head_config_overrides={"pooling_type": "mean"})
+        assert type(model) is self.CLS
+        assert model.include_top is True and model.lm_head is None
+        assert model.task_config["num_classes"] == 4
+        assert model.task_head.pooling_type == "mean"
+        assert model.task_head.dropout.rate == 0.25
+        assert tuple(model(_head_batch(), training=False).shape) == (2, 4)
 
-        batch = _head_batch()
-        np.testing.assert_array_equal(
-            _np(wrapper([batch["input_ids"], batch["attention_mask"]])),
-            _np(inner(batch, training=False)))
+        headless = self.from_factory()
+        assert type(headless) is self.CLS
+        assert headless.include_top is False and headless.task_head is None
+        assert tuple(headless(_head_batch(), training=False).shape) == (
+            2, _SEQ, 64)
 
-    def test_a_classification_factory_backbone_is_reused_with_the_same_weights(
-            self, tmp_path):
-        """A backbone trained through ``create_*_classification`` moves anywhere.
+    def test_an_old_wrapper_backbone_moves_through_the_factory(self, tmp_path):
+        """A backbone saved inside an old two-input wrapper fills any top.
 
-        D-027 of plan-2026-10-11T004932-b83935e1: the factory's functional
-        wrapper nests the headed class as ONE layer, so the documented route
-        (``load_weights_from_checkpoint(..., skip_prefixes=(TASK_HEAD_NAME,),
-        strict=True, allow_unloaded=...)``) compares that inner model's layers.
-        From the classifier checkpoint: a bare TOKEN_CLASSIFICATION model, a
-        bare headless model and the generation wrapper get the exact backbone
-        (the headless ``lm_head`` stays fresh, allowed by the load rule); the
-        generation wrapper's checkpoint then fills a fresh classification
-        wrapper exactly, so the route works into a wrapper too. Before D-027
-        the first two raised "No overlapping layers" and the third a shape
-        mismatch on the wrapped layer.
+        The retired factories returned ``keras.Model([input_ids,
+        attention_mask], core(...))`` around the class, named
+        ``WRAPPED_NAME``; such archives still exist. The shared load rule
+        reads through that one-model wrapper (D-015 and D-027 of the earlier
+        plans), so ``create_<model>(..., pretrained=<path>)`` restores the
+        backbone into a classifier, a token classifier and a headless class;
+        the checkpoint's equal-shape ``task_head`` is never copied. The
+        headless result's own checkpoint then fills a fresh classifier
+        exactly.
         """
         batch = _head_batch()
-        pair = [batch["input_ids"], batch["attention_mask"]]
-        config = dict(self.KW, vocab_size=64)
-        source = self.CLASSIFICATION_FACTORY(dict(config), num_labels=3)
-        source(pair)
-        _randomized(source, 1)
-        path = str(tmp_path / "factory_classifier.keras")
-        source.save(path)
-        reference = _backbone(source.get_layer(self.WRAPPED_NAME))
+        core = self.model(include_top=True, task_config=_CLF,
+                          name=self.WRAPPED_NAME)
+        ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
+        mask = keras.Input(shape=(None,), dtype="int32", name="attention_mask")
+        wrapper = keras.Model(
+            [ids, mask], core({"input_ids": ids, "attention_mask": mask}))
+        _randomized(wrapper, 1)
+        path = str(tmp_path / "old_wrapper_classifier.keras")
+        wrapper.save(path)
+        reference = _backbone(core)
 
-        def check(target, inner, allow):
-            fresh = {name: [_np(w).copy() for w in layer.weights]
-                     for name in ("lm_head", TASK_HEAD_NAME)
-                     for layer in [getattr(inner, name)] if layer is not None}
-            load_weights_from_checkpoint(
-                target, path, skip_prefixes=(TASK_HEAD_NAME,), strict=True,
-                allow_unloaded=allow)
-            got = _backbone(inner)
+        def check(target):
+            got = _backbone(target)
             assert set(got) == set(reference)
             for name, values in reference.items():
                 for a, b in zip(values, got[name]):
                     np.testing.assert_array_equal(a, b, err_msg=name)
-            for name, values in fresh.items():  # tops keep their own init
-                for a, w in zip(values, getattr(inner, name).weights):
-                    np.testing.assert_array_equal(a, _np(w), err_msg=name)
 
-        ner = self.model(include_top=True, task_config=_NER)
-        ner(batch, training=False)
-        check(ner, ner, ())
-        headless = self.model()
-        headless(batch, training=False)
-        check(headless, headless, ("lm_head",))
-        generation = self.GENERATION_FACTORY(dict(config))
-        generation(pair)
-        check(generation, generation.get_layer(self.WRAPPED_NAME), ("lm_head",))
+        def head_is_fresh(target):
+            pairs = [(a, b) for a, b in zip(target.task_head.weights,
+                                             core.task_head.weights)
+                     if len(a.shape) > 1]
+            assert pairs and all(a.shape == b.shape for a, b in pairs)
+            assert not any(np.array_equal(_np(a), _np(b)) for a, b in pairs)
 
-        path = str(tmp_path / "factory_generation.keras")
-        generation.save(path)
-        target = self.CLASSIFICATION_FACTORY(dict(config), num_labels=5)
-        target(pair)
-        # The generation checkpoint's lm_head has no home in a classifier;
-        # complete-or-raise checks the source side too (D-031), so the
-        # caller names it as allowed, as for a headless target above.
-        check(target, target.get_layer(self.WRAPPED_NAME), ("lm_head",))
+        clf = self.from_factory(pretrained=path, include_top=True,
+                                task_config=_CLF)
+        assert type(clf) is self.CLS
+        check(clf)
+        head_is_fresh(clf)  # an equal-shape checkpoint head is never copied
+        ner = self.from_factory(pretrained=path, include_top=True,
+                                task_config=_NER)
+        check(ner)
+        headless = self.from_factory(pretrained=path)
+        check(headless)
+        # The classifier archive holds no lm_head; the headless one is its own.
+        assert headless.lm_head is not None and core.lm_head is None
+
+        path = str(tmp_path / "headless.keras")
+        headless.save(path)
+        target = self.from_factory(pretrained=path, include_top=True,
+                                   task_config=_CLF)
+        check(target)
+        head_is_fresh(target)
 
         # Anti-vacuity: a fresh backbone does NOT hold the reference values.
         fresh = self.model()
@@ -1693,46 +1679,23 @@ class IncludeTopCases:
         assert not all(np.array_equal(a[0], b[0]) for a, b in
                        zip(reference.values(), _backbone(fresh).values()))
 
-    def test_include_top_through_the_dispatcher_is_named_for_its_task(self):
-        """``create_<model>(..., include_top=True, task_config=...)`` is that task's model.
+    @pytest.mark.parametrize("retired", [
+        {"task_type": "classification"},
+        {"num_labels": 3},
+        {"pooling_strategy": "mean"},
+        {"classifier_dropout_rate": 0.5},
+    ], ids=["task_type", "num_labels", "pooling_strategy",
+            "classifier_dropout_rate"])
+    def test_the_factory_refuses_the_retired_task_knobs(self, retired):
+        """The per-task dispatch is gone, and its knobs are refused, not ignored.
 
-        It used to fall through to the generation wrapper and come back named
-        ``*_for_generation`` while emitting the head's logits.
+        A head comes only from ``include_top=True`` with a ``task_config``;
+        ``task_type`` and the classification knobs reach the constructor and
+        Keras refuses them, so a caller of the old API gets an error, never a
+        silently headless model.
         """
-        config = dict(self.KW, vocab_size=64)
-        batch = _head_batch()
-        pair = [batch["input_ids"], batch["attention_mask"]]
-        model = self.DISPATCH_FACTORY(
-            dict(config), include_top=True, task_config=_NER)
-        prefix = self.WRAPPED_NAME[:-len("_backbone")]
-        assert model.name == f"{prefix}_for_token_classification"
-        inner = model.get_layer(self.WRAPPED_NAME)
-        assert isinstance(inner, self.CLS)
-        assert inner.include_top is True and inner.lm_head is None
-        assert tuple(model(pair).shape) == (2, _SEQ, _NER.num_classes)
-        np.testing.assert_array_equal(
-            _np(model(pair)), _np(inner(batch, training=False)))
-
-        # One name per task (reviewer pass-2 NOTE 6, step-11.3): a
-        # TEXT_CLASSIFICATION head is named as the classification factory
-        # names that task, never `*_for_text_classification`.
-        text = self.DISPATCH_FACTORY(dict(config), include_top=True,
-                                     task_config=_CLF)
-        assert text.name == f"{prefix}_for_classification"
-        assert text.name == self.CLASSIFICATION_FACTORY(
-            dict(config), num_labels=3).name
-
-        # The default is still the generation model.
-        generation = self.DISPATCH_FACTORY(dict(config))
-        assert generation.name == f"{prefix}_for_generation"
-        assert tuple(generation(pair).shape) == (2, _SEQ, 64)
-
-        for conflict in ({"task_type": "classification", "num_labels": 3},
-                         {"num_labels": 3},
-                         {"pooling_strategy": "mean"}):
-            with pytest.raises(ValueError, match="include_top=True builds"):
-                self.DISPATCH_FACTORY(dict(config), include_top=True,
-                                      task_config=_NER, **conflict)
+        with pytest.raises(ValueError, match="Unrecognized keyword arguments"):
+            self.from_factory(**retired)
 
     def test_include_top_without_task_config_raises(self):
         with pytest.raises(ValueError, match="include_top=True needs a task_config"):
@@ -1779,8 +1742,6 @@ class TestQwen3IncludeTop(QwenIncludeTopCases):
     KW = dict(hidden_size=32, num_layers=2, num_attention_heads=4,
               num_key_value_heads=2, max_seq_len=16, moe_layers=[],
               num_experts=1, num_experts_per_tok=1, dropout_rate=0.0)
-    CLASSIFICATION_FACTORY = staticmethod(create_qwen3_classification)
-    GENERATION_FACTORY = staticmethod(create_qwen3_generation)
-    DISPATCH_FACTORY = staticmethod(create_qwen3)
+    FACTORY = staticmethod(create_qwen3)
     WRAPPED_NAME = "qwen3_backbone"
     N_BACKBONE = 24

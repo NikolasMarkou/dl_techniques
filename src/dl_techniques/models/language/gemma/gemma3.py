@@ -1,6 +1,6 @@
 """
 Gemma 3 decoder with interleaved sliding-window / global attention and sandwich
-normalization, plus generation and classification task heads.
+normalization, with an optional task head in place of the LM head.
 
 Gemma 3 targets inference memory rather than raw quality: attention costs
 O(n^2) in time, and its key-value cache costs O(n * layers * kv_heads) in
@@ -25,10 +25,10 @@ every layer rather than a larger base in the global layers, so long-context
 behavior differs from the published report; a reader should not assume
 checkpoint compatibility. The LM head is an independent `Dense`, not the tied
 embedding matrix. This package is text-only; the multimodal vision tower is
-not included. `from_variant` takes no `pretrained` argument, and `create_gemma3`'s
-`pretrained=True` raises `NotImplementedError`, so there is no path to a silently
+not included. `from_variant`'s (and so `create_gemma3`'s) `pretrained=True`
+raises `NotImplementedError`, so there is no path to a silently
 random-initialized "pretrained" model; `pretrained=<path>` restores the backbone
-of a local `.keras` checkpoint.
+of a local `.keras` checkpoint, including an old two-input wrapper archive.
 
 With `include_top=True` and a `task_config` the model owns ONE task head from
 `layers/heads/nlp`, named `task_head`, in place of the LM head (no `lm_head`
@@ -36,10 +36,12 @@ is created and no vocabulary logits are computed), fed the final-normed
 hidden states, as `models/language/gpt2` does. The head pools `last` by
 default, the last position kept by the mask, because the causally masked
 blocks make `cls` pool a position that attended only to itself.
-`create_gemma3_classification` is that model behind a two-input functional
-wrapper; it used to re-trace the backbone into a functional graph and pool
-with a hand-rolled `SequencePooling` + `Dense`, so no classifier checkpoint
-written earlier is portable.
+`create_gemma3` returns this class itself, headed or headless, and takes the
+head only through `include_top` and `task_config`; there is no per-task
+factory and no functional wrapper. The classifier used to re-trace the
+backbone into a functional graph and pool with a hand-rolled
+`SequencePooling` + `Dense`, so no classifier checkpoint written earlier is
+portable.
 
 References:
     - Gemma Team, 2025. Gemma 3 Technical Report.
@@ -62,7 +64,6 @@ References:
 
 
 import keras
-from keras import initializers, layers, ops
 from typing import Any, Dict, List, Optional, Union
 
 # ---------------------------------------------------------------------
@@ -74,11 +75,9 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.heads.nlp.model_head import (
     head_output_shape,
     ids_shape_of,
-    task_model_name,
 )
 from dl_techniques.layers.heads.nlp import (
     NLPTaskConfig,
-    NLPTaskType,
     build_model_task_head,
     finalize_head_outputs,
     head_attention_mask,
@@ -357,8 +356,8 @@ class Gemma3(RecordedBuildShapeMixin, keras.Model):
                 vocab_size=self.vocab_size,
                 default_pooling="last",
             )
-        self.emb_scale = ops.sqrt(
-            ops.cast(self.hidden_size, dtype=self.compute_dtype)
+        self.emb_scale = keras.ops.sqrt(
+            keras.ops.cast(self.hidden_size, dtype=self.compute_dtype)
         )
         self._log_model_creation()
 
@@ -435,9 +434,9 @@ class Gemma3(RecordedBuildShapeMixin, keras.Model):
 
     def _build_architecture(self) -> None:
         """Create all model components."""
-        initializer = initializers.TruncatedNormal(stddev=self.initializer_range)
+        initializer = keras.initializers.TruncatedNormal(stddev=self.initializer_range)
 
-        self.embeddings = layers.Embedding(
+        self.embeddings = keras.layers.Embedding(
             input_dim=self.vocab_size,
             output_dim=self.hidden_size,
             embeddings_initializer=initializer,
@@ -469,7 +468,7 @@ class Gemma3(RecordedBuildShapeMixin, keras.Model):
         # and build() must not create what call() does not run.
         self.lm_head = None
         if not self.include_top:
-            self.lm_head = layers.Dense(
+            self.lm_head = keras.layers.Dense(
                 units=self.vocab_size,
                 use_bias=self.use_bias,
                 kernel_initializer=initializer,
@@ -591,8 +590,40 @@ class Gemma3(RecordedBuildShapeMixin, keras.Model):
         return self.lm_head(hidden_states)
 
     @classmethod
-    def from_variant(cls, variant: str, **kwargs: Any) -> "Gemma3":
-        """Create a Gemma3 model from a predefined variant."""
+    def from_variant(
+        cls,
+        variant: str,
+        pretrained: Union[bool, str] = False,
+        **kwargs: Any,
+    ) -> "Gemma3":
+        """Create a Gemma3 model from a predefined variant.
+
+        :param variant: One of ``"270m"``, ``"small"``, ``"tiny"``.
+        :type variant: str
+        :param pretrained: ``False`` (default) or any other falsy value: random
+            initialization. A ``str``: the path of a local ``.keras`` checkpoint
+            whose backbone is restored into the model by layer name, headed or
+            headless. The checkpoint may be a ``Gemma3`` or an old two-input
+            functional wrapper around one; both are read through the same rule.
+            A task head in the checkpoint is never copied, and the model's own
+            head (if any) keeps its fresh initialization. The backbone loads
+            completely or the call raises (another depth or width is refused);
+            on a vocabulary change only the token table and the ``lm_head``
+            keep their initialization. To restore a whole model, head included,
+            use ``keras.models.load_model``. ``True`` raises
+            ``NotImplementedError``: no weights are distributed with this
+            package.
+        :type pretrained: Union[bool, str]
+        :param kwargs: Override or extend any variant parameter, including
+            ``include_top``, ``task_config``, ``head_config_overrides`` and
+            ``pad_token_id``.
+        :return: The constructed model.
+        :rtype: Gemma3
+        :raises ValueError: If ``variant`` is not a recognized key, or a
+            ``pretrained`` checkpoint does not fit the backbone.
+        :raises NotImplementedError: If ``pretrained`` is True.
+        :raises FileNotFoundError: If a ``pretrained`` path does not exist.
+        """
         if variant not in cls.MODEL_VARIANTS:
             available = list(cls.MODEL_VARIANTS.keys())
             raise ValueError(
@@ -605,7 +636,25 @@ class Gemma3(RecordedBuildShapeMixin, keras.Model):
 
         logger.info(f"Creating Gemma3 model from variant: {variant.upper()}")
         logger.info(f"Description: {description}")
-        return cls(**config)
+        weights_path = pretrained_path_or_raise(pretrained, "Gemma3")
+        model = cls(**config)
+        if weights_path is not None:
+            # A build, not a forward: no RNG is drawn and no weight is touched.
+            if not model.built:
+                model.build((None, None))
+            # DECISION plan-2026-10-11T170958-dc4d2202/D-015: the shared load rule on the
+            # wrapper's core, never `model.load_weights` (it restores nothing on a
+            # name or shape mismatch and reports success); do NOT drop TASK_HEAD_NAME
+            # (a head of equal shape would be copied). See decisions.md.
+            load_backbone_from_checkpoint(
+                model,
+                weights_path,
+                head_prefixes=(TASK_HEAD_NAME,),
+                vocab_layers=("token_embedding",),
+                tables=("token_embedding/embeddings", "lm_head/kernel"),
+                tops=("lm_head",),
+            )
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
@@ -640,196 +689,46 @@ class Gemma3(RecordedBuildShapeMixin, keras.Model):
         return config
 
 
-def _two_input_model(core: Gemma3, name: str) -> keras.Model:
-    """Put the ``[input_ids, attention_mask]`` functional interface around ``core``.
-
-    Interface contract (shared by the ``create_gemma3*`` factories):
-
-    :param core: An unbuilt ``Gemma3``, named ``gemma3_backbone`` by every
-        caller.
-    :param name: Name of the returned model.
-    :return: A functional ``keras.Model`` with two int32 inputs whose only
-        non-input layer is ``core``. ``load_weights_from_checkpoint``
-        therefore compares ``core``'s layers, so a backbone moves between such
-        a model and a bare ``Gemma3`` either way.
-    """
-    input_ids = keras.Input(shape=(None,), dtype="int32", name="input_ids")
-    attention_mask = keras.Input(
-        shape=(None,), dtype="int32", name="attention_mask"
-    )
-    outputs = core(
-        inputs={"input_ids": input_ids, "attention_mask": attention_mask}
-    )
-    model = keras.Model(
-        inputs=[input_ids, attention_mask], outputs=outputs, name=name
-    )
-    logger.info(f"Created {name} with {model.count_params():,} parameters.")
-    return model
-
-
-def create_gemma3_generation(config: Dict[str, Any]) -> keras.Model:
-    """Creates a Gemma3 model for text generation tasks."""
-    logger.info("Creating Gemma3 model for text generation.")
-    return _two_input_model(
-        Gemma3(**config, name="gemma3_backbone"), "gemma3_for_generation")
-
-
-def create_gemma3_classification(
-    config: Dict[str, Any],
-    num_labels: int,
-    pooling_strategy: str = "last",
-    classifier_dropout_rate: Optional[float] = None,
-) -> keras.Model:
-    """Creates a Gemma3 model for sequence classification tasks.
-
-    ``pooling_strategy`` is one of ``"last"`` (default — the last position kept
-    by ``attention_mask``, the only one that has attended to the whole sequence
-    under this backbone's causal mask), ``"mean"`` (mask-aware mean) or
-    ``"cls"`` (first position; a function of the first token id alone here, kept
-    only for bidirectional-era checkpoints). The classifier is the model's own
-    task head (``Gemma3(include_top=True)`` with a ``TEXT_CLASSIFICATION``
-    task); this function only puts the two-input functional interface around
-    it.
-    """
-    if num_labels <= 0:
-        raise ValueError(f"num_labels must be positive, got {num_labels}")
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-029: default "last", not "cls" —
-    # causal masking makes 'cls' pool a position that attended only to itself. See decisions.md.
-    if pooling_strategy not in ["last", "cls", "mean"]:
-        raise ValueError(
-            f"pooling_strategy must be 'last', 'cls' or 'mean', got "
-            f"'{pooling_strategy}'"
-        )
-
-    logger.info(
-        f"Creating Gemma3 classification model "
-        f"(Labels: {num_labels}, Pooling: {pooling_strategy})."
-    )
-    classifier = Gemma3(
-        **config,
-        include_top=True,
-        task_config=NLPTaskConfig(
-            name="classification",
-            task_type=NLPTaskType.TEXT_CLASSIFICATION,
-            num_classes=num_labels,
-            dropout_rate=(
-                classifier_dropout_rate if classifier_dropout_rate is not None
-                else config.get("dropout_rate", 0.0)
-            ),
-        ),
-        head_config_overrides={"pooling_type": pooling_strategy},
-        name="gemma3_backbone",
-    )
-    return _two_input_model(
-        classifier, task_model_name("gemma3", NLPTaskType.TEXT_CLASSIFICATION))
-
-
 def create_gemma3(
-    config_or_variant: Union[str, Dict[str, Any]],
-    task_type: str = "generation",
+    variant: str,
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
-) -> keras.Model:
-    """High-level factory to create Gemma3 models for common tasks.
+) -> Gemma3:
+    """Create a Gemma3 model from a shipped ``MODEL_VARIANTS`` name.
 
-    ``task_type="generation"`` (default) gives ``gemma3_for_generation`` and
-    ``"classification"`` (with ``num_labels``, optionally ``pooling_strategy``
-    and ``classifier_dropout_rate``) gives ``gemma3_for_classification``. Any
-    other keyword overrides the config. ``include_top=True`` with a
-    ``task_config`` (and optional ``head_config_overrides``) replaces the LM
-    top with that task head: the result is named
-    ``gemma3_for_<task_type value>`` (e.g. ``gemma3_for_token_classification``),
-    except that ``TEXT_CLASSIFICATION`` gives ``gemma3_for_classification``, the
-    name :func:`create_gemma3_classification` gives the same task; combining it with ``task_type="classification"`` or the classification
-    settings raises ``ValueError``. Every result takes
-    ``[input_ids, attention_mask]``.
+    Delegates to :meth:`Gemma3.from_variant` and holds no logic of its own. A
+    task head comes from the constructor (``include_top=True`` with a
+    ``task_config``), never from a per-task factory.
 
-    :param pretrained: ``False`` (default) or any other falsy value: random
-        initialization. A ``str``: the path of a local ``.keras`` checkpoint (of the
-        ``Gemma3`` itself or of a model this factory returned, headed or headless)
-        whose backbone is restored into the result by layer name. A task head in
-        the checkpoint is never copied, and the result's own head (if any) keeps
-        its fresh initialization. The backbone loads completely or the call raises
-        (another depth or width is refused); on a vocabulary change only the token
-        table and the ``lm_head`` keep their initialization. ``True`` raises
-        ``NotImplementedError``: no weights are distributed with this package.
+    :param variant: A key of :attr:`Gemma3.MODEL_VARIANTS`: ``"270m"``,
+        ``"small"`` or ``"tiny"``.
+    :type variant: str
+    :param pretrained: ``False`` (default) for random initialization; a ``str``
+        path of a local ``.keras`` checkpoint restores the backbone (see
+        :meth:`Gemma3.from_variant`); ``True`` raises ``NotImplementedError``.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Forwarded to :meth:`Gemma3.from_variant`, overriding any
+        variant parameter, including ``include_top=True`` with a
+        ``task_config`` (and optional ``head_config_overrides``) for a model
+        with a task head.
+    :return: The ``Gemma3`` model itself, unbuilt unless ``pretrained`` is a
+        path.
+    :rtype: Gemma3
+    :raises ValueError: If ``variant`` is not a recognized key, or a forwarded
+        argument is invalid.
+    :raises NotImplementedError: If ``pretrained`` is True.
+
+    Example:
+        .. code-block:: python
+
+            model = create_gemma3("tiny")
+            logits = model({"input_ids": ids, "attention_mask": mask})
+            clf = create_gemma3(
+                "tiny",
+                include_top=True,
+                task_config={"name": "sentiment",
+                             "task_type": "text_classification",
+                             "num_classes": 5},
+            )
     """
-    weights_path = pretrained_path_or_raise(pretrained, "Gemma3")
-    model = _dispatch_gemma3(config_or_variant, task_type, dict(kwargs))
-    if weights_path is not None:
-        # DECISION plan-2026-10-11T170958-dc4d2202/D-015: the shared load rule on the
-        # wrapper's core, never `model.load_weights` (it restores nothing on a
-        # name or shape mismatch and reports success); do NOT drop TASK_HEAD_NAME
-        # (a head of equal shape would be copied). See decisions.md.
-        load_backbone_from_checkpoint(
-            model,
-            weights_path,
-            head_prefixes=(TASK_HEAD_NAME,),
-            vocab_layers=("token_embedding",),
-            tables=("token_embedding/embeddings", "lm_head/kernel"),
-            tops=("lm_head",),
-        )
-    return model
-
-
-def _dispatch_gemma3(
-    config_or_variant: Union[str, Dict[str, Any]],
-    task_type: str,
-    kwargs: Dict[str, Any],
-) -> keras.Model:
-    """The task dispatch of :func:`create_gemma3`, without its `pretrained` route.
-
-    :param config_or_variant: As for :func:`create_gemma3`.
-    :param task_type: As for :func:`create_gemma3`.
-    :param kwargs: Overrides and task settings; may be modified.
-    :return: The two-input functional model.
-    """
-    if isinstance(config_or_variant, str):
-        if config_or_variant not in Gemma3.MODEL_VARIANTS:
-            available = list(Gemma3.MODEL_VARIANTS.keys())
-            raise ValueError(
-                f"Unknown variant '{config_or_variant}'. "
-                f"Available: {available}"
-            )
-        config = Gemma3.MODEL_VARIANTS[config_or_variant].copy()
-        config.pop("description", None)
-        logger.info(f"Using Gemma3 variant: {config_or_variant}")
-    elif isinstance(config_or_variant, dict):
-        config = config_or_variant.copy()
-        logger.info("Using custom Gemma3 configuration")
-    else:
-        raise TypeError("config_or_variant must be a string or a dictionary.")
-
-    task_keys = ["num_labels", "pooling_strategy", "classifier_dropout_rate"]
-    task_kwargs = {k: kwargs.pop(k) for k in task_keys if k in kwargs}
-    # The rest of kwargs are model overrides.
-    config.update(kwargs)
-
-    # include_top=True replaces the LM top with the task_config's head, so the
-    # model is that task's, named for it, and never "generation".
-    if config.get("include_top"):
-        if task_type != "generation" or task_kwargs:
-            raise ValueError(
-                "include_top=True builds the head named by task_config; it "
-                "cannot be combined with task_type='classification' or with "
-                "num_labels / pooling_strategy / classifier_dropout_rate, "
-                f"which build their own head. Got task_type={task_type!r} "
-                f"and {sorted(task_kwargs)}."
-            )
-        core = Gemma3(**config, name="gemma3_backbone")
-        return _two_input_model(
-            core, task_model_name("gemma3", core.task_config["task_type"]))
-
-    if task_type == "generation":
-        return create_gemma3_generation(config)
-    if task_type == "classification":
-        if "num_labels" not in task_kwargs:
-            raise ValueError(
-                "num_labels must be provided for the 'classification' task"
-            )
-        return create_gemma3_classification(config, **task_kwargs)
-
-    raise ValueError(
-        f"Unknown task_type '{task_type}'. "
-        "Supported: ['generation', 'classification']"
-    )
+    return Gemma3.from_variant(variant, pretrained=pretrained, **kwargs)

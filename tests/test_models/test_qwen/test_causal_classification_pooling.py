@@ -1,10 +1,17 @@
 """RED proof for C-29 (plan-2026-08-14T233721-d4f9beb2, D-029).
 
-`create_qwen3_classification` and `create_qwen3_next_classification` used to
-default to ``pooling_strategy="cls"``. Both backbones are strictly causally
-masked, so position 0 attends only to itself: the pooled vector — and therefore
-every logit — was a deterministic function of the FIRST TOKEN ID ALONE. Nothing
-raised; loss still decreased, accuracy just plateaued at the first-token prior.
+The retired `create_qwen3_classification` and `create_qwen3_next_classification`
+factories used to default to ``pooling_strategy="cls"``. Both backbones are
+strictly causally masked, so position 0 attends only to itself: the pooled
+vector — and therefore every logit — was a deterministic function of the FIRST
+TOKEN ID ALONE. Nothing raised; loss still decreased, accuracy just plateaued at
+the first-token prior.
+
+A classifier is now the class itself (``include_top=True`` with a
+``TEXT_CLASSIFICATION`` task), and the rule lives there: its head pools
+``"last"`` unless ``head_config_overrides`` names another ``pooling_type``
+(D-012 of plan-2026-10-11T004932-b83935e1). The D-029 factory anchors were
+retired with the factories; this file pins the same claims on the class.
 
 Each assertion below pins a per-example logit vector, never a shape and never a
 mere "output changed somewhere". The mutated token is always inside the region
@@ -12,18 +19,15 @@ kept by ``attention_mask``, because a mutation outside it is invisible for a
 reason that has nothing to do with pooling.
 """
 
-import inspect
-
 import keras
 import numpy as np
 import pytest
 
 from tests.numerics import reassociation_atol
 
-from dl_techniques.models.language.qwen.qwen3 import create_qwen3_classification
-from dl_techniques.models.language.qwen.qwen3_next import (
-    create_qwen3_next_classification,
-)
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+from dl_techniques.models.language.qwen.qwen3 import Qwen3
+from dl_techniques.models.language.qwen.qwen3_next import Qwen3Next
 
 # A backbone small enough to build on CPU in a test. `Qwen3` takes a
 # `moe_layers` list; `Qwen3Next` does not (its GDN/GA block layout is fixed), so
@@ -68,15 +72,20 @@ PAD_INDEX = 7
 NEW_TOKEN = 21
 
 FACTORIES = [
-    pytest.param(create_qwen3_classification, QWEN3_CONFIG, id="qwen3"),
-    pytest.param(
-        create_qwen3_next_classification, QWEN3_NEXT_CONFIG, id="qwen3_next"
-    ),
+    pytest.param(Qwen3, QWEN3_CONFIG, id="qwen3"),
+    pytest.param(Qwen3Next, QWEN3_NEXT_CONFIG, id="qwen3_next"),
 ]
+
+#: Three labels, no dropout, so a probe sees the backbone only.
+CLASSIFICATION = NLPTaskConfig(
+    name="classification", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+    num_classes=3, dropout_rate=0.0,
+)
 
 
 def _logits(model, ids):
-    return np.asarray(model.predict([ids, MASK], verbose=0))
+    return np.asarray(model.predict(
+        {"input_ids": ids, "attention_mask": MASK}, verbose=0))
 
 
 def _mutate(index, token=NEW_TOKEN):
@@ -85,13 +94,15 @@ def _mutate(index, token=NEW_TOKEN):
     return mutated
 
 
-def _build(factory, config, strategy):
+def _build(factory, config, strategy=None):
+    """The headed class; ``strategy=None`` keeps the class's own default."""
     keras.utils.set_random_seed(0)
     return factory(
-        config,
-        num_labels=3,
-        pooling_strategy=strategy,
-        classifier_dropout_rate=0.0,
+        **config,
+        include_top=True,
+        task_config=CLASSIFICATION,
+        head_config_overrides=(
+            {"pooling_type": strategy} if strategy is not None else None),
     )
 
 
@@ -101,12 +112,10 @@ class TestCausalClassificationPooling:
 
     def test_default_pooling_is_last_not_cls(self, factory, config):
         """The shipped default is the whole finding; pin it directly."""
-        default = inspect.signature(factory).parameters[
-            "pooling_strategy"
-        ].default
+        default = _build(factory, config).task_head.pooling_type
         assert default == "last", (
-            "the classification factory's default pooling_strategy regressed "
-            f"to {default!r}; under a causal mask 'cls' pools a position that "
+            "the headed class's default pooling regressed to "
+            f"{default!r}; under a causal mask 'cls' pools a position that "
             "attended only to itself (see decisions.md D-029)"
         )
 
@@ -114,7 +123,7 @@ class TestCausalClassificationPooling:
         self, factory, config
     ):
         """THE defect. At HEAD this delta was exactly 0.000e+00."""
-        model = _build(factory, config, "last")
+        model = _build(factory, config)
         base = _logits(model, IDS)
         moved = _logits(model, _mutate(NON_FIRST_INDEX))
         delta = float(np.max(np.abs(moved - base)))
@@ -156,7 +165,7 @@ class TestCausalClassificationPooling:
 
     def test_padding_is_not_pooled_under_the_default(self, factory, config):
         """`last` gathers the last KEPT position, not `inputs[:, -1, :]`."""
-        model = _build(factory, config, "last")
+        model = _build(factory, config)
         base = _logits(model, IDS)
         moved = _logits(model, _mutate(PAD_INDEX))
         assert np.array_equal(moved, base), (
@@ -178,7 +187,7 @@ def test_sparse_routing_moves_the_pooled_logits_only_by_rounding():
     4e-02 to 1e-01 (measured), thousands of times the bound.
     """
     config = QWEN3_NEXT_SPARSE_CONFIG
-    model = _build(create_qwen3_next_classification, config, "last")
+    model = _build(Qwen3Next, config)
     base = _logits(model, IDS)
     moved = _logits(model, _mutate(PAD_INDEX))
     bound = reassociation_atol(

@@ -25,9 +25,8 @@ from dl_techniques.models.language.qwen.qwen3_next import (
     Qwen3Next,
     Qwen3NextBlock,
     create_qwen3_next,
-    create_qwen3_next_classification,
-    create_qwen3_next_generation,
 )
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.layers.transformers import GatedLinearAttentionBlock
 
 from ..knob_sensitivity_oracle import assert_structural_knob_changes_weights
@@ -571,42 +570,45 @@ class TestQwen3NextModelFactories:
     """Test factory functions and utilities."""
 
     def test_main_factory_functionality(self):
-        """Test the main `create_qwen3_next` factory's core functionality."""
+        """`create_qwen3_next` returns the class itself, headless or headed."""
         num_labels = 5
         vocab_size = 1000
+        batch = {
+            "input_ids": keras.ops.convert_to_tensor(
+                np.random.randint(0, 151936, size=(2, 32)), dtype='int32'),
+            "attention_mask": keras.ops.ones((2, 32), dtype='int32'),
+        }
 
-        # 1. Test generation model from variant
-        gen_model = create_qwen3_next("tiny", task_type="generation")
-        assert gen_model.name == "qwen3_next_for_generation"
-        assert len(gen_model.inputs) == 2
-        input_ids = keras.ops.convert_to_tensor(np.random.randint(0, 151936, size=(2, 32)), dtype='int32')
-        attention_mask = keras.ops.ones((2, 32), dtype='int32')
-        logits = gen_model([input_ids, attention_mask])
-        assert logits.shape == (2, 32, 151936)
+        # 1. A language model from a variant: the class, returning logits
+        gen_model = create_qwen3_next("tiny")
+        assert type(gen_model) is Qwen3Next
+        assert gen_model.include_top is False
+        assert gen_model(batch).shape == (2, 32, 151936)
 
-        # 2. Test classification model from variant
-        clf_model = create_qwen3_next("tiny", task_type="classification", num_labels=num_labels)
-        assert clf_model.name == "qwen3_next_for_classification"
-        assert len(clf_model.inputs) == 2
-        class_logits = clf_model([input_ids, attention_mask])
-        assert class_logits.shape == (2, num_labels)
+        # 2. A sequence classifier from the same variant: the class, headed
+        clf_model = create_qwen3_next(
+            "tiny",
+            include_top=True,
+            task_config=NLPTaskConfig(
+                name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=num_labels),
+        )
+        assert type(clf_model) is Qwen3Next
+        assert clf_model.lm_head is None
+        assert clf_model(batch).shape == (2, num_labels)
 
-        # 3. Test parameter override with kwargs
+        # 3. Overrides of variant keys reach the model itself
         custom_model = create_qwen3_next(
             "tiny",
-            task_type="generation",
             hidden_size=256,  # Override
             num_layers=1,     # Override
             vocab_size=vocab_size
         )
-        assert custom_model.name == "qwen3_next_for_generation"
-        # Access the backbone model to check its config
-        backbone = custom_model.get_layer("qwen3_next_backbone")
-        assert backbone.hidden_size == 256
-        assert backbone.num_layers == 1
-        assert backbone.vocab_size == vocab_size
+        assert custom_model.hidden_size == 256
+        assert custom_model.num_layers == 1
+        assert custom_model.vocab_size == vocab_size
 
-        # 4. Test creating from a configuration dictionary
+        # 4. A custom configuration goes to the class: `Qwen3Next(**config)`
         custom_config = {
             'vocab_size': vocab_size,
             'hidden_size': 128,
@@ -617,39 +619,41 @@ class TestQwen3NextModelFactories:
             'num_experts': 1,
             'num_experts_per_tok': 1,
         }
-        dict_model = create_qwen3_next(custom_config, task_type="generation")
-        dict_backbone = dict_model.get_layer("qwen3_next_backbone")
-        assert dict_backbone.hidden_size == 128
-        assert dict_backbone.vocab_size == vocab_size
+        dict_model = Qwen3Next(**custom_config)
+        assert dict_model.hidden_size == 128
+        assert dict_model.vocab_size == vocab_size
 
-    def test_classification_factory_advanced_options(self):
-        """Test advanced options of the classification factory."""
+    def test_head_knobs_reach_the_task_head(self):
+        """Pooling and dropout are the head's own knobs, set at construction."""
         num_labels = 3
-        input_ids = keras.ops.convert_to_tensor(np.random.randint(0, 151936, size=(2, 24)), dtype='int32')
-        attention_mask = keras.ops.ones((2, 24), dtype='int32')
+        batch = {
+            "input_ids": keras.ops.convert_to_tensor(
+                np.random.randint(0, 151936, size=(2, 24)), dtype='int32'),
+            "attention_mask": keras.ops.ones((2, 24), dtype='int32'),
+        }
+        clf = NLPTaskConfig(
+            name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+            num_classes=num_labels)
 
-        # Test "mean" pooling strategy
+        # "mean" pooling through `head_config_overrides`
         mean_pool_model = create_qwen3_next(
             "tiny",
-            task_type="classification",
-            num_labels=num_labels,
-            pooling_strategy="mean"
+            include_top=True,
+            task_config=clf,
+            head_config_overrides={"pooling_type": "mean"},
         )
-        assert mean_pool_model.name == "qwen3_next_for_classification"
-        mean_pool_logits = mean_pool_model([input_ids, attention_mask])
-        assert mean_pool_logits.shape == (2, num_labels)
+        assert mean_pool_model.task_head.pooling_type == "mean"
+        assert mean_pool_model(batch).shape == (2, num_labels)
 
-        # Test custom classifier dropout
+        # The head's dropout is the task config's `dropout_rate`
         dropout_model = create_qwen3_next(
             "tiny",
-            task_type="classification",
-            num_labels=num_labels,
-            classifier_dropout_rate=0.5
+            include_top=True,
+            task_config=NLPTaskConfig(
+                name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=num_labels, dropout_rate=0.5),
         )
-        # The rate reaches the model's own task head (the hand-rolled
-        # `classifier_dropout` layer no longer exists).
-        head = dropout_model.get_layer("qwen3_next_backbone").task_head
-        assert head.dropout.rate == 0.5
+        assert dropout_model.task_head.dropout.rate == 0.5
 
     def test_model_variant_configurations(self):
         """Test that MODEL_VARIANTS have correct configurations."""
@@ -778,21 +782,31 @@ class TestQwen3NextModelErrorHandling:
 
     def test_invalid_factory_parameters(self):
         """Test error handling in the main factory function."""
-        # Missing num_labels for classification
-        with pytest.raises(ValueError, match="`num_labels` must be provided"):
-            create_qwen3_next("tiny", task_type="classification")
+        # A head without a task
+        with pytest.raises(ValueError, match="include_top=True needs a task_config"):
+            create_qwen3_next("tiny", include_top=True)
 
-        # Invalid task_type
-        with pytest.raises(ValueError, match="Unknown task_type"):
-            create_qwen3_next("tiny", task_type="invalid_task")
+        batch = {"input_ids": np.ones((1, 8), dtype="int32")}
+        tiny = dict(vocab_size=64, hidden_size=32, num_layers=1,
+                    num_attention_heads=4, num_key_value_heads=2,
+                    max_seq_len=16, num_experts=1, num_experts_per_tok=1,
+                    moe_intermediate_size=64)
 
-        # Invalid num_labels
-        with pytest.raises(ValueError, match="num_labels must be positive"):
-            create_qwen3_next("tiny", task_type="classification", num_labels=-1)
+        # A negative class count cannot build its head
+        model = create_qwen3_next("tiny", **tiny, include_top=True, task_config=NLPTaskConfig(
+            name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION, num_classes=-1))
+        with pytest.raises(ValueError, match="Negative dimensions"):
+            model(batch)
 
-        # Invalid pooling strategy
-        with pytest.raises(ValueError, match="pooling_strategy must be 'last', 'cls' or 'mean'"):
-            create_qwen3_next("tiny", task_type="classification", num_labels=3, pooling_strategy="max")
+        # An unknown pooling type is refused by the head
+        model = create_qwen3_next(
+            "tiny", **tiny, include_top=True,
+            task_config=NLPTaskConfig(
+                name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=3),
+            head_config_overrides={"pooling_type": "bogus"})
+        with pytest.raises(ValueError, match="Unknown pooling type"):
+            model(batch)
 
 
 class TestQwen3NextModelPerformance:
@@ -968,7 +982,6 @@ class TestQwen3NextIntegration:
         # Create very small model for training test (reduced from "tiny" to fit RTX 4070 GPU)
         model = create_qwen3_next(
             "tiny",
-            task_type="generation",
             vocab_size=vocab_size,
             hidden_size=128,
             num_layers=1,
@@ -983,13 +996,13 @@ class TestQwen3NextIntegration:
             metrics=['accuracy']
         )
 
-        inputs = [
-            keras.ops.convert_to_tensor(
+        inputs = {
+            "input_ids": keras.ops.convert_to_tensor(
                 np.random.randint(0, vocab_size, size=(batch_size, seq_len)),
                 dtype='int32'
             ),
-            keras.ops.ones((batch_size, seq_len), dtype='int32')  # attention_mask
-        ]
+            "attention_mask": keras.ops.ones((batch_size, seq_len), dtype='int32'),
+        }
         targets = keras.ops.convert_to_tensor(
             np.random.randint(0, vocab_size, size=(batch_size, seq_len)),
             dtype='int32'
@@ -1179,9 +1192,7 @@ class TestQwen3NextIncludeTop(QwenIncludeTopCases):
               num_key_value_heads=2, max_seq_len=16, num_experts=1,
               num_experts_per_tok=1, moe_intermediate_size=64,
               dropout_rate=0.0)
-    CLASSIFICATION_FACTORY = staticmethod(create_qwen3_next_classification)
-    GENERATION_FACTORY = staticmethod(create_qwen3_next_generation)
-    DISPATCH_FACTORY = staticmethod(create_qwen3_next)
+    FACTORY = staticmethod(create_qwen3_next)
     WRAPPED_NAME = "qwen3_next_backbone"
     N_BACKBONE = 64
 

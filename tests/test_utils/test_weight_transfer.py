@@ -488,7 +488,8 @@ class TestVocabChange:
 def _wrapped(inner, extra_layer: bool = False):
     """A functional I/O wrapper whose only non-input layer is *inner*.
 
-    The shape of ``create_qwen3_classification`` and its siblings. With
+    The shape of the models the retired ``create_qwen3_classification`` and
+    its siblings returned, which their old archives still hold. With
     ``extra_layer`` it gains a second weighted layer and is no longer a
     single-model wrapper.
     """

@@ -23,8 +23,6 @@ Functions
 * :func:`head_attention_mask` -- the mask a head pools under: the caller's
   ``attention_mask``, else ``input_ids != pad_token_id``, else all ones, in a
   given dtype.
-* :func:`task_model_name` -- the name of a model wrapping a headed backbone:
-  ``<model>_for_<task>``, one name per task whichever factory built it.
 
 Nothing here touches the backbone. The head is the only layer created, and all
 of its weights live under its own name.
@@ -458,31 +456,3 @@ def head_attention_mask(
         else:
             attention_mask = keras.ops.not_equal(input_ids, pad_token_id)
     return keras.ops.cast(attention_mask, dtype)
-
-# ---------------------------------------------------------------------
-
-
-def task_model_name(model: str, task_type: Union[str, NLPTaskType]) -> str:
-    """The name of a two-input model wrapping a backbone headed for ``task_type``.
-
-    Interface contract (shared by the Qwen3, Qwen3Next and Gemma3 factory
-    modules, whose ``create_<model>_classification`` and dispatching
-    ``create_<model>(..., include_top=True, task_config=...)`` must give one
-    task one name):
-
-    :param model: The model prefix, e.g. ``"qwen3"``.
-    :type model: str
-    :param task_type: The head's task, as an ``NLPTaskType`` or its value.
-    :type task_type: Union[str, NLPTaskType]
-    :return: ``<model>_for_classification`` for ``TEXT_CLASSIFICATION`` (the
-        task the classification factories build), else
-        ``<model>_for_<task_type value>``.
-    :rtype: str
-    :raises ValueError: if ``task_type`` is not an ``NLPTaskType`` value.
-    """
-    task = NLPTaskType(task_type)
-    suffix = (
-        "classification" if task is NLPTaskType.TEXT_CLASSIFICATION
-        else task.value
-    )
-    return f"{model}_for_{suffix}"

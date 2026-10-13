@@ -334,8 +334,9 @@ def test_the_waiver_table_is_empty_and_every_retired_entry_has_a_build(name):
     "name,build_shape,call_shapes,pinned",
     [
         # `input_ids` / `attention_mask`, sequence axis genuinely None -- the
-        # shape `create_qwen3_next_generation` and `_classification` build the
-        # backbone at. Called afterwards at TWO other sequence lengths.
+        # shape the retired two-input functional wrappers built the backbone
+        # at, which their old archives still record. Called afterwards at TWO
+        # other sequence lengths.
         pytest.param(
             "qwen",
             {"input_ids": (None, None), "attention_mask": (None, None)},

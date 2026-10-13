@@ -361,8 +361,8 @@ _sub("gpt2", _b_gpt2, lambda: _ids(64, 2, 16), dtype_exempt_outputs=(0,))
 
 
 def _b_gemma(**head):
-    # ``create_gemma3`` returns a FUNCTIONAL wrapper that expects two input
-    # tensors; the subject here is the ``Gemma3`` backbone itself.
+    # The subject is the ``Gemma3`` class itself (what ``create_gemma3``
+    # returns), shrunk to one block.
     from dl_techniques.models.language.gemma import Gemma3
     return Gemma3(vocab_size=64, hidden_size=32, num_layers=1,
                   num_attention_heads=2, num_key_value_heads=1,

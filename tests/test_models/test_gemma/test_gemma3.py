@@ -4,7 +4,7 @@ Comprehensive Tests for the Modern Keras 3 Gemma3 Model Implementation
 This module provides thorough tests for the Gemma3 model, including:
 - Basic model and transformer block functionality.
 - Serialization/deserialization compliance with Modern Keras 3.
-- All factory functions (from_variant, create_gemma3, generation, classification).
+- The factory functions (from_variant, create_gemma3, which returns the class).
 - Error handling for invalid configurations.
 - Validation of key architectural features like dual normalization and mixed attention.
 
@@ -22,10 +22,9 @@ import keras
 from dl_techniques.models.language.gemma.gemma3 import (
     Gemma3,
     create_gemma3,
-    create_gemma3_generation,
-    create_gemma3_classification,
     Gemma3TransformerBlock
 )
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 from ..test_qwen.test_qwen3 import IncludeTopCases
 
@@ -264,44 +263,47 @@ class TestGemma3Factories:
         # Check that other parameters are from the "tiny" variant
         assert model.num_layers == Gemma3.MODEL_VARIANTS['tiny']['num_layers']
 
-    def test_create_gemma3_generation(self):
-        """Test the high-level factory for generation."""
-        model = create_gemma3("tiny") # task_type defaults to generation
-        assert model.name == "gemma3_for_generation"
-        # Check input and output shapes
-        assert len(model.inputs) == 2 # input_ids, attention_mask
-        assert model.output_shape[2] == Gemma3.MODEL_VARIANTS['tiny']['vocab_size']
+    def test_create_gemma3_returns_the_language_model(self):
+        """The factory returns the class itself, a language model by default."""
+        model = create_gemma3("tiny")
+        assert type(model) is Gemma3
+        assert model.include_top is False
+        ids = keras.Input(shape=(None,), dtype="int32")
+        assert model(ids).shape[2] == Gemma3.MODEL_VARIANTS['tiny']['vocab_size']
 
-    def test_create_gemma3_classification(self):
-        """Test the high-level factory for classification."""
+    def test_create_gemma3_with_a_classification_head(self):
+        """A classifier is the class with ``include_top`` and a task config."""
         num_labels = 10
         model = create_gemma3(
             "tiny",
-            task_type="classification",
-            num_labels=num_labels,
-            pooling_strategy="mean"
+            include_top=True,
+            task_config=NLPTaskConfig(
+                name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=num_labels),
+            head_config_overrides={"pooling_type": "mean"},
         )
-        assert model.name == "gemma3_for_classification"
-        # Check output shape
-        assert model.output_shape == (None, num_labels)
+        assert type(model) is Gemma3
+        assert model.lm_head is None
+        assert model.task_head.pooling_type == "mean"
+        ids = keras.Input(shape=(None,), dtype="int32")
+        assert tuple(model(ids).shape) == (None, num_labels)
 
     def test_create_gemma3_with_custom_config(self, base_config: Dict[str, Any]):
-        """Test creating a model from a custom config dictionary."""
-        model = create_gemma3(base_config, task_type="generation")
-        assert model.name == "gemma3_for_generation"
-        assert model.layers[2].num_layers == base_config['num_layers'] # Backbone is the 3rd layer
-        assert model.layers[2].hidden_size == base_config['hidden_size']
+        """A custom configuration goes to the class: ``Gemma3(**config)``."""
+        model = Gemma3(**base_config)
+        assert model.num_layers == base_config['num_layers']
+        assert model.hidden_size == base_config['hidden_size']
 
     def test_factory_error_handling(self):
         """Test error handling in the high-level factory."""
         with pytest.raises(ValueError, match="Unknown variant 'invalid_variant'"):
             create_gemma3("invalid_variant")
 
-        with pytest.raises(ValueError, match="Unknown task_type 'invalid_task'"):
+        with pytest.raises(ValueError, match="Unrecognized keyword arguments"):
             create_gemma3("tiny", task_type="invalid_task")
 
-        with pytest.raises(ValueError, match="num_labels must be provided"):
-            create_gemma3("tiny", task_type="classification")
+        with pytest.raises(ValueError, match="include_top=True needs a task_config"):
+            create_gemma3("tiny", include_top=True)
 
 
 class TestGemma3ErrorHandling:
@@ -337,7 +339,9 @@ class TestGemma3Integration:
 
     def test_end_to_end_training_simulation(self, base_config: Dict[str, Any]):
         """Test a complete training step on a tiny model."""
-        model = create_gemma3_classification(base_config, num_labels=10)
+        model = Gemma3(**base_config, include_top=True, task_config=NLPTaskConfig(
+            name="clf", task_type=NLPTaskType.TEXT_CLASSIFICATION,
+            num_classes=10))
 
         model.compile(
             optimizer='adam',
@@ -358,7 +362,7 @@ class TestGemma3Integration:
 
         # Train on a single batch
         history = model.fit(
-            [input_ids, attention_mask],
+            {"input_ids": input_ids, "attention_mask": attention_mask},
             targets,
             batch_size=batch_size,
             epochs=1,
@@ -454,8 +458,6 @@ class TestGemma3IncludeTop(IncludeTopCases):
               sliding_window_size=4,
               layer_types=["sliding_window", "full_attention"],
               dropout_rate=0.0)
-    CLASSIFICATION_FACTORY = staticmethod(create_gemma3_classification)
-    GENERATION_FACTORY = staticmethod(create_gemma3_generation)
-    DISPATCH_FACTORY = staticmethod(create_gemma3)
+    FACTORY = staticmethod(create_gemma3)
     WRAPPED_NAME = "gemma3_backbone"
     N_BACKBONE = 26
