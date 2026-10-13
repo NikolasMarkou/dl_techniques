@@ -36,13 +36,16 @@ Tests live in `tests/test_models/test_qwen/`: `test_qwen3.py`, `test_qwen3_next.
 A decoder-only stack built from the repository's shared `TransformerLayer`: Grouped Query
 Attention with RoPE, RMS normalization, and SwiGLU feed-forward networks. Any subset of
 layers can be swapped to Mixture-of-Experts by listing their indices in `moe_layers`; the
-rest stay dense. See **`QWEN3.md`**.
+rest stay dense. Each expert's FFN is `moe_intermediate_size` wide (the Hugging Face
+meaning); a dense layer's FFN is sized from `4 * hidden_size` and does not read it. See
+**`QWEN3.md`**.
 
 ### `Qwen3Next` — hybrid linear-attention MoE
 
 Each `Qwen3NextBlock` is three `GatedLinearAttentionBlock` layers followed by one
 `GatedAttention` layer, every one of them preceded by a zero-centered RMSNorm and followed by
-its own MoE and residual. This trades most of the quadratic attention for linear-time gated
+its own MoE and residual (with `num_experts=1`, a dense FFN in the MoE's place). Every
+expert, and that dense FFN, is `moe_intermediate_size` wide. This trades most of the quadratic attention for linear-time gated
 recurrence while keeping one full-attention layer per block. See **`QWEN3_next.md`**.
 
 ### `Qwen3 Embedding` / `Qwen3 Reranker` — retrieval models
@@ -180,7 +183,11 @@ one head moves to another, weights unchanged, by layer name. At construction tha
 checkpoint of the class, headed or headless, or an old archive of the two-input wrapper the
 factories returned before they returned the class; a task head in it is never copied; the backbone loads completely or the call raises (another depth or
 width is refused; on a vocabulary change only the token table and `lm_head` stay fresh);
-`pretrained=True` raises `NotImplementedError`. By hand:
+`pretrained=True` raises `NotImplementedError`. A `Qwen3Next` archive, or a `Qwen3` archive
+with MoE layers, saved before 2026-10-13 has the old feed-forward shapes (an expert sized by
+`max(1, moe_intermediate_size // hidden_size)` through SwiGLU's 2/3 rule; a dense
+`Qwen3Next` block with no feed-forward) and is refused, by this route and by
+`keras.models.load_model`. By hand:
 
 ```python
 import numpy as np

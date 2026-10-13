@@ -54,12 +54,12 @@ Each Qwen3Next block contains 4 sub-layers, each following this pattern:
 
 | Variant | Blocks | Effective Layers | Parameters (built) | Hidden Size | Experts | Active Experts/Token | `moe_intermediate_size` | Context Length | Description |
 |---------|--------|------------------|--------------------|-------------|---------|----------------------|-------------------------|----------------|-------------|
-| `80b_a3b` | 12 | 48 | 235.0B | 2048 | 512 | 10 | 512 | 262144 | The released Qwen3-Next-80B-A3B config values |
-| `80b` | 12 | 48 | 1.71B | 2048 | 1 (no MoE) | 1 | 5632 | 8192 | Dense: 12 blocks without MoE |
-| `small` | 6 | 24 | 901M | 1024 | 8 | 2 | 704 | 2048 | 6 blocks for experimentation |
-| `tiny` | 3 | 12 | 211M | 512 | 4 | 1 | 352 | 1024 | 3 blocks |
+| `80b_a3b` | 12 | 48 | 80.43B | 2048 | 512 | 10 | 512 | 262144 | The released Qwen3-Next-80B-A3B config values |
+| `80b` | 12 | 48 | 3.38B | 2048 | 1 (no MoE) | 1 | 5632 | 8192 | Dense: 12 blocks, one dense FFN per sublayer |
+| `small` | 6 | 24 | 863M | 1024 | 8 | 2 | 704 | 2048 | 6 blocks for experimentation |
+| `tiny` | 3 | 12 | 199M | 512 | 4 | 1 | 352 | 1024 | 3 blocks |
 
-*Note: "Blocks" refers to Qwen3Next blocks (3 DeltaNet + 1 Attention each). "Effective Layers" is the total number of individual processing layers. Every value except "Parameters (built)" is read from `Qwen3Next.MODEL_VARIANTS` in `qwen3_next.py`. "Parameters (built)" is `count_params()` of what this implementation builds from those values (vocabulary 151936), measured on CPU: exact for `small` and `tiny`; for the two 80b variants extrapolated from 1- and 2-block builds, a method that reproduces the exact `small` and `tiny` counts. They are not the released models' counts: each expert is a SwiGLU with `ffn_expansion_factor = max(1, moe_intermediate_size // hidden_size)`, so an 80b_a3b expert has hidden width 1536 (factor 1), not 512, and with one expert (`80b`) a block builds no feed-forward at all.*
+*Note: "Blocks" refers to Qwen3Next blocks (3 DeltaNet + 1 Attention each). "Effective Layers" is the total number of individual processing layers. Every value except "Parameters (built)" is read from `Qwen3Next.MODEL_VARIANTS` in `qwen3_next.py`. "Parameters (built)" is `count_params()` of what this implementation builds from those values (vocabulary 151936), measured on CPU: exact for `small` and `tiny`; for the two 80b variants extrapolated from 1- and 2-block builds, a method that reproduces the exact `small` and `tiny` counts (80b_a3b: 2- and 3-expert builds give the per-expert count). Each expert is a SwiGLU of hidden width `moe_intermediate_size`, as in the Hugging Face Qwen3-Next config; with one expert (`80b`) each of a block's four sublayers has one dense SwiGLU FFN of that width instead. Weights per token, counting only the `num_experts_per_tok` routed experts of each MoE layer (router, attention, embeddings and `lm_head` in full): 80b_a3b 4.63B, small 552M, tiny 179M. This implementation has no shared expert and unties `lm_head` from the token table, so it is not the released model's parameterization. Before 2026-10-13 (D-014) the counts were 235.0B, 1.71B, 901M and 211M: each expert was sized by `ffn_expansion_factor = max(1, moe_intermediate_size // hidden_size)` through SwiGLU's 2/3 rule (an 80b_a3b expert was 1536 wide, not 512), and the dense `80b` built no feed-forward at all. Archives of those shapes are refused by `from_variant(pretrained=...)` and by `keras.models.load_model`.*
 
 ## Installation
 
@@ -152,8 +152,7 @@ from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
 # Qwen3Next takes no MoEConfig: it builds one per block from three arguments,
 # num_experts, num_experts_per_tok (the gating top_k) and
-# moe_intermediate_size (each SwiGLU expert gets
-# ffn_expansion_factor = max(1, moe_intermediate_size // hidden_size)).
+# moe_intermediate_size (each expert's FFN hidden width, used verbatim).
 model = Qwen3Next(
     vocab_size=1000,
     hidden_size=256,
@@ -163,7 +162,7 @@ model = Qwen3Next(
     max_seq_len=128,
     num_experts=16,
     num_experts_per_tok=4,
-    moe_intermediate_size=1024,  # ffn_expansion_factor 1024 // 256 = 4
+    moe_intermediate_size=1024,  # each expert: 256 -> 1024 -> 256
     normalization_type="zero_centered_rms_norm",
     use_stochastic_depth=True,
     stochastic_depth_rate=0.1,
@@ -172,6 +171,7 @@ logits = model(np.ones((2, 16), dtype="int32"))
 print(logits.shape)  # (2, 16, 1000)
 moe = model.blocks[0].attention_moe
 print(moe.num_experts, moe.gating_config.top_k)  # 16 4
+print(moe.experts[0].ffn_block.hidden_dim)  # 1024
 
 # A custom MoEConfig goes to a Qwen3NextBlock, the model's building block
 moe_config = MoEConfig(
@@ -180,7 +180,7 @@ moe_config = MoEConfig(
         ffn_config={
             "type": "swiglu",
             "output_dim": 256,  # must equal the block's dim
-            "ffn_expansion_factor": 4,
+            "hidden_dim": 1024,
         }
     ),
     gating_config=GatingConfig(top_k=4, gating_type="linear"),
@@ -189,6 +189,16 @@ block = Qwen3NextBlock(dim=256, num_heads=4, max_seq_len=128, moe_config=moe_con
 hidden = block(keras.random.normal((2, 16, 256)))
 print(hidden.shape)  # (2, 16, 256)
 print(block.attention_moe.num_experts)  # 16
+
+# A dense block: one FFN at each of the 4 slots instead of a MoE layer.
+# Qwen3Next(num_experts=1) builds its blocks this way, with
+# hidden_dim=moe_intermediate_size. With neither config a block has no FFN.
+dense_block = Qwen3NextBlock(
+    dim=256, num_heads=4, max_seq_len=128,
+    ffn_config={"type": "swiglu", "output_dim": 256, "hidden_dim": 1024},
+)
+print(dense_block(keras.random.normal((2, 16, 256))).shape)  # (2, 16, 256)
+print(dense_block.attention_ffn.hidden_dim)  # 1024
 ```
 
 ### Manual Configuration
@@ -218,7 +228,7 @@ model = Qwen3Next(
 The hybrid MoE architecture provides significant computational savings:
 
 - **Linear Complexity**: Gated DeltaNet provides O(L) scaling vs O(L²) attention
-- **Active Parameters**: Only ~3-12% of total parameters active per forward pass
+- **Active Parameters**: the share of built weights used per token is 5.8% for `80b_a3b`, 64% for `small` and 90% for `tiny` (measured, see the variant table note); embeddings and `lm_head` dominate the small variants
 - **Memory Usage**: Linear scaling with active parameters, constant memory for sequence length
 - **Throughput**: ~10-30x improvement over dense models of equivalent capacity
 - **Expert Specialization**: Each layer's MoE develops specialized processing capabilities
@@ -342,7 +352,7 @@ loaded_model.summary()
 |---------|--------------|-----------------|------------------|---------------|------------------|
 | `tiny` | 12 | 9 | 3 | 12 | 4 : 1 |
 | `small` | 24 | 18 | 6 | 24 | 8 : 2 |
-| `80b` | 48 | 36 | 12 | 0 | no MoE |
+| `80b` | 48 | 36 | 12 | 0 | no MoE (48 dense FFNs) |
 | `80b_a3b` | 48 | 36 | 12 | 48 | 512 : 10 |
 
 ## Expert Utilization Analysis
