@@ -499,6 +499,33 @@ class SequencePooling(keras.layers.Layer):
 
         return keras.ops.maximum(keras.ops.max(candidates, axis=1), 0)
 
+    @staticmethod
+    def _take_one_position(
+        inputs: keras.KerasTensor,
+        selected: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Gather ``inputs[b, selected[b], :]`` for every row ``b``.
+
+        :param inputs: Input sequence ``(batch, seq_len, hidden_dim)``.
+        :param selected: ``(batch,)`` ``int32`` index from
+            :meth:`_positional_index`.
+        :return: ``(batch, hidden_dim)``, the selected vectors unchanged.
+        """
+        # DECISION plan-2026-10-13T035756-5dd4d94d/D-020: a flat-row `take`,
+        # not `ops.take_along_axis`. On the TensorFlow
+        # backend `take_along_axis` broadcasts through
+        # `tf.broadcast_dynamic_shape`, and under XLA on GPU a retrace with an
+        # unknown sequence length (predict at a second length) refuses it with
+        # "BroadcastArgs must be a compile-time constant". The gather is exact,
+        # so the pooled values are the same.
+        seq_len = keras.ops.cast(keras.ops.shape(inputs)[1], 'int32')
+        row = keras.ops.cumsum(keras.ops.ones_like(selected), axis=0) - 1
+        hidden_dim = inputs.shape[-1]
+        if hidden_dim is None:
+            hidden_dim = keras.ops.shape(inputs)[-1]
+        flat = keras.ops.reshape(inputs, (-1, hidden_dim))
+        return keras.ops.take(flat, row * seq_len + selected, axis=0)
+
     def _apply_single_strategy(
         self,
         strategy: str,
@@ -546,11 +573,7 @@ class SequencePooling(keras.layers.Layer):
                 # No exclusions: bit-identical to the pre-H-02 code.
                 return inputs[:, 0, :]
             selected = self._positional_index(keep, seq_len, mode='first')
-            return keras.ops.take_along_axis(
-                inputs,
-                keras.ops.expand_dims(keras.ops.expand_dims(selected, -1), -1),
-                axis=1
-            )[:, 0, :]
+            return self._take_one_position(inputs, selected)
 
         if strategy not in ['none', 'flatten']:
             inputs, mask = self._apply_mask_and_exclusions(inputs, mask)
@@ -565,11 +588,7 @@ class SequencePooling(keras.layers.Layer):
                 return inputs[:, seq_len // 2, :]
 
             selected = self._positional_index(mask, seq_len, mode=strategy)
-            return keras.ops.take_along_axis(
-                inputs,
-                keras.ops.expand_dims(keras.ops.expand_dims(selected, -1), -1),
-                axis=1
-            )[:, 0, :]
+            return self._take_one_position(inputs, selected)
 
         # Statistical strategies
         elif strategy == 'mean':

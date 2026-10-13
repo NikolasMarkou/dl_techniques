@@ -2145,3 +2145,54 @@ class TestExcludePositionsIsAlsoIsolated:
 if __name__ == "__main__":
     """Run tests with pytest."""
     pytest.main([__file__, "-v", "--tb=short"])
+
+class PoolAfterDenseProbe(keras.Model):
+    """A compiled model whose only reduction is one ``SequencePooling``."""
+
+    def __init__(self, strategy: str, exclude_positions: Optional[List[int]]):
+        super().__init__()
+        self.dense = keras.layers.Dense(4)
+        self.pool = SequencePooling(
+            strategy=strategy, exclude_positions=exclude_positions
+        )
+
+    def call(self, inputs):
+        x = self.dense(keras.ops.expand_dims(
+            keras.ops.cast(inputs["input_ids"], "float32"), -1
+        ))
+        return self.pool(x, mask=inputs.get("attention_mask"))
+
+
+class TestPositionalModesPredictAtASecondLength:
+    """A positional mode serves ``predict`` at a second sequence length.
+
+    The second ``predict`` retraces with an unknown length. Under XLA on GPU,
+    ``ops.take_along_axis`` on the TensorFlow backend broadcasts through
+    ``tf.broadcast_dynamic_shape`` and the compile refused it with
+    "BroadcastArgs must be a compile-time constant", so a headed GPT-2 or
+    Qwen3 (``last`` pooling over the attention mask) could predict at one
+    length only. The CPU XLA compile accepts the old gather, so this suite
+    goes RED only on a GPU run, which is how the repository's suite runs.
+    """
+
+    @pytest.mark.parametrize("strategy", ["last", "middle", "first", "cls"])
+    @pytest.mark.parametrize("masked", [True, False], ids=["mask", "no_mask"])
+    @pytest.mark.parametrize("exclude", [None, [0]], ids=["no_excl", "excl0"])
+    def test_a_second_length_predicts_the_eager_values(
+        self, strategy: str, masked: bool, exclude: Optional[List[int]]
+    ) -> None:
+        model = PoolAfterDenseProbe(strategy, exclude)
+        model.compile(loss="mse")
+        rng = np.random.default_rng(0)
+        for seq_len in (5, 12):
+            feed = {"input_ids": rng.integers(1, 9, (2, seq_len)).astype("int32")}
+            if masked:
+                mask = np.ones((2, seq_len), "int32")
+                mask[0, seq_len - 2:] = 0
+                feed["attention_mask"] = mask
+            got = model.predict(feed, verbose=0)
+            want = keras.ops.convert_to_numpy(model(feed))
+            np.testing.assert_array_equal(got, want, err_msg=(
+                f"strategy={strategy!r}, masked={masked}, exclude={exclude}, "
+                f"seq_len={seq_len}"
+            ))
