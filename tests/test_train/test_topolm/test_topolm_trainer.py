@@ -53,6 +53,7 @@ from dl_techniques.metrics.topographic_selectivity import contrast_tmap
 from train.common.clm_pretrain import ClmPretrainConfig
 
 from dl_techniques.models.language.topolm import MODEL_VARIANTS
+from tests.numerics import MATMUL_ULP_ALLOWANCE, matmul_unit_roundoff
 
 VOCAB = 300
 LENGTH = 12
@@ -589,14 +590,38 @@ class TestActivationExtraction:
             extract_tap_activations(self._backbone(), [], StubTokenizer())
 
     def test_batching_does_not_change_the_result(self):
-        """Two forward passes over the same tokens must agree exactly."""
+        """Batching must not mix items: one batch and batches of two agree.
+
+        The bound depends on the matmul precision in force, which is measured,
+        not read off a flag (``tests/numerics.py`` D-030). With true float32
+        matmuls (CPU, or a GPU with TF32 off) it is the exact ``1e-6``: measured
+        0.0 on CPU and at most 1.2e-8 on GPU 1 with TF32 off. With TF32 on (the
+        default on GPU 1, and what the trainer runs under) the two batch shapes
+        pick different kernels, and the measured gap was at most 1.53 TF32 unit
+        roundoffs of the tap's max |activation| over 30 seeds (7.1e-5 at a max
+        |activation| of 0.14). The bound is ``MATMUL_ULP_ALLOWANCE`` (4) of those
+        units, per tap, with no floor at 1: the taps are 0.01 to 0.14 in
+        magnitude, so a floor would loosen the small taps about 90x. Swapping
+        two items moves a tap by 5e-3 or more, at least 250x this bound.
+        Proven on GPU 1 with TF32 on: an extraction that swaps the first two
+        items of every batch fails here, and so does one that leaks 1% of the
+        previous batch's last item into the next batch's first.
+        """
         backbone = self._backbone()
         prompts = list(SMOKE_STIMULI["a"])
         tokenizer = StubTokenizer()
         one = extract_tap_activations(backbone, prompts, tokenizer, batch_size=99)
         many = extract_tap_activations(backbone, prompts, tokenizer, batch_size=2)
+        unit_roundoff = matmul_unit_roundoff()
+        reduced_precision = unit_roundoff > float(np.finfo(np.float32).eps) / 2.0
         for name in one:
-            np.testing.assert_allclose(one[name], many[name], rtol=1e-6, atol=1e-6)
+            if reduced_precision:
+                atol = MATMUL_ULP_ALLOWANCE * unit_roundoff * np.max(np.abs(one[name]))
+                np.testing.assert_allclose(one[name], many[name], rtol=0, atol=atol)
+            else:
+                np.testing.assert_allclose(
+                    one[name], many[name], rtol=1e-6, atol=1e-6
+                )
 
 
 # ---------------------------------------------------------------------
