@@ -9,6 +9,11 @@ one line each. This file is the authoring contract.
 > canonical guide for Keras 3 authoring here (serialization, `build`, `get_config`,
 > factories, tests). Non-negotiable, new packages and existing ones alike.
 
+> **Read `src/dl_techniques/models/GUIDE.md` before changing a model.** It records the defects
+> found here so far: serialization that silently drops weights, XLA-on-GPU failures a CPU suite
+> cannot see, mixed-precision NaNs, architecture traps, the language task-head rules, and how to
+> write a test that can fail. Most of the rules in this file exist because of one of them.
+
 ## Layout
 
 Families: `common` `embeddings_experimental` `general_purpose` `graph` `language` `memory`
@@ -204,6 +209,8 @@ universal law — see "When it does not apply".
   when executed.
 - Re-run a failure ALONE before calling it real — the suite has ordering-dependent failures.
 - Never loosen a pinned population count to silence it. Re-derive it and justify the change.
+- `GUIDE.md` § 8 lists the fixture and probe shapes that made past guards unable to fail
+  (shape-only asserts, constant or square-only inputs, zero-init branches, scratch-copy mutants).
 
 ## Testing
 
