@@ -3,7 +3,7 @@ Emission layers of the Neural HMM: the per-state log-potential ``log_emit`` of e
 observation, of shape ``(B, T, K)``.
 
 - :class:`GenerativeEmission` scores ``log p(x_t | z_t = k)``, a normalized density. Each
-  state ``k`` owns a learned embedding ``e_k``; a feed-forward head built by
+  state ``k`` owns a learned embedding ``e_k``; an ``mlp`` feed-forward head built by
   :func:`dl_techniques.layers.ffn.factory.create_ffn_layer` maps it, optionally
   concatenated with a per-step context ``h_t``, to the parameters of the state's
   distribution (Tran et al., 2016):
@@ -33,7 +33,7 @@ References:
       Named Entity Recognition. NAACL-HLT. arXiv:1603.01360.
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import keras
 import numpy as np
@@ -42,7 +42,7 @@ import numpy as np
 # Local Imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.ffn.factory import assemble_ffn_config, create_ffn_layer
+from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.utils.dtype_policy import accumulation_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.tensors import log_gamma
@@ -74,10 +74,6 @@ class GenerativeEmission(LogSpaceOutputSpec, keras.layers.Layer):
     :param hidden_dim: Hidden width of the head; positive.
     :param context_dim: Width ``H`` of the per-step context the head also reads; 0 (the
         default) for no context.
-    :param ffn_type: Any :func:`create_ffn_layer` type that maps ``(..., in)`` to
-        ``(..., out)`` and accepts ``hidden_dim``/``output_dim``.
-    :param ffn_args: Extra keyword arguments for the head, merged over the defaults by
-        :func:`assemble_ffn_config`.
     :param min_scale: Floor added to the Gaussian scale and the Poisson rate; positive.
         Unused by ``categorical``.
     :param kwargs: Base ``keras.layers.Layer`` arguments.
@@ -94,8 +90,6 @@ class GenerativeEmission(LogSpaceOutputSpec, keras.layers.Layer):
         state_emb_dim: int = 16,
         hidden_dim: int = 64,
         context_dim: int = 0,
-        ffn_type: str = "mlp",
-        ffn_args: Optional[Dict[str, Any]] = None,
         min_scale: float = 1e-3,
         **kwargs: Any,
     ) -> None:
@@ -128,16 +122,16 @@ class GenerativeEmission(LogSpaceOutputSpec, keras.layers.Layer):
         self.state_emb_dim = state_emb_dim
         self.hidden_dim = hidden_dim
         self.context_dim = context_dim
-        self.ffn_type = ffn_type
-        self.ffn_args = ffn_args
         self.min_scale = min_scale
 
         n_params = {"gaussian": 2 * (obs_dim or 0), "categorical": vocab_size, "poisson": obs_dim}[obs_type]
-        self.head = create_ffn_layer(
-            ffn_type,
-            name="head",
-            **assemble_ffn_config(ffn_type, {"hidden_dim": hidden_dim, "output_dim": n_params}, ffn_args),
-        )
+        # DECISION plan-2026-10-13T192257-1bb3bf1f/D-020: the head type is the LITERAL
+        # "mlp" with literal kwargs. Do NOT make it a constructor knob (ffn_type /
+        # ffn_args): a variable type is a 16th dynamic site that the static forwarding
+        # sweep in test_package_api_contract.py cannot check, past its pinned ceiling of
+        # 15 (D-136 of plan-2026-08-19T163559-499b6f0e). The model's ffn_type knob stays
+        # live through the transformer encoder only.
+        self.head = create_ffn_layer("mlp", name="head", hidden_dim=hidden_dim, output_dim=n_params)
         self.state_embedding = None
 
     def build(
@@ -263,8 +257,6 @@ class GenerativeEmission(LogSpaceOutputSpec, keras.layers.Layer):
                 "state_emb_dim": self.state_emb_dim,
                 "hidden_dim": self.hidden_dim,
                 "context_dim": self.context_dim,
-                "ffn_type": self.ffn_type,
-                "ffn_args": self.ffn_args,
                 "min_scale": self.min_scale,
             }
         )

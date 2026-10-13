@@ -109,6 +109,10 @@ FIXED = {
     # any weight this build path has ever produced in git history. 20 since
     # 2026-10-11: the same 12 plus the 8 head weights.
     "modern_bert": 20,
+    # MEASURED 2026-10-14: the `left-to-right-segmenter` subject (dict inputs
+    # {"obs", "mask"}): 5 emission + 17 causal-transformer encoder + 2
+    # transition weights, the same 24 relative paths after a forward call.
+    "neural_hmm": 24,
     "power_mlp": 5,
     "pw_fnet": 100,
     "qwen": 104,

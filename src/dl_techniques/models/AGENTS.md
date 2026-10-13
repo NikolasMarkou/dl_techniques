@@ -25,11 +25,14 @@ Four families nest one level further (`vision/image_restoration`, `vision/keypoi
 wrong test. Re-derive any count with the command beside it; never quote one from memory.
 
 ```bash
-find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 121 packages
-find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 360 .py
+find src/dl_techniques/models -name '__init__.py' -not -path '*__pycache__*' | wc -l   # 124 packages
+find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l          # 372 .py
 ```
 
-Both re-derived 2026-10-05 by running exactly those two commands
+Both re-derived 2026-10-14 by running exactly those two commands, after
+`time_series/neural_hmm/loss.py` was deleted (-1 `.py`, no package change); the readings
+just before the deletion were **124 / 373**, so 3 packages and 13 files had arrived since
+2026-10-05 from other work that never re-ran the commands. Re-derived 2026-10-05
 (`vision/alexnet/` contributes 1 package and 3 `.py`: `__init__`, `model`,
 `spatial_guard`; the previous readings that same day were **119 / 354**).
 Before that (`vision/mambalct/` contributes 1 package and 3 `.py`: `__init__`,

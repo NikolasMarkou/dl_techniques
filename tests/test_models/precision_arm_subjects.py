@@ -58,7 +58,7 @@ CHARGED_PACKAGES: Tuple[str, ...] = (
     "blt", "capsnet", "cbam", "cliffordnet", "convnext",
     "convunext", "depth_anything", "fastvit", "fnet", "fractalnet", "gemma",
     "gpt2", "hnet", "hrm", "ideogram4", "lewm",
-    "masked_autoencoder", "masked_language_model", "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "ntm",
+    "masked_autoencoder", "masked_language_model", "mini_vec2vec", "mobilenet", "modern_bert", "mothnet", "nano_vlm", "neural_hmm", "ntm",
     "pft_sr", "power_mlp", "qwen", "relgt", "resnet", "scunet", "sd3_mmdit",
     "shgcn", "som", "squeezenet", "superpoint", "swin_transformer", "tabm",
     "time_series", "topolm", "trm", "vae", "video_jepa", "vit",
@@ -867,6 +867,43 @@ def _b_time_series():
 
 
 _sub("time_series", _b_time_series, lambda: _f32(2, 16, 1))
+
+
+def _b_neural_hmm():
+    """The ``left-to-right-segmenter`` preset: the one that reaches the most code.
+
+    It builds the causal transformer encoder, the banded transition and the
+    context-reading generative emission (a rank-4 head input), so the precision,
+    XLA and round-trip arms all run through the encoder as well as the log-space
+    inference. The default ``neural-hmm`` preset has no encoder at all.
+    """
+    from dl_techniques.models.time_series.neural_hmm import create_neural_hmm
+    return create_neural_hmm(
+        "left-to-right-segmenter", n_states=3, obs_type="gaussian", obs_dim=2,
+        hidden_dim=8, state_emb_dim=4, num_layers=1, num_heads=2,
+        intermediate_size=8, max_seq_len=16)
+
+
+def _neural_hmm_inputs():
+    """Two sequences of 6 steps, the second right-padded to a valid length of 4."""
+    mask = np.array([[1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 0]], dtype="float32")
+    return {"obs": _f32(2, 6, 2), "mask": mask}
+
+
+# DECISION plan-2026-10-13T192257-1bb3bf1f/D-018: do NOT replace this with
+# ``dtype_exempt_outputs=(0, 1, 2)``, and do NOT pass ``None``.
+# ``expected_compute_dtype="float32"``: NOT an exemption -- part 2 still runs,
+# against the dtype the package DOCUMENTS. All three outputs (``log_pi``,
+# ``log_A``, ``log_emit``) are log-probabilities that the package computes in
+# the accumulation dtype on purpose (neural_hmm D-010: a float16 Gaussian
+# log-density overflows once |x - mu| / sd > 362, and the forward recursion
+# accumulates), so under mixed_float16 every float output is float32 while the
+# encoder inside runs in float16. ``dtype_exempt_outputs`` cannot express this:
+# exempting all three leaves part 2 no float output and the arm refuses itself
+# as vacuous. Proven able to convict by
+# ``test_neural_hmm/test_model.py::test_the_float32_output_contract_convicts_a_float16_output``.
+_sub("neural_hmm", _b_neural_hmm, _neural_hmm_inputs,
+     expected_compute_dtype="float32")
 
 
 # ===========================================================================

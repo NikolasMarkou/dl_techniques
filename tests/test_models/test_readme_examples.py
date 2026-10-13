@@ -343,5 +343,74 @@ def test_fastvit_exposes_the_canonical_model_variants_alias():
     assert "mci0" in FastVitImageEncoder.MODEL_VARIANTS
 
 
+# ---------------------------------------------------------------------
+# neural_hmm: the leaf README's code blocks and variant table (2026-10-14)
+# ---------------------------------------------------------------------
+
+_NEURAL_HMM_README = os.path.join(
+    os.path.dirname(__file__), os.pardir, os.pardir, "src", "dl_techniques", "models",
+    "time_series", "neural_hmm", "README.md",
+)
+
+
+def _neural_hmm_readme():
+    with open(_NEURAL_HMM_README, encoding="utf-8") as handle:
+        return handle.read()
+
+
+class TestNeuralHMMReadme:
+    """The README was written with the rewrite, so its examples are RUN, not read: every
+    fenced ``python`` block executes in order in ONE namespace (later examples reuse the
+    quick start's ``inputs``/``model``, as a reader would), the values each block binds are
+    checked, and the variant table names exactly the class table's keys."""
+
+    @staticmethod
+    def _blocks():
+        import re
+
+        return re.findall(r"```python\n(.*?)```", _neural_hmm_readme(), flags=re.DOTALL)
+
+    @pytest.fixture(scope="class")
+    def namespace(self):
+        namespace = {}
+        for index, block in enumerate(self._blocks()):
+            exec(compile(block, f"neural_hmm/README.md[block {index}]", "exec"), namespace)
+        return namespace
+
+    def test_the_neural_hmm_readme_has_seven_runnable_blocks(self):
+        assert len(self._blocks()) == 7
+
+    def test_the_neural_hmm_quick_start_values(self, namespace):
+        to_np = keras.ops.convert_to_numpy
+        path, gamma, log_px = (to_np(namespace[k]) for k in ("path", "gamma", "log_px"))
+        assert path.shape == (8, 20) and (path[4:, 15:] == -1).all() and (path[:, :15] >= 0).all()
+        assert gamma.shape == (8, 20, 3) and np.isfinite(log_px).all() and log_px.shape == (8,)
+
+    def test_the_neural_hmm_usage_examples_values(self, namespace):
+        to_np = keras.ops.convert_to_numpy
+        assert to_np(namespace["log_p_y"]).shape == (8,) and (to_np(namespace["log_p_y"]) <= 0).all()
+        assert to_np(namespace["tagged"]).shape == (8, 20)
+        assert np.isfinite(to_np(namespace["per_step_nll"])).all()
+        segments = to_np(namespace["segments"])
+        valid = namespace["mask"] > 0
+        for row, keep in zip(segments, valid):
+            assert row[keep][0] == 0 and (np.diff(row[keep]) >= 0).all()
+        assert np.isfinite(to_np(namespace["log_z"])).all()
+
+    def test_the_neural_hmm_interpretability_values(self, namespace):
+        np.testing.assert_allclose(namespace["transition"].sum(axis=1), 1.0, rtol=0, atol=1e-5)
+        np.testing.assert_allclose(namespace["initial"].sum(), 1.0, rtol=0, atol=1e-5)
+        assert (namespace["dwell"] >= 1.0).all()
+
+    def test_the_neural_hmm_variant_table_names_the_class_table(self):
+        import re
+
+        from dl_techniques.models.time_series.neural_hmm import NeuralHMM
+
+        section = _neural_hmm_readme().split("## 8. Configuration & Presets", 1)[1].split("\n## ", 1)[0]
+        documented = set(re.findall(r"^\| `([a-z0-9-]+)` \|", section, flags=re.MULTILINE))
+        assert documented == set(NeuralHMM.MODEL_VARIANTS)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

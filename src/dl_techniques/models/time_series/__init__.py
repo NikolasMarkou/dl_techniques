@@ -4,7 +4,8 @@ A family of independent forecasting architectures, one subpackage each:
 `adaptive_ema/` and `ets/` (pure additive exponential smoothing -- the one
 RECURSIVE forecaster here, with trainable smoothing parameters),
 `deepar/` (autoregressive probabilistic), `mdn/` (mixture density heads),
-`neural_hmm/` (differentiable Neural Hidden Markov Model, this package),
+`neural_hmm/` (Neural Hidden Markov Model: a latent-state sequence model
+trained by exact likelihood and decoded by Viterbi; not a forecaster),
 `nbeats/` (basis expansion, plus the exogenous `nbeatsx` variant),
 `prism/`, `tirex/` and `xlstm/` (extended LSTM, with a dedicated forecaster
 wrapper). They share the `ForecastMixin` in `forecast.py` but no backbone, so
@@ -17,7 +18,7 @@ from .adaptive_ema.model import (
 from .deepar.model import DeepAR, create_deepar
 from .ets.model import ETSModel, create_ets
 from .mdn.model import MDNModel, create_mdn_model
-from .neural_hmm.model import NeuralHMM, from_variant, MODEL_VARIANTS
+from .neural_hmm.model import NeuralHMM, create_neural_hmm
 from .nbeats.nbeats import NBeatsNet, create_nbeats_model
 from .nbeats.nbeatsx import NBeatsXNet, create_nbeatsx_model
 from .prism.model import PRISMModel, create_prism_model
@@ -31,8 +32,6 @@ __all__ = [
     "ETSModel",
     "MDNModel",
     "NeuralHMM",
-    "from_variant",
-    "MODEL_VARIANTS",
     "NBeatsNet",
     "NBeatsXNet",
     "PRISMModel",
@@ -43,6 +42,7 @@ __all__ = [
     "create_mdn_model",
     "create_nbeats_model",
     "create_nbeatsx_model",
+    "create_neural_hmm",
     "create_prism_model",
     "create_tirex_by_variant",
     "create_tirex_model",

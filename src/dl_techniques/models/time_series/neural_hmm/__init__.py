@@ -1,48 +1,31 @@
-"""Neural Hidden Markov Model — configurable, factory-driven.
+"""Neural Hidden Markov Model: exact HMM inference over neural transitions and emissions.
 
-Public API mirrors the ``models/time_series/mdn`` template: the model class and
-factory functions are re-exported. Internal callers may still import from the
-submodules (``.model`` / ``.encoders`` / ``.transitions`` / ``.emissions`` /
-``.inference`` / ``.loss``) directly.
+The public API is the model class and its factory. The layers are importable from their
+modules (``.encoders``, ``.transitions``, ``.emissions``) and the inference functions
+from ``.inference``.
 
-The package registers itself as
-``dl_techniques.models.neural_hmm.model`` via
-``@register_dl_technique`` (Keras 3 serialisation, no ``custom_objects``
-needed on load).
+Every class registers under ``dl_techniques.models.neural_hmm.<module>``, so a ``.keras``
+archive loads without ``custom_objects``.
 
-Examples
---------
-Build from a variant preset:
+Example::
 
-    >>> from dl_techniques.models.time_series.neural_hmm import from_variant
-    >>> model = from_variant("neural-emission-hmm", n_states=8, obs_dim=16)
+    from dl_techniques.models.time_series.neural_hmm import create_neural_hmm
 
-Build from a full config dict:
+    model = create_neural_hmm("neural-hmm", n_states=4, obs_type="gaussian", obs_dim=2)
+    model.compile(optimizer="adam")
+    model.fit({"obs": obs, "mask": mask}, None, epochs=10)
+    path, score = model.viterbi({"obs": obs, "mask": mask})
 
-    >>> from dl_techniques.models.time_series.neural_hmm.model import NeuralHMM
-    >>> model = NeuralHMM({
-...     "mode": "generative",
-...     "encoder": "lstm",
-...     "emission_context": "none",
-...     "transition": "static",
-...     "topology": "ergodic",
-...     "obs_type": "gaussian",
-...     "hidden": 128,
-...     "state_emb_dim": 32,
-...     "n_states": 8,
-...     "obs_dim": 16,
-... })
-
-References
-----------
-- Rabiner, 1989. A Tutorial on Hidden Markov Models. Proceedings of the IEEE.
-- Tang et al., 2020. Neural HMMs for regime-switching. arXiv:2006.00694.
+References:
+    - Tran, Bisk, Vaswani, Marcu and Knight, 2016. Unsupervised Neural Hidden Markov
+      Models. arXiv:1609.09007.
+    - Rabiner, 1989. A Tutorial on Hidden Markov Models and Selected Applications in
+      Speech Recognition. Proceedings of the IEEE 77(2), pp. 257-286.
 """
 
-from .model import NeuralHMM, from_variant, MODEL_VARIANTS
+from .model import NeuralHMM, create_neural_hmm
 
 __all__ = [
     "NeuralHMM",
-    "from_variant",
-    "MODEL_VARIANTS",
+    "create_neural_hmm",
 ]

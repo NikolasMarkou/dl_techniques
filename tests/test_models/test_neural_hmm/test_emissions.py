@@ -315,13 +315,12 @@ def test_gradients_reach_every_discriminative_weight():
 @pytest.mark.parametrize("context_dim", [0, H])
 @pytest.mark.parametrize("obs_type", list(OBS_KWARGS))
 def test_get_config_from_config_and_set_weights_reproduce_the_output_exactly(obs_type, context_dim):
-    layer = _emission(obs_type, context_dim, state_emb_dim=5, hidden_dim=9, ffn_type="residual",
-                      ffn_args={"activation": "gelu"}, min_scale=0.01)
+    layer = _emission(obs_type, context_dim, state_emb_dim=5, hidden_dim=9, min_scale=0.01)
     config = layer.get_config()
     expected = {
         "n_states": K, "obs_type": obs_type, "obs_dim": OBS_KWARGS[obs_type].get("obs_dim"),
         "vocab_size": OBS_KWARGS[obs_type].get("vocab_size"), "state_emb_dim": 5, "hidden_dim": 9,
-        "context_dim": context_dim, "ffn_type": "residual", "ffn_args": {"activation": "gelu"}, "min_scale": 0.01,
+        "context_dim": context_dim, "min_scale": 0.01,
     }
     assert {k: config[k] for k in expected} == expected
     clone = GenerativeEmission.from_config(config)

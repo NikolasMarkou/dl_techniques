@@ -105,7 +105,7 @@ class NeuralHMMEncoder(keras.layers.Layer):
     :param normalization_type: :func:`create_normalization_layer` type of the output norm
         (every path) and of the pre-norms (``transformer``).
     :param dropout_rate: Dropout in ``[0, 1)``: inside each residual block (``mlp``), after
-        each feed-forward block (``transformer``), on the inputs of each recurrent layer,
+        the position embedding and each feed-forward block (``transformer``), on the inputs of each recurrent layer,
         one mask per sequence (``lstm``, ``gru``), after each convolution (``conv``).
     :param attention_dropout_rate: Dropout in ``[0, 1)`` on the attention probabilities
         (``transformer``).
@@ -180,7 +180,11 @@ class NeuralHMMEncoder(keras.layers.Layer):
             ]
         elif encoder_type == "transformer":
             self.positional_embedding = create_embedding_layer(
-                "positional_learned", name="positional_embedding", max_seq_len=max_seq_len, dim=hidden_dim
+                "positional_learned",
+                name="positional_embedding",
+                max_seq_len=max_seq_len,
+                dim=hidden_dim,
+                dropout_rate=dropout_rate,
             )
             self.blocks = [
                 TransformerLayer(

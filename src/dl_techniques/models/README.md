@@ -149,7 +149,7 @@ image-patch input modality now matches its filing.)
 | `sam/sam3/` | Segment Anything v3, text-promptable |
 | `sd3_mmdit/` | SD3 MMDiT dual-stream text-to-image diffusion transformer |
 
-### `time_series/` (8)
+### `time_series/` (9)
 
 | Package | |
 |---|---|
@@ -157,7 +157,7 @@ image-patch input modality now matches its filing.)
 | `deepar/` | DeepAR probabilistic forecasting |
 | `ets/` | Pure additive exponential smoothing (the one recursive forecaster) |
 | `mdn/` | Mixture Density Networks |
-| `neural_hmm/` | Differentiable Neural Hidden Markov Model (this package) |
+| `neural_hmm/` | Neural Hidden Markov Model: exact forward-algorithm likelihood, Viterbi and posteriors over neural transitions and emissions; generative or CRF |
 | `nbeats/` | N-BEATS, plus the exogenous `nbeatsx` variant |
 | `prism/` | PRISM forecasting |
 | `tirex/` | TiReX |

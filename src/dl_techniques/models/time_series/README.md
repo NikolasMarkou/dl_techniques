@@ -1,6 +1,6 @@
 # `models/time_series/` — the forecasting family
 
-This file is the index and the shared-contract page, not a summary of the eight;
+This file is the index and the shared-contract page, not a summary of the nine;
 every subpackage has a README of its own.
 
 ## The subpackages
@@ -11,6 +11,7 @@ every subpackage has a README of its own.
 | `deepar/` | Autoregressive probabilistic forecasting (Monte-Carlo sampled) | [README](deepar/README.md) |
 | `ets/` | Pure additive exponential smoothing; the one RECURSIVE model here, with trainable smoothing parameters | [README](ets/README.md) |
 | `mdn/` | Mixture-density heads | [README](mdn/README.md) |
+| `neural_hmm/` | Neural Hidden Markov Model: exact HMM likelihood and Viterbi decoding over neural transitions and emissions; a sequence model, not a forecaster (no `ForecastMixin`) | [README](neural_hmm/README.md) |
 | `nbeats/` | N-BEATS basis expansion, plus the exogenous `nbeatsx` variant | [README](nbeats/README.md) |
 | `prism/` | Partitioned / wavelet-band forecasting with a soft router | [README](prism/README.md) |
 | `tirex/` | Mixed sequential (SSM + attention) forecaster | [README](tirex/README.md) |
@@ -55,6 +56,7 @@ from dl_techniques.models.time_series import (
     DeepAR, create_deepar,
     ETSModel, create_ets,
     MDNModel, create_mdn_model,
+    NeuralHMM, create_neural_hmm,
     NBeatsNet, create_nbeats_model,
     NBeatsXNet, create_nbeatsx_model,
     PRISMModel, create_prism_model,
