@@ -2001,6 +2001,18 @@ def _b_models_qwen_components():
     return b.attention_ffn
 
 
+def _b_models_topolm_components():
+    from dl_techniques.models.language.topolm.components import TopoLMBlock
+    # BOTH call sites (`ffn_dense_1` widens, `ffn_dense_2` projects back) are
+    # in `__init__` and pass the hardcoded 'mlp' literal; the build checks the
+    # pair composes at the configured widths. radius=1 is the probe's config,
+    # not a product defect: at hidden_size=16 the taps lay out a 4x4 grid, and
+    # the default radius 5 needs 11x11, which SpatialSmoothness refuses in build.
+    b = TopoLMBlock(hidden_size=16, num_heads=2, intermediate_size=32, radius=1)
+    b.build((None, 8, 16))
+    return b.ffn_dense_2
+
+
 _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "layers/fnet_encoder_block.py": _b_fnet_encoder_block,
     "layers/fusion/multimodal_fusion.py": _b_multimodal_fusion,
@@ -2037,6 +2049,7 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/language/tree_transformer/components.py": _b_models_tree_transformer,
     "models/language/hnet/components.py": _b_models_hnet_components,
     "models/language/qwen/components.py": _b_models_qwen_components,
+    "models/language/topolm/components.py": _b_models_topolm_components,
 }
 
 
