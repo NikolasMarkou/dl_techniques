@@ -459,9 +459,11 @@ def compile_model(
     No ``loss=`` or ``metrics=`` are passed. ``CausalLanguageModel`` owns its
     loss and its ``loss`` / ``accuracy`` / ``perplexity`` trackers through a
     hand-rolled ``train_step``, so a compiled loss here would be inert config.
-    ``jit_compile`` stays off: ``SpatialSmoothness`` is graph-safe, but the
-    whole-step trace is not measured for the fused head, and a run that silently
-    refuses to compile is worse than one that runs eagerly.
+    ``jit_compile`` is not passed, so it stays at Keras's ``"auto"``, which
+    resolves to XLA whenever a GPU is visible (measured: ``model.jit_compile`` is
+    ``True`` after this call on a GPU, ``False`` on a CPU-only host). That is why
+    the taps' index tables are int64 weights: an int32 weight is kept in host
+    memory, where an XLA step on a GPU cannot read it.
 
     :param model: The training head.
     :type model: CausalLanguageModel

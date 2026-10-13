@@ -6,7 +6,11 @@ import keras
 from keras import ops
 from typing import Any, Dict
 
+from dl_techniques.layers.reasoning import (
+    hrm_sparse_puzzle_embedding as sparse_puzzle_embedding_module,
+)
 from dl_techniques.layers.reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
+from tests.index_weights import built_as_int32, int32_variables, requires_gpu
 
 
 class TestSparsePuzzleEmbedding:
@@ -182,3 +186,66 @@ class TestSparsePuzzleEmbedding:
 
         output = layer(ids, training=training)
         assert output.shape == (2, 8)
+
+
+class TestTheIdCacheIsWritableUnderXLAOnAGPU:
+    """``local_ids`` is int64, so a compiled GPU training step can assign it.
+
+    The cache is written by every training-mode call, which in ``fit`` or a
+    jit-compiled ``tf.function`` is inside the compiled step. Ruling and
+    mechanism: plan-2026-10-13T035756-5dd4d94d/D-010 and ``tests/index_weights.py``.
+    """
+
+    IDS = np.array([0, 5, 3, 9], dtype="int32")
+
+    def test_the_id_cache_is_not_an_int32_variable(self):
+        """Device-independent arm: the dtype that decides the placement."""
+        layer = SparsePuzzleEmbedding(num_embeddings=100, embedding_dim=8, batch_size=4)
+        layer(ops.convert_to_tensor(self.IDS), training=True)
+        assert int32_variables(layer) == []
+        assert layer.local_ids.dtype == "int64"
+
+    @requires_gpu
+    def test_a_jit_compiled_training_call_on_a_gpu_fills_the_cache(self):
+        import tensorflow as tf
+
+        layer = SparsePuzzleEmbedding(num_embeddings=100, embedding_dim=8, batch_size=4)
+        layer(ops.convert_to_tensor(self.IDS), training=False)
+
+        @tf.function(jit_compile=True)
+        def step(ids):
+            return layer(ids, training=True)
+
+        step(tf.constant(self.IDS))
+
+        np.testing.assert_array_equal(ops.convert_to_numpy(layer.local_ids), self.IDS)
+        assert "GPU" in layer.local_ids.value.device, layer.local_ids.value.device
+
+    def test_an_archive_with_an_int32_cache_loads_with_identical_values(self, tmp_path):
+        """An archive written before the fix restores bit-exactly into int64."""
+        ids = ops.convert_to_tensor(self.IDS)
+        with built_as_int32(sparse_puzzle_embedding_module):
+            inputs = keras.Input(shape=(), dtype="int32", batch_size=4)
+            old = keras.Model(
+                inputs,
+                SparsePuzzleEmbedding(
+                    num_embeddings=100, embedding_dim=8, batch_size=4,
+                    embeddings_initializer="random_normal", name="puzzle",
+                )(inputs),
+                name="model",
+            )
+        old.get_layer("puzzle")(ids, training=True)
+        assert int32_variables(old) == ["puzzle/local_ids"]
+
+        path = str(tmp_path / "int32_cache.keras")
+        old.save(path)
+        new = keras.models.load_model(path)
+
+        assert int32_variables(new) == []
+        np.testing.assert_array_equal(
+            ops.convert_to_numpy(new.get_layer("puzzle").local_ids), self.IDS
+        )
+        np.testing.assert_array_equal(
+            ops.convert_to_numpy(new(ids, training=False)),
+            ops.convert_to_numpy(old(ids, training=False)),
+        )

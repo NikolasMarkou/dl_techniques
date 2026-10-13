@@ -39,6 +39,7 @@ Internal State:
 import keras
 from typing import Optional, Union, Tuple, Any, Dict
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.dtype_policy import INDEX_WEIGHT_DTYPE
 
 # ---------------------------------------------------------------------
 
@@ -150,13 +151,16 @@ class SparsePuzzleEmbedding(keras.layers.Layer):
             trainable=False
         )
 
-        # Local IDs cache for tracking which embeddings are cached - non-trainable
+        # Local IDs cache for tracking which embeddings are cached - non-trainable.
+        # INDEX_WEIGHT_DTYPE (int64), never int32: the training-mode `assign` below
+        # runs inside the compiled step, and an int32 variable lives in host
+        # memory, where an XLA-compiled step on a GPU cannot reach it.
         self.local_ids = self.add_weight(
             name="local_ids",
             shape=(self.batch_size,),
             initializer="zeros",
             trainable=False,
-            dtype="int32"
+            dtype=INDEX_WEIGHT_DTYPE
         )
 
         super().build(input_shape)
@@ -196,7 +200,7 @@ class SparsePuzzleEmbedding(keras.layers.Layer):
         # 3. Avoid operations on the entire embedding matrix
 
         self.local_embeddings.assign(embeddings_output)
-        self.local_ids.assign(inputs)
+        self.local_ids.assign(keras.ops.cast(inputs, self.local_ids.dtype))
 
         return embeddings_output
 

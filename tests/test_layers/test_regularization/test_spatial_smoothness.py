@@ -36,6 +36,11 @@ from dl_techniques.layers.regularization.spatial_smoothness import (
     spatial_smoothness_loss,
 )
 
+from dl_techniques.layers.regularization import (
+    spatial_smoothness as spatial_smoothness_module,
+)
+from tests.index_weights import built_as_int32, int32_variables, requires_gpu
+
 from .spatial_smoothness_oracle import (
     graded_field_activations,
     reference_d_unit,
@@ -1022,3 +1027,81 @@ class TestGraphSafety:
 
         assert np.isfinite(history.history["loss"][-1])
         assert history.history["loss"][-1] < history.history["loss"][0]
+
+class TestTheTablesAreReadableUnderXLAOnAGPU:
+    """The index tables are int64, so a compiled GPU step can read them.
+
+    TensorFlow keeps an int32 variable in host memory, and an XLA step on a GPU
+    cannot read it. ``tests/index_weights.py`` carries the measured error and
+    the shared instruments. Ruling: plan-2026-10-13T035756-5dd4d94d/D-010.
+    """
+
+    def test_no_table_is_an_int32_variable(self):
+        """Device-independent arm: the dtype that decides the placement."""
+        layer = _build_through_parent(
+            SpatialSmoothness(alpha=2.5, radius=RADIUS, seed=0)
+        )
+        assert int32_variables(layer) == []
+        assert [
+            table.dtype
+            for table in (layer.perm, layer.patch_table, layer.triu_flat)
+        ] == ["int64"] * 3
+
+    @requires_gpu
+    def test_a_jit_compiled_fit_on_a_gpu_reads_the_tables(self):
+        rng = np.random.default_rng(12)
+        inputs = rng.normal(size=(16, 64)).astype("float32")
+        tap = SpatialSmoothness(alpha=2.5, radius=2, seed=0, name="tap")
+        model = keras.Sequential([keras.layers.Dense(64), tap], name="model")
+        model.compile(optimizer="adam", loss="mse", jit_compile=True)
+
+        history = model.fit(inputs, inputs, batch_size=8, epochs=1, verbose=0)
+
+        assert np.isfinite(history.history["loss"][0])
+        assert "GPU" in tap.patch_table.value.device, tap.patch_table.value.device
+
+    def test_an_archive_with_int32_tables_loads_with_identical_tables_and_loss(
+        self, tmp_path
+    ):
+        """An archive written before the fix restores bit-exactly into int64.
+
+        The donor is built with the tables forced back to int32, which is the
+        old code's build, and the int32 dtype is asserted before saving, so the
+        archive really is in the old format.
+        """
+        inputs = _sample_input(seed=6)
+        with built_as_int32(spatial_smoothness_module):
+            old = keras.Sequential(
+                [
+                    keras.layers.Dense(NUM_UNITS, name="project"),
+                    SpatialSmoothness(alpha=2.5, radius=RADIUS, seed=3, name="tap"),
+                ],
+                name="model",
+            )
+            old(inputs, training=False)
+        old_tap = old.layers[-1]
+        assert int32_variables(old) == [
+            "model/tap/patch_table", "model/tap/perm", "model/tap/triu_flat"
+        ]
+
+        path = str(tmp_path / "int32_tables.keras")
+        old.save(path)
+        new = keras.models.load_model(path)
+        new_tap = new.layers[-1]
+
+        assert int32_variables(new) == []
+        for name in ("perm", "patch_table", "triu_flat"):
+            np.testing.assert_array_equal(
+                ops.convert_to_numpy(getattr(new_tap, name)),
+                ops.convert_to_numpy(getattr(old_tap, name)),
+                err_msg=f"{name} was not restored",
+            )
+
+        # The same neighbourhood draw on both sides, so the two penalties are
+        # computed from the same rows and must agree exactly.
+        new_tap.seed_generator.state.assign(old_tap.seed_generator.state)
+        old(inputs, training=True)
+        new(inputs, training=True)
+        old_loss = float(ops.convert_to_numpy(old_tap.last_spatial_loss))
+        assert old_loss > 0.0, "the old arm computed no penalty"
+        assert float(ops.convert_to_numpy(new_tap.last_spatial_loss)) == old_loss

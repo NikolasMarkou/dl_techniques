@@ -103,6 +103,7 @@ from keras import ops
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.dtype_policy import INDEX_WEIGHT_DTYPE
 
 # ---------------------------------------------------------------------
 
@@ -648,6 +649,11 @@ class SpatialSmoothness(keras.layers.Layer):
         assignment and discards it, and the table stays at its initializer value
         in every real model.
 
+        ``perm``, ``patch_table`` and ``triu_flat`` are int64 weights
+        (``utils.dtype_policy.INDEX_WEIGHT_DTYPE``), not int32 ones: TensorFlow
+        keeps an int32 variable in host memory, where an XLA-compiled step on a
+        GPU cannot read it. The NumPy tables they are built from stay int32.
+
         :param input_shape: Shape of the tapped tensor; only the last axis is read.
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If the last axis is not statically known, or if the
@@ -685,21 +691,21 @@ class SpatialSmoothness(keras.layers.Layer):
             shape=(num_units,),
             initializer=_table_initializer(layout.perm),
             trainable=False,
-            dtype="int32",
+            dtype=INDEX_WEIGHT_DTYPE,
         )
         self.patch_table = self.add_weight(
             name="patch_table",
             shape=(tables.num_centers, tables.patch_units),
             initializer=_table_initializer(tables.patch_table),
             trainable=False,
-            dtype="int32",
+            dtype=INDEX_WEIGHT_DTYPE,
         )
         self.triu_flat = self.add_weight(
             name="triu_flat",
             shape=(tables.num_pairs,),
             initializer=_table_initializer(tables.triu_flat),
             trainable=False,
-            dtype="int32",
+            dtype=INDEX_WEIGHT_DTYPE,
         )
         self.d_unit = self.add_weight(
             name="d_unit",
@@ -864,12 +870,14 @@ def _table_initializer(values: np.ndarray) -> Any:
 
     The table is materialised in NumPy and handed to Keras, which converts it.
     Wrapping it in ``ops.convert_to_tensor`` and closing over the result would
-    bind the tensor to whichever graph happened to be tracing.
+    bind the tensor to whichever graph happened to be tracing. The value is cast
+    to the weight's dtype here, so an int32 NumPy table lands in an int64
+    weight without a conversion inside Keras.
     """
     frozen = np.array(values, copy=True)
 
     def _initialize(shape: Tuple[int, ...], dtype: Any = None) -> np.ndarray:
-        del dtype
-        return frozen.reshape(shape)
+        table = frozen.reshape(shape)
+        return table if dtype is None else table.astype(dtype)
 
     return _initialize

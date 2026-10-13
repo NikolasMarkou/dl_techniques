@@ -354,7 +354,10 @@ Its tables (`perm`, `patch_table`, `triu_flat`, `d_unit`) travel as
 that makes a fresh construction reproducible; it does not carry the permutation
 itself. That asymmetry is only safe because the permutation is restored
 bit-exactly, and a trainable `perm` would let the optimizer silently re-map every
-unit while the checkpoint still looked loadable.
+unit while the checkpoint still looked loadable. The three index tables are
+**int64**: TensorFlow keeps an int32 variable in host memory, where the
+XLA-compiled step that `fit` uses on a GPU cannot read it. A checkpoint saved with
+the earlier int32 tables still loads, with identical values.
 
 Two numerical rules, both measured rather than assumed:
 

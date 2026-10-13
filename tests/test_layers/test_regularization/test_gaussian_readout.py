@@ -30,7 +30,11 @@ from dl_techniques.layers.regularization.gaussian_readout import (
     gaussian_kernel_2d,
     gaussian_sigma,
 )
+from dl_techniques.layers.regularization import (
+    gaussian_readout as gaussian_readout_module,
+)
 from dl_techniques.layers.regularization.spatial_smoothness import SpatialLayout
+from tests.index_weights import built_as_int32, int32_variables, requires_gpu
 from tests.test_layers.test_regularization.spatial_smoothness_oracle import (
     smooth_field_activations,
 )
@@ -541,6 +545,60 @@ class TestGaussianReadoutSerialization:
             restored = ops.convert_to_numpy(loaded(inputs, training=False))
 
         np.testing.assert_allclose(restored, original, atol=1e-6, rtol=0)
+
+
+class TestTheIndexTablesAreReadableUnderXLAOnAGPU:
+    """The gather tables are int64, so a compiled GPU step can read them.
+
+    Ruling and mechanism: plan-2026-10-13T035756-5dd4d94d/D-010, and the module
+    docstring of ``tests/index_weights.py``.
+    """
+
+    def test_no_table_is_an_int32_variable(self):
+        """Device-independent arm: the dtype that decides the placement."""
+        layer = GaussianReadout(seed=0)
+        layer(np.zeros((1, 4, NUM_UNITS), dtype="float32"))
+        assert int32_variables(layer) == []
+        assert [layer.cell_to_unit_flat.dtype, layer.perm.dtype] == ["int64"] * 2
+
+    @requires_gpu
+    def test_a_jit_compiled_fit_on_a_gpu_reads_the_tables(self):
+        inputs = np.random.default_rng(3).normal(size=(16, 64)).astype("float32")
+        readout = GaussianReadout(seed=0, name="readout")
+        model = keras.Sequential(
+            [keras.layers.Dense(64), readout], name="model"
+        )
+        model.compile(optimizer="adam", loss="mse", jit_compile=True)
+
+        history = model.fit(inputs, inputs, batch_size=8, epochs=1, verbose=0)
+
+        assert np.isfinite(history.history["loss"][0])
+        assert "GPU" in readout.perm.value.device, readout.perm.value.device
+
+    def test_an_archive_with_int32_tables_loads_with_identical_output(
+        self, tmp_path
+    ):
+        """An archive written before the fix restores bit-exactly into int64."""
+        inputs = np.random.default_rng(5).normal(
+            size=(1, 4, NUM_UNITS)
+        ).astype("float32")
+        with built_as_int32(gaussian_readout_module):
+            old = keras.Sequential(
+                [GaussianReadout(seed=4, name="readout")], name="model"
+            )
+            expected = ops.convert_to_numpy(old(inputs, training=False))
+        assert int32_variables(old) == [
+            "model/readout/cell_to_unit_flat", "model/readout/perm"
+        ]
+
+        path = str(tmp_path / "int32_tables.keras")
+        old.save(path)
+        new = keras.models.load_model(path)
+
+        assert int32_variables(new) == []
+        np.testing.assert_array_equal(
+            ops.convert_to_numpy(new(inputs, training=False)), expected
+        )
 
 
 def _pick_pair(layout):

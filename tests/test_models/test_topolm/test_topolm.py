@@ -29,6 +29,9 @@ import tensorflow as tf
 import keras
 from keras import ops
 
+from dl_techniques.layers.regularization import (
+    spatial_smoothness as spatial_smoothness_module,
+)
 from dl_techniques.layers.regularization.spatial_smoothness import (
     SpatialSmoothness,
 )
@@ -47,6 +50,7 @@ from dl_techniques.models.language.topolm.config import (
     DEFAULT_RADIUS,
     validate_all_variants,
 )
+from tests.index_weights import built_as_int32, int32_variables, requires_gpu
 
 VOCAB = 200
 SMALL = {"embed_dim": 256, "depth": 2, "num_heads": 4, "max_seq_len": 64}
@@ -1192,6 +1196,74 @@ class TestPrecision:
             if not np.array_equal(values, after[path])
         }
         assert moved, "the JIT-compiled step moved nothing"
+
+
+class TestTheTapTablesWorkUnderXLAOnAGPU:
+    """A compiled TopoLM step on a GPU can read every tap's index tables.
+
+    The tables used to be int32 weights. TensorFlow keeps those in host memory,
+    an XLA step on a GPU cannot read them, and ``fit`` compiles with XLA by
+    default on a GPU, so every TopoLM training run there failed while the CPU
+    suite stayed green. Ruling: plan-2026-10-13T035756-5dd4d94d/D-010; the
+    measured error and the shared instruments are in ``tests/index_weights.py``.
+    """
+
+    def test_no_variable_of_the_model_is_int32(self):
+        """Device-independent arm: the dtype that decides the placement."""
+        model = _build()
+        model(_tokens(), training=False)
+        assert int32_variables(model) == []
+        assert {
+            table.dtype
+            for tap in model.tap_layers
+            for table in (tap.perm, tap.patch_table, tap.triu_flat)
+        } == {"int64"}
+
+    @requires_gpu
+    def test_a_jit_compiled_fit_runs_on_a_gpu(self):
+        keras.utils.set_random_seed(0)
+        model = _build(depth=1)
+        head = _build_head(model, aggregate=True)
+        head.compile(optimizer=keras.optimizers.SGD(1e-2), jit_compile=True)
+
+        history = head.fit(_dataset(), epochs=1, verbose=0)
+
+        assert np.isfinite(history.history["loss"][0])
+        devices = {tap.patch_table.value.device for tap in model.tap_layers}
+        assert all("GPU" in device for device in devices), devices
+
+    def test_an_archive_with_int32_tables_loads_with_identical_outputs(
+        self, tmp_path
+    ):
+        """A checkpoint written before the fix loads, and nothing it computes moves.
+
+        The donor is built with the tables forced back to int32, the old code's
+        build, and the int32 dtype is asserted before saving. Both the logits and
+        the per-tap spatial losses are compared exactly; the losses are what the
+        tables feed, since the taps are the identity on the forward path.
+        """
+        tokens = _tokens(seed=5)
+        with built_as_int32(spatial_smoothness_module):
+            old = _build(depth=2, seed=4, alpha=2.5)
+            old(tokens, training=False)
+        assert len(int32_variables(old)) == 3 * len(old.tap_layers) > 0
+
+        path = str(tmp_path / "int32_tables.keras")
+        old.save(path)
+        new = keras.models.load_model(path)
+
+        assert int32_variables(new) == []
+        np.testing.assert_array_equal(
+            ops.convert_to_numpy(new(tokens, training=False)["logits"]),
+            ops.convert_to_numpy(old(tokens, training=False)["logits"]),
+        )
+        for old_tap, new_tap in zip(old.tap_layers, new.tap_layers):
+            new_tap.seed_generator.state.assign(old_tap.seed_generator.state)
+        old(tokens, training=True)
+        new(tokens, training=True)
+        old_losses = [float(value) for value in old.losses]
+        assert len(old_losses) == len(old.tap_layers) and min(old_losses) > 0.0
+        assert [float(value) for value in new.losses] == old_losses
 
 
 class TestEveryComponentIsLive:

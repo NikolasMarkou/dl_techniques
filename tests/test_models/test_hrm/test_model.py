@@ -15,6 +15,7 @@ from dl_techniques.models.language.hrm.model import (
     create_hierarchical_reasoning_model,
 )
 from tests.optimizer_state import build_optimizer_state
+from tests.index_weights import int32_variables, requires_gpu
 
 SEQ_LEN = 16
 
@@ -148,6 +149,65 @@ class TestHRM:
         # GPU fp32 reduction noise -> atol 1e-4 (SYSTEM invariant)
         np.testing.assert_allclose(before, after, atol=1e-4,
                                    err_msg="HRM differs after .keras round-trip")
+
+
+
+class TestThePuzzleIdCacheWorksUnderXLAOnAGPU:
+    """A compiled HRM training step on a GPU can write ``local_ids``.
+
+    ``SparsePuzzleEmbedding`` writes its id cache on every training-mode call,
+    so with ``puzzle_emb_dim > 0`` the write is inside the compiled step. It used
+    to be an int32 weight, which TensorFlow keeps in host memory, where an XLA
+    step on a GPU cannot reach it. Ruling: plan-2026-10-13T035756-5dd4d94d/D-010;
+    the measured error and the shared instruments are in ``tests/index_weights.py``.
+    """
+
+    @staticmethod
+    def _model_with_puzzle_embedding():
+        from dl_techniques.models.language.hrm.model import (
+            HierarchicalReasoningModel,
+        )
+
+        return HierarchicalReasoningModel(
+            vocab_size=64, seq_len=8, embed_dim=32, num_puzzle_identifiers=4,
+            puzzle_emb_dim=32, batch_size=2, h_layers=1, l_layers=1,
+            h_cycles=1, l_cycles=1, num_heads=4, ffn_expansion_factor=2,
+            halt_max_steps=2, halt_exploration_prob=0.0, dropout_rate=0.0,
+        )
+
+    @staticmethod
+    def _puzzle_batch():
+        return {
+            "token_ids": np.ones((2, 8), dtype="int32"),
+            "puzzle_ids": np.array([1, 2], dtype="int32"),
+        }
+
+    def test_no_variable_of_the_model_is_int32(self):
+        """Device-independent arm: the dtype that decides the placement."""
+        model = self._model_with_puzzle_embedding()
+        model(self._puzzle_batch(), training=True)
+        assert int32_variables(model) == []
+
+    @requires_gpu
+    def test_a_jit_compiled_training_step_runs_on_a_gpu(self):
+        import tensorflow as tf
+
+        model = self._model_with_puzzle_embedding()
+        batch = {k: tf.constant(v) for k, v in self._puzzle_batch().items()}
+        model(batch, training=False)
+
+        @tf.function(jit_compile=True)
+        def step(inputs):
+            with tf.GradientTape() as tape:
+                loss = tf.reduce_mean(model(inputs, training=True)["logits"])
+            return loss, tape.gradient(loss, model.trainable_variables)
+
+        loss, _ = step(batch)
+
+        assert np.isfinite(float(loss))
+        cache = model.core.puzzle_embedding.local_ids
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(cache), [1, 2])
+        assert "GPU" in cache.value.device, cache.value.device
 
 
 if __name__ == "__main__":

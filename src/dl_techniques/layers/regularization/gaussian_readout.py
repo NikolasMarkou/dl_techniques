@@ -42,6 +42,7 @@ from keras import ops
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.dtype_policy import INDEX_WEIGHT_DTYPE
 from dl_techniques.layers.regularization.spatial_smoothness import (
     SpatialLayout,
     resolve_grid_shape,
@@ -260,6 +261,8 @@ class GaussianReadout(keras.layers.Layer):
 
         # Unit -> cell scatter, and cell -> unit gather. Two tables, because they
         # are inverses of each other and a layout only ever uses one direction.
+        # Both are INDEX_WEIGHT_DTYPE (int64), never int32: an int32 weight lives
+        # in host memory, where an XLA-compiled step on a GPU cannot read it.
         self.cell_to_unit_flat = self.add_weight(
             name="cell_to_unit_flat",
             shape=(num_units,),
@@ -267,14 +270,14 @@ class GaussianReadout(keras.layers.Layer):
                 self.layout.cell_to_unit.reshape(-1)
             ),
             trainable=False,
-            dtype="int32",
+            dtype=INDEX_WEIGHT_DTYPE,
         )
         self.perm = self.add_weight(
             name="perm",
             shape=(num_units,),
             initializer=_index_initializer(self.layout.perm),
             trainable=False,
-            dtype="int32",
+            dtype=INDEX_WEIGHT_DTYPE,
         )
 
         # Conv2D is rank-4 (batch, rows, cols, channels), while the incoming
@@ -384,11 +387,11 @@ def _index_initializer(values: np.ndarray) -> Any:
     ``build`` and assigning it would be discarded by the ``StatelessScope`` that
     runs whenever this layer is first reached from a parent's ``call``.
     """
-    frozen = np.array(values, dtype="int32", copy=True)
+    frozen = np.array(values, dtype=INDEX_WEIGHT_DTYPE, copy=True)
 
     def _initialize(shape: Tuple[int, ...], dtype: Any = None) -> np.ndarray:
-        del dtype
-        return frozen.reshape(shape)
+        table = frozen.reshape(shape)
+        return table if dtype is None else table.astype(dtype)
 
     return _initialize
 

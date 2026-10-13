@@ -75,6 +75,18 @@ _MAX_USEFUL_MASK_MAGNITUDE = 1e9
 #: ordinary-scale logits stays finite. Still admits ``1e4`` in float16.
 _OVERFLOW_HEADROOM = 4.0
 
+# DECISION plan-2026-10-13T035756-5dd4d94d/D-010: an integer weight is int64.
+# WHAT NOT TO DO: do not create an index table or an id cache as an int32 weight.
+# TensorFlow places an int32 resource variable in host memory, and an
+# XLA-compiled step on a GPU cannot read or assign a host resource ("Trying to
+# access resource ... located in device CPU:0 from device GPU:0"). A compiled
+# `fit` is the Keras default on a GPU, so an int32 weight breaks training there
+# while every CPU test stays green. Casting at the point of use does not help:
+# the variable read is the failing op. An archive saved with int32 weights still
+# loads, because `assign` converts the stored values to int64 without loss.
+#: Dtype of every integer weight that a compiled step reads or assigns.
+INDEX_WEIGHT_DTYPE = "int64"
+
 # ---------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------
