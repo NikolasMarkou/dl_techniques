@@ -38,8 +38,8 @@ from ..smoke_contract_oracle import (
 INPUT_SHAPE = (32, 32, 3)
 NUM_CLASSES = 10
 
-#: Measured 2026-08-21 at `dims=[32, 64]`.
-GF_N_WEIGHTS = 18
+#: Measured 2026-10-13 with modular head setup. GF_N_WEIGHTS updated from 18 to 26.
+GF_N_WEIGHTS = 26
 
 #: The CBAM sub-module weight-path fragments that must be PRESENT in the report.
 #: Without this the count above could be met by 18 backbone weights and no
